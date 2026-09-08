@@ -50,9 +50,6 @@ export type Collation = "binary" | "caseInsensitive";
 export function compareRecordedInstants(left: RecordedInstant, right: RecordedInstant): -1 | 0 | 1;
 
 // @public
-type CompositionPartSide = "from" | "to";
-
-// @public
 export function createExternalRef<T extends string>(table: T): (id: string) => ExternalRefValue<T>;
 
 // @public (undocumented)
@@ -86,7 +83,7 @@ export type DefineEdgeOptions<S extends z.ZodObject<z.ZodRawShape>, From extends
 }>;
 
 // @public
-export function defineGraph<const TNodes extends Record<string, NodeRegistration<NodeType>>, const TEdges extends Record<string, EdgeEntry>, const TOntology extends readonly OntologyRelation[] = readonly [], const TIdentity extends GraphIdentityConfig | undefined = undefined>(config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
+export function defineGraph<const TNodes extends Record<string, NodeRegistration<NodeType>>, const TEdges extends Record<string, EdgeEntry>, const TOntology extends readonly OntologyRelation[], const TIdentity extends GraphIdentityConfig | undefined = undefined>(config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
 
 // @public
 export function defineNode<K extends string, S extends z.ZodObject<z.ZodRawShape>>(name: K, options: DefineNodeOptions<S>): NodeType<K, S>;
@@ -140,9 +137,9 @@ export type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes exte
     from: readonly FromTypes[];
     to: ToDef;
     cardinality?: Cardinality;
-    targetCardinality?: TargetCardinality;
     endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -239,8 +236,7 @@ type ExtensionEdgeDef = Readonly<{
     from: readonly string[];
     to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
-    cardinality?: Cardinality;
-    targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -318,8 +314,6 @@ type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -684,8 +678,6 @@ type OntologyRelation = Readonly<{
     metaEdge: MetaEdge;
     from: NodeType | AnyEdgeType | string;
     to: NodeType | AnyEdgeType | string;
-    via?: string;
-    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -749,9 +741,6 @@ export type SearchableSchema = z.ZodString & Readonly<{
 
 // @public (undocumented)
 type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "to_kind" | "to_id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
-
-// @public
-export type TargetCardinality = Exclude<Cardinality, "unique">;
 
 // @public
 export type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";

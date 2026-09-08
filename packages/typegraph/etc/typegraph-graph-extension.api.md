@@ -10,12 +10,6 @@ import { z } from 'zod';
 const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
 
 // @public
-type Cardinality = "many" | "one" | "unique" | "oneActive";
-
-// @public
-type CompositionPartSide = "from" | "to";
-
-// @public
 export const CURRENT_GRAPH_EXTENSION_VERSION: 1;
 
 // @public
@@ -48,8 +42,7 @@ export type ExtensionEdgeDef = Readonly<{
     from: readonly string[];
     to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
-    cardinality?: Cardinality;
-    targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -148,8 +141,6 @@ export type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -203,7 +194,7 @@ export type ExtensionUniqueWhere = Readonly<{
 }>;
 
 // @public
-export const GRAPH_EXTENSION_ISSUE_CODES: readonly ["UNSUPPORTED_PROPERTY_TYPE", "INVALID_PROPERTY_REFINEMENT", "NESTED_ARRAY", "NESTED_OBJECT_TOO_DEEP", "INVALID_MODIFIER_TARGET", "INVALID_ENUM_VALUES", "INVALID_NUMBER_BOUNDS", "INVALID_LENGTH_BOUNDS", "INVALID_PATTERN", "INVALID_EMBEDDING_DIMENSIONS", "INVALID_SEARCHABLE_LANGUAGE", "RESERVED_PROPERTY_NAME", "INVALID_KIND_NAME", "DUPLICATE_KIND_NAME", "EMPTY_PROPERTIES", "EMPTY_FROM_OR_TO", "DUPLICATE_UNIQUE_CONSTRAINT", "EMPTY_UNIQUE_FIELDS", "DUPLICATE_UNIQUE_FIELD", "UNKNOWN_UNIQUE_FIELD", "INVALID_UNIQUE_WHERE_OP", "UNKNOWN_UNIQUE_WHERE_FIELD", "INVALID_ANNOTATION", "UNKNOWN_META_EDGE", "ONTOLOGY_CYCLE", "ONTOLOGY_SELF_LOOP", "ONTOLOGY_DISJOINT_CONFLICT", "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS", "DUPLICATE_ONTOLOGY_RELATION", "ONTOLOGY_COMPOSITION_VIA_REQUIRED", "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN", "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN", "INVALID_DOCUMENT_SHAPE", "UNKNOWN_DOCUMENT_KEY", "UNSUPPORTED_STRING_FORMAT", "INVALID_INDEX_DECLARATION", "DUPLICATE_INDEX_NAME", "EMPTY_INDEX_FIELDS", "UNKNOWN_PROPERTY_KEY"];
+export const GRAPH_EXTENSION_ISSUE_CODES: readonly ["UNSUPPORTED_PROPERTY_TYPE", "INVALID_PROPERTY_REFINEMENT", "NESTED_ARRAY", "NESTED_OBJECT_TOO_DEEP", "INVALID_MODIFIER_TARGET", "INVALID_ENUM_VALUES", "INVALID_NUMBER_BOUNDS", "INVALID_LENGTH_BOUNDS", "INVALID_PATTERN", "INVALID_EMBEDDING_DIMENSIONS", "INVALID_SEARCHABLE_LANGUAGE", "RESERVED_PROPERTY_NAME", "INVALID_KIND_NAME", "DUPLICATE_KIND_NAME", "EMPTY_PROPERTIES", "EMPTY_FROM_OR_TO", "DUPLICATE_UNIQUE_CONSTRAINT", "EMPTY_UNIQUE_FIELDS", "DUPLICATE_UNIQUE_FIELD", "UNKNOWN_UNIQUE_FIELD", "INVALID_UNIQUE_WHERE_OP", "UNKNOWN_UNIQUE_WHERE_FIELD", "INVALID_ANNOTATION", "UNKNOWN_META_EDGE", "ONTOLOGY_CYCLE", "ONTOLOGY_SELF_LOOP", "ONTOLOGY_DISJOINT_CONFLICT", "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS", "DUPLICATE_ONTOLOGY_RELATION", "INVALID_DOCUMENT_SHAPE", "UNKNOWN_DOCUMENT_KEY", "UNSUPPORTED_STRING_FORMAT", "INVALID_INDEX_DECLARATION", "DUPLICATE_INDEX_NAME", "EMPTY_INDEX_FIELDS", "UNKNOWN_PROPERTY_KEY"];
 
 // @public
 export const GRAPH_EXTENSION_TOP_LEVEL_KEYS: readonly ["version", "annotations", "nodes", "edges", "ontology", "indexes"];
@@ -392,9 +383,6 @@ type Result<T, E = Error> = Readonly<{
     success: false;
     error: E;
 }>;
-
-// @public
-type TargetCardinality = Exclude<Cardinality, "unique">;
 
 // @public
 class TypeGraphError extends Error {

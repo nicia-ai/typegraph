@@ -110,8 +110,9 @@ type CheckUniqueParams = Readonly<{
 }>;
 
 // @public
-type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef & Readonly<{
+type ClaimEdgeCardinalityParams = Readonly<{
     graphId: string;
+    cardinality: Exclude<Cardinality, "many">;
     edgeKind: string;
     edgeId: string;
     fromKind: string;
@@ -192,35 +193,10 @@ type CompiledStatementSql = IntentSql<"statement">;
 type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
-type CompositionPair = Readonly<{
-    partKind: string;
-    wholeKind: string;
-    viaEdgeKind: string;
-    partSide: CompositionPartSide;
-    population: "one" | "oneActive";
-}>;
-
-// @public
-type CompositionPartSide = "from" | "to";
-
-// @public
-type CompositionRelation = Readonly<{
-    pairs: readonly CompositionPair[];
-    edgeKinds: ReadonlySet<string>;
-    partSideByEdgeKind: ReadonlyMap<string, CompositionPartSide>;
-}>;
-
-// @public
 export function computeSchemaDiff(before: SerializedSchema, after: SerializedSchema): SchemaDiff;
 
 // @public
 export function computeSchemaHash(schema: SerializedSchema): Promise<SchemaHash>;
-
-// @public
-type ConstrainedCardinality = Exclude<Cardinality, "many">;
-
-// @public
-type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
 
 // @public
 type ConstraintFenceViolationRows = Readonly<{
@@ -231,8 +207,9 @@ type ConstraintFenceViolationRows = Readonly<{
 }>;
 
 // @public
-type ContendedEdgeRow = EdgeCardinalityAxisRef & Readonly<{
+type ContendedEdgeRow = Readonly<{
     edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
     edgeId: string;
     fromKind: string;
     fromId: string;
@@ -344,16 +321,6 @@ type ContributionRepopulationStats = Readonly<{
 }>;
 
 // @public
-type CountEdgesAtEndpointParams = Readonly<{
-    graphId: string;
-    edgeKind: string;
-    endpoint: "from" | "to";
-    endpointKind: string;
-    endpointId: string;
-    activeOnly?: boolean;
-}>;
-
-// @public
 type CountEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -364,6 +331,15 @@ type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+}>;
+
+// @public
+type CountEdgesFromParams = Readonly<{
+    graphId: string;
+    edgeKind: string;
+    fromKind: string;
+    fromId: string;
+    activeOnly?: boolean;
 }>;
 
 // @public
@@ -514,17 +490,9 @@ type DurableEdgeBatchMembers = Readonly<{
 const EDGE_TYPE_BRAND: "__edgeType";
 
 // @public
-type EdgeCardinalityAxisRef = Readonly<{
-    direction: "source";
-    cardinality: ConstrainedCardinality;
-}> | Readonly<{
-    direction: "target";
-    cardinality: ConstrainedTargetCardinality;
-}>;
-
-// @public
-type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
+type EdgeCardinalityDeclaration = Readonly<{
     edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
 }>;
 
 // @public
@@ -618,7 +586,7 @@ type EdgeEndpointAllowance = Readonly<{
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -661,9 +629,9 @@ type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends Nod
     from: readonly FromTypes[];
     to: ToDef;
     cardinality?: Cardinality;
-    targetCardinality?: TargetCardinality;
     endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -744,8 +712,7 @@ type ExtensionEdgeDef = Readonly<{
     from: readonly string[];
     to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
-    cardinality?: Cardinality;
-    targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -823,8 +790,6 @@ type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -1091,7 +1056,7 @@ type GraphBackend = Readonly<{
     hardDeleteEdgesBatch?: (this: void, params: DeleteEdgesBatchParams) => Promise<void>;
     getEdge: (this: void, graphId: string, id: string) => Promise<EdgeRow | undefined>;
     getEdges?: (this: void, graphId: string, ids: readonly string[]) => Promise<readonly EdgeRow[]>;
-    countEdgesAtEndpoint: (this: void, params: CountEdgesAtEndpointParams) => Promise<number>;
+    countEdgesFrom: (this: void, params: CountEdgesFromParams) => Promise<number>;
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
@@ -1595,12 +1560,6 @@ export function isBackwardsCompatible(diff: SchemaDiff): boolean;
 // @public
 export function isSchemaInitialized(backend: GraphBackend, graphId: string): Promise<boolean>;
 
-// @public
-export function isStructuralSubtype(child: JsonSchema, parent: JsonSchema): StructuralSubtypeResult;
-
-// @public
-export function isTypeLevelSubtype(child: JsonSchema, parent: JsonSchema): StructuralSubtypeResult;
-
 // @public (undocumented)
 type JsonPointer = string & {
     readonly __jsonPointer: unique symbol;
@@ -1616,11 +1575,7 @@ export type JsonSchema = Readonly<{
     properties?: Record<string, JsonSchema>;
     required?: readonly string[];
     items?: JsonSchema;
-    prefixItems?: readonly JsonSchema[];
-    minItems?: number;
-    maxItems?: number;
     additionalProperties?: boolean | JsonSchema;
-    propertyNames?: JsonSchema;
     enum?: readonly unknown[];
     const?: unknown;
     anyOf?: readonly JsonSchema[];
@@ -1631,7 +1586,6 @@ export type JsonSchema = Readonly<{
     default?: unknown;
     minimum?: number;
     maximum?: number;
-    multipleOf?: number;
     minLength?: number;
     maxLength?: number;
     pattern?: string;
@@ -1652,19 +1606,25 @@ type KindEntity = "node" | "edge";
 
 // @public
 class KindRegistry {
-    constructor(nodeKinds: ReadonlyMap<string, NodeType>, edgeKinds: ReadonlyMap<string, AnyEdgeType>, closures: RegistryClosures, identity?: GraphIdentityConfig, composition?: CompositionRelation);
+    constructor(nodeKinds: ReadonlyMap<string, NodeType>, edgeKinds: ReadonlyMap<string, AnyEdgeType>, closures: {
+        subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
+        subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
+        broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
+        narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
+        equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
+        iriToKind: ReadonlyMap<string, string>;
+        relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
+        disjointPairs: ReadonlySet<string>;
+        partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
+        hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
+        edgeInverses: ReadonlyMap<string, string>;
+        edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
+        edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    }, identity?: GraphIdentityConfig);
     areDisjoint(a: string, b: string): boolean;
     areEquivalent(a: string, b: string): boolean;
     // (undocumented)
     readonly broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
-    compositionEdgeKinds(): readonly string[];
-    compositionEdgeKindsOver(partKind: string): readonly string[];
-    compositionEdgeKindsUnder(wholeKind: string): readonly string[];
-    compositionPartKindsUnder(wholeKind: string): readonly string[];
-    compositionPartSide(edgeKind: string): CompositionPartSide | undefined;
-    compositionPopulation(concretePartKind: string): "one" | "oneActive" | undefined;
-    compositionRelation(): CompositionRelation;
-    compositionWholeKindsOver(partKind: string): readonly string[];
     disjointKindPairs(): readonly (readonly [string, string])[];
     disjointPairLabel(a: string, b: string): string;
     // (undocumented)
@@ -1684,7 +1644,6 @@ class KindRegistry {
     expandNarrower(kind: string): readonly string[];
     expandSubClasses(kind: string): readonly string[];
     getAncestors(kind: string): ReadonlySet<string>;
-    getCompositionEdge(partKind: string, wholeKind: string): CompositionPair | undefined;
     getDescendants(kind: string): ReadonlySet<string>;
     getDisjointKinds(kind: string): readonly string[];
     getEdgeType(name: string): AnyEdgeType | undefined;
@@ -1707,7 +1666,6 @@ class KindRegistry {
     isAssignableTo(concreteKind: string, targetKind: string): boolean;
     isAssignableToAny(concreteKind: string, targetKinds: readonly string[]): boolean;
     isBroaderThan(broaderConcept: string, narrowerConcept: string): boolean;
-    isCompositionEdge(edgeKind: string): boolean;
     isNarrowerThan(narrowerConcept: string, broaderConcept: string): boolean;
     isPartOf(part: string, whole: string): boolean;
     isSubClassOf(child: string, parent: string): boolean;
@@ -1758,7 +1716,7 @@ type ManagedEdgeCreatePlan = Readonly<{
     entity: "edge";
     params: InsertEdgeParams;
     schemaFence?: SchemaWriteFenceParams;
-    cardinalityClaims?: readonly ClaimEdgeCardinalityParams[];
+    cardinalityClaim?: ClaimEdgeCardinalityParams;
 }>;
 
 // @public
@@ -1963,7 +1921,7 @@ type NullCheckOp = "isNull" | "isNotNull";
 // @public
 export type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "metaEdge" | "relation";
+    entity: "metaEdge" | "relation" | "edgeRegistration";
     name: string;
     severity: ChangeSeverity;
     details: string;
@@ -1980,6 +1938,9 @@ export type OntologyDataProbe = Readonly<{
 }> | Readonly<{
     kind: "edgeEndpointAssignability";
     allowances: readonly EdgeEndpointAllowance[];
+}> | Readonly<{
+    kind: "edgeAcyclicity";
+    edgeKinds: readonly string[];
 }>;
 
 // @public
@@ -1987,8 +1948,6 @@ type OntologyRelation = Readonly<{
     metaEdge: MetaEdge;
     from: NodeType | AnyEdgeType | string;
     to: NodeType | AnyEdgeType | string;
-    via?: string;
-    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -2016,9 +1975,6 @@ type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
 
 // @public
 type PredicateBuilder = Readonly<Record<string, FieldPredicateBuilder>>;
-
-// @public
-export function projectTypeVisible(schema: JsonSchema): JsonSchema;
 
 // @public
 type PurgeEdgeClaimsParams = Readonly<{
@@ -2112,23 +2068,6 @@ export function registerGraphTemplate<G extends GraphDef>(backend: GraphBackend,
     templateId: string;
     reconciled: ReconciledSchema<G>;
 }>): Promise<GraphTemplate<G>>;
-
-// @public
-type RegistryClosures = Readonly<{
-    subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
-    subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
-    broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
-    narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
-    equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
-    iriToKind: ReadonlyMap<string, string>;
-    relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
-    disjointPairs: ReadonlySet<string>;
-    partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
-    hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
-    edgeInverses: ReadonlyMap<string, string>;
-    edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
-    edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
-}>;
 
 // @public
 type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
@@ -2286,12 +2225,12 @@ export type SerializedEdgeDef = Readonly<{
     targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
     properties: JsonSchema;
     cardinality: Cardinality;
-    targetCardinality?: TargetCardinality;
     endpointExistence: EndpointExistence;
     matchIdentity?: Readonly<{
         name: string;
         fields: readonly string[];
     }>;
+    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;
@@ -2329,8 +2268,6 @@ export type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -2492,25 +2429,6 @@ type SqlTextChunk = Readonly<{
 // @public
 type StrategyTableContribution = TableContribution;
 
-// @public
-export type StructuralIncomparableReason = "unsupported-keyword" | "schema-reference" | "type-token-array" | "unsupported-construct" | "max-depth-exceeded";
-
-// @public
-export type StructuralSubtypeReason = "missing-required-property" | "optional-in-child-required-in-parent" | "type-token-mismatch" | "unconstrained-where-parent-constrains" | "value-set-not-subset" | "string-length-not-tighter" | "pattern-mismatch" | "format-mismatch" | "numeric-bound-not-tighter" | "multiple-of-mismatch" | "array-bounds-not-tighter" | "tuple-arity-mismatch" | "no-matching-union-member" | "property-names-mismatch";
-
-// @public
-export type StructuralSubtypeResult = Readonly<{
-    verdict: "subtype";
-}> | Readonly<{
-    verdict: "not-subtype";
-    reason: StructuralSubtypeReason;
-    path: readonly string[];
-}> | Readonly<{
-    verdict: "incomparable";
-    reason: StructuralIncomparableReason;
-    path: readonly string[];
-}>;
-
 // @public (undocumented)
 type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "to_kind" | "to_id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
 
@@ -2529,9 +2447,6 @@ type TableState = Readonly<{
     name: string;
     exists: boolean;
 }>;
-
-// @public
-type TargetCardinality = Exclude<Cardinality, "unique">;
 
 // @public
 type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";

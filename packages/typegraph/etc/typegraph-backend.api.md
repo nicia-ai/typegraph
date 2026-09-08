@@ -1327,8 +1327,9 @@ export type CheckUniqueParams = Readonly<{
 }>;
 
 // @public
-export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef & Readonly<{
+export type ClaimEdgeCardinalityParams = Readonly<{
     graphId: string;
+    cardinality: Exclude<Cardinality, "many">;
     edgeKind: string;
     edgeId: string;
     fromKind: string;
@@ -1454,21 +1455,12 @@ export type CompiledStatementSql = IntentSql<"statement">;
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
-type CompositionPartSide = "from" | "to";
-
-// @public
 class ConfigurationError extends TypeGraphError {
     constructor(message: string, details?: Record<string, unknown>, options?: {
         cause?: unknown;
         suggestion?: string;
     });
 }
-
-// @public
-type ConstrainedCardinality = Exclude<Cardinality, "many">;
-
-// @public
-type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
 
 // @public
 export type ConstraintFenceViolationRows = Readonly<{
@@ -1479,8 +1471,9 @@ export type ConstraintFenceViolationRows = Readonly<{
 }>;
 
 // @public
-export type ContendedEdgeRow = EdgeCardinalityAxisRef & Readonly<{
+export type ContendedEdgeRow = Readonly<{
     edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
     edgeId: string;
     fromKind: string;
     fromId: string;
@@ -1691,16 +1684,6 @@ export type ContributionRepopulationStats = Readonly<{
 }>;
 
 // @public
-export type CountEdgesAtEndpointParams = Readonly<{
-    graphId: string;
-    edgeKind: string;
-    endpoint: "from" | "to";
-    endpointKind: string;
-    endpointId: string;
-    activeOnly?: boolean;
-}>;
-
-// @public
 export type CountEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -1711,6 +1694,15 @@ export type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+}>;
+
+// @public
+export type CountEdgesFromParams = Readonly<{
+    graphId: string;
+    edgeKind: string;
+    fromKind: string;
+    fromId: string;
+    activeOnly?: boolean;
 }>;
 
 // @public
@@ -1920,17 +1912,9 @@ export type DurableEdgeBatchMembers = Readonly<{
 }>;
 
 // @public
-type EdgeCardinalityAxisRef = Readonly<{
-    direction: "source";
-    cardinality: ConstrainedCardinality;
-}> | Readonly<{
-    direction: "target";
-    cardinality: ConstrainedTargetCardinality;
-}>;
-
-// @public
-export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
+export type EdgeCardinalityDeclaration = Readonly<{
     edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
 }>;
 
 // @public
@@ -2014,7 +1998,7 @@ export type EdgeEndpointAllowance = Readonly<{
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -2120,8 +2104,7 @@ export type ExtensionEdgeDef = Readonly<{
     from: readonly string[];
     to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
-    cardinality?: Cardinality;
-    targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -2199,8 +2182,6 @@ export type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -2508,7 +2489,7 @@ export type GraphBackend = Readonly<{
     hardDeleteEdgesBatch?: (this: void, params: DeleteEdgesBatchParams) => Promise<void>;
     getEdge: (this: void, graphId: string, id: string) => Promise<EdgeRow | undefined>;
     getEdges?: (this: void, graphId: string, ids: readonly string[]) => Promise<readonly EdgeRow[]>;
-    countEdgesAtEndpoint: (this: void, params: CountEdgesAtEndpointParams) => Promise<number>;
+    countEdgesFrom: (this: void, params: CountEdgesFromParams) => Promise<number>;
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
@@ -2993,11 +2974,7 @@ export type JsonSchema = Readonly<{
     properties?: Record<string, JsonSchema>;
     required?: readonly string[];
     items?: JsonSchema;
-    prefixItems?: readonly JsonSchema[];
-    minItems?: number;
-    maxItems?: number;
     additionalProperties?: boolean | JsonSchema;
-    propertyNames?: JsonSchema;
     enum?: readonly unknown[];
     const?: unknown;
     anyOf?: readonly JsonSchema[];
@@ -3008,7 +2985,6 @@ export type JsonSchema = Readonly<{
     default?: unknown;
     minimum?: number;
     maximum?: number;
-    multipleOf?: number;
     minLength?: number;
     maxLength?: number;
     pattern?: string;
@@ -3054,7 +3030,7 @@ export type ManagedEdgeCreatePlan = Readonly<{
     entity: "edge";
     params: InsertEdgeParams;
     schemaFence?: SchemaWriteFenceParams;
-    cardinalityClaims?: readonly ClaimEdgeCardinalityParams[];
+    cardinalityClaim?: ClaimEdgeCardinalityParams;
 }>;
 
 // @public
@@ -3231,6 +3207,9 @@ export function normalizeGraphCommandIsolation(value: unknown): GraphCommandIsol
 
 // @public
 export type NullCheckOp = "isNull" | "isNotNull";
+
+// @public
+export function observesPostFenceCommits(isolation: GraphCommandIsolation): boolean;
 
 // @public
 export type OperationNames<D extends CapabilityBundleDefinition> = D["operations"][number]["operation"];
@@ -3618,12 +3597,12 @@ export type SerializedEdgeDef = Readonly<{
     targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
     properties: JsonSchema;
     cardinality: Cardinality;
-    targetCardinality?: TargetCardinality;
     endpointExistence: EndpointExistence;
     matchIdentity?: Readonly<{
         name: string;
         fields: readonly string[];
     }>;
+    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;
@@ -3661,8 +3640,6 @@ export type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -3955,9 +3932,6 @@ export type TableState = Readonly<{
     name: string;
     exists: boolean;
 }>;
-
-// @public
-type TargetCardinality = Exclude<Cardinality, "unique">;
 
 // @public
 export type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
