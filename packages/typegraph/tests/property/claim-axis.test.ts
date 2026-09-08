@@ -36,11 +36,31 @@ function kindType(name: string): NodeType {
 function subClassRegistry(
   edges: readonly (readonly [string, string])[],
 ): KindRegistry {
-  const relations: OntologyRelation[] = edges.map(([child, parent]) => ({
-    metaEdge: core.subClassOfMetaEdge,
-    from: kindType(child),
-    to: kindType(parent),
-  }));
+  return mixedRegistry(edges, []);
+}
+
+/**
+ * Builds a registry from a mix of `subClassOf` and `equivalentTo` relations —
+ * D1 folds both into the SAME subsumption closure, so the axis determinism
+ * property must hold whether a component is connected by subclassing,
+ * equivalence, or both.
+ */
+function mixedRegistry(
+  subClassEdges: readonly (readonly [string, string])[],
+  equivalenceEdges: readonly (readonly [string, string])[],
+): KindRegistry {
+  const relations: OntologyRelation[] = [
+    ...subClassEdges.map(([child, parent]): OntologyRelation => ({
+      metaEdge: core.subClassOfMetaEdge,
+      from: kindType(child),
+      to: kindType(parent),
+    })),
+    ...equivalenceEdges.map(([left, right]): OntologyRelation => ({
+      metaEdge: core.equivalentToMetaEdge,
+      from: kindType(left),
+      to: kindType(right),
+    })),
+  ];
   return new KindRegistry(
     new Map(),
     new Map(),
@@ -81,22 +101,60 @@ const subClassEdgesArb = fc
     ),
   );
 
-/** Every kind reachable from `kind` through subclass edges in either direction. */
+/**
+ * Random unordered `equivalentTo` edges over the same kind names. No
+ * acyclicity constraint is needed — equivalence is symmetric/transitive by
+ * construction, so any pair set is coherent.
+ */
+const equivalenceEdgesArb = fc
+  .uniqueArray(
+    fc
+      .tuple(
+        fc.integer({ min: 0, max: KIND_NAMES.length - 2 }),
+        fc.integer({ min: 1, max: KIND_NAMES.length - 1 }),
+      )
+      .filter(([left, right]) => left < right),
+    { maxLength: 8 },
+  )
+  .map((pairs) =>
+    pairs.map(
+      ([left, right]) =>
+        [KIND_NAMES[left] as string, KIND_NAMES[right] as string] as const,
+    ),
+  );
+
+/**
+ * Every kind reachable from `kind` through subclass edges OR equivalence
+ * edges, in either direction — the same "one connected component, one axis"
+ * property must hold regardless of which meta-edge joined two kinds, since
+ * the registry folds both into one subsumption closure (D1).
+ */
 function connectedKinds(
   kind: string,
-  edges: readonly (readonly [string, string])[],
+  subClassEdges: readonly (readonly [string, string])[],
+  equivalenceEdges: readonly (readonly [string, string])[] = [],
 ): readonly string[] {
   const members = new Set<string>([kind]);
   let grew = true;
   while (grew) {
     grew = false;
-    for (const [child, parent] of edges) {
+    for (const [child, parent] of subClassEdges) {
       if (members.has(child) && !members.has(parent)) {
         members.add(parent);
         grew = true;
       }
       if (members.has(parent) && !members.has(child)) {
         members.add(child);
+        grew = true;
+      }
+    }
+    for (const [left, right] of equivalenceEdges) {
+      if (members.has(left) && !members.has(right)) {
+        members.add(right);
+        grew = true;
+      }
+      if (members.has(right) && !members.has(left)) {
+        members.add(left);
         grew = true;
       }
     }
@@ -107,21 +165,25 @@ function connectedKinds(
 describe("uniqueness claim axis determinism", () => {
   it("gives every kind in a connected component the same axis", () => {
     fc.assert(
-      fc.property(subClassEdgesArb, (edges) => {
-        const registry = subClassRegistry(edges);
-        for (const kind of KIND_NAMES) {
-          const axis = uniquenessClaimAxis(
-            kind,
-            "kindWithSubClasses",
-            registry,
-          );
-          for (const member of connectedKinds(kind, edges)) {
-            expect(
-              uniquenessClaimAxis(member, "kindWithSubClasses", registry),
-            ).toBe(axis);
+      fc.property(
+        subClassEdgesArb,
+        equivalenceEdgesArb,
+        (edges, equivEdges) => {
+          const registry = mixedRegistry(edges, equivEdges);
+          for (const kind of KIND_NAMES) {
+            const axis = uniquenessClaimAxis(
+              kind,
+              "kindWithSubClasses",
+              registry,
+            );
+            for (const member of connectedKinds(kind, edges, equivEdges)) {
+              expect(
+                uniquenessClaimAxis(member, "kindWithSubClasses", registry),
+              ).toBe(axis);
+            }
           }
-        }
-      }),
+        },
+      ),
       { numRuns: 200 },
     );
   });
@@ -131,19 +193,23 @@ describe("uniqueness claim axis determinism", () => {
     // key at an axis this kind never visits, so the probe's set must be inside
     // the component the axis is folded from.
     fc.assert(
-      fc.property(subClassEdgesArb, (edges) => {
-        const registry = subClassRegistry(edges);
-        for (const kind of KIND_NAMES) {
-          const component = new Set(connectedKinds(kind, edges));
-          for (const probed of getKindsForUniquenessCheck(
-            kind,
-            "kindWithSubClasses",
-            registry,
-          )) {
-            expect(component.has(probed)).toBe(true);
+      fc.property(
+        subClassEdgesArb,
+        equivalenceEdgesArb,
+        (edges, equivEdges) => {
+          const registry = mixedRegistry(edges, equivEdges);
+          for (const kind of KIND_NAMES) {
+            const component = new Set(connectedKinds(kind, edges, equivEdges));
+            for (const probed of getKindsForUniquenessCheck(
+              kind,
+              "kindWithSubClasses",
+              registry,
+            )) {
+              expect(component.has(probed)).toBe(true);
+            }
           }
-        }
-      }),
+        },
+      ),
       { numRuns: 200 },
     );
   });

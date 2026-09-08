@@ -190,6 +190,41 @@ describe("KindRegistry Subsumption Properties", () => {
         { numRuns: 20 },
       );
     });
+
+    it("irreflexivity survives equivalentTo folding into a subsumption cycle", () => {
+      // The empty-ontology irreflexivity case above cannot catch a regression
+      // in `withoutSelfMembership`: with no relations, `subClassAncestors` has
+      // no cycles to strip in the first place. A plain `equivalentTo(A, B)`
+      // with no other subClassOf relation doesn't cycle either under the
+      // registry's collapse-to-one-representative construction (see
+      // `computeEquivalenceRepresentatives`) — the class collapses to ONE
+      // node with no self-edge. A genuine cross-class subClassOf CYCLE
+      // between two equivalence classes' representatives (`A ⊑ X` and
+      // `X ⊑ A`, with `A ≡ B` and `X ≡ Y`) DOES make each representative
+      // reach itself in the collapsed closure, which then propagates into
+      // every member of both classes — exactly where a missing
+      // self-membership strip would surface. (Such an ontology is separately
+      // rejected as `ONTOLOGY_CYCLE` by `validateOntologyRelations`, but
+      // `detectDisjointExpansionConflicts` still runs the registry's closure
+      // builder on a cyclic ontology before that rejection is enforced, per
+      // its own documented contract.)
+      const kindArb = fc.constantFrom("A", "B", "X", "Y");
+      fc.assert(
+        fc.property(kindArb, (kind) => {
+          const relations = [
+            createRelation("A", META_EDGE_EQUIVALENT_TO, "B"),
+            createRelation("X", META_EDGE_EQUIVALENT_TO, "Y"),
+            createRelation("A", META_EDGE_SUB_CLASS_OF, "X"),
+            createRelation("X", META_EDGE_SUB_CLASS_OF, "A"),
+          ];
+          const registry = createRegistry(relations);
+          expect(registry.isSubClassOf(kind, kind)).toBe(false);
+          const expanded = registry.expandSubClasses(kind);
+          expect(new Set(expanded).size).toBe(expanded.length);
+        }),
+        { numRuns: 10 },
+      );
+    });
   });
 
   describe("expandSubClasses", () => {
