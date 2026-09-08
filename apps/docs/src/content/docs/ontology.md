@@ -99,6 +99,13 @@ const allMedia = await store
 This is a fundamental difference from traditional ORM inheritance—TypeGraph stores the concrete type
 (`kind: "Podcast"`) in the database, and expands at query time when requested.
 
+**Changing this on a populated graph**: adding a `subClassOf` relation is
+checked against existing data before it commits — it can merge two
+uniqueness components or propagate a `disjointWith` down to a new
+descendant — and removing one is checked for live edges whose endpoints rely
+on the subsumption. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
+
 ### Hierarchical (Concept Hierarchy)
 
 **`broader`** and **`narrower`**: Define conceptual hierarchy without identity.
@@ -118,6 +125,10 @@ const narrowerTopics = registry.expandNarrower("Technology");
 // ["ArtificialIntelligence", "MachineLearning", "DeepLearning", ...]
 ```
 
+**Changing this on a populated graph**: `broader`/`narrower` never gate a
+write or change what a claim contends for, so adding or removing one is
+always safe and auto-migrates unconditionally.
+
 ### Equivalence
 
 **`equivalentTo`**: Defines semantic equivalence between types or external IRIs.
@@ -132,6 +143,15 @@ equivalentTo(Organization, "https://schema.org/Organization");
 For durable individual identity, enable the graph-level TypeGraph Identity
 Profile and use `store.identity`. That ledger deliberately does not provide OWL
 property substitution or automatic graph-wide query expansion.
+
+**Changing this on a populated graph**: `equivalentTo` and `sameAs` are
+classified exactly like `subClassOf` — an addition is checked against
+existing data (it can propagate a `disjointWith`, and will also merge
+uniqueness components once equivalence folds into subsumption), and a
+removal is checked for live edges relying on it. `differentFrom` is inert —
+it reaches no closure and drives no write-path decision — so it is always
+safe. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
 
 ### Constraints
 
@@ -171,6 +191,13 @@ construction-and-reload rule applies to the other ontology coherence checks
 (duplicate relations, hierarchical self-loops and cycles, and inverse-partner
 uniqueness).
 
+**Changing this on a populated graph**: adding `disjointWith` is checked
+against every live node before it commits — two nodes already sharing an id
+under kinds the new relation makes mutually exclusive refuse the migration.
+Removing `disjointWith` can never invalidate existing data, so it stays safe
+and auto-migrates unconditionally. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
+
 ### Composition
 
 **`partOf`** and **`hasPart`**: Define compositional relationships.
@@ -181,6 +208,10 @@ hasPart(Book, Chapter);
 partOf(Episode, Podcast);
 hasPart(Podcast, Episode);
 ```
+
+**Changing this on a populated graph**: adding or removing `partOf`/`hasPart`
+is always safe and auto-migrates unconditionally (composition constraints do
+not yet exist to make otherwise).
 
 ### Edge Relationships
 
@@ -225,6 +256,12 @@ using equal kinds or `subClassOf` assignability. Matching the independent source
 and target unions is insufficient for source-dependent edges. A self-inverse
 edge must satisfy the same reversed-pair check against itself.
 
+**Changing this on a populated graph**: adding or removing `inverseOf`
+changes what a default `expand: "inverse"` traversal returns for existing
+edges — a read-semantics change — so it is `breaking` and requires an
+explicit `migrateSchema()`. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
+
 **`implies`**: Declares that one edge kind implies another exists.
 
 ```typescript
@@ -259,6 +296,12 @@ An incompatible pair (say, `Author -> Paper` implying
 into a store or committed as a schema version (`createStore`,
 `createStoreWithSchema`, `store.evolve({ ontology })`) — including relations
 authored through a graph extension, not just `implies()` calls in code.
+
+**Changing this on a populated graph**: adding or removing `implies` changes
+what a default `expand: "implying"` traversal returns for existing edges —
+the same read-semantics reasoning as `inverseOf` — so it is also `breaking`
+and requires an explicit `migrateSchema()`. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
 
 ## Using the Ontology
 

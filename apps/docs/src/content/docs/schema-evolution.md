@@ -30,9 +30,17 @@ These changes are backwards compatible and auto-migrate without intervention:
 - Adding new node types
 - Adding new edge types
 - Adding optional properties (with defaults)
-- Adding ontology relations
+- Adding `broader`, `narrower`, `partOf`, `hasPart`, or `relatedTo` ontology
+  relations
+- Removing `disjointWith` ontology relations
 - Changing per-kind annotations (UI hints, audit policy, etc.)
 - Changing graph-scoped annotations (display metadata, capabilities, etc.)
+
+Adding `disjointWith`, `subClassOf`, `equivalentTo`, or `sameAs` — and removing
+`subClassOf`, `equivalentTo`, or `sameAs` — auto-migrate too, but only after a
+data check. See
+[Ontology tightenings are checked against your data](#ontology-tightenings-are-checked-against-your-data)
+below.
 
 ### Adding an Optional Property
 
@@ -156,6 +164,71 @@ before annotations are enabled. TypeGraph 0.54+ preserves unknown top-level
 schema fields across parse-and-recommit cycles, so later additive metadata
 slices follow the same rollout rule.
 
+## Ontology tightenings are checked against your data
+
+Some ontology changes can invalidate rows that already exist. TypeGraph
+classifies these by what they do to your data, not just to the schema
+document, and runs a data check inside the schema-commit transaction before
+publishing the new version:
+
+| Meta-edge                                    | Added                                             | Removed                                           |
+| --------------------------------------------- | -------------------------------------------------- | -------------------------------------------------- |
+| `disjointWith`                                | Warning — checked against live nodes               | Safe                                                |
+| `subClassOf`, `equivalentTo`, `sameAs`        | Warning — checked against live nodes               | Warning — checked against live edges               |
+| `inverseOf`, `implies`                        | Breaking                                            | Breaking                                            |
+| `broader`, `narrower`, `partOf`, `hasPart`, `relatedTo`, `differentFrom` | Safe | Safe |
+
+- **Adding `disjointWith`** is checked against every live node: if two nodes
+  already share an id under kinds the new relation makes mutually exclusive
+  (directly, or via `subClassOf` propagation), the commit refuses.
+- **Adding `subClassOf`, `equivalentTo`, or `sameAs`** is checked two ways: it
+  can propagate an existing `disjointWith` down to a kind that was not
+  disjoint before (same check as above), and it can merge two previously
+  independent `kindWithSubClasses` uniqueness components — if both already
+  hold a live row under the same key, the commit refuses.
+- **Removing `subClassOf`, `equivalentTo`, or `sameAs`** can shrink an edge
+  kind's admitted endpoint pairs. If a live edge's endpoints rely on the
+  subsumption the relation provided, the commit refuses.
+- **Removing `disjointWith`** never invalidates anything — loosening a
+  constraint cannot make an existing row wrong — so it stays safe and
+  auto-migrates unconditionally.
+- **Adding or removing `inverseOf` or `implies`** changes what a default
+  `expand: "inverse"` / `expand: "implying"` traversal returns for existing
+  edges — a read-semantics change, not a data-validity one — so it is
+  `breaking` and requires an explicit `migrateSchema()`, the same treatment
+  the Operational Identity `sameIdAcrossKinds` flip gets.
+- A relation whose `from` or `to` names a kind **this same commit removes**
+  is always safe with no check — `Store.removeKinds()` is unaffected.
+
+A refused tightening throws `MigrationError`:
+
+```typescript
+try {
+  await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "ontology-tightening-violated") {
+    console.log(error.details.violations);
+    // → the exact rows blocking the migration, in the shape
+    //   store.verifyConstraintFences() returns
+  }
+}
+```
+
+Resolve the offending rows (delete them, change their kind, or narrow the
+ontology change), then retry. `store.verifyConstraintFences()` lists the same
+rows on demand at any time — run it against a live store to find conflicts
+before attempting a migration.
+
+**Residual window.** The check runs inside the commit transaction but takes no
+additional lock: under the previous schema the tightening's kinds are not yet
+disjoint (or their uniqueness components have not yet merged, or the edge
+kind's endpoints have not yet shrunk), so there is no claim for a lock to
+fence. A writer that commits under the previous schema version between the
+check and the version compare-and-swap is invisible to it — the same residual
+window the existing empty-kind removal fence carries.
+`store.verifyConstraintFences()` remains the post-hoc detector for exactly
+that window.
+
 ## Breaking Changes
 
 These require explicit handling:
@@ -164,6 +237,7 @@ These require explicit handling:
 - Removing properties
 - Adding required properties (no default)
 - Renaming types or properties
+- Adding or removing an `inverseOf` or `implies` ontology relation
 
 TypeGraph will throw `MigrationError` by default. You have two options: fix
 the schema to be backwards compatible, or use the expand-contract pattern.
@@ -499,7 +573,11 @@ console.log("Current version:", active?.version);
 | Add node type                  | Safe           | Yes            |
 | Add edge type                  | Safe           | Yes            |
 | Add optional property          | Safe           | Yes            |
-| Add ontology relation          | Safe           | Yes            |
+| Add `broader`/`narrower`/`partOf`/`hasPart`/`relatedTo` | Safe | Yes |
+| Add `disjointWith`, `subClassOf`, `equivalentTo`, `sameAs` | Warning (data-checked) | Yes, if the check passes |
+| Remove `subClassOf`, `equivalentTo`, `sameAs` | Warning (data-checked) | Yes, if the check passes |
+| Remove `disjointWith`          | Safe           | Yes            |
+| Add/remove `inverseOf`, `implies` | Breaking    | No             |
 | Change kind annotations           | Safe           | Yes            |
 | Add required property          | Breaking       | No             |
 | Remove property                | Breaking       | No             |

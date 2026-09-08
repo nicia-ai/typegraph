@@ -80,6 +80,7 @@ import {
   registerMultiKindQueryIntegrationTests,
   registerMultiRecursiveTraversalIntegrationTests,
   registerMultiRootSubgraphBatchIntegrationTests,
+  registerOntologyTighteningIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
@@ -339,6 +340,7 @@ export function createIntegrationTestSuite<
     registerConstraintFenceErrorIntegrationTests(context);
     registerConstraintFenceTransactionHealthTests(context);
     registerConstraintFenceVerificationIntegrationTests(context);
+    registerOntologyTighteningIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
     registerSetNodeMutationIntegrationTests(context);

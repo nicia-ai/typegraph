@@ -111,6 +111,18 @@ export {
 } from "./structural-subtype";
 
 // ============================================================
+// Ontology change classification (data-validated tightening)
+// ============================================================
+
+export {
+  classifyOntologyChanges,
+  type OntologyDataProbe,
+  type OntologySnapshot,
+  ontologyTighteningProbes,
+  type UniquenessComponentProbeGroup,
+} from "./ontology-change";
+
+// ============================================================
 // Validation Utilities
 // ============================================================
 

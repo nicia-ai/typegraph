@@ -23,10 +23,13 @@
  */
 
 import type { KindEntity } from "../core/types";
+import type { OntologyChange } from "../schema/migration";
 import type { SchemaDiff } from "../schema/migration";
-// Type-only import: `materialize-indexes.ts` value-imports
-// `ConfigurationError` from this file, but type-only imports are erased
-// at runtime so this back-edge does not create a value cycle.
+import type { ConstraintFenceViolation } from "../store/claims/verify";
+// Type-only imports: `materialize-indexes.ts` and `claims/verify.ts`
+// value-import `ConfigurationError` / `MigrationError` from this file, but
+// type-only imports are erased at runtime so these back-edges do not create
+// a value cycle.
 import type { MaterializeIndexesResult } from "../store/materialize-indexes";
 
 // ============================================================
@@ -1122,6 +1125,14 @@ export const MIGRATION_FAILURE_REASONS = [
   "kind-removal",
   /** A declared edge match identity changed while its edge kind held rows. */
   "edge-match-identity-rekey",
+  /**
+   * An ontology tightening (`disjointWith` / `subClassOf` / `equivalentTo` /
+   * `sameAs` addition, or a `subClassOf` / `equivalentTo` / `sameAs`
+   * removal) is false against existing rows. Inspect `details.violations`
+   * — in exactly the shape `store.verifyConstraintFences()` returns — for
+   * the rows that must be resolved before retrying.
+   */
+  "ontology-tightening-violated",
 ] as const;
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
@@ -1179,6 +1190,26 @@ export type MigrationErrorDetails =
       toVersion: number;
       reason: "edge-match-identity-rekey";
       edgeKinds: readonly string[];
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      reason: "ontology-tightening-violated";
+      /**
+       * The ontology changes that required a data check — every classified
+       * change in the diff whose `probes` is non-empty. A change classified
+       * `safe` or `breaking` (which carries no `probes`) never appears here,
+       * even when the same diff also contains one.
+       */
+      changes: readonly OntologyChange[];
+      /**
+       * The rows that make the proposed ontology false, in exactly the
+       * shape `store.verifyConstraintFences()` returns — so the same rows
+       * that block the migration can be listed, resolved, and the
+       * migration retried.
+       */
+      violations: readonly ConstraintFenceViolation[];
     }>;
 
 /**

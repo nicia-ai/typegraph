@@ -405,290 +405,92 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   `BulkOperationHookContext`. Gate: every added symbol at every moved
 //   entrypoint is one of those eight names, no entrypoint's debt decreased,
 //   and no other entrypoint moved.
-// TransactionBackend gaining LineageBackend batch. `TransactionBackend`
-// gained `LineageBackend` (a `Pick<GraphBackend, "lineage">`, mirroring the
-// pre-existing `CatalogBackend`) so `tx.lineage` is type-accessible on a
-// transaction handle the same way `tx.catalog` already was — the runtime fix
-// this ships alongside threads a profile-supplied `lineage` onto a
-// transaction-scoped backend in both dialects, which was previously silently
-// dropped. `LineageBackend` is directly exported only from `./backend`, the
-// module that defines it; every OTHER entrypoint that renders
-// `TransactionBackend` at all (its type literal spells `LineageBackend` out
-// as one of its intersection members) reaches `LineageBackend` only through
-// that reachability, so the rule is simply: every entrypoint that renders
-// `TransactionBackend` and does not itself export `LineageBackend` gains
-// forgotten-export debt for it, by exactly +1. Fourteen entrypoints render
-// `TransactionBackend` without exporting `LineageBackend` and so move: `.`,
-// `./adapters/drizzle/engine`, `./adapters/drizzle/postgres`, `./adapters/
-// drizzle/postgres/pglite`, `./adapters/drizzle/sqlite`, `./adapters/
-// drizzle/sqlite/libsql`, `./adapters/drizzle/sqlite/local`,
-// `./graph-merge`, `./interchange`, `./postgres/pglite`, `./profiler`,
-// `./provenance`, `./schema`, and `./sqlite/local`. `LineageMembers`/
-// `LineageDelta`/`EntityKey`/`EngineRevision` were already counted as
-// forgotten exports at every one of those fourteen wherever
-// `GraphBranch`/`GraphBackend.lineage` reached them (see the batch above),
-// so `LineageBackend` is the only symbol this step adds to any of their
-// counts. Gate: every moved entrypoint's debt increased by exactly 1, and
-// no other entrypoint moved.
-// Post-rebase batch. `feat/lineage-capability` added `GraphBranch.
-// forkRevision?: EngineRevision` (the pruned-diff step) before rebasing onto
-// a `main` that had independently added `GraphBranch.close` (the forked
-// working-copy strategy) — both branches touched the same object-type
-// literal. The source conflict was resolved correctly (`GraphBranch` now
-// carries both members), but this ledger and every `etc/*.api.md` were
-// carried forward from `main`'s side of that same conflict, which predates
-// `forkRevision` entirely — silently discarding the forgotten-export debt
-// the lineage branch's own commits had already earned and accounted for.
-// This run restores it: exactly 14 entrypoints move, every one by the same
-// +4 (`EngineRevision` plus the three other lineage types it makes newly
-// reachable wherever `GraphBranch` or `GraphBackend.lineage` renders),
-// confirmed by comparing against the two entrypoints whose `.api.md` TEXT
-// also changed (`./graph-merge` for `forkRevision` itself, `./adapters/
-// drizzle/engine` for this step's own `CreateBaseSchemaMembersDeps.
-// sinceIndexDdl` — a plain tuple of primitives, so it earns no forgotten
-// export of its own and contributes nothing beyond the shared +4). Gate:
-// every moved entrypoint's debt only increased, and by the same amount.
-// LineageSession batch. `LineageMembers.revision`/`.changesSince` each gained
-// a `session: LineageSession` parameter (the connection a read runs on,
-// replacing a dead identity comparison `assertTargetUnchanged` used to make
-// against a bag that took no session argument at all). `LineageSession` is
-// directly exported only from `./backend`, the module that defines it;
-// every other entrypoint that renders `LineageMembers` at all now also
-// renders `LineageSession` inside its two members' signatures, so the SAME
-// fourteen entrypoints the `LineageBackend` batch above named move again,
-// each by exactly +1: `.`, `./adapters/drizzle/engine`, `./adapters/
-// drizzle/postgres`, `./adapters/drizzle/postgres/pglite`, `./adapters/
-// drizzle/sqlite`, `./adapters/drizzle/sqlite/libsql`, `./adapters/
-// drizzle/sqlite/local`, `./graph-merge`, `./interchange`, `./postgres/
-// pglite`, `./profiler`, `./provenance`, `./schema`, and `./sqlite/local`.
-// Gate: every moved entrypoint's debt increased by exactly 1, no other
-// entrypoint moved, and `./backend`'s own `.api.md` is the only one whose
-// TEXT diff adds a new top-level type (`LineageSession` itself) rather than
-// only touching `LineageMembers`'s two member signatures and the `lineage`
-// registry entry's `accesses` field.
 //
-// Recorded read source seam batch: `ExternalRecordedReadSource` and the
-// built-in capture binding's type both gained `source`/`predicate` members
-// (an intersection with the newly-public `RecordedReadSource`), whose
-// signatures reference `RecordedInstantParts` — a shape `core/temporal.ts`
-// already exported by name but no entrypoint had rendered before. `.`
-// directly exports `RecordedReadSource` and `RecordedSourceTable` now
-// (dropping the old unexported `RecordedReadSource` union from its own
-// forgotten set) while picking up `RecordedInstantParts` as a forgotten
-// export, netting zero (394 → 394, a different symbol set behind the same
-// count, hence a new SHA). The six entrypoints that mirror `.`'s surface
-// without directly exporting `RecordedReadSource`/`RecordedSourceTable`
-// (`./graph-merge`, `./interchange`, `./postgres/pglite`, `./profiler`,
-// `./provenance`, `./sqlite/local`) each gain both types as forgotten
-// exports, +2 apiece.
-//
-// Engine-native recorded time batch: `RecordedInstantParts` (already
-// forgotten export debt everywhere it rendered) became a discriminated union
-// of two new shapes, `TypeGraphRecordedInstantParts` and
-// `EngineRecordedInstantParts`, and the recorded read binding union
-// (`RecordedReadBinding`) gained a third member, `EngineRecordedReadSource` —
-// both reachable wherever `RecordedInstantParts`/`RecordedReadBinding`
-// already rendered. `StoreCore` (reachable from `.` via `Store`) also gained
-// `recordedTimeOwnership: RecordedTimeOwnership`, a fourth new forgotten
-// export at the same site. The seven entrypoints that already rendered
-// `RecordedInstantParts` (`.`, `./graph-merge`, `./interchange`, `./postgres/
-// pglite`, `./profiler`, `./provenance`, `./sqlite/local`) each move by
-// exactly +4. Gate: every moved entrypoint's debt increased by exactly 4, no
-// other entrypoint moved, and no bundled backend's own `.api.md` TEXT gains a
-// new top-level type beyond the two already-public seam types
-// (`EngineRecordedTimeMembers`/`EngineRecordedRevision`, added in the prior
-// commit) referencing `RecordedInstantParts`'s new shape indirectly.
-// bulkFindEdgesTo adds BulkFindEdgesToParams and BulkFindEdgesToResult to the
-// six Store-bearing secondary entrypoints (+2 each). Both are directly
-// exported from the root entrypoint; no other symbol sets changed.
-// Set-oriented read APIs add seven root-exported supporting types to
-// `StoreCore`: CheckedReadScope, EdgeReadWindow, NeighborOrderField,
-// NeighborReadOptions, NeighborResult, OneStatementBatchResults, and
-// OneStatementBatchableQuery. The same six Store-bearing secondary
-// entrypoints render those names without exporting them directly (+7 each).
-// Composable set-read follow-up. The root directly exports the six new public
-// helper types (`NeighborNodeOrderField`, `NeighborOrder`, `NeighborRead`,
-// `SubgraphRead`, `EmbeddableOneStatementRead`, and
-// `ExecutableOneStatementRead`), while the
-// compatibility-preserving optional-boundary Store construction makes six
-// private helper names newly reachable there (+6). The six Store-bearing
-// secondary entrypoints do not re-export the six public helper names, so they
-// gain those six plus the same six private helpers (+12 each). No other
-// entrypoint's forgotten-export set changes.
-// Scoped batch reads replace the public `*Query` pairs with a single
-// `BatchReadBuilder` callback surface. The four secondary Store entrypoints
-// that can re-export its two public helper types lose the three superseded
-// forgotten names (`NeighborRead`, `SubgraphRead`, and
-// `ExecutableOneStatementRead`). The bundled local-backend entrypoints also
-// lose one superseded helper without re-exporting the new helpers: importing
-// Store types there would unnecessarily expose the Store dependency graph
-// through their adapter aliases.
-// Query DSL phase 1/2 contract repair adds twelve private helper names to the
-// root and the six Store-bearing secondary entrypoints (+12 each). Seven
-// (`AggregateAliasMap`, `AggregateFieldResult`, `AliasSchemaValue`,
-// `AliasValue`, `FieldResult`, `PropertyValue`, `WithAliasOptionality`) carry
-// schema-aware aggregate result inference; four (`EqualityOperand`,
-// `MembershipOperand`, `NullFieldAccessor`, `ObjectComparisonAccessor`) carry
-// the corrected predicate operand/accessor contracts; and
-// `OneStatementBatchReads` preserves batchOnce tuple and readonly-array result
-// inference. These are implementation helpers behind exported fluent APIs,
-// not independently useful contracts, so exporting them merely to erase
-// measured forgotten-export debt would enlarge the package surface without a
-// caller use case. No names were removed and no other entrypoint moved.
-// Query DSL phase 3 adds typed database expressions and projection queries.
-// Thirty-six private representation/inference helpers become reachable from
-// every Store-bearing surface: `AggregateExpressionNode`, `AggregateOperator`,
-// `AliasExpressions`, `ArithmeticExpressionNode`, `ArithmeticOperator`,
-// `BooleanExpressionNode`, `CoalesceExpressionNode`, `ComparisonExpressionNode`,
-// `ConditionalExpressionNode`, `DatabaseExpressionNode`,
-// `DatabaseExpressionPredicate`, `DatabaseJsonValue`, `DatabaseLiteral`,
-// `ExistsSubqueryExpressionNode`, `ExpressionComparisonOperator`,
-// `ExpressionMetadata`, `ExpressionObjectChildren`,
-// `ExpressionProjectionEntries`, `ExpressionProjectionEntry`,
-// `ExpressionSubqueryHelpers`, `ExpressionSubqueryRelation`,
-// `ExpressionValue$1`, `FieldExpressionNode`, `IsUnion`,
-// `LiteralExpressionNode`, `NotExpressionNode`, `NullCheckExpressionNode`,
-// `NumericConversionExpressionNode`, `OneStatementReadProvenance`,
-// `OuterReferenceExpressionNode`, `ParameterExpressionNode`,
-// `ProjectedExpressionSubqueryRelation`, `ScalarExpressionSubqueryRelation`,
-// `ScalarSubqueryExpressionNode`, `UndefinedWhenNullish`, and
-// `UndefinedWhenOptional`. The six secondary Store entrypoints additionally
-// reach seven public root exports they do not re-export (`DatabaseExpression`,
-// `DatabaseProjection`, `ExecutableProjectionQuery`, `ExpressionAliasContext`,
-// `ExpressionValue`, `ProjectionResult`, `QueryExpressionContext`), producing
-// their exact +43 delta. The root instead gains twenty private helpers used by
-// its exported expression factories and inference: `Comparable`,
-// `ComparableExpression`, `LiteralResult`, `MergeAliasMaps`,
-// `MergeEdgeAliasMaps`, `NonNull`, `NullIfEitherUndefined`,
-// `NumericExpression`, `OrderedComparable`, `ParameterValue`, `coalesce`,
-// `countDistinct_2`, `count_2`, `isNotNull`, `isNull`, `literal`, `not`,
-// `parameter`, `toNumber`, and `when`, producing its exact +56 delta. These
-// helpers are implementation details behind the exported fluent surface; no
-// forgotten name was removed, and exporting them would add API without an
-// independent caller contract.
-// Phase 4 adds eleven internal relation contract names behind the root's public
-// fluent API: AggregateRelationFields, CompatibleRelationProjection,
-// DerivedRelation, RelationAst, RelationColumn, RelationDefinition, RelationOrder,
-// RelationProvenance, RelationSource, RelationState, and SetRelation. Root debt
-// is 476 -> 487. The six Store-bearing secondary entrypoints also reference the
-// root-only public ExecutableRelationQuery, PreparedBindings,
-// PreparedParameterDeclaration, RelationColumnContext, RelationProjection, and
-// RelationProjectionResult, giving each an exact +17 delta. No old names were
-// removed, and these internal constructor/compiler types are not independent APIs.
-// Phase 6 adds two internal qualified-path inference helpers at the root:
-// RequiredRecursiveAliasValue and ResolvePathFormat (487 -> 489). The six
-// Store-bearing secondary entrypoints additionally reach the root-exported
-// BatchOnceOptions and five QualifiedRecursivePath* types, plus those same two
-// helpers, for an exact +8 each. These names are the implementation graph behind
-// the public opt-in batch option and qualified recursive-path result; the public
-// caller types are exported at the root, while duplicating them across unrelated
-// entrypoints would enlarge those surfaces. No forgotten name was removed.
-// Ordered scalar collection adds one private factory name, `collect`, to the
-// root expression object's inferred public shape (+1: 489 -> 490). The root
-// directly exports its caller-facing `CollectOrder` type. The six secondary
-// Store-bearing entrypoints render that type through the same expression
-// surface without re-exporting it, so each gains `CollectOrder` instead (+1).
-// No other forgotten-export set changes: the aggregate AST metadata and
-// collection element metadata reuse types already present in those graphs.
-// Splitting collection aggregation into its own public AST discriminant adds
-// the internal `CollectExpressionNode` to the root and the same six
-// Store-bearing secondary entrypoints (+1 each). `CollectOptions` is exported
-// directly at the root and does not propagate into the secondary declaration
-// graphs. Removing `"collect"` from `AggregateOperator` and `orderBy` from
-// `AggregateExpressionNode` changes existing declarations without changing
-// the forgotten-name set. No other entrypoint changes.
-// Recorded revision requests add three public root types:
-// `RecordedRevisionRequest`, `HistoryTransactionContext`, and
-// `MeasurableHistoryTransactionContext`. The Store-bearing `./provenance`,
-// `./sqlite/local`, and `./postgres/pglite` entrypoints render those root-only
-// types transitively, so each gains exactly those three forgotten exports.
-// The root names all three directly and gains no forgotten-export debt.
-// Explicit multi-kind sources add FieldCategory to the root's reachable helper
-// graph. Store-bearing secondary entrypoints also reference CommonPropertyKeys
-// and NodePropsFor, which are exported by the root rather than repeated on each
-// secondary surface. IsUnion is now shared with expression subqueries and keeps
-// its existing forgotten-export name. Measured additions: +1 root, +3 on the
-// six Store-bearing secondary entrypoints below; other surfaces are unchanged.
-// Adopted schema evolution adds directly exported plan, option, outcome, and
-// timeout types at their defining barrels. The API extractor also renders
-// implementation-only owner/payload and backend adoption types transitively
-// through Store and adapter signatures. These are booked as forgotten-export
-// debt rather than widened as standalone package exports: they are not
-// callable entrypoints or useful authoring contracts. After the six public
-// plan/option types are directly exported from the root, root debt rises by
-// four;
-// Store-bearing secondary surfaces rise by six; backend adapter surfaces rise
-// by two (one for the adoption result), and schema/engine surfaces by one.
-// `branchForEvolution` is a direct graph-merge export; its transitive
-// `EvolutionPlan` and Store evolution option types account for the additional
-// graph-merge debt. The exact fingerprints below gate every changed surface.
-// Planned evolution (#705) changes the type graph reachable through StoreEvolution:
-// SchemaIdentity and the discriminated EvolutionRequirement union become named
-// root/schema exports, while adapter authoring gains SchemaProvisioning and
-// AdoptedSchemaWriteTransaction. The remaining entrypoint-specific changes below
-// are exact symbol-set fingerprints, not a relaxed count-only allowance.
-// Ordered record collections export CollectRecordFields, CollectedRecord, and
-// CollectRecordOperand directly from the root. Six Store-bearing secondary
-// entrypoints reach only CollectRecordOperand transitively, adding exactly
-// that one forgotten name to each fingerprint below. Removing that name from
-// each measured symbol set reproduces its previous fingerprint.
-// Partitioned top-N introduces TopPerPartitionRelation as a transitive
-// forgotten export at the root. Six Store-bearing secondary entrypoints also
-// reach TopPerPartitionOptions and TopPerPartitionOrder without exporting them
-// directly. Removing these exact new names from each measured symbol set
-// reproduces its previous fingerprint; all other entrypoints are unchanged.
-// Shared capability upgrades add ContributionScope and node-candidate query
-// contracts to Store-bearing entrypoints, while endpoint-set conformance adds
-// its fixture types and a bundle-member helper. These declarations are
-// intentionally public or transitively reachable from public signatures; the
-// updated hashes below record the exact measured name sets from this run.
-// Array membership and tuple cursor predicates add their AST nodes to the
-// public query graph. The root also reaches their operand helper types; each
-// Store-bearing secondary entrypoint reaches the two predicate node types.
-// Resolved node update batch contracts become reachable through the six
-// Store-bearing secondary entrypoints. The fingerprints below record the
-// complete measured symbol sets after that portable batch surface was added.
-// Recorded heterogeneous node upserts add the public transaction input/result
-// types at the root and make the backend lowering contracts reachable through
-// GraphBackend. The backend barrel exports those contracts directly; the
-// remaining entrypoints retain their deliberately narrower public surfaces,
-// so the exact transitive name sets are booked here rather than widened.
+// Ontology change classification batch (roadmap §3.A, item A): the fourth
+// constraint-fence-audit family (`edgeEndpointAssignability`) adds
+// `EdgeEndpointAllowance` and `MisassignedEdgeEndpointRow` to
+// `src/backend/types.ts`'s `ReadConstraintFenceViolationsParams` /
+// `ConstraintFenceViolationRows`, and the new `MigrationErrorDetails`
+// `"ontology-tightening-violated"` member carries `changes: readonly
+// OntologyChange[]` (whose own `probes?: readonly OntologyDataProbe[]` names
+// the new `OntologyDataProbe` union and its `UniquenessComponentProbeGroup`
+// member). `OntologyChange` itself was ALREADY forgotten-export debt
+// everywhere it renders (pre-existing, via `SchemaDiff.ontology`) and so is
+// NOT part of this batch's delta — only the four truly new names are.
+// Measured, not assumed:
+// - `./schema` (271→273, +2) and the six `./adapters/drizzle/*` sub-entrypoints
+//   plus `./adapters/drizzle/engine` (each +2: `./adapters/drizzle/sqlite`
+//   247→249, `./adapters/drizzle/postgres` 246→248,
+//   `./adapters/drizzle/postgres/pglite` 250→252,
+//   `./adapters/drizzle/sqlite/local` 250→252,
+//   `./adapters/drizzle/sqlite/libsql` 250→252, `./adapters/drizzle/engine`
+//   320→322) gain only `EdgeEndpointAllowance` and `MisassignedEdgeEndpointRow`:
+//   `./schema` exports `OntologyChange` / `OntologyDataProbe` /
+//   `UniquenessComponentProbeGroup` directly (`classifyOntologyChanges`,
+//   `ontologyTighteningProbes`), so nothing else the new
+//   `MigrationErrorDetails` member or the fourth audit family reaches needs a
+//   forgotten name there or at the backend-adapter entrypoints, which never
+//   name `OntologyChange` at all.
+// - The six `Store`-bearing entrypoints that do not export
+//   `classifyOntologyChanges` (`./interchange` 709→713, `./profiler`
+//   711→715, `./graph-merge` 726→730, `./provenance` 717→721, `./sqlite/local`
+//   706→710, `./postgres/pglite` 706→710) each gain all four:
+//   `EdgeEndpointAllowance`, `MisassignedEdgeEndpointRow`, `OntologyDataProbe`,
+//   and `UniquenessComponentProbeGroup` (+4 apiece). `./backend`,
+//   `./adapters/drizzle/indexes`, `./core`, `./graph-extension`, and
+//   `./indexes` are unaffected: `./backend` exports `EdgeEndpointAllowance`
+//   and `MisassignedEdgeEndpointRow` directly, and the other four never reach
+//   `MigrationErrorDetails`, `ReadConstraintFenceViolationsParams`, or
+//   `ConstraintFenceViolationRows` at all.
+// - `.` (the package root) is the one Store-bearing entrypoint that does NOT
+//   gain any of the four: `src/index.ts` exports `EdgeEndpointAllowance` and
+//   `MisassignedEdgeEndpointRow` directly (alongside `ConstraintFenceViolation`)
+//   and `OntologyDataProbe` / `UniquenessComponentProbeGroup` directly
+//   (alongside the schema-reads block), so a consumer of
+//   `"@nicia-ai/typegraph"` alone can name every field of a narrowed
+//   `ConstraintFenceViolation` or `MigrationErrorDetails` without a subpath
+//   import. Its debt therefore stays at the pre-batch baseline (388), not
+//   388→392. Gate: every added symbol at every OTHER moved entrypoint is one
+//   of the four names above (never `OntologyChange` itself, which is
+//   pre-existing debt everywhere including `.`), `.` is the one entrypoint
+//   this batch leaves unchanged, no OTHER entrypoint's debt decreased, and
+//   exactly 13 entrypoints moved.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 501,
-    sha256: "2087b6807b4984fbe0ecc2473e27d3d21add2de0d3738b0ff9151c12f8555bb4",
+    count: 388,
+    sha256: "ba5d322f78a05b64e3c21926da4836acb52a26ee41906b9904915884dae7c6ac",
   },
   "./adapters/drizzle/engine": {
-    count: 336,
-    sha256: "093a591827631c8bf0d39d0545fdafb5146a2ffa4ef0e7bc3a13e3b788349665",
+    count: 322,
+    sha256: "c1184d0391487c646381096ba4499a6b065f6249a24caaa0d47d237f40384b78",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 265,
-    sha256: "f2ff4682146d644371699c7401b7669cce137b8d72573065614cceecd3330b9f",
+    count: 248,
+    sha256: "14101f3a480081f3650fb72d0c65c73898e9ce6b1e622f25ffc3509af1029673",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 269,
-    sha256: "9b43d805eff4a13e93d019b4eda078d9f7f87623667d11be5121eda8fdb81e0f",
+    count: 252,
+    sha256: "7fc79f06823339308e4077229a53c97cad6c32ddc265a2658bcf982ad00983c0",
   },
   "./adapters/drizzle/sqlite": {
-    count: 266,
-    sha256: "bd8ccc0d561def033a698b4debd310a7474b91cbc84c1906e9505f33f7208b88",
+    count: 249,
+    sha256: "8eef6c35cd1162acda9ed9f8f2c509aecda288112b719efc053b0c35782e79ab",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 269,
-    sha256: "84947a220caf1ca427203f54504c2abea1c76930ef6a68a886fc1a3936020343",
+    count: 252,
+    sha256: "28ddcda4fb17ca95efd42b00715b177ad4681aa473ea4cab6c8a2643cb449f6f",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 269,
-    sha256: "84947a220caf1ca427203f54504c2abea1c76930ef6a68a886fc1a3936020343",
+    count: 252,
+    sha256: "28ddcda4fb17ca95efd42b00715b177ad4681aa473ea4cab6c8a2643cb449f6f",
   },
   "./backend": {
-    count: 18,
-    sha256: "febe6415eed00c5e97431d9a311d9a443cebd1015c2c053ac777d1bb245dbadd",
+    count: 16,
+    sha256: "fbcbd40667f4a4374dd0e267e595a852e5dfeec68d3d4e5e775848bc6468738f",
   },
   "./core": {
     count: 72,
@@ -702,36 +504,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 866,
-    sha256: "2d6663245e0507451946b8519cdcac3f7b4b185c142e9b1ee27c25d74f91fb49",
+    count: 730,
+    sha256: "ac9e2060f9ea27fb9e86d34aa149399103ca0f4ecb0331278c9f08400405f4ae",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 849,
-    sha256: "f0a15151233e52449f14610067263b04e2e6e63147318287accfd78e326a1dc0",
+    count: 713,
+    sha256: "a2554712de880f0a40d4f97619da39c6c322574d095f01b1b5267a566ae37ac8",
   },
   "./postgres/pglite": {
-    count: 855,
-    sha256: "f09819a0eeded08fb10c68db7d6ae17cafa005dcba8b7863fa6ac4a55887542f",
+    count: 710,
+    sha256: "6f5552bf9a5e998997e3f965460d3e643f052c85fc71510adf94615ab81914f5",
   },
   "./profiler": {
-    count: 851,
-    sha256: "8e9639ae422506df342bb7c6ffeabfd2524eeef316795d107e89de4e838f844a",
+    count: 715,
+    sha256: "98ae19d1f08289dea5954115d2d694f3fb5b4be85993040910f28c3e74891c0d",
   },
   "./provenance": {
-    count: 864,
-    sha256: "27ee1b7e293ae2f6fe2862fb4d754445e86e60c82955b3cfa5e7453013a06af1",
+    count: 721,
+    sha256: "3b7b8e200acec162f0d0d83f82bfa8ef7379e2bf9458d46c4a8ab3a64c230e47",
   },
   "./schema": {
-    count: 288,
-    sha256: "588e9ab6d547e809644ca2543f3268c45bcedb2c485b0c3e9c4f0658b5857539",
+    count: 273,
+    sha256: "d8daaf0d30dddffcfd484018daba5fc0e4ebd0f96ac7cc4df65ff37f97a1b7e2",
   },
   "./sqlite/local": {
-    count: 855,
-    sha256: "f09819a0eeded08fb10c68db7d6ae17cafa005dcba8b7863fa6ac4a55887542f",
+    count: 710,
+    sha256: "6f5552bf9a5e998997e3f965460d3e643f052c85fc71510adf94615ab81914f5",
   },
 };
 

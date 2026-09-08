@@ -258,16 +258,16 @@ export function registerConstraintFenceVerificationIntegrationTests(
       const violations = await store.verifyConstraintFences();
       expect(violations).toHaveLength(1);
       const violation = requireDefined(violations[0], "cardinality violation");
+      // Narrowed by assertion rather than by a ternary, so a report that named
+      // the wrong family fails here instead of comparing an empty list.
+      if (violation.family !== "edgeCardinality")
+        throw new Error(`expected an edge violation, got ${violation.family}`);
       expect(violation.target).toEqual({
         relation: "edgeClaims",
         graphId: verifyGraph.id,
         axis: "one:verifyManages",
         key: encodeTupleKey(["VerifyEmployee", employee.id]),
       });
-      // Narrowed by assertion rather than by a ternary, so a report that named
-      // the wrong family fails here instead of comparing an empty list.
-      if (violation.family !== "edgeCardinality")
-        throw new Error(`expected an edge violation, got ${violation.family}`);
       expect(violation.edgeIds).toEqual(
         [edge.id, "verify-unfenced-edge"].toSorted(),
       );
@@ -304,6 +304,273 @@ export function registerConstraintFenceVerificationIntegrationTests(
       // population, so it must not name it either.
       expect(await store.verifyConstraintFences()).toEqual([]);
     });
+
+    it("reports a live edge sitting outside every declared endpoint pair", async () => {
+      const store = await context.createStore(verifyGraph);
+      const contractor = await store.nodes.VerifyContractor.create({
+        email: "grace@example.com",
+      });
+      const project = await store.nodes.VerifyProject.create({
+        title: "Fences",
+      });
+
+      // `verifyManages` only ever declares `from: [VerifyEmployee]`, so a
+      // `VerifyContractor` source is a pre-upgrade shape no live claim
+      // fences: the edges primary key is `(graph, id)`, so this insert is
+      // legal and holds no cardinality claim against it.
+      await store.backend.insertEdge({
+        graphId: verifyGraph.id,
+        id: "verify-misassigned-edge",
+        kind: "verifyManages",
+        fromKind: "VerifyContractor",
+        fromId: contractor.id,
+        toKind: "VerifyProject",
+        toId: project.id,
+        props: {},
+      });
+
+      expect(await store.verifyConstraintFences()).toEqual([
+        {
+          family: "edgeEndpointAssignability",
+          edgeKind: "verifyManages",
+          allowedPairs: [["VerifyEmployee", "VerifyProject"]],
+          edges: [
+            {
+              edgeKind: "verifyManages",
+              edgeId: "verify-misassigned-edge",
+              fromKind: "VerifyContractor",
+              fromId: contractor.id,
+              toKind: "VerifyProject",
+              toId: project.id,
+            },
+          ],
+        },
+      ]);
+    });
+
+    it("does not report a misassigned edge whose valid-time window already closed", async () => {
+      const store = await context.createStore(verifyGraph);
+      const contractor = await store.nodes.VerifyContractor.create({
+        email: "closed-window@example.com",
+      });
+      const project = await store.nodes.VerifyProject.create({
+        title: "Closed window",
+      });
+
+      // Same misassignment as the case above, but its valid-time window
+      // ended in the past — a current-coordinate read never returns this
+      // row, so it cannot be violating a declaration only current reads
+      // apply to. "Live" for this family is the same current-window
+      // predicate `compileTemporalFilter({ mode: "current" })` compiles for
+      // an ordinary read: `deleted_at IS NULL AND (valid_from IS NULL OR
+      // valid_from <= now) AND (valid_to IS NULL OR valid_to > now)`.
+      await store.backend.insertEdge({
+        graphId: verifyGraph.id,
+        id: "verify-misassigned-edge-closed-window",
+        kind: "verifyManages",
+        fromKind: "VerifyContractor",
+        fromId: contractor.id,
+        toKind: "VerifyProject",
+        toId: project.id,
+        props: {},
+        validFrom: "2019-01-01T00:00:00.000Z",
+        validTo: "2020-01-01T00:00:00.000Z",
+      });
+
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+    // MUTATION CHECK (verified): dropping the `valid_to > now` half of the
+    // current-window predicate in `buildMisassignedEdgeEndpointAudit`
+    // (`src/backend/drizzle/operations/constraint-fence-audit.ts`) reports
+    // this closed-window row as a live violation and this test fails.
+
+    it("reports a misassigned edge with a bounded FUTURE valid-time window", async () => {
+      const store = await context.createStore(verifyGraph);
+      const contractor = await store.nodes.VerifyContractor.create({
+        email: "future-window@example.com",
+      });
+      const project = await store.nodes.VerifyProject.create({
+        title: "Future window",
+      });
+
+      // The window is CURRENTLY open (started in the past, ends far in the
+      // future) — exactly what an ordinary current-coordinate read returns
+      // today. A predicate that excludes anything but `valid_to IS NULL`
+      // would miss this row entirely, which is the bug this case guards.
+      await store.backend.insertEdge({
+        graphId: verifyGraph.id,
+        id: "verify-misassigned-edge-future-window",
+        kind: "verifyManages",
+        fromKind: "VerifyContractor",
+        fromId: contractor.id,
+        toKind: "VerifyProject",
+        toId: project.id,
+        props: {},
+        validFrom: "2019-01-01T00:00:00.000Z",
+        validTo: "2999-01-01T00:00:00.000Z",
+      });
+
+      expect(await store.verifyConstraintFences()).toEqual([
+        {
+          family: "edgeEndpointAssignability",
+          edgeKind: "verifyManages",
+          allowedPairs: [["VerifyEmployee", "VerifyProject"]],
+          edges: [
+            {
+              edgeKind: "verifyManages",
+              edgeId: "verify-misassigned-edge-future-window",
+              fromKind: "VerifyContractor",
+              fromId: contractor.id,
+              toKind: "VerifyProject",
+              toId: project.id,
+            },
+          ],
+        },
+      ]);
+    });
+    // MUTATION CHECK (verified): restoring the original `valid_to IS NULL`
+    // liveness predicate (instead of the current-window one) makes this
+    // bounded-future-window row invisible to the audit and this test fails.
+
+    it(
+      "audits a wide subclass hierarchy without exceeding SQLite's " +
+        "expression-tree depth or a connection's bind-parameter budget",
+      async () => {
+        // (141)^2 = 19,881 admitted pairs after subsumption expansion: past
+        // SQLite's `SQLITE_MAX_EXPR_DEPTH` break (an `OR`-chain rendering of
+        // the allowance breaks at ~1,000-1,700 pairs — a root with ~31-40
+        // direct subclasses) AND past a single statement's bind-parameter
+        // budget (32,766 modern SQLite / 32,767 Postgres), so this width
+        // forces the real multi-statement, intersected-chunk path this audit
+        // now takes — not merely a bigger single query.
+        const SUBCLASS_COUNT = 140;
+        const WideRoot = defineNode("WideRoot", { schema: z.object({}) });
+        const WideAlien = defineNode("WideAlien", { schema: z.object({}) });
+        const subclasses = Array.from({ length: SUBCLASS_COUNT }, (_, index) =>
+          defineNode(`WideSub${index}`, { schema: z.object({}) }),
+        );
+        const wideRelationship = defineEdge("wideRelationship", {
+          schema: z.object({}),
+        });
+        const wideGraph = defineGraph({
+          id: "constraint_fence_wide_hierarchy",
+          nodes: {
+            WideRoot: { type: WideRoot },
+            WideAlien: { type: WideAlien },
+            ...Object.fromEntries(
+              subclasses.map((sub, index) => [
+                `WideSub${index}`,
+                { type: sub },
+              ]),
+            ),
+          },
+          edges: {
+            wideRelationship: {
+              type: wideRelationship,
+              from: [WideRoot],
+              to: [WideRoot],
+            },
+          },
+          ontology: subclasses.map((sub) => subClassOf(sub, WideRoot)),
+        });
+
+        const store = await context.createStore(wideGraph);
+
+        // Every node, including the two leaves and the misassigned edge's
+        // endpoints, is written through the backend directly: the dynamically
+        // built `nodes` map has no per-kind literal keys for the typed
+        // `store.nodes.<Kind>` collections to resolve at compile time, and
+        // (for the leaves) the live `subClassOf` relation that admits them as
+        // `wideRelationship` endpoints is itself something only the backend's untyped
+        // insert can express — exactly like the endpoint-shrink cases
+        // elsewhere in this suite.
+        await store.backend.insertNode({
+          graphId: wideGraph.id,
+          kind: "WideSub0",
+          id: "wide-leaf-a",
+          props: {},
+        });
+        await store.backend.insertNode({
+          graphId: wideGraph.id,
+          kind: "WideSub1",
+          id: "wide-leaf-b",
+          props: {},
+        });
+        // A legitimately admitted edge between two leaves. It must NOT
+        // appear in the report.
+        await store.backend.insertEdge({
+          graphId: wideGraph.id,
+          id: "wide-admitted-edge",
+          kind: "wideRelationship",
+          fromKind: "WideSub0",
+          fromId: "wide-leaf-a",
+          toKind: "WideSub1",
+          toId: "wide-leaf-b",
+          props: {},
+        });
+
+        // A genuinely misassigned edge: `WideAlien` is outside the
+        // hierarchy entirely, so this row sits outside every one of the
+        // (141)^2 admitted pairs and must be the only violation reported.
+        await store.backend.insertNode({
+          graphId: wideGraph.id,
+          kind: "WideAlien",
+          id: "wide-alien",
+          props: {},
+        });
+        await store.backend.insertNode({
+          graphId: wideGraph.id,
+          kind: "WideRoot",
+          id: "wide-root",
+          props: {},
+        });
+        await store.backend.insertEdge({
+          graphId: wideGraph.id,
+          id: "wide-misassigned-edge",
+          kind: "wideRelationship",
+          fromKind: "WideAlien",
+          fromId: "wide-alien",
+          toKind: "WideRoot",
+          toId: "wide-root",
+          props: {},
+        });
+
+        const violations = await store.verifyConstraintFences();
+        expect(violations).toHaveLength(1);
+        const violation = requireDefined(
+          violations[0],
+          "wide-hierarchy violation",
+        );
+        if (violation.family !== "edgeEndpointAssignability") {
+          throw new Error(
+            `expected edgeEndpointAssignability, got ${violation.family}`,
+          );
+        }
+        expect(violation.edgeKind).toBe("wideRelationship");
+        expect(violation.edges).toEqual([
+          {
+            edgeKind: "wideRelationship",
+            edgeId: "wide-misassigned-edge",
+            fromKind: "WideAlien",
+            fromId: "wide-alien",
+            toKind: "WideRoot",
+            toId: "wide-root",
+          },
+        ]);
+        // Root paired with every kind (itself plus its 140 subclasses),
+        // squared — proving the full allowance was expanded and read, not
+        // silently truncated by the chunking this width forces.
+        expect(violation.allowedPairs).toHaveLength((SUBCLASS_COUNT + 1) ** 2);
+        expect(violation.allowedPairs).toContainEqual(["WideRoot", "WideRoot"]);
+        expect(violation.allowedPairs).toContainEqual(["WideSub0", "WideSub1"]);
+      },
+      30_000,
+    );
+    // MUTATION CHECK (lane-A-load-bearing.md): reverting
+    // `buildMisassignedEdgeEndpointAudit` to render the admitted pairs as an
+    // `OR`-chain of bound equalities (rather than a `VALUES`-joined
+    // `NOT EXISTS`) throws `SqliteError: Expression tree is too large` on
+    // this case's SQLite lane.
 
     it("audits declarations added after this Store became stale", async () => {
       const staleStore = await context.createStore(verifyGraph);
