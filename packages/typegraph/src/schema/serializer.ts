@@ -531,6 +531,10 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
           fields: [...registration.matchIdentity.fields],
         },
       }),
+    // Emitted only when true: `computeSchemaHash` hashes this document, so
+    // emitting `acyclic: false` on every edge would move the hash of every
+    // existing graph on next open (see `SerializedEdgeDef.acyclic`).
+    ...(registration.acyclic === true ? { acyclic: true } : {}),
     description: edge.description,
     ...(annotations === undefined ? {} : { annotations }),
   };

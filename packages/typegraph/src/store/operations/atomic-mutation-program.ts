@@ -29,6 +29,7 @@ import { DatabaseOperationError } from "../../errors";
 import type { KindRegistry } from "../../registry/kind-registry";
 import { hasOwnKey } from "../../utils/object";
 import { edgeCardinalityAxisReferences } from "../claims/edge-claims";
+import { edgeWriteNeedsConstraintFence } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
 import type { CreateEdgeInput, CreateNodeInput } from "../types";
@@ -239,7 +240,9 @@ export function resolveAtomicEdgeConvergenceExecutor(
   if (registration?.matchIdentity === undefined) {
     return;
   }
-  if (edgeCardinalityAxisReferences(registration).length > 0) return;
+  // No native program applies a constrained cardinality axis or acyclicity;
+  // such a create must re-enter the portable path, which probes and refuses.
+  if (edgeWriteNeedsConstraintFence(registration) !== undefined) return;
   const declaredFields = registration.matchIdentity.fields;
   if (
     declaredFields.length !== input.matchOn.length ||
@@ -268,7 +271,14 @@ export function resolveAtomicEdgeBatchExecutor(
     !input.inputs.every(
       (item) =>
         hasOwnKey(input.graph.edges, item.kind) &&
-        input.graph.edges[item.kind] !== undefined,
+        input.graph.edges[item.kind] !== undefined &&
+        // No native program applies acyclicity: acyclicity's fence has no
+        // database key to claim through (`CONSTRAINT_FENCE_BACKING.
+        // edgeAcyclicity === "lockOnly"`), which this fused program's claim
+        // rows cannot express. Any acyclic kind in the batch sends the WHOLE
+        // batch through the portable path, which probes the combined insert
+        // once, after it lands.
+        input.graph.edges[item.kind]?.acyclic !== true,
     )
   ) {
     return;
@@ -400,7 +410,10 @@ function isAtomicResolvedEdgeKindEligible(
   const registration = input.graph.edges[input.kind];
   return (
     registration !== undefined &&
-    edgeCardinalityAxisReferences(registration).length === 0 &&
+    // No native program applies a constrained cardinality axis or
+    // acyclicity; such a create must re-enter the portable path, which
+    // probes and refuses.
+    edgeWriteNeedsConstraintFence(registration) === undefined &&
     registration.matchIdentity === undefined
   );
 }

@@ -39,6 +39,7 @@ import { checkDisjointness } from "../constraints";
 import { type GraphDef } from "../core/define-graph";
 import { type UniqueConstraint } from "../core/types";
 import { type KindRegistry } from "../registry/kind-registry";
+import { acyclicEdgeRelations } from "./acyclicity";
 import { type ConstraintFenceReason } from "./claims/backing";
 import {
   type EdgeCardinalityAxisRef,
@@ -70,23 +71,36 @@ export type ConstraintContext = Readonly<{
  * The constraint that makes an edge write of this declaration constrained, or
  * `undefined` when it is not.
  *
- * A declaration with no constrained axis (both options `many`, or absent)
- * runs no cardinality probe and must NOT pay for the lock — the fence is for
- * writes that check something, not for writes in general. Every constrained
- * axis counts or existence-tests sibling edges before inserting, and nothing
- * in the schema repeats that test.
+ * A declaration with no constrained cardinality axis (both `cardinality` and
+ * `targetCardinality` absent or `many`) and no `acyclic: true` runs no probe
+ * and must NOT pay for the lock — the fence is for writes that check
+ * something, not for writes in general. Every constrained axis counts or
+ * existence-tests sibling edges before inserting, and an `acyclic: true` edge
+ * kind (`cardinality: "many", acyclic: true` is the common case) runs the
+ * reachability probe before inserting; nothing in the schema repeats either
+ * test.
+ *
+ * Cardinality is reported first when both apply, so every refusal payload
+ * that existed before `acyclic` shipped stays byte-identical — the fence
+ * itself is the same per-graph lock regardless of which reason names it, so
+ * the choice affects only what a refusal on an unfenceable backend calls the
+ * constraint.
  *
  * The one owner of this classification: it folds through
  * {@link edgeCardinalityAxisReferences}, the same fold `checkEdgeCardinalityConstraints`
  * iterates, so a second inline `!== "many"` at a write path — blind to a
- * target-only declaration — can never drift from it.
+ * target-only declaration — can never drift from it. {@link graphOwesClaims}
+ * deliberately does NOT call this: it asks the cardinality-only half of the
+ * same fold directly, because acyclicity has no claim row to substitute for
+ * the per-graph lock import skips (see {@link graphOwesLockOnlyFence}).
  */
 export function edgeWriteNeedsConstraintFence(
-  declarations: EdgeCardinalityDeclarations,
+  declarations: EdgeCardinalityDeclarations & Readonly<{ acyclic?: boolean }>,
 ): ConstraintFenceReason | undefined {
-  return edgeCardinalityAxisReferences(declarations).length === 0 ?
-      undefined
-    : "edgeCardinality";
+  if (edgeCardinalityAxisReferences(declarations).length > 0) {
+    return "edgeCardinality";
+  }
+  return declarations.acyclic === true ? "edgeAcyclicity" : undefined;
 }
 
 /**
@@ -159,6 +173,15 @@ export function nodeWriteNeedsConstraintFence(
  * It lives here rather than beside {@link nodeClaimSites} because it also folds
  * {@link edgeWriteNeedsConstraintFence}, and this module is the one that already
  * sees both per-kind predicates.
+ *
+ * Deliberately asks about CARDINALITY alone, never acyclicity: a claim row is
+ * a pre-insert reservation import's per-row recovery substitutes for the
+ * per-graph lock it does not take, and acyclicity has no claim row to
+ * reserve (`lockOnly`) — so this predicate would have nothing to report for
+ * it anyway. The lock-only question for an acyclic graph is
+ * {@link graphOwesLockOnlyFence}, a separate decision with a separate
+ * consumer: import takes the per-graph lock per chunk when it applies,
+ * rather than trying to substitute a claim that does not exist.
  */
 export function graphOwesClaims(
   graph: GraphDef,
@@ -176,10 +199,32 @@ export function graphOwesClaims(
     }
   }
   for (const registration of Object.values(graph.edges)) {
-    const reason = edgeWriteNeedsConstraintFence(registration);
-    if (reason !== undefined) return reason;
+    if (edgeCardinalityAxisReferences(registration).length > 0) {
+      return "edgeCardinality";
+    }
   }
   return undefined;
+}
+
+/**
+ * Whether `importGraph` must take the per-graph write lock per chunk: the
+ * graph declares at least one `acyclic: true` edge kind.
+ *
+ * Import takes no per-graph lock by design (`graphOwesClaims`'s docblock) and
+ * is fenced instead by the claim rows its constrained writes issue —
+ * acyclicity has no claim row, so that substitute does not exist here. This
+ * is therefore a real change to import's concurrency posture for such a
+ * graph: for the duration of each chunk transaction, every other writer of
+ * the graph blocks. `importGraphData` reads this before the first chunk and,
+ * on a backend with no transactions, refuses the whole import up front
+ * rather than probing unfenced.
+ */
+export function graphOwesLockOnlyFence(
+  graph: GraphDef,
+): ConstraintFenceReason | undefined {
+  return acyclicEdgeRelations(graph).length === 0 ?
+      undefined
+    : "edgeAcyclicity";
 }
 
 /**
