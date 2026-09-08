@@ -65,6 +65,7 @@ import {
   type AliasMap,
   type AliasNodeType,
   type BaseFieldAccessor,
+  type BuildRecursiveAliases,
   type EdgeAccessor,
   type EdgeAlias,
   type EdgeAliasMap,
@@ -113,6 +114,24 @@ export type IdentityTraversalOption<G extends GraphDef> =
 
 type DynamicNodeTypeFor<T> =
   T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
+
+/**
+ * Options shared by `parts()` and `wholes()`. There is deliberately no
+ * `expand`: `expand` means "same relation, more members" (ontology
+ * implying/inverse expansion, Q1), and the composition edge-kind set these
+ * two steps traverse is derived from the registry's composition relation,
+ * not from an expansion mode.
+ */
+export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
+  /** Alias to navigate from (defaults to current/last traversal target). */
+  from?: keyof Aliases & string;
+  /** Maximum recursion depth. `1` reaches only the direct level. */
+  maxHops?: number;
+  /** Include recursion depth in output. Pass a string to customize the alias. */
+  depth?: string;
+  /** Include the traversal path in output. Pass a string to customize the alias. */
+  path?: string;
+}>;
 
 type DynamicEdgeTypeFor<T> =
   T extends RuntimeEdgeKind ? RuntimeEdgeTypeFor<T> : DynamicEdgeType;
@@ -689,6 +708,286 @@ export class QueryBuilder<
       undefined, // pendingEdgePredicates — default
       options?.includeIdentityMembers ?? false,
     );
+  }
+
+  /**
+   * Navigates to every composition PART transitively under the source
+   * alias's kind — the declared-structure alternative to spelling
+   * `.traverse(edgeKind, ...).recursive(...)` by hand over the realizing
+   * edge kinds, and the one way to cross a composition relation realized by
+   * more than one edge kind in a single step (a Podcast whose Episodes are
+   * `episodeOf` and whose Segments are `segmentOf` still reads as one
+   * `.parts(...)` call).
+   *
+   * Direction is derived per realizing edge kind from
+   * `registry.compositionPartSide`, not fixed: a `part -> whole` edge
+   * (`partSide: "from"`) is followed reversed (`"in"`) to reach parts, and a
+   * `whole -> part` edge (`partSide: "to"`, the `has_*` convention) is
+   * followed in its own direction (`"out"`). A relation realized by both
+   * orientations compiles to one traversal step that unions them — the same
+   * `inverseEdgeKinds` mechanism `{ expand: "inverse" }` already compiles to
+   * a `UNION ALL` of both directions at every recursion round — so a mixed
+   * relation costs nothing extra to declare and the uniform case (the common
+   * one) pays nothing extra to compile.
+   *
+   * Recurses by default — the difference from `traverse`, which reaches only
+   * the direct level — to the full transitive parts closure; pass `maxHops:
+   * 1` for direct parts only. The result alias is untyped (`DynamicNodeType`,
+   * reached through `.field(name)`) because the parts closure is registry
+   * data that may span more than one node kind with different schemas, not a
+   * single kind the graph's static type can name.
+   *
+   * Refuses rather than silently returning zero rows: an alias whose kind
+   * declares no composition parts throws `ConfigurationError` with code
+   * `COMPOSITION_NO_PARTS_DECLARED`.
+   */
+  parts<
+    NA extends string,
+    const O extends CompositionNavigationOptions<Aliases> = Record<
+      string,
+      never
+    >,
+  >(
+    nodeAlias: UniqueAlias<NA, Aliases>,
+    options?: O,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
+    EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
+    RecursiveAliases &
+      BuildRecursiveAliases<
+        O extends { depth: infer D extends string } ? D : false,
+        O extends { path: infer P extends string } ? P : false,
+        NA
+      >,
+    CoordinateState
+  > {
+    return this.#navigateComposition(
+      "parts",
+      nodeAlias,
+      options,
+    ) as unknown as QueryBuilder<
+      G,
+      Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
+      EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
+      RecursiveAliases &
+        BuildRecursiveAliases<
+          O extends { depth: infer D extends string } ? D : false,
+          O extends { path: infer P extends string } ? P : false,
+          NA
+        >,
+      CoordinateState
+    >;
+  }
+
+  /**
+   * Navigates to every composition WHOLE transitively over the source
+   * alias's kind — the mirror of {@link QueryBuilder.parts}. Direction is
+   * derived the same way, flipped: a `part -> whole` edge is followed in its
+   * own direction (`"out"`) and a `whole -> part` (`has_*`) edge is followed
+   * reversed (`"in"`). See {@link QueryBuilder.parts} for the recursion,
+   * typing, and refusal rules, which are otherwise identical.
+   *
+   * Refuses with `ConfigurationError` (`COMPOSITION_NO_WHOLES_DECLARED`) on
+   * an alias whose kind declares no composition wholes.
+   */
+  wholes<
+    NA extends string,
+    const O extends CompositionNavigationOptions<Aliases> = Record<
+      string,
+      never
+    >,
+  >(
+    nodeAlias: UniqueAlias<NA, Aliases>,
+    options?: O,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
+    EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
+    RecursiveAliases &
+      BuildRecursiveAliases<
+        O extends { depth: infer D extends string } ? D : false,
+        O extends { path: infer P extends string } ? P : false,
+        NA
+      >,
+    CoordinateState
+  > {
+    return this.#navigateComposition(
+      "wholes",
+      nodeAlias,
+      options,
+    ) as unknown as QueryBuilder<
+      G,
+      Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
+      EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
+      RecursiveAliases &
+        BuildRecursiveAliases<
+          O extends { depth: infer D extends string } ? D : false,
+          O extends { path: infer P extends string } ? P : false,
+          NA
+        >,
+      CoordinateState
+    >;
+  }
+
+  /**
+   * Shared body for `parts()`/`wholes()`. `relation` selects which registry
+   * readers and which orientation-to-direction mapping apply; everything
+   * else — refusal, edge-kind partition, the union construction, recursion —
+   * is one code path so the two steps cannot drift.
+   */
+  #navigateComposition(
+    relation: "parts" | "wholes",
+    nodeAlias: string,
+    options: CompositionNavigationOptions<Aliases> | undefined,
+  ): QueryBuilder<G, AliasMap, EdgeAliasMap, RecursiveAliasMap, "open"> {
+    validateSqlIdentifier(nodeAlias);
+    const registry = this.#config.registry;
+    const fromAlias = options?.from ?? this.#state.currentAlias;
+    const sourceKinds = this.#getKindNamesForAlias(fromAlias) ?? [];
+
+    const edgeKindsUnder = (kind: string): readonly string[] =>
+      relation === "parts" ?
+        registry.compositionEdgeKindsUnder(kind)
+      : registry.compositionEdgeKindsOver(kind);
+    const targetKindsUnder = (kind: string): readonly string[] =>
+      relation === "parts" ?
+        registry.compositionPartKindsUnder(kind)
+      : registry.compositionWholeKindsOver(kind);
+
+    const edgeKinds = new Set<string>();
+    for (const kind of sourceKinds) {
+      for (const edgeKind of edgeKindsUnder(kind)) edgeKinds.add(edgeKind);
+    }
+    if (edgeKinds.size === 0) {
+      const kindsLabel =
+        sourceKinds.length > 0 ?
+          sourceKinds.map((kind) => `"${kind}"`).join(", ")
+        : "(unknown)";
+      throw new ConfigurationError(
+        `.${relation}("${nodeAlias}") was called on alias "${fromAlias}" (kind${sourceKinds.length === 1 ? "" : "s"} ${kindsLabel}), which declares no composition ${relation}.`,
+        {
+          code:
+            relation === "parts" ?
+              "COMPOSITION_NO_PARTS_DECLARED"
+            : "COMPOSITION_NO_WHOLES_DECLARED",
+          alias: fromAlias,
+          kinds: sourceKinds,
+        },
+        {
+          suggestion:
+            relation === "parts" ?
+              `Declare a partOf/hasPart relation naming ${kindsLabel} as the whole, or call .traverse(...) directly for a non-composition relationship.`
+            : `Declare a partOf/hasPart relation naming ${kindsLabel} as the part, or call .traverse(...) directly for a non-composition relationship.`,
+        },
+      );
+    }
+
+    const targetKinds = new Set<string>();
+    for (const kind of sourceKinds) {
+      for (const targetKind of targetKindsUnder(kind)) {
+        targetKinds.add(targetKind);
+      }
+    }
+
+    // §1.7 orientation table: `parts()` reaches a `part -> whole` edge
+    // ("from") reversed and a `whole -> part` edge ("to") forward; `wholes()`
+    // flips both.
+    const forwardDirection: TraversalDirection =
+      relation === "parts" ? "in" : "out";
+    const reversedDirection: TraversalDirection =
+      relation === "parts" ? "out" : "in";
+
+    const forwardEdgeKinds: string[] = [];
+    const reversedEdgeKinds: string[] = [];
+    for (const edgeKind of edgeKinds) {
+      if (registry.compositionPartSide(edgeKind) === "from") {
+        forwardEdgeKinds.push(edgeKind);
+      } else {
+        reversedEdgeKinds.push(edgeKind);
+      }
+    }
+
+    // Uniform orientation (either set empty) needs no `inverseEdgeKinds` —
+    // the direct-only compiled branch — and pays nothing beyond a plain
+    // traversal; mixed orientation folds the other set in as the existing
+    // union machinery's inverse branch.
+    const [direction, directEdgeKinds, inverseEdgeKinds]: readonly [
+      TraversalDirection,
+      readonly string[],
+      readonly string[],
+    ] =
+      forwardEdgeKinds.length > 0 ?
+        [forwardDirection, forwardEdgeKinds, reversedEdgeKinds]
+      : [reversedDirection, reversedEdgeKinds, []];
+
+    const edgeAlias = `${nodeAlias}_edge`;
+    validateSqlIdentifier(edgeAlias);
+
+    const newState: QueryBuilderState = {
+      ...this.#state,
+      dynamicEdgeAliases: new Set([
+        ...this.#state.dynamicEdgeAliases,
+        edgeAlias,
+      ]),
+    };
+
+    const traversalBuilder = new TraversalBuilder<
+      G,
+      AliasMap,
+      EdgeAliasMap,
+      string,
+      string,
+      TraversalDirection,
+      false,
+      false,
+      false,
+      RecursiveAliasMap,
+      "open",
+      DynamicEdgeType
+    >(
+      this.#config,
+      newState,
+      directEdgeKinds,
+      edgeAlias,
+      direction,
+      fromAlias,
+      inverseEdgeKinds,
+      false,
+      undefined, // variableLength — default
+      undefined, // pendingEdgePredicates — default
+      false,
+    );
+
+    const targetKindList = [...targetKinds].toSorted((left, right) =>
+      left < right ? -1
+      : left > right ? 1
+      : 0,
+    );
+
+    // Recurse by default (the value proposition versus `traverse`): skip only
+    // when the caller both asked for exactly one hop and requested neither a
+    // depth nor a path column, so no accepted option is ever silently
+    // dropped by the optimization.
+    const wantsRecursiveOutput =
+      options?.depth !== undefined || options?.path !== undefined;
+    return (options?.maxHops === 1 && !wantsRecursiveOutput ?
+      traversalBuilder.toKindSet(targetKindList, nodeAlias)
+    : traversalBuilder
+        .recursive({
+          ...(options?.maxHops === undefined ?
+            {}
+          : { maxHops: options.maxHops }),
+          ...(options?.depth === undefined ? {} : { depth: options.depth }),
+          ...(options?.path === undefined ? {} : { path: options.path }),
+        })
+        .toKindSet(targetKindList, nodeAlias)) as unknown as QueryBuilder<
+      G,
+      AliasMap,
+      EdgeAliasMap,
+      RecursiveAliasMap,
+      "open"
+    >;
   }
 
   /**
