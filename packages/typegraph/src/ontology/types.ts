@@ -129,10 +129,30 @@ export type TypedOntologyRelation<
 > = Readonly<{ metaEdge: MetaEdge<M>; from: From; to: To }>;
 
 /**
+ * `keyof T`, with any generic index-signature key (`[x: string]: ...`)
+ * dropped — keeping only concrete, named literal keys. `z.object({})`
+ * infers a props type whose `keyof` is the generic `string` (Zod4's
+ * representation of "no named properties"), not a literal-key-free `{}`;
+ * without this filter, `IncompatibleKeys` would iterate that generic
+ * `string` pseudo-key as if it were a REQUIRED named property, comparing
+ * every child property against it and reporting the whole comparison as a
+ * mismatch (its `Fields` resolving to the generic `string` type rather
+ * than a real property name) even for a `parent` with no named properties
+ * at all. `string extends K` is true exactly for the generic index-key
+ * (where `K` is itself `string`), false for every concrete literal key.
+ */
+type LiteralKeysOf<T> = {
+  [K in keyof T]-?: string extends K ? never : K;
+}[keyof T] &
+  string;
+
+/**
  * Every key `Parent`'s schema declares that `Child`'s schema has no
  * compatible replacement for: a property `Child` is missing while `Parent`
  * requires it, or a property both declare whose `Child` type does not fit
- * `Parent`'s.
+ * `Parent`'s. Only NAMED (literal-key) parent properties are considered —
+ * see {@link LiteralKeysOf}; an index signature never represents a
+ * required property in the JSON-Schema/structural-subtype sense.
  *
  * Compares PER PROPERTY (`Child[K] extends Parent[K]`), never by building a
  * `Pick<Parent, K>` object type and checking `Child extends` it as a whole —
@@ -148,13 +168,13 @@ export type TypedOntologyRelation<
  * rather than distributing the conditional over its members.
  */
 export type IncompatibleKeys<Child, Parent> = {
-  [K in keyof Parent]-?: K extends keyof Child ?
+  [K in LiteralKeysOf<Parent>]-?: K extends keyof Child ?
     [Child[K]] extends [Parent[K]] ?
       never
     : K
   : undefined extends Parent[K] ? never
   : K;
-}[keyof Parent] &
+}[LiteralKeysOf<Parent>] &
   string;
 
 /**
@@ -176,17 +196,33 @@ export type StructuralSubtypeMismatch<
 }>;
 
 /**
- * Resolves to `P` when `C`'s schema output structurally extends `P`'s, or to
- * a {@link StructuralSubtypeMismatch} naming the incompatible fields
- * otherwise. `NodeProps` is the Zod OUTPUT type, so this sees exactly what
- * `isStructuralSubtype` (`src/schema/structural-subtype.ts`) sees when
- * applied to the same pair's projected JSON Schema, modulo the refinements,
- * transforms, and value-level constraints that projection cannot represent
- * — `tests/property/typed-subsumption-agreement.test.ts` pins the one
+ * Resolves to `unknown` (a no-op intersection member) when `C`'s schema
+ * output structurally extends `P`'s, or to a {@link StructuralSubtypeMismatch}
+ * naming the incompatible fields otherwise. `NodeProps` is the Zod OUTPUT
+ * type, so this sees exactly what `isStructuralSubtype`
+ * (`src/schema/structural-subtype.ts`) sees when applied to the same pair's
+ * projected JSON Schema, modulo the refinements, transforms, and
+ * value-level constraints that projection cannot represent —
+ * `tests/property/typed-subsumption-agreement.test.ts` pins the one
  * direction that must agree between the two.
+ *
+ * Consumed as an INTERSECTION member on the parameter
+ * (`parent: P & SubClassOfCheck<C, P>`), not as the parameter's type
+ * directly (`parent: SubClassOfParent<C, P>` resolving to `P` or the
+ * mismatch). The direct form puts `P` only inside a conditional's BRANCH,
+ * with the conditional's own CHECK also depending on `P` — a circular
+ * inference TypeScript cannot always resolve, confirmed for a `parent` with
+ * an EMPTY schema (`z.object({})`): `keyof {}` is `never`, so the check has
+ * no structural position to infer `P` from, inference falls back to the
+ * unconstrained `P extends NodeType` default, and a valid pair is refused
+ * with a spurious mismatch whose field list is the generic `string` rather
+ * than a real property name. The intersection form puts `P` NAKED as its
+ * own member, so inference reads it directly off the argument regardless of
+ * whether the check resolves — `SubClassOfCheck` only has to be
+ * SATISFIABLE, never has to participate in inferring anything.
  */
-export type SubClassOfParent<C extends NodeType, P extends NodeType> =
-  [IncompatibleKeys<NodeProps<C>, NodeProps<P>>] extends [never] ? P
+export type SubClassOfCheck<C extends NodeType, P extends NodeType> =
+  [IncompatibleKeys<NodeProps<C>, NodeProps<P>>] extends [never] ? unknown
   : StructuralSubtypeMismatch<
       C["kind"],
       P["kind"],
@@ -194,15 +230,17 @@ export type SubClassOfParent<C extends NodeType, P extends NodeType> =
     >;
 
 /**
- * Resolves to `B` when `A` and `B`'s schemas are mutually structurally
- * subtyping (the D1 "mutual subsumption" reading of `equivalentTo` between
- * two registered kinds), or to a {@link StructuralSubtypeMismatch} naming
- * the direction that fails and its incompatible fields.
+ * The `equivalentTo`/`sameAs` sibling of {@link SubClassOfCheck}: resolves to
+ * `unknown` when `A` and `B`'s schemas are mutually structurally subtyping
+ * (the D1 "mutual subsumption" reading between two registered kinds), or to
+ * a {@link StructuralSubtypeMismatch} naming the direction that fails and its
+ * incompatible fields. Consumed the same way, as an intersection member on
+ * the second parameter.
  */
-export type EquivalentToPartner<A extends NodeType, B extends NodeType> =
+export type EquivalentToCheck<A extends NodeType, B extends NodeType> =
   [IncompatibleKeys<NodeProps<A>, NodeProps<B>>] extends [never] ?
     [IncompatibleKeys<NodeProps<B>, NodeProps<A>>] extends [never] ?
-      B
+      unknown
     : StructuralSubtypeMismatch<
         B["kind"],
         A["kind"],

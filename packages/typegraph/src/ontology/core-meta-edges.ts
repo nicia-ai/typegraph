@@ -15,11 +15,11 @@ import {
   META_EDGE_SUB_CLASS_OF,
 } from "./constants";
 import {
-  type EquivalentToPartner,
+  type EquivalentToCheck,
   META_EDGE_BRAND,
   type MetaEdge,
   type OntologyRelation,
-  type SubClassOfParent,
+  type SubClassOfCheck,
   type TypedOntologyRelation,
 } from "./types";
 
@@ -80,7 +80,7 @@ const subClassOfMetaEdge = createMetaEdge(META_EDGE_SUB_CLASS_OF, {
  * output must structurally extend `parent`'s — every property `parent`
  * requires, `child` has with a compatible type; `child` may add properties
  * or narrow an optional-in-parent property. A pair that fails this is
- * refused at compile time with a {@link SubClassOfParent} mismatch naming
+ * refused at compile time with a {@link SubClassOfCheck} mismatch naming
  * the incompatible fields, and — for pairs the type checker cannot see
  * through (refinements, transforms, value-level constraints) — at registry
  * build time by the authoritative runtime check
@@ -94,13 +94,13 @@ const subClassOfMetaEdge = createMetaEdge(META_EDGE_SUB_CLASS_OF, {
  */
 export function subClassOf<C extends NodeType, P extends NodeType>(
   child: C,
-  parent: SubClassOfParent<C, P>,
+  parent: P & SubClassOfCheck<C, P>,
 ): TypedOntologyRelation<typeof META_EDGE_SUB_CLASS_OF, C, P> {
   return {
     metaEdge: subClassOfMetaEdge,
     from: child,
     to: parent,
-  } as unknown as TypedOntologyRelation<typeof META_EDGE_SUB_CLASS_OF, C, P>;
+  };
 }
 
 // ============================================================
@@ -218,7 +218,7 @@ const equivalentToMetaEdge = createMetaEdge(META_EDGE_EQUIVALENT_TO, {
  */
 export function equivalentTo<A extends NodeType, B extends NodeType>(
   kindA: A,
-  kindB: EquivalentToPartner<A, B>,
+  kindB: B & EquivalentToCheck<A, B>,
 ): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, B>;
 export function equivalentTo(
   kindA: NodeType | AnyEdgeType,
@@ -262,7 +262,7 @@ const sameAsMetaEdge = createMetaEdge(META_EDGE_SAME_AS, {
 /** @deprecated see the primary `sameAs` declaration above. */
 export function sameAs<A extends NodeType, B extends NodeType>(
   kindA: A,
-  kindB: EquivalentToPartner<A, B>,
+  kindB: B & EquivalentToCheck<A, B>,
 ): TypedOntologyRelation<typeof META_EDGE_SAME_AS, A, B>;
 /** @deprecated see the primary `sameAs` declaration above. */
 export function sameAs(kindA: NodeType, kindBOrIri: string): OntologyRelation;
