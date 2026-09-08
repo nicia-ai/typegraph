@@ -38,6 +38,25 @@
  * `src/registry/builders.ts`) or an external IRI — is skipped: subsumption
  * does not apply to a kind this registry does not know the shape of.
  *
+ * **Known gap (C13-R1-09): `isAssignableTo(A, B) ⇒ every A row satisfies
+ * B's schema` does not hold for a kind whose Zod schema fails
+ * `z.toJSONSchema` conversion.** `serializeSchemaProperties`
+ * (`src/schema/serializer.ts`) catches that failure and projects `{ type:
+ * "object" }` for ANY unconvertible construct (`z.set()`, `z.map()`, and
+ * others), so two structurally unrelated kinds that both contain one — say
+ * a child dropping a field the parent requires, buried inside a `z.set()`
+ * element — project to the SAME `{ type: "object" }` and pass this check as
+ * "subtype" via ordinary property equality, with no way for this predicate
+ * to tell "genuinely identical" from "both unprojectable" apart. This is
+ * NOT new to this module — `serializeSchemaProperties` has fallen back this
+ * way since it was introduced — but this module is the first consumer that
+ * turns its output into a hard correctness GUARANTEE rather than a
+ * best-effort introspection view. Fixing it belongs in the serializer (make
+ * "unprojectable" a distinct, non-`{type:"object"}` signal this module can
+ * refuse on), not here; until then, a kind containing `z.set()`/`z.map()`/
+ * another unconvertible construct is effectively SKIPPED by this check
+ * (silently, not `incomparable`) rather than guaranteed.
+ *
  * `evolve()` re-declaring an existing kind needs no special path: the
  * registry is rebuilt from the merged graph and this module walks the WHOLE
  * closure every time, so a redeclared kind is re-checked against its

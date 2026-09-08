@@ -136,20 +136,29 @@ describe("C.2 — subClassOf refused when the child is not a structural subtype"
   });
 
   it("refuses an opaque construct (z.intersection) as incomparable, never silently accepted", () => {
-    const sharedField = z.intersection(
-      z.object({ a: z.string() }),
-      z.object({ b: z.string() }),
-    );
-    // The child adds an unrelated property so the two schemas are NOT
-    // identical overall — otherwise `isStructuralSubtype`'s top-level
-    // reflexivity fast path would return "subtype" without ever descending
-    // into `tag` to find the unmodeled `allOf`. Width subtyping (the child
-    // adding a property) must still surface the opaque field's refusal.
+    // Child's `tag` differs from Parent's `tag` ONLY by a value-level
+    // constraint (`minLength: 3`) TypeScript's z.infer cannot see, so the
+    // pair still compiles under C.1 (both project to the same `{ a: string,
+    // b: string }` output type) — but the projected JSON Schema is NOT
+    // byte-identical, so the identity rule (C13-R1-03) cannot fire, and the
+    // opaque `allOf` keyword must still surface the refusal. Width
+    // subtyping (the child adding "note") must not mask it either.
     const Child = defineNode("Child", {
-      schema: z.object({ tag: sharedField, note: z.string() }),
+      schema: z.object({
+        tag: z.intersection(
+          z.object({ a: z.string().min(3) }),
+          z.object({ b: z.string() }),
+        ),
+        note: z.string(),
+      }),
     });
     const Parent = defineNode("Parent", {
-      schema: z.object({ tag: sharedField }),
+      schema: z.object({
+        tag: z.intersection(
+          z.object({ a: z.string() }),
+          z.object({ b: z.string() }),
+        ),
+      }),
     });
 
     let caught: unknown;
@@ -168,6 +177,62 @@ describe("C.2 — subClassOf refused when the child is not a structural subtype"
     expect(caught).toBeInstanceOf(ConfigurationError);
     expect((caught as ConfigurationError).details["code"]).toBe(
       "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
+    );
+  });
+
+  it("accepts a child that copies a recursive/intersection parent property VERBATIM and adds a field (C13-R1-03)", () => {
+    // A schema is trivially a subtype of itself regardless of which
+    // keywords it carries — including `$ref` (recursive z.lazy) and `allOf`
+    // (z.intersection), which the structural-subtype predicate otherwise
+    // cannot judge at all. Before the fix, compareSchemas ran the
+    // $ref/unmodeled guards BEFORE the identity shortcut, so this pair was
+    // refused as SCHEMA_INCOMPARABLE even though the child copies the
+    // parent's property verbatim.
+    const sharedIntersection = z.intersection(
+      z.object({ a: z.string() }),
+      z.object({ b: z.string() }),
+    );
+    interface RecursiveTree {
+      readonly children: readonly RecursiveTree[];
+    }
+    const sharedRecursive: z.ZodType<RecursiveTree> = z.lazy(() =>
+      z.object({ children: z.array(sharedRecursive) }),
+    );
+
+    const IntersectionParent = defineNode("IntersectionParent", {
+      schema: z.object({ tag: sharedIntersection }),
+    });
+    const IntersectionChild = defineNode("IntersectionChild", {
+      schema: z.object({ tag: sharedIntersection, note: z.string() }),
+    });
+    const RecursiveParent = defineNode("RecursiveParent", {
+      schema: z.object({ tree: sharedRecursive }),
+    });
+    const RecursiveChild = defineNode("RecursiveChild", {
+      schema: z.object({ tree: sharedRecursive, note: z.string() }),
+    });
+
+    const registry = buildKindRegistry(
+      defineGraph({
+        id: "subclass_verbatim_copy",
+        nodes: {
+          IntersectionParent: { type: IntersectionParent },
+          IntersectionChild: { type: IntersectionChild },
+          RecursiveParent: { type: RecursiveParent },
+          RecursiveChild: { type: RecursiveChild },
+        },
+        edges: {},
+        ontology: [
+          subClassOf(IntersectionChild, IntersectionParent),
+          subClassOf(RecursiveChild, RecursiveParent),
+        ],
+      }),
+    );
+    expect(
+      registry.isAssignableTo("IntersectionChild", "IntersectionParent"),
+    ).toBe(true);
+    expect(registry.isAssignableTo("RecursiveChild", "RecursiveParent")).toBe(
+      true,
     );
   });
 
@@ -356,5 +421,54 @@ describe("C.2 — evolve() checks an authored extension before any write", () =>
     await expect(evolved.evolve(breakingExtension)).rejects.toThrow(
       ConfigurationError,
     );
+  });
+});
+
+describe("C.2 — known gap: unconvertible Zod constructs project identically (C13-R1-09)", () => {
+  // `z.set()`/`z.map()` fail `z.toJSONSchema` and both collapse to the SAME
+  // `{ type: "object" }` fallback (src/schema/serializer.ts), so this pair
+  // — genuinely incompatible (Parent requires a "tags" set the Child
+  // doesn't even declare) — is silently ACCEPTED rather than refused. This
+  // pins the DOCUMENTED, not desired, current behavior (see the module
+  // headers on validate-structural-subsumption.ts and serializer.ts): a
+  // kind containing an unconvertible construct is effectively skipped by
+  // C.2, not guaranteed. A future serializer fix that distinguishes
+  // "unprojectable" from a real `{ type: "object" }` should make this test
+  // start refusing the pair — update it deliberately then, not by
+  // widening this pin further.
+  //
+  // Child genuinely lacks Parent's "tags" property, so `subClassOf(Child,
+  // Parent)` would also fail C.1's compile-time check — this reaches C.2
+  // through the deserialized-document route instead, the same way an
+  // older, laxer validator (or a hand-edited document) could have written
+  // it, matching the "deserialized documents" pattern above.
+  it("does not refuse a persisted subClassOf pair that differs only inside a z.set()/z.map() field", () => {
+    const SetChild = defineNode("SetChild", {
+      schema: z.object({ note: z.string() }),
+    });
+    const SetParent = defineNode("SetParent", {
+      schema: z.object({ note: z.string(), tags: z.set(z.string()) }),
+    });
+    const graph = defineGraph({
+      id: "subclass_unconvertible_gap",
+      nodes: { SetChild: { type: SetChild }, SetParent: { type: SetParent } },
+      edges: {},
+      ontology: [],
+    });
+    const serialized = serializeSchema(graph, 1);
+    const withUnconvertibleRelation = {
+      ...serialized,
+      ontology: {
+        ...serialized.ontology,
+        relations: [
+          ...serialized.ontology.relations,
+          { metaEdge: "subClassOf", from: "SetChild", to: "SetParent" },
+        ],
+      },
+    };
+
+    expect(() =>
+      deserializeSchema(withUnconvertibleRelation).buildRegistry(),
+    ).not.toThrow();
   });
 });

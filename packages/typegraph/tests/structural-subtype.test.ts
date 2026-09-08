@@ -880,7 +880,7 @@ describe("incomparable constructs", () => {
   // A self-recursive schema's `$ref` sits at a nested position
   // (`properties.children.items`), not at the schema's own top level, and an
   // identical pair short-circuits through the equality fast path before ever
-  // visiting it (rule 5) — so the partner here must share the "children"
+  // visiting it (rule 2) — so the partner here must share the "children"
   // shape but differ in its element type, forcing real recursion down to the
   // `$ref` node instead of exercising a path that never reaches it.
   function recursiveListSchema(): z.ZodType {
@@ -1171,12 +1171,14 @@ describe("projection coverage", () => {
     expect(unclassifiedKeywords).toEqual([]);
   });
 
-  // Each entry supplies its own [child, parent] pair rather than a single
-  // self-compared schema: a self-recursive schema compared to an IDENTICAL
-  // copy of itself hits the equality fast path (rule 5) before the walk ever
-  // reaches the nested `$ref`, so that specific construct needs a partner
-  // that differs enough to force real recursion (see the `schema-reference`
-  // tests above for why).
+  // Each entry supplies its own [child, parent] pair, DIFFERING enough that
+  // rule 2's full-schema identity check (C13-R1-03) cannot fire — otherwise
+  // the pair would short-circuit to `subtype` before the walk ever reaches
+  // the construct under test. A self-recursive schema compared to an
+  // IDENTICAL copy of itself is exactly this trap for a NESTED `$ref` (the
+  // top-level shapes are equal even though the nested `$ref` targets are
+  // not resolved), so that entry needs a partner that differs enough to
+  // force real recursion (see the `schema-reference` tests above for why).
   const INCOMPARABLE_BY_DESIGN: readonly [
     string,
     () => readonly [JsonSchema, JsonSchema],
@@ -1195,29 +1197,37 @@ describe("projection coverage", () => {
       },
     ],
     [
-      "z.never()",
+      "z.never() vs. a DIFFERENT z.never()-shaped never",
       () => {
-        const schema = projected(z.never());
-        return [schema, schema];
+        // Both project to `{ not: {} }`, which is genuinely identical —
+        // z.never() carries no parameters to differ on. Compare it instead
+        // against a schema this predicate can't equate it to, so the
+        // unsupported-keyword rule is what's under test, not rule 2.
+        return [projected(z.never()), projected(z.string())];
       },
     ],
     [
-      "z.intersection",
+      "two DIFFERENT z.intersection(...) schemas",
       () => {
-        const schema = projected(
+        const a = projected(
           z.intersection(
             z.object({ a: z.string() }),
             z.object({ b: z.number() }),
           ),
         );
-        return [schema, schema];
+        const b = projected(
+          z.intersection(
+            z.object({ a: z.string() }),
+            z.object({ c: z.boolean() }),
+          ),
+        );
+        return [a, b];
       },
     ],
     [
-      "z.file()",
+      "z.file() vs. an unrelated schema",
       () => {
-        const schema = projected(z.file());
-        return [schema, schema];
+        return [projected(z.file()), projected(z.string())];
       },
     ],
   ];
@@ -1226,5 +1236,59 @@ describe("projection coverage", () => {
     const [child, parent] = buildPair();
     const result = isStructuralSubtype(child, parent);
     expect(result.verdict).toBe("incomparable");
+  });
+
+  // C13-R1-03: an unmodeled construct (`$ref`/`allOf`/`not`/`contentEncoding`
+  // and friends) is still refused between two DIFFERENT schemas — see
+  // INCOMPARABLE_BY_DESIGN above — but a schema is trivially a subtype of
+  // itself regardless of which keywords it carries (rule 2), so an
+  // IDENTICAL pair carrying one of these constructs must compare as
+  // `subtype`, not `incomparable`. This is what lets a `subClassOf` child
+  // copy a recursive (`z.lazy`) or intersection (`z.intersection`) parent
+  // property VERBATIM without the pair being refused as
+  // SCHEMA_INCOMPARABLE.
+  describe("identical unmodeled constructs are reflexive (C13-R1-03)", () => {
+    it("z.never() self-comparison is a subtype", () => {
+      const schema = projected(z.never());
+      expect(isStructuralSubtype(schema, schema).verdict).toBe("subtype");
+    });
+
+    it("z.intersection(...) self-comparison is a subtype", () => {
+      const schema = projected(
+        z.intersection(
+          z.object({ a: z.string() }),
+          z.object({ b: z.number() }),
+        ),
+      );
+      expect(isStructuralSubtype(schema, schema).verdict).toBe("subtype");
+    });
+
+    it("z.file() self-comparison is a subtype", () => {
+      const schema = projected(z.file());
+      expect(isStructuralSubtype(schema, schema).verdict).toBe("subtype");
+    });
+
+    it("a self-recursive (z.lazy) schema self-comparison is a subtype", () => {
+      interface Recursive {
+        readonly children: readonly Recursive[];
+      }
+      const recursive: z.ZodType<Recursive> = z.lazy(() =>
+        z.object({ children: z.array(recursive) }),
+      );
+      const schema = projected(recursive);
+      expect(isStructuralSubtype(schema, schema).verdict).toBe("subtype");
+    });
+
+    it("a child copying a parent's z.intersection property VERBATIM, plus an added field, is a subtype", () => {
+      const sharedIntersection = z.intersection(
+        z.object({ a: z.string() }),
+        z.object({ b: z.number() }),
+      );
+      const parent = projected(z.object({ x: sharedIntersection }));
+      const child = projected(
+        z.object({ x: sharedIntersection, extra: z.string() }),
+      );
+      expect(isStructuralSubtype(child, parent).verdict).toBe("subtype");
+    });
   });
 });
