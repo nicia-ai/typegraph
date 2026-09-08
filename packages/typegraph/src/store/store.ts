@@ -305,6 +305,7 @@ import {
   nodeUpsertDirtyCheck,
   prepareNodeReplacement,
 } from "./operations";
+import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import {
   batchRefusalDetails,
   batchRefusalSuffix,
@@ -1256,6 +1257,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.identityAtCoordinate(coordinate),
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
+      deleteNodeWithPolicy: (target, work, policy) =>
+        executeNodeDelete(
+          this.#createNodeOperationContext(),
+          work.kind,
+          work.id,
+          target,
+          policy,
+        ),
       applyResolvedNodeUniqueness: async (target, writes, apply) => {
         const upserts = writes.upserts.map((upsert) => {
           if (!hasOwnKey(this.#graph.nodes, upsert.kind)) {
@@ -3853,10 +3862,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
+    const txNodeOperationContext = this.#createNodeOperationContext(
+      runHooks,
+      runBulkHooks,
+      attempt,
+    );
     const txNodeOperations: NodeOperations = {
-      ...this.#buildNodeOperations(
-        this.#createNodeOperationContext(runHooks, runBulkHooks, attempt),
-      ),
+      ...this.#buildNodeOperations(txNodeOperationContext),
       createQuery: () =>
         this.#createQueryForBackend(txBackend, undefined, attempt),
       maybeRefreshStatisticsAfterBulk: undefined,
@@ -3931,7 +3943,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       edges,
       ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
       backend: createTransactionReadBackend(txBackend),
-      [TRANSACTION_RUNTIME]: { backend: txBackend, runNodeOperationHooks },
+      [TRANSACTION_RUNTIME]: {
+        backend: txBackend,
+        runNodeOperationHooks,
+        deleteNodeWithPolicy: (
+          work: Readonly<{ kind: string; id: string }>,
+          policy?: NodeDeletePolicy,
+        ) =>
+          executeNodeDelete(
+            txNodeOperationContext,
+            work.kind,
+            work.id,
+            txBackend,
+            policy,
+          ),
+      },
       getNodeCollection,
       ...this.#edgeCollectionAccess(edges),
     };

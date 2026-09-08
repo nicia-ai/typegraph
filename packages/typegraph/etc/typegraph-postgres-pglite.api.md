@@ -3412,6 +3412,13 @@ type NodeCreateCommandResult = Readonly<{
 // @public
 type NodeCurrentReads<N extends NodeType, CN extends string = string> = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
 
+// @public
+type NodeDeletePolicy = Readonly<{
+    enforceDeleteBehavior: boolean;
+    consumedEdgeIds?: ReadonlySet<string>;
+    cascadeComposition?: boolean;
+}>;
+
 // @public (undocumented)
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
@@ -4926,6 +4933,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
+    deleteNodeWithPolicy: (target: GraphBackend | TransactionBackend, work: Readonly<{
+        kind: string;
+        id: string;
+    }>, policy?: NodeDeletePolicy) => Promise<void>;
     applyResolvedNodeUniqueness: <Output>(target: TransactionBackend, writes: Readonly<{
         upserts: readonly Readonly<{
             kind: string;
@@ -5470,6 +5481,10 @@ type TransactionReceipt = Readonly<{
 type TransactionRuntime = Readonly<{
     backend: TransactionBackend;
     runNodeOperationHooks: <T>(operation: "create" | "update" | "delete", kind: string, id: string, fn: () => Promise<T>) => Promise<T>;
+    deleteNodeWithPolicy: (work: Readonly<{
+        kind: string;
+        id: string;
+    }>, policy?: NodeDeletePolicy) => Promise<void>;
 }>;
 
 // @public

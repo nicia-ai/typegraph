@@ -37,6 +37,7 @@ export const PGLITE_TEST_FILES = [
   "tests/lock-fence-refusal.test.ts",
   "tests/materialize-trigram-extension.test.ts",
   "tests/node-claim-write-fusion.test.ts",
+  "tests/node-delete-policy-root-atomic-bypass-pglite.test.ts",
   "tests/node-fulltext-write-fusion.test.ts",
   "tests/node-vector-write-fusion.test.ts",
   "tests/optimistic-tier.test.ts",
