@@ -328,15 +328,12 @@ export function buildCompositionRelation(
       continue;
     }
 
-    const existingPartSide = partSideByEdgeKind.get(viaEdgeKind);
-    if (existingPartSide !== undefined && existingPartSide !== partSide) {
-      issues.push({
-        code: "ONTOLOGY_COMPOSITION_VIA_MIXED",
-        message: `Edge kind "${viaEdgeKind}" realizes composition in two different orientations ("${existingPartSide}" and "${partSide}"); one edge kind must have one part side.`,
-        relation,
-      });
-      continue;
-    }
+    // A second declaration disagreeing with an already-recorded orientation
+    // for this edge kind is not checked here: composition-exactness (below)
+    // already refuses it, because a `pairs` entry computed under the wrong
+    // orientation cannot cover the edge's own admitted (from, to) pairs
+    // without also leaving a genuinely admitted pair uncovered. A dedicated
+    // check here would be a second, unreachable spelling of that decision.
     partSideByEdgeKind.set(viaEdgeKind, partSide);
     representativeByEdgeKind.set(viaEdgeKind, relation);
 

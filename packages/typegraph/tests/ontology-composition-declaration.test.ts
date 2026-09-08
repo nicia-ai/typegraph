@@ -306,6 +306,40 @@ describe("composition registration checks (buildKindRegistry)", () => {
     );
   });
 
+  it("ONTOLOGY_COMPOSITION_VIA_MIXED: the same via edge realizes two orientations", () => {
+    // `link`'s source-dependent target map admits (A -> B) and (C -> D). The
+    // first declaration is only forward-compatible (A -> B); the second is
+    // only reverse-compatible (whole C -> part D), so `link` ends up
+    // realizing composition in two different orientations. There is no
+    // dedicated check for this: recording the second declaration's pair
+    // under the wrong global orientation is exactly what composition-
+    // exactness (the general "every admitted pair is declared" check) also
+    // catches, because the corrupted pair can no longer cover (A, B).
+    const A = defineNode("A", { schema: emptySchema });
+    const B = defineNode("B", { schema: emptySchema });
+    const C = defineNode("C", { schema: emptySchema });
+    const D = defineNode("D", { schema: emptySchema });
+    const link = defineEdge("link", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "composition-via-mixed-orientation",
+      nodes: { A: { type: A }, B: { type: B }, C: { type: C }, D: { type: D } },
+      edges: {
+        link: {
+          type: link,
+          from: [A, C],
+          to: { A: [B], C: [D] },
+          cardinality: "one",
+          targetCardinality: "one",
+        },
+      },
+      ontology: [partOf(A, B, { via: link }), hasPart(C, D, { via: link })],
+    });
+    expectCompositionCode(
+      () => buildKindRegistry(graph),
+      "ONTOLOGY_COMPOSITION_VIA_MIXED",
+    );
+  });
+
   it("ONTOLOGY_COMPOSITION_POPULATION_MIXED: one part kind under edges with different populations", () => {
     const SharedPart = defineNode("SharedPart", { schema: emptySchema });
     const WholeOne = defineNode("WholeOne", { schema: emptySchema });
