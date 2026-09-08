@@ -509,7 +509,18 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
     ...(targetKindsBySource === undefined ? {} : { targetKindsBySource }),
     properties: serializeZodSchema(edge.schema),
     cardinality: registration.cardinality ?? "many",
-    targetCardinality: registration.targetCardinality ?? "many",
+    // Omitted (rather than always written, like `cardinality`) when the
+    // registration leaves it undeclared or declares the default explicitly:
+    // a graph that never uses this option must serialize byte-identically,
+    // and hash byte-identically, to a document produced before this option
+    // existed — the deserializer's `.default("many")` (`src/schema/types.ts`)
+    // is what reads an absent key back as unconstrained.
+    ...((
+      registration.targetCardinality === undefined ||
+      registration.targetCardinality === "many"
+    ) ?
+      {}
+    : { targetCardinality: registration.targetCardinality }),
     endpointExistence: registration.endpointExistence ?? "notDeleted",
     ...(registration.matchIdentity === undefined ?
       {}

@@ -40,7 +40,11 @@ export function newlyConstrainedEdgeAxes(
     const beforeDef = before.edges[edgeKind];
     const declarations = {
       cardinality: afterDef.cardinality,
-      targetCardinality: afterDef.targetCardinality,
+      // `SerializedEdgeDef.targetCardinality` is optional and absent means
+      // "many" (see `serializeEdgeDef`) — defaulted explicitly here rather
+      // than left `undefined`, since `exactOptionalPropertyTypes` treats an
+      // explicit `undefined` differently from an omitted key.
+      targetCardinality: afterDef.targetCardinality ?? "many",
     };
     for (const ref of edgeCardinalityAxisReferences(declarations)) {
       const storedCardinality =

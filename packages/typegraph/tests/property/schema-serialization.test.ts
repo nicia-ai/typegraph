@@ -562,12 +562,24 @@ describe("Schema Serialization Properties", () => {
       );
     });
 
-    it("serialize -> JSON -> Zod parse -> JSON is byte-identical", () => {
+    it("JSON -> Zod parse -> JSON is stable under a second round-trip", () => {
       fc.assert(
         fc.property(graphDefArb, versionArb, (graph, version) => {
           const serialized = serializeSchema(graph, version);
 
-          const canonicalBefore = JSON.stringify(serialized, sortedReplacer);
+          // The FIRST parse is deliberately not compared against the raw
+          // `serialized` object's own JSON: `targetCardinality` (see
+          // `SerializedEdgeDef`) is omitted at serialize time when it's the
+          // default `"many"`, and the zod schema backfills it with
+          // `.default("many")` on read — the same asymmetry a document
+          // stored before the option existed relies on to keep loading as
+          // unconstrained. That first parse is where the one intentional
+          // rewrite happens; what this test actually guards is that parsing
+          // is otherwise idempotent — a document already round-tripped once
+          // (as every document read back from storage has been) must not
+          // keep drifting on every subsequent parse.
+          const onceParsed = serializedSchemaZod.parse(serialized);
+          const canonicalBefore = JSON.stringify(onceParsed, sortedReplacer);
           const reparsed = serializedSchemaZod.parse(
             JSON.parse(canonicalBefore),
           );
@@ -1216,7 +1228,13 @@ describe("Schema Serialization Properties", () => {
       });
 
       const serialized = serializeSchema(graph, 1);
-      const json = JSON.stringify(serialized, sortedReplacer);
+      // Parsed once before taking the baseline — see the comment on
+      // "JSON -> Zod parse -> JSON is stable under a second round-trip"
+      // above: `targetCardinality` is omitted at serialize time and
+      // backfilled by the zod default on the first parse, so the baseline
+      // here is the already-parsed form, not the raw serializer output.
+      const onceParsed = serializedSchemaZod.parse(serialized);
+      const json = JSON.stringify(onceParsed, sortedReplacer);
       const parsed = serializedSchemaZod.parse(JSON.parse(json));
       const reSerialized = JSON.stringify(parsed, sortedReplacer);
 

@@ -502,7 +502,11 @@ export type SerializedEdgeDef = Readonly<{
   targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
   properties: JsonSchema;
   cardinality: Cardinality;
-  targetCardinality: TargetCardinality;
+  // Optional, unlike `cardinality`: omitted from the serialized document
+  // (see `serializeEdgeDef`) when the registration leaves it undeclared or
+  // equal to the default `"many"`, so a graph that never uses this option
+  // keeps its pre-existing document shape and schema hash.
+  targetCardinality?: TargetCardinality;
   endpointExistence: EndpointExistence;
   matchIdentity?: Readonly<{
     name: string;

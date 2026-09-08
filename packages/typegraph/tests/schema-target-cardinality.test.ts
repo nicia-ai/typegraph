@@ -17,7 +17,6 @@ import {
   computeSchemaDiff,
   computeSchemaHash,
   deserializeSchema,
-  type SerializedSchema,
   serializeSchema,
 } from "../src/schema";
 import { ensureSchema, parseSerializedSchema } from "../src/schema/manager";
@@ -43,15 +42,28 @@ function buildGraph(targetCardinality?: "many" | "one" | "oneActive") {
 }
 
 describe("targetCardinality serialization", () => {
-  it("serializes the declared value", () => {
+  it("serializes a non-default declared value", () => {
     const serialized = serializeSchema(buildGraph("one"), 1);
     expect(serialized.edges["schemaTcKnows"]?.targetCardinality).toBe("one");
   });
 
-  it("defaults to many when undeclared", () => {
+  it("omits the key when undeclared", () => {
     const serialized = serializeSchema(buildGraph(), 1);
-    expect(serialized.edges["schemaTcKnows"]?.targetCardinality).toBe("many");
+    expect(serialized.edges["schemaTcKnows"]).not.toHaveProperty(
+      "targetCardinality",
+    );
   });
+
+  it("omits the key when explicitly declared as the default", () => {
+    const serialized = serializeSchema(buildGraph("many"), 1);
+    expect(serialized.edges["schemaTcKnows"]).not.toHaveProperty(
+      "targetCardinality",
+    );
+  });
+  // MUTATION CHECK (verified): replace the conditional spread in
+  // `serializeEdgeDef` (`src/schema/serializer.ts`) with an unconditional
+  // `targetCardinality: registration.targetCardinality ?? "many"`. Both
+  // omission tests above fail — the key is written for every edge kind.
 
   it("round-trips through deserializeSchema", () => {
     const serialized = serializeSchema(buildGraph("oneActive"), 1);
@@ -60,20 +72,16 @@ describe("targetCardinality serialization", () => {
     expect(edge?.targetCardinality).toBe("oneActive");
   });
 
-  it("loads a document stored before this option existed as many", () => {
-    // Simulates a pre-D.1 stored document: no `targetCardinality` key at
-    // all, parsed through the SAME zod schema a read from the database
-    // goes through — `.default("many")` is what makes the loose record
-    // resolve the absent key instead of dropping it silently.
-    const serialized = serializeSchema(buildGraph(), 1) as Record<
-      string,
-      unknown
-    >;
-    const edges = serialized["edges"] as Record<
-      string,
-      Record<string, unknown>
-    >;
-    delete requireDefined(edges["schemaTcKnows"])["targetCardinality"];
+  it("loads a document with no targetCardinality key as many", () => {
+    // A graph that never declares the option already serializes without the
+    // key (see above) — this IS the shape a pre-D.1 stored document has.
+    // Round-trip it through the same zod parse a database read goes
+    // through — `.default("many")` is what resolves the absent key instead
+    // of dropping the declaration silently.
+    const serialized = serializeSchema(buildGraph(), 1);
+    expect(serialized.edges["schemaTcKnows"]).not.toHaveProperty(
+      "targetCardinality",
+    );
     const parsed = parseSerializedSchema(JSON.stringify(serialized));
     const deserialized = deserializeSchema(parsed);
     expect(deserialized.getEdge("schemaTcKnows")?.targetCardinality).toBe(
@@ -163,39 +171,50 @@ describe("targetCardinality diffing", () => {
   // fails (`change` is `undefined`).
 });
 
+describe("targetCardinality byte-identical serialization", () => {
+  // Golden value captured by running this exact graph (Person node,
+  // `schemaTcKnows` edge, both undeclared cardinality axes) through
+  // `serializeSchema` + `computeSchemaHash` on
+  // `origin/integration/ontology-semantics` @ 4eba11a2 — the commit this
+  // branch is based on, before `targetCardinality` existed at all. A graph
+  // that never declares the option must keep producing this exact document
+  // and hash forever, or every deployment that predates this feature pays a
+  // schema-hash mismatch (and the serialize-and-diff walk that follows) on
+  // its next boot.
+  const PRE_TARGET_CARDINALITY_HASH = "2babef64196c95c1";
+
+  it("hashes identically to a document produced before targetCardinality existed", async () => {
+    const serialized = serializeSchema(buildGraph(), 1);
+    expect(serialized.edges["schemaTcKnows"]).not.toHaveProperty(
+      "targetCardinality",
+    );
+    const hash = await computeSchemaHash(serialized);
+    expect(hash).toBe(PRE_TARGET_CARDINALITY_HASH);
+  });
+  // MUTATION CHECK (verified): revert `serializeEdgeDef`
+  // (`src/schema/serializer.ts`) to write `targetCardinality`
+  // unconditionally. The computed hash no longer matches the golden value
+  // above.
+});
+
 describe("targetCardinality and ensureSchema's hash short-circuit", () => {
-  // Because `serializeEdgeDef` writes `targetCardinality` unconditionally
-  // (see the test above), a schema document stored before this release never
-  // matches the current hash again, even though loading it back parses the
-  // absent key as "many" via the same zod default — a semantically EMPTY
-  // change. `ensureSchema` must still report `"unchanged"` for a graph that
-  // never touches `targetCardinality`, and — this is the part the changeset
-  // must not overstate as free — it does so by falling through the full
-  // serialize + diff walk and returning early on `!diff.hasChanges`, never
-  // rewriting the stored (pre-D.1) hash to the current one. That means this
-  // exact walk repeats on every future boot of the same graph, forever.
-  it("reports unchanged, and leaves the stored hash untouched, for a document missing the key", async () => {
+  // `serializeEdgeDef` omits `targetCardinality` for a graph that never
+  // declares it (see above), so a schema document stored before this
+  // release hashes identically to the one `ensureSchema` computes for the
+  // same graph today. That means the fast hash-equality check at the top of
+  // `ensureSchema` (`src/schema/manager.ts`) reports `"unchanged"` WITHOUT
+  // ever calling `computeSchemaDiff` — a pre-existing deployment that never
+  // uses this option pays no extra cost booting against this release.
+  it("reports unchanged via the fast hash-equality path for a document missing the key", async () => {
     const db = createTestDatabase();
     const backend = createSqliteBackend(db);
     const graph = buildGraph(); // targetCardinality left undeclared ("many")
 
-    const currentDocument = serializeSchema(graph, 1) as Record<
-      string,
-      unknown
-    >;
-    const edges = currentDocument["edges"] as Record<
-      string,
-      Record<string, unknown>
-    >;
-    delete requireDefined(edges["schemaTcKnows"])["targetCardinality"];
-    // Cast through `unknown`: this object is deliberately missing the
-    // required `targetCardinality` field, exactly as a pre-D.1 stored
-    // document is — `computeSchemaHash` hashes whatever shape it is handed
-    // and a real caller only ever gets here via `parseSerializedSchema`'s own
-    // loose-record path, not this compile-time type.
-    const preD1Hash = await computeSchemaHash(
-      currentDocument as unknown as SerializedSchema,
+    const currentDocument = serializeSchema(graph, 1);
+    expect(currentDocument.edges["schemaTcKnows"]).not.toHaveProperty(
+      "targetCardinality",
     );
+    const preD1Hash = await computeSchemaHash(currentDocument);
 
     db.run(sql`
       INSERT INTO typegraph_schema_versions

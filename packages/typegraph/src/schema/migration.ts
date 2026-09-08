@@ -1023,13 +1023,18 @@ function diffEdgeDef(
 
   // Check target cardinality — same "modified"/"warning" shape as the source
   // axis: severity policy is unchanged for both directions, because the data
-  // probe (not the severity) is what actually gates a tightening.
-  if (before.targetCardinality !== after.targetCardinality) {
+  // probe (not the severity) is what actually gates a tightening. Defaulted
+  // before comparing: unlike `cardinality`, an absent key means "many" (see
+  // `SerializedEdgeDef`), so an undeclared-vs-undeclared or
+  // undeclared-vs-explicit-"many" pair must diff as unchanged.
+  const beforeTargetCardinality = before.targetCardinality ?? "many";
+  const afterTargetCardinality = after.targetCardinality ?? "many";
+  if (beforeTargetCardinality !== afterTargetCardinality) {
     changes.push({
       type: "modified",
       kind: name,
       severity: "warning",
-      details: `Target cardinality changed from "${before.targetCardinality}" to "${after.targetCardinality}" for "${name}"`,
+      details: `Target cardinality changed from "${beforeTargetCardinality}" to "${afterTargetCardinality}" for "${name}"`,
       before,
       after,
     });
