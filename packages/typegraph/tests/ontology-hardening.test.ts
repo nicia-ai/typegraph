@@ -23,7 +23,10 @@ import {
   type SerializedSchema,
   serializeSchema,
 } from "../src/schema";
-import { disjointnessClaimAxis } from "../src/store/claims/axis";
+import {
+  disjointnessClaimAxis,
+  uniquenessClaimTarget,
+} from "../src/store/claims/axis";
 import { createStoreWithSchema } from "../src/store/store";
 import { createTestBackend, matchingArray, matchingObject } from "./test-utils";
 
@@ -293,6 +296,66 @@ describe("ontology truth and hardening", () => {
     expect(validateOntologyRelations(ontology)).toEqual([]);
     const closures = computeClosuresFromNamedOntology(ontology);
     expect(closures.disjointPairs.has("Beta|Gamma")).toBe(true);
+  });
+
+  it("keeps an external IRI out of subsumption itself, not only out of disjointness propagation", () => {
+    // The disjointness tests above only pin what gets THROUGH an IRI-routed
+    // equivalence chain, not whether the IRI itself became a subsumption
+    // member. An IRI is an inert reference (ontology.md): it must never
+    // appear as an ancestor/descendant, never satisfy isSubClassOf, and never
+    // enter a kind's subclass component or uniqueness claim axis.
+    const externalIri = "https://schema.org/Person";
+
+    // Single-kind case: Person ≡ IRI alone must not turn the mapping into a
+    // cross-kind uniqueness claim.
+    const soloGraph = defineGraph({
+      id: "iri-inert-solo",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      ontology: [equivalentTo(Person, externalIri)],
+    });
+    const soloRegistry = buildKindRegistry(soloGraph);
+    expect(soloRegistry.getSubClassComponent("Person")).toEqual(["Person"]);
+    expect(
+      uniquenessClaimTarget("Person", "kindWithSubClasses", soloRegistry),
+    ).toEqual({ axis: "Person", crossKind: false });
+
+    // Two-kind case: Person ≡ IRI ≡ Individual routes a real equivalence
+    // through the IRI, so Person and Individual must fold together — but the
+    // IRI itself must stay out of every subsumption-reading API.
+    const Individual = defineNode("Individual", { schema: emptySchema });
+    const routedGraph = defineGraph({
+      id: "iri-inert-routed",
+      nodes: { Person: { type: Person }, Individual: { type: Individual } },
+      edges: {},
+      ontology: [
+        equivalentTo(Person, externalIri),
+        equivalentTo(Individual, externalIri),
+      ],
+    });
+    const routedRegistry = buildKindRegistry(routedGraph);
+
+    expect([...routedRegistry.getAncestors("Person")]).not.toContain(
+      externalIri,
+    );
+    expect([...routedRegistry.getAncestors("Individual")]).not.toContain(
+      externalIri,
+    );
+    expect(routedRegistry.expandSubClasses("Person")).not.toContain(
+      externalIri,
+    );
+    expect(routedRegistry.isSubClassOf("Person", externalIri)).toBe(false);
+    expect(routedRegistry.isAssignableTo("Person", externalIri)).toBe(false);
+    expect(routedRegistry.getSubClassComponent("Person")).toEqual([
+      "Individual",
+      "Person",
+    ]);
+    expect(routedRegistry.getSubClassComponent("Individual")).toBe(
+      routedRegistry.getSubClassComponent("Person"),
+    );
+    expect(
+      uniquenessClaimTarget("Person", "kindWithSubClasses", routedRegistry),
+    ).toEqual({ axis: "Individual", crossKind: true });
   });
 
   it("pins the literal disjointPairs set for the equivalentTo-is-subsumption probe graph", () => {

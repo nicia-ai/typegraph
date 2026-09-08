@@ -578,6 +578,17 @@ type CollectedOntologyRelations = Readonly<{
  * class would otherwise cost O(class size) PER MEMBER to re-discover the same
  * fellows and structural descendants every other member's view already
  * named.
+ *
+ * PRECONDITION `expandDisjointSide` relies on and does not re-check: within
+ * one equivalence class, every member's `subClassDescendants` entry must be
+ * "nearly identical" — differing only by which single member each entry
+ * excludes (the property `expandCollapsedRelation` guarantees by construction
+ * for its own two closures). A `subClassDescendants` built any other way
+ * (e.g. by hand, or by a future second builder) breaks the "one fellow's view
+ * already covers every other fellow's" skip silently: it stops early having
+ * missed whichever fellow's distinct descendants were never walked, with no
+ * error. Only `computeDisjointExpansionClosures` is a sound source of this
+ * type today.
  */
 export type DisjointExpansionClosures = Readonly<{
   subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
@@ -674,9 +685,13 @@ function collectOntologyRelations(
  * is what an equivalence class is), so materializing all N·(N-1) pairs before
  * even reaching Warshall — and Warshall's own O(V³) worst case over that many
  * newly-connected nodes — turns one large, otherwise-ordinary `sameAs`
- * migration into an out-of-memory crash. Collapsing first keeps the
- * transitive-closure work proportional to the number of DISTINCT classes and
- * subClassOf-connected kinds, never to a single class's size.
+ * migration into an out-of-memory crash. Collapsing first keeps THE
+ * TRANSITIVE-CLOSURE STEP (`computeTransitiveClosure` and its invert)
+ * proportional to the number of DISTINCT classes and subClassOf-connected
+ * kinds, never to a single class's size — the O(class size) work in
+ * `expandCollapsedRelation` below to fold each class back in is separate and
+ * unavoidable, and `computeSubClassComponents`, downstream of both, still
+ * BFSes one large equivalence-only class in O(class size²).
  */
 function computeEquivalenceRepresentatives(
   equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>,
@@ -720,6 +735,14 @@ function computeEquivalenceRepresentatives(
  * cost of building a real combined `Set`, and it pays it once per
  * representative, never once per sibling — the same discipline that keeps
  * `withoutSelfMembership`'s caller cheap for a huge equivalence-only class.
+ *
+ * An equivalence class may itself contain an external IRI (a kind mapped to
+ * one for cross-system reference), and an IRI is never a kind, so it must not
+ * surface as a member here. Whether a REPRESENTATIVE's class contains one is
+ * checked and cached once per representative — `classHasExternalIri` below —
+ * rather than scanned once per member, so a large IRI-free equivalence class
+ * (the common case) still costs O(1) per member instead of paying an O(class
+ * size) scan on every one of its members.
  */
 function expandCollapsedRelation(
   collapsedRelation: ReadonlyMap<string, ReadonlySet<string>>,
@@ -749,12 +772,33 @@ function expandCollapsedRelation(
     return extra;
   }
 
+  const classHasExternalIriByRepresentative = new Map<string, boolean>();
+  function classHasExternalIri(representative: string): boolean {
+    const cached = classHasExternalIriByRepresentative.get(representative);
+    if (cached !== undefined) return cached;
+    let found = false;
+    for (const fellow of equivalenceSets.get(representative) ?? []) {
+      if (isExternalIri(fellow)) {
+        found = true;
+        break;
+      }
+    }
+    classHasExternalIriByRepresentative.set(representative, found);
+    return found;
+  }
+
   const result = new Map<string, ReadonlySet<string>>();
   for (const kind of allKinds) {
     if (isExternalIri(kind)) continue;
     const representative = representativeOf.get(kind) ?? kind;
     const extra = extraOf(representative);
-    const ownClassMembers = equivalenceSets.get(kind);
+    const rawOwnClassMembers = equivalenceSets.get(kind);
+    const ownClassMembers =
+      rawOwnClassMembers !== undefined && classHasExternalIri(representative) ?
+        new Set(
+          [...rawOwnClassMembers].filter((fellow) => !isExternalIri(fellow)),
+        )
+      : rawOwnClassMembers;
     if (extra.size === 0) {
       if (ownClassMembers !== undefined && ownClassMembers.size > 0) {
         result.set(kind, ownClassMembers);
@@ -771,14 +815,20 @@ function expandCollapsedRelation(
 /**
  * Strips a kind's own name from its ancestor set.
  *
- * A genuinely cyclic `subClassOf` declaration (rejected by
- * `validateOntologyRelations`, but still reached by the disjointness-conflict
- * pass before that rejection is enforced) can make a representative reach
- * itself in the collapsed closure, which then propagates into every member of
- * its equivalence class. Subsumption is STRICT regardless — `isSubClassOf(k,
- * k)` is false and `expandSubClasses(k)` lists `k` once — so the self-edge is
- * removed here, at the one place the closure is built, rather than guarded at
- * each of the read sites.
+ * A perfectly LEGAL ontology can put a representative on a cycle: a kind
+ * sitting strictly between two mutually-equivalent kinds forces it, since
+ * `equivalentTo` collapses `A` and `B` to one representative before the
+ * closure runs — `equivalentTo(A, B)`, `subClassOf(A, C)`, `subClassOf(C, B)`
+ * passes `validateOntologyRelations` (the raw `subClassOf` edges `A → C → B`
+ * are not a cycle; nothing here inspects `equivalentTo`), yet after the fold
+ * `C`'s representative reaches `A`'s representative and back, so `A`, `B` and
+ * `C` all become reachable from themselves. A genuinely cyclic `subClassOf`
+ * declaration (rejected by `validateOntologyRelations`, but still reached by
+ * the disjointness-conflict pass before that rejection is enforced) produces
+ * the same self-reachability the harder way. Subsumption is STRICT in both
+ * cases — `isSubClassOf(k, k)` is false and `expandSubClasses(k)` lists `k`
+ * once — so the self-edge is removed here, at the one place the closure is
+ * built, rather than guarded at each of the read sites.
  */
 function withoutSelfMembership(
   closure: ReadonlyMap<string, ReadonlySet<string>>,

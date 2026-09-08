@@ -225,6 +225,38 @@ describe("KindRegistry Subsumption Properties", () => {
         { numRuns: 10 },
       );
     });
+
+    it("irreflexivity survives a LEGAL ontology whose fold creates a cycle", () => {
+      // Unlike the case above, this ontology is never rejected:
+      // `validateOntologyRelations` only inspects raw `subClassOf` edges
+      // (A subClassOf C, C subClassOf B — not a cycle, since B and A are
+      // different names at that layer), so this graph builds cleanly. The
+      // cycle only appears AFTER `equivalentTo(A, B)` collapses A and B to one
+      // representative: C's representative then reaches A's representative
+      // and back. This is the shape `withoutSelfMembership`'s docstring leads
+      // with; the sibling test above exercises the separately-rejected
+      // directly-cyclic shape instead.
+      const kindArb = fc.constantFrom("A", "B", "C");
+      fc.assert(
+        fc.property(kindArb, (kind) => {
+          const relations = [
+            createRelation("A", META_EDGE_EQUIVALENT_TO, "B"),
+            createRelation("A", META_EDGE_SUB_CLASS_OF, "C"),
+            createRelation("C", META_EDGE_SUB_CLASS_OF, "B"),
+          ];
+          const registry = createRegistry(relations);
+          expect(registry.isSubClassOf(kind, kind)).toBe(false);
+          const expanded = registry.expandSubClasses(kind);
+          expect(new Set(expanded).size).toBe(expanded.length);
+          // The forced consequence: C sits strictly between two equivalents,
+          // so it collapses into the same class as A and B (ruling 11).
+          expect(registry.isAssignableTo("A", "C")).toBe(true);
+          expect(registry.isAssignableTo("C", "A")).toBe(true);
+          expect(registry.isAssignableTo("B", "C")).toBe(true);
+        }),
+        { numRuns: 10 },
+      );
+    });
   });
 
   describe("expandSubClasses", () => {
