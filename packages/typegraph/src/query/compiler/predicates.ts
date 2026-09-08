@@ -47,7 +47,11 @@ import {
   isInSubqueryTypeCompatible,
   isUnsupportedInSubqueryValueType,
 } from "../subquery-utils";
-import { type SqlSchema, type VectorSlotMap } from "./schema";
+import {
+  type RecordedReadBinding,
+  type SqlSchema,
+  type VectorSlotMap,
+} from "./schema";
 import { type ReadInstantMode } from "./temporal";
 
 const COMPARISON_OP_SQL: Record<string, string> = {
@@ -476,6 +480,12 @@ export type PredicateCompilerContext = Readonly<{
    * builder's template cache. Absent means `"literal"`.
    */
   readInstant?: ReadInstantMode;
+  /**
+   * Recorded read binding whose `source`/`predicate` seam the temporal
+   * filter pass consults when the query carries a recorded pin. Threaded
+   * from `CompileQueryOptions.recordedReadBinding`.
+   */
+  recordedReadBinding?: RecordedReadBinding;
   /** Equal-id behavior for historical identity traversal reconstruction. */
   identitySameIdAcrossKinds?: "fold" | "ignore";
   /**

@@ -478,8 +478,10 @@ export type {
 } from "./core/runtime-kind";
 export {
   type ExternalRecordedReadSource,
+  type RecordedReadSource,
   recordedRelation,
   type RecordedRelationOptions,
+  type RecordedSourceTable,
 } from "./query/compiler/schema";
 export type {
   AdapterHistoryStore,

@@ -2701,10 +2701,10 @@ const EXTERNAL_REF_TABLE_KEY: "_externalRefTable";
 
 // @public (undocumented)
 export type ExternalRecordedReadSource = Readonly<{
-    source: "external";
+    kind: "external";
     schema: SqlSchema;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
-}>;
+}> & RecordedReadSource;
 
 // @public
 export function externalRef<T extends string>(table: T): ExternalRefSchema<T>;
@@ -5813,6 +5813,12 @@ export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
 
+// @public (undocumented)
+type RecordedInstantParts = Readonly<{
+    revision: number;
+    recordedAt: string;
+}>;
+
 // @public
 export function recordedInstantRevision(instant: RecordedInstant): number;
 
@@ -5820,10 +5826,13 @@ export function recordedInstantRevision(instant: RecordedInstant): number;
 export function recordedInstantWallTime(instant: RecordedInstant): string;
 
 // @public (undocumented)
-type RecordedReadBinding = RecordedReadSource;
+type RecordedReadBinding = ExternalRecordedReadSource | TypeGraphRecordedReadSource;
 
-// @public (undocumented)
-type RecordedReadSource = ExternalRecordedReadSource | TypeGraphRecordedReadSource;
+// @public
+export type RecordedReadSource = Readonly<{
+    source: (table: RecordedSourceTable, revision: RecordedInstantParts) => SqlFragment;
+    predicate: (prefix: SqlFragment, revision: RecordedInstantParts) => SqlFragment | undefined;
+}>;
 
 // @public (undocumented)
 export type RecordedReadStore<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, RecordedReadStore<G>> & Readonly<{
@@ -5862,6 +5871,9 @@ export type RecordedScanPage<T> = Readonly<{
     nextCursor: string | undefined;
     hasNextPage: boolean;
 }>;
+
+// @public
+export type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
 
 // @public
 export type RecordedStoreView<G extends GraphDef> = RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
@@ -7677,10 +7689,10 @@ export type TypeGraphErrorOptions = Readonly<{
 
 // @public (undocumented)
 type TypeGraphRecordedReadSource = Readonly<{
-    source: "typegraph-capture";
+    kind: "typegraph-capture";
     schema: SqlSchema;
     [TYPEGRAPH_RECORDED_READ_SOURCE]: true;
-}>;
+}> & RecordedReadSource;
 
 // @public
 export type UnboundLiveStoreOptions = LiveStoreOptions & Readonly<{

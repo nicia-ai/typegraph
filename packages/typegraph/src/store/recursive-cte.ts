@@ -67,6 +67,7 @@ export function buildReachableCte(
     recordedAsOf: options.recordedAsOf,
     tableAlias: "n",
     currentTimestamp,
+    recordedReadBinding: options.recordedReadBinding,
   });
   const edgeTemporalFilter = compileTemporalFilter({
     mode: options.temporalMode,
@@ -74,6 +75,7 @@ export function buildReachableCte(
     recordedAsOf: options.recordedAsOf,
     tableAlias: "e",
     currentTimestamp,
+    recordedReadBinding: options.recordedReadBinding,
   });
   // Derive the read schema from the same `recordedAsOf` that drives the temporal
   // filters above: when a recorded pin is set the node/edge sources become the

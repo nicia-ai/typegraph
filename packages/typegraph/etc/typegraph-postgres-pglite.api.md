@@ -1790,10 +1790,10 @@ const EXTERNAL_RECORDED_READ_SOURCE: unique symbol;
 
 // @public (undocumented)
 type ExternalRecordedReadSource = Readonly<{
-    source: "external";
+    kind: "external";
     schema: SqlSchema;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
-}>;
+}> & RecordedReadSource;
 
 // @public (undocumented)
 type ExtractAllowedPairs<From, To> = To extends readonly (infer ToNode extends NodeType)[] ? {
@@ -4060,10 +4060,19 @@ type RecordedInstant = string & {
 };
 
 // @public (undocumented)
-type RecordedReadBinding = RecordedReadSource;
+type RecordedInstantParts = Readonly<{
+    revision: number;
+    recordedAt: string;
+}>;
 
 // @public (undocumented)
-type RecordedReadSource = ExternalRecordedReadSource | TypeGraphRecordedReadSource;
+type RecordedReadBinding = ExternalRecordedReadSource | TypeGraphRecordedReadSource;
+
+// @public
+type RecordedReadSource = Readonly<{
+    source: (table: RecordedSourceTable, revision: RecordedInstantParts) => SqlFragment;
+    predicate: (prefix: SqlFragment, revision: RecordedInstantParts) => SqlFragment | undefined;
+}>;
 
 // @public (undocumented)
 type RecordedReadStore<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, RecordedReadStore<G>> & Readonly<{
@@ -4094,6 +4103,9 @@ type RecordedScanPage<T> = Readonly<{
     nextCursor: string | undefined;
     hasNextPage: boolean;
 }>;
+
+// @public
+type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
 
 // @public
 type RecordedStoreView<G extends GraphDef> = RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
@@ -5510,10 +5522,10 @@ const TYPEGRAPH_RECORDED_READ_SOURCE: unique symbol;
 
 // @public (undocumented)
 type TypeGraphRecordedReadSource = Readonly<{
-    source: "typegraph-capture";
+    kind: "typegraph-capture";
     schema: SqlSchema;
     [TYPEGRAPH_RECORDED_READ_SOURCE]: true;
-}>;
+}> & RecordedReadSource;
 
 // @public
 type UnboundLiveStoreOptions = LiveStoreOptions & Readonly<{

@@ -710,5 +710,229 @@
     "kind": "required-member-added",
     "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
     "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "RecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
+    "issue": "#622"
   }
 ]

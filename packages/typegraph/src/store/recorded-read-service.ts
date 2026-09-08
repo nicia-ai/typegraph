@@ -4,7 +4,11 @@ import {
   type GraphBackend,
   type NodeRow,
 } from "../backend/types";
-import { type ReadCoordinate } from "../core/temporal";
+import {
+  parseRecordedInstant,
+  type ReadCoordinate,
+  type RecordedInstantParts,
+} from "../core/temporal";
 import {
   type AnyEdgeType,
   type EdgeId,
@@ -17,6 +21,7 @@ import {
   type RecordedReadBinding,
   recordedReadSqlSchema,
   requireRecordedReadBinding,
+  type SqlSchema,
 } from "../query/compiler/schema";
 import {
   compileTemporalFilter,
@@ -160,11 +165,18 @@ function createRecordedReadBackend(
   });
 }
 
-function recordedTemporalFilter(
-  backend: GraphBackend,
+/**
+ * The recorded revision a point read or scan reconstructs at, parsed once
+ * from the coordinate's `recorded.asOf` — the single place a missing
+ * recorded pin is refused, consulted by {@link createRecordedReadService}'s
+ * callers before they resolve the recorded schema. The temporal filter below
+ * re-derives the same instant through {@link compileTemporalFilter}'s own
+ * parse rather than repeating the refusal here, since by the time it runs
+ * this function has already guaranteed the coordinate carries one.
+ */
+function requireRecordedRevision(
   coordinate: ReadCoordinate,
-  tableAlias: string,
-): SqlFragment {
+): RecordedInstantParts {
   const recordedAsOf = coordinate.recorded?.asOf;
   if (recordedAsOf === undefined) {
     throw new ConfigurationError(
@@ -172,12 +184,21 @@ function recordedTemporalFilter(
       { code: "RECORDED_POINT_READ_MISSING_COORDINATE" },
     );
   }
+  return parseRecordedInstant(recordedAsOf, "coordinate.recorded.asOf");
+}
+
+function recordedTemporalFilter(
+  coordinate: ReadCoordinate,
+  tableAlias: string,
+  recordedReadBinding: RecordedReadBinding,
+): SqlFragment {
   return compileTemporalFilter({
     mode: coordinate.valid.mode,
     asOf: coordinate.valid.asOf,
-    recordedAsOf,
+    recordedAsOf: coordinate.recorded?.asOf,
     tableAlias,
     currentTimestamp: currentReadInstant(),
+    recordedReadBinding,
   });
 }
 
@@ -290,17 +311,21 @@ export function createRecordedReadService(
     mapRecordedNodeRow,
     mapRecordedEdgeRow,
   } = params;
-  const recordedSchema =
-    recordedReadBinding === undefined ? undefined : (
-      recordedReadSqlSchema(recordedReadBinding)
-    );
 
-  function schemaForRecordedRead(surface: string) {
-    return (
-      recordedSchema ??
-      recordedReadSqlSchema(
-        requireRecordedReadBinding(recordedReadBinding, surface),
-      )
+  /**
+   * Resolves the recorded relation schema for `revision` — built fresh per
+   * coordinate since {@link RecordedReadSource.source} takes the revision
+   * (an engine-native binding could fold it into the source expression
+   * itself), and refuses the same way every recorded read refuses a missing
+   * binding.
+   */
+  function schemaForRecordedRead(
+    surface: string,
+    revision: RecordedInstantParts,
+  ): SqlSchema {
+    return recordedReadSqlSchema(
+      requireRecordedReadBinding(recordedReadBinding, surface),
+      revision,
     );
   }
 
@@ -312,7 +337,11 @@ export function createRecordedReadService(
 
     const uniqueIds = [...new Set(ids)];
     const aliasSql = sql.raw(alias);
-    const temporalFilter = recordedTemporalFilter(backend, coordinate, alias);
+    const temporalFilter = recordedTemporalFilter(
+      coordinate,
+      alias,
+      requireRecordedReadBinding(recordedReadBinding, "recorded-point-read"),
+    );
     const chunkResults = await withRelationsPrecondition(
       backend,
       Promise.all(
@@ -362,7 +391,11 @@ export function createRecordedReadService(
         undefined
       : decodeRecordedScanCursor(options.after, scope);
     const aliasSql = sql.raw(alias);
-    const temporalFilter = recordedTemporalFilter(backend, coordinate, alias);
+    const temporalFilter = recordedTemporalFilter(
+      coordinate,
+      alias,
+      requireRecordedReadBinding(recordedReadBinding, "recorded-scan"),
+    );
     const rows = await withRelationsPrecondition(
       backend,
       backend.execute<Record<string, unknown>>(
@@ -409,7 +442,10 @@ export function createRecordedReadService(
     ids: readonly NodeId<N>[],
     coordinate: ReadCoordinate,
   ): Promise<readonly (Node<N> | undefined)[]> {
-    const schema = schemaForRecordedRead("recorded-point-read");
+    const schema = schemaForRecordedRead(
+      "recorded-point-read",
+      requireRecordedRevision(coordinate),
+    );
     return recordedGetByIds({
       entity: "node",
       table: schema.nodesTable,
@@ -426,7 +462,10 @@ export function createRecordedReadService(
     ids: readonly EdgeId<E>[],
     coordinate: ReadCoordinate,
   ): Promise<readonly (Edge<E> | undefined)[]> {
-    const schema = schemaForRecordedRead("recorded-point-read");
+    const schema = schemaForRecordedRead(
+      "recorded-point-read",
+      requireRecordedRevision(coordinate),
+    );
     return recordedGetByIds({
       entity: "edge",
       table: schema.edgesTable,
@@ -443,7 +482,10 @@ export function createRecordedReadService(
     coordinate: ReadCoordinate,
     options?: RecordedScanOptions,
   ): Promise<RecordedScanPage<Node<N>>> {
-    const schema = schemaForRecordedRead("recorded-scan");
+    const schema = schemaForRecordedRead(
+      "recorded-scan",
+      requireRecordedRevision(coordinate),
+    );
     return recordedScan({
       entity: "node",
       table: schema.nodesTable,
@@ -460,7 +502,10 @@ export function createRecordedReadService(
     coordinate: ReadCoordinate,
     options?: RecordedScanOptions,
   ): Promise<RecordedScanPage<Edge<E>>> {
-    const schema = schemaForRecordedRead("recorded-scan");
+    const schema = schemaForRecordedRead(
+      "recorded-scan",
+      requireRecordedRevision(coordinate),
+    );
     return recordedScan({
       entity: "edge",
       table: schema.edgesTable,

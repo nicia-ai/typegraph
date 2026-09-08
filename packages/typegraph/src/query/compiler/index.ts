@@ -295,6 +295,9 @@ export function compileQuery(
     schema,
     annIndexTypes,
     readInstant: options_.readInstant ?? "literal",
+    ...(options_.recordedReadBinding === undefined ?
+      {}
+    : { recordedReadBinding: options_.recordedReadBinding }),
     identitySameIdAcrossKinds: options_.identitySameIdAcrossKinds ?? "fold",
     compileQuery: (subAst, subGraphId) =>
       compileQuery(

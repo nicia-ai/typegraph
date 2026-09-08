@@ -870,6 +870,7 @@ function createOperation(
     : { recordedAsOf: temporal.recordedAsOf }),
     tableAlias: "n",
     currentTimestamp,
+    recordedReadBinding: ctx.recordedReadBinding,
   });
   const edgeTemporalFilter = compileTemporalFilter({
     mode: temporal.temporalMode,
@@ -879,6 +880,7 @@ function createOperation(
     : { recordedAsOf: temporal.recordedAsOf }),
     tableAlias: "e",
     currentTimestamp,
+    recordedReadBinding: ctx.recordedReadBinding,
   });
   const weightExpression =
     options.weightProperty === undefined ?

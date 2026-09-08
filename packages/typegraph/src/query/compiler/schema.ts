@@ -7,6 +7,10 @@
  */
 import { type VectorIndexType, type VectorMetric } from "../../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../../constants";
+import {
+  parseRecordedInstant,
+  type RecordedInstantParts,
+} from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { typeGraphGlobalSymbol } from "../../utils/global-symbol";
 import { isSqlFragment, sql, type SqlFragment } from "../sql-fragment";
@@ -370,14 +374,84 @@ const EXTERNAL_RECORDED_READ_SOURCE: unique symbol = typeGraphGlobalSymbol(
   "external-recorded-read-source-v1",
 );
 
-export type ExternalRecordedReadSource = Readonly<{
-  source: "external";
-  schema: SqlSchema;
-  [EXTERNAL_RECORDED_READ_SOURCE]: true;
+/**
+ * The relation a {@link RecordedReadSource} sources rows from: the two entity
+ * tables the query compiler swaps to for a recorded read, and the identity
+ * assertion ledger the identity reconstruction path consults.
+ */
+export type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
+
+/**
+ * The one seam every recorded read consults instead of spelling the relation
+ * swap and the recorded-time interval itself.
+ *
+ * `source` names the relation (or table expression) holding `table`'s
+ * recorded rows for `revision`. TypeGraph's own capture and external
+ * bindings both return the matching recorded relation regardless of
+ * `revision` — the relation carries every revision, and `predicate` narrows
+ * it afterward. A binding whose `source` already scopes its rows to exactly
+ * one revision (an engine-native temporal table expression, say) returns
+ * `undefined` from `predicate` instead of re-spelling a redundant filter.
+ */
+export type RecordedReadSource = Readonly<{
+  source: (
+    table: RecordedSourceTable,
+    revision: RecordedInstantParts,
+  ) => SqlFragment;
+  predicate: (
+    prefix: SqlFragment,
+    revision: RecordedInstantParts,
+  ) => SqlFragment | undefined;
 }>;
 
+/**
+ * `source`/`predicate` shared by every TypeGraph-relation-backed binding: the
+ * recorded relation named by `schema`, narrowed by the `recorded_from <= r
+ * AND r < recorded_to` interval every recorded row carries. `recordedRelation`
+ * and the built-in capture binding both build their seam this way, so the
+ * relation swap and the interval cannot drift apart between the two kinds.
+ */
+function typeGraphRelationRecordedReadSource(
+  schema: SqlSchema,
+): RecordedReadSource {
+  return {
+    source(
+      table: RecordedSourceTable,
+      _revision: RecordedInstantParts,
+    ): SqlFragment {
+      switch (table) {
+        case "nodes": {
+          return schema.recordedNodesTable;
+        }
+        case "edges": {
+          return schema.recordedEdgesTable;
+        }
+        case "identityAssertions": {
+          return schema.recordedIdentityAssertionsTable;
+        }
+      }
+    },
+    predicate(
+      prefix: SqlFragment,
+      revision: RecordedInstantParts,
+    ): SqlFragment {
+      const recordedFrom = sql`${prefix}recorded_from`;
+      const recordedTo = sql`${prefix}recorded_to`;
+      const { revision: revisionNumber } = revision;
+      return sql`${recordedFrom} <= ${revisionNumber} AND ${revisionNumber} < ${recordedTo}`;
+    },
+  };
+}
+
+export type ExternalRecordedReadSource = Readonly<{
+  kind: "external";
+  schema: SqlSchema;
+  [EXTERNAL_RECORDED_READ_SOURCE]: true;
+}> &
+  RecordedReadSource;
+
 type ExternalRecordedReadSourceCandidate = Readonly<{
-  source?: unknown;
+  kind?: unknown;
   schema?: unknown;
   [EXTERNAL_RECORDED_READ_SOURCE]?: unknown;
 }>;
@@ -387,15 +461,14 @@ const TYPEGRAPH_RECORDED_READ_SOURCE: unique symbol = typeGraphGlobalSymbol(
 );
 
 export type TypeGraphRecordedReadSource = Readonly<{
-  source: "typegraph-capture";
+  kind: "typegraph-capture";
   schema: SqlSchema;
   [TYPEGRAPH_RECORDED_READ_SOURCE]: true;
-}>;
+}> &
+  RecordedReadSource;
 
-type RecordedReadSource =
+export type RecordedReadBinding =
   ExternalRecordedReadSource | TypeGraphRecordedReadSource;
-
-export type RecordedReadBinding = RecordedReadSource;
 
 export type RecordedRelationOptions = Readonly<{
   schema: SqlSchema;
@@ -406,9 +479,10 @@ export function recordedRelation(
 ): ExternalRecordedReadSource {
   const schema = requireSqlSchema(options.schema, "recordedRelation schema");
   return Object.freeze({
-    source: "external",
+    kind: "external",
     schema,
     [EXTERNAL_RECORDED_READ_SOURCE]: true as const,
+    ...typeGraphRelationRecordedReadSource(schema),
   });
 }
 
@@ -433,7 +507,7 @@ function isExternalRecordedReadSource(
   if (typeof source !== "object" || source === null) return false;
   const candidate = source as ExternalRecordedReadSourceCandidate;
   return (
-    candidate.source === "external" &&
+    candidate.kind === "external" &&
     candidate[EXTERNAL_RECORDED_READ_SOURCE] === true &&
     isSqlSchema(candidate.schema) &&
     Object.isFrozen(candidate)
@@ -445,9 +519,10 @@ export function createRecordedReadBinding(
 ): TypeGraphRecordedReadSource {
   const readSchema = requireSqlSchema(schema, "recorded read binding schema");
   return Object.freeze({
-    source: "typegraph-capture",
+    kind: "typegraph-capture",
     schema: readSchema,
     [TYPEGRAPH_RECORDED_READ_SOURCE]: true as const,
+    ...typeGraphRelationRecordedReadSource(readSchema),
   });
 }
 
@@ -477,7 +552,7 @@ export function requireRecordedReadBinding(
 }
 
 type TypeGraphRecordedReadSourceCandidate = Readonly<{
-  source?: unknown;
+  kind?: unknown;
   schema?: unknown;
   [TYPEGRAPH_RECORDED_READ_SOURCE]?: unknown;
 }>;
@@ -488,7 +563,7 @@ function isTypeGraphRecordedReadSource(
   if (typeof source !== "object" || source === null) return false;
   const candidate = source as TypeGraphRecordedReadSourceCandidate;
   return (
-    candidate.source === "typegraph-capture" &&
+    candidate.kind === "typegraph-capture" &&
     candidate[TYPEGRAPH_RECORDED_READ_SOURCE] === true &&
     isSqlSchema(candidate.schema) &&
     Object.isFrozen(candidate)
@@ -506,19 +581,23 @@ function isRecordedReadBinding(
 
 /**
  * Returns a schema view whose primary node/edge sources are the recorded-time
- * relations. The recorded relations are row-compatible with the live tables
- * for every column the query compiler, subgraph extractor, and algorithms
- * already read; the temporal filter adds the `recorded_from/to` predicate.
+ * relations for `revision`, resolved through `binding.source` — the single
+ * place the relation swap and the recorded-time predicate ({@link
+ * recordedReadSchemaFor}'s caller, via `compileTemporalFilter`) both consult
+ * the same seam. The recorded relations are row-compatible with the live
+ * tables for every column the query compiler, subgraph extractor, and
+ * algorithms already read.
  */
-export function recordedReadSqlSchema(binding: RecordedReadBinding): SqlSchema {
-  const { schema } = requireRecordedReadBinding(
-    binding,
-    "recorded-read-schema",
-  );
+export function recordedReadSqlSchema(
+  binding: RecordedReadBinding,
+  revision: RecordedInstantParts,
+): SqlSchema {
+  const validated = requireRecordedReadBinding(binding, "recorded-read-schema");
+  const { schema } = validated;
   return freezeSqlSchema({
     tables: schema.tables,
-    nodesTable: schema.recordedNodesTable,
-    edgesTable: schema.recordedEdgesTable,
+    nodesTable: validated.source("nodes", revision),
+    edgesTable: validated.source("edges", revision),
     recordedNodesTable: schema.recordedNodesTable,
     recordedEdgesTable: schema.recordedEdgesTable,
     recordedClockTable: schema.recordedClockTable,
@@ -544,7 +623,11 @@ export function recordedReadSchemaFor(
 ): SqlSchema {
   const baseSchema = requireSqlSchema(schema, `${surface} schema`);
   if (recordedAsOf === undefined) return baseSchema;
-  return recordedReadSqlSchema(requireRecordedReadBinding(binding, surface));
+  const revision = parseRecordedInstant(recordedAsOf, "recordedAsOf");
+  return recordedReadSqlSchema(
+    requireRecordedReadBinding(binding, surface),
+    revision,
+  );
 }
 
 /**

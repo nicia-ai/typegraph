@@ -466,10 +466,25 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // TEXT diff adds a new top-level type (`LineageSession` itself) rather than
 // only touching `LineageMembers`'s two member signatures and the `lineage`
 // registry entry's `accesses` field.
+//
+// Recorded read source seam batch: `ExternalRecordedReadSource` and the
+// built-in capture binding's type both gained `source`/`predicate` members
+// (an intersection with the newly-public `RecordedReadSource`), whose
+// signatures reference `RecordedInstantParts` — a shape `core/temporal.ts`
+// already exported by name but no entrypoint had rendered before. `.`
+// directly exports `RecordedReadSource` and `RecordedSourceTable` now
+// (dropping the old unexported `RecordedReadSource` union from its own
+// forgotten set) while picking up `RecordedInstantParts` as a forgotten
+// export, netting zero (394 → 394, a different symbol set behind the same
+// count, hence a new SHA). The six entrypoints that mirror `.`'s surface
+// without directly exporting `RecordedReadSource`/`RecordedSourceTable`
+// (`./graph-merge`, `./interchange`, `./postgres/pglite`, `./profiler`,
+// `./provenance`, `./sqlite/local`) each gain both types as forgotten
+// exports, +2 apiece.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 394,
-    sha256: "332b798faee651caa6d3544413c56f17d3da886db870a327e0bd015e2be57bd1",
+    sha256: "3851b337bc6bfe117620e5f455ff2bc14a2d1e91ff1f68e9217ced79ba27ca43",
   },
   "./adapters/drizzle/engine": {
     count: 326,
@@ -515,36 +530,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 732,
-    sha256: "a8def9b66461f7543a91120f3278b9fb3ccb90284c31901cc0f2ce7a8fe7dc21",
+    count: 734,
+    sha256: "f07647149fbc1b5c00ebbc472498f458ee9dff5f329635d707a3b52cabbb4765",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 715,
-    sha256: "32e93d18f9dc117d8c3333ee147d01e88df18851cb9832adfda4b801a295aa84",
+    count: 717,
+    sha256: "44cdec3a4b9f29418f2e3924b8faccfc5ead2f05c3407896302178d076babc39",
   },
   "./postgres/pglite": {
-    count: 712,
-    sha256: "620f5cd75513be9dd8c97a6b097afdce1ea87a99068432bf3f5102af7214a797",
+    count: 714,
+    sha256: "cd48c317869da5d2670d6fcddeadd37f0a904a8ce84851448d3957c879a0818c",
   },
   "./profiler": {
-    count: 717,
-    sha256: "6fbd5405bcf49f618171f47994391c48b8b6cb5f8aed9413d0a79188773509f2",
+    count: 719,
+    sha256: "10c516fe57661fd1f3c6c6cb9a7c7945d9c02442e305de01786bb119f6570c52",
   },
   "./provenance": {
-    count: 723,
-    sha256: "45292db1f519001a8be95686625ffcf36f35580718dc321affaf0cb8f77d4c7b",
+    count: 725,
+    sha256: "b8fd70bbcd765ff3f123d2a7a0d08e530c987368289629edf4b5a95fd4189eee",
   },
   "./schema": {
     count: 277,
     sha256: "b88f3306930490a80ecded62269ecc5b336855706f4e0551325986a3fe630fea",
   },
   "./sqlite/local": {
-    count: 712,
-    sha256: "620f5cd75513be9dd8c97a6b097afdce1ea87a99068432bf3f5102af7214a797",
+    count: 714,
+    sha256: "cd48c317869da5d2670d6fcddeadd37f0a904a8ce84851448d3957c879a0818c",
   },
 };
 
