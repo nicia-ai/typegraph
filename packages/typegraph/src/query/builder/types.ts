@@ -136,6 +136,23 @@ export type NodeAlias<
 }>;
 
 /**
+ * True when `G["ontology"]` has lost its `const`-inferred tuple shape — its
+ * `length` is the general `number` rather than a tuple's fixed literal
+ * count. `defineGraph`'s `const TOntology` normally keeps the array a tuple
+ * of positionally typed relations (so {@link SubsumptionAffected} can
+ * `Extract` a `to: { kind: K }` literal out of it), but a caller can lose
+ * that shape — most commonly by building the relations in a variable
+ * annotated `readonly OntologyRelation[]` before passing it to
+ * `defineGraph({ ontology })`, the exact pattern the changeset blesses
+ * ("code that annotates a relation's result as `OntologyRelation` still
+ * compiles unchanged"). `defineGraph`'s own omitted-`ontology` default is
+ * the literal empty tuple `readonly []` (`length: 0`), which is NOT erased
+ * by this test — only a genuinely unbounded array is.
+ */
+type OntologyTypeErased<G extends GraphDef> =
+  number extends G["ontology"]["length"] ? true : false;
+
+/**
  * Whether kind `K` in graph `G` participates in a `subClassOf`/`equivalentTo`
  * relation that could hand a polymorphic-default query a row of a DIFFERENT
  * concrete kind: `K` is a `subClassOf` target, or `K` is either side of an
@@ -144,9 +161,26 @@ export type NodeAlias<
  * non-recursive `Extract` over `G["ontology"]`, computable with no
  * transitive-closure type engine. `false` (a graph with `ontology: []`, or a
  * kind no relation touches) costs zero type churn.
+ *
+ * **An {@link OntologyTypeErased} ontology widens conservatively.** Once the
+ * tuple has lost its fixed length, every element has necessarily widened to
+ * the untyped `OntologyRelation` shape too (a tuple can only lose its length
+ * by losing the literal types that made each position distinct), so no
+ * per-element `Extract` can rule out a `subClassOf` targeting `K` — without
+ * this arm the check would silently answer `false`, an unsound
+ * under-widening. This is deliberately scored on the WHOLE array's
+ * tuple-ness, not on whether any individual union member happens to be a
+ * bare `OntologyRelation`: `broader`, `disjointWith`, `inverseOf` and every
+ * other non-C.1 meta-edge helper are typed to return plain `OntologyRelation`
+ * by design, so a real tuple that legitimately mixes a typed `subClassOf`
+ * with one of those untouched relations (`ontology: [subClassOf(Child,
+ * Parent), inverseOf(knows, knows)]`) must NOT trip this arm — the tuple's
+ * length is still the literal `2`, and the precise `Extract` test below
+ * still finds `subClassOf`'s `to: { kind: K }` literal on its own element.
  */
 type SubsumptionAffected<G extends GraphDef, K extends string> =
-  [
+  OntologyTypeErased<G> extends true ? true
+  : [
     Extract<
       G["ontology"][number],
       | { metaEdge: { name: "subClassOf" }; to: { kind: K } }

@@ -23,6 +23,7 @@ import {
 } from "../src";
 import type {
   IncompatibleKeys,
+  OntologyRelation,
   StructuralSubtypeMismatch,
 } from "../src/ontology/types";
 import { buildKindRegistry } from "../src/registry/builders";
@@ -217,6 +218,40 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
     expect(query).toBeDefined();
     type Row = Awaited<ReturnType<typeof query.execute>>[number];
     expectTypeOf<Row["kind"]>().toEqualTypeOf<"MediaAliasTest">();
+  });
+
+  it("widens kind to string when the ontology tuple is annotated as bare OntologyRelation[] (C13-R2-01)", () => {
+    // The changeset's Breaking-changes bullet blesses this exact pattern:
+    // "Code that annotates a relation's result as `OntologyRelation` still
+    // compiles unchanged." Annotating the array itself erases every element
+    // to the untyped `OntologyRelation` shape, so `SubsumptionAffected` can
+    // no longer see the `to: { kind: "MediaAliasTest" }` literal by
+    // `Extract`ing it — it must fall back to conservative widening instead
+    // of silently reporting `false`, which would let the alias stay narrow
+    // while the runtime alias is genuinely polymorphic.
+    const annotatedOntology: readonly OntologyRelation[] = [
+      subClassOf(PodcastKind, MediaKind),
+    ];
+    const annotatedGraph = defineGraph({
+      id: "alias_typing_annotated",
+      nodes: {
+        MediaAliasTest: { type: MediaKind },
+        PodcastAliasTest: { type: PodcastKind },
+      },
+      edges: {},
+      ontology: annotatedOntology,
+    });
+    const annotatedRegistry = buildKindRegistry(annotatedGraph);
+
+    const query = createQueryBuilder<typeof annotatedGraph>(
+      annotatedGraph.id,
+      annotatedRegistry,
+    )
+      .from("MediaAliasTest", "m")
+      .select((ctx) => ctx.m);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
   });
 
   it("includeSubClasses: false keeps kind literal even on an affected alias", () => {
