@@ -1,13 +1,16 @@
 /**
- * Merge apply's node deletion no longer goes through the public collection
- * facade (`nodeCollection(...).delete(id)`); it routes through the internal
- * runtime port `transactionDeleteNodeWithPolicy` instead, passing
- * `{ enforceDeleteBehavior: true }`. Two dimensions of that switch each get
- * their own test:
+ * Merge apply's node deletion routes through the internal runtime port
+ * `transactionDeleteNodeWithPolicy`, passing
+ * `{ enforceDeleteBehavior: true, cascadeComposition: false }`. This does NOT
+ * cover the facade-to-port switch itself: merge's own delete already went
+ * through `txNodeOperations`, built from the same `txNodeOperationContext`
+ * (`store.ts`), so its hooks were already buffered before that switch — the
+ * switch is behavior-neutral in production today. What these two tests DO
+ * guard, each under its own case:
  *
- * - ENFORCEMENT: a target node's own `restrict` edge still aborts the merge
- *   exactly as it did through the old facade call, and zero rows change on
- *   that refusal.
+ * - ENFORCEMENT: the policy merge apply passes does not drop delete-behavior
+ *   enforcement — a target node's own `restrict` edge still aborts the
+ *   merge, and zero rows change on that refusal.
  * - ROUTING: the delete is bound to the SAME transaction merge apply is
  *   already running in — its buffered hook runner and attempt — not a
  *   freshly-built context off the outer Store. A delete inside a merge that
