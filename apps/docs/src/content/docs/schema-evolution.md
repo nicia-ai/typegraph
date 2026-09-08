@@ -278,6 +278,16 @@ try {
   ) {
     console.log(error.details.axes); // → the newly-constrained axes
     console.log(error.details.violations); // → the offending rows
+  }
+}
+```
+
+Resolve the offending rows (delete the excess edges, or loosen the target
+schema change), then retry. This check has the same residual window as the
+ontology tightening check above: it takes no additional lock, so a writer
+committing under the previous schema version between the probe and the
+version compare-and-swap is invisible to it.
+
 ## Structural subsumption is checked before you upgrade
 
 Separately from the data check above, a `subClassOf`/`equivalentTo`/`sameAs`
@@ -302,11 +312,6 @@ try {
 }
 ```
 
-Resolve the offending rows (delete the excess edges, or loosen the target
-schema change), then retry. This check has the same residual window as the
-ontology tightening check above: it takes no additional lock, so a writer
-committing under the previous schema version between the probe and the
-version compare-and-swap is invisible to it.
 No data migration is required for this class of refusal — it's a
 schema-authoring fix (loosen the parent, tighten the child, or replace
 `subClassOf` with `broader` if the relation was really a taxonomy). Only the

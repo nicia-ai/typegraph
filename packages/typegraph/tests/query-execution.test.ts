@@ -464,7 +464,7 @@ describe("Query Execution (SQLite)", () => {
         .select((context) => ({
           id: context.o.id,
           kind: context.o.kind,
-          name: context.o["name"],
+          name: context.o.name,
         }))
         .execute();
 
@@ -979,7 +979,7 @@ describe("Query Execution (SQLite)", () => {
         .select((context) => ({
           id: context.o.id,
           kind: context.o.kind,
-          name: context.o["name"],
+          name: context.o.name,
         }))
         .execute();
 

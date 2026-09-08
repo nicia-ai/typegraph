@@ -248,13 +248,13 @@ export async function main(): Promise<void> {
       .to("Media", "m", { includeSubClasses: true })
       .select((ctx) => ({
         person: ctx.p.name,
-        title: ctx.m["title"],
+        title: ctx.m.title,
         kind: ctx.m.kind,
       }))
       .execute();
 
     for (const row of allWatched) {
-      console.log(`  ${row.person} watched "${String(row.title)}" (${row.kind})`);
+      console.log(`  ${row.person} watched "${row.title}" (${row.kind})`);
     }
     console.log(
       "  ^ All four items, including both TVShows — Media expands to\n" +
@@ -272,13 +272,13 @@ export async function main(): Promise<void> {
       .to("Movie", "m", { includeSubClasses: true })
       .select((ctx) => ({
         person: ctx.p.name,
-        title: ctx.m["title"],
+        title: ctx.m.title,
         kind: ctx.m.kind,
       }))
       .execute();
 
     for (const row of moviesWatched) {
-      console.log(`  ${row.person} watched "${String(row.title)}" (${row.kind})`);
+      console.log(`  ${row.person} watched "${row.title}" (${row.kind})`);
     }
     console.log(
       '  ^ "Breaking Bad" and "The Office" are excluded: TVShow is a\n' +
