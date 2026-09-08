@@ -142,15 +142,22 @@ function groupProbesByKind(
   return { disjointness, uniqueness, endpoints };
 }
 
+/** The first couple of violations, rendered for a refusal message. */
+function previewViolations(
+  violations: readonly ConstraintFenceViolation[],
+): string {
+  return violations
+    .slice(0, 2)
+    .map((violation) => JSON.stringify(violation))
+    .join("; ");
+}
+
 function buildOntologyTighteningViolatedError(
   params: SchemaTighteningPreflightParams,
   changes: readonly OntologyChange[],
   violations: readonly ConstraintFenceViolation[],
 ): MigrationError {
-  const shown = violations
-    .slice(0, 2)
-    .map((violation) => JSON.stringify(violation))
-    .join("; ");
+  const shown = previewViolations(violations);
   // Only the changes that actually required a data check: a `safe` or
   // `breaking` change in the same diff (`relatedTo` added alongside the
   // `disjointWith` this refusal is about, say) carries no `probes` and would
@@ -178,10 +185,7 @@ function buildEdgeCardinalityTighteningViolatedError(
   axes: readonly EdgeCardinalityDeclaration[],
   violations: readonly ConstraintFenceViolation[],
 ): MigrationError {
-  const shown = violations
-    .slice(0, 2)
-    .map((violation) => JSON.stringify(violation))
-    .join("; ");
+  const shown = previewViolations(violations);
   return new MigrationError(
     `Edge cardinality tightening refused: ${String(violations.length)} existing row(s) violate the proposed cardinality. ` +
       `${shown}. Run store.verifyConstraintFences() to list them, resolve the rows, then retry.`,
