@@ -465,10 +465,20 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `countEdgesFrom` → `countEdgesAtEndpoint` member and its widened claim/audit
 // param types). `./core`, `./indexes` and `./adapters/drizzle/indexes` reach
 // none of those shapes and are unaffected.
+//
+// D.1 review fix (finding D1-R1-05): `.` (the package root) now exports
+// `EdgeCardinalityAxisRef` and `EdgeCardinalityDirection` directly — the two
+// types `EdgeCardinalityDeclaration` (already public from `.`) and
+// `CardinalityErrorDetails.direction` (already public from `.`) are built
+// from — so a consumer of `"@nicia-ai/typegraph"` alone can name either
+// field's type without a subpath import. `.`'s debt therefore DROPS 391→389
+// (two names move from forgotten to real exports); every OTHER entrypoint is
+// unaffected, since none of them re-exports either name and both remain
+// forgotten there exactly as the paragraph above describes.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 391,
-    sha256: "2c64b36c4319517c0d6853d6f5548bb75a593839b44391bcebf3058dc9af973c",
+    count: 389,
+    sha256: "616322c9babf73c8578d0d7c86a0108055bede2c76362addb80e940687cc987e",
   },
   "./adapters/drizzle/engine": {
     count: 325,

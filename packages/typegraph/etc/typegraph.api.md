@@ -1875,7 +1875,7 @@ type EdgeBulkUpsertItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTyp
 }> & ValidityEndMutation : never;
 
 // @public
-type EdgeCardinalityAxisRef = Readonly<{
+export type EdgeCardinalityAxisRef = Readonly<{
     direction: "source";
     cardinality: ConstrainedCardinality;
 }> | Readonly<{
@@ -1889,7 +1889,7 @@ export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
 }>;
 
 // @public
-type EdgeCardinalityDirection = "source" | "target";
+export type EdgeCardinalityDirection = "source" | "target";
 
 // @public
 type EdgeChange = Readonly<{

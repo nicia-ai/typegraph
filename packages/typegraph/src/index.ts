@@ -627,6 +627,11 @@ export type {
 // `reason: "edge-cardinality-tightening-violated"` — same reasoning as the
 // ontology probe types above. Also available from the "./backend" subpath.
 export type { EdgeCardinalityDeclaration } from "./backend/types";
+// `EdgeCardinalityDeclaration` and `CardinalityErrorDetails.direction` are
+// both built from these two: a consumer narrowing either one needs to name
+// the intersection member (`EdgeCardinalityAxisRef`) or the bare direction
+// discriminant (`EdgeCardinalityDirection`) without reaching into
+// `store/claims/edge-claims` directly.
 export type {
   AlgorithmCyclePolicy,
   BaseTraversalOptions,
@@ -652,6 +657,10 @@ export type {
   WeightedShortestPathOptions,
   WeightedShortestPathResult,
 } from "./store/algorithms";
+export type {
+  EdgeCardinalityAxisRef,
+  EdgeCardinalityDirection,
+} from "./store/claims/edge-claims";
 export type {
   AnyEdge,
   AnyNode,
