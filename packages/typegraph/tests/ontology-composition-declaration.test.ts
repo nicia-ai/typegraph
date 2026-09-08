@@ -345,6 +345,65 @@ describe("composition registration checks (buildKindRegistry)", () => {
     );
   });
 
+  it("ONTOLOGY_COMPOSITION_VIA_MIXED: a reflexive pair and a cross-kind pair disagree on which side is the part, regardless of declaration order", () => {
+    // `link`'s source-dependent target map admits (Section -> Section) and
+    // (Book -> Chapter). The reflexive Section pair is declared `from`
+    // explicitly (both orientations are endpoint-compatible for a reflexive
+    // pair, so it must be). The Book/Chapter pair is only reverse-compatible
+    // (whole Book -> part Chapter), so it infers `to` — contradicting the
+    // edge-wide orientation the first declaration already recorded. Before
+    // this was refused directly, `partSideByEdgeKind` silently kept only the
+    // second declaration's side, and exactness was computed against that one
+    // side for every pair of the edge kind, corrupting the reflexive pair's
+    // own entry — and making the verdict depend on declaration order.
+    const Section = defineNode("Section", { schema: emptySchema });
+    const Book = defineNode("Book", { schema: emptySchema });
+    const Chapter = defineNode("Chapter", { schema: emptySchema });
+    const link = defineEdge("link", { schema: emptySchema });
+    const edges = {
+      link: {
+        type: link,
+        from: [Section, Book],
+        to: { Section: [Section], Book: [Chapter] },
+        cardinality: "one",
+        targetCardinality: "one",
+      },
+    } as const;
+    const nodes = {
+      Section: { type: Section },
+      Book: { type: Book },
+      Chapter: { type: Chapter },
+    };
+
+    const sectionFirst = defineGraph({
+      id: "composition-orientation-conflict-section-first",
+      nodes,
+      edges,
+      ontology: [
+        partOf(Section, Section, { via: link, partSide: "from" }),
+        hasPart(Book, Chapter, { via: link }),
+      ],
+    });
+    expectCompositionCode(
+      () => buildKindRegistry(sectionFirst),
+      "ONTOLOGY_COMPOSITION_VIA_MIXED",
+    );
+
+    const bookFirst = defineGraph({
+      id: "composition-orientation-conflict-book-first",
+      nodes,
+      edges,
+      ontology: [
+        hasPart(Book, Chapter, { via: link }),
+        partOf(Section, Section, { via: link, partSide: "from" }),
+      ],
+    });
+    expectCompositionCode(
+      () => buildKindRegistry(bookFirst),
+      "ONTOLOGY_COMPOSITION_VIA_MIXED",
+    );
+  });
+
   it("ONTOLOGY_COMPOSITION_POPULATION_MIXED: one part kind under edges with different populations", () => {
     const SharedPart = defineNode("SharedPart", { schema: emptySchema });
     const WholeOne = defineNode("WholeOne", { schema: emptySchema });
@@ -459,6 +518,96 @@ describe("a valid multi-relation composition declaration", () => {
     expect(registry.compositionEdgeKindsOver("Segment")).toEqual([
       "episodeOf",
       "segmentOf",
+    ]);
+  });
+});
+
+describe("the mirrored partOf + hasPart idiom (E-a-3)", () => {
+  // apps/docs/src/content/docs/ontology.md teaches declaring both directions
+  // of the same realizing edge: `partOf(Chapter, Book, { via })` and
+  // `hasPart(Book, Chapter, { via })`. Both normalize to the identical
+  // (partKind, wholeKind, viaEdgeKind) tuple and must collapse to one pair,
+  // not two, or every `pairs` consumer double-processes the composition.
+  const Chapter = defineNode("Chapter", { schema: emptySchema });
+  const Book = defineNode("Book", { schema: emptySchema });
+  const chapterOf = defineEdge("chapterOf", { schema: emptySchema });
+
+  const graph = defineGraph({
+    id: "composition-mirror-idiom",
+    nodes: { Chapter: { type: Chapter }, Book: { type: Book } },
+    edges: {
+      chapterOf: {
+        type: chapterOf,
+        from: [Chapter],
+        to: [Book],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      partOf(Chapter, Book, { via: chapterOf }),
+      hasPart(Book, Chapter, { via: chapterOf }),
+    ],
+  });
+
+  it("yields exactly one CompositionPair", () => {
+    const registry = buildKindRegistry(graph);
+    expect(registry.compositionRelation().pairs).toEqual([
+      {
+        partKind: "Chapter",
+        wholeKind: "Book",
+        viaEdgeKind: "chapterOf",
+        partSide: "from",
+        population: "one",
+      },
+    ]);
+  });
+});
+
+describe("two realizing edges over one (part, whole) pair (E-a-2)", () => {
+  // §2.5's "mixed orientations under one part kind are legal" already
+  // implies several edges may realize one part kind; this is the same shape
+  // for a single (part, whole) pair. The duplicate-relation key must key on
+  // `via` (and `partSide`), not just `(metaEdge, from, to)`, or this refuses
+  // as DUPLICATE_ONTOLOGY_RELATION.
+  const Part = defineNode("Part", { schema: emptySchema });
+  const Whole = defineNode("Whole", { schema: emptySchema });
+  const edgeA = defineEdge("edgeA", { schema: emptySchema });
+  const edgeB = defineEdge("edgeB", { schema: emptySchema });
+
+  const graph = defineGraph({
+    id: "composition-two-vias-one-pair",
+    nodes: { Part: { type: Part }, Whole: { type: Whole } },
+    edges: {
+      edgeA: { type: edgeA, from: [Part], to: [Whole], cardinality: "one" },
+      edgeB: { type: edgeB, from: [Part], to: [Whole], cardinality: "one" },
+    },
+    ontology: [
+      partOf(Part, Whole, { via: edgeA }),
+      partOf(Part, Whole, { via: edgeB }),
+    ],
+  });
+
+  it("builds without DUPLICATE_ONTOLOGY_RELATION and records both pairs", () => {
+    const registry = buildKindRegistry(graph);
+    expect(registry.compositionRelation().pairs).toEqual([
+      {
+        partKind: "Part",
+        wholeKind: "Whole",
+        viaEdgeKind: "edgeA",
+        partSide: "from",
+        population: "one",
+      },
+      {
+        partKind: "Part",
+        wholeKind: "Whole",
+        viaEdgeKind: "edgeB",
+        partSide: "from",
+        population: "one",
+      },
+    ]);
+    expect(registry.compositionEdgeKindsOver("Part")).toEqual([
+      "edgeA",
+      "edgeB",
     ]);
   });
 });
