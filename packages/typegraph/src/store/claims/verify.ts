@@ -42,6 +42,7 @@ import { ConfigurationError } from "../../errors";
 import { buildGraphEdgeEndpointKinds } from "../../registry/builders";
 import { expandEdgeEndpointAllowance } from "../../registry/edge-endpoint-allowance";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { groupBy } from "../../utils/array";
 import { compareStrings } from "../../utils/compare";
 import {
   type ClaimOwner,
@@ -323,12 +324,7 @@ function edgeEndpointViolations(
   const allowedPairsByKind = new Map(
     allowances.map((allowance) => [allowance.edgeKind, allowance.allowedPairs]),
   );
-  const rowsByKind = new Map<string, MisassignedEdgeEndpointRow[]>();
-  for (const row of rows) {
-    const existing = rowsByKind.get(row.edgeKind) ?? [];
-    existing.push(row);
-    rowsByKind.set(row.edgeKind, existing);
-  }
+  const rowsByKind = groupBy(rows, (row) => row.edgeKind);
   return [...rowsByKind.entries()]
     .toSorted(([left], [right]) => compareStrings(left, right))
     .map(([edgeKind, edgeRows]) => ({
