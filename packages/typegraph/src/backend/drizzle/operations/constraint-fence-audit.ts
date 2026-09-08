@@ -181,6 +181,14 @@ export function buildDisjointOverlapAudit(
  * An EMPTY allowance list means the declaration admits nothing: every live
  * edge of the kind is returned, and the statement renders no pair predicate
  * at all.
+ *
+ * "Live" here matches `EDGE_CARDINALITY_SPECS`'s `liveAndActive` holders in
+ * {@link buildContendedEdgeRowAudit} — `deleted_at IS NULL AND valid_to IS
+ * NULL` — not merely soft-delete. A bitemporal edge whose valid-time window
+ * already closed is invisible to a current-coordinate read, so it cannot be
+ * violating a declaration a current read would ever apply to it; treating it
+ * as live would make a graph that closed a stale edge years ago permanently
+ * unable to commit an ontology tightening.
  */
 export function buildMisassignedEdgeEndpointAudit(
   tables: Tables,
@@ -213,6 +221,7 @@ export function buildMisassignedEdgeEndpointAudit(
     FROM ${edges}
     WHERE ${qualified(relation, edges.graphId)} = ${graphId}
       AND ${qualified(relation, edges.kind)} = ${edgeKind}
-      AND ${qualified(relation, edges.deletedAt)} IS NULL${admittedPredicate}
+      AND ${qualified(relation, edges.deletedAt)} IS NULL
+      AND ${qualified(relation, edges.validTo)} IS NULL${admittedPredicate}
   `;
 }

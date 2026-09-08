@@ -348,6 +348,41 @@ export function registerConstraintFenceVerificationIntegrationTests(
       ]);
     });
 
+    it("does not report a misassigned edge whose valid-time window already closed", async () => {
+      const store = await context.createStore(verifyGraph);
+      const contractor = await store.nodes.VerifyContractor.create({
+        email: "closed-window@example.com",
+      });
+      const project = await store.nodes.VerifyProject.create({
+        title: "Closed window",
+      });
+
+      // Same misassignment as the case above, but its valid-time window
+      // ended in the past — a current-coordinate read never returns this
+      // row, so it cannot be violating a declaration only current reads
+      // apply to. "Live" for this family matches
+      // `EDGE_CARDINALITY_SPECS`'s `liveAndActive` holders: `deleted_at IS
+      // NULL AND valid_to IS NULL`, not merely soft-delete.
+      await store.backend.insertEdge({
+        graphId: verifyGraph.id,
+        id: "verify-misassigned-edge-closed-window",
+        kind: "verifyManages",
+        fromKind: "VerifyContractor",
+        fromId: contractor.id,
+        toKind: "VerifyProject",
+        toId: project.id,
+        props: {},
+        validFrom: "2019-01-01T00:00:00.000Z",
+        validTo: "2020-01-01T00:00:00.000Z",
+      });
+
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+    // MUTATION CHECK (verified): dropping `AND valid_to IS NULL` from
+    // `buildMisassignedEdgeEndpointAudit`
+    // (`src/backend/drizzle/operations/constraint-fence-audit.ts`) reports
+    // this closed-window row as a live violation and this test fails.
+
     it("audits declarations added after this Store became stale", async () => {
       const staleStore = await context.createStore(verifyGraph);
       const evolved = await staleStore.evolve(
