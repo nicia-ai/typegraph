@@ -145,7 +145,7 @@ export type NodeAlias<
  * transitive-closure type engine. `false` (a graph with `ontology: []`, or a
  * kind no relation touches) costs zero type churn.
  */
-export type SubsumptionAffected<G extends GraphDef, K extends string> =
+type SubsumptionAffected<G extends GraphDef, K extends string> =
   [
     Extract<
       G["ontology"][number],
