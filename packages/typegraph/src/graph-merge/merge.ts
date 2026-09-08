@@ -192,6 +192,7 @@ import type {
   JsonValue,
   KindRegistry,
   Node,
+  NodeDeletePolicy,
   NodeId,
   NodeType,
   Store,
@@ -1972,22 +1973,26 @@ async function applyNodeRows<G extends GraphDef>(
       releases: deletions,
     },
     async () => {
+      // Routed through the internal runtime port, not the public collection
+      // facade: the facade's `delete(id)` takes no options by design, and
+      // merge apply needs to state a policy — enforcement stays on, so a
+      // part's own `restrict` edge still aborts the merge.
+      // `cascadeComposition: false` is what keeps the runtime composition
+      // cascade from double-deleting a part: the plan's own `nodeDeletions`
+      // already enumerate every part a composition delete would otherwise
+      // cascade to (`assertNoCompositionOrphans`, above, is what verifies
+      // that enumeration is COMPLETE before this loop runs at all).
+      const deletePolicy: NodeDeletePolicy = {
+        enforceDeleteBehavior: true,
+        cascadeComposition: false,
+      };
       for (const deletion of deletions) {
-        // Routed through the internal runtime port, not the public
-        // collection facade: the facade's `delete(id)` takes no options by
-        // design, and merge apply needs to state a policy — enforcement
-        // stays on, so a part's own `restrict` edge still aborts the merge.
-        // `cascadeComposition: false` is stated now even though the cascade
-        // it suppresses does not exist yet (see `NodeDeletePolicy`): the
-        // plan's own `nodeDeletions` already enumerate every part a
-        // composition delete would otherwise cascade to, so merge apply must
-        // never let a future cascade double-delete them. This delete is
-        // bound to THIS transaction's own hook-runner and attempt via
-        // `deleteNodeWithPolicy`, not a fresh context built from the outer
-        // `target` Store — see `TransactionDeleteNodeWithPolicy`.
+        // This delete is bound to THIS transaction's own hook-runner and
+        // attempt via `deleteNodeWithPolicy`, not a fresh context built from
+        // the outer `target` Store — see `TransactionDeleteNodeWithPolicy`.
         await deleteNodeWithPolicy(
           { kind: deletion.kind, id: deletion.id },
-          { enforceDeleteBehavior: true, cascadeComposition: false },
+          deletePolicy,
         );
       }
       const committed = new Set<MergeKey>();

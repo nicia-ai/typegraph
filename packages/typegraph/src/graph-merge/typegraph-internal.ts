@@ -56,11 +56,7 @@ export { type KindRegistry } from "../registry/kind-registry";
 export { sortedReplacer } from "../schema/canonical";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
 export { type UniqueIntrospection } from "../store/introspect";
-export {
-  type CompositionCascadeMember,
-  type CompositionCascadePlan,
-  planCompositionCascade,
-} from "../store/operations/composition-cascade";
+export { planCompositionCascade } from "../store/operations/composition-cascade";
 export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
