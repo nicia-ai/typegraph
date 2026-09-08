@@ -55,5 +55,5 @@ is present only on the claim-backed families, so consumers must narrow on
 - A backend without transaction support cannot enforce acyclicity at all;
   writes to an acyclic edge kind are refused with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`
   rather than silently skipping the check.
-- Graph extensions may declare `acyclic` on a runtime-authored edge; they
-  still may not declare `cardinality`.
+- Graph extensions may declare `acyclic` on a runtime-authored edge,
+  alongside `cardinality` / `targetCardinality`.
