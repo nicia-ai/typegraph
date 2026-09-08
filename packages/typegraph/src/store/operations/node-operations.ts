@@ -229,6 +229,11 @@ import {
   isAutocommitSingleStatementWrite,
 } from "./autocommit-single-statement";
 import {
+  type CompositionCascadePlan,
+  planCompositionCascade,
+} from "./composition-cascade";
+import {
+  type NodeDeleteMode,
   type NodeDeletePolicy,
   nodeDeletePolicyRequiresPortablePath,
   type NodeInsertSyncItem,
@@ -420,6 +425,157 @@ function nodeBatchConstraintProbes<G extends GraphDef>(
   return inputs.map((input) =>
     nodeFencesConstraintProbe(ctx, input.kind, operation),
   );
+}
+
+/**
+ * WHICH constraint makes a node DELETE a constrained write.
+ *
+ * A composition whole — a kind declaring composition parts
+ * (`compositionEdgeKindsUnder(kind).length > 0`) — cascades to those parts
+ * under the per-graph write lock, so the closure `planCompositionCascade`
+ * reads must be a snapshot no concurrent attach can defeat. The
+ * classification is STATIC (a declared-schema property, decided before any
+ * row read), which is what lets a part-less kind's delete stay unfenced on
+ * every backend, interactive transactions or not — the declaration-property
+ * fast path.
+ *
+ * `"edgeComposition"` is E-b's constant; until it lands this uses the
+ * existing `"edgeCardinality"` reason (both name the same remediation class
+ * to `CONSTRAINT_FENCE_ADVICE`: declare cardinality on the realizing edge).
+ */
+function nodeDeleteConstraintProbe<G extends GraphDef>(
+  ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
+  kind: string,
+): ConstraintFenceReason | undefined {
+  if (!hasOwnKey(ctx.graph.nodes, kind)) return undefined;
+  return ctx.registry.compositionEdgeKindsUnder(kind).length > 0 ?
+      "edgeCardinality"
+    : undefined;
+}
+
+/**
+ * Folds a composition cascade's consumed edge ids into a delete policy, for
+ * the ROOT node's own delete-behavior enforcement — the cascade already
+ * excludes these from every MEMBER's own restrict count (via the policy
+ * `runCompositionCascade` builds for them); this is what excludes them from
+ * the root's, so a whole declared `onDelete: "restrict"` with only
+ * composition edges to its (now-deleted) parts still deletes.
+ */
+function withCascadeConsumedEdges(
+  policy: NodeDeletePolicy | undefined,
+  consumedEdgeIds: ReadonlySet<string>,
+): NodeDeletePolicy | undefined {
+  if (consumedEdgeIds.size === 0) return policy;
+  const merged = new Set(policy?.consumedEdgeIds);
+  for (const edgeId of consumedEdgeIds) merged.add(edgeId);
+  return {
+    enforceDeleteBehavior: policy?.enforceDeleteBehavior ?? true,
+    consumedEdgeIds: merged,
+    ...(policy?.cascadeComposition === undefined ?
+      {}
+    : { cascadeComposition: policy.cascadeComposition }),
+  };
+}
+
+/**
+ * Runs the composition cascade for one whole delete: plans the parts closure
+ * under `lock` (`planCompositionCascade`), deletes each part LEAF-FIRST
+ * through its own node-delete pipeline — `session.retireNode` /
+ * `session.purgeNode`, exactly as a direct delete of that part would run, so
+ * its own non-composition edges, uniqueness/claim release, embedding and
+ * fulltext projections, and identity cascade all apply — then explicitly
+ * deletes every composition edge the cascade consumed, since each member's
+ * own delete-behavior enforcement was told to skip them (they would
+ * otherwise survive: a `consumedEdgeIds` edge is excluded from BOTH the
+ * restrict count and the cascade/disconnect removal of the delete that
+ * consumed it).
+ *
+ * A no-op when `policy?.cascadeComposition` is `false` (merge apply's
+ * request: the plan already carries the part deletions) or when the kind
+ * declares no composition parts. Returns the plan either way, so the caller
+ * can fold `consumedEdgeIds` into the ROOT's own policy
+ * ({@link withCascadeConsumedEdges}).
+ */
+async function runCompositionCascade<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  id: string,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  mode: NodeDeleteMode,
+  policy: NodeDeletePolicy | undefined,
+  session: NodeWriteSession,
+): Promise<CompositionCascadePlan> {
+  if (policy?.cascadeComposition === false) {
+    return { members: [], consumedEdgeIds: new Set() };
+  }
+  const plan = await planCompositionCascade(
+    { graphId: ctx.graphId, registry: ctx.registry, lock },
+    kind,
+    id,
+    target,
+  );
+  if (plan.members.length === 0) return plan;
+
+  const identity = ctx.identity;
+  const memberPolicy: NodeDeletePolicy = {
+    enforceDeleteBehavior: true,
+    consumedEdgeIds: plan.consumedEdgeIds,
+    cascadeComposition: false,
+  };
+  for (const member of plan.members) {
+    const registration = getNodeRegistration(ctx.graph, member.kind);
+    if (mode === "soft") {
+      const preflight = await target.getNode(
+        ctx.graphId,
+        member.kind,
+        member.id,
+      );
+      // Already gone (concurrently deleted, or already visited via another
+      // path through the closure) — nothing to retire, but the edges this
+      // cascade consumed still get cleaned up below.
+      if (!preflight || !isLiveNodeRow(preflight)) continue;
+      await session.retireNode(
+        {
+          existing: preflight,
+          schema: registration.type.schema,
+          uniqueConstraints: registration.unique ?? [],
+          onDelete: registration.onDelete,
+        },
+        memberPolicy,
+      );
+      if (identity !== undefined) {
+        await identity.detachDeleted(
+          target,
+          { kind: member.kind, id: member.id },
+          "soft",
+        );
+      }
+    } else {
+      await session.purgeNode(
+        {
+          kind: member.kind,
+          id: member.id,
+          schema: registration.type.schema,
+          onDelete: registration.onDelete,
+        },
+        memberPolicy,
+      );
+      if (identity !== undefined) {
+        await identity.detachDeleted(
+          target,
+          { kind: member.kind, id: member.id },
+          "hard",
+        );
+      }
+    }
+  }
+  // The explicit cleanup that guarantees no composition edge row survives
+  // its endpoints, even when a member's own onDelete is `restrict`: every
+  // consumed edge was deliberately excluded from each endpoint's own
+  // cascade/disconnect removal above.
+  await session.deleteCompositionEdges([...plan.consumedEdgeIds], mode);
+  return plan;
 }
 
 /**
@@ -3817,9 +3973,12 @@ export async function executeNodeDelete<G extends GraphDef>(
   await runHookedWritePlan(
     nodeWritePlanContext(ctx),
     opContext,
-    nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
+    nodeWritePlan(
+      nodeDeleteConstraintProbe(ctx, kind),
+      nodeRequiresIdentityLock(ctx),
+    ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const identity = ctx.identity;
       const registration = getNodeRegistration(ctx.graph, kind);
       // This preflight is NOT removable round-trip fat: the soft-delete
@@ -3828,6 +3987,20 @@ export async function executeNodeDelete<G extends GraphDef>(
       // the concurrency-correct source for it.
       const preflight = await target.getNode(ctx.graphId, kind, id);
       if (!preflight || !isLiveNodeRow(preflight)) return false;
+
+      // Composition parts, leaf-first, BEFORE the whole itself — under the
+      // per-graph write lock this write plan already fenced for a
+      // composition whole (`nodeDeleteConstraintProbe`).
+      const cascadePlan = await runCompositionCascade(
+        ctx,
+        kind,
+        id,
+        target,
+        lock,
+        "soft",
+        policy,
+        session,
+      );
 
       // The cascade (connected edges, uniques, embeddings, fulltext, node) is
       // not individually atomic, so it runs in one write transaction. Under
@@ -3840,7 +4013,7 @@ export async function executeNodeDelete<G extends GraphDef>(
           uniqueConstraints: registration.unique ?? [],
           onDelete: registration.onDelete,
         },
-        policy,
+        withCascadeConsumedEdges(policy, cascadePlan.consumedEdgeIds),
       );
       if (identity !== undefined) {
         await identity.detachDeleted(target, { kind, id }, "soft");
@@ -3906,10 +4079,11 @@ async function findConnectedEdgesForNodeBatch<G extends GraphDef>(
  * Owning the write transaction here also prevents a per-item success from
  * being reported before the batch's outer COMMIT.
  *
- * Takes no {@link NodeDeletePolicy}: every item's delete-behavior enforcement
- * always runs and there is no `consumedEdgeIds` narrowing on this path (see
- * that field's doc). A future batched leaf-first cascade sweep needs its own
- * plumbing here before it can consume an edge on this path.
+ * Takes no {@link NodeDeletePolicy} — every item's delete-behavior
+ * enforcement always runs unnarrowed by a caller-supplied
+ * `consumedEdgeIds` — but a composition whole in the batch still cascades to
+ * its own parts: `runCompositionCascade` per item, under the one write
+ * lock this batch's plan fences for when `kind` declares composition parts.
  */
 export async function executeNodeDeleteBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -3935,9 +4109,12 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
 
   await runWritePlan(
     nodeWritePlanContext(ctx),
-    nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
+    nodeWritePlan(
+      nodeDeleteConstraintProbe(ctx, kind),
+      nodeRequiresIdentityLock(ctx),
+    ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const identity = ctx.identity;
       const registration = getNodeRegistration(ctx.graph, kind);
       let affectedCount = 0;
@@ -3949,12 +4126,26 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
         const preflight = await target.getNode(ctx.graphId, kind, id);
         if (!preflight || !isLiveNodeRow(preflight)) continue;
 
-        await session.retireNode({
-          existing: preflight,
-          schema: registration.type.schema,
-          uniqueConstraints: registration.unique ?? [],
-          onDelete: registration.onDelete,
-        });
+        const cascadePlan = await runCompositionCascade(
+          ctx,
+          kind,
+          id,
+          target,
+          lock,
+          "soft",
+          undefined,
+          session,
+        );
+
+        await session.retireNode(
+          {
+            existing: preflight,
+            schema: registration.type.schema,
+            uniqueConstraints: registration.unique ?? [],
+            onDelete: registration.onDelete,
+          },
+          withCascadeConsumedEdges(undefined, cascadePlan.consumedEdgeIds),
+        );
         if (identity !== undefined) {
           await identity.detachDeleted(target, { kind, id }, "soft");
         }
@@ -4029,13 +4220,17 @@ async function executeAtomicNodeDeletes<G extends GraphDef>(
  * Executes a node hard delete operation (permanent removal).
  *
  * Unlike soft delete, this permanently removes the node and all
- * associated data (uniqueness entries, embeddings) from the database.
+ * associated data (uniqueness entries, embeddings) from the database. A
+ * composition whole still cascades to its parts first, leaf-first, through
+ * their own hard-delete pipeline — the mirror of the soft-delete cascade in
+ * {@link executeNodeDelete}.
  */
 export async function executeNodeHardDelete<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   id: string,
   backend: GraphBackend | TransactionBackend,
+  policy?: NodeDeletePolicy,
 ): Promise<void> {
   // Gate outside hooks and transaction so an absent node neither fires hooks
   // nor opens an empty transaction (see executeNodeDelete). The cascade
@@ -4048,9 +4243,12 @@ export async function executeNodeHardDelete<G extends GraphDef>(
   return runHookedWritePlan(
     nodeWritePlanContext(ctx),
     opContext,
-    nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
+    nodeWritePlan(
+      nodeDeleteConstraintProbe(ctx, kind),
+      nodeRequiresIdentityLock(ctx),
+    ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const identity = ctx.identity;
       const registration = getNodeRegistration(ctx.graph, kind);
       // No in-transaction preflight (unlike soft delete, whose pipeline
@@ -4061,16 +4259,31 @@ export async function executeNodeHardDelete<G extends GraphDef>(
       // removed between the gate and the write lock makes each statement
       // a 0-row no-op.
 
+      // Composition parts, leaf-first, BEFORE the whole itself.
+      const cascadePlan = await runCompositionCascade(
+        ctx,
+        kind,
+        id,
+        target,
+        lock,
+        "hard",
+        policy,
+        session,
+      );
+
       // The cascade (edges, node, embeddings) is not individually atomic, so
       // it runs in one write transaction. Embeddings live in strategy-owned
       // per-`(kind, field)` tables, so they are cleaned up here rather than
       // in the backend's graph-agnostic `hardDeleteNode` cascade.
-      await session.purgeNode({
-        kind,
-        id,
-        schema: registration.type.schema,
-        onDelete: registration.onDelete,
-      });
+      await session.purgeNode(
+        {
+          kind,
+          id,
+          schema: registration.type.schema,
+          onDelete: registration.onDelete,
+        },
+        withCascadeConsumedEdges(policy, cascadePlan.consumedEdgeIds),
+      );
       if (identity !== undefined) {
         await identity.detachDeleted(target, { kind, id }, "hard");
       }

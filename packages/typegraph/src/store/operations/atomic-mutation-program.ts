@@ -327,6 +327,13 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   if (!hasOwnKey(input.graph.nodes, input.kind)) return;
   const registration = input.graph.nodes[input.kind];
   if (registration === undefined) return;
+  // A composition whole's delete cascades to its parts through the portable
+  // pipeline (`planCompositionCascade`, `node-operations.ts`) — a decision
+  // that reads rows and recurses, which the fused command's single read-free
+  // SQL shape cannot express. Statically ineligible by declaration, before
+  // any row is read: "does this kind declare parts?" is a property of the
+  // registry, not of this particular delete.
+  if (input.registry.compositionEdgeKindsUnder(input.kind).length > 0) return;
   const executor = resolveAtomicMutationProfile(input)?.deleteNodes;
   if (executor === undefined) return;
   const releasedClaimFamilies = new Set(executor.releasedClaimFamilies);

@@ -108,7 +108,7 @@ export function createNodeWriteContext(
 }
 
 /** Whether a delete removes the node (`hard`) or tombstones it (`soft`). */
-type NodeDeleteMode = "soft" | "hard";
+export type NodeDeleteMode = "soft" | "hard";
 
 /**
  * Tunes how a delete treats the node's connected edges.
@@ -259,40 +259,54 @@ async function enforceNodeDeleteBehavior(
       // Both behaviors remove connected edges. "cascade" signals intent to
       // remove dependent data; "disconnect" signals intent to sever the
       // relationship. The effect is identical because edges cannot exist
-      // without both endpoints. One batched statement per bind-budget
-      // chunk instead of one statement per edge; the per-edge loop remains
-      // for backends without the batch members.
-      const connectedEdgeIds = unconsumedEdges.map((edge) => edge.id);
-      const batchDelete =
-        args.mode === "hard" ?
-          backend.hardDeleteEdgesBatch
-        : backend.deleteEdgesBatch;
-      if (batchDelete === undefined) {
-        for (const edge of unconsumedEdges) {
-          await (args.mode === "hard" ?
-            backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })
-          : backend.deleteEdge({ graphId: ctx.graphId, id: edge.id }));
-        }
-      } else {
-        await batchDelete({
-          graphId: ctx.graphId,
-          ids: connectedEdgeIds,
-        });
-      }
-      // Hard-deleted holders are already takeable through the liveness probe;
-      // this is housekeeping so node cascades do not grow edgeClaims forever.
-      // Soft-deleted edges retain their rows for resurrection and are not
-      // reaped here.
-      if (args.mode === "hard") {
-        await purgeEdgeClaims(
-          backend,
-          ctx.claimsVerdict(),
-          ctx.graphId,
-          connectedEdgeIds,
-        );
-      }
+      // without both endpoints.
+      await deleteEdgesById(
+        ctx,
+        backend,
+        args.mode,
+        unconsumedEdges.map((edge) => edge.id),
+      );
       break;
     }
+  }
+}
+
+/**
+ * Deletes a set of edges by id, in the given mode. One batched statement per
+ * bind-budget chunk instead of one statement per edge; the per-edge loop
+ * remains for backends without the batch members.
+ *
+ * The one owner of "how does a delete remove an edge row" for both
+ * {@link enforceNodeDeleteBehavior}'s cascade/disconnect arm (unconsumed
+ * edges) and the composition cascade's explicit cleanup of the edges it
+ * consumed (`node-operations.ts`) — a composition edge is deliberately
+ * excluded from every member's OWN `unconsumedEdges` pass, so nothing else
+ * ever removes its row.
+ */
+export async function deleteEdgesById(
+  ctx: Pick<NodeWriteContext, "graphId" | "claimsVerdict">,
+  backend: Backend,
+  mode: NodeDeleteMode,
+  edgeIds: readonly string[],
+): Promise<void> {
+  if (edgeIds.length === 0) return;
+  const batchDelete =
+    mode === "hard" ? backend.hardDeleteEdgesBatch : backend.deleteEdgesBatch;
+  if (batchDelete === undefined) {
+    for (const edgeId of edgeIds) {
+      await (mode === "hard" ?
+        backend.hardDeleteEdge({ graphId: ctx.graphId, id: edgeId })
+      : backend.deleteEdge({ graphId: ctx.graphId, id: edgeId }));
+    }
+  } else {
+    await batchDelete({ graphId: ctx.graphId, ids: [...edgeIds] });
+  }
+  // Hard-deleted holders are already takeable through the liveness probe;
+  // this is housekeeping so node cascades do not grow edgeClaims forever.
+  // Soft-deleted edges retain their rows for resurrection and are not
+  // reaped here.
+  if (mode === "hard") {
+    await purgeEdgeClaims(backend, ctx.claimsVerdict(), ctx.graphId, edgeIds);
   }
 }
 
@@ -578,10 +592,10 @@ export async function applyNodeSoftDelete(
  * per-`(kind, field)` tables the graph-agnostic cascade cannot reach, so they
  * are cleaned here.
  *
- * Takes no {@link NodeDeletePolicy}: enforcement always runs and there is no
- * `consumedEdgeIds` narrowing on this path (see that field's doc). A future
- * hard-delete cascade needs its own plumbing here before it can consume an
- * edge on this path.
+ * Takes an optional {@link NodeDeletePolicy}, honored exactly as the soft
+ * delete path honors it (`enforceDeleteBehavior`, `consumedEdgeIds`): the
+ * composition cascade's hard-delete arm narrows a member's restrict count by
+ * the edges it is itself consuming, the same way the soft-delete arm does.
  */
 export async function applyNodeHardDelete(
   ctx: NodeWriteContext,
@@ -592,11 +606,13 @@ export async function applyNodeHardDelete(
     onDelete: DeleteBehavior | undefined;
   }>,
   backend: Backend,
+  policy?: NodeDeletePolicy,
 ): Promise<void> {
   await enforceNodeDeleteBehavior(
     ctx,
     { kind: args.kind, id: args.id, mode: "hard", onDelete: args.onDelete },
     backend,
+    policy,
   );
   await backend.hardDeleteNode({
     graphId: ctx.graphId,
