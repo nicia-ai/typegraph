@@ -351,9 +351,10 @@ function resolvedTableNamesEqual(
   a: ResolvedSqlTableNames,
   b: ResolvedSqlTableNames,
 ): boolean {
-  return (Object.keys(a) as (keyof ResolvedSqlTableNames)[]).every(
-    (key) => a[key] === b[key],
-  );
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<
+    keyof ResolvedSqlTableNames
+  >;
+  return [...keys].every((key) => a[key] === b[key]);
 }
 
 /**

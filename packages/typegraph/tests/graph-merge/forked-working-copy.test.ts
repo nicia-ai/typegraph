@@ -544,8 +544,8 @@ describe("forkedWorkingCopyStrategy", () => {
   );
 
   it(
-    "propagates the base's explicit SQL schema onto the fork when connect() " +
-      "binds the SAME custom table names the base used",
+    "accepts a fork whose connect() backend binds the SAME custom table " +
+      "names the base used (schema inheritance follows from the fence)",
     async () => {
       const CUSTOM_NAMES = {
         recordedClock: "app_recorded_clock",
