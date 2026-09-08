@@ -84,14 +84,6 @@ export type EdgeChange = Readonly<{
 // Ontology Changes
 // ============================================================
 
-/**
- * A change to the ontology.
- *
- * Defined in `./ontology-change` (alongside the data-probe machinery that
- * classifies it) and re-exported here so the public path
- * (`src/schema/index.ts`) is unchanged.
- */
-
 /** A durable graph-level Operational Identity capability change. */
 export type IdentityChange = Readonly<{
   type: ChangeType;
@@ -243,6 +235,12 @@ export type SchemaDiff = Readonly<{
  * @param before - The previous schema version
  * @param after - The new schema version
  * @returns A diff describing all changes
+ * @throws ConfigurationError when `before` or `after` adds or removes a
+ *   relation and the ontology on the affected side cannot be interpreted —
+ *   see {@link classifyOntologyChanges}. Every caller of this function
+ *   inherits the throw: `loadAndVerifyGraph` / `createVerifiedStore`,
+ *   `getSchemaChanges`, and (through it) `requiresMigration` are audited at
+ *   their own declarations.
  */
 export function computeSchemaDiff(
   before: SerializedSchema,
@@ -1465,4 +1463,11 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
   return actions;
 }
 
+/**
+ * A change to the ontology.
+ *
+ * Defined in `./ontology-change` (alongside the data-probe machinery that
+ * classifies it) and re-exported here so the public path
+ * (`src/schema/index.ts`) is unchanged.
+ */
 export { type OntologyChange } from "./ontology-change";
