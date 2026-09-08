@@ -6,11 +6,7 @@
  */
 import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
-import {
-  META_EDGE_EQUIVALENT_TO,
-  META_EDGE_SAME_AS,
-  META_EDGE_SUB_CLASS_OF,
-} from "../ontology/constants";
+import { isSubsumptionMetaEdge } from "../ontology/constants";
 import { compareStrings } from "../utils/compare";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
@@ -463,12 +459,8 @@ function nodePropertyChangeMayAffectExistingSubsumption(
   if (changedKinds.size === 0) return false;
 
   for (const relation of after.ontology.relations) {
-    const isSubsumptionRelation =
-      relation.metaEdge === META_EDGE_SUB_CLASS_OF ||
-      relation.metaEdge === META_EDGE_EQUIVALENT_TO ||
-      relation.metaEdge === META_EDGE_SAME_AS;
     if (
-      isSubsumptionRelation &&
+      isSubsumptionMetaEdge(relation.metaEdge) &&
       (changedKinds.has(relation.from) || changedKinds.has(relation.to))
     ) {
       return true;

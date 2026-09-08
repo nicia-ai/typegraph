@@ -692,6 +692,7 @@ export class TraversalBuilder<
     rootKind: string,
     expandedKinds: readonly string[],
   ): void {
+    const edgeKind = this.#edgeKinds[0] ?? "(unknown)";
     for (const kind of expandedKinds) {
       try {
         this.#assertValidEndpoint(kind);
@@ -699,15 +700,15 @@ export class TraversalBuilder<
         if (!(error instanceof EndpointError)) throw error;
         throw new ConfigurationError(
           `includeNarrower expansion of "${rootKind}" includes "${kind}", ` +
-            `which is not an admitted endpoint of edge "${this.#edgeKinds[0] ?? "(unknown)"}".`,
+            `which is not an admitted endpoint of edge "${edgeKind}".`,
           {
             code: "ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED",
             rootKind,
             narrowerKind: kind,
-            edgeKind: this.#edgeKinds[0] ?? "(unknown)",
+            edgeKind,
           },
           {
-            suggestion: `Widen edge "${this.#edgeKinds[0] ?? "(unknown)"}"'s declared endpoints to admit "${kind}", or drop its broader/narrower relation to "${rootKind}".`,
+            suggestion: `Widen edge "${edgeKind}"'s declared endpoints to admit "${kind}", or drop its broader/narrower relation to "${rootKind}".`,
             cause: error,
           },
         );
