@@ -63,6 +63,7 @@ function planInput(): MergePlanArtifactV1Input {
       baseAmbiguities: [],
       provenanceRecords: [],
       warnings: [],
+      compositionOrphans: [],
       diagnostics: { entries: [], total: 0, limit: 10, truncated: false },
     },
     provenance: { includeInReport: true, persist: false },

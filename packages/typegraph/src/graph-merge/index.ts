@@ -38,7 +38,10 @@ export {
   captureCandidateWriteSetTarget,
   planCandidateWriteSet,
 } from "./candidate-write-set";
-export type { MergeConstraintConflictErrorDetails } from "./errors";
+export type {
+  MergeCompositionOrphanErrorDetails,
+  MergeConstraintConflictErrorDetails,
+} from "./errors";
 export {
   BaseVersionMismatchError,
   BranchError,
@@ -49,6 +52,7 @@ export {
   InvalidMergePlanError,
   MatchEvidenceError,
   MERGE_ERROR_CODES,
+  MergeCompositionOrphanError,
   MergeConflictError,
   MergeConstraintConflictError,
   MergeError,
@@ -89,6 +93,7 @@ export type {
   MergePlanBranchAnchor,
   MergePlanCandidateDiagnostic,
   MergePlanCanonicalMapping,
+  MergePlanCompositionOrphan,
   MergePlanDiagnostics,
   MergePlanDigest,
   MergePlanEdgeDelete,

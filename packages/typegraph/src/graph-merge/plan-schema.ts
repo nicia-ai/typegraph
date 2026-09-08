@@ -202,6 +202,20 @@ export type MergePlanTypeReconciliation = Readonly<{
   decisiveEdges?: readonly MergePlanMatchEvidence[] | undefined;
 }>;
 
+/**
+ * A live composition part of a whole the plan deletes, which the plan does
+ * NOT itself delete — a part attached on the target after the branch point
+ * (or independently of it), found by re-reading the parts closure
+ * (`planCompositionCascade`) against every planned node deletion. Surfaced
+ * here so a dry run reports it; apply re-verifies the same finding under the
+ * write lock and refuses with `MergeCompositionOrphanError` when it recurs.
+ */
+export type MergePlanCompositionOrphan = Readonly<{
+  part: MergePlanEntityRef;
+  whole: MergePlanEntityRef;
+  viaEdgeKind: string;
+}>;
+
 export type MergePlanReview = Readonly<{
   resolutions: readonly MergePlanEntityResolution[];
   conflicts: readonly JsonValue[];
@@ -212,6 +226,7 @@ export type MergePlanReview = Readonly<{
   baseAmbiguities: readonly JsonValue[];
   provenanceRecords: readonly JsonValue[];
   warnings: readonly string[];
+  compositionOrphans: readonly MergePlanCompositionOrphan[];
   diagnostics?: MergePlanDiagnostics | undefined;
 }>;
 
@@ -637,6 +652,15 @@ const mergePlanReviewSchema = z
         .strict(),
     ),
     warnings: z.array(z.string()),
+    compositionOrphans: z.array(
+      z
+        .object({
+          part: mergePlanEntityRefSchema,
+          whole: mergePlanEntityRefSchema,
+          viaEdgeKind: nonEmptyStringSchema,
+        })
+        .strict(),
+    ),
     diagnostics: diagnosticsSchema.optional(),
   })
   .strict();
