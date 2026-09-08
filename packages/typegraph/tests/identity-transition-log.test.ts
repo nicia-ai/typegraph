@@ -20,6 +20,7 @@ import {
 import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
 import { type IdentityServiceContext } from "../src/identity/service-types";
 import {
+  pruneIdentityTransitions,
   pruneIdentityTransitionsForContext,
   readIdentityTransitions,
 } from "../src/identity/transition-log";
@@ -202,6 +203,32 @@ describe("identity transition log", () => {
       beforeRecorded: recordedNow,
     });
     expect(pruneResult.pruned).toBe(before.length);
+    const afterPrune = await readTransitions(ctx);
+    expect(afterPrune.length).toBe(0);
+  });
+
+  it("pruneIdentityTransitions(store, options) — the Store-based public shape — prunes through the same path", async () => {
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await store.nodes.Person.create({ name: "A" }, { id: "a" });
+    await store.nodes.Person.create({ name: "B" }, { id: "b" });
+    await store.identity.assertSame(
+      { kind: "Person", id: "a" },
+      { kind: "Person", id: "b" },
+    );
+    await store.nodes.Person.create({ name: "C" }, { id: "c" });
+    const recordedNow = await store.recordedNow();
+    if (recordedNow === undefined) {
+      throw new Error("expected a recorded instant");
+    }
+    const pruneResult = await pruneIdentityTransitions(store, {
+      beforeRecorded: recordedNow,
+    });
+    expect(pruneResult.pruned).toBeGreaterThanOrEqual(1);
+    const ctx = storeRuntime(store).identityContext();
     const afterPrune = await readTransitions(ctx);
     expect(afterPrune.length).toBe(0);
   });
