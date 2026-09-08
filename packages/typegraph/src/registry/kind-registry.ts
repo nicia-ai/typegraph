@@ -672,10 +672,10 @@ function collectOntologyRelations(
 }
 
 /**
- * Maps every LOCAL (non-IRI) equivalence-class member to that class's
- * canonical representative — the code-point minimum of the class's local
- * members. A kind outside every equivalence class is absent (callers fall
- * back to the kind itself).
+ * Maps every equivalence-class member — including an external IRI member —
+ * to that class's canonical representative: the code-point minimum of the
+ * class's LOCAL (non-IRI) members. A kind outside every equivalence class is
+ * absent (callers fall back to the kind itself).
  *
  * D1 folds `equivalentTo` into mutual subsumption by collapsing each class to
  * ONE node before the transitive closure runs ({@link
@@ -692,20 +692,44 @@ function collectOntologyRelations(
  * `expandCollapsedRelation` below to fold each class back in is separate and
  * unavoidable, and `computeSubClassComponents`, downstream of both, still
  * BFSes one large equivalence-only class in O(class size²).
+ *
+ * An IRI member MUST map to its class's representative too, even though an
+ * IRI never surfaces as a kind on its own (that filter lives downstream, in
+ * {@link expandCollapsedRelation}'s `ownClassMembers` handling). A raw
+ * `subClassOf` relation can name an IRI as an endpoint — a graph-extension
+ * document is not type-checked against `NodeType`, so `subClassOf(Student,
+ * "<iri>")` is representable even though the typed `subClassOf()` helper
+ * never produces one — and `collapsedSubClass` below collapses that endpoint
+ * through `representativeOf`. Leaving the IRI unmapped left it as a literal
+ * node in the collapsed graph: reachable from the ancestor side (subClassOf's
+ * child), because that side walks OUTWARD from a real kind, but never a KEY
+ * on the descendant side, because nothing collapses to look IT up. That made
+ * `subClassAncestors`/`subClassDescendants` stop being exact inverses for
+ * exactly the shape D1 exists to unify — an equivalence class routed through
+ * an IRI that also terminates a `subClassOf` edge.
  */
 function computeEquivalenceRepresentatives(
   equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>,
 ): ReadonlyMap<string, string> {
   const representativeOf = new Map<string, string>();
   for (const [member, others] of equivalenceSets) {
-    if (isExternalIri(member) || representativeOf.has(member)) continue;
-    const localMembers = [member, ...others].filter(
-      (name) => !isExternalIri(name),
-    );
+    if (representativeOf.has(member)) continue;
+    const allMembers = [member, ...others];
+    const localMembers = allMembers.filter((name) => !isExternalIri(name));
+    // A class made up ENTIRELY of external IRIs — two bare IRIs declared
+    // equivalentTo each other — has no local kind to route to. The typed
+    // `equivalentTo()` helper can never produce this (its left parameter is
+    // always a real kind), but the raw, untyped ontology-relation shape a
+    // graph-extension document or a hand-built `NamedOntologyRelation` uses
+    // can. Leave its members unmapped rather than crash: with no local kind
+    // in the class, there is nothing for a `subClassOf` endpoint to route
+    // to, so this is the same pre-existing, out-of-scope "bare unmapped IRI"
+    // case as an IRI with no equivalence class at all.
+    if (localMembers.length === 0) continue;
     const representative = requireDefined(
       localMembers.toSorted((left, right) => compareCodePoints(left, right))[0],
     );
-    for (const name of localMembers) representativeOf.set(name, representative);
+    for (const name of allMembers) representativeOf.set(name, representative);
   }
   return representativeOf;
 }

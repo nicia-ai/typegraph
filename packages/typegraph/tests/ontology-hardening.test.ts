@@ -262,7 +262,20 @@ describe("ontology truth and hardening", () => {
     );
   });
 
-  it("stops disjointness descent at external IRIs in validation and runtime alike", () => {
+  it("continues subclass descent through an external IRI that is also a subClassOf endpoint", () => {
+    // Regression for a defect found reviewing D1: `subClassOf(Gamma, IRI)`
+    // reaches Alpha's representative through the IRI's equivalence class
+    // (`equivalentTo(Alpha, IRI)`) on the ANCESTOR side by construction —
+    // `isSubClassOf("Gamma", "Alpha")` was already true before this fix, via
+    // `expandCollapsedRelation`'s per-representative fellow walk. What was
+    // missing was the DESCENDANT side: `representativeOf` left the IRI
+    // unmapped, so `collapsedSubClass` kept it as a literal, disconnected
+    // node instead of resolving it to Alpha's representative, and Gamma
+    // silently dropped out of `subClassDescendants.get("Alpha")` — the two
+    // closures disagreed about the very same pair. An IRI is still never a
+    // KIND (it never appears as a member of either set), but it is no longer
+    // a dead end for a `subClassOf` edge that names it: the class it belongs
+    // to is exactly what a `subClassOf`-to-IRI edge subsumes.
     const externalIri = "http://example.org/X";
     const ontology = [
       { metaEdge: "equivalentTo", from: "Alpha", to: externalIri },
@@ -270,13 +283,17 @@ describe("ontology truth and hardening", () => {
       { metaEdge: "disjointWith", from: "Alpha", to: "Beta" },
     ];
 
-    // An IRI is an inert reference, so subclass descent stops there: Gamma
-    // inherits nothing from Alpha. Validation must agree rather than reason
-    // past what the registry actually materializes.
     expect(validateOntologyRelations(ontology)).toEqual([]);
 
     const closures = computeClosuresFromNamedOntology(ontology);
-    expect([...closures.disjointPairs]).toEqual(["Alpha|Beta"]);
+    expect(closures.subClassAncestors.get("Gamma")?.has("Alpha")).toBe(true);
+    expect(closures.subClassDescendants.get("Alpha")?.has("Gamma")).toBe(true);
+    expect([...closures.disjointPairs].toSorted()).toEqual([
+      "Alpha|Beta",
+      "Beta|Gamma",
+    ]);
+    // Gamma is a SUBCLASS of Alpha through the IRI bridge, not equivalentTo
+    // it — the equivalence set itself stays exactly what was declared.
     expect(closures.equivalenceSets.get("Alpha")?.has("Gamma")).toBe(false);
   });
 

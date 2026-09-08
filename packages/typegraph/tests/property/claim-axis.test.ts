@@ -15,6 +15,10 @@ import { z } from "zod";
 import { getKindsForUniquenessCheck } from "../../src/constraints";
 import { defineNode } from "../../src/core/node";
 import { type NodeType } from "../../src/core/types";
+import {
+  META_EDGE_EQUIVALENT_TO,
+  META_EDGE_SUB_CLASS_OF,
+} from "../../src/ontology/constants";
 import { core } from "../../src/ontology/core-meta-edges";
 import { type OntologyRelation } from "../../src/ontology/types";
 import {
@@ -162,7 +166,99 @@ function connectedKinds(
   return [...members];
 }
 
+/**
+ * A bare external IRI, usable as a `subClassOf`/`equivalentTo` endpoint
+ * alongside the ordinary kind names above. `KIND_NAMES`-only arbitraries can
+ * never generate the shape a real review defect lived in — an equivalence
+ * class routed through an IRI that is ALSO a `subClassOf` endpoint — because
+ * every endpoint they produce is a registered kind.
+ */
+const EXTERNAL_IRI = "https://example.com/claim-axis-probe";
+
+const endpointWithIriArb = fc.oneof(
+  fc.constantFrom(...KIND_NAMES),
+  fc.constant(EXTERNAL_IRI),
+);
+
+const relationWithIriArb = fc
+  .tuple(
+    fc.constantFrom(META_EDGE_SUB_CLASS_OF, META_EDGE_EQUIVALENT_TO),
+    endpointWithIriArb,
+    endpointWithIriArb,
+  )
+  .filter(([, from, to]) => from !== to);
+
+/**
+ * `EXTERNAL_IRI` is always ALSO the target of a fixed `equivalentTo` from a
+ * real kind, so it is guaranteed to belong to an equivalence class in every
+ * generated ontology. This is deliberate, not an incomplete generator: a bare
+ * `subClassOf` naming an external IRI that is equivalentTo NOTHING is a
+ * separate, pre-existing gap in `rootAncestor` (an IRI with an empty ancestor
+ * set trivially passes its "maximal" check and can itself become the chosen
+ * root, whose `expandSubClasses` then never contains the base kind) — already
+ * present on this branch before D1, unrelated to the equivalence-routing
+ * defect this property pins, and out of scope here.
+ */
+const ontologyWithIriArb = fc
+  .array(relationWithIriArb, { maxLength: 10 })
+  .map((relations) => [
+    [META_EDGE_EQUIVALENT_TO, "Alpha", EXTERNAL_IRI] as const,
+    ...relations,
+  ]);
+
+/**
+ * Builds a registry directly from raw `(metaEdge, from, to)` tuples, with
+ * `from`/`to` used exactly as given — including the external IRI, which
+ * `getKindName` (the sole consumer inside `computeClosuresFromOntology`)
+ * passes through unchanged. This reaches the same closure code a
+ * graph-extension document's untyped strings do, without routing an IRI
+ * through `kindType`/`defineNode`.
+ */
+function registryFromRawRelations(
+  relations: readonly (readonly [string, string, string])[],
+): KindRegistry {
+  const ontologyRelations: OntologyRelation[] = relations.map(
+    ([metaEdge, from, to]): OntologyRelation => ({
+      metaEdge:
+        metaEdge === META_EDGE_SUB_CLASS_OF ?
+          core.subClassOfMetaEdge
+        : core.equivalentToMetaEdge,
+      from,
+      to,
+    }),
+  );
+  return new KindRegistry(
+    new Map(),
+    new Map(),
+    computeClosuresFromOntology(ontologyRelations),
+  );
+}
+
 describe("uniqueness claim axis determinism", () => {
+  // Regression for a defect found reviewing D1: a `subClassOf` endpoint that
+  // is an external IRI belonging to an equivalence class made `rootAncestor`
+  // pick a "root" whose own `expandSubClasses` did not contain the kind that
+  // asked — `getKindsForUniquenessCheck` returned a probe set missing the
+  // base kind entirely, contradicting its own documented contract ("the root
+  // and all its descendants, WHICH INCLUDES baseKind"). Root-caused and fixed
+  // in `computeEquivalenceRepresentatives` (kind-registry.ts): reverting that
+  // fix makes this fail immediately (a `TypeError` before the fold even
+  // stabilizes, or a probe set missing `kind`, depending on which shape
+  // fast-check shrinks to first).
+  it("always includes the base kind in its own kindWithSubClasses probe, even when an IRI mediates the connection", () => {
+    fc.assert(
+      fc.property(ontologyWithIriArb, (tuples) => {
+        const registry = registryFromRawRelations(tuples);
+        for (const kind of KIND_NAMES) {
+          expect(
+            getKindsForUniquenessCheck(kind, "kindWithSubClasses", registry),
+          ).toContain(kind);
+        }
+      }),
+      { numRuns: 500 },
+    );
+  });
+
   it("gives every kind in a connected component the same axis", () => {
     fc.assert(
       fc.property(

@@ -70,6 +70,26 @@ function createRelation(
 }
 
 /**
+ * Creates an ontology relation with a RAW endpoint — a plain string used
+ * as-is rather than resolved to a registered `NodeType`. Needed to author an
+ * external-IRI endpoint (e.g. `"https://schema.org/Person"`): `getKindName`
+ * passes a string straight through, so this reaches the same closure code a
+ * graph-extension document's untyped `from`/`to` strings do, without routing
+ * an IRI through `defineNode`.
+ */
+function createRawRelation(
+  from: string,
+  metaEdgeName: string,
+  to: string,
+): OntologyRelation {
+  const metaEdge = metaEdgeMap[metaEdgeName];
+  if (!metaEdge) {
+    throw new Error(`Unknown meta-edge: ${metaEdgeName}`);
+  }
+  return { metaEdge, from, to };
+}
+
+/**
  * Creates a KindRegistry from ontology relations.
  */
 function createRegistry(relations: readonly OntologyRelation[]): KindRegistry {
@@ -309,6 +329,93 @@ describe("KindRegistry Subsumption Properties", () => {
 
       // Animal is in Dog's ancestors iff Dog is in Animal's descendants
       expect(registry.getDescendants("Animal").has("Dog")).toBe(true);
+    });
+
+    // Regression coverage for a defect found reviewing D1: an `equivalentTo`
+    // class routed through an external IRI that is ALSO a `subClassOf`
+    // endpoint made `subClassAncestors`/`subClassDescendants` stop being
+    // inverses of each other, so `isSubClassOf`/`isAssignableTo` disagreed
+    // with `expandSubClasses`/`getDescendants` about the very same pair. Both
+    // shapes below reproduced the divergence before `representativeOf`
+    // mapped an IRI to its class's representative (kind-registry.ts,
+    // `computeEquivalenceRepresentatives`): reverting that fix — dropping the
+    // IRI from `representativeOf` again — makes both cases below fail.
+    it("keeps ancestors/descendants exact inverses when a subClassOf endpoint is an equivalence-routed IRI", () => {
+      const externalIri = "https://schema.org/Person";
+
+      // Shape 1: Student subClassOf <IRI>, with Person and Individual both
+      // equivalentTo the SAME IRI (so Person, Individual, and — transitively
+      // through the IRI — Student's ancestor chain all fold together).
+      const shapeOne = createRegistry([
+        createRawRelation("Person", META_EDGE_EQUIVALENT_TO, externalIri),
+        createRawRelation("Individual", META_EDGE_EQUIVALENT_TO, externalIri),
+        createRawRelation("Student", META_EDGE_SUB_CLASS_OF, externalIri),
+      ]);
+
+      expect(shapeOne.isSubClassOf("Student", "Person")).toBe(true);
+      expect(shapeOne.expandSubClasses("Person")).toContain("Student");
+      expect(shapeOne.getDescendants("Person").has("Student")).toBe(true);
+      // The IRI itself is an inert reference — it must never surface as a
+      // member of any subsumption-reading result.
+      for (const kind of ["Student", "Person", "Individual"]) {
+        expect(shapeOne.getAncestors(kind).has(externalIri)).toBe(false);
+        expect(shapeOne.getDescendants(kind).has(externalIri)).toBe(false);
+        expect(shapeOne.expandSubClasses(kind)).not.toContain(externalIri);
+      }
+
+      // Shape 2 (mirror): the IRI is the CHILD side of subClassOf instead of
+      // the parent, and is equivalentTo a kind that never subclasses
+      // anything else.
+      const shapeTwo = createRegistry([
+        createRawRelation(externalIri, META_EDGE_SUB_CLASS_OF, "C"),
+        createRawRelation(externalIri, META_EDGE_EQUIVALENT_TO, "A"),
+      ]);
+      expect(shapeTwo.isAssignableTo("A", "C")).toBe(true);
+      expect(shapeTwo.expandSubClasses("C")).toContain("A");
+      expect(shapeTwo.expandSubClasses("C")).not.toContain(externalIri);
+    });
+
+    it("ancestors and descendants stay exact inverses over random subClassOf/equivalentTo/IRI ontologies", () => {
+      const kindArb = fc.constantFrom("A", "B", "C", "D", "E");
+      const endpointArb = fc.oneof(
+        kindArb,
+        fc.constant("https://example.com/shared"),
+      );
+      const relationArb = fc
+        .tuple(
+          fc.constantFrom(META_EDGE_SUB_CLASS_OF, META_EDGE_EQUIVALENT_TO),
+          endpointArb,
+          endpointArb,
+        )
+        .filter(([, from, to]) => from !== to);
+      const ontologyArb = fc.array(relationArb, { maxLength: 10 });
+
+      fc.assert(
+        fc.property(ontologyArb, (tuples) => {
+          const relations = tuples.map(([metaEdge, from, to]) =>
+            createRawRelation(from, metaEdge, to),
+          );
+          const registry = createRegistry(relations);
+          // The external IRI is deliberately EXCLUDED from this set: a
+          // `subClassOf` edge naming an IRI that belongs to no equivalence
+          // class at all is a separate, pre-existing gap (the IRI can still
+          // leak into one side's member set) that these confirmed findings
+          // do not cover. What this property pins is the one the findings
+          // DO cover: ancestors/descendants agree about every pair of real
+          // kinds, regardless of how an IRI-routed equivalence class
+          // reshuffles the closure around them.
+          const namedKinds = ["A", "B", "C", "D", "E"];
+
+          for (const left of namedKinds) {
+            for (const right of namedKinds) {
+              expect(registry.getAncestors(left).has(right)).toBe(
+                registry.getDescendants(right).has(left),
+              );
+            }
+          }
+        }),
+        { numRuns: 500 },
+      );
     });
   });
 });
