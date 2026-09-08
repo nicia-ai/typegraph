@@ -100,6 +100,15 @@ export type ClosureTransitionRecord = Readonly<{
   priorClassRef?: PlainNodeRef | undefined;
 }>;
 
+function sameMemberSet(
+  left: readonly PlainNodeRef[],
+  right: readonly PlainNodeRef[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const rightKeys = new Set(right.map((member) => refKey(member)));
+  return left.every((member) => rightKeys.has(refKey(member)));
+}
+
 /**
  * The exhaustive-diff predicate: given a member's OLD class (before a
  * structural mutation) and its NEW class (after), the one owner of "does this
@@ -108,13 +117,18 @@ export type ClosureTransitionRecord = Readonly<{
  * schema-transition) calls this — never a second inline spelling of the
  * comparison.
  *
- * A member whose canonical is unchanged never needs its own record: if its
- * old class genuinely lost members, at least one OTHER member of that old
- * class ends up under a different canonical, and THAT member's record already
- * carries `priorClassRef` equal to the old canonical — sufficient for a seed
- * tracking the old canonical to discover this boundary by the reverse
- * lineage hop. A member whose old class was never a real (>=2 member) closure
- * row reports `priorClassRef: undefined` ("the class did not exist").
+ * A member is skipped ONLY when nothing about its class changed at all — same
+ * canonical AND same member set. A canonical that survives unchanged while
+ * the member SET shrank (e.g. the only other member of a two-member class was
+ * hard-deleted, so nothing "became" a new label to carry the reverse hop) is
+ * NOT redundant: proven by the exhaustiveness property test, which found a
+ * live counterexample where skipping a same-canonical-but-shrunk member
+ * dropped the only witness of a real membership change. The resulting record
+ * is self-referential (`classRef === priorClassRef`) in that case — this
+ * still lets a seed tracking that label discover the boundary via the
+ * forward match, even with no reverse hop to lean on. A member whose old
+ * class was never a real (>=2 member) closure row reports `priorClassRef:
+ * undefined` ("the class did not exist").
  */
 export function diffClosureTransitions(
   affected: readonly PlainNodeRef[],
@@ -129,13 +143,19 @@ export function diffClosureTransitions(
     if (oldClass === undefined) continue;
     const newClass = newClassOf.get(key);
     // Absent from the new state: the member no longer exists (e.g. a hard
-    // delete removed it from the live population). Its departure is reported
-    // through whichever surviving member's record carries the old canonical
-    // as `priorClassRef`; there is nothing to name it "became" here.
+    // delete removed it from the live population). Its own departure has no
+    // "became" to name; a SURVIVING class-mate's own record (self-referential
+    // when its canonical is unchanged, per the rule above) is what carries
+    // this event, not a record keyed on the departed member itself.
     if (newClass === undefined) continue;
     const priorCanonical = requireDefined(oldClass[0]);
     const canonical = requireDefined(newClass[0]);
-    if (refKey(priorCanonical) === refKey(canonical)) continue;
+    if (
+      refKey(priorCanonical) === refKey(canonical) &&
+      sameMemberSet(oldClass, newClass)
+    ) {
+      continue;
+    }
     const dedupeKey = `${refKey(canonical)} ${refKey(priorCanonical)}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);

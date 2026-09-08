@@ -43,10 +43,13 @@ const PERSON_CLASS_REFS = [
 
 function readTransitions<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
-  classRefs: readonly Readonly<{ kind: string; id: string }>[] = PERSON_CLASS_REFS,
+  classReferences: readonly Readonly<{
+    kind: string;
+    id: string;
+  }>[] = PERSON_CLASS_REFS,
 ) {
   return readIdentityTransitions(ctx.backend, ctx.schema, ctx.graphId, {
-    classRefs,
+    classRefs: classReferences,
     limit: 200,
   });
 }
@@ -87,8 +90,16 @@ describe("identity transition log", () => {
     const ctx = storeRuntime(store).identityContext();
     const rows = await readTransitions(ctx);
     const retractRows = rows.filter((row) => row.cause === "retract");
-    expect(retractRows.length).toBe(1);
-    expect(retractRows[0]?.assertion_ids).toEqual([asserted.assertion.id]);
+    // A 2-member class fully dissolving into two singletons produces TWO
+    // records — one per departing member, since NEITHER retains the other as
+    // a class-mate to carry the reverse-lineage hop (see diffClosureTransitions'
+    // same-canonical-but-shrunk-membership rule, proven load-bearing by the
+    // exhaustiveness property test). Every record still names the retracted
+    // assertion.
+    expect(retractRows.length).toBe(2);
+    for (const row of retractRows) {
+      expect(row.assertion_ids).toEqual([asserted.assertion.id]);
+    }
   });
 
   it("notes a fold transition for a same-id cross-kind create, and a restore transition on resurrection", async () => {
@@ -107,17 +118,17 @@ describe("identity transition log", () => {
     await store.nodes.Person.create({ name: "A" }, { id: "shared" });
     await store.nodes.Org.create({ name: "A Org" }, { id: "shared" });
     const ctx = storeRuntime(store).identityContext();
-    const sharedRefs = [
+    const sharedReferences = [
       { kind: "Person", id: "shared" },
       { kind: "Org", id: "shared" },
     ];
-    const rows = await readTransitions(ctx, sharedRefs);
+    const rows = await readTransitions(ctx, sharedReferences);
     const foldRows = rows.filter((row) => row.cause === "fold");
     expect(foldRows.length).toBeGreaterThanOrEqual(1);
 
     await store.nodes.Org.delete(asNodeId("shared"));
     await store.nodes.Org.create({ name: "A Org 2" }, { id: "shared" });
-    const afterRestore = await readTransitions(ctx, sharedRefs);
+    const afterRestore = await readTransitions(ctx, sharedReferences);
     const restoreRows = afterRestore.filter((row) => row.cause === "restore");
     expect(restoreRows.length).toBeGreaterThanOrEqual(1);
   });
