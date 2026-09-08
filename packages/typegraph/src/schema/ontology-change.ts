@@ -415,25 +415,42 @@ function edgeEndpointAssignabilityDelta(
 }
 
 /**
- * Edge kinds present on both sides whose `acyclic` flag went from
- * absent/`false` to `true` this commit — item D.2's tightening. A brand-new
- * edge kind (absent from `before`) is excluded: there is no prior data it
- * could have violated, so classifying it would pay for a probe against an
- * empty population every time a schema author declares `acyclic: true` on a
- * kind for the first time.
+ * Edge kinds present on both sides whose `acyclic` flag made the transition
+ * `wasTransition` selects for — a brand-new edge kind (absent from `before`)
+ * never qualifies for either direction, since there is no prior data an
+ * added axiom could have violated or a removed one could have depended on.
+ * The one loop {@link edgeAcyclicityAddedDelta} and
+ * {@link edgeAcyclicityRemovedDelta} both filter, so the "present on both
+ * sides" test cannot drift between the two directions.
  */
-function edgeAcyclicityAddedDelta(
+function edgeAcyclicityTransitionDelta(
   before: OntologySnapshot,
   after: OntologySnapshot,
+  wasTransition: (wasAcyclic: boolean, isAcyclic: boolean) => boolean,
 ): readonly string[] {
   const edgeKinds: string[] = [];
   for (const edgeKind of Object.keys(after.edges)) {
     if (!hasOwnKey(before.edges, edgeKind)) continue;
     const wasAcyclic = before.edges[edgeKind]?.acyclic === true;
     const isAcyclic = after.edges[edgeKind]?.acyclic === true;
-    if (!wasAcyclic && isAcyclic) edgeKinds.push(edgeKind);
+    if (wasTransition(wasAcyclic, isAcyclic)) edgeKinds.push(edgeKind);
   }
   return edgeKinds.toSorted(compareStrings);
+}
+
+/**
+ * Edge kinds present on both sides whose `acyclic` flag went from
+ * absent/`false` to `true` this commit — item D.2's tightening.
+ */
+function edgeAcyclicityAddedDelta(
+  before: OntologySnapshot,
+  after: OntologySnapshot,
+): readonly string[] {
+  return edgeAcyclicityTransitionDelta(
+    before,
+    after,
+    (wasAcyclic, isAcyclic) => !wasAcyclic && isAcyclic,
+  );
 }
 
 /**
@@ -445,14 +462,11 @@ function edgeAcyclicityRemovedDelta(
   before: OntologySnapshot,
   after: OntologySnapshot,
 ): readonly string[] {
-  const edgeKinds: string[] = [];
-  for (const edgeKind of Object.keys(before.edges)) {
-    if (!hasOwnKey(after.edges, edgeKind)) continue;
-    const wasAcyclic = before.edges[edgeKind]?.acyclic === true;
-    const isAcyclic = after.edges[edgeKind]?.acyclic === true;
-    if (wasAcyclic && !isAcyclic) edgeKinds.push(edgeKind);
-  }
-  return edgeKinds.toSorted(compareStrings);
+  return edgeAcyclicityTransitionDelta(
+    before,
+    after,
+    (wasAcyclic, isAcyclic) => wasAcyclic && !isAcyclic,
+  );
 }
 
 // ============================================================

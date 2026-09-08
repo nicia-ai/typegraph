@@ -141,6 +141,7 @@ import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import {
+  type AcyclicityProbeContext,
   assertEdgeRelationsAcyclic,
   edgeKindIsInAcyclicRelation,
   type ProposedRelationEdge,
@@ -504,15 +505,7 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
       "an acyclic edge create reached validateAndPrepareEdgeCreate with no write lock",
     );
     await assertEdgeRelationsAcyclic(
-      {
-        graphId: ctx.graphId,
-        graph: ctx.graph,
-        schema: ctx.revisionSchema,
-        dialect: getDialect(backend.dialect),
-        target: backend,
-        lock,
-        operation: "edges.create",
-      },
+      acyclicityProbeContext(ctx, backend, lock, "edges.create"),
       [
         {
           edgeId: id,
@@ -619,6 +612,30 @@ function edgeAcyclic<G extends GraphDef>(
   kind: string,
 ): boolean {
   return edgeKindIsInAcyclicRelation(ctx.graph, kind);
+}
+
+/**
+ * The `AcyclicityProbeContext` every acyclicity assertion in this module
+ * builds — three call sites share this exact shape (`edges.create`,
+ * `edges.bulkCreate`, `edges.resurrect`), reading `graph`/`schema` from `ctx`
+ * and deriving `dialect` from whichever write target the call is fenced
+ * against.
+ */
+function acyclicityProbeContext<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  operation: string,
+): AcyclicityProbeContext {
+  return {
+    graphId: ctx.graphId,
+    graph: ctx.graph,
+    schema: ctx.revisionSchema,
+    dialect: getDialect(target.dialect),
+    target,
+    lock,
+    operation,
+  };
 }
 
 /**
@@ -1981,15 +1998,7 @@ async function assertBatchEdgesRelationsAcyclic<G extends GraphDef>(
   batchInsertWork: readonly EdgeInsertWork[],
 ): Promise<void> {
   await assertEdgeRelationsAcyclic(
-    {
-      graphId: ctx.graphId,
-      graph: ctx.graph,
-      schema: ctx.revisionSchema,
-      dialect: getDialect(target.dialect),
-      target,
-      lock,
-      operation: "edges.bulkCreate",
-    },
+    acyclicityProbeContext(ctx, target, lock, "edges.bulkCreate"),
     proposedRelationEdgesFromInsertWork(batchInsertWork),
   );
 }
@@ -2191,18 +2200,15 @@ async function performEdgeUpdate<G extends GraphDef>(
     // here — checking it would over-fence a path §5 rules must stay free.
     if (reentersLivePopulation && edgeAcyclic(ctx, input.identity.kind)) {
       await assertEdgeRelationsAcyclic(
-        {
-          graphId: ctx.graphId,
-          graph: ctx.graph,
-          schema: ctx.revisionSchema,
-          dialect: getDialect(target.dialect),
+        acyclicityProbeContext(
+          ctx,
           target,
-          lock: requireDefined(
+          requireDefined(
             lock,
             "an acyclic edge resurrection reached performEdgeUpdate with no write lock",
           ),
-          operation: "edges.resurrect",
-        },
+          "edges.resurrect",
+        ),
         [
           {
             edgeId: id,
