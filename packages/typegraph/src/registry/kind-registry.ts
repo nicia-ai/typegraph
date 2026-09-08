@@ -512,7 +512,7 @@ export class KindRegistry {
       if (wholeKinds.has(pair.wholeKind)) edgeKinds.add(pair.viaEdgeKind);
     }
     return [...edgeKinds].toSorted((left, right) =>
-      compareStrings(left, right),
+      compareCodePoints(left, right),
     );
   }
 
@@ -530,7 +530,7 @@ export class KindRegistry {
       if (partKinds.has(pair.partKind)) edgeKinds.add(pair.viaEdgeKind);
     }
     return [...edgeKinds].toSorted((left, right) =>
-      compareStrings(left, right),
+      compareCodePoints(left, right),
     );
   }
 
@@ -542,7 +542,7 @@ export class KindRegistry {
     )) {
       for (const part of this.getParts(declaredKind)) parts.add(part);
     }
-    return [...parts].toSorted((left, right) => compareStrings(left, right));
+    return [...parts].toSorted((left, right) => compareCodePoints(left, right));
   }
 
   /** Every whole kind transitively over `partKind`, across every composition relation. */
@@ -553,7 +553,9 @@ export class KindRegistry {
     )) {
       for (const whole of this.getWholes(declaredKind)) wholes.add(whole);
     }
-    return [...wholes].toSorted((left, right) => compareStrings(left, right));
+    return [...wholes].toSorted((left, right) =>
+      compareCodePoints(left, right),
+    );
   }
 
   /**

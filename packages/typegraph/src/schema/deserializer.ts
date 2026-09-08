@@ -217,7 +217,9 @@ export function buildSerializedEdgeKindFacts(
       to: def.toKinds,
       pairs,
       cardinality: def.cardinality,
-      targetCardinality: def.targetCardinality,
+      // Absent in documents stored before the option existed (the serializer
+      // omits the default so untouched graphs keep their hash).
+      targetCardinality: def.targetCardinality ?? "many",
     });
   }
   return result;
