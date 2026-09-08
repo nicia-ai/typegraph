@@ -3656,6 +3656,9 @@ type OntologyRelation = Readonly<{
 }>;
 
 // @public
+type OntologyTypeErased<G extends GraphDef> = number extends G["ontology"]["length"] ? true : false;
+
+// @public
 type OperationHookContext = HookContext & Readonly<{
     operation: "create" | "update" | "delete";
     entity: KindEntity;
@@ -5474,7 +5477,7 @@ type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, 
 }>;
 
 // @public
-type SubsumptionAffected<G extends GraphDef, K extends string> = [
+type SubsumptionAffected<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? true : [
 Extract<G["ontology"][number], {
     metaEdge: {
         name: "subClassOf";

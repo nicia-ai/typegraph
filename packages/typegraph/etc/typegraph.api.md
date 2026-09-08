@@ -1528,7 +1528,7 @@ export type DefineEdgeOptions<S extends z.ZodObject<z.ZodRawShape>, From extends
 }>;
 
 // @public
-export function defineGraph<const TNodes extends Record<string, NodeRegistration<NodeType>>, const TEdges extends Record<string, EdgeEntry>, const TOntology extends readonly OntologyRelation[], const TIdentity extends GraphIdentityConfig | undefined = undefined>(config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
+export function defineGraph<const TNodes extends Record<string, NodeRegistration<NodeType>>, const TEdges extends Record<string, EdgeEntry>, const TOntology extends readonly OntologyRelation[] = readonly [], const TIdentity extends GraphIdentityConfig | undefined = undefined>(config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
 
 // @public
 export function defineGraphExtension<const T extends GraphExtension>(input: T): T & GraphExtension;
@@ -5443,6 +5443,9 @@ export type OntologyRelation = Readonly<{
 }>;
 
 // @public
+type OntologyTypeErased<G extends GraphDef> = number extends G["ontology"]["length"] ? true : false;
+
+// @public
 export type OperationHookContext = HookContext & Readonly<{
     operation: "create" | "update" | "delete";
     entity: KindEntity;
@@ -7599,7 +7602,7 @@ export type SubsetNode<G extends GraphDef, K extends NodeKinds<G>> = {
 }[K];
 
 // @public
-type SubsumptionAffected<G extends GraphDef, K extends string> = [
+type SubsumptionAffected<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? true : [
 Extract<G["ontology"][number], {
     metaEdge: {
         name: "subClassOf";

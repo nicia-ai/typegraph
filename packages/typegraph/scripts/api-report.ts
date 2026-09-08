@@ -525,6 +525,15 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // becomes reachable there. `./schema` gains `isTypeLevelSubtype` and
 // `projectTypeVisible` as DIRECT exports (visible in the api report diff, not
 // this ledger), so its forgotten-export debt is unaffected.
+//
+// C13-R2-01 follow-up: `SubsumptionAffected` gained a new private helper,
+// `OntologyTypeErased` (whether `G["ontology"]` has lost its `const`-inferred
+// tuple shape — see its docblock in `src/query/builder/types.ts`), reachable
+// through the exact same seven entrypoints as `SubsumptionAffected` itself
+// and no others, for the same reason: `.` (+1: 401 → 402) and the six
+// Store-bearing entrypoints above (+1 apiece: `./interchange` 717 → 718,
+// `./profiler` 719 → 720, `./graph-merge` 734 → 735, `./provenance`
+// 725 → 726, `./sqlite/local` 714 → 715, `./postgres/pglite` 714 → 715).
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 393,
