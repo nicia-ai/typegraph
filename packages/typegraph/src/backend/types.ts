@@ -2993,11 +2993,12 @@ export type GraphBackend = Readonly<{
 
   /**
    * The engine's whole-database revision and the per-graph change delta
-   * since an earlier one. Present when an engine can answer both cheaply;
-   * absent on a custom backend, and on a bundled backend whose store has
-   * not enabled the recorded-relations lineage that backs it. Every
-   * consumer falls back to a full comparison when this is absent — see
-   * `requireLineage` in `backend/capabilities/lineage.ts`.
+   * since an earlier one. Present only when a backend's engine declares it
+   * (`EngineProvisioning.lineage`); absent on both bundled Drizzle backends
+   * regardless of `history`, where `resolveLineage` falls back to the
+   * store's own recorded-relations derivation instead of this member.
+   * Every consumer falls back to a full comparison when this is absent —
+   * see `requireLineage` in `backend/capabilities/lineage.ts`.
    */
   lineage?: LineageMembers | undefined;
 

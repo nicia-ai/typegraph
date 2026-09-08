@@ -1007,11 +1007,14 @@ const store = await openProvenanceStore(backend, targetGraphId);
 ## Snapshot vs incremental
 
 A branch is forked from a `base@V` — a token combining the base's schema hash
-with either its durable revision anchor (`revisionTracking: true` / `history:
-true`) or the compatibility fingerprint of live content. A revision anchor is
-namespaced by a durable per-graph origin, so it is not transferable between
-independently created stores. The two merge entry points differ in how they treat
-that token.
+with an anchor chosen by one precedence: the store's durable revision anchor
+when `revisionTracking: true` or `history: true` is on; otherwise an **engine
+anchor** when the backend itself declares a `lineage` capability (see
+[Lineage and pruned diffs](#lineage-and-pruned-diffs) below); otherwise the
+compatibility fingerprint of live content. A revision anchor is namespaced by
+a durable per-graph origin, so it is not transferable between independently
+created stores. The two merge entry points differ in how they treat that
+token.
 
 **`merge()` is a snapshot merge.** Every branch must have forked from the
 target's *current* `base@V`. If the target advanced since the branch was taken,
@@ -1056,6 +1059,60 @@ transaction-capable target backend. Managed targets also acquire the
 schema-version write fence; raw targets remain outside schema fencing. On
 PostgreSQL, serialization failures from either the target-content guard or the
 schema fence are retried automatically around the complete commit.
+
+### Lineage and pruned diffs
+
+A backend may declare a `lineage` capability: an opaque, whole-database
+`revision()` it can report and compare, plus `changesSince(revision,
+graphId)`, which names every node and edge of one graph that changed
+(inserted, updated, deleted, or resurrected) after that revision — or admits
+`{ kind: "unbounded" }` when it cannot bound the answer (an unrecognized
+revision, or history older than what it retains). Neither bundled backend
+implements this itself; when a store has `history: true`, it derives one from
+its own recorded relations instead, and `resolveLineage(store)` is the one
+place that picks between the two — the backend's own `lineage` first, else
+the store's recorded-relations one, else nothing. A `lineage` source is
+consulted only to avoid rework; it never changes what a merge decides.
+
+**The engine anchor.** When a store has no revision tracking but its backend
+declares `lineage`, `base@V`'s anchor is `engine:<revision>` — the engine's
+own whole-database revision at fork time. (A capturing store never reaches
+this form: `history: true` also turns revision tracking on, so the per-graph
+revision anchor wins first — the recorded-relations lineage can back an
+engine anchor only for a caller that builds one by hand.) Re-validating an
+engine anchor cannot stop at a raw inequality the way a revision anchor does,
+because the engine's revision is whole-database: a commit to a completely
+unrelated graph on the same engine also bumps it. So a mismatch first calls
+`changesSince(anchored, graphId)` — an empty `keys` delta means nothing in
+*this* graph moved and the merge proceeds as unchanged; a non-empty delta, or
+`unbounded`, is a real divergence and raises `BaseVersionMismatchError` with
+`details: { expectedRevision, liveRevision, changedKeys? }`. One known gap:
+`changesSince` names only node and edge keys, so a commit that changes
+nothing but a graph's current identity assertions is invisible to an
+engine-anchored guard and is tolerated as unchanged — the content-fingerprint
+fallback does not share this gap (its fingerprint folds identity assertions
+in), and neither does a revision anchor (any store write advances its shared
+clock).
+
+**Pruning the diff.** `branch()` also records a `forkRevision` on the
+returned `GraphBranch` — the fork's own `lineage.revision()`, read right
+after the working copy is created and before any write reaches it. When
+staging a branch for merge, its diff against the base is restricted to the
+union of two deltas: what changed on the *fork* since `forkRevision`, and
+what changed on the *base* since the anchor in its own `base@V` — instead of
+enumerating every live row on both sides. A key absent from both deltas
+cannot have changed since the fork point, so narrowing the read to their
+union cannot miss anything the full diff would have found; it only fetches
+fewer rows to compare. Pruning is a pure optimization with one rule: whenever either side cannot
+supply a bounded delta, the merge falls back to comparing every live row,
+exactly as it always has. That covers no `forkRevision` (a hand-built
+branch, or one whose store resolved no `lineage`); either side's
+`changesSince` answering `unbounded`; and the base's own anchor failing to
+resolve against the base store's lineage at all — an origin mismatch between
+a revision-anchored `base` and the base store's live revision row, a
+revision anchor minted before the base store's first tracked write, or an
+engine anchor whose store now resolves no `lineage`. Nothing about *what* a
+merge decides depends on whether its diff was pruned.
 
 ## Working copies
 

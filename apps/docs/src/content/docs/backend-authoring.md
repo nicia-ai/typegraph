@@ -129,7 +129,7 @@ different reasons of their own (see the table).
 | `strategy` | Captured by `buildOperations` and every transaction handle. |
 | `fulltext` | Captured by `buildOperations` and every transaction handle. |
 | `vector` | Captured by `buildOperations` and every transaction handle. |
-| `provisioning` | `ensureTable` and `catalog` are captured by migrations and transaction handles. |
+| `provisioning` | `ensureTable` and `catalog` are captured by migrations and transaction handles; `lineage` is read once at root assembly and reaches neither — it is refused only because `provisioning` is refused as one object. |
 | `assembly` | Opaque and bundled-only; a derived profile carries the base's `assembly` forward by reference, so it resolves to the identical `buildOperations` / `lateMembers` pair the base builder closed over. |
 
 An override naming any of these throws `ConfigurationError` with code
@@ -320,6 +320,54 @@ instead — no `drain` key: that field applies only to `mechanism: "advisory"`)
 to actually resolve an `engine-serialized` plan that needs no
 lock spelling at all.
 
+## Supplying `lineage`
+
+`EngineProvisioning.lineage` forwards onto the assembled backend's optional
+`lineage` member unchanged, exactly like `provisioning.catalog` forwards onto
+`catalog`. Neither bundled profile sets it: `buildPostgresEngineProfile` and
+`buildSqliteEngineProfile` both leave it `undefined`, so a store built on a
+bundled backend derives its `lineage` from its own recorded relations when
+`history: true` is on, and has none otherwise (see
+[Lineage and pruned diffs](/graph-merge#lineage-and-pruned-diffs)). An engine
+whose storage layer already tracks a whole-database revision and can answer
+"what changed in this graph since revision R" more cheaply than a full scan
+supplies `lineage` directly, and every caller that consults it — graph-merge's
+engine-anchored `base@V` guard and its pruned diff among them — picks it up
+automatically through `resolveLineage`, ahead of the recorded-relations
+fallback.
+
+`revision()` must return a token comparable only by equality against another
+revision the SAME `lineage` produced — never parsed, ordered, or compared
+across two different backends' `lineage`. It reports the engine's revision of
+the WHOLE DATABASE, not one graph, which is a stricter (and more useful)
+guarantee than the per-graph anchor `revisionTracking` keeps: a caller
+re-validating an engine anchor cannot treat a raw revision mismatch as a
+divergence the way it does for a per-graph one, because a commit to a
+completely unrelated graph on the same engine also bumps this revision — see
+`graph-merge/merge.ts`'s `engineAnchorMismatch`, which always confirms a
+mismatch through `changesSince` before refusing. `changesSince` must cover
+every way a row can change — insert, update, delete, and resurrection after a
+delete — deduplicated, and must answer `{ kind: "unbounded" }` rather than
+guess whenever it cannot bound the delta for a given revision (an unrecognized
+token, or history older than what it retains). Both members must tolerate
+being called from inside an open transaction on the same backend they were
+read off; see the `LineageMembers` doc comment for the concrete reentrancy
+case graph-merge depends on.
+
+Test a new `lineage` against `tests/backends/integration/lineage-conformance.ts`'s
+`registerLineageConformanceIntegrationTests` (registered per-dialect through
+`createIntegrationTestSuite`, or called directly against your own backend,
+via `{ getStore: () => ({ backend }) }`). It registers two describes: only
+"lineage: recorded-relations conformance" is portable — it drives every case
+through `resolveLineage`, the same path a real caller takes, and is the case
+the bundled recorded-relations derivation passes: after N writes,
+`changesSince(r0)` is exactly the touched keys, `changesSince(rN)` is empty, a
+hard delete after a revision reports the deleted key once, and an unrecognized
+revision is `unbounded`. "lineage: pre-capture gap detection" is
+TypeGraph-specific — it exercises `recordedRelationsLineage` directly and has
+no equivalent for an engine-native `lineage`; an engine profile's own suite
+should run against the conformance describe only and skip the other.
+
 ## Refusals you may meet
 
 | Code | When |
@@ -329,6 +377,7 @@ lock spelling at all.
 | `WRITE_FENCE_DECLARATION_INVALID` | The declared `writeFence` carries an unrecognized `mechanism`, `drain`, or `conflict` string; a `drain` key on a mechanism other than `"advisory"` / `"row"`; a `conflict` key on anything but `"row"`; or `conflict: "commit-time"` on a target whose own `capabilities.execution.interactiveTransactions` is `false` — that value is honored only by the `"optimistic-retry"` execution tier, which never derives without an interactive transaction to replay inside, so accepting it there would silently drop it rather than apply it. `resolveWriteFencePlan` validates the raw value (a plain-JavaScript author is not held to the discriminated-union type) before shaping a plan from it. |
 | `CALLER_SERIALIZED_REFUSES_ADOPTION` | `adoptTransaction` was called on a backend whose resolved write-fence plan is `caller-serialized` — an externally owned transaction's lifetime cannot be held by the backend's in-process write-unit queue. |
 | `CATALOG_UNAVAILABLE` | A store path that needs the backend's catalog probes (index materialization, the recorded-time schema check, the recorded-time migration's column read) finds `catalog` absent — a profile whose `provisioning.catalog` is unset builds a backend with no `catalog` member at all. |
+| `LINEAGE_UNAVAILABLE` | A caller reached `requireLineage` directly and found `lineage` absent — a profile whose `provisioning.lineage` is unset builds a backend with no `lineage` member. Every graph-merge caller that consults `lineage` goes through `resolveLineage` instead, which already falls back to the recorded-relations lineage or to a full comparison rather than hitting this refusal. |
 | `ENGINE_PROFILE_OVERRIDE_UNSUPPORTED` | `deriveEngineProfile`'s `overrides` names a key outside the derivable set, or one of the three adapter-backed sub-fields with a changed value (see [the carve-out](#the-adapter-backed-carve-out)). |
 | `ENGINE_ASSEMBLY_UNRECOGNIZED` | The profile's `assembly` is not a value `assembleEngine` produced — a profile built by hand rather than obtained from a bundled builder (optionally adapted with `deriveEngineProfile`). |
 
