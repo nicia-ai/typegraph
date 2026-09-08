@@ -22,12 +22,20 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
+import { chunk } from "../utils/array";
+import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
+import { toCanonicalIdentityTimestamp } from "./row-codec";
 import { runIdentityMutation } from "./service-facade";
 import { refKey } from "./service-read";
 import { type IdentityServiceContext } from "./service-types";
-import { type IdentityTarget, type PlainNodeRef } from "./sql-target";
+import {
+  identityChunkSize,
+  type IdentityTarget,
+  MAX_REFERENCE_CHUNK_SIZE,
+  type PlainNodeRef,
+} from "./sql-target";
 
 /**
  * The nine exhaustive causes a materialized identity class can change under
@@ -156,12 +164,21 @@ export function diffClosureTransitions(
     ) {
       continue;
     }
-    const dedupeKey = `${refKey(canonical)} ${refKey(priorCanonical)}`;
+    const emittedPriorClassRef =
+      oldClass.length >= 2 ? priorCanonical : undefined;
+    // The dedupe key must be built from what is actually EMITTED (the
+    // collapsed `priorClassRef`), not from `priorCanonical` before that
+    // collapse: two members whose pre-collapse labels differ can both
+    // collapse to the same `undefined` (both were singletons), and keying on
+    // the raw label gave them distinct keys, emitting the same record twice.
+    const dedupeKey = `${refKey(canonical)} ${
+      emittedPriorClassRef === undefined ? "" : refKey(emittedPriorClassRef)
+    }`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
     records.push({
       classRef: canonical,
-      priorClassRef: oldClass.length >= 2 ? priorCanonical : undefined,
+      priorClassRef: emittedPriorClassRef,
     });
   }
   return records;
@@ -289,8 +306,15 @@ function normalizeIdentityTransitionRow(
     graph_id: asRowString(row.graph_id, "graph_id"),
     transition_id: asRowString(row.transition_id, "transition_id"),
     recorded_revision: toRevisionNumber(row.recorded_revision),
-    recorded_at: asRowString(row.recorded_at, "recorded_at"),
-    valid_at: asRowString(row.valid_at, "valid_at"),
+    // Both columns are `timestamp(..., { withTimezone: true }).notNull()` on
+    // PostgreSQL (schema/postgres.ts), which node-postgres decodes to a JS
+    // `Date` — exactly the case `toCanonicalIdentityTimestamp` exists to
+    // handle (row-codec.ts), and the one every other identity relation
+    // already decodes through. `asRowString` would throw on that Date and,
+    // on a text-returning driver, would pass a non-ISO string through
+    // uncanonicalized.
+    recorded_at: toCanonicalIdentityTimestamp(row.recorded_at),
+    valid_at: toCanonicalIdentityTimestamp(row.valid_at),
     cause: asRowString(row.cause, "cause") as IdentityTransitionCause,
     class_kind: asRowString(row.class_kind, "class_kind"),
     class_id: asRowString(row.class_id, "class_id"),
@@ -333,6 +357,16 @@ export type IdentityTransitionReadScope = Readonly<{
  * fixed-point walk needs in one query — ordered by recorded revision then by
  * transition id, so several notes sharing a boundary come back in the
  * deterministic insertion order they were written.
+ *
+ * `scope.classRefs` is chunked through the shared bind-budget helper (each
+ * reference costs four bind parameters: kind+id in the forward match, kind+id
+ * in the reverse match) exactly as every other identity OR-list is
+ * (`deleteAssertionsTouchingKinds`, `loadCurrentStructuralClasses`) — a wide
+ * lineage must hit a typed refusal, never the driver's own opaque
+ * bind-variable-limit error. Each chunk is read with the full `scope.limit`
+ * and the merged, deduplicated rows are re-sorted and re-truncated to that
+ * same limit, so chunking never changes the result a single unchunked query
+ * would have returned.
  */
 export async function readIdentityTransitions(
   target: IdentityTarget,
@@ -341,6 +375,28 @@ export async function readIdentityTransitions(
   scope: IdentityTransitionReadScope,
 ): Promise<readonly IdentityTransitionRow[]> {
   if (scope.classRefs.length === 0) return [];
+  const chunkSize = identityChunkSize(target, {
+    fixedParameters: 4,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 4,
+  });
+  if (scope.classRefs.length > chunkSize) {
+    const matched = new Map<string, IdentityTransitionRow>();
+    for (const refChunk of chunk(scope.classRefs, chunkSize)) {
+      const rows = await readIdentityTransitions(target, schema, graphId, {
+        ...scope,
+        classRefs: refChunk,
+      });
+      for (const row of rows) matched.set(row.transition_id, row);
+    }
+    return [...matched.values()]
+      .toSorted((left, right) =>
+        left.recorded_revision === right.recorded_revision ?
+          compareCodePoints(left.transition_id, right.transition_id)
+        : left.recorded_revision - right.recorded_revision,
+      )
+      .slice(0, scope.limit);
+  }
   // Exact-pair OR lists rather than two independent IN-lists: an IN-list per
   // column would match the cross product of unrelated kind/id pairs.
   const classMatches = sql.join(

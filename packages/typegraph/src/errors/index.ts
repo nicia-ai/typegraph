@@ -970,6 +970,10 @@ export type IdentityReplayErrorDetails =
       code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
       requestedFrom: string;
       prunedBefore: string;
+    }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_WALK_INCOMPLETE";
+      ceiling: number;
     }>;
 
 /**

@@ -1618,7 +1618,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       : lockIdentityGraph(target, this.graphId);
   }
 
-  /** @internal Restores same-id folding after the ops-layer import bypass. */
+  /**
+   * @internal Restores same-id folding after the ops-layer import bypass.
+   *
+   * Always `"fold"`: import never resurrects a tombstone (a soft-deleted node
+   * is not updatable through it — see `src/interchange/import.ts`), so every
+   * reference this reaches is a genuine first materialization, never a
+   * restore.
+   */
   foldImportedIdentityNodes(
     target: IdentityTarget,
     references: readonly Readonly<{ kind: string; id: string }>[],
@@ -1635,6 +1642,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       },
       target,
       references,
+      "fold",
     );
   }
 
@@ -5634,6 +5642,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             foldCreated: (
               target: IdentityTarget,
               references: readonly Readonly<{ kind: string; id: string }>[],
+              cause: "fold" | "restore",
             ) =>
               foldIdentityForCreatedNodes(
                 {
@@ -5644,6 +5653,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 },
                 target,
                 references,
+                cause,
               ),
             detachDeleted: (
               target: IdentityTarget,

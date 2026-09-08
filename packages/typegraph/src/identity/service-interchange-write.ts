@@ -519,6 +519,16 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
   return runIdentityMutation(
     ctx,
     async (target, touch, markWritten, noteTransition) => {
+      // §2.3: `reconcile` names a union/split "always with decision
+      // populated". Without a governing decision this is an ordinary
+      // interchange apply, and its closure repair / import carry the cause
+      // that already describes them elsewhere (`retract` for the split a
+      // batch of retractions can cause, `assert` for the union an import
+      // performs) — never a hardcoded `reconcile` that would misrepresent an
+      // undecided write as governed.
+      const closureRepairCause =
+        decision === undefined ? "retract" : "reconcile";
+      const importCause = decision === undefined ? "assert" : "reconcile";
       const applyBody = async (): Promise<
         Readonly<{ created: number; retracted: number }>
       > => {
@@ -544,7 +554,7 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
             ctx.sameIdAcrossKinds,
           );
           noteClassTransitions(ctx.graphId, noteTransition, transitions, {
-            cause: "reconcile",
+            cause: closureRepairCause,
             assertionIds: retracted.map((assertion) => assertion.id),
             validAt: operationInstant,
           });
@@ -561,7 +571,7 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
           assertions,
           "archival",
           new Set(retracted.map((assertion) => assertion.id)),
-          "reconcile",
+          importCause,
         );
         // The import records capture touches through its OWN recorded binding, so
         // the mutation's wrapped touch never fires for created rows — an

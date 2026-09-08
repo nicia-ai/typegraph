@@ -317,6 +317,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     foldCreated: (
       target: IdentityTarget,
       references: readonly Readonly<{ kind: string; id: string }>[],
+      cause: "fold" | "restore",
     ) => Promise<void>;
     detachDeleted: (
       target: IdentityTarget,
@@ -2531,7 +2532,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         prepared,
       );
       if (identity !== undefined) {
-        await identity.foldCreated(target, foldReferences([prepared]));
+        await identity.foldCreated(
+          target,
+          foldReferences([prepared]),
+          "restore",
+        );
       }
       return shouldReturnRow ? rowToNode(resurrected) : undefined;
     }
@@ -2612,7 +2617,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         );
       if (inserted !== undefined) {
         if (identity !== undefined) {
-          await identity.foldCreated(target, foldReferences([prepared]));
+          await identity.foldCreated(
+            target,
+            foldReferences([prepared]),
+            "fold",
+          );
         }
         return shouldReturnRow ? rowToNode(inserted) : undefined;
       }
@@ -2658,7 +2667,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         prepared,
       );
       if (identity !== undefined) {
-        await identity.foldCreated(target, foldReferences([prepared]));
+        await identity.foldCreated(
+          target,
+          foldReferences([prepared]),
+          "restore",
+        );
       }
       return shouldReturnRow ? rowToNode(resurrected) : undefined;
     }
@@ -2691,7 +2704,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     });
 
     if (identity !== undefined) {
-      await identity.foldCreated(target, foldReferences([prepared]));
+      await identity.foldCreated(target, foldReferences([prepared]), "fold");
     }
 
     if (row === undefined) return;
@@ -2849,7 +2862,16 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
         await resurrectPreparedNode(ctx, session, target, prepared);
       }
       if (identity !== undefined) {
-        await identity.foldCreated(target, foldReferences(preparedCreates));
+        await identity.foldCreated(
+          target,
+          foldReferences(partition.inserts),
+          "fold",
+        );
+        await identity.foldCreated(
+          target,
+          foldReferences(partition.resurrections),
+          "restore",
+        );
       }
     },
     { didWrite: writeResultAlwaysChanges },
@@ -2975,7 +2997,16 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         ),
       );
       if (identity !== undefined) {
-        await identity.foldCreated(target, foldReferences(preparedCreates));
+        await identity.foldCreated(
+          target,
+          foldReferences(partition.inserts),
+          "fold",
+        );
+        await identity.foldCreated(
+          target,
+          foldReferences(partition.resurrections),
+          "restore",
+        );
       }
 
       return rows.map((row) => rowToNode(row));
@@ -3099,9 +3130,11 @@ export async function executeNodeUpdate<G extends GraphDef>(
         options,
       );
       if (options?.clearDeleted && identity !== undefined) {
-        await identity.foldCreated(target, [
-          { kind: input.kind, id: input.id },
-        ]);
+        await identity.foldCreated(
+          target,
+          [{ kind: input.kind, id: input.id }],
+          "restore",
+        );
       }
       return node;
     },
@@ -3443,9 +3476,11 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
         options,
       );
       if (options?.clearDeleted && identity !== undefined) {
-        await identity.foldCreated(target, [
-          { kind: input.kind, id: input.id },
-        ]);
+        await identity.foldCreated(
+          target,
+          [{ kind: input.kind, id: input.id }],
+          "restore",
+        );
       }
       return node;
     },
@@ -3644,9 +3679,11 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
           ),
         );
         if (entry.clearDeleted && ctx.identity !== undefined) {
-          await ctx.identity.foldCreated(target, [
-            { kind: entry.input.kind, id: entry.input.id },
-          ]);
+          await ctx.identity.foldCreated(
+            target,
+            [{ kind: entry.input.kind, id: entry.input.id }],
+            "restore",
+          );
         }
       }
       return nodes;

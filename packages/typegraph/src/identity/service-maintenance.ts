@@ -62,13 +62,7 @@ import {
   type PlainNodeRef,
 } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
-import {
-  diffClosureTransitions,
-  readIdentityTransitions,
-} from "./transition-log";
-
-/** Bound on the lineage probe `foldIdentityForCreatedNodes` runs to classify `fold` vs `restore` — a handful of references, never the full replay walk's ceiling. */
-const IDENTITY_TRANSITION_LINEAGE_PROBE_LIMIT = 200;
+import { diffClosureTransitions } from "./transition-log";
 
 /**
  * The context slice a closure rebuild reads. Narrower than the full
@@ -640,19 +634,35 @@ export async function snapshotIdentityClosureClasses(
       WHERE graph_id = ${graphId}
     `),
   );
-  const groups = new Map<string, PlainNodeRef[]>();
+  const groups = new Map<
+    string,
+    Readonly<{ classRef: PlainNodeRef; members: PlainNodeRef[] }>
+  >();
   for (const row of rows) {
     const classKey = `${row.class_kind} ${row.class_id}`;
-    const group = groups.get(classKey) ?? [];
-    group.push({ kind: row.member_kind, id: row.member_id });
+    const group = groups.get(classKey) ?? {
+      classRef: { kind: row.class_kind, id: row.class_id },
+      members: [],
+    };
+    group.members.push({ kind: row.member_kind, id: row.member_id });
     groups.set(classKey, group);
   }
   const byMember = new Map<string, readonly PlainNodeRef[]>();
-  for (const group of groups.values()) {
-    const sorted = group.toSorted((left, right) =>
-      compareReferences(left, right),
-    );
-    for (const member of sorted) byMember.set(refKey(member), sorted);
+  for (const { classRef, members } of groups.values()) {
+    // The class's canonical is the row's OWN `class_kind`/`class_id` — what
+    // the closure table already recorded — never re-derived by sorting the
+    // member set. `insertClosureComponents` and `mergeCurrentClasses` both
+    // happen to label a class by its code-point-least member today, but a
+    // consumer of this snapshot (the kind-drop / schema-transition diff) must
+    // agree with whatever the table actually stored, including a partially
+    // repaired closure or a future relabelling rule that breaks that
+    // coincidence.
+    const canonicalKey = refKey(classRef);
+    const rest = members
+      .filter((member) => refKey(member) !== canonicalKey)
+      .toSorted((left, right) => compareReferences(left, right));
+    const ordered = [classRef, ...rest];
+    for (const member of ordered) byMember.set(refKey(member), ordered);
   }
   return byMember;
 }
@@ -808,6 +818,20 @@ export async function foldIdentityForCreatedNodes(
   >,
   target: Backend,
   references: readonly PlainNodeRef[],
+  // `restore` (a node resurrection re-running the fold) vs. `fold` (an
+  // ordinary create) is decided by NODE STATE, at the call site, which
+  // already knows the answer: every write path that can resurrect a
+  // soft-deleted id (the tombstone-resurrection leg of `create`, and
+  // `update({ clearDeleted: true })`) routes through this parameter, rather
+  // than through the same write path a fresh create takes. The transition
+  // log cannot answer this reliably instead — a departing member's OWN
+  // `detach` record names only the SURVIVING class-mate (see
+  // `diffClosureTransitions`'s "absent from the new state" branch), so a
+  // probe for `references` themselves as `class` or `priorClass` finds
+  // nothing for exactly the member being resurrected, and would silently
+  // misclassify a restore as a fold once its history aged past any bounded
+  // probe window.
+  cause: "fold" | "restore",
 ): Promise<void> {
   if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") return;
   await lockIdentityGraph(target, ctx.graphId);
@@ -818,29 +842,6 @@ export async function foldIdentityForCreatedNodes(
         ctx,
         rawTarget,
         references.map((ref) => ref.id),
-      );
-      // `restore` (a node resurrection re-running the fold) vs. `fold` (an
-      // ordinary create) is decided by data, not by which write-path call
-      // site reached here. A materialized closure row cannot be the signal —
-      // `detachIdentityForNode` already removed it when the member left — so
-      // this asks the transition log itself: did any of `references` leave a
-      // class before (a `detach` or `kind-drop` naming it as `class` or
-      // `priorClass`)? Classified per call rather than per reference, to keep
-      // one cause per batch, matching every other note site.
-      // Reads `[]` on a non-history store (the table exists, but nothing is
-      // ever written to it), so this defaults to `fold` there — the correct
-      // answer, since `noteTransition` is a no-op on that store regardless.
-      const priorHistory = await readIdentityTransitions(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        {
-          classRefs: references,
-          limit: IDENTITY_TRANSITION_LINEAGE_PROBE_LIMIT,
-        },
-      );
-      const hadPriorClass = priorHistory.some(
-        (row) => row.cause === "detach" || row.cause === "kind-drop",
       );
       const closureReferences: PlainNodeRef[] = [];
       for (const ref of references) {
@@ -878,7 +879,7 @@ export async function foldIdentityForCreatedNodes(
         ctx.sameIdAcrossKinds,
       );
       noteClassTransitions(ctx.graphId, noteTransition, transitions, {
-        cause: hadPriorClass ? "restore" : "fold",
+        cause,
         assertionIds: [],
         validAt: nowIso(),
       });
@@ -950,15 +951,45 @@ async function readNodeDeletionInstant(
     );
 }
 
+/** Reads a node's currently stored `valid_to`, as it stands BEFORE the write in progress applies it. */
+async function readNodeValidTo(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  ref: PlainNodeRef,
+): Promise<string | undefined> {
+  const rows = await target.execute<Readonly<{ valid_to: unknown }>>(
+    asCompiledRowsSql(sql`
+      SELECT valid_to
+      FROM ${schema.nodesTable}
+      WHERE graph_id = ${graphId}
+        AND kind = ${ref.kind}
+        AND id = ${ref.id}
+      LIMIT 1
+    `),
+  );
+  const row = rows.at(0);
+  return row === undefined ? undefined : (
+      optionalIdentityTimestamp(row.valid_to)
+    );
+}
+
 /**
  * Refuses a finite node window that would strand identity assertion history,
- * then — once the narrowing is confirmed safe — notes the `window-end`
- * transition when `ref` currently belongs to a real (>=2 member) identity
- * class: narrowing its own valid-time window changes what a valid-time
- * `membersOf` read returns after `validTo` even though nothing in the ledger
- * or the closure table is written. Self-referential (`classRef ===
- * priorClassRef`) because the class's LABEL does not change, only its
- * coordinate-visible membership.
+ * then — once the narrowing is confirmed safe AND confirmed to actually MOVE
+ * the window — notes the `window-end` transition when `ref` currently belongs
+ * to a real (>=2 member) identity class: narrowing its own valid-time window
+ * changes what a valid-time `membersOf` read returns after `validTo` even
+ * though nothing in the ledger or the closure table is written.
+ * Self-referential (`classRef === priorClassRef`) because the class's LABEL
+ * does not change, only its coordinate-visible membership.
+ *
+ * A repeat update that restates the SAME `validTo` moves nothing — §2.3
+ * forbids manufacturing a boundary at which membership did not change, so
+ * this compares against the node's own stored `valid_to` and takes no note
+ * when they already agree. `validAt` is the canonical operation instant
+ * (§2.2), never `validTo` itself, which can be a future-scheduled window
+ * boundary rather than "when this happened".
  */
 export async function requireNodeValidityEndCompatible(
   ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
@@ -998,6 +1029,13 @@ export async function requireNodeValidityEndCompatible(
           endpointWindow: { validTo },
         });
       }
+      const currentValidTo = await readNodeValidTo(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        ref,
+      );
+      if (currentValidTo === validTo) return;
       const classes = await loadCurrentStructuralClasses(
         rawTarget,
         ctx.schema,
@@ -1012,7 +1050,7 @@ export async function requireNodeValidityEndCompatible(
         classRef: canonical,
         priorClassRef: canonical,
         assertionIds: [],
-        validAt: validTo,
+        validAt: nowIso(),
       });
     },
   );
