@@ -7,9 +7,9 @@
  * src/schema/serializer.ts) — never on the originating Zod schema and never
  * on stored data. Because the projection erases refinements, transforms,
  * and brands (`.refine`, `.superRefine`, `.brand`, `.pipe`, `.lazy`,
- * `.toLowerCase()` all collapse to their base schema — see the inventory in
- * the plan's evidence section), this predicate is necessarily blind to them
- * too: a Zod-level narrowing with no JSON-Schema trace cannot be judged.
+ * `.toLowerCase()` all collapse to their base schema), this predicate is
+ * necessarily blind to them too: a Zod-level narrowing with no JSON-Schema
+ * trace cannot be judged.
  *
  * This is a different question from `isBreakingPropertyChange`
  * (./migration.ts), which answers "do rows that were valid before a schema
