@@ -1147,14 +1147,27 @@ clock).
 **`Store.clear()` rotates the origin.** Both origin-namespaced anchor forms
 share one `typegraph_revision_origins` row per graph, and `clear()` deletes
 and re-mints it — inside the same transaction as the rest of the clear — for
-any store with `revisionTracking` or `history` enabled. Without this, a
-graph cleared and repopulated to the same revision COUNT would mint a
-`base@V` byte-identical to one minted before the clear (origin unchanged,
-revision numbering coincidentally realigned), and a branch forked before the
-clear would merge as if the clear had never happened. A branch forked from a
-store before it was cleared therefore always fails the `base@V` precondition
+any store able to mint EITHER form: one with `revisionTracking` or `history`
+enabled (the revision anchor), and, separately, an engine-anchored store
+whose backend declares `lineage` directly with tracking off. Without this, a
+graph cleared and repopulated to look the same — the same revision COUNT for
+a tracked store, or a coincidentally-matching engine revision for an
+engine-anchored one — would mint a `base@V` byte-identical to one minted
+before the clear (origin unchanged), and a branch forked before the clear
+would merge as if the clear had never happened. A branch forked from a store
+before it was cleared therefore always fails the `base@V` precondition
 against that store once cleared, even after it is repopulated to look the
 same — re-branch from the post-clear store instead.
+
+The origin row is also read fresh on every mint (`computeBaseVersion`,
+`Store.revisionOriginNow()`), never cached on a `Store` instance. Two live
+`Store` objects can legitimately observe the same graph — nothing requires
+that only one `Store` ever exists per database — and only one of them runs
+`clear()` at a time; a stale per-instance cache on the other would keep
+minting anchors from the origin that existed before the clear, so a branch
+it forks would fail every merge at commit until that `Store` happened to be
+recreated. Reading fresh means a second `Store` over a graph another `Store`
+just cleared sees the rotation immediately, with nothing to recreate.
 
 **Pruning the diff.** `branch()` also records a `forkRevision` on the
 returned `GraphBranch` — the fork's own `lineage.revision(session)`, read

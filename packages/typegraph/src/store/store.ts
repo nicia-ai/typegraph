@@ -323,6 +323,7 @@ import {
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
   resetRevisionOrigin,
+  resolveLineage,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
   withRecordedFlushObserver,
@@ -1087,7 +1088,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   readonly #adapterBackend: AdapterBackend<TNativeTransaction> | undefined;
   readonly #captureEnabled: boolean;
   readonly #revisionTrackingEnabled: boolean;
-  #revisionOrigin: Promise<string> | undefined;
   readonly #recordedReadBinding: RecordedReadBinding | undefined;
   readonly #registry: KindRegistry;
   readonly #hooks: StoreHooks;
@@ -2674,6 +2674,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * branch from one independent store from matching a coincident timestamp in
    * another store.
    *
+   * Reads the origin row fresh on every call rather than caching it on this
+   * `Store` instance: two `Store` objects can legitimately observe the same
+   * graph (a second live `Store` opened over the same backend/graphId), and
+   * only one of them runs `clear()`'s origin rotation at a time. A cached
+   * copy on the OTHER instance would keep answering with the pre-rotation
+   * nonce until that instance happened to be recreated — `computeBaseVersion`
+   * would then mint a stale anchor from it, and every merge into that
+   * instance would fail at commit for no reason visible to the caller.
+   * `ensureRevisionOrigin`'s own `INSERT … ON CONFLICT DO NOTHING` already
+   * makes concurrent first-time minting safe without a per-Store memo.
+   *
    * @internal
    */
   async revisionOriginNow(): Promise<string> {
@@ -2683,26 +2694,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         { code: "REVISION_ORIGIN_REQUIRES_TRACKING" },
       );
     }
-    const pendingOrigin =
-      this.#revisionOrigin ??
-      ensureRevisionOrigin(
-        this.#baseBackend,
-        this.#recordedRevisionOrigins,
-        this.#sqlSchema(),
-        this.graphId,
-      );
-    this.#revisionOrigin = pendingOrigin;
-    try {
-      return await pendingOrigin;
-    } catch (error) {
-      // A transient DDL/connection failure must not permanently poison this
-      // Store's cached initialization promise. Preserve a newer in-flight
-      // attempt if another caller replaced it before this rejection arrived.
-      if (this.#revisionOrigin === pendingOrigin) {
-        this.#revisionOrigin = undefined;
-      }
-      throw error;
-    }
+    return ensureRevisionOrigin(
+      this.#baseBackend,
+      this.#recordedRevisionOrigins,
+      this.#sqlSchema(),
+      this.graphId,
+    );
   }
 
   /**
@@ -4067,14 +4064,35 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * The store is usable after clearing — new data can be created immediately.
    */
   async clear(): Promise<void> {
-    if (this.#revisionTrackingEnabled) {
+    // Both origin-namespaced `base@V` anchor forms — the TypeGraph revision
+    // anchor and the engine anchor (`base-version.ts`'s module doc) — share
+    // one `typegraph_revision_origins` row per graph, so any store able to
+    // mint EITHER form must rotate it here. `#revisionTrackingEnabled`
+    // covers the first; `resolveLineage(this) !== undefined` covers the
+    // second — with tracking off, `resolveLineage` can only ever answer
+    // with the backend's OWN `lineage` (a capturing store's
+    // recorded-relations lineage is unreachable here, since capture also
+    // turns tracking on — see `resolveLineage`'s own doc), so this is
+    // exactly the engine-anchored case. Gating the rotation on
+    // `#revisionTrackingEnabled` alone left an engine-anchored store's
+    // origin untouched by `clear()`, so a branch forked before the clear
+    // could still satisfy the base-version precondition once the graph was
+    // repopulated to report the same engine revision — the same epoch leak
+    // this rotation exists to close, just reachable through the other
+    // anchor form.
+    const mintsAnchorOrigin =
+      this.#revisionTrackingEnabled || resolveLineage(this) !== undefined;
+    if (mintsAnchorOrigin) {
       // `ensureRevisionOriginsTable` is schema DDL, never projected onto an
       // open `transaction()` handle (unlike ordinary row writes) — it must
       // run on the ROOT backend, before `doClear` opens its transaction, so
       // the row-only `resetRevisionOrigin` below can rely on the table
       // already existing inside it. Idempotent (`CREATE TABLE IF NOT
-      // EXISTS`), so running it unconditionally here is safe even when a
-      // prior `revisionOriginNow()` call already created it.
+      // EXISTS`). On every bundled backend the table is already part of the
+      // full base-schema DDL a fresh backend installs at construction (see
+      // `tests/store-clear.test.ts`'s own note), so this call is a proven
+      // no-op there; it exists for a backend whose
+      // `ensureRevisionOriginsTable` provisions the relation lazily instead.
       await ensureRevisionOriginsRelation(
         this.#baseBackend,
         this.#recordedRevisionOrigins,
@@ -4094,17 +4112,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           await readRecordedClock(target, this.#sqlSchema(), this.graphId)
         : undefined;
       await target.clearGraph(this.graphId);
-      if (this.#revisionTrackingEnabled) {
+      if (mintsAnchorOrigin) {
         // Rotate the durable per-graph revision-origin nonce in the SAME
-        // transaction as `clearGraph`. `clearGraph` deletes the recorded-clock
+        // transaction as `clearGraph`, for either origin-namespaced anchor
+        // form this store can mint. `clearGraph` deletes the recorded-clock
         // row (and, under history, every recorded relation row) but never
         // touches the origin row — without this, a graph repopulated after
-        // clear() to the same revision COUNT would restore both halves of
-        // the TypeGraph revision anchor (origin unchanged, numbering
-        // restarting from the same low values) and a pre-clear branch would
-        // silently pass the base-version precondition again. See
-        // `resetRevisionOrigin`'s own doc for why this must be the origin
-        // row, not the clock, that fences the epoch.
+        // clear() to look the same (the same revision COUNT for a tracked
+        // store, or a coincidentally-matching engine revision for an
+        // engine-anchored one) would restore the anchor's origin half
+        // unchanged, and a pre-clear branch would silently pass the
+        // base-version precondition again. See `resetRevisionOrigin`'s own
+        // doc for why this must be the origin row, not the revision, that
+        // fences the epoch.
         await resetRevisionOrigin(target, this.#sqlSchema(), this.graphId);
       }
       // Live (non-capturing) revision tracking immediately reseeds the
@@ -4130,13 +4150,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#baseBackend.transaction(async (tx) => doClear(tx))
     : doClear(this.#baseBackend));
 
-    // The origin row was rotated inside the transaction above (when
-    // revision tracking is on); drop this Store's memoized copy so the next
-    // `revisionOriginNow()` call re-reads the fresh nonce instead of
-    // returning the pre-clear origin it cached.
-    if (this.#revisionTrackingEnabled) {
-      this.#revisionOrigin = undefined;
-    }
+    // `revisionOriginNow()` and `computeBaseVersion` both read the origin
+    // row fresh on every call (no per-Store memo survives this method), so
+    // there is nothing here to invalidate.
 
     // `clearGraph` is graph-agnostic and can't reach the strategy-owned
     // per-`(kind, field)` vector tables, so reset them here — otherwise cleared

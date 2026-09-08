@@ -85,6 +85,7 @@ import { asBranchId } from "../../src/graph-merge/types";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import { getCommittedSchemaVersion, migrateSchema } from "../../src/schema";
+import { resetRevisionOrigin } from "../../src/store/recorded-capture/clock";
 import { storeBackend } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend, fakeEmbedder } from "./test-utils";
@@ -1177,6 +1178,105 @@ describe("engine anchor: origin binding across independent databases", () => {
 
     expect(isOk(result)).toBe(true);
     expect(await widgetLabels(storeA)).toEqual(["base", "from fork"]);
+  });
+
+  it("clear() rotates the engine anchor's origin, refusing a branch forked before the clear even once the graph is repopulated to look the same", async () => {
+    const state = initialState();
+    const [store] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await store.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(store, makePlainBackend, { id: BRANCH }),
+    );
+
+    await store.clear();
+    // Repopulate to look the same: identical schema, identical live
+    // content, and the scripted engine revision never leaves "r0" — only
+    // the durable origin row (rotated by `clear()`) can still tell this
+    // graph apart from the one `forkBranch` actually forked from.
+    await store.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const result = await merge<WidgetGraph>(
+      store,
+      [forkBranch],
+      engineAnchorMergeOptions(fakeEmbedder),
+    );
+
+    // Mutation-proof: narrowing `clear()`'s `mintsAnchorOrigin` gate
+    // (`store.ts`) back to `this.#revisionTrackingEnabled` alone makes this
+    // assertion fail. This store has revision tracking OFF, so the origin
+    // row survives the clear untouched, the repopulated graph mints the
+    // IDENTICAL `engine:<origin>:r0` anchor `forkBranch` forked from, and
+    // the merge wrongly succeeds against a graph whose entire prior content
+    // was replaced.
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+  });
+
+  it("assertTargetUnchanged refuses an engine-anchored commit when the target's origin rotates between the outer precondition and the commit transaction", async () => {
+    const state = initialState();
+    const [store] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await store.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(store, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const embedder = driftingEmbedder(async () => {
+      // Rotates the live origin row directly — the SAME row `clear()`
+      // rotates — strictly between the outer `base@V` precondition
+      // (already satisfied by the time the embedder first fires; see
+      // `driftingEmbedder`'s own doc) and the commit transaction's
+      // `assertTargetUnchanged`. Rotating the row directly, rather than
+      // calling `store.clear()`, isolates this test from `clear()`'s other
+      // effect (wiping every row), which this test has no need to exercise.
+      // Before `clear()` could rotate an engine-anchored store's origin at
+      // all, NOTHING could move it between plan and commit, so
+      // `assertTargetUnchanged`'s engine-branch origin check was provably
+      // unreachable — this is the first test to reach it.
+      await resetRevisionOrigin(
+        storeBackend(store),
+        store.revisionSchema,
+        store.graphId,
+      );
+    });
+
+    const result = await merge<WidgetGraph>(
+      store,
+      [forkBranch],
+      engineAnchorMergeOptions(embedder),
+    );
+
+    // Mutation-proof: replacing the engine-branch origin check's condition
+    // in `assertTargetUnchanged` (`merge.ts`, `if (!originMatch.matches)`)
+    // with `if (false)` makes this assertion fail — the commit proceeds
+    // and silently applies the fork's plan against a target whose origin no
+    // longer matches what the plan was validated against.
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+      expect(result.error.message).toContain("forked from a different store");
+    }
+    // Nothing committed from the stale plan.
+    expect(await widgetLabels(store)).toEqual(["base"]);
   });
 });
 

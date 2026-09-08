@@ -279,9 +279,17 @@ describe("store.clear() rotates the durable revision origin", () => {
   });
 
   it("rotates the origin even when revisionOriginNow() was never called before the first clear()", async () => {
-    // Exercises `ensureRevisionOriginsRelation`'s own bootstrap: this store
-    // never minted an origin before `clear()`, so the origins table may not
-    // exist yet when `clear()` runs.
+    // Proves rotation does not depend on a prior `revisionOriginNow()` call
+    // having minted the row. It does NOT exercise `ensureRevisionOriginsRelation`'s
+    // own lazy-bootstrap path on this fixture: `createTestBackend()`'s local
+    // SQLite backend installs the FULL base schema — `typegraph_revision_origins`
+    // included — at construction time (`installLocalSqliteBaseSchema`,
+    // `src/backend/sqlite/local.ts`), so the table already exists before
+    // `clear()` ever runs here, the same as it does on the bundled PGlite and
+    // server-Postgres factories. `clear()`'s upfront `ensureRevisionOriginsRelation`
+    // call is a proven no-op on every bundled backend for this reason; it exists
+    // only for a custom backend whose `ensureRevisionOriginsTable` provisions
+    // the relation lazily instead.
     const store = createStore(graph, backend, { history: true });
     await store.nodes.Person.create({
       email: "alice@example.com",
