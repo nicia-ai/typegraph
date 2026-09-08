@@ -874,12 +874,17 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.",
-    // 24, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
+    // 26, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
     // accesses on one physical line, which a line-keyed grep counts once but
     // the type-aware scanner counts as two access nodes (§Baselines). The
     // forked working-copy strategy reads the connected backend's names to
-    // fence them against the base store's resolved schema.
-    accesses: 24,
+    // fence them against the base store's resolved schema. Item D.2 adds two
+    // more: the ontology-tightening preflight's acyclicity probe
+    // (`schema/ontology-tightening-preflight.ts`) and the constraint-fence
+    // audit's acyclicity family (`store/claims/verify.ts`) each build the
+    // `SqlSchema` `readEdgeAcyclicityViolations` needs from the backend's
+    // table names, the same way every other schema-shaped reader here does.
+    accesses: 26,
   },
   fenceSql: {
     kind: "reasoned",
