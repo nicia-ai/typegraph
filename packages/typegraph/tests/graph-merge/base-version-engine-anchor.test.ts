@@ -52,7 +52,10 @@ import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { deriveBackend } from "../../src/backend/derive-backend";
+import {
+  deriveBackend,
+  isBackendDerivedFrom,
+} from "../../src/backend/derive-backend";
 import { generateSqliteMigrationSQL } from "../../src/backend/drizzle/ddl";
 import { createSqlBackend } from "../../src/backend/drizzle/engine";
 import { buildSqliteEngineProfile } from "../../src/backend/drizzle/sqlite";
@@ -1111,6 +1114,17 @@ describe("assertTargetUnchanged reads lineage on its pinned session", () => {
       sessionRecordingLineage(targetState, targetCalls),
     );
     const targetBackend = createSqlBackend(targetProfile);
+    // Observe every transaction handle this backend hands to a callback,
+    // so the commit-time session can be compared to the pinned handle BY
+    // IDENTITY (or derivation from it) rather than merely "not the root".
+    const observedHandles: object[] = [];
+    const observedTarget = deriveBackend(targetBackend, {
+      transaction: (callback, options) =>
+        targetBackend.transaction((handle) => {
+          observedHandles.push(handle);
+          return callback(handle);
+        }, options),
+    });
 
     const forkState = initialState();
     const forkCalls: RecordedLineageCall[] = [];
@@ -1128,7 +1142,7 @@ describe("assertTargetUnchanged reads lineage on its pinned session", () => {
     try {
       const [baseStore] = await createStoreWithSchema(
         widgetGraph,
-        targetBackend,
+        observedTarget,
       );
       await baseStore.nodes.Widget.bulkCreate([
         { id: "base-1", props: { label: "base", group: "g1" } },
@@ -1193,22 +1207,28 @@ describe("assertTargetUnchanged reads lineage on its pinned session", () => {
       // `assertTargetUnchanged`'s engine-anchor branch to pass
       // `storeBackend(target)` instead of `txBackend` as the session to
       // `requireLineage`/`engineAnchorMismatch`, and every entry's
-      // `session` becomes `targetBackend`, failing this assertion.
+      // `session` becomes the store's root (`observedTarget`), failing
+      // this assertion.
       const commitTimeCalls = targetCalls.filter(
-        (call) => call.session !== targetBackend,
+        (call) => call.session !== observedTarget,
       );
       expect(commitTimeCalls.map((call) => call.member)).toEqual([
         "revision",
         "changesSince",
       ]);
-      // Every commit-time call ran on the SAME session (one open
-      // transaction), and that session is not the root backend.
-      const [commitSession] = commitTimeCalls;
-      expect(
-        commitTimeCalls.every(
-          (call) => call.session === commitSession?.session,
-        ),
-      ).toBe(true);
+      // Every commit-time call ran on the pinned transaction handle the
+      // backend handed to the commit callback (or a handle derived from
+      // it) — not the root, and not some third object either.
+      const pinnedHandle = requireDefined(
+        observedHandles.at(-1),
+        "the commit ran inside a transaction",
+      );
+      for (const call of commitTimeCalls) {
+        expect(
+          call.session === pinnedHandle ||
+            isBackendDerivedFrom(call.session, pinnedHandle),
+        ).toBe(true);
+      }
     } finally {
       targetSqlite.close();
       forkSqlite.close();

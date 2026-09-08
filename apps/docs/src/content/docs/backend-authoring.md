@@ -349,7 +349,11 @@ fallback to the root: a `lineage` reachable only through a `deriveBackend`
 overlay applied to the already-built root object never reaches a
 `transaction()` handle that way, so a profile that wants its `lineage`
 honored at commit time must thread it through `EngineProvisioning.lineage`,
-which reaches every `transaction()` handle the same way `catalog` does.
+which reaches every `transaction()` handle the same way `catalog` does. For
+the same reason, never attach one `lineage` to the root object and a
+different one to the profile: the plan's anchor is minted from the root's
+`lineage` and the commit guard compares it against the handle's, and two
+sources' revisions are not comparable — an untouched target would be refused.
 Implement `revision`/`changesSince` by running the query ON the `session`
 argument (`session.execute`/`session.executeRaw`) — never on a connection
 you closed over instead. A `session` is always either the backend that
