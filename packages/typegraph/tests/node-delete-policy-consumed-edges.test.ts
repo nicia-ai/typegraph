@@ -5,11 +5,18 @@
  *
  * No producer populates `consumedEdgeIds` with real composition-edge ids yet
  * (that lands with the registry's composition-edge owner), so these tests
- * drive the seam directly through the internal runtime port — the same port
- * merge apply now uses (`deleteNodeWithPolicy`) — with hand-picked edge ids
- * standing in for a future cascade's plan. They prove two things: the seam
- * narrows exactly the edges it is told to, and today's behavior (an empty or
- * absent `consumedEdgeIds`) is byte-identical to before this field existed.
+ * drive the seam with hand-picked edge ids standing in for a future cascade's
+ * plan. They prove two things: the seam narrows exactly the edges it is told
+ * to, and today's behavior (an empty or absent `consumedEdgeIds`) is
+ * byte-identical to before this field existed.
+ *
+ * Driven through `store.transaction` + `transactionDeleteNodeWithPolicy` —
+ * the SAME production path merge apply uses — rather than the Store-scoped
+ * `StoreRuntime.deleteNodeWithPolicy` port: that Store-scoped variant builds
+ * its own unbuffered hook context and is correct only OUTSIDE a
+ * `store.transaction` callback (see its doc), so it is reserved for the one
+ * test (`tests/node-delete-policy-root-atomic-bypass-pglite.test.ts`) that
+ * specifically needs to call it directly against a root backend.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -22,7 +29,7 @@ import {
   RestrictedDeleteError,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import { STORE_RUNTIME } from "../src/store/runtime-port";
+import { transactionDeleteNodeWithPolicy } from "../src/store/runtime-port";
 
 const Target = defineNode("Target", { schema: z.object({}) });
 const RestrictNode = defineNode("RestrictNode", { schema: z.object({}) });
@@ -59,8 +66,8 @@ describe("NodeDeletePolicy.consumedEdgeIds", () => {
       const restrictNode = await store.nodes.RestrictNode.create({});
       const edge = await store.edges.link.create(restrictNode, target, {});
 
-      await backend.transaction((tx) =>
-        store[STORE_RUNTIME].deleteNodeWithPolicy(
+      await store.transaction((tx) =>
+        transactionDeleteNodeWithPolicy(
           tx,
           { kind: "RestrictNode", id: restrictNode.id },
           {
@@ -101,8 +108,8 @@ describe("NodeDeletePolicy.consumedEdgeIds", () => {
       await store.edges.link.create(restrictNode, unconsumedTarget, {});
 
       await expect(
-        backend.transaction((tx) =>
-          store[STORE_RUNTIME].deleteNodeWithPolicy(
+        store.transaction((tx) =>
+          transactionDeleteNodeWithPolicy(
             tx,
             { kind: "RestrictNode", id: restrictNode.id },
             {
@@ -144,8 +151,8 @@ describe("NodeDeletePolicy.consumedEdgeIds", () => {
         {},
       );
 
-      await backend.transaction((tx) =>
-        store[STORE_RUNTIME].deleteNodeWithPolicy(
+      await store.transaction((tx) =>
+        transactionDeleteNodeWithPolicy(
           tx,
           { kind: "CascadeNode", id: cascadeNode.id },
           {
@@ -181,8 +188,8 @@ describe("NodeDeletePolicy.consumedEdgeIds", () => {
       await store.edges.link.create(restrictNode, target, {});
 
       await expect(
-        backend.transaction((tx) =>
-          store[STORE_RUNTIME].deleteNodeWithPolicy(
+        store.transaction((tx) =>
+          transactionDeleteNodeWithPolicy(
             tx,
             { kind: "RestrictNode", id: restrictNode.id },
             { enforceDeleteBehavior: true },
@@ -190,8 +197,8 @@ describe("NodeDeletePolicy.consumedEdgeIds", () => {
         ),
       ).rejects.toBeInstanceOf(RestrictedDeleteError);
       await expect(
-        backend.transaction((tx) =>
-          store[STORE_RUNTIME].deleteNodeWithPolicy(tx, {
+        store.transaction((tx) =>
+          transactionDeleteNodeWithPolicy(tx, {
             kind: "RestrictNode",
             id: restrictNode.id,
           }),
