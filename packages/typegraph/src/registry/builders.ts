@@ -66,19 +66,26 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
             : relation.from.kind,
           to: typeof relation.to === "string" ? relation.to : relation.to.kind,
         })),
-    edgeEndpoints: buildEdgeEndpointKinds(graph.edges),
+    edgeEndpoints: buildGraphEdgeEndpointKinds(graph.edges),
     ...(graph.identity === undefined ? {} : { identity: graph.identity }),
   });
 }
 
 /**
  * Maps each registered edge kind to its declared domain/range kind names,
- * for `validateImpliesEndpointCompatibility`. A `Map` (rather than the
- * plain `graph.edges` object) so a lookup for an edge kind literally named
- * "toString" or another `Object.prototype` member can't resolve to an
- * inherited member instead of `undefined`.
+ * for `validateImpliesEndpointCompatibility` and for
+ * `expandEdgeEndpointAllowance` (`src/registry/edge-endpoint-allowance.ts`).
+ * A `Map` (rather than the plain `graph.edges` object) so a lookup for an
+ * edge kind literally named "toString" or another `Object.prototype` member
+ * can't resolve to an inherited member instead of `undefined`.
+ *
+ * The serialized-schema sibling of this adapter is
+ * `buildSerializedEdgeEndpointKinds` (`src/schema/deserializer.ts`): the two
+ * read genuinely different representations (a live `GraphDef` vs a persisted
+ * document), so they stay separate, but both feed the one
+ * `expandEdgeEndpointAllowance`.
  */
-function buildEdgeEndpointKinds(
+export function buildGraphEdgeEndpointKinds(
   edges: Record<string, EdgeRegistration>,
 ): ReadonlyMap<string, EdgeEndpointKinds> {
   const result = new Map<string, EdgeEndpointKinds>();

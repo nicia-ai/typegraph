@@ -126,6 +126,23 @@ function uniquenessClaimKinds(
   return scope === "kind" ? [kind] : subClassComponent(kind, registry);
 }
 
+/**
+ * THE code-point minimum of a set of kinds — what a uniqueness axis folds
+ * a covered set onto. One spelling, so the live-graph claim target
+ * ({@link uniquenessClaimTarget}) and the ontology-tightening probe (which
+ * folds a proposed schema's merged subclass component onto the same axis)
+ * cannot compute two different minima for the same covered set.
+ *
+ * `undefined` only for an empty input, which no real caller produces: both
+ * `uniquenessClaimKinds` and a merged subclass component always carry at
+ * least the kind that anchors them.
+ */
+export function uniquenessAxisOfKinds(
+  kinds: readonly string[],
+): string | undefined {
+  return kinds.toSorted((left, right) => compareStrings(left, right))[0];
+}
+
 /** THE decision above — the one owner of both readings. */
 export function uniquenessClaimTarget(
   kind: string,
@@ -133,7 +150,10 @@ export function uniquenessClaimTarget(
   registry: KindRegistry,
 ): UniquenessClaimTarget {
   const kinds = uniquenessClaimKinds(kind, scope, registry);
-  return { axis: kinds[0] ?? kind, crossKind: kinds.length > 1 };
+  return {
+    axis: uniquenessAxisOfKinds(kinds) ?? kind,
+    crossKind: kinds.length > 1,
+  };
 }
 
 /**
