@@ -3,6 +3,7 @@ import {
   defineGraph,
   defineNode,
   equivalentTo,
+  generateId,
   type NodeType,
   type OntologyRelation,
   sameAs,
@@ -330,6 +331,16 @@ describe("reconcileTypes over the store's KindRegistry (T10)", () => {
       expect(requireDefined(result.dropped[0]).id).toBe(incompatible);
       expect(result.retypeMap.get(compatible)).toBe("SpecialistDoctor");
       expect(result.retypeMap.has(incompatible)).toBe(false);
+    });
+
+    it("produces a retype map keyed by canonical id usable by the T11 cascade", () => {
+      const canonicalId = generateId() as MergeKey;
+      const result = reconcileTypes(
+        [{ canonicalId, memberKinds: ["Person", "SpecialistDoctor"] }],
+        registry,
+        "ontology",
+      );
+      expect(result.retypeMap.get(canonicalId)).toBe("SpecialistDoctor");
     });
   });
 });
