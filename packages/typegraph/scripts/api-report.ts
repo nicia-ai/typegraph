@@ -488,50 +488,58 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // 714→715, `./profiler` 719→720, `./provenance` 725→726, `./sqlite/local`
 // 714→715. No other entrypoint renders `TransactionRuntime`/`StoreRuntime`,
 // so no other entrypoint moved.
+//
+// Composition relation (partOf/hasPart via/partSide, issue plan-E-a): every
+// entrypoint that reaches `KindRegistry`, `ExtensionOntologyRelation`, or the
+// registry closures picks up `CompositionPartSide` (a `@public` named export)
+// and, where the entrypoint also surfaces `RegistryClosures` internals,
+// `CompositionPair` / `CompositionRelation` as forgotten exports. `./indexes`
+// and `./adapters/drizzle/indexes` never reach the registry and are
+// unaffected.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 390,
     sha256: "00fdac891db51d14a5f6df05c88229b1e9ea28204f4f4e2f3c732914557047bc",
   },
   "./adapters/drizzle/engine": {
-    count: 325,
-    sha256: "ad93ca20f9939f682c612dc5be7a3e8593b4f1ca0fb93cfe4d1d3c0b20baf675",
+    count: 326,
+    sha256: "7dfec1a8e9937450ce718c9a17bf6ed5a76ce7335f8f4dc9fbc7011cb06d31d6",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 252,
-    sha256: "dbdb9ec1e7034a1721eebd624d3bea46bf43def2aa0855284ccfc5da720ceb2b",
+    count: 253,
+    sha256: "9e42929bfab571d3f869a2b8c5fd0a8fc83f5e6772b77f1495e5541df15692d1",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 256,
-    sha256: "161936583ff06b9db2fff2ec2c9629af3ce145a9450eecdca790a7e3a308f7de",
+    count: 257,
+    sha256: "da9c7ad400e95a30212816e5c595c8af61e540c3531a23bf007d8ea397f3d8d7",
   },
   "./adapters/drizzle/sqlite": {
-    count: 253,
-    sha256: "f21c6ed25dcc6a95efbd34d3fcc5d24e771042ab0d05f7fbff78aadbc0d47e3b",
+    count: 254,
+    sha256: "38c16c3b0646f2e0e876bbefcce61a470d55508b3f3ea0f73d682819d69c85c2",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 256,
-    sha256: "ad9c65771dc326df5827da7d8650154ae0fa47afac44de97f90738de6feba530",
+    count: 257,
+    sha256: "0e6fc3a6d64d2b4c8f4c9a3eeffb0ea9be67e813fd1f0b69de856fed075baa6f",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 256,
-    sha256: "ad9c65771dc326df5827da7d8650154ae0fa47afac44de97f90738de6feba530",
+    count: 257,
+    sha256: "0e6fc3a6d64d2b4c8f4c9a3eeffb0ea9be67e813fd1f0b69de856fed075baa6f",
   },
   "./backend": {
-    count: 20,
-    sha256: "aa70f937be267b441a0dff63e92d4e45aad8043a3d248a535771c1271c10f5f6",
+    count: 21,
+    sha256: "fbf0fba6e529961f739f68a602e7896b97108515fc4f0cdcab68c91a7f58f84d",
   },
   "./core": {
-    count: 72,
-    sha256: "bf73c4f71677d2b3ec2e36bfd37e9ede5c3f57377fc923f0df2eb1b500cfc84d",
+    count: 73,
+    sha256: "8a65d5628e516ca9bc20f3a31da6438c60c27ffc656d376739db0dd1d0498f5e",
   },
   "./graph-extension": {
-    count: 18,
-    sha256: "621501c502ff0fd24d2955e39360cc24e1b36b051f75784a5a1d8950a39aa4ab",
+    count: 19,
+    sha256: "7a8ee88d1a81a5cf165abb6f34e45072b14b180e200bf9bf8b9ff83015647375",
   },
   // MergePlanReadContext derives its read-only surface from the runtime method
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
@@ -561,8 +569,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "f610ceff1d8dcfad33e0302b787135a74070b878314c3a61b1e7d48c29e1c861",
   },
   "./schema": {
-    count: 277,
-    sha256: "40f55b05aab182551ad9c5ef9c763c7cc0ba1bc3ce32aaf43f1e8668f9417ebf",
+    count: 281,
+    sha256: "680f42a4071d001152f018bdbbec952785ccb1f1aa1ec5400b6ae35b177c2a50",
   },
   "./sqlite/local": {
     count: 715,
