@@ -25,6 +25,8 @@ import {
   partOf,
 } from "../src";
 import { type AnyEdgeType } from "../src/core/types";
+import { mergeGraphExtension } from "../src/graph-extension/merge";
+import { buildKindRegistry } from "../src/registry";
 import { deserializeSchema } from "../src/schema/deserializer";
 import { computeSchemaDiff } from "../src/schema/migration";
 import { serializeSchema } from "../src/schema/serializer";
@@ -121,7 +123,106 @@ describe("a `via` change diffs as remove + add, not a no-op", () => {
     expect(relationChanges).toHaveLength(2);
     const removed = relationChanges.find((change) => change.type === "removed");
     const added = relationChanges.find((change) => change.type === "added");
-    expect(removed?.details).toBe("Relation partOf(Pa:rt, Wh|ole) was removed");
-    expect(added?.details).toBe("Relation partOf(Pa:rt, Wh|ole) was added");
+    expect(removed?.details).toBe(
+      'Relation partOf(Pa:rt, Wh|ole) via "edgeOld" was removed',
+    );
+    expect(added?.details).toBe(
+      'Relation partOf(Pa:rt, Wh|ole) via "edgeNew" was added',
+    );
+  });
+});
+
+describe("`partSide` round-trips across representations (E-a-4)", () => {
+  // `partSide` is the one composition field that cannot be re-derived on
+  // load: it is only required (and only meaningful) for the ambiguous R5
+  // shape (a reflexive pair whose realizing edge admits both orientations),
+  // so a dropped copy is silent until the next load of exactly that shape,
+  // where it turns a valid persisted graph into an
+  // ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED refusal.
+  //
+  // MUTATION CHECK (recorded in the lane's load-bearing note): removed the
+  // `relation.partSide === undefined ? {} : { partSide: relation.partSide }`
+  // spread from `buildRegistryFromSerializedSchema`
+  // (`src/schema/deserializer.ts`) — "round-trips through
+  // deserializeSchema" flipped from passing to throwing
+  // ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED; the extension-path case was
+  // unaffected (it does not go through the deserializer). Restored after
+  // the check.
+  const Section = defineNode("Section", { schema: emptySchema });
+  const parentSection = defineEdge("parentSection", { schema: emptySchema });
+
+  it("round-trips through deserializeSchema", () => {
+    const graph = defineGraph({
+      id: "composition-partside-roundtrip",
+      nodes: { Section: { type: Section } },
+      edges: {
+        parentSection: {
+          type: parentSection,
+          from: [Section],
+          to: [Section],
+          cardinality: "one",
+        },
+      },
+      ontology: [
+        partOf(Section, Section, { via: parentSection, partSide: "from" }),
+      ],
+    });
+
+    const schema = serializeSchema(graph, 1);
+    const registry = deserializeSchema(schema).buildRegistry();
+
+    expect(registry.compositionPartSide("parentSection")).toBe("from");
+    expect(registry.compositionRelation().pairs).toEqual([
+      {
+        partKind: "Section",
+        wholeKind: "Section",
+        viaEdgeKind: "parentSection",
+        partSide: "from",
+        population: "one",
+      },
+    ]);
+  });
+
+  it("round-trips through mergeGraphExtension", () => {
+    const baseGraph = defineGraph({
+      id: "composition-partside-roundtrip-extension",
+      nodes: { Section: { type: Section } },
+      edges: {},
+      ontology: [],
+    });
+    const extension = defineGraphExtension({
+      nodes: {},
+      edges: {
+        parentSection: {
+          from: ["Section"],
+          to: ["Section"],
+          cardinality: "one",
+          properties: {},
+        },
+      },
+      ontology: [
+        {
+          metaEdge: "partOf",
+          from: "Section",
+          to: "Section",
+          via: "parentSection",
+          partSide: "from",
+        },
+      ],
+    });
+
+    const merged = mergeGraphExtension(baseGraph, extension);
+    const registry = buildKindRegistry(merged);
+
+    expect(registry.compositionPartSide("parentSection")).toBe("from");
+    expect(registry.compositionRelation().pairs).toEqual([
+      {
+        partKind: "Section",
+        wholeKind: "Section",
+        viaEdgeKind: "parentSection",
+        partSide: "from",
+        population: "one",
+      },
+    ]);
   });
 });
