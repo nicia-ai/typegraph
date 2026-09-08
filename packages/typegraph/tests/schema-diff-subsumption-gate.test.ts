@@ -41,7 +41,10 @@ function emptyOntology(
   };
 }
 
-function schemaWithLooseCode(looseHasMinLength: boolean): SerializedSchema {
+function schemaWithLooseCode(
+  looseHasMinLength: boolean,
+  looseMinLength = 5,
+): SerializedSchema {
   return {
     graphId: "subsumption_gate_test",
     version: 1,
@@ -54,7 +57,7 @@ function schemaWithLooseCode(looseHasMinLength: boolean): SerializedSchema {
           properties: {
             code:
               looseHasMinLength ?
-                { type: "string", minLength: 5 }
+                { type: "string", minLength: looseMinLength }
               : { type: "string" },
           },
           required: ["code"],
@@ -98,8 +101,14 @@ describe("computeSchemaDiff — property-only change against an existing hierarc
   });
 
   it("does not throw when the child's property change keeps the hierarchy valid", () => {
+    // `after` genuinely changes Loose's `code` property (minLength 5 -> 10,
+    // still >= Tight's minLength 5, so the hierarchy stays valid) —
+    // byte-identical `before`/`after` node definitions would make
+    // `nodePropertyChangeMayAffectExistingSubsumption` see `changedKinds.size
+    // === 0` and never build the registry at all, certifying nothing.
     const before = schemaWithLooseCode(true);
-    const after = { ...schemaWithLooseCode(true), version: 2 };
+    const after = { ...schemaWithLooseCode(true, 10), version: 2 };
+    expect(before.nodes["Loose"]).not.toEqual(after.nodes["Loose"]);
 
     expect(() => computeSchemaDiff(before, after)).not.toThrow();
   });
