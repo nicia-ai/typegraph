@@ -1949,7 +1949,18 @@ async function applyNodeRows<G extends GraphDef>(
     },
     async () => {
       for (const deletion of deletions) {
-        await nodeCollection(nodesApi, deletion.kind).delete(deletion.id);
+        // Routed through the internal runtime port, not the public
+        // collection facade: the facade's `delete(id)` takes no options by
+        // design, and merge apply needs to state a policy — enforcement
+        // stays on (a part's own `restrict` edge must still abort the
+        // merge), while `cascadeComposition: false` says the branch's diff,
+        // not a cascade run here, already carries every part deletion the
+        // plan trusts.
+        await storeRuntime(target).deleteNodeWithPolicy(
+          txBackend,
+          { kind: deletion.kind, id: deletion.id },
+          { enforceDeleteBehavior: true, cascadeComposition: false },
+        );
       }
       const committed = new Set<MergeKey>();
       for (const upsert of upserts) {

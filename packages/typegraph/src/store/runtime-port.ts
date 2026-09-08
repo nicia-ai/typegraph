@@ -27,6 +27,7 @@ import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { type InternalGraphAlgorithms } from "./algorithms";
+import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import {
   type InternalSubgraphOptions,
   type SubgraphProject,
@@ -129,6 +130,22 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
   rebuildIdentityClosure: () => Promise<void>;
   validateIdentity: () => Promise<void>;
+  /**
+   * Soft-deletes one node under an explicit {@link NodeDeletePolicy}, going
+   * through the same portable delete path (`executeNodeDelete`) the public
+   * collection facade uses — hooks, delete-behavior enforcement, identity
+   * detachment, and sidecar cleanup all fire exactly as they do for
+   * `store.nodes[kind].delete(id)`. The public collection `delete(id)` takes
+   * no options by design (a merge-only flag does not belong on it, the
+   * `bulkInsert` precedent), so a caller that needs a non-default policy —
+   * today, merge apply — reaches this internal port instead. The caller
+   * supplies a transaction-bound backend.
+   */
+  deleteNodeWithPolicy: (
+    target: TransactionBackend,
+    work: Readonly<{ kind: string; id: string }>,
+    policy?: NodeDeletePolicy,
+  ) => Promise<void>;
   /**
    * Validates one final resolved node write set, then clears the affected
    * nodes' claim rows so its upserts may take their approved keys in any order,

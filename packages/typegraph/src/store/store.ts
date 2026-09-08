@@ -1256,6 +1256,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.identityAtCoordinate(coordinate),
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
+      deleteNodeWithPolicy: (target, work, policy) =>
+        executeNodeDelete(
+          this.#createNodeOperationContext(),
+          work.kind,
+          work.id,
+          target,
+          policy,
+        ),
       applyResolvedNodeUniqueness: async (target, writes, apply) => {
         const upserts = writes.upserts.map((upsert) => {
           if (!hasOwnKey(this.#graph.nodes, upsert.kind)) {
