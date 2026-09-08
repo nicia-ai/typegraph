@@ -33,6 +33,8 @@
     "bench:acyclicity:file": "tsx src/acyclicity-bench.ts --storage=file",
     "prebench:acyclicity:postgres": "pnpm --filter @nicia-ai/typegraph build",
     "bench:acyclicity:postgres": "tsx src/acyclicity-bench.ts --backend=postgres",
+    "prebench:acyclicity:contention": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:acyclicity:contention": "tsx src/acyclicity-bench.ts --backend=postgres --contention",
     "prebench:bulk-load": "pnpm --filter @nicia-ai/typegraph build",
     "bench:bulk-load": "tsx src/bulk-load-investigation.ts",
     "prebench:bulk-load:postgres": "pnpm --filter @nicia-ai/typegraph build",

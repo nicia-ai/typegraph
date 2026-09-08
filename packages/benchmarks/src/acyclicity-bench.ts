@@ -8,17 +8,30 @@
  *   pnpm --filter @nicia-ai/typegraph-benchmarks bench:acyclicity
  *   pnpm --filter @nicia-ai/typegraph-benchmarks bench:acyclicity:file
  *   POSTGRES_URL=... pnpm --filter @nicia-ai/typegraph-benchmarks bench:acyclicity:postgres
+ *   POSTGRES_URL=... pnpm --filter @nicia-ai/typegraph-benchmarks bench:acyclicity:contention
  *
- * Scope note: this lane runs the wide-DAG and diamond-lattice shapes from
- * the design note's §13.2 table are NOT implemented here — chain-append,
- * chain-prepend, and forest are, at 10^4 and 10^5 edges. Report-only, no
- * guardrails, matching write-bench's stance. The ship-criteria decision
- * (D-7) is the lead's, run against this lane's own PostgreSQL numbers.
+ * The default and `:file`/`:postgres` invocations also print a §7.6
+ * `EXPLAIN`/`EXPLAIN QUERY PLAN` reading of the probe statement itself,
+ * asserting `typegraph_edges_from_idx` coverage rather than assuming it.
+ * `:contention` is a separate mode (§13.4): *W* ∈ {2, 4, 8, 16} real
+ * PostgreSQL connections appending to a shared acyclic relation for 30s
+ * each, reporting aggregate throughput, p99 latency, and the fraction of
+ * time spent waiting on the per-graph advisory lock — it requires
+ * `--backend=postgres` (PGlite/SQLite cannot exhibit genuine contention) and
+ * is not run as part of the ordinary latency invocations above.
+ *
+ * Scope note: the wide-DAG and diamond-lattice shapes from the design
+ * note's §13.2 table are NOT implemented here; chain-append, chain-prepend,
+ * and forest are, at 10^4 and 10^5 edges. Report-only, no guardrails,
+ * matching write-bench's stance. The ship-criteria decision (D-7) is the
+ * lead's, run against this lane's own PostgreSQL numbers.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import Database from "better-sqlite3";
+import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import {
@@ -30,7 +43,14 @@ import {
   type Store,
 } from "@nicia-ai/typegraph";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
-import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import {
+  createSqliteBackend,
+  generateSqliteMigrationSQL,
+} from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import {
+  createPostgresBackend,
+  generatePostgresMigrationSQL,
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { z } from "zod";
 
 import { getPostgresUrl, type PerfBackend, type SqliteStorage } from "./config";
@@ -289,11 +309,378 @@ async function benchForest(
   );
 }
 
+// ============================================================
+// §7.6 / §13.3's fourth reading: EXPLAIN (ANALYZE, BUFFERS) / EXPLAIN QUERY
+// PLAN of the reachability probe itself, asserting index coverage rather
+// than assuming it (design note line 516-517, 999-1003).
+// ============================================================
+
+/** The system index the recursive term's `from_kind, from_id` join must use. */
+const EXPECTED_ACYCLICITY_INDEX = "typegraph_edges_from_idx";
+
+type CapturedStatement = Readonly<{ sql: string; params: readonly unknown[] }>;
+
+/**
+ * A bring-your-own-connection SQLite backend (public
+ * `@nicia-ai/typegraph/adapters/drizzle/sqlite`) whose driver-level
+ * `client.prepare` is patched to record every statement — the same idiom
+ * `tests/lock-fence-test-utils.ts` uses, reimplemented here so this package
+ * depends on no typegraph test file. `better-sqlite3`'s synchronous session
+ * never routes a query through Drizzle's own session object, tx-scoped or
+ * not, so patching `prepare` alone sees everything.
+ */
+function buildCapturingSqliteBackend(): Readonly<{
+  backend: GraphBackend;
+  statements: CapturedStatement[];
+  close: () => Promise<void>;
+}> {
+  const client = new Database(":memory:");
+  client.exec(generateSqliteMigrationSQL());
+  const statements: CapturedStatement[] = [];
+  const originalPrepare = client.prepare.bind(client);
+  client.prepare = ((sqlText: string) => {
+    const statement = originalPrepare(sqlText);
+    const originalAll = statement.all.bind(statement);
+    statement.all = (...params: unknown[]) => {
+      statements.push({ sql: sqlText, params });
+      return originalAll(...params);
+    };
+    return statement;
+  }) as typeof client.prepare;
+  const backend = createSqliteBackend(drizzleBetterSqlite3(client));
+  return {
+    backend,
+    statements,
+    close: () => {
+      client.close();
+      return Promise.resolve();
+    },
+  };
+}
+
+/**
+ * A bring-your-own-connection PostgreSQL backend (public
+ * `@nicia-ai/typegraph/adapters/drizzle/postgres`) whose Drizzle `logger`
+ * records every statement. The acyclicity probe always runs inside the
+ * per-graph write-fence transaction, which routes through Drizzle's own
+ * session (`postgres.ts`'s tx-scoped execution adapter), so the logger alone
+ * — no driver-level `pool.query` patch — sees it.
+ */
+function buildCapturingPostgresBackend(pool: Pool): Readonly<{
+  backend: GraphBackend;
+  statements: CapturedStatement[];
+}> {
+  const statements: CapturedStatement[] = [];
+  const db = drizzleNodePostgres(pool, {
+    logger: {
+      logQuery(query: string, params: unknown[]): void {
+        statements.push({ sql: query, params });
+      },
+    },
+  });
+  return { backend: createPostgresBackend(db), statements };
+}
+
+/** The captured probe statement, or `undefined` if none was issued. */
+function findAcyclicityProbeStatement(
+  statements: readonly CapturedStatement[],
+): CapturedStatement | undefined {
+  return statements.find(
+    (statement) =>
+      statement.sql.includes("WITH RECURSIVE") &&
+      statement.sql.includes("ancestry"),
+  );
+}
+
+/**
+ * Runs the reachability probe once against a chain of `size` edges (the
+ * chain-prepend shape: the walk from `head` traverses the whole chain, the
+ * realistic worst case for the recursive term), captures its exact SQL text
+ * and bound parameters, and re-issues it as an `EXPLAIN` on the SAME
+ * connection. Prints the plan and reports whether it names
+ * {@link EXPECTED_ACYCLICITY_INDEX} — report-only, matching this lane's
+ * stance elsewhere, but printed prominently: a silent heap scan here means
+ * every other number in this file is priced against the wrong plan.
+ */
+async function explainAcyclicityProbe(
+  backendKind: PerfBackend,
+  size: number,
+): Promise<void> {
+  if (backendKind === "sqlite") {
+    const { backend, statements, close } = buildCapturingSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      const ids = await seedChain(store, "dependsOn", size);
+      const fresh = await store.nodes.Task.create({});
+      const head = { kind: "Task" as const, id: ids[0]! };
+      statements.splice(0);
+      await store.edges.dependsOn.create(fresh, head);
+
+      const probe = findAcyclicityProbeStatement(statements);
+      if (probe === undefined) {
+        console.log(
+          `acyclicity:explain:sqlite:${String(size)}  NO PROBE STATEMENT CAPTURED`,
+        );
+        return;
+      }
+      // Re-run EXPLAIN QUERY PLAN on the SAME backend connection the probe
+      // itself ran on, not a fresh one, so the plan reflects the actual
+      // populated database.
+      if (backend.executeRaw === undefined) {
+        console.log(
+          `acyclicity:explain:sqlite:${String(size)}  backend exposes no executeRaw`,
+        );
+        return;
+      }
+      const plan = await backend.executeRaw<Record<string, unknown>>(
+        `EXPLAIN QUERY PLAN ${probe.sql}`,
+        probe.params,
+      );
+      const planText = plan
+        .map((row) => Object.values(row).join(" "))
+        .join("\n");
+      const usesExpectedIndex = planText.includes(EXPECTED_ACYCLICITY_INDEX);
+      console.log(
+        `acyclicity:explain:sqlite:${String(size)}  ${usesExpectedIndex ? `USES ${EXPECTED_ACYCLICITY_INDEX}` : "DOES NOT NAME THE EXPECTED INDEX — see plan below"}`,
+      );
+      if (!usesExpectedIndex) console.log(planText);
+    } finally {
+      await close();
+    }
+    return;
+  }
+
+  // PostgreSQL: a fresh pool, migrated once, capturing statements through
+  // Drizzle's logger (see {@link buildCapturingPostgresBackend}).
+  const pool = new Pool({ connectionString: getPostgresUrl() });
+  try {
+    await pool.query(generatePostgresMigrationSQL());
+    const { backend, statements } = buildCapturingPostgresBackend(pool);
+    const [store] = await createStoreWithSchema(graph, backend);
+    const ids = await seedChain(store, "dependsOn", size);
+    const fresh = await store.nodes.Task.create({});
+    const head = { kind: "Task" as const, id: ids[0]! };
+    statements.splice(0);
+    await store.edges.dependsOn.create(fresh, head);
+
+    const probe = findAcyclicityProbeStatement(statements);
+    if (probe === undefined) {
+      console.log(
+        `acyclicity:explain:postgres:${String(size)}  NO PROBE STATEMENT CAPTURED`,
+      );
+      return;
+    }
+    const result = await pool.query(`EXPLAIN (ANALYZE, BUFFERS) ${probe.sql}`, [
+      ...probe.params,
+    ]);
+    const planText = (result.rows as readonly Record<string, unknown>[])
+      .map((row) => Object.values(row).join(" "))
+      .join("\n");
+    const usesExpectedIndex = planText.includes(EXPECTED_ACYCLICITY_INDEX);
+    const isIndexOnlyScan = /Index Only Scan/i.test(planText);
+    console.log(
+      `acyclicity:explain:postgres:${String(size)}  ${
+        usesExpectedIndex ?
+          `USES ${EXPECTED_ACYCLICITY_INDEX}${isIndexOnlyScan ? " (index-only scan)" : " (NOT an index-only scan — see plan below)"}`
+        : "DOES NOT NAME THE EXPECTED INDEX — see plan below"
+      }`,
+    );
+    if (!usesExpectedIndex || !isIndexOnlyScan) console.log(planText);
+  } finally {
+    await pool.end();
+  }
+}
+
+// ============================================================
+// §13.4 Contention run (PostgreSQL only, real server — PGlite is
+// single-connection and cannot overlap). Not run by this lane's SQLite
+// invocations; wired behind `--contention --backend=postgres`.
+// ============================================================
+
+const CONTENTION_WRITER_COUNTS = [2, 4, 8, 16] as const;
+const CONTENTION_DURATION_MS = 30_000;
+const CONTENTION_SEED_EDGES = 100_000;
+/** `pg_advisory_xact_lock`'s wait event, per `pg_stat_activity.wait_event`. */
+const ADVISORY_LOCK_WAIT_EVENT = "advisory";
+
+type ContentionResult = Readonly<{
+  writers: number;
+  throughputPerSecond: number;
+  p99Ms: number;
+  waitFraction: number;
+}>;
+
+/**
+ * One writer's loop for the duration of the run: append a fresh node onto
+ * the END of its own private chain (so writers never contend on the SAME
+ * two-node cycle — see D-7's intent, which prices FENCE HOLD TIME, not
+ * refusal handling), recording each insert's latency.
+ */
+async function runContentionWriter(
+  store: BenchStore,
+  edgeKind: "cardinalityOne" | "dependsOn",
+  headId: string,
+  deadline: number,
+): Promise<{ count: number; latenciesMs: number[] }> {
+  let tail = { kind: "Task" as const, id: headId };
+  const latenciesMs: number[] = [];
+  let count = 0;
+  while (nowMs() < deadline) {
+    const fresh = await store.nodes.Task.create({});
+    const startedAt = nowMs();
+    await store.edges[edgeKind].create(tail, fresh);
+    latenciesMs.push(nowMs() - startedAt);
+    tail = { kind: "Task", id: fresh.id };
+    count += 1;
+  }
+  return { count, latenciesMs };
+}
+
+/** Fraction of `pg_stat_activity` samples, taken once per second, waiting on the advisory lock. */
+async function sampleAdvisoryWaitFraction(
+  pool: Pool,
+  deadline: number,
+): Promise<number> {
+  let waiting = 0;
+  let total = 0;
+  while (nowMs() < deadline) {
+    const result = await pool.query<{ wait_event: string | null }>(
+      "SELECT wait_event FROM pg_stat_activity WHERE state = 'active'",
+    );
+    total += result.rows.length;
+    waiting += result.rows.filter(
+      (row) => row.wait_event === ADVISORY_LOCK_WAIT_EVENT,
+    ).length;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return total === 0 ? 0 : waiting / total;
+}
+
+/**
+ * *W* writer connections, each appending to its OWN chain of the given edge
+ * kind on the same graph, for {@link CONTENTION_DURATION_MS}. Every writer
+ * of `dependsOn` contends for the SAME per-graph advisory lock regardless of
+ * which chain it appends to (`edgeWriteNeedsConstraintFence` fences the
+ * whole graph, not a chain), so this measures exactly the fence-hold-time
+ * question §13.4 asks: how much of it is the probe.
+ */
+async function runContentionLevel(
+  edgeKind: "cardinalityOne" | "dependsOn",
+  writerCount: number,
+): Promise<ContentionResult> {
+  const pools = Array.from(
+    { length: writerCount },
+    () => new Pool({ connectionString: getPostgresUrl(), max: 2 }),
+  );
+  const samplerPool = new Pool({ connectionString: getPostgresUrl() });
+  try {
+    await pools[0]!.query(generatePostgresMigrationSQL());
+    const stores = pools.map((pool) =>
+      createStoreWithSchema(
+        graph,
+        createPostgresBackend(drizzleNodePostgres(pool)),
+      ),
+    );
+    const resolvedStores = await Promise.all(stores);
+    // Each writer gets its own disjoint chain, seeded up front so the
+    // measured loop is pure append cost, matching `benchChainAppend`. The
+    // chains are sized so the relation's TOTAL population reaches
+    // §13.4's stated 10^5 edges before the timed contention window opens —
+    // an append is O(1) regardless of chain length in this design (the
+    // walk from a fresh leaf finds no out-edges), so this sizing is about
+    // matching the stated population, not stressing the probe itself.
+    const perWriterSeedSize = Math.max(
+      1,
+      Math.floor(CONTENTION_SEED_EDGES / writerCount),
+    );
+    const heads = await Promise.all(
+      resolvedStores.map(async ([store]) => {
+        const ids = await seedChain(store, edgeKind, perWriterSeedSize);
+        return ids[ids.length - 1]!;
+      }),
+    );
+
+    const deadline = nowMs() + CONTENTION_DURATION_MS;
+    const [writerResults, waitFraction] = await Promise.all([
+      Promise.all(
+        resolvedStores.map(async ([store], index) =>
+          runContentionWriter(store, edgeKind, heads[index]!, deadline),
+        ),
+      ),
+      sampleAdvisoryWaitFraction(samplerPool, deadline),
+    ]);
+    const allLatencies = writerResults.flatMap((result) => result.latenciesMs);
+    const totalCount = writerResults.reduce(
+      (sum, result) => sum + result.count,
+      0,
+    );
+    return {
+      writers: writerCount,
+      throughputPerSecond: totalCount / (CONTENTION_DURATION_MS / 1000),
+      p99Ms: percentile(allLatencies, 0.99),
+      waitFraction,
+    };
+  } finally {
+    await Promise.all(pools.map((pool) => pool.end()));
+    await samplerPool.end();
+  }
+}
+
+async function runContentionSuite(): Promise<void> {
+  console.log(
+    `\nD-7 contention run: W writers appending to a shared ${String(CONTENTION_SEED_EDGES)}-edge acyclic relation for ${String(CONTENTION_DURATION_MS / 1000)}s each.\n`,
+  );
+  const baseline: ContentionResult[] = [];
+  const subject: ContentionResult[] = [];
+  for (const writerCount of CONTENTION_WRITER_COUNTS) {
+    const cardinalityOneResult = await runContentionLevel(
+      "cardinalityOne",
+      writerCount,
+    );
+    baseline.push(cardinalityOneResult);
+    console.log(
+      `contention:cardinalityOne:writers=${String(writerCount)}  throughput=${cardinalityOneResult.throughputPerSecond.toFixed(1)}/s  p99=${formatMs(cardinalityOneResult.p99Ms)}  waitFraction=${cardinalityOneResult.waitFraction.toFixed(2)}`,
+    );
+    const dependsOnResult = await runContentionLevel("dependsOn", writerCount);
+    subject.push(dependsOnResult);
+    console.log(
+      `contention:dependsOn:writers=${String(writerCount)}      throughput=${dependsOnResult.throughputPerSecond.toFixed(1)}/s  p99=${formatMs(dependsOnResult.p99Ms)}  waitFraction=${dependsOnResult.waitFraction.toFixed(2)}`,
+    );
+  }
+
+  const eightWriterBaseline = baseline.find((result) => result.writers === 8);
+  const eightWriterSubject = subject.find((result) => result.writers === 8);
+  if (eightWriterBaseline !== undefined && eightWriterSubject !== undefined) {
+    const ratio =
+      eightWriterSubject.throughputPerSecond /
+      eightWriterBaseline.throughputPerSecond;
+    console.log(
+      `\nD-7: 8-writer dependsOn throughput is ${(ratio * 100).toFixed(1)}% of the cardinalityOne baseline (criterion: >= 70%).`,
+    );
+  }
+}
+
 async function main(argv: readonly string[]): Promise<void> {
   const backendKind: PerfBackend =
     argv.includes("--backend=postgres") ? "postgres" : "sqlite";
   const sqliteStorage: SqliteStorage =
     argv.includes("--storage=file") ? "file" : "memory";
+
+  // §13.4: a separate mode from the latency lane above — 30s per writer
+  // count is far too slow to run inline with every invocation, and the
+  // measurement only means anything on a real PostgreSQL server (PGlite
+  // cannot overlap two writers).
+  if (argv.includes("--contention")) {
+    if (backendKind !== "postgres") {
+      throw new Error(
+        "--contention requires --backend=postgres: PGlite/SQLite are " +
+          "single-connection and cannot exhibit genuine write contention.",
+      );
+    }
+    await runContentionSuite();
+    return;
+  }
+
   console.log(
     `TypeGraph acyclicity bench (backend=${backendKind}${backendKind === "sqlite" ? `, storage=${sqliteStorage}` : ""}, warmup=${WARMUP_ITERATIONS}, samples=${SAMPLE_ITERATIONS})`,
   );
@@ -325,11 +712,16 @@ async function main(argv: readonly string[]): Promise<void> {
   });
   console.log(`\nappended run to ${historyPath}`);
 
+  console.log("\n§7.6 index-coverage reading:");
+  for (const size of SIZES) {
+    await explainAcyclicityProbe(backendKind, size);
+  }
+
   console.log(
     "\nD-7 ship criteria (read manually against the numbers above):" +
       '\n  - acyclic insert p95 within ~3x the cardinality:"one" insert p95 at 10^5 edges on the forest shape, on both engines.' +
-      '\n  - 8-writer PostgreSQL contention run keeps aggregate throughput within ~30% of the cardinality:"one" run (not measured by this lane).' +
-      "\nFail either => the maintained ancestor set needs to be designed before D.2 ships. This lane does not decide it — the lead does, from PostgreSQL numbers this script does not produce.",
+      '\n  - 8-writer PostgreSQL contention run keeps aggregate throughput within ~30% of the cardinality:"one" run: run separately with `--backend=postgres --contention` (30s per writer count, not run as part of this invocation).' +
+      "\nFail either => the maintained ancestor set needs to be designed before D.2 ships. This lane does not decide it — the lead does, from PostgreSQL numbers.",
   );
 }
 
