@@ -1828,8 +1828,11 @@ export function createCommonOperationBackend(
     }
 
     const outcomes = new Map<string, EdgeClaimOutcome>();
-    // One claim row per inserted edge, so the edge-insert budget is the right
-    // ceiling for the multi-row lock statement.
+    // Chunked by CLAIM entries, not edges — a two-axis edge kind emits two
+    // claims per inserted edge. The edge-insert budget is still a safe
+    // ceiling here: a claim row binds fewer parameters than an edge row, so
+    // chunking claims at the same size never exceeds the bind budget an edge
+    // insert of that size already clears.
     for (const chunk of chunkArray(entries, batchConfig.edgeInsertBatchSize)) {
       const lockQuery = operationStrategy.buildLockEdgeClaims(chunk, nowIso());
       const rows = await execution.execAll<{
