@@ -520,7 +520,7 @@ export function createNodeCollection<
       const rootAlias = "compare_and_set_candidate";
       const candidateIdColumn = `${rootAlias}_id`;
       const candidateIds = createQuery()
-        .fromDynamic(kind, rootAlias)
+        .fromDynamic(kind, rootAlias, { includeSubClasses: false })
         .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
         .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
         .compile();
@@ -553,7 +553,7 @@ export function createNodeCollection<
       const rootAlias = "update_candidate";
       const readInstant = nowIso();
       let base = createQuery()
-        .fromDynamic(kind, rootAlias)
+        .fromDynamic(kind, rootAlias, { includeSubClasses: false })
         .temporal("asOf", readInstant);
       const where = params.where;
       if (where !== undefined) {
@@ -567,7 +567,7 @@ export function createNodeCollection<
         const edgeAlias = `update_edge_${index}`;
         const relatedAlias = `update_related_${index}`;
         const relationRoot = createQuery()
-          .fromDynamic(kind, rootAlias)
+          .fromDynamic(kind, rootAlias, { includeSubClasses: false })
           .temporal("asOf", readInstant);
         let traversal = relationRoot.traverseDynamic(
           relation.edgeKind,
@@ -580,7 +580,9 @@ export function createNodeCollection<
         if (relation.whereEdge !== undefined) {
           traversal = traversal.whereEdge(edgeAlias, relation.whereEdge);
         }
-        let related = traversal.toDynamic(relation.relatedKind, relatedAlias);
+        let related = traversal.toDynamic(relation.relatedKind, relatedAlias, {
+          includeSubClasses: false,
+        });
         if (relation.whereRelated !== undefined) {
           related = related.whereNode(relatedAlias, relation.whereRelated);
         }
@@ -663,8 +665,12 @@ export function createNodeCollection<
           temporal,
           defaultTemporalMode,
         );
+        // Pinned exact-kind: the no-`where` branch just below goes straight
+        // to the backend find path, which is exact-kind by construction —
+        // this branch must return the identical row set (see the comment
+        // there), not a polymorphic-by-default one.
         let query = createQuery()
-          .from(kind, "_n")
+          .from(kind, "_n", { includeSubClasses: false })
           .temporal(asOf === undefined ? temporalMode : "asOf", asOf)
           .whereNode("_n", filter.where as never)
           .select((ctx: Record<string, unknown>) => ctx["_n"]);

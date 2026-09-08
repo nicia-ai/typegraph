@@ -511,6 +511,16 @@ export type BaseStoreOptions = Readonly<{
   queryDefaults?: Readonly<{
     /** Default traversal ontology expansion mode (default: "inverse"). */
     traversalExpansion?: TraversalExpansion;
+    /**
+     * Default subclass-expansion axis for `from`/`to`/`fromDynamic`/
+     * `toDynamic` when an alias states no `includeSubClasses` (default:
+     * `true`, roadmap Q3 — a supertype query is polymorphic by default).
+     * Pass `false` to restore the pre-Q3 exact-kind behavior everywhere.
+     * `search()` and the collection APIs (`find`, `count`, `updateWhere`,
+     * `compareAndSet`) are unaffected — they stay exact-kind regardless of
+     * this setting.
+     */
+    includeSubClasses?: boolean;
   }>;
 }>;
 

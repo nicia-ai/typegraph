@@ -551,7 +551,7 @@ describe("subquery predicates", () => {
     start: {
       alias: "u",
       kinds: ["User"],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [],
     predicates: [],

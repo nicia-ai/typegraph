@@ -23,6 +23,7 @@ import {
   type TemporalMode,
 } from "../../core/types";
 import { ConfigurationError, KindNotFoundError } from "../../errors";
+import { type PolymorphicNodeType } from "../../ontology/types";
 import { isInteropProbeKey } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -46,6 +47,11 @@ import {
 } from "../predicates";
 import { type FieldTypeInfo } from "../schema-introspector";
 import {
+  type AliasExpansionOptions,
+  expandKindsForAxis,
+  resolveAliasExpansion,
+} from "./alias-expansion";
+import {
   createDynamicFieldBuilder,
   type DynamicEdgeType,
   type DynamicNodeType,
@@ -57,6 +63,7 @@ import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
 import { TraversalBuilder } from "./traversal-builder";
 import {
   type AliasMap,
+  type AliasNodeType,
   type BaseFieldAccessor,
   type EdgeAccessor,
   type EdgeAlias,
@@ -315,13 +322,31 @@ export class QueryBuilder<
   /**
    * Starts a query from a node kind.
    *
+   * Subclass expansion defaults to `true` (roadmap Q3) — a supertype query
+   * is polymorphic unless narrowed. `includeSubClasses: false` restores the
+   * exact-kind reading; `includeNarrower: true` expands through
+   * `broader`/`narrower` instead (C.3, untyped alias — no schema
+   * relationship is claimed). The two are mutually exclusive on one alias
+   * (`ConfigurationError`, `QUERY_ALIAS_EXPANSION_CONFLICT`).
+   *
    * @param kind - The node kind to start from
    * @param alias - A unique alias for this node (compile-time error if duplicate)
    */
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: false },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<AliasNodeType<G, K>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  from<K extends keyof G["nodes"] & string, A extends string>(
+    kind: K,
+    alias: UniqueAlias<A, Aliases>,
+    options: { includeSubClasses: false; includeNarrower?: false },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"]>>,
@@ -333,7 +358,19 @@ export class QueryBuilder<
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: true },
+    options: { includeSubClasses: true; includeNarrower?: false },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  from<K extends keyof G["nodes"] & string, A extends string>(
+    kind: K,
+    alias: UniqueAlias<A, Aliases>,
+    options: { includeNarrower: true; includeSubClasses?: false },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias>,
@@ -345,7 +382,7 @@ export class QueryBuilder<
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: boolean },
+    options?: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias>,
@@ -356,18 +393,18 @@ export class QueryBuilder<
     // Validate alias to prevent SQL injection
     validateSqlIdentifier(alias);
 
-    const includeSubClasses = options?.includeSubClasses ?? false;
-
-    // Expand kinds if including subclasses
-    const kinds =
-      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+    const expansion = resolveAliasExpansion(
+      options,
+      this.#config.defaultIncludeSubClasses,
+    );
+    const kinds = expandKindsForAxis(expansion, kind, this.#config.registry);
 
     const newState: QueryBuilderState = {
       ...this.#state,
       startAlias: alias,
       currentAlias: alias,
       startKinds: kinds,
-      includeSubClasses,
+      startExpansion: expansion,
     };
 
     return new QueryBuilder(this.#config, newState);
@@ -377,14 +414,54 @@ export class QueryBuilder<
    * Runtime-kind sibling of `from`; accepts a kind name or Store-issued token.
    * Throws `KindNotFoundError` if the kind is not registered. String-keyed
    * predicates use the `n.field("name").number().gte(...)` discriminator.
+   *
+   * The runtime kind may not appear in `G["ontology"]` at all, so — unlike
+   * `from()` — this always widens to {@link PolymorphicNodeType} whenever the
+   * axis is not `"exact"`, rather than computing `SubsumptionAffected`.
    */
   fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: boolean },
+    options: { includeSubClasses: false; includeNarrower?: false },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options?: { includeSubClasses?: true; includeNarrower?: false },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options: { includeNarrower: true; includeSubClasses?: false },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options?: AliasExpansionOptions,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias>,
     EdgeAliases,
     RecursiveAliases,
     CoordinateState
@@ -401,18 +478,22 @@ export class QueryBuilder<
       });
     }
 
-    const includeSubClasses = options?.includeSubClasses ?? false;
-    const kinds =
-      includeSubClasses ?
-        this.#config.registry.expandSubClasses(kindName)
-      : [kindName];
+    const expansion = resolveAliasExpansion(
+      options,
+      this.#config.defaultIncludeSubClasses,
+    );
+    const kinds = expandKindsForAxis(
+      expansion,
+      kindName,
+      this.#config.registry,
+    );
 
     const newState: QueryBuilderState = {
       ...this.#state,
       startAlias: alias,
       currentAlias: alias,
       startKinds: kinds,
-      includeSubClasses,
+      startExpansion: expansion,
       dynamicNodeAliases: new Set([...this.#state.dynamicNodeAliases, alias]),
     };
 

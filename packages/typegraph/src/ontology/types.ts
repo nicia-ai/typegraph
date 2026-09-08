@@ -215,16 +215,23 @@ export type EquivalentToPartner<A extends NodeType, B extends NodeType> =
     >;
 
 /**
- * The parent's typed props, with the runtime-variable facts widened. C.1/C.2
- * guarantee that a subtype row satisfies the parent's PROPERTIES; they say
- * nothing about which concrete kind produced the row, so
- * `Node<PolymorphicNodeType<N>>` keeps every property fully typed while
- * widening the `kind` discriminant to `string` and the `NodeId` brand to one
- * an exact `NodeId<N>` is assignable TO but not FROM — the safe direction.
- * See `AliasNodeType` (`src/query/builder/types.ts`) for where this is
- * applied selectively, only to aliases the ontology can actually affect.
+ * `N`, with the runtime-variable facts widened. C.1/C.2 guarantee that a
+ * subtype row satisfies the parent's PROPERTIES; they say nothing about
+ * which concrete kind produced the row, so `Node<PolymorphicNodeType<N>>`
+ * keeps every property fully typed while widening the `kind` discriminant
+ * to `string` and the `NodeId` brand to one an exact `NodeId<N>` is
+ * assignable TO but not FROM — the safe direction. See `AliasNodeType`
+ * (`src/query/builder/types.ts`) for where this is applied selectively,
+ * only to aliases the ontology can actually affect.
+ *
+ * An intersection (`Omit<N, "kind"> & { kind: string }`), not a fresh
+ * `NodeType<string, N["schema"]>` — the fresh construction drops every
+ * property `N` carries beyond `schema`, including a brand a runtime-kind
+ * marker type layers on TOP of `NodeType` (`DynamicNodeType`'s
+ * `DYNAMIC_NODE_BRAND`, `src/query/builder/dynamic.ts`). Losing that brand
+ * silently switched `fromDynamic`/`toDynamic` aliases from the dynamic
+ * `.field()` accessor to the typed one. The intersection widens ONLY `kind`,
+ * preserving every other property — brands included — unchanged.
  */
-export type PolymorphicNodeType<N extends NodeType> = NodeType<
-  string,
-  N["schema"]
->;
+export type PolymorphicNodeType<N extends NodeType> = Omit<N, "kind"> &
+  Readonly<{ kind: string }>;

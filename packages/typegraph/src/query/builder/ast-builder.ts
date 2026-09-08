@@ -35,7 +35,7 @@ export function buildQueryAst(
     start: {
       alias: state.startAlias,
       kinds: state.startKinds,
-      includeSubClasses: state.includeSubClasses,
+      expansion: state.startExpansion,
     },
     traversals: state.traversals,
     predicates: state.predicates,

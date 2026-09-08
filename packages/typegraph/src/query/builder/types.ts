@@ -21,6 +21,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
+import { type PolymorphicNodeType } from "../../ontology/types";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
   type AggregateOrderSpec,
@@ -45,6 +46,7 @@ import type {
   SimilarToOptions,
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+import { type AliasExpansionAxis } from "./alias-expansion";
 import {
   type DynamicEdgeAccessor,
   type DynamicNodeAccessor,
@@ -132,6 +134,42 @@ export type NodeAlias<
   alias: string;
   optional: Optional;
 }>;
+
+/**
+ * Whether kind `K` in graph `G` participates in a `subClassOf`/`equivalentTo`
+ * relation that could hand a polymorphic-default query a row of a DIFFERENT
+ * concrete kind: `K` is a `subClassOf` target, or `K` is either side of an
+ * `equivalentTo`/`sameAs` pair. Direct participation is enough — a kind with
+ * a transitive descendant necessarily has a direct one — so this is a single
+ * non-recursive `Extract` over `G["ontology"]`, computable with no
+ * transitive-closure type engine. `false` (a graph with `ontology: []`, or a
+ * kind no relation touches) costs zero type churn.
+ */
+export type SubsumptionAffected<G extends GraphDef, K extends string> =
+  [
+    Extract<
+      G["ontology"][number],
+      | { metaEdge: { name: "subClassOf" }; to: { kind: K } }
+      | { metaEdge: { name: "equivalentTo" | "sameAs" }; from: { kind: K } }
+      | { metaEdge: { name: "equivalentTo" | "sameAs" }; to: { kind: K } }
+    >,
+  ] extends [never] ?
+    false
+  : true;
+
+/**
+ * The alias type a `from(kind, alias)` call with NO explicit
+ * `includeSubClasses` resolves to, under the Q3 polymorphic-by-default
+ * axis. `PolymorphicNodeType` only when `K` is actually
+ * {@link SubsumptionAffected} — a compile-time subtype guarantee (C.1/C.2)
+ * covers the kind's PROPERTIES, never its `kind` discriminant or `NodeId`
+ * brand, so a row may come back as a narrower concrete kind whenever the
+ * axis can expand at all.
+ */
+export type AliasNodeType<G extends GraphDef, K extends string> =
+  SubsumptionAffected<G, K> extends true ?
+    PolymorphicNodeType<G["nodes"][K]["type"]>
+  : G["nodes"][K]["type"];
 
 /**
  * A map of alias names to their node aliases.
@@ -617,6 +655,13 @@ export type QueryBuilderConfig = Readonly<{
   schemaIntrospector: SchemaIntrospector;
   /** Default traversal ontology expansion mode. */
   defaultTraversalExpansion: TraversalExpansion;
+  /**
+   * Store-level default for the `from`/`to`/`fromDynamic`/`toDynamic`
+   * subclass-expansion axis when an alias states no `includeSubClasses`
+   * (roadmap Q3). `true` (the default everywhere a store doesn't override
+   * it) makes a supertype query polymorphic.
+   */
+  defaultIncludeSubClasses: boolean;
   /** Whether this builder's graph enables Operational Identity. */
   identityEnabled: boolean;
   /** Equal-id behavior used by historical identity traversal compilation. */
@@ -635,7 +680,8 @@ export type QueryBuilderState = Readonly<{
   startKinds: readonly string[];
   /** The current alias (last traversal target, or startAlias if no traversals) */
   currentAlias: string;
-  includeSubClasses: boolean;
+  /** The start alias's resolved expansion axis — see `alias-expansion.ts`. */
+  startExpansion: AliasExpansionAxis;
   traversals: readonly Traversal[];
   predicates: readonly NodePredicate[];
   projection: readonly ProjectedField[];
@@ -672,6 +718,15 @@ export type CreateQueryBuilderOptions = Readonly<{
   schema?: SqlSchema;
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
+  /**
+   * Default subclass-expansion axis for `from`/`to`/`fromDynamic`/
+   * `toDynamic` when an alias states no `includeSubClasses` (default:
+   * `true`, roadmap Q3). A store-issued builder threads its own
+   * `queryDefaults.includeSubClasses`; a standalone `createQueryBuilder`
+   * defaults to `true` too, so a store-less builder and a store-issued one
+   * agree.
+   */
+  defaultIncludeSubClasses?: boolean;
   /**
    * Overrides whether a builder may compile identity-aware traversals
    * (`traverse(..., { includeIdentityMembers: true })`).

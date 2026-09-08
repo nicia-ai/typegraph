@@ -271,9 +271,14 @@ function buildKindCandidates(
       { capability: "search", graphId: ctx.graphId },
     );
   }
+  // Pinned exact-kind: `resolveSearchKinds` has already expanded the kind
+  // set and this runs PER resolved kind — inheriting the query-builder
+  // default here would re-expand each one again and make an un-opted
+  // `search()` silently polymorphic (search()'s own `includeSubClasses`
+  // option stays the one and only axis for this facade).
   const chain = ctx
     .createQuery()
-    .from(nodeKind, SEARCH_CANDIDATE_ALIAS)
+    .from(nodeKind, SEARCH_CANDIDATE_ALIAS, { includeSubClasses: false })
     .whereNode(SEARCH_CANDIDATE_ALIAS, where);
   const compiled = chain
     .select(

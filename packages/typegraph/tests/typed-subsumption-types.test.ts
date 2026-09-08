@@ -12,11 +12,19 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
-import { defineNode, equivalentTo, sameAs, subClassOf } from "../src";
+import {
+  createQueryBuilder,
+  defineGraph,
+  defineNode,
+  equivalentTo,
+  sameAs,
+  subClassOf,
+} from "../src";
 import type {
   IncompatibleKeys,
   StructuralSubtypeMismatch,
 } from "../src/ontology/types";
+import { buildKindRegistry } from "../src/registry/builders";
 
 // ============================================================
 // Fixtures
@@ -141,5 +149,85 @@ describe("C.1 — sameAs carries the same contract as equivalentTo", () => {
     // @ts-expect-error - Person is missing Employee's employeeId field
     // eslint-disable-next-line @typescript-eslint/no-deprecated
     sameAs(Person, Employee);
+  });
+});
+
+describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
+  const MediaKind = defineNode("MediaAliasTest", {
+    schema: z.object({ title: z.string() }),
+  });
+  const PodcastKind = defineNode("PodcastAliasTest", {
+    schema: z.object({ title: z.string(), rssUrl: z.string() }),
+  });
+
+  const affectedGraph = defineGraph({
+    id: "alias_typing_affected",
+    nodes: {
+      MediaAliasTest: { type: MediaKind },
+      PodcastAliasTest: { type: PodcastKind },
+    },
+    edges: {},
+    ontology: [subClassOf(PodcastKind, MediaKind)],
+  });
+  const affectedRegistry = buildKindRegistry(affectedGraph);
+
+  const plainGraph = defineGraph({
+    id: "alias_typing_plain",
+    nodes: { MediaAliasTest: { type: MediaKind } },
+    edges: {},
+    ontology: [],
+  });
+  const plainRegistry = buildKindRegistry(plainGraph);
+
+  it("widens kind to string on a subsumption-affected alias with no explicit option", () => {
+    const query = createQueryBuilder<typeof affectedGraph>(
+      affectedGraph.id,
+      affectedRegistry,
+    )
+      .from("MediaAliasTest", "m")
+      .select((ctx) => ctx.m);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
+  });
+
+  it("keeps kind literal when the graph declares no subsumption relations", () => {
+    const query = createQueryBuilder<typeof plainGraph>(
+      plainGraph.id,
+      plainRegistry,
+    )
+      .from("MediaAliasTest", "m")
+      .select((ctx) => ctx.m);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<"MediaAliasTest">();
+  });
+
+  it("includeSubClasses: false keeps kind literal even on an affected alias", () => {
+    const query = createQueryBuilder<typeof affectedGraph>(
+      affectedGraph.id,
+      affectedRegistry,
+    )
+      .from("MediaAliasTest", "m", { includeSubClasses: false })
+      .select((ctx) => ctx.m);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<"MediaAliasTest">();
+  });
+
+  it("refuses includeSubClasses + includeNarrower together, at compile time and at runtime", () => {
+    const builder = createQueryBuilder<typeof affectedGraph>(
+      affectedGraph.id,
+      affectedRegistry,
+    );
+    const conflictingOptions = {
+      includeSubClasses: true,
+      includeNarrower: true,
+    } as const;
+
+    expect(() => {
+      // @ts-expect-error - includeSubClasses and includeNarrower are mutually exclusive
+      builder.from("MediaAliasTest", "m", conflictingOptions);
+    }).toThrow("cannot both be requested");
   });
 });

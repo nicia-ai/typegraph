@@ -42,7 +42,7 @@ describe("plan inspector", () => {
       },
       start: {
         alias: "p",
-        includeSubClasses: false,
+        expansion: "exact" as const,
         kinds: ["Person"] as const,
       },
       temporalMode: { mode: "current" as const },
@@ -81,7 +81,7 @@ describe("plan inspector", () => {
       },
       start: {
         alias: "p",
-        includeSubClasses: false,
+        expansion: "exact" as const,
         kinds: ["Person"] as const,
       },
       temporalMode: { mode: "current" as const },
@@ -133,7 +133,7 @@ describe("plan inspector", () => {
       },
       start: {
         alias: "p",
-        includeSubClasses: false,
+        expansion: "exact" as const,
         kinds: ["Person"] as const,
       },
       temporalMode: { mode: "current" as const },
@@ -175,7 +175,7 @@ describe("plan inspector", () => {
         },
         start: {
           alias: "p",
-          includeSubClasses: false,
+          expansion: "exact" as const,
           kinds: ["Person"] as const,
         },
         temporalMode: { mode: "current" as const },
@@ -209,7 +209,7 @@ describe("plan inspector", () => {
         },
         start: {
           alias: "p",
-          includeSubClasses: false,
+          expansion: "exact" as const,
           kinds: ["Person"] as const,
         },
         temporalMode: { mode: "current" as const },
@@ -253,7 +253,7 @@ describe("plan inspector", () => {
       },
       start: {
         alias: "p",
-        includeSubClasses: false,
+        expansion: "exact" as const,
         kinds: ["Person"] as const,
       },
       temporalMode: { mode: "current" as const },
