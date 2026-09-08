@@ -273,13 +273,36 @@ and auto-migrates unconditionally. See
 
 ### Composition
 
-**`partOf`** and **`hasPart`**: Define compositional relationships.
+**`partOf`** and **`hasPart`**: Declare a whole/part relationship, realized by
+an edge kind that actually stores the containment. `via` is required and
+names that edge; `partSide` is required only when the edge's endpoints make
+both orientations valid.
 
 ```typescript
-partOf(Chapter, Book);
-hasPart(Book, Chapter);
-partOf(Episode, Podcast);
-hasPart(Podcast, Episode);
+const episodeOf = defineEdge("episodeOf");
+
+partOf(Episode, Podcast, { via: episodeOf });
+// hasPart(Podcast, Episode, { via: episodeOf }) declares the identical pair —
+// pick whichever direction reads more naturally, not both.
+```
+
+`via`'s realizing edge must declare a whole-side cardinality of `"one"` or
+`"oneActive"`: `cardinality` when the part is the edge's `from` endpoint,
+`targetCardinality` when the part is its `to` endpoint. Every `(from, to)`
+pair the edge admits must be declared as a composition pair in that same
+orientation — an edge cannot be a composition edge for some of its endpoints
+and a plain edge for the rest.
+
+A same-kind (reflexive) pair, or any pair whose realizing edge admits both
+orientations between the two kinds, is ambiguous: `partSide: "from" | "to"`
+must be declared explicitly, naming which endpoint holds the part.
+
+```typescript
+const parentSection = defineEdge("parentSection");
+
+// `parentSection` admits Section -> Section either way, so the orientation
+// can't be inferred.
+partOf(Section, Section, { via: parentSection, partSide: "from" });
 ```
 
 **Changing this on a populated graph**: adding or removing `partOf`/`hasPart`
@@ -400,7 +423,7 @@ const graph = defineGraph({
     disjointWith(Media, Person),
 
     // Composition
-    partOf(Episode, Podcast),
+    partOf(Episode, Podcast, { via: episodeOf }),
 
     // Edge relationships
     inverseOf(cites, citedBy),
@@ -628,20 +651,39 @@ Declares mutual exclusion (types cannot share the same ID).
 function disjointWith(a: NodeType, b: NodeType): OntologyRelation;
 ```
 
-#### `partOf(part, whole)`
+#### `partOf(part, whole, options)`
 
-Declares compositional relationship (part to whole).
+Declares a compositional relationship (part to whole), realized by the edge
+kind named in `options.via`. `options.partSide` is required only when `via`'s
+endpoints admit both orientations between `part` and `whole` (a same-kind
+pair, or any pair the edge's declaration otherwise leaves ambiguous).
 
 ```typescript
-function partOf(part: NodeType, whole: NodeType): OntologyRelation;
+type CompositionPartSide = "from" | "to";
+
+type CompositionOptions = {
+  via: EdgeType;
+  partSide?: CompositionPartSide;
+};
+
+function partOf(
+  part: NodeType,
+  whole: NodeType,
+  options: CompositionOptions,
+): OntologyRelation;
 ```
 
-#### `hasPart(whole, part)`
+#### `hasPart(whole, part, options)`
 
-Declares compositional relationship (whole to part).
+Declares a compositional relationship (whole to part) — the mirror of
+`partOf`. Declaring both directions for the same pair is redundant; pick one.
 
 ```typescript
-function hasPart(whole: NodeType, part: NodeType): OntologyRelation;
+function hasPart(
+  whole: NodeType,
+  part: NodeType,
+  options: CompositionOptions,
+): OntologyRelation;
 ```
 
 #### `relatedTo(a, b)`

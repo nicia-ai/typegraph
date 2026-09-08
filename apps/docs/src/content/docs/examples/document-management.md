@@ -23,7 +23,6 @@ import {
   searchable,
   subClassOf,
   partOf,
-  hasPart,
 } from "@nicia-ai/typegraph";
 
 // Base content type (abstract)
@@ -118,7 +117,13 @@ const graph = defineGraph({
     Permission: { type: Permission },
   },
   edges: {
-    contains: { type: contains, from: [Folder], to: [Folder, Document] },
+    contains: {
+      type: contains,
+      from: [Folder],
+      to: [Folder, Document],
+      // A Folder or Document belongs to exactly one parent Folder.
+      targetCardinality: "one",
+    },
     relatedTo: { type: relatedTo, from: [Document], to: [Document] },
     hasPermission: { type: hasPermission, from: [User], to: [Content] },
     createdBy: { type: createdBy, from: [Content], to: [User] },
@@ -128,9 +133,12 @@ const graph = defineGraph({
     subClassOf(Folder, Content),
     subClassOf(Document, Content),
 
-    // Compositional relationships
-    partOf(Document, Folder),
-    hasPart(Folder, Document),
+    // Compositional relationships, both realized by `contains`. Every pair
+    // the edge admits must be declared, including the reflexive
+    // Folder-in-Folder case — and because that pair's orientation is
+    // ambiguous (both endpoints are Folder), `partSide` must be declared.
+    partOf(Folder, Folder, { via: contains, partSide: "to" }),
+    partOf(Document, Folder, { via: contains }),
   ],
 });
 ```
