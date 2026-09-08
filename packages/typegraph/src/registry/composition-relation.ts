@@ -165,8 +165,23 @@ export function inferCompositionPartSide(
 // The builder / validator
 // ============================================================
 
-/** Normalizes a `partOf` or `hasPart` relation to `(partKind, wholeKind)`. */
-function normalizePartWhole(
+/**
+ * Whether `metaEdge` is one of the two composition meta-edges (`partOf` /
+ * `hasPart`). Exported so every site that needs "is this relation a
+ * composition relation" calls one predicate instead of re-spelling the
+ * `=== META_EDGE_PART_OF || === META_EDGE_HAS_PART` pair (E-a-7).
+ */
+export function isCompositionMetaEdge(metaEdge: string): boolean {
+  return metaEdge === META_EDGE_PART_OF || metaEdge === META_EDGE_HAS_PART;
+}
+
+/**
+ * Normalizes a `partOf` or `hasPart` relation to `(partKind, wholeKind)`.
+ * Exported so the registry's declaration-closure collector
+ * (`kind-registry.ts`'s `partOf`/`hasPart` closure) shares this decision
+ * instead of re-spelling the same from/to flip (E-a-7).
+ */
+export function normalizePartWhole(
   relation: NamedOntologyRelation,
 ): Readonly<{ partKind: string; wholeKind: string }> {
   return relation.metaEdge === META_EDGE_PART_OF ?
@@ -259,14 +274,12 @@ export function buildCompositionRelation(
 }> {
   const issues: CompositionIssue[] = [];
   const pairs: CompositionPair[] = [];
+  const seenPairKeys = new Set<string>();
   const partSideByEdgeKind = new Map<string, CompositionPartSide>();
   const representativeByEdgeKind = new Map<string, NamedOntologyRelation>();
 
   for (const relation of ontology) {
-    if (
-      relation.metaEdge !== META_EDGE_PART_OF &&
-      relation.metaEdge !== META_EDGE_HAS_PART
-    ) {
+    if (!isCompositionMetaEdge(relation.metaEdge)) {
       continue;
     }
     const viaEdgeKind = relation.via;
@@ -329,13 +342,36 @@ export function buildCompositionRelation(
     }
 
     // A second declaration disagreeing with an already-recorded orientation
-    // for this edge kind is not checked here: composition-exactness (below)
-    // already refuses it, because a `pairs` entry computed under the wrong
-    // orientation cannot cover the edge's own admitted (from, to) pairs
-    // without also leaving a genuinely admitted pair uncovered. A dedicated
-    // check here would be a second, unreachable spelling of that decision.
+    // for this edge kind is refused directly, rather than relying on
+    // composition-exactness (below) to notice a coverage gap: exactness
+    // only catches the conflict when the corrupted pair also fails to
+    // reproduce the edge's admitted pairs, which is not guaranteed for
+    // every endpoint shape and makes the verdict declaration-order
+    // dependent. Recording one side per edge kind and refusing a
+    // contradicting second side keeps the map's invariant true by
+    // construction instead of by coincidence.
+    const existingPartSide = partSideByEdgeKind.get(viaEdgeKind);
+    if (existingPartSide !== undefined && existingPartSide !== partSide) {
+      issues.push({
+        code: "ONTOLOGY_COMPOSITION_VIA_MIXED",
+        message:
+          `Edge kind "${viaEdgeKind}" realizes composition in two different orientations ` +
+          `("${existingPartSide}" and "${partSide}"); one edge kind must have one part side.`,
+        relation,
+      });
+      continue;
+    }
     partSideByEdgeKind.set(viaEdgeKind, partSide);
     representativeByEdgeKind.set(viaEdgeKind, relation);
+
+    // The documented `partOf(part, whole, ...)` + mirrored
+    // `hasPart(whole, part, ...)` idiom (both realized by the same edge)
+    // normalizes to the identical (partKind, wholeKind, viaEdgeKind) tuple.
+    // Keep one `CompositionPair` per tuple so every `pairs` consumer
+    // (exactness, population, cascade, navigation) processes it once.
+    const pairKey = encodeTupleKey([partKind, wholeKind, viaEdgeKind]);
+    if (seenPairKeys.has(pairKey)) continue;
+    seenPairKeys.add(pairKey);
 
     pairs.push({
       partKind,
@@ -351,14 +387,14 @@ export function buildCompositionRelation(
   // This is what makes "is a composition edge" a whole-kind property, so
   // cascade and navigation can use a flat edge-kind set with no per-pair
   // filter.
-  for (const [edgeKind, partSide] of partSideByEdgeKind) {
+  for (const edgeKind of partSideByEdgeKind.keys()) {
     const facts = edgeFacts.get(edgeKind);
     if (facts === undefined) continue;
     const declaredTuples = new Set(
       pairs
         .filter((pair) => pair.viaEdgeKind === edgeKind)
         .map((pair) =>
-          partSide === "from" ?
+          pair.partSide === "from" ?
             encodeTupleKey([pair.partKind, pair.wholeKind])
           : encodeTupleKey([pair.wholeKind, pair.partKind]),
         ),
