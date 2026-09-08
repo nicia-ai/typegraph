@@ -258,16 +258,16 @@ export function registerConstraintFenceVerificationIntegrationTests(
       const violations = await store.verifyConstraintFences();
       expect(violations).toHaveLength(1);
       const violation = requireDefined(violations[0], "cardinality violation");
+      // Narrowed by assertion rather than by a ternary, so a report that named
+      // the wrong family fails here instead of comparing an empty list.
+      if (violation.family !== "edgeCardinality")
+        throw new Error(`expected an edge violation, got ${violation.family}`);
       expect(violation.target).toEqual({
         relation: "edgeClaims",
         graphId: verifyGraph.id,
         axis: "one:verifyManages",
         key: encodeTupleKey(["VerifyEmployee", employee.id]),
       });
-      // Narrowed by assertion rather than by a ternary, so a report that named
-      // the wrong family fails here instead of comparing an empty list.
-      if (violation.family !== "edgeCardinality")
-        throw new Error(`expected an edge violation, got ${violation.family}`);
       expect(violation.edgeIds).toEqual(
         [edge.id, "verify-unfenced-edge"].toSorted(),
       );
@@ -303,6 +303,49 @@ export function registerConstraintFenceVerificationIntegrationTests(
       // liveness predicate would take its axis. The report reads the same
       // population, so it must not name it either.
       expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("reports a live edge sitting outside every declared endpoint pair", async () => {
+      const store = await context.createStore(verifyGraph);
+      const contractor = await store.nodes.VerifyContractor.create({
+        email: "grace@example.com",
+      });
+      const project = await store.nodes.VerifyProject.create({
+        title: "Fences",
+      });
+
+      // `verifyManages` only ever declares `from: [VerifyEmployee]`, so a
+      // `VerifyContractor` source is a pre-upgrade shape no live claim
+      // fences: the edges primary key is `(graph, id)`, so this insert is
+      // legal and holds no cardinality claim against it.
+      await store.backend.insertEdge({
+        graphId: verifyGraph.id,
+        id: "verify-misassigned-edge",
+        kind: "verifyManages",
+        fromKind: "VerifyContractor",
+        fromId: contractor.id,
+        toKind: "VerifyProject",
+        toId: project.id,
+        props: {},
+      });
+
+      expect(await store.verifyConstraintFences()).toEqual([
+        {
+          family: "edgeEndpointAssignability",
+          edgeKind: "verifyManages",
+          allowedPairs: [["VerifyEmployee", "VerifyProject"]],
+          edges: [
+            {
+              edgeKind: "verifyManages",
+              edgeId: "verify-misassigned-edge",
+              fromKind: "VerifyContractor",
+              fromId: contractor.id,
+              toKind: "VerifyProject",
+              toId: project.id,
+            },
+          ],
+        },
+      ]);
     });
 
     it("audits declarations added after this Store became stale", async () => {

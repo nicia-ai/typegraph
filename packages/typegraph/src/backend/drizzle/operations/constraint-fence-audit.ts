@@ -169,3 +169,50 @@ export function buildDisjointOverlapAudit(
   `;
   return sql`${liveIdsOfKind(kinds[0])} INTERSECT ${liveIdsOfKind(kinds[1])}`;
 }
+
+/**
+ * Live edges of one kind whose `(from_kind, to_kind)` matches no declared
+ * pair.
+ *
+ * A pair list rather than a per-side kind list because a source-dependent
+ * target map (`targetKindsBySource`) admits pairs, not a Cartesian product —
+ * and because the caller already expanded subsumption
+ * (`expandEdgeEndpointAllowance`), so this statement compares literals only.
+ * An EMPTY allowance list means the declaration admits nothing: every live
+ * edge of the kind is returned, and the statement renders no pair predicate
+ * at all.
+ */
+export function buildMisassignedEdgeEndpointAudit(
+  tables: Tables,
+  graphId: string,
+  edgeKind: string,
+  allowedPairs: readonly (readonly [string, string])[],
+): SQL {
+  const { edges } = tables;
+  const relation = getTableName(edges);
+  const admittedPredicate =
+    allowedPairs.length === 0 ?
+      sql.empty()
+    : sql` AND NOT (${sql.join(
+        allowedPairs.map(
+          ([fromKind, toKind]) => sql`
+            (${qualified(relation, edges.fromKind)} = ${fromKind}
+              AND ${qualified(relation, edges.toKind)} = ${toKind})
+          `,
+        ),
+        sql` OR `,
+      )})`;
+  return sql`
+    SELECT
+      ${quotedColumn(edges.id)} as edge_id,
+      ${quotedColumn(edges.kind)} as edge_kind,
+      ${quotedColumn(edges.fromKind)} as from_kind,
+      ${quotedColumn(edges.fromId)} as from_id,
+      ${quotedColumn(edges.toKind)} as to_kind,
+      ${quotedColumn(edges.toId)} as to_id
+    FROM ${edges}
+    WHERE ${qualified(relation, edges.graphId)} = ${graphId}
+      AND ${qualified(relation, edges.kind)} = ${edgeKind}
+      AND ${qualified(relation, edges.deletedAt)} IS NULL${admittedPredicate}
+  `;
+}

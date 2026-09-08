@@ -137,6 +137,7 @@ import type {
   InsertUniqueParams,
   ManagedEdgeCreatePlan,
   ManagedNodeCreatePlan,
+  MisassignedEdgeEndpointRow,
   NodeCreateCommandResult,
   NodeRow,
   PopulatedSchemaKind,
@@ -5290,7 +5291,48 @@ export function createCommonOperationBackend(
           disjointOverlaps.push({ kinds, nodeId: row.node_id });
       }
 
-      return { contendedUniqueRows, contendedEdgeRows, disjointOverlaps };
+      // Present whenever the caller asked for the family (the key is
+      // defined, even if empty) — never present otherwise, so
+      // `auditConstraintFences`'s "asked and got nothing" refusal stays
+      // meaningful.
+      const misassignedEdgeEndpointRows: MisassignedEdgeEndpointRow[] = [];
+      if (params.edgeEndpointAllowances !== undefined) {
+        for (const allowance of params.edgeEndpointAllowances) {
+          const rows = await execution.execAll<{
+            edge_id: string;
+            edge_kind: string;
+            from_kind: string;
+            from_id: string;
+            to_kind: string;
+            to_id: string;
+          }>(
+            operationStrategy.buildMisassignedEdgeEndpointAudit(
+              params.graphId,
+              allowance.edgeKind,
+              allowance.allowedPairs,
+            ),
+          );
+          for (const row of rows) {
+            misassignedEdgeEndpointRows.push({
+              edgeKind: row.edge_kind,
+              edgeId: row.edge_id,
+              fromKind: row.from_kind,
+              fromId: row.from_id,
+              toKind: row.to_kind,
+              toId: row.to_id,
+            });
+          }
+        }
+      }
+
+      return {
+        contendedUniqueRows,
+        contendedEdgeRows,
+        disjointOverlaps,
+        ...(params.edgeEndpointAllowances === undefined ?
+          {}
+        : { misassignedEdgeEndpointRows }),
+      };
     },
 
     async checkUnique(
