@@ -706,12 +706,15 @@ type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = 
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
-export function ensureSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: SchemaManagerOptions & {
+export function ensureSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: SchemaManagerOptions & EnsureSchemaPreloadedOptions): Promise<SchemaValidationResult>;
+
+// @public
+type EnsureSchemaPreloadedOptions = Readonly<{
     preloaded?: Readonly<{
         activeRow: SchemaVersionRow | undefined;
         storedSchema: SerializedSchema | undefined;
     }>;
-}): Promise<SchemaValidationResult>;
+}>;
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
@@ -2221,7 +2224,6 @@ export type SchemaManagerOptions = Readonly<{
     onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
     onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
     schema?: SqlSchema;
-    historyEnabled?: boolean;
 }>;
 
 // @public (undocumented)

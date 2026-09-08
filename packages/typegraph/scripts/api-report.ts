@@ -639,6 +639,15 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 735,
     sha256: "8453e575a6964dbbed2185c9323a59f0f0b02f08dc4ebb9725136a439cd5eaf6",
   },
+  // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
+  // options type was extracted into the named (but non-exported)
+  // `EnsureSchemaPreloadedOptions` alias so `EnsureSchemaInternalOptions`
+  // could extend it for `ensureSchemaInternal` (the new export `store.ts`
+  // calls directly with `historyEnabled`, never re-exported from a public
+  // entry point). An anonymous inline type never registers as a forgotten
+  // export; a named non-exported one used in `ensureSchema`'s public
+  // signature does. +1, only on `./schema` — the sole entrypoint that
+  // names `ensureSchema`.
   "./schema": {
     count: 281,
     sha256: "680f42a4071d001152f018bdbbec952785ccb1f1aa1ec5400b6ae35b177c2a50",

@@ -6503,7 +6503,6 @@ export type SchemaManagerOptions = Readonly<{
     onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
     onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
     schema?: SqlSchema;
-    historyEnabled?: boolean;
 }>;
 
 // @public
