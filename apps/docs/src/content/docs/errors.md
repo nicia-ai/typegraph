@@ -1156,6 +1156,40 @@ try {
 }
 ```
 
+The `details.reason` value `"ontology-tightening-violated"` means an ontology
+change — adding `disjointWith`, `subClassOf`, `equivalentTo`, or `sameAs`, or
+removing `subClassOf`, `equivalentTo`, or `sameAs` — is false against rows
+that already exist. `details.changes` carries only the ontology changes in
+this diff that required a data check (a `safe` or `breaking` change in the
+same commit is never included, even one alongside the change that was
+refused); `details.violations` carries the offending rows in exactly the
+shape `store.verifyConstraintFences()` returns. Resolve those rows (delete
+them, change their kind, or narrow the ontology change) and retry. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+for what each meta-edge checks.
+
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "ontology-tightening-violated") {
+    console.log(error.details.violations);
+    // [{ family: "nodeDisjointness", target: {...}, owners: [...] }, ...]
+  }
+}
+```
+
+#### Ontology tightening and constraint-fence audit guard codes
+
+Committing an ontology tightening uses stable `ConfigurationError` detail
+codes when the backend cannot run the required data check atomically:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` | The backend cannot commit the ontology-tightening data check atomically with the schema-version compare-and-swap. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
+| `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` | The backend does not implement `readConstraintFenceViolations` at all, so neither `store.verifyConstraintFences()` nor an ontology-tightening preflight can run. |
+| `CONSTRAINT_FENCE_AUDIT_FAMILY_UNSUPPORTED` | The backend ran the audit but did not answer the `edgeEndpointAssignability` family it was asked for (`misassignedEdgeEndpointRows` was left `undefined`). An empty report there would be indistinguishable from a clean database, so the audit refuses rather than reporting one. |
+
 ### `BaseSchemaMigrationError`
 
 Thrown by zero-DDL verified and graph-template entry points when the

@@ -6,4 +6,7 @@ export {
 } from "./kind-registry";
 
 // Builder functions
-export { buildKindRegistry } from "./builders";
+export { buildGraphEdgeEndpointKinds, buildKindRegistry } from "./builders";
+
+// Edge endpoint allowance expansion
+export { expandEdgeEndpointAllowance } from "./edge-endpoint-allowance";

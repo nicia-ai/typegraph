@@ -3785,6 +3785,15 @@ export type SchemaWriteTransactionBackend = TransactionBackend &
 export type SchemaCommitPreflightBackend = TransactionBackend &
   Readonly<{
     executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+    /**
+     * The read-only fence audit, when the preflight target can run it.
+     * Optional for the same reason `executeSchemaDdl` is: a custom
+     * backend's `commitSchemaVersionWithPreflight` may hand back a
+     * transaction that cannot. An ontology-tightening preflight that needs
+     * it refuses with `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` rather than
+     * skipping the check.
+     */
+    readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
   }>;
 
 /**
@@ -4055,6 +4064,31 @@ export type ReadConstraintFenceViolationsParams = Readonly<{
   disjointKindPairs: readonly (readonly [string, string])[];
   /** Every edge kind declaring a cardinality other than `many`. */
   edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+  /**
+   * Edge kinds whose live rows must still sit on a declared endpoint pair.
+   * Optional (and, when present, possibly empty) so a params object built
+   * before this family existed keeps compiling: an absent value means the
+   * caller does not ask for the family, and `readConstraintFenceViolations`
+   * must then omit `misassignedEdgeEndpointRows` rather than reporting a
+   * clean (and therefore reassuring) empty result for it.
+   */
+  edgeEndpointAllowances?: readonly EdgeEndpointAllowance[];
+}>;
+
+/** Every concrete `(fromKind, toKind)` pair an edge kind's declaration still admits. */
+export type EdgeEndpointAllowance = Readonly<{
+  edgeKind: string;
+  allowedPairs: readonly (readonly [string, string])[];
+}>;
+
+/** One live edge whose endpoints no declared pair admits. */
+export type MisassignedEdgeEndpointRow = Readonly<{
+  edgeKind: string;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
 }>;
 
 /**
@@ -4096,6 +4130,12 @@ export type ConstraintFenceViolationRows = Readonly<{
   contendedUniqueRows: readonly ContendedUniqueRow[];
   contendedEdgeRows: readonly ContendedEdgeRow[];
   disjointOverlaps: readonly DisjointOverlapRow[];
+  /**
+   * Present whenever `edgeEndpointAllowances` was asked for (defined on the
+   * params, even if empty). A backend that cannot answer the family omits
+   * it, and the caller refuses rather than reporting a clean result.
+   */
+  misassignedEdgeEndpointRows?: readonly MisassignedEdgeEndpointRow[];
 }>;
 
 /**

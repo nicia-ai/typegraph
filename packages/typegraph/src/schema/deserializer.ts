@@ -120,7 +120,7 @@ export function deserializeSchema(
     getIdentity: () => schema.identity,
     getRaw: () => schema,
 
-    buildRegistry: () => buildRegistryFromRelations(schema),
+    buildRegistry: () => buildRegistryFromSerializedSchema(schema),
   };
 }
 
@@ -129,12 +129,28 @@ export function deserializeSchema(
 // ============================================================
 
 /**
- * Builds a KindRegistry from serialized relations.
+ * Builds a KindRegistry from a serialized schema's ontology, edges, and
+ * identity slices.
  *
  * Persisted closures are a legacy inspection artifact. Relations are validated
  * and closures are recomputed so old schemas gain current hardening rules.
+ *
+ * Deliberately narrower than `SerializedSchema`: `nodes` carries no
+ * information this construction needs (node kinds are discovered through the
+ * ontology relations and edge endpoints, and no Zod schema can be
+ * reconstructed from JSON Schema anyway), so the ontology-tightening
+ * classifier (`src/schema/ontology-change.ts`) can build a registry for
+ * either side of a diff from an `OntologySnapshot` without also carrying the
+ * property-schema slice.
+ *
+ * Exported (renamed from the former private `buildRegistryFromRelations`) so
+ * the deserializer's registry and the ontology-tightening classifier's
+ * registry are the SAME construction — one owner, so a persisted ontology
+ * cannot be interpreted two different ways by two call sites.
  */
-function buildRegistryFromRelations(schema: SerializedSchema): KindRegistry {
+export function buildRegistryFromSerializedSchema(
+  schema: Pick<SerializedSchema, "ontology" | "edges" | "identity">,
+): KindRegistry {
   // Build empty node/edge kind maps (we don't have the actual Zod schemas)
   const nodeKinds = new Map<string, NodeType>();
   const edgeKinds = new Map<string, AnyEdgeType>();
@@ -148,19 +164,20 @@ function buildRegistryFromRelations(schema: SerializedSchema): KindRegistry {
         to: relation.to,
       }),
     ),
-    edgeEndpoints: buildEdgeEndpointKinds(schema.edges),
+    edgeEndpoints: buildSerializedEdgeEndpointKinds(schema.edges),
     ...(schema.identity === undefined ? {} : { identity: schema.identity }),
   });
 }
 
 /**
  * Maps each edge kind's serialized definition to its domain/range kind
- * names, for `validateImpliesEndpointCompatibility`. A `Map` (rather than
- * the plain `schema.edges` object) so a lookup for an edge kind literally
- * named "toString" or another `Object.prototype` member can't resolve to
- * an inherited member instead of `undefined`.
+ * names, for `validateImpliesEndpointCompatibility` and for
+ * `expandEdgeEndpointAllowance` (`src/registry/edge-endpoint-allowance.ts`).
+ * A `Map` (rather than the plain `schema.edges` object) so a lookup for an
+ * edge kind literally named "toString" or another `Object.prototype` member
+ * can't resolve to an inherited member instead of `undefined`.
  */
-function buildEdgeEndpointKinds(
+export function buildSerializedEdgeEndpointKinds(
   edges: Record<string, SerializedEdgeDef>,
 ): ReadonlyMap<string, EdgeEndpointKinds> {
   const result = new Map<string, EdgeEndpointKinds>();

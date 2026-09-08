@@ -117,6 +117,7 @@ import type {
   EdgeConvergeCreateCommand,
   EdgeConvergeCreateCommandResult,
   EdgeCreateCommandResult,
+  EdgeEndpointAllowance,
   EdgeExistsBetweenParams,
   EdgeRow,
   FindEdgesByEndpointSetParams,
@@ -137,6 +138,7 @@ import type {
   InsertUniqueParams,
   ManagedEdgeCreatePlan,
   ManagedNodeCreatePlan,
+  MisassignedEdgeEndpointRow,
   NodeCreateCommandResult,
   NodeRow,
   PopulatedSchemaKind,
@@ -1003,6 +1005,92 @@ function pairAtomicMutationChunksWithIds<T>(
     offset += entries.length;
     return { entries, ids: chunkIds };
   });
+}
+
+// `graphId`, `edgeKind`, and `now` (bound twice, once per side of the
+// current-window predicate) are fixed per statement; each admitted pair
+// costs two more (`fromKind`, `toKind`).
+const MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT = 4;
+const MISASSIGNED_EDGE_ENDPOINT_PAIR_PARAM_COUNT = 2;
+
+/**
+ * How many admitted pairs one `buildMisassignedEdgeEndpointAudit` statement
+ * may render, sized to the connection's bound-parameter budget. Unlike the
+ * disjunction this statement used to render, a `VALUES` derived table does
+ * not grow SQLite's expression-tree depth with the pair count, so the bound
+ * budget is the only ceiling left to respect.
+ */
+function misassignedEdgeEndpointPairChunkSize(
+  maxBindParameters: number,
+): number {
+  return Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT) /
+        MISASSIGNED_EDGE_ENDPOINT_PAIR_PARAM_COUNT,
+    ),
+  );
+}
+
+/**
+ * The live edges of one edge kind whose endpoints match none of its
+ * allowance's admitted pairs, chunking the pairs across several statements
+ * when the allowance exceeds `pairChunkSize`.
+ *
+ * A row is truly misassigned only when it fails EVERY chunk's admitted-pairs
+ * predicate — failing one chunk means only that the row is not admitted by
+ * that chunk's pairs, not that no pair anywhere admits it. So the final
+ * answer is the INTERSECTION, by edge id, of what each chunk's statement
+ * reports; a chunk that already leaves no candidates ends the loop early,
+ * since intersecting with the empty set can only stay empty.
+ */
+async function readMisassignedEdgeEndpointRows(
+  execution: OperationBackendExecution,
+  operationStrategy: CommonOperationStrategy,
+  graphId: string,
+  allowance: EdgeEndpointAllowance,
+  now: string,
+  pairChunkSize: number,
+): Promise<readonly MisassignedEdgeEndpointRow[]> {
+  type Row = Readonly<{
+    edge_id: string;
+    edge_kind: string;
+    from_kind: string;
+    from_id: string;
+    to_kind: string;
+    to_id: string;
+  }>;
+  const pairChunks =
+    allowance.allowedPairs.length === 0 ?
+      [[]]
+    : chunkArray(allowance.allowedPairs, pairChunkSize);
+  let candidates: Map<string, Row> | undefined;
+  for (const pairChunk of pairChunks) {
+    const rows = await execution.execAll<Row>(
+      operationStrategy.buildMisassignedEdgeEndpointAudit(
+        graphId,
+        allowance.edgeKind,
+        now,
+        pairChunk,
+      ),
+    );
+    const rowsByEdgeId = new Map(rows.map((row) => [row.edge_id, row]));
+    candidates =
+      candidates === undefined ?
+        rowsByEdgeId
+      : new Map(
+          [...candidates].filter(([edgeId]) => rowsByEdgeId.has(edgeId)),
+        );
+    if (candidates.size === 0) break;
+  }
+  return [...(candidates?.values() ?? [])].map((row) => ({
+    edgeKind: row.edge_kind,
+    edgeId: row.edge_id,
+    fromKind: row.from_kind,
+    fromId: row.from_id,
+    toKind: row.to_kind,
+    toId: row.to_id,
+  }));
 }
 
 function assembleAtomicResolvedMutationSet<TRow>(
@@ -5290,7 +5378,42 @@ export function createCommonOperationBackend(
           disjointOverlaps.push({ kinds, nodeId: row.node_id });
       }
 
-      return { contendedUniqueRows, contendedEdgeRows, disjointOverlaps };
+      // Present whenever the caller asked for the family (the key is
+      // defined, even if empty) — never present otherwise, so
+      // `auditConstraintFences`'s "asked and got nothing" refusal stays
+      // meaningful.
+      const misassignedEdgeEndpointRows: MisassignedEdgeEndpointRow[] = [];
+      if (params.edgeEndpointAllowances !== undefined) {
+        // One instant for the whole family: every chunk of every allowance
+        // in this call reads against the same "current" window, exactly as
+        // `withPinnedReadInstant` pins one instant across the operands of a
+        // set operation (`src/query/compiler/temporal.ts`).
+        const now = nowIso();
+        const pairChunkSize = misassignedEdgeEndpointPairChunkSize(
+          maxBindParameters,
+        );
+        for (const allowance of params.edgeEndpointAllowances) {
+          for (const row of await readMisassignedEdgeEndpointRows(
+            execution,
+            operationStrategy,
+            params.graphId,
+            allowance,
+            now,
+            pairChunkSize,
+          )) {
+            misassignedEdgeEndpointRows.push(row);
+          }
+        }
+      }
+
+      return {
+        contendedUniqueRows,
+        contendedEdgeRows,
+        disjointOverlaps,
+        ...(params.edgeEndpointAllowances === undefined ?
+          {}
+        : { misassignedEdgeEndpointRows }),
+      };
     },
 
     async checkUnique(

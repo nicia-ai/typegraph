@@ -86,6 +86,7 @@ import {
   buildContendedEdgeRowAudit,
   buildContendedUniqueRowAudit,
   buildDisjointOverlapAudit,
+  buildMisassignedEdgeEndpointAudit,
 } from "./constraint-fence-audit";
 import type { AtomicContributionEvidence } from "./contribution-evidence";
 import {
@@ -577,6 +578,17 @@ export type CommonOperationStrategy = Readonly<{
   buildDisjointOverlapAudit: (
     graphId: string,
     kinds: readonly [string, string],
+  ) => SQL;
+  /**
+   * The fourth read-only fence-audit statement: live edges of one kind
+   * whose endpoints match no declared pair. A member for the same reason
+   * the other three are — the type checker forces both dialects to have it.
+   */
+  buildMisassignedEdgeEndpointAudit: (
+    graphId: string,
+    edgeKind: string,
+    now: string,
+    allowedPairs: readonly (readonly [string, string])[],
   ) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
   /**
@@ -1239,6 +1251,20 @@ function createCommonOperationStrategy(
       kinds: readonly [string, string],
     ): SQL {
       return buildDisjointOverlapAudit(tables, graphId, kinds);
+    },
+    buildMisassignedEdgeEndpointAudit(
+      graphId: string,
+      edgeKind: string,
+      now: string,
+      allowedPairs: readonly (readonly [string, string])[],
+    ): SQL {
+      return buildMisassignedEdgeEndpointAudit(
+        tables,
+        graphId,
+        edgeKind,
+        now,
+        allowedPairs,
+      );
     },
     buildGetActiveSchema(graphId: string): SQL {
       return buildGetActiveSchema(tables, graphId, dialect);

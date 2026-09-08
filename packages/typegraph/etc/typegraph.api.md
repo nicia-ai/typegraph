@@ -825,6 +825,11 @@ export type ConstraintFenceViolation = Readonly<{
     family: "edgeCardinality";
     target: ClaimTarget;
     edgeIds: readonly string[];
+}> | Readonly<{
+    family: "edgeEndpointAssignability";
+    edgeKind: string;
+    allowedPairs: readonly (readonly [string, string])[];
+    edges: readonly MisassignedEdgeEndpointRow[];
 }>;
 
 // @public
@@ -832,6 +837,7 @@ type ConstraintFenceViolationRows = Readonly<{
     contendedUniqueRows: readonly ContendedUniqueRow[];
     contendedEdgeRows: readonly ContendedEdgeRow[];
     disjointOverlaps: readonly DisjointOverlapRow[];
+    misassignedEdgeEndpointRows?: readonly MisassignedEdgeEndpointRow[];
 }>;
 
 // @public
@@ -2010,6 +2016,12 @@ type EdgeCreateOptions = Readonly<{
     id?: string;
     validFrom?: string | null;
     validTo?: string;
+}>;
+
+// @public
+export type EdgeEndpointAllowance = Readonly<{
+    edgeKind: string;
+    allowedPairs: readonly (readonly [string, string])[];
 }>;
 
 // @public
@@ -4738,7 +4750,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 // @public
-export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found", "kind-removal", "edge-match-identity-rekey"];
+export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found", "kind-removal", "edge-match-identity-rekey", "ontology-tightening-violated"];
 
 // @public
 export class MigrationError extends TypeGraphError {
@@ -4776,6 +4788,13 @@ export type MigrationErrorDetails = Readonly<{
     toVersion: number;
     reason: "edge-match-identity-rekey";
     edgeKinds: readonly string[];
+}> | Readonly<{
+    graphId: string;
+    fromVersion: number;
+    toVersion: number;
+    reason: "ontology-tightening-violated";
+    changes: readonly OntologyChange[];
+    violations: readonly ConstraintFenceViolation[];
 }>;
 
 // @public (undocumented)
@@ -4791,6 +4810,16 @@ type MigrationHookContext = Readonly<{
 
 // @public
 export function min(alias: string, field: string): AggregateExpr;
+
+// @public
+export type MisassignedEdgeEndpointRow = Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
 
 // @public
 export function narrower(broaderConcept: NodeType, narrowerConcept: NodeType): OntologyRelation;
@@ -5277,6 +5306,19 @@ type OntologyChange = Readonly<{
     name: string;
     severity: ChangeSeverity;
     details: string;
+    probes?: readonly OntologyDataProbe[];
+}>;
+
+// @public
+export type OntologyDataProbe = Readonly<{
+    kind: "nodeDisjointness";
+    pairs: readonly (readonly [string, string])[];
+}> | Readonly<{
+    kind: "nodeUniquenessComponent";
+    groups: readonly UniquenessComponentProbeGroup[];
+}> | Readonly<{
+    kind: "edgeEndpointAssignability";
+    allowances: readonly EdgeEndpointAllowance[];
 }>;
 
 // @public (undocumented)
@@ -5677,6 +5719,7 @@ type ReadConstraintFenceViolationsParams = Readonly<{
     uniqueConstraintNames: readonly string[];
     disjointKindPairs: readonly (readonly [string, string])[];
     edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+    edgeEndpointAllowances?: readonly EdgeEndpointAllowance[];
 }>;
 
 // @public
@@ -6203,6 +6246,7 @@ export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "co
 // @internal
 type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
     executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+    readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
 }>;
 
 // @public
@@ -7855,6 +7899,12 @@ export type UniqueIntrospection = Readonly<{
     fields: readonly string[];
     scope: UniquenessScope;
     collation: Collation;
+}>;
+
+// @public
+export type UniquenessComponentProbeGroup = Readonly<{
+    constraintName: string;
+    coveredKinds: readonly string[];
 }>;
 
 // @public

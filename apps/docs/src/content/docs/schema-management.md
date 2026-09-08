@@ -262,7 +262,15 @@ These changes are backwards compatible and can be auto-migrated:
 - Adding new node types
 - Adding new edge types
 - Adding optional properties with defaults
-- Adding new ontology relations
+- Adding `broader`, `narrower`, `partOf`, `hasPart`, or `relatedTo` ontology
+  relations
+- Removing `disjointWith` ontology relations
+
+Adding `disjointWith`, `subClassOf`, `equivalentTo`, or `sameAs` — and
+removing `subClassOf`, `equivalentTo`, or `sameAs` — also auto-migrate, but
+only after a data check inside the commit transaction: see
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+for what each one checks and how a refusal is reported.
 
 ### Breaking Changes (Require Manual Action)
 
@@ -274,6 +282,7 @@ These changes require manual migration:
 - Removing properties
 - Changing cardinality constraints to be more restrictive
 - Removing allowed endpoint pairs from a source-dependent edge
+- Adding or removing an `inverseOf` or `implies` ontology relation
 
 ### Endpoint Pair Changes
 

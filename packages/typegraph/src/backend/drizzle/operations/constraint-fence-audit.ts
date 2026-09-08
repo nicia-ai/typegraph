@@ -26,6 +26,9 @@ import { quotedColumn, type Tables } from "./shared";
 /** The alias the correlated subquery reads the same relation under. */
 const PEER = "peer";
 
+/** The alias the misassigned-endpoint audit's `VALUES` derived table reads under. */
+const ALLOWED_PAIR_ALIAS = "tg_allowed_pair";
+
 /** Qualifies a column with a relation name, the rendering both dialects read. */
 function qualified(
   relation: string,
@@ -168,4 +171,80 @@ export function buildDisjointOverlapAudit(
       AND ${qualified(relation, nodes.deletedAt)} IS NULL
   `;
   return sql`${liveIdsOfKind(kinds[0])} INTERSECT ${liveIdsOfKind(kinds[1])}`;
+}
+
+/**
+ * Live edges of one kind whose `(from_kind, to_kind)` matches no declared
+ * pair.
+ *
+ * A pair list rather than a per-side kind list because a source-dependent
+ * target map (`targetKindsBySource`) admits pairs, not a Cartesian product —
+ * and because the caller already expanded subsumption
+ * (`expandEdgeEndpointAllowance`), so this statement compares literals only.
+ * An EMPTY allowance list means the declaration admits nothing: every live
+ * edge of the kind is returned, and the statement renders no pair predicate
+ * at all.
+ *
+ * The admitted-pairs list is rendered as a `VALUES` derived table joined by
+ * `NOT EXISTS`, never as a disjunction of bound equality pairs: a flat `OR`
+ * chain nests one boolean operator per pair, so its parsed expression tree
+ * grows with the pair count and exceeds SQLite's `SQLITE_MAX_EXPR_DEPTH`
+ * (1000) on an ordinary subclass hierarchy — a root with ~40 direct
+ * subclasses and one edge kind over it already renders (41)² ≈ 1681 pairs.
+ * `VALUES` rows are siblings in the parse tree, not nested expressions, so
+ * this predicate's depth is constant in the pair count; the caller
+ * ({@link file://../../operation-backend-core.ts readConstraintFenceViolations})
+ * still chunks `allowedPairs` to the connection's bound-parameter budget and
+ * intersects the per-chunk results, because that budget (not expression
+ * depth) is what an unbounded pair count can still exceed on every dialect.
+ *
+ * "Live" is `caller.now` bound against the same current-window predicate
+ * `compileTemporalFilter({ mode: "current" })` compiles for an ordinary read
+ * (`src/query/compiler/temporal.ts`) — `deleted_at IS NULL AND (valid_from IS
+ * NULL OR valid_from <= now) AND (valid_to IS NULL OR valid_to > now)` — not
+ * `valid_to IS NULL`. A currently-valid edge can carry a bounded FUTURE
+ * `valid_to` (e.g. a term appointment); it is what every current-coordinate
+ * read returns today, so it is exactly what this audit must not miss. `now`
+ * is a parameter, not `nowIso()` sampled here, so every chunk of every
+ * allowance in one audit call reads against the same instant.
+ */
+export function buildMisassignedEdgeEndpointAudit(
+  tables: Tables,
+  graphId: string,
+  edgeKind: string,
+  now: string,
+  allowedPairs: readonly (readonly [string, string])[],
+): SQL {
+  const { edges } = tables;
+  const relation = getTableName(edges);
+  const admittedPredicate =
+    allowedPairs.length === 0 ?
+      sql.empty()
+    : sql`
+      AND NOT EXISTS (
+             SELECT 1 FROM (VALUES ${sql.join(
+          allowedPairs.map(
+            ([fromKind, toKind]) => sql`(${fromKind}, ${toKind})`,
+          ),
+          sql`, `,
+        )}) AS ${sql.raw(`"${ALLOWED_PAIR_ALIAS}"`)}
+             WHERE ${sql.raw(`"${ALLOWED_PAIR_ALIAS}".column1`)} = ${qualified(relation, edges.fromKind)}
+               AND ${sql.raw(`"${ALLOWED_PAIR_ALIAS}".column2`)} = ${qualified(relation, edges.toKind)}
+           )
+    `;
+  return sql`
+    SELECT
+      ${quotedColumn(edges.id)} as edge_id,
+      ${quotedColumn(edges.kind)} as edge_kind,
+      ${quotedColumn(edges.fromKind)} as from_kind,
+      ${quotedColumn(edges.fromId)} as from_id,
+      ${quotedColumn(edges.toKind)} as to_kind,
+      ${quotedColumn(edges.toId)} as to_id
+    FROM ${edges}
+    WHERE ${qualified(relation, edges.graphId)} = ${graphId}
+      AND ${qualified(relation, edges.kind)} = ${edgeKind}
+      AND ${qualified(relation, edges.deletedAt)} IS NULL
+      AND (${qualified(relation, edges.validFrom)} IS NULL OR ${qualified(relation, edges.validFrom)} <= ${now})
+      AND (${qualified(relation, edges.validTo)} IS NULL OR ${qualified(relation, edges.validTo)} > ${now})${admittedPredicate}
+  `;
 }

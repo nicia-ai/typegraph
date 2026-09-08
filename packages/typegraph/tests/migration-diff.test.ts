@@ -1089,7 +1089,7 @@ describe("computeSchemaDiff", () => {
       });
     });
 
-    it("detects added relation as safe change", () => {
+    it("detects added relation as data-validated warning", () => {
       const before = createSchema({ version: 1 });
       const after = createSchema({
         version: 2,
@@ -1109,7 +1109,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.ontology[0]).toMatchObject({
         type: "added",
         entity: "relation",
-        severity: "safe",
+        severity: "warning",
       });
       expect(requireDefined(diff.ontology[0]).details).toContain("subClassOf");
       expect(requireDefined(diff.ontology[0]).details).toContain("Employee");
@@ -1138,6 +1138,28 @@ describe("computeSchemaDiff", () => {
         entity: "relation",
         severity: "warning",
       });
+    });
+
+    it("classifies an added inverseOf relation as breaking", () => {
+      const before = createSchema({ version: 1 });
+      const after = createSchema({
+        version: 2,
+        ontology: {
+          ...emptyOntology(),
+          relations: [{ metaEdge: "inverseOf", from: "likes", to: "likedBy" }],
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.ontology).toHaveLength(1);
+      expect(diff.ontology[0]).toMatchObject({
+        type: "added",
+        entity: "relation",
+        severity: "breaking",
+      });
+      expect(diff.hasBreakingChanges).toBe(true);
+      expect(diff.isBackwardsCompatible).toBe(false);
     });
   });
 

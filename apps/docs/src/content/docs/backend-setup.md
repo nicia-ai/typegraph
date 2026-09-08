@@ -2169,10 +2169,25 @@ for (const violation of await store.verifyConstraintFences()) {
 It reports one entry per contended axis — `nodeUniqueness` and
 `nodeDisjointness` carry the conflicting `owners` (each a `concrete_kind` /
 `node_id` pair, because ids are unique only per kind), `edgeCardinality` carries
-the conflicting `edgeIds`. It reads the nodes, edges and `uniques` relations, so
+the conflicting `edgeIds`. A fourth family, `edgeEndpointAssignability`,
+reports edge kinds whose live rows sit outside every endpoint pair the current
+ontology admits (`edgeKind`, the `allowedPairs` still admitted, and the
+offending `edges`) — the same shrink an [ontology tightening](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+checks against, but reported for a whole graph rather than just the delta one
+schema commit proposes. It reads the nodes, edges and `uniques` relations, so
 it finds violations that predate the claim tables; it writes nothing, and it
 repairs nothing — choosing which claimant keeps the axis is a data-loss decision
 that stays with you.
+
+A custom backend implementing `readConstraintFenceViolations` may receive an
+`edgeEndpointAllowances` declaration (one entry per edge kind, each the
+concrete `(fromKind, toKind)` pairs the ontology still admits) and must answer
+with a `misassignedEdgeEndpointRows` array — present (even if empty) whenever
+`edgeEndpointAllowances` was non-empty. Leaving the key `undefined` when the
+family was requested is refused with `CONSTRAINT_FENCE_AUDIT_FAMILY_UNSUPPORTED`
+rather than tolerated as a clean result: an empty report there would be
+indistinguishable from a database with no violations, which is the one answer
+this diagnostic must never fabricate.
 
 ### SQLite ↔ PostgreSQL parity
 
