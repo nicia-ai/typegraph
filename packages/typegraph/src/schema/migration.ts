@@ -564,7 +564,7 @@ function normalizedSubschemaMap(value: unknown): unknown {
  * in a different order is correctly a no-op rather than a "modified" kind that
  * forces a migration.
  */
-function propertySchemasEqual(before: unknown, after: unknown): boolean {
+export function propertySchemasEqual(before: unknown, after: unknown): boolean {
   return canonicalEqual(
     orderNormalizedSchema(before),
     orderNormalizedSchema(after),
@@ -701,9 +701,15 @@ function propertyTypeSignature(schema: JsonSchema): string {
 
 /**
  * Non-constraining JSON-Schema keywords: changing them cannot invalidate an
- * existing stored value, so a diff limited to these is safe.
+ * existing stored value, so a diff limited to these is safe. Exported (module-
+ * local; not re-exported from `./index`) so `structural-subtype.ts`'s
+ * projection-coverage test can classify a projected keyword as migration
+ * metadata without re-spelling this list — this predicate's own rule 4
+ * silently drops the same keywords for a different reason (see that module's
+ * doc comment), but the KEYWORD SET a Zod projection can emit has exactly one
+ * owner regardless of which predicate is asking about it.
  */
-const NON_CONSTRAINING_KEYWORDS = new Set([
+export const NON_CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
   "description",
   "title",
   "default",
@@ -711,7 +717,9 @@ const NON_CONSTRAINING_KEYWORDS = new Set([
 ]);
 
 /** A copy of `schema` with the non-constraining keywords removed. */
-function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
+export function stripSchemaMetadata(
+  schema: JsonSchema,
+): Record<string, unknown> {
   // Data-keyed: JSON-Schema keywords parsed out of the persisted document.
   const stripped = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(schema)) {
@@ -720,7 +728,7 @@ function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
   return stripped;
 }
 
-function isObjectSchema(schema: JsonSchema): boolean {
+export function isObjectSchema(schema: JsonSchema): boolean {
   return schema.type === "object" || schema.properties !== undefined;
 }
 

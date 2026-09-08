@@ -100,6 +100,17 @@ export {
 } from "./migration";
 
 // ============================================================
+// Structural Subtyping
+// ============================================================
+
+export {
+  isStructuralSubtype,
+  type StructuralIncomparableReason,
+  type StructuralSubtypeReason,
+  type StructuralSubtypeResult,
+} from "./structural-subtype";
+
+// ============================================================
 // Validation Utilities
 // ============================================================
 
