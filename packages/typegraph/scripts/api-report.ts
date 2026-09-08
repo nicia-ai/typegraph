@@ -431,23 +431,34 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   `MigrationErrorDetails` member or the fourth audit family reaches needs a
 //   forgotten name there or at the backend-adapter entrypoints, which never
 //   name `OntologyChange` at all.
-// - The seven `Store`-bearing entrypoints that do not export
-//   `classifyOntologyChanges` (`.` 388→392, `./interchange` 709→713,
-//   `./profiler` 711→715, `./graph-merge` 726→730, `./provenance` 717→721,
-//   `./sqlite/local` 706→710, `./postgres/pglite` 706→710) each gain all four:
+// - The six `Store`-bearing entrypoints that do not export
+//   `classifyOntologyChanges` (`./interchange` 709→713, `./profiler`
+//   711→715, `./graph-merge` 726→730, `./provenance` 717→721, `./sqlite/local`
+//   706→710, `./postgres/pglite` 706→710) each gain all four:
 //   `EdgeEndpointAllowance`, `MisassignedEdgeEndpointRow`, `OntologyDataProbe`,
 //   and `UniquenessComponentProbeGroup` (+4 apiece). `./backend`,
 //   `./adapters/drizzle/indexes`, `./core`, `./graph-extension`, and
 //   `./indexes` are unaffected: `./backend` exports `EdgeEndpointAllowance`
 //   and `MisassignedEdgeEndpointRow` directly, and the other four never reach
 //   `MigrationErrorDetails`, `ReadConstraintFenceViolationsParams`, or
-//   `ConstraintFenceViolationRows` at all. Gate: every added symbol at every
-//   moved entrypoint is one of the four names above (never `OntologyChange`
-//   itself), no entrypoint's debt decreased, and exactly 14 entrypoints moved.
+//   `ConstraintFenceViolationRows` at all.
+// - `.` (the package root) is the one Store-bearing entrypoint that does NOT
+//   gain any of the four: `src/index.ts` exports `EdgeEndpointAllowance` and
+//   `MisassignedEdgeEndpointRow` directly (alongside `ConstraintFenceViolation`)
+//   and `OntologyDataProbe` / `UniquenessComponentProbeGroup` directly
+//   (alongside the schema-reads block), so a consumer of
+//   `"@nicia-ai/typegraph"` alone can name every field of a narrowed
+//   `ConstraintFenceViolation` or `MigrationErrorDetails` without a subpath
+//   import. Its debt therefore stays at the pre-batch baseline (388), not
+//   388→392. Gate: every added symbol at every OTHER moved entrypoint is one
+//   of the four names above (never `OntologyChange` itself, which is
+//   pre-existing debt everywhere including `.`), `.` is the one entrypoint
+//   this batch leaves unchanged, no OTHER entrypoint's debt decreased, and
+//   exactly 13 entrypoints moved.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 392,
-    sha256: "90590b1f13bbc79accec374b63a51b617b4445789d1d0abf776c3085eb3cfd75",
+    count: 388,
+    sha256: "ba5d322f78a05b64e3c21926da4836acb52a26ee41906b9904915884dae7c6ac",
   },
   "./adapters/drizzle/engine": {
     count: 322,

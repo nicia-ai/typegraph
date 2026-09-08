@@ -2019,7 +2019,7 @@ type EdgeCreateOptions = Readonly<{
 }>;
 
 // @public
-type EdgeEndpointAllowance = Readonly<{
+export type EdgeEndpointAllowance = Readonly<{
     edgeKind: string;
     allowedPairs: readonly (readonly [string, string])[];
 }>;
@@ -4812,7 +4812,7 @@ type MigrationHookContext = Readonly<{
 export function min(alias: string, field: string): AggregateExpr;
 
 // @public
-type MisassignedEdgeEndpointRow = Readonly<{
+export type MisassignedEdgeEndpointRow = Readonly<{
     edgeKind: string;
     edgeId: string;
     fromKind: string;
@@ -5310,7 +5310,7 @@ type OntologyChange = Readonly<{
 }>;
 
 // @public
-type OntologyDataProbe = Readonly<{
+export type OntologyDataProbe = Readonly<{
     kind: "nodeDisjointness";
     pairs: readonly (readonly [string, string])[];
 }> | Readonly<{
@@ -7902,7 +7902,7 @@ export type UniqueIntrospection = Readonly<{
 }>;
 
 // @public
-type UniquenessComponentProbeGroup = Readonly<{
+export type UniquenessComponentProbeGroup = Readonly<{
     constraintName: string;
     coveredKinds: readonly string[];
 }>;

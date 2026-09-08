@@ -170,6 +170,7 @@ export type {
   EdgeConvergenceMatch,
   EdgeCreateCommand,
   EdgeCreateCommandResult,
+  EdgeEndpointAllowance,
   EdgeEntityReadBackend,
   EdgeEntityWriteBackend,
   FilteredApproximateSearch,
@@ -200,6 +201,7 @@ export type {
   ManagedEdgeCreatePlan,
   ManagedNodeCreateMode,
   ManagedNodeCreatePlan,
+  MisassignedEdgeEndpointRow,
   NodeCreateCommand,
   NodeCreateCommandResult,
   NodeEntityReadBackend,
@@ -609,6 +611,15 @@ export {
   instantiateGraphTemplate,
   isSchemaInitialized,
   registerGraphTemplate,
+} from "./schema";
+// The data checks a schema commit's ontology tightening owes. Named here so
+// a consumer narrowing `MigrationErrorDetails.changes[n].probes` or a
+// `ConstraintFenceViolation`'s `edgeEndpointAssignability` member (below)
+// can name every field's type without a subpath import. Also available from
+// the "./schema" subpath.
+export type {
+  OntologyDataProbe,
+  UniquenessComponentProbeGroup,
 } from "./schema";
 export type {
   AlgorithmCyclePolicy,
