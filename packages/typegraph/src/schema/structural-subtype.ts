@@ -58,12 +58,21 @@
  *    projection emits `oneOf` only for `z.discriminatedUnion`, whose members
  *    are mutually exclusive by construction, so the two readings coincide
  *    over this fragment, with no overlap detection performed), every child
- *    member must find SOME parent member it subtypes. This is also what
- *    handles nullability with no special case: `z.string()` is a subtype of
- *    `z.string().nullable()` (`anyOf: [string, null]`) because the lone
- *    child member matches the union's first member; the reverse is not,
+ *    member must find SOME parent member it subtypes — checking every parent
+ *    member before concluding `incomparable`, so the verdict never depends on
+ *    the order the parent declared its members in (a member that cannot be
+ *    judged does not stop the search for a later member that matches). This
+ *    is also what handles nullability with no special case: `z.string()` is a
+ *    subtype of `z.string().nullable()` (`anyOf: [string, null]`) because the
+ *    lone child member matches the union's first member; the reverse is not,
  *    because the union's `null` member matches nothing on a bare `string`
- *    parent.
+ *    parent. A union keyword is ANDed with any sibling keyword on the same
+ *    schema object, not replaced by it — `{ type: "string", anyOf: [...] }`
+ *    admits only strings that also match a member — so once the member check
+ *    passes, the parent's sibling keywords (with `anyOf`/`oneOf` removed) are
+ *    compared too, through the ordinary rule set; the child's own sibling
+ *    keywords are not, since dropping them is conservative (see
+ *    `compareUnionSiblingConstraints`).
  * 7. Otherwise the two are compared as leaves: value sets (`const`/`enum`)
  *    must narrow, type tokens must agree (`integer` narrows `number`),
  *    objects compare property-by-property with the child allowed to add or
@@ -205,7 +214,7 @@ const NULL_TYPE_TOKEN = "null";
  * the same way it was for `format` before this predicate learned to compare
  * it (see `COMPARABLE_KEYWORDS`).
  */
-const UNMODELED_CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
+export const UNMODELED_CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
   "not",
   "allOf",
   "contentEncoding",
@@ -240,7 +249,7 @@ const UNMODELED_CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
  * either — it is compared exactly like `pattern` (present on the child,
  * absent or identical on the parent).
  */
-const COMPARABLE_KEYWORDS: ReadonlySet<string> = new Set([
+export const COMPARABLE_KEYWORDS: ReadonlySet<string> = new Set([
   "type",
   "const",
   "enum",
@@ -263,6 +272,22 @@ const COMPARABLE_KEYWORDS: ReadonlySet<string> = new Set([
   "multipleOf",
   "anyOf",
   "oneOf",
+]);
+
+/**
+ * Standard JSON Schema annotation keywords the Zod projection is known to
+ * emit that carry no constraint (unlike `UNMODELED_CONSTRAINING_KEYWORDS`)
+ * and so fall out of rule 4 with no special case, the same way an arbitrary
+ * `.meta()` key or `searchable()`'s `_searchableField` tag does. Listed here
+ * — rather than left to fall silently through rule 4 unnamed — only so the
+ * projection-coverage test (`tests/structural-subtype.test.ts`) can tell a
+ * keyword the projection is KNOWN to emit today from one a future Zod
+ * upgrade adds that no one has classified yet; adding an entry here does not
+ * change this module's runtime behavior in any way. `readOnly` (`.readonly()`)
+ * is the only keyword in this bucket at present.
+ */
+export const KNOWN_IGNORED_KEYWORDS: ReadonlySet<string> = new Set([
+  "readOnly",
 ]);
 
 const SUBTYPE: StructuralSubtypeResult = { verdict: "subtype" };
@@ -361,7 +386,9 @@ function compareSchemas(
   }
 
   if (isUnionSchema(child) || isUnionSchema(parent)) {
-    return compareUnion(child, parent, path, depth);
+    const unionResult = compareUnion(child, parent, path, depth);
+    if (unionResult.verdict !== "subtype") return unionResult;
+    return compareUnionSiblingConstraints(child, parent, path, depth);
   }
 
   return compareLeaf(child, parent, path, depth);
@@ -387,6 +414,46 @@ function unionMembers(schema: JsonSchema): readonly JsonSchema[] {
   return schema.anyOf ?? schema.oneOf ?? [schema];
 }
 
+/**
+ * `schema` with `anyOf`/`oneOf` removed, everything else untouched. Used to
+ * isolate a union schema's SIBLING keywords — the constraints ANDed alongside
+ * the union rather than expressed by it.
+ */
+function withoutUnionKeywords(schema: JsonSchema): JsonSchema {
+  const { anyOf: _anyOf, oneOf: _oneOf, ...rest } = schema;
+  return rest;
+}
+
+/**
+ * A union keyword (`anyOf`/`oneOf`) is ANDed with every sibling keyword on
+ * the same schema object, never replaced by it: `{ type: "string", anyOf:
+ * [...] }` admits only strings that ALSO match one of the `anyOf` members.
+ * `compareUnion` decides the member-matching half of that AND; this decides
+ * the other half by re-running the ordinary comparison against the PARENT's
+ * sibling keywords with `anyOf`/`oneOf` stripped off.
+ *
+ * Only the parent side needs this. Dropping the CHILD's own sibling keywords
+ * when it is a union is conservative — treating the child as looser than it
+ * really is can only produce a false `incomparable`/`not-subtype` refusal,
+ * never a false `subtype` accept — so no equivalent check runs for `child`.
+ * Dropping the PARENT's sibling keywords is unsound: it silently narrows what
+ * the parent constraint set actually excludes, which is exactly the defect
+ * this function closes (C2-R2-01).
+ */
+function compareUnionSiblingConstraints(
+  child: JsonSchema,
+  parent: JsonSchema,
+  path: readonly string[],
+  depth: number,
+): StructuralSubtypeResult {
+  if (!isUnionSchema(parent)) return SUBTYPE;
+  const parentSiblings = withoutUnionKeywords(parent);
+  if (Object.keys(stripSchemaMetadata(parentSiblings)).length === 0) {
+    return SUBTYPE;
+  }
+  return compareSchemas(child, parentSiblings, path, depth);
+}
+
 function compareUnion(
   child: JsonSchema,
   parent: JsonSchema,
@@ -406,6 +473,12 @@ function compareUnion(
     const memberPath =
       childIsUnion ? [...path, unionMemberSegment(childIndex)] : path;
     let matchedParentMember = false;
+    // A parent member that is itself incomparable does not end the search:
+    // the schema is order-insensitive by construction (unions are sets), so
+    // a LATER parent member that matches must still be found before this
+    // reports `incomparable` (C2-R2-04) — the top-level verdict for a given
+    // pair must not depend on the declared order of the parent's members.
+    let firstIncomparable: StructuralSubtypeResult | undefined;
     for (const parentMember of parentMembers) {
       const probeResult = compareSchemas(
         childMember,
@@ -413,14 +486,21 @@ function compareUnion(
         memberPath,
         depth + 1,
       );
-      if (probeResult.verdict === "incomparable") return probeResult;
       if (probeResult.verdict === "subtype") {
         matchedParentMember = true;
         break;
       }
+      if (
+        probeResult.verdict === "incomparable" &&
+        firstIncomparable === undefined
+      ) {
+        firstIncomparable = probeResult;
+      }
     }
     if (!matchedParentMember) {
-      return notSubtype("no-matching-union-member", memberPath);
+      return (
+        firstIncomparable ?? notSubtype("no-matching-union-member", memberPath)
+      );
     }
   }
 

@@ -17,7 +17,13 @@ import {
   isStructuralSubtype,
   type StructuralSubtypeResult,
 } from "../src/schema";
+import { NON_CONSTRAINING_KEYWORDS } from "../src/schema/migration";
 import { serializeSchemaProperties } from "../src/schema/serializer";
+import {
+  COMPARABLE_KEYWORDS,
+  KNOWN_IGNORED_KEYWORDS,
+  UNMODELED_CONSTRAINING_KEYWORDS,
+} from "../src/schema/structural-subtype";
 import {
   type JsonSchema,
   type SerializedNodeDef,
@@ -32,6 +38,37 @@ import { requireDefined } from "../src/utils/presence";
 
 function projected(schema: z.ZodType): JsonSchema {
   return serializeSchemaProperties(schema);
+}
+
+/**
+ * Every keyword `schema` carries, recursing only through JSON-Schema
+ * COMPOSITION edges (`properties` values, an object-valued
+ * `additionalProperties`, `propertyNames`, `items`, `prefixItems` members,
+ * `anyOf`/`oneOf` members) — never through a property NAME itself, which is
+ * data, not a keyword. Used by the "projection coverage" ratchet below.
+ */
+function collectProjectedKeywords(schema: JsonSchema, into: Set<string>): void {
+  for (const key of Object.keys(schema)) into.add(key);
+  if (schema.properties !== undefined) {
+    for (const propertySchema of Object.values(schema.properties)) {
+      collectProjectedKeywords(propertySchema, into);
+    }
+  }
+  if (typeof schema.additionalProperties === "object") {
+    collectProjectedKeywords(schema.additionalProperties, into);
+  }
+  if (schema.propertyNames !== undefined) {
+    collectProjectedKeywords(schema.propertyNames, into);
+  }
+  if (schema.items !== undefined) {
+    collectProjectedKeywords(schema.items, into);
+  }
+  for (const member of schema.prefixItems ?? []) {
+    collectProjectedKeywords(member, into);
+  }
+  for (const member of schema.anyOf ?? schema.oneOf ?? []) {
+    collectProjectedKeywords(member, into);
+  }
 }
 
 function verdict(child: z.ZodType, parent: z.ZodType): StructuralSubtypeResult {
@@ -748,6 +785,94 @@ describe("unions and nullability", () => {
 });
 
 // ============================================================
+// Union sibling keywords (C2-R2-01, C2-R2-04)
+// ============================================================
+
+describe("union sibling keywords", () => {
+  // C2-R2-01: a union keyword is ANDed with any sibling keyword on the same
+  // schema object, not replaced by it. `compareUnion` alone only checks the
+  // OR half of that AND (does the child match some member); dropping the
+  // parent's sibling keywords entirely — as the predicate did before this
+  // fix — silently discards the AND half and wrongly accepts pairs the
+  // parent actually excludes.
+  it("a parent union member match does not excuse the parent's own type sibling", () => {
+    // Every value satisfying the child (a number) fails the parent's own
+    // `type: "string"`, regardless of what the parent's `anyOf` allows.
+    const child: JsonSchema = { type: "number" };
+    const parent: JsonSchema = {
+      type: "string",
+      anyOf: [{ type: "number" }],
+    };
+    const result = isStructuralSubtype(child, parent);
+    expect(result).toMatchObject({
+      verdict: "not-subtype",
+      reason: "type-token-mismatch",
+    });
+  });
+
+  it("a parent union match does not excuse the parent's own minLength sibling", () => {
+    // The child (a bare string) admits "" — the parent's `anyOf` matches
+    // strings, but the parent ALSO requires minLength >= 5, which "" fails.
+    const child: JsonSchema = { type: "string" };
+    const parent: JsonSchema = {
+      anyOf: [{ type: "string" }, { type: "number" }],
+      minLength: 5,
+    };
+    const result = isStructuralSubtype(child, parent);
+    expect(result).toMatchObject({
+      verdict: "not-subtype",
+      reason: "string-length-not-tighter",
+    });
+  });
+
+  it("a parent union match does not excuse the parent's own required property sibling", () => {
+    // The child object admits `{}` — the parent's `anyOf` matches plain
+    // objects, but the parent ALSO requires property "a", which `{}` lacks.
+    const child: JsonSchema = {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    };
+    const parent: JsonSchema = {
+      anyOf: [{ type: "object" }, { type: "null" }],
+      properties: { a: { type: "string" } },
+      required: ["a"],
+    };
+    const result = isStructuralSubtype(child, parent);
+    expect(result).toMatchObject({
+      verdict: "not-subtype",
+      reason: "missing-required-property",
+      path: ["a"],
+    });
+  });
+
+  it("a parent union with no sibling keywords is unaffected (regression guard)", () => {
+    assertVerdict(
+      verdict(z.string(), z.union([z.string(), z.number()])),
+      "subtype",
+    );
+  });
+
+  // C2-R2-04: the verdict must not depend on the declared order of the
+  // parent's union members — an `incomparable` member earlier in the list
+  // must not stop the search for a matching member later in the list.
+  it("compareUnion's verdict is independent of parent-member order", () => {
+    const child: JsonSchema = { type: "string" };
+    const incomparableFirst: JsonSchema = {
+      anyOf: [{ not: {} }, { type: "string" }],
+    };
+    const incomparableLast: JsonSchema = {
+      anyOf: [{ type: "string" }, { not: {} }],
+    };
+    const resultA = isStructuralSubtype(child, incomparableFirst);
+    const resultB = isStructuralSubtype(child, incomparableLast);
+    expect(resultA).toEqual(resultB);
+    expect(resultA).toEqual({ verdict: "subtype" });
+  });
+});
+
+// ============================================================
 // Incomparable constructs
 // ============================================================
 
@@ -947,13 +1072,13 @@ describe("divergence from the migration predicate", () => {
 // ============================================================
 
 describe("projection coverage", () => {
-  // Every schema here must be reflexive (subtype of itself) once projected.
-  // If a future Zod upgrade starts emitting a keyword outside
-  // COMPARABLE_KEYWORDS for one of these constructs, this list is where it
-  // will fail first — add the keyword to COMPARABLE_KEYWORDS (if it is a
-  // constraint this predicate should model) or to UNMODELED_CONSTRAINING_KEYWORDS
-  // (if it constrains but is out of scope) in structural-subtype.ts, and only
-  // then update this test.
+  // Every schema here is checked for reflexivity below (a sanity baseline —
+  // it holds for any schema this predicate can even parse, since equal
+  // projections always hit the equality fast path before any construct is
+  // examined, so it CANNOT catch a future Zod upgrade emitting an
+  // unclassified keyword; see the `it` below the `it.each` for the test that
+  // actually ratchets that). The list itself stays useful as the record of
+  // every Zod construct this predicate has been checked against.
   const PROJECTION_CASES: readonly [string, z.ZodType][] = [
     ["z.string()", z.string()],
     ["z.string().min(1)", z.string().min(1)],
@@ -1010,6 +1135,40 @@ describe("projection coverage", () => {
     expect(isStructuralSubtype(schemaProjection, schemaProjection)).toEqual({
       verdict: "subtype",
     });
+  });
+
+  // The actual ratchet (C2-R2-02): walks every keyword the projection emits
+  // across all of PROJECTION_CASES — recursing only through JSON-Schema
+  // COMPOSITION edges (`properties` values, `items`, `prefixItems` members,
+  // `propertyNames`, an object-valued `additionalProperties`, `anyOf`/`oneOf`
+  // members), never through a property NAME itself — and asserts every one
+  // of them is a keyword this module has actually classified: comparable,
+  // known-but-unmodeled, known-non-constraining migration metadata, or a
+  // named-but-ignored annotation. A keyword outside all four buckets means a
+  // Zod upgrade started emitting something no one has looked at yet, and this
+  // is where that surfaces — reflexivity (above) cannot: it always hits the
+  // equality fast path before any keyword is examined, so it stays green even
+  // when `compareLeaf`'s entire rule set is gutted (confirmed by mutation).
+  // If this fails: add the reported keyword to COMPARABLE_KEYWORDS (if it
+  // should be compared for subtyping), UNMODELED_CONSTRAINING_KEYWORDS (if it
+  // constrains but is out of scope), or KNOWN_IGNORED_KEYWORDS (if it is a
+  // genuine non-constraining annotation) in structural-subtype.ts, and only
+  // then update this test.
+  it("every keyword the projection emits across PROJECTION_CASES has been classified", () => {
+    const observedKeywords = new Set<string>();
+    for (const [, schema] of PROJECTION_CASES) {
+      collectProjectedKeywords(projected(schema), observedKeywords);
+    }
+    const classifiedKeywords = new Set<string>([
+      ...COMPARABLE_KEYWORDS,
+      ...UNMODELED_CONSTRAINING_KEYWORDS,
+      ...NON_CONSTRAINING_KEYWORDS,
+      ...KNOWN_IGNORED_KEYWORDS,
+    ]);
+    const unclassifiedKeywords = [...observedKeywords]
+      .filter((keyword) => !classifiedKeywords.has(keyword))
+      .toSorted();
+    expect(unclassifiedKeywords).toEqual([]);
   });
 
   // Each entry supplies its own [child, parent] pair rather than a single

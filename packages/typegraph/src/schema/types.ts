@@ -373,14 +373,19 @@ export type JsonSchema = Readonly<{
   default?: unknown;
   minimum?: number;
   maximum?: number;
-  exclusiveMinimum?: number;
-  exclusiveMaximum?: number;
   multipleOf?: number;
   minLength?: number;
   maxLength?: number;
   pattern?: string;
   format?: string;
-  contentEncoding?: string;
+  // `exclusiveMinimum`, `exclusiveMaximum`, and `contentEncoding` are
+  // deliberately NOT named members: every reader of them
+  // (`structural-subtype.ts`'s `readNumber` and `unmodeledConstruct`) reaches
+  // them through the index signature below with a dynamic key, so naming them
+  // here would only widen this public type's surface with no code that needs
+  // the narrower access `noPropertyAccessFromIndexSignature` requires for the
+  // members that ARE named (`prefixItems`, `minItems`, `maxItems`,
+  // `propertyNames`, `multipleOf`).
   [key: string]: unknown;
 }>;
 

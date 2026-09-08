@@ -3326,14 +3326,11 @@ type JsonSchema = Readonly<{
     default?: unknown;
     minimum?: number;
     maximum?: number;
-    exclusiveMinimum?: number;
-    exclusiveMaximum?: number;
     multipleOf?: number;
     minLength?: number;
     maxLength?: number;
     pattern?: string;
     format?: string;
-    contentEncoding?: string;
     [key: string]: unknown;
 }>;
 

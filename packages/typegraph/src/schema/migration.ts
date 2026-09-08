@@ -701,9 +701,15 @@ function propertyTypeSignature(schema: JsonSchema): string {
 
 /**
  * Non-constraining JSON-Schema keywords: changing them cannot invalidate an
- * existing stored value, so a diff limited to these is safe.
+ * existing stored value, so a diff limited to these is safe. Exported (module-
+ * local; not re-exported from `./index`) so `structural-subtype.ts`'s
+ * projection-coverage test can classify a projected keyword as migration
+ * metadata without re-spelling this list — this predicate's own rule 4
+ * silently drops the same keywords for a different reason (see that module's
+ * doc comment), but the KEYWORD SET a Zod projection can emit has exactly one
+ * owner regardless of which predicate is asking about it.
  */
-const NON_CONSTRAINING_KEYWORDS = new Set([
+export const NON_CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
   "description",
   "title",
   "default",
