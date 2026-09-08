@@ -32,8 +32,8 @@ import {
  *      property union under the stable, non-wall-clock conflict policy.
  *   6. DELETE/MODIFY — `resolveDeleteModify` (T8a): the authoritative final
  *      liveness of every inherited node + the delete/modify conflicts.
- *   7. TYPE-RECONCILE — `reconcileTypes` (T10) over the public-closure glue when
- *      `reconcileTypes: "ontology"`; otherwise a no-op.
+ *   7. TYPE-RECONCILE — `reconcileTypes` (T10) over the store's validated
+ *      `KindRegistry` when `reconcileTypes: "ontology"`; otherwise a no-op.
  *   8. EDGE REPOINT — `repointEdges` (T9): repoint every staged edge onto its
  *      cluster canonical, drop edges to finally-deleted endpoints, dedupe + union
  *      edge props under the same conflict policy.
@@ -74,7 +74,6 @@ import {
   canonicalizeCluster,
   COMMITTED_TARGET_BRANCH,
 } from "./canonicalize";
-import { buildSubClassClosure } from "./closures";
 import type { ClusterResult } from "./clustering";
 import {
   connectedComponents,
@@ -200,6 +199,8 @@ import type {
   GraphDef,
   IdentityTransferAssertion,
   JsonValue,
+  JsonValue,
+  KindRegistry,
   LineageDelta,
   LineageMembers,
   LineageSession,
@@ -948,7 +949,7 @@ function buildInternalMergePlan<G extends GraphDef>(
   baseMembers: readonly BaseMember[],
   options: NormalizedMergeOptions<G>,
   branchRank: ReadonlyMap<BranchId, number>,
-  subClassClosure: ReturnType<typeof buildSubClassClosure>,
+  registry: KindRegistry,
   identityContext: PlanIdentityContext,
   storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>,
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
@@ -1036,7 +1037,7 @@ function buildInternalMergePlan<G extends GraphDef>(
   const preferKind =
     isOntology ?
       (kinds: readonly string[]): string | undefined =>
-        mostSpecificCommonKind(subClassClosure, kinds)
+        mostSpecificCommonKind(registry, kinds)
     : undefined;
   const clusterEdges =
     isOntology ?
@@ -1044,8 +1045,7 @@ function buildInternalMergePlan<G extends GraphDef>(
         ...candidateEdges,
         ...ontologyRetypeEdges(
           newNodesById.keys(),
-          (kinds) =>
-            mostSpecificCommonKind(subClassClosure, kinds) !== undefined,
+          (kinds) => mostSpecificCommonKind(registry, kinds) !== undefined,
         ),
       ]
     : candidateEdges;
@@ -1376,11 +1376,12 @@ function buildInternalMergePlan<G extends GraphDef>(
     }
   }
 
-  // (7) opt-in ontology type reconciliation over the public-closure glue. Inputs
-  // (incl. base member kinds) were collected per cluster in the canonicalize loop.
+  // (7) opt-in ontology type reconciliation over the store's validated
+  // KindRegistry. Inputs (incl. base member kinds) were collected per cluster
+  // in the canonicalize loop.
   const reconciliation = reconcileTypes(
     reconcileInputs,
-    subClassClosure,
+    registry,
     options.reconcileTypes,
   );
   const reconciledClusterByEntityId = new Map<string, ClusterResult>();
@@ -3183,7 +3184,15 @@ async function resolveMerge<G extends GraphDef, Output>(
     for (const kind of introspection.kinds) {
       introspectionKinds.set(kind.name, kind.unique);
     }
-    const subClassClosure = buildSubClassClosure(introspection.ontology);
+    // The registry is built from the same `graph.ontology` `introspect()`
+    // projects onto `{ metaEdge, from, to }` pairs (store/introspect.ts), and
+    // unlike that raw projection it has already passed
+    // `validateOntologyRelations` — including the equivalence-class refusal.
+    // `store`, not `target`: on the incremental path `store` is the fork
+    // point, which is the ontology source type reconciliation has always
+    // used, and the schema-drift guard above already refuses a branch whose
+    // schema differs.
+    const registry = store.registry;
 
     // (3) candidate generation across every resolved kind. When an embedder is
     // configured, precompute the STAGED texts' vectors ONCE (a batched step) so
@@ -3285,7 +3294,7 @@ async function resolveMerge<G extends GraphDef, Output>(
       candidates.data.baseMembers,
       options,
       branchRank,
-      subClassClosure,
+      registry,
       identityContext,
       storedIdentityRowsById,
       targetPeers,

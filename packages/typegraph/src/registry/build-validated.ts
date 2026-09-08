@@ -3,6 +3,7 @@ import { type AnyEdgeType, type NodeType } from "../core/types";
 import { ConfigurationError } from "../errors";
 import {
   type NamedOntologyRelation,
+  type OntologyKindClassification,
   validateOntologyRelations,
 } from "../ontology/validation";
 import { requireDefined } from "../utils/presence";
@@ -24,8 +25,22 @@ export function buildValidatedKindRegistry(
     ontology: readonly NamedOntologyRelation[];
     edgeEndpoints: ReadonlyMap<string, EdgeEndpointKinds>;
     identity?: GraphIdentityConfig;
+    /**
+     * How to tell a registered node kind from a registered edge kind, for the
+     * equivalence-class check. Defaults to this input's own kind maps; the
+     * schema deserializer supplies its own because it builds a registry with
+     * EMPTY kind maps (it has no Zod schemas) and would otherwise classify
+     * every name as neither.
+     */
+    kindClassification?: OntologyKindClassification;
   }>,
 ): KindRegistry {
+  const kindClassification: OntologyKindClassification =
+    input.kindClassification ?? {
+      isNodeKind: (name: string) => input.nodeKinds.has(name),
+      isEdgeKind: (name: string) => input.edgeKinds.has(name),
+    };
+
   if (input.ontology.length === 0) {
     const registry = new KindRegistry(
       input.nodeKinds,
@@ -37,7 +52,7 @@ export function buildValidatedKindRegistry(
     return registry;
   }
 
-  const issues = validateOntologyRelations(input.ontology);
+  const issues = validateOntologyRelations(input.ontology, kindClassification);
   if (issues.length > 0) {
     const firstIssue = requireDefined(issues[0]);
     throw new ConfigurationError(

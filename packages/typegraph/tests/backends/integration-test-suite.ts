@@ -81,6 +81,7 @@ import {
   registerMultiRecursiveTraversalIntegrationTests,
   registerMultiRootSubgraphBatchIntegrationTests,
   registerOntologyTighteningIntegrationTests,
+  registerOntologyEquivalenceIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
@@ -330,6 +331,7 @@ export function createIntegrationTestSuite<
     registerAdoptedEvolutionConcurrencyTests(context);
     registerMigrateSchemaKindIntegrationTests(context);
     registerReconciledSchemaIntegrationTests(context);
+    registerOntologyEquivalenceIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
     registerLineageConformanceIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);

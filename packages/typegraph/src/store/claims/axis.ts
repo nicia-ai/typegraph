@@ -23,7 +23,7 @@ import { subClassComponent } from "../../constraints";
 import { type UniquenessScope } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { compareStrings } from "../../utils/compare";
+import { compareCodePoints, compareStrings } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
 
 /**
@@ -199,7 +199,7 @@ export function uniquenessProbeKinds(
   const coveredKinds = uniquenessClaimKinds(kind, scope, registry);
   const rest = coveredKinds
     .filter((candidate) => candidate !== axis)
-    .toSorted((left, right) => compareStrings(left, right));
+    .toSorted((left, right) => compareCodePoints(left, right));
   return [axis, ...rest];
 }
 

@@ -174,10 +174,19 @@ const equivalentToMetaEdge = createMetaEdge(META_EDGE_EQUIVALENT_TO, {
 
 /**
  * Creates an equivalentTo ontology relation.
- * Can be used with external IRIs for cross-system mapping.
+ *
+ * Between two registered kinds, `equivalentTo` is MUTUAL SUBSUMPTION (D1):
+ * `KindRegistry` folds the class into `subClassAncestors`/`subClassDescendants`
+ * before the transitive closure, so `isAssignableTo`, `expandSubClasses`,
+ * disjointness propagation and the `kindWithSubClasses` claim axis all agree
+ * that the two kinds are substitutable. Subsumption is a node-kind relation,
+ * so the left parameter widens to `NodeType | AnyEdgeType` only so an edge
+ * kind can be mapped to an external IRI for cross-system mapping — an edge
+ * kind equivalenced to a registered node or edge kind is refused at registry
+ * build (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`).
  */
 export function equivalentTo(
-  kindA: NodeType,
+  kindA: NodeType | AnyEdgeType,
   kindBOrIri: NodeType | string,
 ): OntologyRelation {
   return {

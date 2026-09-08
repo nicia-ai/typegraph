@@ -21,7 +21,7 @@ import {
 import { isExternalIri } from "../ontology/external-iri";
 import { type OntologyRelation } from "../ontology/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
-import { compareStrings } from "../utils/compare";
+import { compareCodePoints } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
 
 const DISJOINT_PAIR_SEPARATOR = "|";
@@ -127,7 +127,7 @@ function computeSubClassComponents(
       }
     }
     const component = Object.freeze(
-      [...members].toSorted((left, right) => compareStrings(left, right)),
+      [...members].toSorted((left, right) => compareCodePoints(left, right)),
     );
     for (const member of members) components.set(member, component);
   }
@@ -565,6 +565,30 @@ type CollectedOntologyRelations = Readonly<{
  * The closures disjointness expansion consumes. `validateOntologyRelations`
  * and the registry share this exact input so a declaration validation accepts
  * can never expand differently at runtime.
+ *
+ * D1 folds every `equivalentTo` pair into `subClassAncestors`/
+ * `subClassDescendants` before this closure is built (see
+ * {@link computeSubsumptionAndEquivalenceClosures}), so every equivalence-set
+ * member is ALREADY reachable through `subClassDescendants` alone —
+ * `equivalenceSets` is not a second, independent source of "which kinds does
+ * this one inherit disjointness from". It is carried here purely so
+ * {@link expandDisjointSide} can recognize when two kinds share a class and
+ * skip re-walking a fellow's (nearly-identical, and potentially huge)
+ * `subClassDescendants` view a second time: a large `equivalentTo`/`sameAs`
+ * class would otherwise cost O(class size) PER MEMBER to re-discover the same
+ * fellows and structural descendants every other member's view already
+ * named.
+ *
+ * PRECONDITION `expandDisjointSide` relies on and does not re-check: within
+ * one equivalence class, every member's `subClassDescendants` entry must be
+ * "nearly identical" — differing only by which single member each entry
+ * excludes (the property `expandCollapsedRelation` guarantees by construction
+ * for its own two closures). A `subClassDescendants` built any other way
+ * (e.g. by hand, or by a future second builder) breaks the "one fellow's view
+ * already covers every other fellow's" skip silently: it stops early having
+ * missed whichever fellow's distinct descendants were never walked, with no
+ * error. Only `computeDisjointExpansionClosures` is a sound source of this
+ * type today.
  */
 export type DisjointExpansionClosures = Readonly<{
   subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
@@ -647,15 +671,246 @@ function collectOntologyRelations(
   };
 }
 
+/**
+ * Maps every equivalence-class member — including an external IRI member —
+ * to that class's canonical representative: the code-point minimum of the
+ * class's LOCAL (non-IRI) members. A kind outside every equivalence class is
+ * absent (callers fall back to the kind itself).
+ *
+ * D1 folds `equivalentTo` into mutual subsumption by collapsing each class to
+ * ONE node before the transitive closure runs ({@link
+ * computeSubsumptionAndEquivalenceClosures}), rather than by spelling out
+ * every ordered pair of distinct members as a direct edge: a class of N
+ * members already has every member mutually reachable BY CONSTRUCTION (that
+ * is what an equivalence class is), so materializing all N·(N-1) pairs before
+ * even reaching Warshall — and Warshall's own O(V³) worst case over that many
+ * newly-connected nodes — turns one large, otherwise-ordinary `sameAs`
+ * migration into an out-of-memory crash. Collapsing first keeps THE
+ * TRANSITIVE-CLOSURE STEP (`computeTransitiveClosure` and its invert)
+ * proportional to the number of DISTINCT classes and subClassOf-connected
+ * kinds, never to a single class's size — the O(class size) work in
+ * `expandCollapsedRelation` below to fold each class back in is separate and
+ * unavoidable, and `computeSubClassComponents`, downstream of both, still
+ * BFSes one large equivalence-only class in O(class size²).
+ *
+ * An IRI member MUST map to its class's representative too, even though an
+ * IRI never surfaces as a kind on its own (that filter lives downstream, in
+ * {@link expandCollapsedRelation}'s `ownClassMembers` handling). A raw
+ * `subClassOf` relation can name an IRI as an endpoint — a graph-extension
+ * document is not type-checked against `NodeType`, so `subClassOf(Student,
+ * "<iri>")` is representable even though the typed `subClassOf()` helper
+ * never produces one — and `collapsedSubClass` below collapses that endpoint
+ * through `representativeOf`. Leaving the IRI unmapped left it as a literal
+ * node in the collapsed graph: reachable from the ancestor side (subClassOf's
+ * child), because that side walks OUTWARD from a real kind, but never a KEY
+ * on the descendant side, because nothing collapses to look IT up. That made
+ * `subClassAncestors`/`subClassDescendants` stop being exact inverses for
+ * exactly the shape D1 exists to unify — an equivalence class routed through
+ * an IRI that also terminates a `subClassOf` edge.
+ */
+function computeEquivalenceRepresentatives(
+  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlyMap<string, string> {
+  const representativeOf = new Map<string, string>();
+  for (const [member, others] of equivalenceSets) {
+    if (representativeOf.has(member)) continue;
+    const allMembers = [member, ...others];
+    const localMembers = allMembers.filter((name) => !isExternalIri(name));
+    // A class made up ENTIRELY of external IRIs — two bare IRIs declared
+    // equivalentTo each other — has no local kind to route to. The typed
+    // `equivalentTo()` helper can never produce this (its left parameter is
+    // always a real kind), but the raw, untyped ontology-relation shape a
+    // graph-extension document or a hand-built `NamedOntologyRelation` uses
+    // can. Leave its members unmapped rather than crash: with no local kind
+    // in the class, there is nothing for a `subClassOf` endpoint to route
+    // to, so this is the same pre-existing, out-of-scope "bare unmapped IRI"
+    // case as an IRI with no equivalence class at all.
+    if (localMembers.length === 0) continue;
+    const representative = requireDefined(
+      localMembers.toSorted((left, right) => compareCodePoints(left, right))[0],
+    );
+    for (const name of allMembers) representativeOf.set(name, representative);
+  }
+  return representativeOf;
+}
+
+/**
+ * Expands a collapsed-representative reachability relation (subClassOf
+ * ancestors, or its invert) back to a per-kind map, folding each kind's own
+ * equivalence class back in. Used for BOTH directions: once with the
+ * collapsed ancestor closure to build `subClassAncestors`, once with its
+ * invert (cheap — see {@link computeSubsumptionAndEquivalenceClosures}) to
+ * build `subClassDescendants`, since the fold is symmetric in both.
+ *
+ * The per-representative "extra" reachable set — everything reached
+ * transitively through subClassOf, each expanded to ITS OWN class's fellow
+ * members — is computed and cached ONCE per representative, never once per
+ * class member: every member of one equivalence class shares the identical
+ * extra set, so recomputing it per member is exactly the redundant O(class
+ * size) work {@link computeEquivalenceRepresentatives}'s docstring explains
+ * collapsing avoids.
+ *
+ * When a kind's class reaches nothing beyond itself in `collapsedRelation`
+ * (the common case for a class formed purely by `equivalentTo`/`sameAs`, with
+ * no other subClassOf relation anywhere in the class), this reuses
+ * `equivalenceSets.get(kind)` — already an O(1)-to-construct excluding view —
+ * as the kind's reachable set directly, with NO per-kind materialization.
+ * Only a kind whose class ALSO reaches outside members pays the O(class size)
+ * cost of building a real combined `Set`, and it pays it once per
+ * representative, never once per sibling — the same discipline that keeps
+ * `withoutSelfMembership`'s caller cheap for a huge equivalence-only class.
+ *
+ * An equivalence class may itself contain an external IRI (a kind mapped to
+ * one for cross-system reference), and an IRI is never a kind, so it must not
+ * surface as a member here. Whether a REPRESENTATIVE's class contains one is
+ * checked and cached once per representative — `classHasExternalIri` below —
+ * rather than scanned once per member, so a large IRI-free equivalence class
+ * (the common case) still costs O(1) per member instead of paying an O(class
+ * size) scan on every one of its members.
+ */
+function expandCollapsedRelation(
+  collapsedRelation: ReadonlyMap<string, ReadonlySet<string>>,
+  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>,
+  representativeOf: ReadonlyMap<string, string>,
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const allKinds = new Set<string>(representativeOf.keys());
+  for (const [from, tos] of collapsedRelation) {
+    allKinds.add(from);
+    for (const to of tos) allKinds.add(to);
+  }
+
+  const extraByRepresentative = new Map<string, ReadonlySet<string>>();
+  function extraOf(representative: string): ReadonlySet<string> {
+    const cached = extraByRepresentative.get(representative);
+    if (cached !== undefined) return cached;
+    const extra = new Set<string>();
+    for (const reachableRepresentative of collapsedRelation.get(
+      representative,
+    ) ?? []) {
+      extra.add(reachableRepresentative);
+      for (const fellow of equivalenceSets.get(reachableRepresentative) ?? []) {
+        if (!isExternalIri(fellow)) extra.add(fellow);
+      }
+    }
+    extraByRepresentative.set(representative, extra);
+    return extra;
+  }
+
+  const classHasExternalIriByRepresentative = new Map<string, boolean>();
+  function classHasExternalIri(representative: string): boolean {
+    const cached = classHasExternalIriByRepresentative.get(representative);
+    if (cached !== undefined) return cached;
+    let found = false;
+    for (const fellow of equivalenceSets.get(representative) ?? []) {
+      if (isExternalIri(fellow)) {
+        found = true;
+        break;
+      }
+    }
+    classHasExternalIriByRepresentative.set(representative, found);
+    return found;
+  }
+
+  const result = new Map<string, ReadonlySet<string>>();
+  for (const kind of allKinds) {
+    if (isExternalIri(kind)) continue;
+    const representative = representativeOf.get(kind) ?? kind;
+    const extra = extraOf(representative);
+    const rawOwnClassMembers = equivalenceSets.get(kind);
+    const ownClassMembers =
+      rawOwnClassMembers !== undefined && classHasExternalIri(representative) ?
+        new Set(
+          [...rawOwnClassMembers].filter((fellow) => !isExternalIri(fellow)),
+        )
+      : rawOwnClassMembers;
+    if (extra.size === 0) {
+      if (ownClassMembers !== undefined && ownClassMembers.size > 0) {
+        result.set(kind, ownClassMembers);
+      }
+      continue;
+    }
+    const combined = new Set<string>(extra);
+    for (const fellow of ownClassMembers ?? []) combined.add(fellow);
+    result.set(kind, combined);
+  }
+  return result;
+}
+
+/**
+ * Strips a kind's own name from its ancestor set.
+ *
+ * A perfectly LEGAL ontology can put a representative on a cycle: a kind
+ * sitting strictly between two mutually-equivalent kinds forces it, since
+ * `equivalentTo` collapses `A` and `B` to one representative before the
+ * closure runs — `equivalentTo(A, B)`, `subClassOf(A, C)`, `subClassOf(C, B)`
+ * passes `validateOntologyRelations` (the raw `subClassOf` edges `A → C → B`
+ * are not a cycle; nothing here inspects `equivalentTo`), yet after the fold
+ * `C`'s representative reaches `A`'s representative and back, so `A`, `B` and
+ * `C` all become reachable from themselves. A genuinely cyclic `subClassOf`
+ * declaration (rejected by `validateOntologyRelations`, but still reached by
+ * the disjointness-conflict pass before that rejection is enforced) produces
+ * the same self-reachability the harder way. Subsumption is STRICT in both
+ * cases — `isSubClassOf(k, k)` is false and `expandSubClasses(k)` lists `k`
+ * once — so the self-edge is removed here, at the one place the closure is
+ * built, rather than guarded at each of the read sites.
+ */
+function withoutSelfMembership(
+  closure: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const result = new Map<string, ReadonlySet<string>>();
+  for (const [kind, reachable] of closure) {
+    result.set(
+      kind,
+      reachable.has(kind) ?
+        new Set([...reachable].filter((other) => other !== kind))
+      : reachable,
+    );
+  }
+  return result;
+}
+
 function computeSubsumptionAndEquivalenceClosures(
   collected: CollectedOntologyRelations,
 ): DisjointExpansionClosures &
-  Readonly<{ subClassAncestors: ReadonlyMap<string, ReadonlySet<string>> }> {
-  const subClassAncestors = computeTransitiveClosure(collected.subClass);
+  Readonly<{
+    subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
+    equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
+  }> {
+  const equivalenceSets = computeEquivalenceSets(collected.equivalent);
+  const representativeOf = computeEquivalenceRepresentatives(equivalenceSets);
+
+  const collapsedSubClass: NamedRelationPair[] = [];
+  for (const [child, parent] of collected.subClass) {
+    const repChild = representativeOf.get(child) ?? child;
+    const repParent = representativeOf.get(parent) ?? parent;
+    if (repChild !== repParent) collapsedSubClass.push([repChild, repParent]);
+  }
+  const collapsedAncestors = computeTransitiveClosure(collapsedSubClass);
+  // Inverting the COLLAPSED closure is cheap — it is sized to the distinct
+  // subClassOf-connected kinds, never to any one equivalence class's member
+  // count — unlike inverting the expanded `subClassAncestors` below, which
+  // would force materializing the full O(class size²) descendant relation a
+  // large equivalence-only class already avoids by construction.
+  const collapsedDescendants = invertClosure(collapsedAncestors);
+
+  const subClassAncestors = withoutSelfMembership(
+    expandCollapsedRelation(
+      collapsedAncestors,
+      equivalenceSets,
+      representativeOf,
+    ),
+  );
+  const subClassDescendants = withoutSelfMembership(
+    expandCollapsedRelation(
+      collapsedDescendants,
+      equivalenceSets,
+      representativeOf,
+    ),
+  );
   return {
     subClassAncestors,
-    subClassDescendants: invertClosure(subClassAncestors),
-    equivalenceSets: computeEquivalenceSets(collected.equivalent),
+    subClassDescendants,
+    equivalenceSets,
   };
 }
 
@@ -673,6 +928,34 @@ export function computeDisjointExpansionClosures(
   return computeSubsumptionAndEquivalenceClosures(
     collectOntologyRelations(ontology),
   );
+}
+
+/**
+ * Every equivalence class the ontology declares, each as its member list in
+ * code-point order, once per class.
+ *
+ * Exported so ontology validation classifies the SAME classes the registry
+ * folds into subsumption. A second spelling of "which kinds are one class"
+ * would let validation accept a class the fold then treats differently.
+ */
+export function computeEquivalenceClasses(
+  ontology: readonly NamedOntologyRelation[],
+): readonly (readonly string[])[] {
+  const sets = computeEquivalenceSets(
+    collectOntologyRelations(ontology).equivalent,
+  );
+  const seen = new Set<string>();
+  const classes: (readonly string[])[] = [];
+  for (const [member, others] of sets) {
+    const members = [member, ...others].toSorted((left, right) =>
+      compareCodePoints(left, right),
+    );
+    const key = JSON.stringify(members);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    classes.push(Object.freeze(members));
+  }
+  return classes;
 }
 
 /** Computes all registry closures from already-normalized relation names. */
@@ -986,43 +1269,59 @@ function computeDisjointPairs(
 
 /**
  * Expands one side of a disjoint pair to every kind that inherits its
- * disjointness: the kind itself, its subclass descendants, and its
- * equivalence-set members. External IRIs are excluded — they are inert
- * references, not local kinds that participate in identity folding.
+ * disjointness: the kind itself and its subclass descendants. External IRIs
+ * are excluded — they are inert references, not local kinds that participate
+ * in identity folding.
  *
- * The IRI exclusion stops descent, so a subclass reached only *through* an
- * IRI does not inherit disjointness. Equivalence, by contrast, still crosses
- * IRIs because `computeEquivalenceSets` unions over them: a class containing
- * an IRI is already closed, and every member is one hop away.
+ * D1 folds `equivalentTo` into mutual subsumption before this closure is
+ * built ({@link computeSubsumptionAndEquivalenceClosures}), so an
+ * equivalence-set member is
+ * ALREADY a subclass descendant — walking `equivalenceSets` here too would be
+ * a second, redundant path to the same kinds. The IRI exclusion still stops
+ * descent through a subclass declared against an IRI endpoint (a graph
+ * extension may author one), so a subclass reached only *through* an IRI does
+ * not inherit disjointness.
  *
  * Both the registry and `validateOntologyRelations` expand through this
  * function. Re-implementing it against the declared relations instead of the
- * precomputed closures reintroduces exactly that IRI asymmetry as a
+ * precomputed closure reintroduces the equivalence-through-IRI case as a
  * validation blind spot.
  */
 export function expandDisjointSide(
   kind: string,
   closures: DisjointExpansionClosures,
 ): readonly string[] {
-  const expanded = new Set<string>();
-  // Equivalence sets partition the kinds, so every member of a class sees the
-  // same class. Consuming a class once keeps expansion linear in the class
-  // size instead of quadratic.
-  const consumedEquivalenceClasses = new Set<string>();
+  if (isExternalIri(kind)) return [];
+  // `expanded` marks a kind the MOMENT it is discovered (pushed), not only
+  // once it is popped and processed — so every kind is pushed AT MOST ONCE
+  // for the life of this call, which bounds `pending`'s size to the number of
+  // distinct kinds ever discovered instead of letting an equivalence class's
+  // members re-discover each other before any of them is marked.
+  const expanded = new Set<string>([kind]);
+  // A member of an already-fully-walked equivalence class needs no second
+  // walk of its own `subClassDescendants` view: two fellows' views differ
+  // only by which single member each excludes, so once ANY fellow's view has
+  // been iterated, every other fellow's view is already a subset of
+  // `expanded`. Without this, a class of N members costs O(N) to iterate
+  // PER MEMBER — O(N²) total, and exactly what turned an otherwise-ordinary
+  // `equivalentTo`/`sameAs` migration into a multi-billion-entry queue before
+  // this guard existed. Marking every fellow the first time (also O(N),
+  // exactly once per class) is what makes the skip legal for the rest.
+  const descendantsAlreadyCoveredBy = new Set<string>();
   const pending = [kind];
   while (pending.length > 0) {
     const current = requireDefined(pending.pop());
-    if (expanded.has(current) || isExternalIri(current)) continue;
-    expanded.add(current);
-    if (!consumedEquivalenceClasses.has(current)) {
-      consumedEquivalenceClasses.add(current);
-      for (const equivalent of closures.equivalenceSets.get(current) ?? []) {
-        consumedEquivalenceClasses.add(equivalent);
-        pending.push(equivalent);
+    if (!descendantsAlreadyCoveredBy.has(current)) {
+      for (const descendant of closures.subClassDescendants.get(current) ??
+        []) {
+        if (!expanded.has(descendant) && !isExternalIri(descendant)) {
+          expanded.add(descendant);
+          pending.push(descendant);
+        }
       }
-    }
-    for (const descendant of closures.subClassDescendants.get(current) ?? []) {
-      pending.push(descendant);
+      for (const fellow of closures.equivalenceSets.get(current) ?? []) {
+        descendantsAlreadyCoveredBy.add(fellow);
+      }
     }
   }
   return [...expanded];

@@ -23,8 +23,12 @@ import {
   type SerializedSchema,
   serializeSchema,
 } from "../src/schema";
-import { disjointnessClaimAxis } from "../src/store/claims/axis";
-import { matchingArray, matchingObject } from "./test-utils";
+import {
+  disjointnessClaimAxis,
+  uniquenessClaimTarget,
+} from "../src/store/claims/axis";
+import { createStoreWithSchema } from "../src/store/store";
+import { createTestBackend, matchingArray, matchingObject } from "./test-utils";
 
 const emptySchema = z.object({});
 const Person = defineNode("Person", { schema: emptySchema });
@@ -258,7 +262,20 @@ describe("ontology truth and hardening", () => {
     );
   });
 
-  it("stops disjointness descent at external IRIs in validation and runtime alike", () => {
+  it("continues subclass descent through an external IRI that is also a subClassOf endpoint", () => {
+    // Regression for a defect found reviewing D1: `subClassOf(Gamma, IRI)`
+    // reaches Alpha's representative through the IRI's equivalence class
+    // (`equivalentTo(Alpha, IRI)`) on the ANCESTOR side by construction —
+    // `isSubClassOf("Gamma", "Alpha")` was already true before this fix, via
+    // `expandCollapsedRelation`'s per-representative fellow walk. What was
+    // missing was the DESCENDANT side: `representativeOf` left the IRI
+    // unmapped, so `collapsedSubClass` kept it as a literal, disconnected
+    // node instead of resolving it to Alpha's representative, and Gamma
+    // silently dropped out of `subClassDescendants.get("Alpha")` — the two
+    // closures disagreed about the very same pair. An IRI is still never a
+    // KIND (it never appears as a member of either set), but it is no longer
+    // a dead end for a `subClassOf` edge that names it: the class it belongs
+    // to is exactly what a `subClassOf`-to-IRI edge subsumes.
     const externalIri = "http://example.org/X";
     const ontology = [
       { metaEdge: "equivalentTo", from: "Alpha", to: externalIri },
@@ -266,14 +283,123 @@ describe("ontology truth and hardening", () => {
       { metaEdge: "disjointWith", from: "Alpha", to: "Beta" },
     ];
 
-    // An IRI is an inert reference, so subclass descent stops there: Gamma
-    // inherits nothing from Alpha. Validation must agree rather than reason
-    // past what the registry actually materializes.
     expect(validateOntologyRelations(ontology)).toEqual([]);
 
     const closures = computeClosuresFromNamedOntology(ontology);
-    expect([...closures.disjointPairs]).toEqual(["Alpha|Beta"]);
+    expect(closures.subClassAncestors.get("Gamma")?.has("Alpha")).toBe(true);
+    expect(closures.subClassDescendants.get("Alpha")?.has("Gamma")).toBe(true);
+    expect([...closures.disjointPairs].toSorted()).toEqual([
+      "Alpha|Beta",
+      "Beta|Gamma",
+    ]);
+    // Gamma is a SUBCLASS of Alpha through the IRI bridge, not equivalentTo
+    // it — the equivalence set itself stays exactly what was declared.
     expect(closures.equivalenceSets.get("Alpha")?.has("Gamma")).toBe(false);
+  });
+
+  it("propagates disjointness through an IRI-routed equivalence chain (fold parity)", () => {
+    // D1 folds equivalentTo into mutual subsumption BEFORE the disjoint-side
+    // expansion runs, so `expandDisjointSide` no longer walks `equivalenceSets`
+    // separately (§3.1e) — it reaches Beta through `subClassDescendants` alone,
+    // exactly as it reached a subclass before this change. This case is the
+    // one that would break if that fold were undone.
+    const externalIri = "http://example.org/equivalence-route";
+    const ontology = [
+      { metaEdge: "equivalentTo", from: "Alpha", to: externalIri },
+      { metaEdge: "equivalentTo", from: externalIri, to: "Beta" },
+      { metaEdge: "disjointWith", from: "Alpha", to: "Gamma" },
+    ];
+
+    expect(validateOntologyRelations(ontology)).toEqual([]);
+    const closures = computeClosuresFromNamedOntology(ontology);
+    expect(closures.disjointPairs.has("Beta|Gamma")).toBe(true);
+  });
+
+  it("keeps an external IRI out of subsumption itself, not only out of disjointness propagation", () => {
+    // The disjointness tests above only pin what gets THROUGH an IRI-routed
+    // equivalence chain, not whether the IRI itself became a subsumption
+    // member. An IRI is an inert reference (ontology.md): it must never
+    // appear as an ancestor/descendant, never satisfy isSubClassOf, and never
+    // enter a kind's subclass component or uniqueness claim axis.
+    const externalIri = "https://schema.org/Person";
+
+    // Single-kind case: Person ≡ IRI alone must not turn the mapping into a
+    // cross-kind uniqueness claim.
+    const soloGraph = defineGraph({
+      id: "iri-inert-solo",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      ontology: [equivalentTo(Person, externalIri)],
+    });
+    const soloRegistry = buildKindRegistry(soloGraph);
+    expect(soloRegistry.getSubClassComponent("Person")).toEqual(["Person"]);
+    expect(
+      uniquenessClaimTarget("Person", "kindWithSubClasses", soloRegistry),
+    ).toEqual({ axis: "Person", crossKind: false });
+
+    // Two-kind case: Person ≡ IRI ≡ Individual routes a real equivalence
+    // through the IRI, so Person and Individual must fold together — but the
+    // IRI itself must stay out of every subsumption-reading API.
+    const Individual = defineNode("Individual", { schema: emptySchema });
+    const routedGraph = defineGraph({
+      id: "iri-inert-routed",
+      nodes: { Person: { type: Person }, Individual: { type: Individual } },
+      edges: {},
+      ontology: [
+        equivalentTo(Person, externalIri),
+        equivalentTo(Individual, externalIri),
+      ],
+    });
+    const routedRegistry = buildKindRegistry(routedGraph);
+
+    expect([...routedRegistry.getAncestors("Person")]).not.toContain(
+      externalIri,
+    );
+    expect([...routedRegistry.getAncestors("Individual")]).not.toContain(
+      externalIri,
+    );
+    expect(routedRegistry.expandSubClasses("Person")).not.toContain(
+      externalIri,
+    );
+    expect(routedRegistry.isSubClassOf("Person", externalIri)).toBe(false);
+    expect(routedRegistry.isAssignableTo("Person", externalIri)).toBe(false);
+    expect(routedRegistry.getSubClassComponent("Person")).toEqual([
+      "Individual",
+      "Person",
+    ]);
+    expect(routedRegistry.getSubClassComponent("Individual")).toBe(
+      routedRegistry.getSubClassComponent("Person"),
+    );
+    expect(
+      uniquenessClaimTarget("Person", "kindWithSubClasses", routedRegistry),
+    ).toEqual({ axis: "Individual", crossKind: true });
+  });
+
+  it("pins the literal disjointPairs set for the equivalentTo-is-subsumption probe graph", () => {
+    // The exact literal member list `computeDisjointPairs` produced before D1
+    // folded equivalence into subsumption. Company gains Corporation as a
+    // subclass descendant (mutual subsumption), so Corporation inherits
+    // Person's disjointness with Company byte-identically to how the
+    // pre-fold code reached it through a separate equivalence walk.
+    const Corporation = defineNode("Corporation", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "equivalence-subsumption-disjoint-pairs-pin",
+      nodes: {
+        Person: { type: Person },
+        Company: { type: Company },
+        Corporation: { type: Corporation },
+      },
+      edges: {},
+      ontology: [
+        equivalentTo(Company, Corporation),
+        disjointWith(Person, Company),
+      ],
+    });
+    const registry = buildKindRegistry(graph);
+    expect([...registry.disjointPairs].toSorted()).toEqual([
+      "Company|Person",
+      "Corporation|Person",
+    ]);
   });
 
   it("keeps disjoint pairs injective when kind names contain pipes", () => {
@@ -679,5 +805,183 @@ describe("ontology truth and hardening", () => {
       ],
     });
     expect(() => mergeGraphExtension(host, external)).not.toThrow();
+  });
+
+  describe("equivalence classes must be node-kind-only (ONTOLOGY_EQUIVALENCE_INVALID_CLASS)", () => {
+    it("rejects a class that mixes a node kind and an edge kind", () => {
+      const worksAt = defineEdge("worksAtMixed");
+      const graph = defineGraph({
+        id: "equivalence-invalid-mixed",
+        nodes: { Person: { type: Person } },
+        edges: {
+          worksAtMixed: { type: worksAt, from: [Person], to: [Person] },
+        },
+        // The widened `equivalentTo` signature accepts an edge kind on the
+        // left directly — no runtime-only spelling needed, and this is
+        // exactly what makes the runtime refusal load-bearing rather than a
+        // type error: the call compiles, and only the registry build catches
+        // that the two sides are a node kind and an edge kind.
+        ontology: [equivalentTo(worksAt, Person)],
+      });
+
+      expect(() => buildKindRegistry(graph)).toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+            issues: matchingArray([
+              expect.objectContaining({
+                code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+                details: matchingObject({ reason: "mixed-node-and-edge" }),
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it("rejects two registered edge kinds folded into one class through a shared IRI", () => {
+      const worksAt = defineEdge("worksAtShared");
+      const employedBy = defineEdge("employedByShared");
+      const graph = defineGraph({
+        id: "equivalence-invalid-multiple-edges",
+        nodes: { Person: { type: Person } },
+        edges: {
+          worksAtShared: { type: worksAt, from: [Person], to: [Person] },
+          employedByShared: {
+            type: employedBy,
+            from: [Person],
+            to: [Person],
+          },
+        },
+        ontology: [
+          equivalentTo(worksAt, "https://schema.org/worksFor"),
+          equivalentTo(employedBy, "https://schema.org/worksFor"),
+        ],
+      });
+
+      expect(() => buildKindRegistry(graph)).toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+            issues: matchingArray([
+              expect.objectContaining({
+                code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+                details: matchingObject({ reason: "multiple-edge-kinds" }),
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it("allows one edge kind ≡ one IRI and one node kind ≡ another IRI", () => {
+      const worksAt = defineEdge("worksAtLegal");
+      const Company = defineNode("EquivalenceLegalCompany", {
+        schema: emptySchema,
+      });
+      const graph = defineGraph({
+        id: "equivalence-valid-edge-and-node-to-iri",
+        nodes: {
+          Person: { type: Person },
+          EquivalenceLegalCompany: { type: Company },
+        },
+        edges: {
+          worksAtLegal: { type: worksAt, from: [Person], to: [Company] },
+        },
+        ontology: [
+          equivalentTo(worksAt, "https://schema.org/worksFor"),
+          equivalentTo(Company, "https://schema.org/Organization"),
+        ],
+      });
+
+      const registry = buildKindRegistry(graph);
+      expect(registry.resolveIri("https://schema.org/worksFor")).toBe(
+        "worksAtLegal",
+      );
+      expect(registry.resolveIri("https://schema.org/Organization")).toBe(
+        "EquivalenceLegalCompany",
+      );
+    });
+
+    it("rejects the same invalid class on the persisted-schema deserializer path", () => {
+      const worksAt = defineEdge("worksAtPersisted");
+      const employedBy = defineEdge("employedByPersisted");
+      const graph = defineGraph({
+        id: "equivalence-invalid-persisted",
+        nodes: { Person: { type: Person } },
+        edges: {
+          worksAtPersisted: { type: worksAt, from: [Person], to: [Person] },
+          employedByPersisted: {
+            type: employedBy,
+            from: [Person],
+            to: [Person],
+          },
+        },
+        ontology: [
+          equivalentTo(worksAt, "https://schema.org/worksForPersisted"),
+          equivalentTo(employedBy, "https://schema.org/worksForPersisted"),
+        ],
+      });
+      // The live registry build already refuses this graph, so persist the
+      // RELATIONS only (bypassing `buildKindRegistry`) to exercise the
+      // deserializer's own classifier, built from `schema.nodes`/`schema.edges`
+      // rather than delegated to a caller — the thing §3.4 threads.
+      const schema = serializeSchema(graph, 1);
+
+      expect(() => deserializeSchema(schema).buildRegistry()).toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+          }),
+        }),
+      );
+    });
+
+    it("rejects two edge kinds folded through a shared IRI only after evolve merges the registry", async () => {
+      const backend = createTestBackend();
+      const baseGraph = defineGraph({
+        id: "equivalence-invalid-evolve-base",
+        nodes: { Person: { type: Person } },
+        edges: {},
+      });
+      const [store] = await createStoreWithSchema(baseGraph, backend);
+
+      await expect(
+        store.evolve(
+          defineGraphExtension({
+            edges: {
+              worksAtEvolve: {
+                from: ["Person"],
+                to: ["Person"],
+                properties: {},
+              },
+              employedByEvolve: {
+                from: ["Person"],
+                to: ["Person"],
+                properties: {},
+              },
+            },
+            ontology: [
+              {
+                metaEdge: "equivalentTo",
+                from: "worksAtEvolve",
+                to: "https://schema.org/worksForEvolve",
+              },
+              {
+                metaEdge: "equivalentTo",
+                from: "employedByEvolve",
+                to: "https://schema.org/worksForEvolve",
+              },
+            ],
+          }),
+        ),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+          }),
+        }),
+      );
+    });
   });
 });

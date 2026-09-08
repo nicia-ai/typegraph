@@ -58,11 +58,6 @@ export {
   importGraphStream,
   summarizeImportErrors,
 } from "../interchange/import";
-export { computeTransitiveClosure, isReachable } from "../ontology/closures";
-export {
-  META_EDGE_EQUIVALENT_TO,
-  META_EDGE_SAME_AS,
-} from "../ontology/constants";
 export { getEdgeRowsByIds } from "../store/edge-fetch";
 export { getNodeRowsByIds } from "../store/node-fetch";
 // The provenance ownership probe needs graph-scoped raw SQL to look for rows
@@ -73,16 +68,14 @@ export {
 } from "../query/compiler/schema";
 export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+export { type KindRegistry } from "../registry/kind-registry";
 export { sortedReplacer } from "../schema/canonical";
 export {
   computeSchemaHash,
   getGraphDefinitionHash,
   serializeSchema,
 } from "../schema/serializer";
-export {
-  type OntologyIntrospection,
-  type UniqueIntrospection,
-} from "../store/introspect";
+export { type UniqueIntrospection } from "../store/introspect";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,

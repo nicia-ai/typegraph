@@ -2784,7 +2784,7 @@ type EntityKey = Readonly<{
 type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 
 // @public
-export function equivalentTo(kindA: NodeType, kindBOrIri: NodeType | string): OntologyRelation;
+export function equivalentTo(kindA: NodeType | AnyEdgeType, kindBOrIri: NodeType | string): OntologyRelation;
 
 // @public
 export type ErrorCategory = "user" | "constraint" | "system";

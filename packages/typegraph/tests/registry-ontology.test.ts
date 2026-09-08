@@ -286,6 +286,42 @@ describe("hasPart - Inverse of partOf", () => {
   });
 });
 
+describe("equivalentTo is mutual subsumption", () => {
+  const Person = defineNode("Person", { schema: emptySchema });
+  const Company = defineNode("Company", { schema: emptySchema });
+  const Corporation = defineNode("Corporation", { schema: emptySchema });
+
+  const graph = defineGraph({
+    id: "equivalence_subsumption_test",
+    nodes: {
+      Person: { type: Person },
+      Company: { type: Company },
+      Corporation: { type: Corporation },
+    },
+    edges: {},
+    ontology: [
+      equivalentTo(Company, Corporation),
+      disjointWith(Person, Company),
+    ],
+  });
+
+  const registry = buildKindRegistry(graph);
+
+  it("makes disjointness, assignability, expansion and the component all agree", () => {
+    expect(registry.areDisjoint("Person", "Corporation")).toBe(true);
+    expect(registry.isAssignableTo("Corporation", "Company")).toBe(true);
+    expect(registry.isAssignableTo("Company", "Corporation")).toBe(true);
+    expect(registry.expandSubClasses("Company")).toContain("Corporation");
+    expect(registry.getSubClassComponent("Company")).toEqual([
+      "Company",
+      "Corporation",
+    ]);
+    expect(registry.getSubClassComponent("Corporation")).toBe(
+      registry.getSubClassComponent("Company"),
+    );
+  });
+});
+
 describe("isAssignableTo - Subsumption-based Assignment", () => {
   const Organization = defineNode("Organization", { schema: emptySchema });
   const Company = defineNode("Company", { schema: emptySchema });

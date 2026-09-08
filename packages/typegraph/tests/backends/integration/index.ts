@@ -53,6 +53,7 @@ export { registerMultiKindQueryIntegrationTests } from "./multi-kind-queries";
 export { registerMultiRecursiveTraversalIntegrationTests } from "./multi-recursive-traversals";
 export { registerMultiRootSubgraphBatchIntegrationTests } from "./multi-root-subgraph-batch";
 export { registerOntologyTighteningIntegrationTests } from "./ontology-tightening";
+export { registerOntologyEquivalenceIntegrationTests } from "./ontology-equivalence";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerPredicateIntegrationTests } from "./predicates";
