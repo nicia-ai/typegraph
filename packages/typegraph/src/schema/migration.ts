@@ -11,10 +11,13 @@ import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { canonicalEqual, sortedReplacer } from "./canonical";
 import {
+  classifyOntologyChanges,
+  type OntologyChange,
+} from "./ontology-change";
+import {
   type JsonSchema,
   type SerializedEdgeDef,
   type SerializedNodeDef,
-  type SerializedOntology,
   type SerializedSchema,
 } from "./types";
 
@@ -29,10 +32,20 @@ export type ChangeType = "added" | "removed" | "modified" | "renamed";
 
 /**
  * Severity of a change for migration purposes.
+ *
+ * `warning` auto-migrates only if the data allows it: an ontology tightening
+ * (`disjointWith` / `subClassOf` / `equivalentTo` / `sameAs` addition, or a
+ * `subClassOf` / `equivalentTo` / `sameAs` removal) is `warning`-severity and
+ * still routes through `ensureSchema`'s auto-migrate branch, but the commit
+ * transaction runs a data probe first (`prepareOntologyTighteningPreflight`)
+ * and refuses with `MigrationError` `reason: "ontology-tightening-violated"`
+ * when existing rows would violate the tightened ontology. `isBackwardsCompatible`
+ * keeps meaning exactly "no `breaking` change" — it does not mean "safe to
+ * auto-migrate unconditionally".
  */
 export type ChangeSeverity =
   | "safe" // No data migration needed
-  | "warning" // Might need attention
+  | "warning" // Auto-migrates only if the data allows it
   | "breaking"; // Requires data migration
 
 // ============================================================
@@ -73,14 +86,11 @@ export type EdgeChange = Readonly<{
 
 /**
  * A change to the ontology.
+ *
+ * Defined in `./ontology-change` (alongside the data-probe machinery that
+ * classifies it) and re-exported here so the public path
+ * (`src/schema/index.ts`) is unchanged.
  */
-export type OntologyChange = Readonly<{
-  type: ChangeType;
-  entity: "metaEdge" | "relation";
-  name: string;
-  severity: ChangeSeverity;
-  details: string;
-}>;
 
 /** A durable graph-level Operational Identity capability change. */
 export type IdentityChange = Readonly<{
@@ -240,7 +250,7 @@ export function computeSchemaDiff(
 ): SchemaDiff {
   const nodeChanges = diffNodes(before.nodes, after.nodes);
   const edgeChanges = diffEdges(before.edges, after.edges);
-  const ontologyChanges = diffOntology(before.ontology, after.ontology);
+  const ontologyChanges = classifyOntologyChanges(before, after);
   const identityChange = diffIdentity(before.identity, after.identity);
   const annotationsChange = diffGraphAnnotations(
     before.annotations,
@@ -1097,84 +1107,6 @@ function annotationsChanged(before: unknown, after: unknown): boolean {
 }
 
 // ============================================================
-// Ontology Diff
-// ============================================================
-
-/**
- * Computes changes to the ontology.
- */
-function diffOntology(
-  before: SerializedOntology,
-  after: SerializedOntology,
-): readonly OntologyChange[] {
-  const changes: OntologyChange[] = [];
-
-  // Diff meta-edges
-  const metaEdgesBefore = new Set(Object.keys(before.metaEdges));
-  const metaEdgesAfter = new Set(Object.keys(after.metaEdges));
-
-  for (const name of metaEdgesBefore) {
-    if (!metaEdgesAfter.has(name)) {
-      changes.push({
-        type: "removed",
-        entity: "metaEdge",
-        name,
-        severity: "breaking",
-        details: `Meta-edge "${name}" was removed`,
-      });
-    }
-  }
-
-  for (const name of metaEdgesAfter) {
-    if (!metaEdgesBefore.has(name)) {
-      changes.push({
-        type: "added",
-        entity: "metaEdge",
-        name,
-        severity: "safe",
-        details: `Meta-edge "${name}" was added`,
-      });
-    }
-  }
-
-  // Diff relations (simplified - just detect additions/removals)
-  const relationsBefore = new Set(
-    before.relations.map((r) => `${r.metaEdge}:${r.from}:${r.to}`),
-  );
-  const relationsAfter = new Set(
-    after.relations.map((r) => `${r.metaEdge}:${r.from}:${r.to}`),
-  );
-
-  for (const relationKey of relationsBefore) {
-    if (!relationsAfter.has(relationKey)) {
-      const [metaEdge, from, to] = relationKey.split(":");
-      changes.push({
-        type: "removed",
-        entity: "relation",
-        name: relationKey,
-        severity: "warning",
-        details: `Relation ${metaEdge}(${from}, ${to}) was removed`,
-      });
-    }
-  }
-
-  for (const relationKey of relationsAfter) {
-    if (!relationsBefore.has(relationKey)) {
-      const [metaEdge, from, to] = relationKey.split(":");
-      changes.push({
-        type: "added",
-        entity: "relation",
-        name: relationKey,
-        severity: "safe",
-        details: `Relation ${metaEdge}(${from}, ${to}) was added`,
-      });
-    }
-  }
-
-  return changes;
-}
-
-// ============================================================
 // Index Diff
 // ============================================================
 
@@ -1520,3 +1452,5 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
 
   return actions;
 }
+
+export { type OntologyChange } from "./ontology-change";
