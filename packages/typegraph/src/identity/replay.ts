@@ -343,22 +343,32 @@ function identityReplayHistoryTruncatedError(
   );
 }
 
+type WalkedTransitions = Readonly<{
+  seed: PlainNodeRef;
+  fromRevision: number | undefined;
+  toRevision: number | undefined;
+  limit: number;
+  rows: readonly IdentityTransitionRow[];
+}>;
+
 /**
- * Every transition (§3.1's `transitionsOf`) touching `ref`'s class lineage,
- * ascending by recorded revision. `store.identity.transitionsOf` (PR-3) is a
- * thin wrapper over this.
+ * The shared setup both `identityTransitionsOf` and `identityReplay` need
+ * before they diverge: enforce `history: true`, resolve the requested limit
+ * and revision bounds, seed and run the lineage walk (§3.2 step 2), and
+ * enforce the boundary-count limit (§3.2 step 3) on the result. `seed` is the
+ * caller's ORIGINAL reference (not the resolved class canonical), for
+ * `identityReplay`'s `reconstructAt` calls — see that function's docblock for
+ * why the two must not be conflated.
  */
-export async function identityTransitionsOf<G extends GraphDef>(
+async function walkedTransitionsFor<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   ref: IdentityNodeRefInput<G>,
-  options?: IdentityReplayOptions,
-): Promise<readonly IdentityTransition<G>[]> {
+  options: IdentityReplayOptions | undefined,
+): Promise<WalkedTransitions> {
   requireHistoryEnabled(ctx);
   const limit = resolveLimit(options?.limit);
-  const walkSeed = await currentClassCanonicalSeed(
-    ctx,
-    registeredPlainRef(ctx, ref),
-  );
+  const seed = registeredPlainRef(ctx, ref);
+  const walkSeed = await currentClassCanonicalSeed(ctx, seed);
   const fromRevision =
     options?.fromRecorded === undefined ?
       undefined
@@ -369,6 +379,20 @@ export async function identityTransitionsOf<G extends GraphDef>(
     : parseRecordedInstant(options.toRecorded, "toRecorded").revision;
   const rows = await walkClassLineage(ctx, walkSeed, fromRevision, toRevision);
   assertBoundaryLimit(rows, limit);
+  return { seed, fromRevision, toRevision, limit, rows };
+}
+
+/**
+ * Every transition (§3.1's `transitionsOf`) touching `ref`'s class lineage,
+ * ascending by recorded revision. `store.identity.transitionsOf` (PR-3) is a
+ * thin wrapper over this.
+ */
+export async function identityTransitionsOf<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  ref: IdentityNodeRefInput<G>,
+  options?: IdentityReplayOptions,
+): Promise<readonly IdentityTransition<G>[]> {
+  const { rows } = await walkedTransitionsFor(ctx, ref, options);
   return rows.map((row) => publicTransition<G>(row));
 }
 
@@ -385,20 +409,11 @@ export async function identityReplay<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
-  requireHistoryEnabled(ctx);
-  const limit = resolveLimit(options?.limit);
-  const seed = registeredPlainRef(ctx, ref);
-  const walkSeed = await currentClassCanonicalSeed(ctx, seed);
-  const fromRevision =
-    options?.fromRecorded === undefined ?
-      undefined
-    : parseRecordedInstant(options.fromRecorded, "fromRecorded").revision;
-  const toRevision =
-    options?.toRecorded === undefined ?
-      undefined
-    : parseRecordedInstant(options.toRecorded, "toRecorded").revision;
-  const rows = await walkClassLineage(ctx, walkSeed, fromRevision, toRevision);
-  assertBoundaryLimit(rows, limit);
+  const { seed, fromRevision, toRevision, rows } = await walkedTransitionsFor(
+    ctx,
+    ref,
+    options,
+  );
 
   const retention = await readTransitionRetentionDetails(
     ctx.backend,
