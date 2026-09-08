@@ -768,16 +768,23 @@ contributes no claim and raises no conflict, whatever its branch's rank.
 ## Ontology type reconciliation
 
 With `reconcileTypes: "ontology"`, two staged nodes that share an id but carry
-subtype-compatible kinds (via the graph's `subClassOf` closure) are collapsed to
-the **most-specific** common type, recorded as a `TypeReconciliation`. A base
-`Doctor` and a branch `SpecialistDoctor` reconcile to `SpecialistDoctor` instead
-of being dropped as incompatible. The default `"off"` keeps identity strictly
-`(kind, id)`.
+subtype-compatible kinds (via the store's own validated `KindRegistry` — the
+same registry a query runs against, not a private closure the merge recomputes)
+are collapsed to the **most-specific** common type, recorded as a
+`TypeReconciliation`. A base `Doctor` and a branch `SpecialistDoctor` reconcile
+to `SpecialistDoctor` instead of being dropped as incompatible. The default
+`"off"` keeps identity strictly `(kind, id)`.
 
 ```typescript
 const graph = defineGraph({ /* ... */ ontology: [subClassOf(SpecialistDoctor, Doctor)] });
 const result = await merge(base, branches, { reconcileTypes: "ontology" });
 ```
+
+`equivalentTo` participates in "most specific" too, since it is mutual
+subsumption (see [Ontology & Reasoning](/ontology#equivalence)): a base
+`Doctor` and a branch `Physician` declared `equivalentTo` reconcile to whichever
+of the two sorts first in code-point order, deterministically, rather than
+being flagged incompatible.
 
 ## Choosing the survivor
 

@@ -45,11 +45,11 @@ properties between types, or automatically expand every query.
 
 | Relation / feature | Runtime contract |
 | --- | --- |
-| `subClassOf` | Transitive registry closure, write-path endpoint assignability, and opt-in node-query expansion with `includeSubClasses` |
+| `subClassOf` | Transitive registry closure, write-path endpoint assignability, and opt-in node-query expansion with `includeSubClasses`. The closure now also includes every `equivalentTo`/`sameAs` class — two equivalent kinds are mutual subclasses of each other |
 | `disjointWith` | Same-ID collision enforcement, propagated through interleaved `subClassOf` and `equivalentTo` closure (`sameAs` remains a deprecated equivalence alias) |
 | `implies` | Transitive registry closure and opt-in traversal expansion with `expand: "implying"`; endpoints are validated |
 | `inverseOf` | Single inverse partner, endpoint reversal validation, and traversal expansion with `expand: "inverse"` (the default store setting) |
-| `equivalentTo` | Registry lookups and graph-merge type reconciliation; no automatic query or property behavior. `sameAs` is folded in as a full alias — the merge type reconciler and the registry treat a `sameAs` declaration identically to `equivalentTo` |
+| `equivalentTo` | Between two registered kinds, MUTUAL SUBSUMPTION: folded into the same closure `subClassOf` reads, so `isAssignableTo`, `expandSubClasses`/`includeSubClasses`, edge-endpoint acceptance, disjointness propagation and the `kindWithSubClasses` claim axis all treat the two kinds as substitutable. An IRI on either side stays an inert cross-system reference — it never becomes a kind, but a class reached *through* one still folds together. Restricted to node kinds: an equivalence class that mixes a node kind and an edge kind, or that holds more than one registered edge kind, is refused (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`). `sameAs` is folded in as a full alias — the merge type reconciler and the registry treat a `sameAs` declaration identically to `equivalentTo` |
 | `broader` / `narrower` | Transitive registry introspection only |
 | `partOf` / `hasPart` | Transitive registry introspection only |
 | `relatedTo` | Symmetric direct registry introspection through `getRelatedKinds` only |
@@ -131,17 +131,76 @@ always safe and auto-migrates unconditionally.
 
 ### Equivalence
 
-**`equivalentTo`**: Defines semantic equivalence between types or external IRIs.
+**`equivalentTo`**: Between two registered kinds, `equivalentTo` is MUTUAL
+SUBSUMPTION — the registry folds the class into the same closure `subClassOf`
+uses, so the two kinds become fully substitutable:
+
+```typescript
+const Company = defineNode("Company", { schema: z.object({ name: z.string() }) });
+const Corporation = defineNode("Corporation", { schema: z.object({ name: z.string() }) });
+
+equivalentTo(Company, Corporation);
+
+registry.isAssignableTo("Corporation", "Company"); // true
+registry.isAssignableTo("Company", "Corporation"); // true — mutual
+registry.expandSubClasses("Company"); // ["Company", "Corporation"]
+```
+
+That substitutability reaches every consumer of the subsumption closure:
+`includeSubClasses: true` on a `Company`-scoped query or `search()` call also
+returns `Corporation` rows, an edge endpoint declared `to: [Company]` accepts
+a `Corporation` node, and disjointness declared against `Company` propagates
+to `Corporation` too. A `kindWithSubClasses` uniqueness constraint fences
+across the pair — the two kinds share one claim axis, so a value unique for
+`Company` is now also unique for `Corporation`.
+
+Because subsumption is a strict order (`isSubClassOf(k, k)` is always false,
+and `expandSubClasses` never repeats a kind), a kind that sits strictly
+between two mutually-equivalent kinds collapses into the same class too: with
+`Physician subClassOf Doctor` and `Doctor equivalentTo Physician` declared
+together, `Physician` and `Doctor` are simply the same class and every other
+kind's relationship to one is its relationship to both. This is the
+mathematically forced consequence of making `equivalentTo` mutual subsumption,
+not a special case the registry detects.
+
+`equivalentTo` also maps a type to an external IRI for cross-system mapping,
+exactly as before. An IRI is an inert reference — it never becomes a kind of
+its own — but a class *reached through* one still folds together:
 
 ```typescript
 equivalentTo(Person, "https://schema.org/Person");
-equivalentTo(Organization, "https://schema.org/Organization");
+equivalentTo(Individual, "https://schema.org/Person");
+// Person and Individual are now one class, even though neither equivalentTo
+// call named the other directly.
+```
+
+An edge kind may be mapped to an external IRI too (`equivalentTo`'s left
+parameter accepts `NodeType | AnyEdgeType`), but subsumption itself is a
+node-kind relation. An equivalence class is refused, with a
+`ConfigurationError` whose details code is `ONTOLOGY_EQUIVALENCE_INVALID_CLASS`,
+when it mixes a node kind and an edge kind, or when it contains more than one
+registered edge kind (which can happen transitively, through two edges mapped
+to the same IRI):
+
+```typescript
+// Refused: worksAt (an edge kind) and Person (a node kind) in one class.
+equivalentTo(worksAt, Person);
+
+// Refused: two registered edge kinds folded together through a shared IRI.
+equivalentTo(worksAt, "https://schema.org/worksFor");
+equivalentTo(employedBy, "https://schema.org/worksFor");
+
+// Legal: one edge kind and one node kind, each mapped to its OWN IRI.
+equivalentTo(worksAt, "https://schema.org/worksFor");
+equivalentTo(Person, "https://schema.org/Person");
 ```
 
 **`sameAs`** and **`differentFrom`** are deprecated type-level factories.
-`sameAs` is currently a type-equivalence alias; `differentFrom` is decorative.
-For durable individual identity, enable the graph-level TypeGraph Identity
-Profile and use `store.identity`. That ledger deliberately does not provide OWL
+`sameAs` behaves identically to `equivalentTo` in every respect above (the
+registry folds both meta-edges into the same equivalence classes); its left
+parameter stays `NodeType`-only, unwidened. `differentFrom` is decorative. For
+durable individual identity, enable the graph-level TypeGraph Identity Profile
+and use `store.identity`. That ledger deliberately does not provide OWL
 property substitution or automatic graph-wide query expansion.
 
 **Changing this on a populated graph**: `equivalentTo` and `sameAs` are
@@ -180,16 +239,18 @@ await store.nodes.Organization.create({ name: "Acme" }, { id: "entity-1" });
 A kind disjoint with itself, a kind disjoint with one of its own subclass
 ancestors, a common subclass of two disjoint parents, and a kind declared both
 `equivalentTo` and `disjointWith` another are all rejected, including overlaps
-reached through mixed equivalence/subclass paths. These checks run
-both when you construct a graph and when a persisted schema is reloaded, so a
-document written by an older, more permissive version can fail validation on
-load with a `ConfigurationError` whose details code is
-`ONTOLOGY_DISJOINT_CONFLICT`. To recover, fix the graph definition and, for a
-persisted schema, correct the stored document before upgrading (or rewrite it
-through the previous minor version, which still accepts it). The same
-construction-and-reload rule applies to the other ontology coherence checks
-(duplicate relations, hierarchical self-loops and cycles, and inverse-partner
-uniqueness).
+reached through mixed equivalence/subclass paths. An equivalence class that
+mixes a node kind and an edge kind, or that holds more than one registered
+edge kind, is rejected too (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`; see
+"Equivalence" above). These checks run both when you construct a graph and
+when a persisted schema is reloaded, so a document written by an older, more
+permissive version can fail validation on load with a `ConfigurationError`
+whose details code names the specific check. To recover, fix the graph
+definition and, for a persisted schema, correct the stored document before
+upgrading (or rewrite it through the previous minor version, which still
+accepts it). The same construction-and-reload rule applies to the other
+ontology coherence checks (duplicate relations, hierarchical self-loops and
+cycles, and inverse-partner uniqueness).
 
 **Changing this on a populated graph**: adding `disjointWith` is checked
 against every live node before it commits — two nodes already sharing an id
@@ -509,22 +570,30 @@ Declares hierarchical relationship (broader concept to narrower concept).
 function narrower(broader: NodeType, narrower: NodeType): OntologyRelation;
 ```
 
-#### `equivalentTo(a, b)`
+#### `equivalentTo(kindA, kindBOrIri)`
 
-Declares semantic equivalence between types or with external IRIs.
+Declares mutual subsumption between two registered kinds, or maps a kind to an
+external IRI for cross-system mapping. The left parameter accepts an edge kind
+too, so an edge can be mapped to an IRI — subsumption itself stays a node-kind
+relation, so an equivalence class mixing a node kind and an edge kind, or
+holding more than one registered edge kind, is refused
+(`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`; see "Equivalence" above).
 
 ```typescript
 function equivalentTo(
-  a: NodeType | string,
-  b: NodeType | string
+  kindA: NodeType | AnyEdgeType,
+  kindBOrIri: NodeType | string
 ): OntologyRelation;
 ```
 
 #### `sameAs(kindA, kindBOrIri)`
 
 Deprecated type-level alias of `equivalentTo`, including the equivalence with
-external IRIs. Migrate to the graph-level TypeGraph Identity Profile for
-individual identity.
+external IRIs — the registry folds `sameAs` into the identical mutual-
+subsumption classes. Unlike `equivalentTo`, its left parameter is **not**
+widened: `sameAs` stays `NodeType`-only, since it is scheduled for removal and
+no interop case needs the edge-to-IRI shape on it. Migrate to the graph-level
+TypeGraph Identity Profile for individual identity.
 
 ```typescript
 function sameAs(kindA: NodeType, kindBOrIri: NodeType | string): OntologyRelation;

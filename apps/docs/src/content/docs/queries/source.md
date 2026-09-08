@@ -85,7 +85,9 @@ const allMedia = await store
 
 When `includeSubClasses: true`:
 
-- Results include nodes of the specified kind AND all subclass kinds
+- Results include nodes of the specified kind AND all subclass kinds — AND any
+  kind declared `equivalentTo` the specified kind (or one of its subclasses),
+  since equivalence is mutual subsumption and folds into the same closure
 - The `kind` field in results reflects the actual node kind
 - All properties common to the parent kind are accessible
 
