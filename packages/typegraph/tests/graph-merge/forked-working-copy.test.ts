@@ -215,6 +215,37 @@ describe("forkedWorkingCopyStrategy", () => {
     await baseBackend.close();
   });
 
+  it("retries a failed branch close instead of caching the rejection, so a transient teardown failure does not orphan the working copy", async () => {
+    const { backend: baseBackend } = createLocalSqliteBackend();
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+    await baseStore.nodes.Widget.create({ name: "Original" });
+
+    let attempts = 0;
+    const makeBackend = () => {
+      const { backend } = createLocalSqliteBackend();
+      return Promise.resolve(
+        deriveBackend(backend, {
+          close: async () => {
+            attempts += 1;
+            if (attempts === 1) throw new Error("transient teardown failure");
+            await backend.close();
+          },
+        }),
+      );
+    };
+    const cloneBranch = unwrap(await branch<G>(baseStore, makeBackend));
+
+    await expect(cloneBranch.close()).rejects.toThrow(
+      "transient teardown failure",
+    );
+    await expect(cloneBranch.close()).resolves.toBeUndefined();
+    await cloneBranch.close();
+
+    expect(attempts).toBe(2);
+
+    await baseBackend.close();
+  });
+
   it("disposes the fork and leaves nothing open when connect() fails; the base remains usable", async () => {
     const { backend: baseBackend } = createLocalSqliteBackend();
     const [baseStore] = await createStoreWithSchema(graph, baseBackend);

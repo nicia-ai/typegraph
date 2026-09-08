@@ -422,20 +422,36 @@ function forkAliasesBase<G extends GraphDef>(
 }
 
 /**
- * The branch handle's `close`: releases the working copy's backend exactly
- * once, however many times and however concurrently it is called. The
+ * The branch handle's `close`: releases the working copy's backend once,
+ * however many times and however concurrently it is called. The
  * `GraphBackend` contract does not require an idempotent `close`, so the
- * handle coalesces every call onto the first one's promise rather than
- * relying on the backend (a forked working copy's composed close, or a
- * caller-built backend from `MakeBackend`) tolerating a second release.
+ * handle coalesces concurrent calls onto the in-flight release and treats a
+ * completed release as final, rather than relying on the backend (a forked
+ * working copy's composed close, or a caller-built backend from
+ * `MakeBackend`) tolerating a second release.
+ *
+ * A FAILED release is not final: the in-flight promise is dropped on
+ * rejection so the next call attempts the cleanup again — a composed close
+ * retries the teardown phases that did not complete, and caching the
+ * rejection would hide that retry and leave a host-level fork orphaned
+ * after a transient failure.
  */
 export function coalescedWorkingCopyClose<G extends GraphDef>(
   store: Store<G>,
 ): () => Promise<void> {
-  let closing: Promise<void> | undefined;
-  return () => {
-    closing ??= storeBackend(store).close();
-    return closing;
+  let closed = false;
+  let inFlight: Promise<void> | undefined;
+  return async () => {
+    if (closed) return;
+    inFlight ??= storeBackend(store)
+      .close()
+      .then(() => {
+        closed = true;
+      })
+      .finally(() => {
+        inFlight = undefined;
+      });
+    await inFlight;
   };
 }
 

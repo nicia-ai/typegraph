@@ -84,9 +84,10 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
    * {@link WorkingCopyStrategy} built (e.g. a forked working copy's
    * connection AND its host-level fork, see `forkedWorkingCopyStrategy`).
    * Idempotent the same way {@link IngestionBranch.close} is: both coalesce
-   * every call, concurrent ones included, onto one release of the working
-   * copy's backend, so a backend whose own `close` is not idempotent is
-   * still released exactly once. `branch()` sets this; a hand-built `GraphBranch` (the merge
+   * concurrent calls onto one release of the working copy's backend and make
+   * a completed release final, so a backend whose own `close` is not
+   * idempotent is still released exactly once; a release that FAILED is
+   * retried by the next call rather than cached. `branch()` sets this; a hand-built `GraphBranch` (the merge
    * primitive's own committed-target stand-in, `tests/`-only fixtures) must
    * supply one too — a no-op when the object does not own a disposable
    * backend at all.
