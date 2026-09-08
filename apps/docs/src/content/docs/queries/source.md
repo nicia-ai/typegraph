@@ -184,6 +184,9 @@ available. String inputs retain the discriminator-based dynamic surface.
 
 - [Filter](/queries/filter) - `whereNode()`, `whereEdge()`
 - [Traverse](/queries/traverse) - `traverse()`, `optionalTraverse()`
+- [Recursive](/queries/recursive) - `.recursive()`, and the composition
+  shortcuts [`parts()` /
+  `wholes()`](/queries/recursive#composition-shortcuts-parts-and-wholes)
 - [Shape](/queries/shape) - `select()`, `aggregate()`
 - [Order](/queries/order) - `orderBy()`, `limit()`, `offset()`
 - [Aggregate](/queries/aggregate) - `groupBy()`, `groupByNode()`

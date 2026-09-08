@@ -394,6 +394,50 @@ enforced, adding a `partOf` to an already-populated graph can surface parts
 that already have more than one live whole; removing one only ever loosens a
 constraint, so it stays safe regardless.
 
+#### Choosing a containment tier
+
+Not every "this belongs to that" relationship is composition. Before reaching
+for `partOf`/`hasPart`, place the relation in exactly one of three tiers:
+
+| tier | what you write | what the runtime guarantees |
+| --- | --- | --- |
+| 1 — Composition | `partOf(Part, Whole, { via: edge })` | one whole per part across every composition relation; acyclic over the union of realizing edge kinds; deleting a whole deletes its parts leaf-first; `parts()`/`wholes()` navigation across heterogeneous edge kinds |
+| 2 — Aggregation | `cardinality`, `targetCardinality`, `acyclic` on an edge registration | each rule enforced independently, with no ownership slot, no cascade, no cross-relation constraint |
+| 3 — Mereology | an ordinary edge kind + `.recursive()` | transitivity only, no integrity claim |
+
+**The only tier with a cascade is the only tier with an ownership slot.** A
+part with two owners is not a part. Any relation whose users need shared
+membership, overlapping hierarchies, or re-homing a child when its parent is
+removed is tier 2, not tier 1 — declaring it `partOf` would mean deleting the
+parent deletes children that should have survived.
+
+**Rows retained for external referrers are tier 2, not composition.** A
+"version of X" relation whose parts must stay resolvable by id after the
+whole is deleted — a historical run record, a receipt, an audit snapshot — is
+single-parent and acyclic like composition, but its members must *outlive*
+their parent. That is exactly what composition's cascade refuses to do
+(parts die with the whole), so this pattern is aggregation: a plain edge with
+`cardinality`/`targetCardinality`, no `partOf`/`hasPart`.
+
+A worked, product-shaped version of this distinction: `Artifact ->
+ArtifactVersion -> ArtifactChunk`, `ChangeSet -> ChangeSetItem`, `Skill ->
+SkillVersion`, and `EvalRun -> results` are true composition (exactly one
+parent, parts die with the whole). A folder tree where deleting a folder
+re-homes its children to the deleted folder's parent, or a document whose
+deletion retracts claims but leaves the referenced entity standing on
+remaining support, is aggregation — declaring either `partOf` would be wrong,
+not just imprecise.
+
+#### Upgrade prerequisite: the composition claim needs `typegraph_edge_claims`
+
+Composition's one-whole-per-part guarantee rides the same reserved relation
+edge cardinality claims already use, `typegraph_edge_claims`. A deployment
+initialized before that relation existed must provision it (under owner
+credentials — see [Backend Setup](/backend-setup)) **before** declaring the
+first `partOf`/`hasPart`. Declaring composition against a database missing
+that relation fails with `EDGE_CLAIM_RELATION_MISSING`, naming the
+provisioning step to run.
+
 ### Edge Relationships
 
 **`inverseOf`**: Declares two edge kinds as inverses of each other.

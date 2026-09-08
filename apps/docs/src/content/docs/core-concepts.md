@@ -485,6 +485,15 @@ reacquires every applicable reservation, on both axes.
 `direction: "source" | "target"`, alongside `toKind` / `toId` for the target
 endpoint (`fromKind` / `fromId` keep their existing meaning).
 
+Cardinality and target cardinality constrain one edge kind's own population;
+they say nothing about what happens to the nodes on either end when the
+relation is a real whole/part relationship. That's a separate declaration,
+[**composition**](/ontology#composition) (`partOf` / `hasPart`): it names
+which edge kind *realizes* containment, requires that edge to declare
+`cardinality`/`targetCardinality: "one"` or `"oneActive"` on the whole side,
+and adds ownership (one whole per part) and cascade (deleting a whole deletes
+its parts) on top — guarantees plain cardinality never provides on its own.
+
 ### Edge Operations
 
 ```typescript
