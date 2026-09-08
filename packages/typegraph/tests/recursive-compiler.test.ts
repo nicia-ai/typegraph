@@ -351,11 +351,23 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
+      // Both directions read from a preceding, non-recursive CTE that
+      // normalizes each orientation to tg_source_*/tg_target_* columns —
+      // never two branches each self-joining `recursive_cte` (PostgreSQL
+      // refuses more than one such self-reference; see
+      // `compileRecursiveDirectedEdgesCte`'s doc comment).
+      expect(sql).toContain("_directed_edges AS (");
       expect(sql).toContain('"typegraph_edges" e');
-      expect(sql).toContain("e.from_id = r.target_id");
-      expect(sql).toContain("e.to_id = r.target_id");
+      expect(sql).toContain("e.from_id AS tg_source_id");
+      expect(sql).toContain("e.to_id AS tg_target_id");
+      expect(sql).toContain("e.to_id AS tg_source_id");
+      expect(sql).toContain("e.from_id AS tg_target_id");
+      // The self-loop duplicate guard still applies inside the CTE.
       expect(sql).toContain("e.from_id = e.to_id");
       expect(sql).toContain("e.from_kind = e.to_kind");
+      // The recursive term itself joins the normalized relation exactly once.
+      expect(sql).toContain("e.tg_source_id = r.target_id");
+      expect(sql).toContain("e.tg_source_kind = r.target_kind");
     });
 
     it("forces worktable-first join order on sqlite recursive steps", () => {
