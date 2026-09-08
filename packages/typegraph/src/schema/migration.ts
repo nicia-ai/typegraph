@@ -564,7 +564,7 @@ function normalizedSubschemaMap(value: unknown): unknown {
  * in a different order is correctly a no-op rather than a "modified" kind that
  * forces a migration.
  */
-function propertySchemasEqual(before: unknown, after: unknown): boolean {
+export function propertySchemasEqual(before: unknown, after: unknown): boolean {
   return canonicalEqual(
     orderNormalizedSchema(before),
     orderNormalizedSchema(after),
@@ -689,7 +689,7 @@ function diffNodeDef(
  * JSON-encoded props no longer satisfy the declared type, which no data-free
  * migration can reconcile.
  */
-function propertyTypeSignature(schema: JsonSchema): string {
+export function propertyTypeSignature(schema: JsonSchema): string {
   if (schema.type !== undefined) return JSON.stringify(schema.type);
   if (schema.const !== undefined) return "const";
   if (schema.enum !== undefined) return "enum";
@@ -711,7 +711,9 @@ const NON_CONSTRAINING_KEYWORDS = new Set([
 ]);
 
 /** A copy of `schema` with the non-constraining keywords removed. */
-function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
+export function stripSchemaMetadata(
+  schema: JsonSchema,
+): Record<string, unknown> {
   // Data-keyed: JSON-Schema keywords parsed out of the persisted document.
   const stripped = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(schema)) {
@@ -720,7 +722,7 @@ function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
   return stripped;
 }
 
-function isObjectSchema(schema: JsonSchema): boolean {
+export function isObjectSchema(schema: JsonSchema): boolean {
   return schema.type === "object" || schema.properties !== undefined;
 }
 

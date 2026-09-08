@@ -1548,6 +1548,9 @@ export function isBackwardsCompatible(diff: SchemaDiff): boolean;
 // @public
 export function isSchemaInitialized(backend: GraphBackend, graphId: string): Promise<boolean>;
 
+// @public
+export function isStructuralSubtype(child: JsonSchema, parent: JsonSchema): StructuralSubtypeResult;
+
 // @public (undocumented)
 type JsonPointer = string & {
     readonly __jsonPointer: unique symbol;
@@ -1563,7 +1566,11 @@ export type JsonSchema = Readonly<{
     properties?: Record<string, JsonSchema>;
     required?: readonly string[];
     items?: JsonSchema;
+    prefixItems?: readonly JsonSchema[];
+    minItems?: number;
+    maxItems?: number;
     additionalProperties?: boolean | JsonSchema;
+    propertyNames?: JsonSchema;
     enum?: readonly unknown[];
     const?: unknown;
     anyOf?: readonly JsonSchema[];
@@ -1574,10 +1581,14 @@ export type JsonSchema = Readonly<{
     default?: unknown;
     minimum?: number;
     maximum?: number;
+    exclusiveMinimum?: number;
+    exclusiveMaximum?: number;
+    multipleOf?: number;
     minLength?: number;
     maxLength?: number;
     pattern?: string;
     format?: string;
+    contentEncoding?: string;
     [key: string]: unknown;
 }>;
 
@@ -2381,6 +2392,25 @@ type SqlTextChunk = Readonly<{
 
 // @public
 type StrategyTableContribution = TableContribution;
+
+// @public
+export type StructuralIncomparableReason = "unsupported-keyword" | "schema-reference" | "type-token-array" | "unsupported-construct" | "max-depth-exceeded";
+
+// @public
+export type StructuralSubtypeReason = "missing-required-property" | "optional-in-child-required-in-parent" | "type-token-mismatch" | "unconstrained-where-parent-constrains" | "value-set-not-subset" | "string-length-not-tighter" | "pattern-mismatch" | "numeric-bound-not-tighter" | "multiple-of-mismatch" | "array-bounds-not-tighter" | "tuple-arity-mismatch" | "no-matching-union-member" | "property-names-mismatch";
+
+// @public
+export type StructuralSubtypeResult = Readonly<{
+    verdict: "subtype";
+}> | Readonly<{
+    verdict: "not-subtype";
+    reason: StructuralSubtypeReason;
+    path: readonly string[];
+}> | Readonly<{
+    verdict: "incomparable";
+    reason: StructuralIncomparableReason;
+    path: readonly string[];
+}>;
 
 // @public (undocumented)
 type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "to_kind" | "to_id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
