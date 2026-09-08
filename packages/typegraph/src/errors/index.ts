@@ -968,7 +968,16 @@ export type IdentityReplayErrorDetails =
     }>
   | Readonly<{
       code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
-      requestedFrom: string;
+      /**
+       * The caller's OWN `fromRecorded`, present only when the caller
+       * actually supplied one. `requestedTo` is `toRecorded`, always present
+       * (this refusal only fires when a bounded range — `toRecorded` given —
+       * lies entirely below the watermark). Never fabricated from the other:
+       * an open-ended request (no `fromRecorded`) must not read back a
+       * `requestedFrom` it never named.
+       */
+      requestedFrom?: string;
+      requestedTo: string;
       prunedBefore: string;
     }>
   | Readonly<{

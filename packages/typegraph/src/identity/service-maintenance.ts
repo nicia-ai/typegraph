@@ -751,6 +751,17 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
         ctx.graphId,
       );
       const affected = combineSnapshotMembers(before, afterRows);
+      // `before` does NOT need the same `fillLiveSingletons` treatment
+      // `identitySchemaCommitPreflight` (schema-transition.ts) gives its own
+      // pre-commit snapshot: that fill exists to catch a live singleton
+      // folding into a class for the FIRST time, which can only happen when
+      // the closure is built from a state where identity had not yet run at
+      // all (first enablement). On an already-enabled graph, every node
+      // creation folds through `foldIdentityForCreatedNodes` immediately, so
+      // no live member can reach this cascade as an untouched singleton that
+      // is about to be folded for the first time — `replaceClosure`'s
+      // active-kinds rebuild can only ever shrink or remove existing
+      // classes, never mint a genuinely new one.
       const after = fillLiveSingletons(afterRows, affected, (kind) =>
         ctx.registry.nodeKinds.has(kind),
       );

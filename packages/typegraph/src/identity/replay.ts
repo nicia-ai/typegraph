@@ -324,12 +324,18 @@ function assertBoundaryLimit(
 }
 
 function identityReplayHistoryTruncatedError(
-  requestedFrom: string,
+  requestedFrom: string | undefined,
+  requestedTo: string,
   prunedBefore: string,
 ): IdentityReplayError {
   return new IdentityReplayError(
     "The requested replay range lies entirely below the retention watermark: its history has been pruned.",
-    { code: "IDENTITY_REPLAY_HISTORY_TRUNCATED", requestedFrom, prunedBefore },
+    {
+      code: "IDENTITY_REPLAY_HISTORY_TRUNCATED",
+      ...(requestedFrom === undefined ? {} : { requestedFrom }),
+      requestedTo,
+      prunedBefore,
+    },
     {
       suggestion:
         "Request a range at or after the watermark, or omit fromRecorded to see everything retained.",
@@ -406,7 +412,8 @@ export async function identityReplay<G extends GraphDef>(
   // up to "now", which the watermark can never exceed.
   if (watermark > 0 && toRevision !== undefined && toRevision < watermark) {
     throw identityReplayHistoryTruncatedError(
-      options?.fromRecorded ?? requireDefined(options?.toRecorded),
+      options?.fromRecorded,
+      requireDefined(options?.toRecorded),
       createRecordedInstant(watermark, retention.prunedAt),
     );
   }

@@ -120,10 +120,22 @@ function sameMemberSet(
 /**
  * The exhaustive-diff predicate: given a member's OLD class (before a
  * structural mutation) and its NEW class (after), the one owner of "does this
- * count as a class-identity transition, and if so what does it name". Every
- * structural cause site (assert, retract, fold, detach, kind-drop,
- * schema-transition) calls this — never a second inline spelling of the
- * comparison.
+ * count as a class-identity transition, and if so what does it name". retract,
+ * fold, detach, kind-drop, and schema-transition all call this directly —
+ * never a second inline spelling of the comparison.
+ *
+ * `assert`'s own site, `mergeCurrentClasses`, is §12's SANCTIONED second
+ * owner, not an oversight: fusing two classes has both sides in hand
+ * up front (never a snapshot-then-diff), so it derives its ONE resulting
+ * record directly from `aClass[0]` / `bClass[0]` rather than calling this
+ * predicate. It is a NARROWER decision than this function's general
+ * before/after diff — "which one canonical survives a two-class fuse" — and
+ * the two must not drift on that narrower question: this predicate's OWN
+ * merge branch (`sameMemberSet` false, one canonical replacing another)
+ * agrees today. A future change to either must keep them agreeing, since the
+ * replay walk before/after equivalence (§9.3) depends on the record
+ * `mergeCurrentClasses` emits carrying the same meaning this predicate's
+ * would for the same fuse.
  *
  * A member is skipped ONLY when nothing about its class changed at all — same
  * canonical AND same member set. A canonical that survives unchanged while
@@ -355,8 +367,16 @@ export type IdentityTransitionReadScope = Readonly<{
  * Reads every transition row whose `class` OR `prior class` names one of
  * `scope.classRefs` — the forward AND reverse lineage hop the replay
  * fixed-point walk needs in one query — ordered by recorded revision then by
- * transition id, so several notes sharing a boundary come back in the
- * deterministic insertion order they were written.
+ * transition id, so the result is DETERMINISTIC and stable across repeated
+ * reads of the same committed rows.
+ *
+ * NOT insertion order: `transition_id` is a random `nanoid` (`generateId()`,
+ * `flush.ts`), so two notes buffered at the SAME recorded revision can sort
+ * either way relative to each other here, regardless of which was written
+ * first. Nothing depends on their relative order today — every note sharing
+ * one boundary shares the same `before`/`after` step in replay — but a
+ * future reader that does must not assume this ordering reflects buffering
+ * order.
  *
  * `scope.classRefs` is chunked through the shared bind-budget helper (each
  * reference costs four bind parameters: kind+id in the forward match, kind+id

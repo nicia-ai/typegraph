@@ -13,6 +13,10 @@ import { z } from "zod";
 
 import { createAdapterStoreWithSchema, defineGraph, defineNode } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import {
+  createRecordedInstant,
+  recordedInstantRevision,
+} from "../src/core/temporal";
 import { IdentityReplayError } from "../src/errors";
 import {
   IDENTITY_REPLAY_MAX_LIMIT,
@@ -21,6 +25,7 @@ import {
 } from "../src/identity/replay";
 import { pruneIdentityTransitionsForContext } from "../src/identity/transition-log";
 import { storeRuntime } from "../src/store/runtime-port";
+import { nowIso } from "../src/utils/date";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
@@ -76,45 +81,60 @@ describe("identity replay", () => {
     ).rejects.toThrow();
   });
 
-  it("replays merge / split / re-merge: every step's after matches the live closure at that revision", async () => {
+  it("replays merge / split / re-merge: every step's before/after matches an independent asOfRecorded read", async () => {
+    // G1R2-09: `identityReplay` assigns `before = previousAfter` for every
+    // non-first boundary (replay.ts), so a loop comparing `current.before`
+    // against `previous.after` compares a value against the variable it was
+    // copied from — it cannot fail for any implementation of the walk. Every
+    // assertion below instead checks against `store.asOfRecorded(...)`, a
+    // read path replay's OWN reconstruction never touches, matching the
+    // cross-backend twin (tests/backends/integration/identity-replay.ts).
     const store = await buildAbcStore();
     const a = { kind: "Person" as const, id: "a" };
     const b = { kind: "Person" as const, id: "b" };
 
     const same1 = await store.identity.assertSame(a, b);
-    const same2 = await store.identity.assertSame(b, {
-      kind: "Person",
-      id: "c",
-    });
+    await store.identity.assertSame(b, { kind: "Person", id: "c" });
     await store.identity.retractAssertion(same1.assertion.id);
     await store.identity.assertSame(a, b);
 
     const ctx = storeRuntime(store).identityContext();
     const replay = await identityReplay(ctx, a);
 
-    expect(replay.steps.length).toBeGreaterThan(0);
-    // Causes appear in commit order; assert/retract/assert must all be
-    // present because a's class demonstrably changed at each of those events.
-    const causes = replay.steps.map((step) => step.transition.cause);
-    expect(causes).toContain("assert");
-    expect(causes).toContain("retract");
-    void same2;
+    // The exact cause sequence, not merely "contains" — merge (assert a-b),
+    // merge (assert b-c, absorbing a transitively), split (retract a-b, in
+    // TWO records sharing one boundary: a departs alone, b/c's own record
+    // shares the same self-referential canonical), re-merge (assert a-b).
+    expect(replay.steps.map((step) => step.transition.cause)).toEqual([
+      "assert",
+      "assert",
+      "retract",
+      "retract",
+      "assert",
+    ]);
 
-    // before(i) == after(i-1) for every step but the first.
-    for (let index = 1; index < replay.steps.length; index += 1) {
-      const previous = replay.steps[index - 1];
-      const current = replay.steps[index];
-      if (previous === undefined || current === undefined) continue;
-      if (previous.transition.recorded === current.transition.recorded) {
-        // Same-revision steps share their before/after by construction.
-        continue;
-      }
-      expect(current.before.map((ref) => ref.id).toSorted()).toEqual(
-        previous.after.map((ref) => ref.id).toSorted(),
+    // Every step's `after` — and the first step's `before` — independently
+    // verified against `asOfRecorded`, never against another step's own
+    // reconstructed value.
+    for (const [index, step] of replay.steps.entries()) {
+      const after = await store
+        .asOfRecorded(step.transition.recorded)
+        .identity.membersOf(a);
+      expect(step.after.map((ref) => ref.id).toSorted()).toEqual(
+        after.map((ref) => ref.id).toSorted(),
+      );
+      if (index > 0) continue;
+      const revision = recordedInstantRevision(step.transition.recorded);
+      const beforeInstant = createRecordedInstant(revision - 1, nowIso());
+      const before = await store
+        .asOfRecorded(beforeInstant)
+        .identity.membersOf(a);
+      expect(step.before.map((ref) => ref.id).toSorted()).toEqual(
+        before.map((ref) => ref.id).toSorted(),
       );
     }
 
-    // The final step's `after` matches a live membersOf read.
+    // The final step's `after` also matches a live membersOf read.
     const lastStep = replay.steps.at(-1);
     if (lastStep === undefined) throw new Error("expected at least one step");
     const liveMembers = await store.identity.membersOf(a);
@@ -220,7 +240,27 @@ describe("identity replay", () => {
         toRecorded: beforePruneRecorded,
       }),
     ).rejects.toMatchObject({
-      details: { code: "IDENTITY_REPLAY_HISTORY_TRUNCATED" },
+      details: {
+        code: "IDENTITY_REPLAY_HISTORY_TRUNCATED",
+        requestedFrom: beforePruneRecorded,
+        requestedTo: beforePruneRecorded,
+      },
+    });
+
+    // G1R2-08: with no `fromRecorded` at all (an open start, closed only by
+    // `toRecorded`), `requestedFrom` must be ABSENT — never fabricated from
+    // `toRecorded`, which is the caller's range END, not its start.
+    await expect(
+      identityReplay(ctx, a, { toRecorded: beforePruneRecorded }),
+    ).rejects.toSatisfy((error: unknown) => {
+      if (!(error instanceof IdentityReplayError)) return false;
+      if (error.details.code !== "IDENTITY_REPLAY_HISTORY_TRUNCATED") {
+        return false;
+      }
+      return (
+        !("requestedFrom" in error.details) &&
+        error.details.requestedTo === beforePruneRecorded
+      );
     });
   });
 });

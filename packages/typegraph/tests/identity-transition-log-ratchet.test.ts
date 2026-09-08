@@ -52,8 +52,9 @@ const SOURCE_ROOT = path.resolve(
  * Matches the SqlSchema field (`identityTransitionsTable`) and the bare
  * table-name identifier (`identityTransitions`, as in
  * `tables.identityTransitions` or the `DEFAULT_TABLE_NAMES` key) — but NOT
- * `identityTransitionsOf` (the replay-facing function, which never touches
- * the relation directly; it calls `readIdentityTransitions`) and NOT
+ * `identityTransitionsOf` (the replay-facing function — see
+ * {@link READ_TRANSITIONS_REFERENCE} for the relation access IT makes, one
+ * level down through `readIdentityTransitions`) and NOT
  * `identityTransitionRetentionTable` / `identityTransitionRetention` (the
  * SEPARATE, singular-"Transition" retention-watermark relation, which is
  * out of this ratchet's scope). The raw string literal
@@ -62,6 +63,37 @@ const SOURCE_ROOT = path.resolve(
  * same line.
  */
 const TRANSITION_LOG_REFERENCE = /\bidentityTransitions(Table)?\b/;
+
+/**
+ * Matches the relation's ONE read primitive by name — a module can reach the
+ * relation's ROWS through this call without ever naming
+ * `identityTransitionsTable` or `tables.identityTransitions` itself (a
+ * probe appending a `membersFromLog(rows)`-shaped helper to
+ * `service-read.ts`, deriving membership from rows a caller already fetched
+ * via `readIdentityTransitions`, is exactly this shape — see G1R2-05).
+ */
+const READ_TRANSITIONS_REFERENCE = /\breadIdentityTransitions\b/;
+
+/**
+ * Matches an import statement pulling ANYTHING from the transition-log
+ * module, regardless of which name it imports — a backstop against a
+ * renamed re-export (`export { readIdentityTransitions as X }`) slipping a
+ * membership-capable import past {@link READ_TRANSITIONS_REFERENCE}'s bare
+ * identifier match. Every current import from this module (types, the
+ * `diffClosureTransitions` predicate, the one writer) is reviewed and
+ * allowlisted below; a NEW import path match is a new module to review, not
+ * necessarily a violation.
+ */
+const TRANSITION_LOG_IMPORT_PATH =
+  /from ["'](?:\.\/|(?:\.\.\/)+identity\/)transition-log["']/;
+
+function referencesTransitionLog(line: string): boolean {
+  return (
+    TRANSITION_LOG_REFERENCE.test(line) ||
+    READ_TRANSITIONS_REFERENCE.test(line) ||
+    TRANSITION_LOG_IMPORT_PATH.test(line)
+  );
+}
 
 type AllowedModule = Readonly<{
   /** Path relative to `packages/typegraph/src`. */
@@ -111,6 +143,51 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
     reason:
       "Resolves the configured/default table name into the PostgreSQL backend's `SqlTableNames`, mirroring every other relation.",
   },
+  {
+    file: "backend/types.ts",
+    reason:
+      "IdentityTableNames names the relation as one of the six Operational Identity table-name fields a backend port speaks about — structural, not a read.",
+  },
+  {
+    file: "backend/drizzle/engine/members/identity-members.ts",
+    reason:
+      "IDENTITY_TABLE_LOGICAL_NAMES scopes ensureIdentityTables/identityTableDdl's DDL provisioning to include the relation — DDL as data, never executed here and never a membership read.",
+  },
+  {
+    file: "identity/schema-transition.ts",
+    reason:
+      "identityTableNames() resolves the relation's configured physical name into the IdentityTableNames struct handed to the DDL-provisioning ports above — structural wiring, not a read.",
+  },
+  {
+    file: "identity/replay.ts",
+    reason:
+      "The one consumer of readIdentityTransitions: reads rows for boundary/cause/provenance data ONLY — every membership answer it returns comes from historicalIdentityReconstructionCtes instead (its own top-of-file docblock), structurally pinned by tests/identity-replay.test.ts (L3).",
+  },
+  {
+    file: "identity/service-mutation.ts",
+    reason:
+      "Imports diffClosureTransitions — the pure before/after class-diff predicate, not the relation — to compute the record a caller's own noteTransition then writes.",
+  },
+  {
+    file: "identity/service-maintenance.ts",
+    reason:
+      "Imports diffClosureTransitions for the same reason as service-mutation.ts — a pure predicate over closure snapshots, never the relation's rows.",
+  },
+  {
+    file: "identity/service-interchange-write.ts",
+    reason:
+      "Imports the IdentityDecisionProvenance type only, to type a governed-apply's decision metadata before handing it to noteTransition — no relation access.",
+  },
+  {
+    file: "store/recorded-capture.ts",
+    reason:
+      "Imports IdentityDecisionProvenance / IdentityTransitionDraft / IdentityTransitionNote — the touch/noteTransition callback types the capture session's public surface is typed against. The one writer (flush.ts) INSERTs; this file only buffers notes callers hand it.",
+  },
+  {
+    file: "store/recorded-capture/relations.ts",
+    reason:
+      "Imports IDENTITY_TRANSITION_COLUMN_NAMES for its .length only, to derive the per-statement chunk size flush.ts binds — column-count arithmetic, never a row.",
+  },
 ];
 
 type FoundSite = Readonly<{ file: string; lineNumber: number; line: string }>;
@@ -133,7 +210,7 @@ function scanForTransitionLogReferences(): readonly FoundSite[] {
   for (const file of collectTypeScriptFiles(SOURCE_ROOT)) {
     const lines = fs.readFileSync(file, "utf8").split("\n");
     for (const [index, line] of lines.entries()) {
-      if (!TRANSITION_LOG_REFERENCE.test(line)) continue;
+      if (!referencesTransitionLog(line)) continue;
       sites.push({
         file: path.relative(SOURCE_ROOT, file).replaceAll(path.sep, "/"),
         lineNumber: index + 1,
