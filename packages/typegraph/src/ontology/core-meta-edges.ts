@@ -14,7 +14,14 @@ import {
   META_EDGE_SAME_AS,
   META_EDGE_SUB_CLASS_OF,
 } from "./constants";
-import { META_EDGE_BRAND, type MetaEdge, type OntologyRelation } from "./types";
+import {
+  type EquivalentToPartner,
+  META_EDGE_BRAND,
+  type MetaEdge,
+  type OntologyRelation,
+  type SubClassOfParent,
+  type TypedOntologyRelation,
+} from "./types";
 
 // ============================================================
 // Helper to Create Meta-Edge
@@ -68,16 +75,32 @@ const subClassOfMetaEdge = createMetaEdge(META_EDGE_SUB_CLASS_OF, {
 
 /**
  * Creates a subClassOf ontology relation.
+ *
+ * Compile-time structural contract (C.1, roadmap D2): `child`'s schema
+ * output must structurally extend `parent`'s — every property `parent`
+ * requires, `child` has with a compatible type; `child` may add properties
+ * or narrow an optional-in-parent property. A pair that fails this is
+ * refused at compile time with a {@link SubClassOfParent} mismatch naming
+ * the incompatible fields, and — for pairs the type checker cannot see
+ * through (refinements, transforms, value-level constraints) — at registry
+ * build time by the authoritative runtime check
+ * (`src/registry/validate-structural-subsumption.ts`). C.1 is a filter, not
+ * the authority: it accepts strictly more than the registry does, never
+ * less.
+ *
+ * A hierarchy that is a taxonomy rather than a subtype relationship — the
+ * child does not extend the parent's schema — should use `broader(child,
+ * parent)` instead; see `includeNarrower` for kind-level taxonomy queries.
  */
-export function subClassOf(
-  child: NodeType,
-  parent: NodeType,
-): OntologyRelation {
+export function subClassOf<C extends NodeType, P extends NodeType>(
+  child: C,
+  parent: SubClassOfParent<C, P>,
+): TypedOntologyRelation<typeof META_EDGE_SUB_CLASS_OF, C, P> {
   return {
     metaEdge: subClassOfMetaEdge,
     from: child,
     to: parent,
-  };
+  } as unknown as TypedOntologyRelation<typeof META_EDGE_SUB_CLASS_OF, C, P>;
 }
 
 // ============================================================
@@ -185,7 +208,26 @@ const equivalentToMetaEdge = createMetaEdge(META_EDGE_EQUIVALENT_TO, {
  * kind can be mapped to an external IRI for cross-system mapping — an edge
  * kind equivalenced to a registered node or edge kind is refused at registry
  * build (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`).
+ *
+ * Between two node kinds this carries the same compile-time structural
+ * contract as `subClassOf` (C.1), checked in BOTH directions -- mutual
+ * subsumption means each kind's schema must extend the other's. The IRI
+ * form (`equivalentTo(kind, iri)`) and the edge-to-node form carry no
+ * check: an external IRI, and an edge kind paired with a node kind (always
+ * refused at registry build), have no comparable schema pair.
  */
+export function equivalentTo<A extends NodeType, B extends NodeType>(
+  kindA: A,
+  kindB: EquivalentToPartner<A, B>,
+): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, B>;
+export function equivalentTo(
+  kindA: NodeType | AnyEdgeType,
+  kindBOrIri: string,
+): OntologyRelation;
+export function equivalentTo(
+  kindA: AnyEdgeType,
+  kindB: NodeType,
+): OntologyRelation;
 export function equivalentTo(
   kindA: NodeType | AnyEdgeType,
   kindBOrIri: NodeType | string,
@@ -208,10 +250,22 @@ const sameAsMetaEdge = createMetaEdge(META_EDGE_SAME_AS, {
 /**
  * Creates the deprecated type-level `sameAs` alias of `equivalentTo`.
  *
+ * Carries the same compile-time structural contract as `equivalentTo` (C.1):
+ * `collectOntologyRelations` (`src/registry/kind-registry.ts`) folds `sameAs`
+ * into the same equivalence bucket as `equivalentTo`, so leaving this alias
+ * unchecked would make it an escape hatch around C.1/C.2.
+ *
  * @deprecated Enable `identity: { sameIdAcrossKinds: "fold" }` and use the
  * TypeGraph Identity Profile's runtime `store.identity` ledger. The ledger
  * does not perform OWL property substitution or automatic query expansion.
  */
+/** @deprecated see the primary `sameAs` declaration above. */
+export function sameAs<A extends NodeType, B extends NodeType>(
+  kindA: A,
+  kindB: EquivalentToPartner<A, B>,
+): TypedOntologyRelation<typeof META_EDGE_SAME_AS, A, B>;
+/** @deprecated see the primary `sameAs` declaration above. */
+export function sameAs(kindA: NodeType, kindBOrIri: string): OntologyRelation;
 export function sameAs(
   kindA: NodeType,
   kindBOrIri: NodeType | string,
