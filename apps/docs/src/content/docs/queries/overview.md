@@ -133,14 +133,19 @@ store
 
 ### Be Specific with Kinds
 
-Unless you need subclass expansion, use exact kinds:
+Querying a kind with subclasses is polymorphic **by default** — `from`/`to`/
+`fromDynamic`/`toDynamic` include subtype rows unless you narrow. If you only
+want the exact kind, say so:
 
 ```typescript
-// More efficient: Exact kind
+// Exact kind by construction — no subclasses to expand
 .from("Podcast", "p")
 
-// Less efficient: Includes all subclasses
-.from("Media", "m", { includeSubClasses: true })
+// Polymorphic by default: includes every Media subclass (Podcast, Article, ...)
+.from("Media", "m")
+
+// Narrow it back to exactly Media rows
+.from("Media", "m", { includeSubClasses: false })
 ```
 
 ### Always Paginate Large Results
