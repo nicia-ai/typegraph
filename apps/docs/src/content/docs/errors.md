@@ -495,12 +495,17 @@ try {
   if (error instanceof CardinalityError) {
     console.log(error.category); // "constraint"
     console.log(error.details);
-    // { edgeKind: "worksAt", fromKind: "Person", fromId: "<alice-id>", cardinality: "one", existingCount: 1 }
+    // { edgeKind: "worksAt", direction: "source", fromKind: "Person", fromId: "<alice-id>", toKind: "Company", toId: "<other-company-id>", cardinality: "one", existingCount: 1 }
     console.log(error.suggestion);
     // "Remove the existing edge before creating a new one, or update the existing edge..."
   }
 }
 ```
+
+`details.direction` names which endpoint's population was overrun —
+`"source"` for a `cardinality` violation, `"target"` for a
+`targetCardinality` one. `fromKind` / `fromId` / `toKind` / `toId` always
+name both endpoints, regardless of direction.
 
 ### `UniquenessError`
 
@@ -718,7 +723,7 @@ cannot fence constrained writes" is unusable advice while "your
 
 | `details.constraint` | The write it describes |
 | --- | --- |
-| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`. |
+| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` (`one`, `unique`, `oneActive`) or `targetCardinality` (`one`, `oneActive`) constrains it, on either endpoint. |
 | `edgeMatchKeyConvergence` | Endpoint convergence that requires the portable transaction-scoped path: an undeclared dynamic `matchOn`, constrained cardinality, update or temporal options, derived/custom backends, or schema-aware resurrection of a tombstoned winner. A schema-declared durable `matchIdentity` removes this fence from eligible live single-item and bulk create/found paths. |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
 | `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind. A `scope: "kind"` unique is backed by the uniques primary key and needs no fence. |
@@ -1175,6 +1180,28 @@ try {
   if (error instanceof MigrationError && error.details.reason === "ontology-tightening-violated") {
     console.log(error.details.violations);
     // [{ family: "nodeDisjointness", target: {...}, owners: [...] }, ...]
+  }
+}
+```
+
+The `details.reason` value `"edge-cardinality-tightening-violated"` is the
+same shape for edge cardinality: newly declaring or tightening `cardinality`
+or `targetCardinality` on an edge kind is false against rows that already
+exist. `details.axes` names the axes this commit newly constrains (each an
+`{direction, cardinality, edgeKind}` triple); `details.violations` carries
+the offending rows in exactly the shape `store.verifyConstraintFences()`
+returns. An axis is probed whenever the proposed value is constrained and
+differs from the stored one — including a genuine loosening, which costs one
+read of an already-clean population rather than risk missing a tightening.
+
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "edge-cardinality-tightening-violated") {
+    console.log(error.details.axes);
+    // [{ direction: "target", cardinality: "one", edgeKind: "assignedTo" }]
+    console.log(error.details.violations);
   }
 }
 ```

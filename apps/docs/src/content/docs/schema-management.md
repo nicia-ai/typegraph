@@ -280,7 +280,9 @@ These changes require manual migration:
 - Renaming node or edge types
 - Changing property types
 - Removing properties
-- Changing cardinality constraints to be more restrictive
+- Changing source or target cardinality constraints to be more restrictive
+  (data-checked; see
+  [Edge cardinality tightenings are checked against your data](/schema-evolution#edge-cardinality-tightenings-are-checked-against-your-data))
 - Removing allowed endpoint pairs from a source-dependent edge
 - Adding or removing an `inverseOf` or `implies` ontology relation
 
