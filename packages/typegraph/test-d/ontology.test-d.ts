@@ -58,3 +58,13 @@ declare const anyEdge: AnyEdgeType;
 declare const anyNode: NodeType;
 expectType<OntologyRelation>(equivalentTo(anyEdge, "https://example.com/x"));
 expectAssignable<OntologyRelation>(equivalentTo(anyNode, anyNode));
+
+// A node kind paired with an edge kind, in EITHER order, has no defined
+// substitution semantics either — refused at registry build
+// (ONTOLOGY_EQUIVALENCE_INVALID_CLASS) — and the overload set (C13-R1-11)
+// tightened this to a compile-time refusal too, in the node-first direction.
+// (The edge-first direction, `equivalentTo(anyEdge, anyNode)`, DOES
+// typecheck via the `(AnyEdgeType, NodeType)` overload; only the runtime
+// registry build refuses it, matching the two-edge-kind case's runtime-only
+// refusal above.)
+expectError(equivalentTo(anyNode, anyEdge));
