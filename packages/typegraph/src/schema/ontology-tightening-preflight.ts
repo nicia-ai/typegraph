@@ -83,6 +83,14 @@ function buildOntologyTighteningViolatedError(
     .slice(0, 2)
     .map((violation) => JSON.stringify(violation))
     .join("; ");
+  // Only the changes that actually required a data check: a `safe` or
+  // `breaking` change in the same diff (`relatedTo` added alongside the
+  // `disjointWith` this refusal is about, say) carries no `probes` and would
+  // otherwise show up in `details.changes` as if it, too, were implicated —
+  // see `MigrationErrorDetails`'s `"ontology-tightening-violated"` docblock.
+  const probedChanges = changes.filter(
+    (change) => (change.probes ?? []).length > 0,
+  );
   return new MigrationError(
     `Ontology tightening refused: ${String(violations.length)} existing row(s) violate the proposed ontology. ` +
       `${shown}. Run store.verifyConstraintFences() to list them, resolve the rows, then retry.`,
@@ -91,7 +99,7 @@ function buildOntologyTighteningViolatedError(
       fromVersion: params.fromVersion,
       toVersion: params.toVersion,
       reason: "ontology-tightening-violated",
-      changes,
+      changes: probedChanges,
       violations,
     },
   );

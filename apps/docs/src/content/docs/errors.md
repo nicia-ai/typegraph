@@ -1145,8 +1145,10 @@ materializes and arbitrates the new durable keys.
 The `details.reason` value `"ontology-tightening-violated"` means an ontology
 change — adding `disjointWith`, `subClassOf`, `equivalentTo`, or `sameAs`, or
 removing `subClassOf`, `equivalentTo`, or `sameAs` — is false against rows
-that already exist. `details.changes` carries the classified ontology
-changes; `details.violations` carries the offending rows in exactly the
+that already exist. `details.changes` carries only the ontology changes in
+this diff that required a data check (a `safe` or `breaking` change in the
+same commit is never included, even one alongside the change that was
+refused); `details.violations` carries the offending rows in exactly the
 shape `store.verifyConstraintFences()` returns. Resolve those rows (delete
 them, change their kind, or narrow the ontology change) and retry. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)

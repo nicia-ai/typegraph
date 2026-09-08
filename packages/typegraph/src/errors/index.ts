@@ -1196,7 +1196,12 @@ export type MigrationErrorDetails =
       fromVersion: number;
       toVersion: number;
       reason: "ontology-tightening-violated";
-      /** The ontology changes that required a data check. */
+      /**
+       * The ontology changes that required a data check — every classified
+       * change in the diff whose `probes` is non-empty. A change classified
+       * `safe` or `breaking` (which carries no `probes`) never appears here,
+       * even when the same diff also contains one.
+       */
       changes: readonly OntologyChange[];
       /**
        * The rows that make the proposed ontology false, in exactly the
