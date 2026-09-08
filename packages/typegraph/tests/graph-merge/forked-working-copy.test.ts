@@ -14,6 +14,8 @@ import { copyFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -24,7 +26,9 @@ import {
   defineGraph,
   defineNode,
 } from "../../src";
+import { deriveBackend } from "../../src/backend/derive-backend";
 import { createSqliteTables } from "../../src/backend/drizzle/schema/sqlite";
+import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
 import { computeBaseVersion } from "../../src/graph-merge/base-version";
 import { branch } from "../../src/graph-merge/branch";
@@ -111,7 +115,7 @@ function fileForkStrategy(sourcePath: string, label: string) {
 }
 
 describe("forkedWorkingCopyStrategy", () => {
-  it("forks a file-backed SQLite database by copying its file, merges a fork write back to the base, and releases the fork only when the working copy's composed close runs", async () => {
+  it("forks a file-backed SQLite database by copying its file, merges a fork write back to the base, and releases the fork only when forkBranch.close() runs its composed close", async () => {
     const basePath = createTemporaryDbPath("base-roundtrip");
     const { backend: baseBackend } = openFileBackend(basePath);
     const [baseStore] = await createStoreWithSchema(graph, baseBackend);
@@ -162,15 +166,21 @@ describe("forkedWorkingCopyStrategy", () => {
       "Forked Edit",
     );
 
-    // The fork survives the whole merge — `dispose` releases it only when the
-    // working copy's own `close()` runs, never earlier and never on its own.
+    // The fork survives the whole merge — `dispose` releases it only when
+    // `forkBranch.close()` runs, never earlier and never on its own.
     expect(dispose).not.toHaveBeenCalled();
     expect(existsSync(forkedPath)).toBe(true);
 
-    await getStoreBackend(forkBranch.store).close();
+    await forkBranch.close();
 
     expect(dispose).toHaveBeenCalledTimes(1);
     expect(existsSync(forkedPath)).toBe(false);
+
+    // Idempotent: a second close is a no-op, not a second teardown attempt
+    // (mirrors IngestionBranch.close's own idempotency, inherited from the
+    // composed backend's close()).
+    await forkBranch.close();
+    expect(dispose).toHaveBeenCalledTimes(1);
 
     await baseBackend.close();
   });
@@ -372,8 +382,8 @@ describe("forkedWorkingCopyStrategy", () => {
         "Fork Edit",
       ]);
 
-      await getStoreBackend(forkBranch.store).close();
-      await getStoreBackend(cloneBranch.store).close();
+      await forkBranch.close();
+      await cloneBranch.close();
       await baseBackend.close();
     },
   );
@@ -430,8 +440,8 @@ describe("forkedWorkingCopyStrategy", () => {
         ConfigurationError,
       );
 
-      await getStoreBackend(forkBranch.store).close();
-      await getStoreBackend(cloneBranch.store).close();
+      await forkBranch.close();
+      await cloneBranch.close();
       await baseBackend.close();
     },
   );
@@ -465,7 +475,7 @@ describe("forkedWorkingCopyStrategy", () => {
     });
     expect(onOperationEnd).toHaveBeenCalledTimes(1);
 
-    await getStoreBackend(forkBranch.store).close();
+    await forkBranch.close();
     await baseBackend.close();
   });
 
@@ -538,7 +548,7 @@ describe("forkedWorkingCopyStrategy", () => {
         "Forked Edit",
       );
 
-      await getStoreBackend(forkBranch.store).close();
+      await forkBranch.close();
       await baseBackend.close();
     },
   );
@@ -612,7 +622,7 @@ describe("forkedWorkingCopyStrategy", () => {
         "Forked Edit",
       );
 
-      await getStoreBackend(forkBranch.store).close();
+      await forkBranch.close();
       await baseBackend.close();
     },
   );
@@ -673,4 +683,114 @@ describe("forkedWorkingCopyStrategy", () => {
       await baseBackend.close();
     },
   );
+
+  it("refuses a fork whose connect() returns the base store's own backend outright (object identity), disposing only the fork and leaving the base open", async () => {
+    const sqlite = new Database(":memory:");
+    // Declared "independent" so this test isolates the object-identity arm:
+    // an undeclared better-sqlite3 backend is marked "serialized", which
+    // would let sharesSerializedTransactionResource catch a self-aliased
+    // backend too (any backend equals itself) and mask a broken identity
+    // check. Marking it independent takes that arm out of play.
+    const baseBackend = createSqliteBackend(drizzle(sqlite), {
+      executionProfile: { isSync: true },
+      serializedResource: { mode: "independent" },
+    });
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+    await baseStore.nodes.Widget.create({ name: "Original" });
+
+    const dispose = vi.fn(() => Promise.resolve());
+    const strategy = forkedWorkingCopyStrategy<G, ForkHandle>({
+      fork: () => Promise.resolve({ dispose }),
+      // A cached-factory bug: `connect()` hands back the BASE's own backend
+      // instead of opening a connection to the fork.
+      connect: () => Promise.resolve(getStoreBackend(baseStore)),
+    });
+
+    await expect(
+      strategy.create(baseStore, await computeBaseVersion(baseStore)),
+    ).rejects.toBeInstanceOf(BranchError);
+    // Only the fork is released — the aliased backend is the base's, and
+    // closing it here would close the base out from under its owner.
+    expect(dispose).toHaveBeenCalledTimes(1);
+
+    expect(
+      (await baseStore.nodes.Widget.find()).map((found) => found.name),
+    ).toEqual(["Original"]);
+    await baseStore.nodes.Widget.create({ name: "Still works" });
+
+    sqlite.close();
+  });
+
+  it("refuses a fork whose connect() returns a backend derived FROM the base's backend through deriveBackend", async () => {
+    const sqlite = new Database(":memory:");
+    // Declared "independent" for the same isolation reason as the object-
+    // identity test above: deriveBackend also CARRIES a "serialized" audit
+    // onto the derived backend, so an undeclared base would let
+    // sharesSerializedTransactionResource catch this case too and mask a
+    // broken isBackendDerivedFrom check.
+    const baseBackend = createSqliteBackend(drizzle(sqlite), {
+      executionProfile: { isSync: true },
+      serializedResource: { mode: "independent" },
+    });
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+    await baseStore.nodes.Widget.create({ name: "Original" });
+
+    const dispose = vi.fn(() => Promise.resolve());
+    const strategy = forkedWorkingCopyStrategy<G, ForkHandle>({
+      fork: () => Promise.resolve({ dispose }),
+      // A decorator over the base's own backend is still the base's
+      // connection underneath — deriveBackend carries derivation lineage
+      // (isBackendDerivedFrom), regardless of the resource audit, even with
+      // an empty overlay.
+      connect: () =>
+        Promise.resolve(deriveBackend(getStoreBackend(baseStore), {})),
+    });
+
+    await expect(
+      strategy.create(baseStore, await computeBaseVersion(baseStore)),
+    ).rejects.toBeInstanceOf(BranchError);
+    expect(dispose).toHaveBeenCalledTimes(1);
+
+    expect(
+      (await baseStore.nodes.Widget.find()).map((found) => found.name),
+    ).toEqual(["Original"]);
+
+    sqlite.close();
+  });
+
+  it("refuses a fork whose connect() returns a SECOND createSqliteBackend wrapper over the SAME better-sqlite3 Database as the base (shared-resource arm)", async () => {
+    const sqlite = new Database(":memory:");
+    const baseBackend = createSqliteBackend(drizzle(sqlite), {
+      executionProfile: { isSync: true },
+    });
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+    await baseStore.nodes.Widget.create({ name: "Original" });
+
+    const dispose = vi.fn(() => Promise.resolve());
+    const strategy = forkedWorkingCopyStrategy<G, ForkHandle>({
+      fork: () => Promise.resolve({ dispose }),
+      // A SEPARATE createSqliteBackend/drizzle() wrapper, but over the exact
+      // same `sqlite` Database handle — two independently-constructed
+      // objects sharing one connection, not an identity or derivation
+      // relationship, so only sharesSerializedTransactionResource catches
+      // this.
+      connect: () =>
+        Promise.resolve(
+          createSqliteBackend(drizzle(sqlite), {
+            executionProfile: { isSync: true },
+          }),
+        ),
+    });
+
+    await expect(
+      strategy.create(baseStore, await computeBaseVersion(baseStore)),
+    ).rejects.toBeInstanceOf(BranchError);
+    expect(dispose).toHaveBeenCalledTimes(1);
+
+    expect(
+      (await baseStore.nodes.Widget.find()).map((found) => found.name),
+    ).toEqual(["Original"]);
+
+    sqlite.close();
+  });
 });

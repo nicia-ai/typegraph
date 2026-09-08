@@ -4,8 +4,14 @@ export {
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../backend/capabilities/write-fence";
-export { wrapWithManagedClose } from "../backend/derive-backend";
-export { snapshotExportContention } from "../backend/transaction-resource";
+export {
+  isBackendDerivedFrom,
+  wrapWithManagedClose,
+} from "../backend/derive-backend";
+export {
+  sharesSerializedTransactionResource,
+  snapshotExportContention,
+} from "../backend/transaction-resource";
 export type {
   GraphBackend,
   NodeRow,

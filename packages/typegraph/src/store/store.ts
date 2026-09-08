@@ -1770,7 +1770,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Excludes `history`/`revisionTracking` — those are the working-copy
    * strategy's own decision, not something to inherit blindly.
    *
-   * @internal
+   * Public: this is the getter a custom `WorkingCopyStrategy` author is meant
+   * to call (see `forkedWorkingCopyStrategy` in `graph-merge`), not an
+   * internal implementation detail like its `historyEnabled`/
+   * `revisionTrackingEnabled`/`revisionSchema` siblings.
    */
   get workingCopyOptions(): WorkingCopyOptions {
     const {

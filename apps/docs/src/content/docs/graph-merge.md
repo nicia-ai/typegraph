@@ -1102,6 +1102,9 @@ import {
   type ForkHandle,
 } from "@nicia-ai/typegraph/graph-merge";
 import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { decorateBackend } from "@nicia-ai/typegraph/backend";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 
 // A host whose fork call returns a new connection string for the branch —
 // this is the shape of the copy-on-write branching APIs some Postgres hosts
@@ -1116,8 +1119,22 @@ const strategy = forkedWorkingCopyStrategy<G, HostBranch>({
       dispose: async () => hostBranchApi.deleteBranch(created.id),
     };
   },
-  connect: async (fork) =>
-    createPostgresBackend(await connectPool(fork.connectionString)),
+  connect: async (fork) => {
+    // `createPostgresBackend` takes a Drizzle database, not a pool — open
+    // one here. Its `close()` deliberately does not end a caller-owned pool
+    // (Drizzle leaves connection lifecycle to the caller), so compose the
+    // pool's own shutdown into this fork's `close` through the public
+    // `decorateBackend` (never a spread) — `branch()`'s composed close then
+    // ends the pool along with releasing the fork.
+    const pool = new Pool({ connectionString: fork.connectionString });
+    const backend = createPostgresBackend(drizzle(pool));
+    return decorateBackend(backend, {
+      close: async () => {
+        await backend.close();
+        await pool.end();
+      },
+    });
+  },
 });
 
 // `makeBackend` is ignored once an explicit strategy is supplied — pass a
@@ -1178,17 +1195,39 @@ relations, so `store.asOfRecorded(<an instant before the fork>)` answers from
 that history. A clone-based branch never enables history, so the same call on
 it refuses outright.
 
-Because a fork is expected to be byte-for-byte identical to the base, `create()`
-asserts `computeBaseVersion(forkStore) === base` right after attaching the
-store, where `base` is the token `branch()` already stamped off the ORIGINAL
-base store before invoking the strategy — cheap when the base has revision
-tracking (an O(1) anchor compare), an O(graph) content fingerprint otherwise,
-and computed exactly once either way. A mismatch closes the backend first and
-refuses with a `BranchError` carrying `forkVersion`/`baseVersion` in
+`create()` asserts `computeBaseVersion(forkStore) === base` right after
+attaching the store, where `base` is the token `branch()` already stamped off
+the ORIGINAL base store before invoking the strategy — cheap when the base has
+revision tracking (an O(1) anchor compare), an O(graph) content fingerprint
+otherwise, and computed exactly once either way. This proves base-token
+equality at the instant the fork was taken, not byte-for-byte physical
+identity: the untracked fingerprint deliberately omits tombstones,
+`created_at`/`updated_at`, the `version` column, and recorded history (the "A
+fork preserves what a clone drops" paragraph above) — providing those
+unchanged is the FORK MECHANISM's job, not something this assertion re-verifies
+on every branch. That is still the right fence: the merge's lost-update guard
+reads `version` and the diff reads tombstones/timestamps straight off the
+fork, so a `fork` that is not a true physical copy breaks them regardless of
+what the content fingerprint agrees on. A mismatch closes the backend first
+and refuses with a `BranchError` carrying `forkVersion`/`baseVersion` in
 `error.details`; `branch()` catches it and returns that `BranchError` as the
 `cause` of the outer `BranchError` it resolves with. A fork taken while the
 base was mid-write, or a `fork` implementation that returns something other
 than an exact copy, is refused here rather than merged against silently.
+
+`create()` also refuses BEFORE ever attaching a store when `connect()`'s
+backend aliases the base's own backend: the same backend object, one derived
+from the other through `deriveBackend`, or two wrappers sharing one underlying
+connection. Without this check, a `connect()` that mistakenly hands back the
+base's own backend (a cached factory keyed by database name, say) would pass
+every fence below trivially — every write on the "fork" would actually mutate
+the base, and closing the working copy would close the base's own backend. The
+refusal disposes only the fork (never the aliased backend, which the base
+still owns) and throws a `BranchError` naming `connect()`. This cannot detect
+every aliasing shape: a fresh backend built over the base's own connection
+pool is indistinguishable from a real fork's connection when that pool audits
+as independent (the normal case for a default-size `pg.Pool`) — a pooled
+checkout genuinely is a different connection from the pool's perspective.
 
 `ingestionBranch()` stays clone-based. Its strategy derives a working-copy
 schema with node uniqueness deferred so an untrusted batch's repeated keys can

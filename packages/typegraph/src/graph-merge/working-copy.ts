@@ -63,6 +63,8 @@ import {
   exportGraphStream,
   importGraph,
   importGraphStream,
+  isBackendDerivedFrom,
+  sharesSerializedTransactionResource,
   snapshotExportContention,
   storeBackend,
   wrapWithManagedClose,
@@ -282,23 +284,42 @@ export type ForkedWorkingCopyOptions<
   /**
    * Produces a host-level fork of the database `baseStore` is on — the
    * caller's own fork API call (a file copy, a `CREATE DATABASE ... TEMPLATE`,
-   * a hosting product's branch-database call). The fork MUST be byte-for-byte
-   * identical to the base at the instant it is taken: `create()` asserts this
-   * with `computeBaseVersion` and refuses otherwise (see
-   * {@link forkedWorkingCopyStrategy}).
+   * a hosting product's branch-database call). The fork MUST be the base at
+   * the instant it is taken: `create()` asserts this by comparing
+   * `computeBaseVersion` between the fork and the base and refuses otherwise
+   * (see {@link forkedWorkingCopyStrategy}). That comparison proves base-token
+   * equality (schema plus a revision anchor, or a live-content fingerprint) —
+   * see `computeBaseVersion`'s own doc comment for exactly what it does and
+   * does not cover — not a byte-for-byte audit of the fork; the FORK
+   * MECHANISM is what is trusted for physical fidelity.
    */
   fork: (baseStore: Store<G>) => Promise<TFork>;
   /**
-   * Opens a backend on the fork `fork` produced. The returned backend's own
-   * table bindings (`backend.tableNames`) MUST agree with the base's
-   * resolved SQL schema (`baseStore.revisionSchema` — the same schema the
-   * fork's store resolves to via {@link forkStoreOptions}). A fork is the
-   * SAME physical database as the base, so this is normally automatic (a
-   * backend factory bound to the base's custom names, if any, opens
-   * correctly on the fork too); `create()` still checks it and refuses with
-   * a {@link BranchError}, closing the backend first, when the two disagree
-   * — a backend bound to the wrong table names reads and writes through
-   * tables the fork's rows were never written to.
+   * Opens a backend on the fork `fork` produced. The returned backend MUST be
+   * an INDEPENDENT connection, never the base's own backend or one that
+   * shares its connection: `create()` refuses before wrapping when the
+   * connected backend is `===` the base's backend, is derived from it (or it
+   * from the connected backend) through `deriveBackend`, or shares its
+   * serialized transaction resource (two wrappers over the same underlying
+   * connection) — see {@link forkedWorkingCopyStrategy}'s aliasing check. This
+   * catches a `connect` that mistakenly hands back a cached factory's
+   * existing backend; it CANNOT catch a fresh backend built over the base's
+   * own connection pool when that pool audits as independent (a default-size
+   * `pg.Pool`, for example) — a pooled checkout is genuinely a different
+   * connection from the pool's perspective, so nothing here can tell it apart
+   * from a real fork's connection short of the caller's own knowledge of
+   * their topology.
+   *
+   * The returned backend's own table bindings (`backend.tableNames`) MUST
+   * also agree with the base's resolved SQL schema (`baseStore.revisionSchema`
+   * — the same schema the fork's store resolves to via
+   * {@link forkStoreOptions}). A fork is the SAME physical database as the
+   * base, so this is normally automatic (a backend factory bound to the
+   * base's custom names, if any, opens correctly on the fork too); `create()`
+   * still checks it and refuses with a {@link BranchError}, closing the
+   * backend first, when the two disagree — a backend bound to the wrong table
+   * names reads and writes through tables the fork's rows were never written
+   * to.
    */
   connect: (fork: TFork) => Promise<GraphBackend>;
 }>;
@@ -358,6 +379,49 @@ function resolvedTableNamesEqual(
 }
 
 /**
+ * Whether `connectedBackend` aliases `baseStore`'s own backend rather than
+ * naming an independent connection to the fork — the ONE decision every arm
+ * of {@link forkedWorkingCopyStrategy}'s aliasing refusal reduces to; nothing
+ * else in this module re-derives it.
+ *
+ * Three ways two backend objects can turn out to be the SAME underlying
+ * connection even though `connect()` believes it opened a fresh one:
+ *
+ *   - Object identity: `connect()` returned the base's own backend outright
+ *     (e.g. a cached factory keyed by database name that returns the base's
+ *     backend for any fork of that database).
+ *   - Derivation lineage, in EITHER direction, through `deriveBackend`
+ *     (`isBackendDerivedFrom`): a decorator built from the base's backend, or
+ *     the base's backend built from what `connect()` returned.
+ *   - A shared serialized transaction resource
+ *     (`sharesSerializedTransactionResource`): two independently-constructed
+ *     wrapper objects whose statements land on the SAME underlying
+ *     connection — two `createSqliteBackend` calls over one `Database`
+ *     handle, for example. `src/backend/transaction-resource.ts` is the
+ *     existing owner of "two wrappers on one connection"; this reuses it
+ *     rather than re-deriving it.
+ *
+ * Deliberately NOT exhaustive — see {@link ForkedWorkingCopyOptions.connect}'s
+ * doc comment for the one aliasing shape none of these three arms can see: a
+ * fresh backend built over the base's own connection POOL, when that pool
+ * audits as independent (the normal case for a default-size `pg.Pool`). A
+ * pooled checkout genuinely is a different connection from the pool's own
+ * perspective, so there is nothing here to detect.
+ */
+function forkAliasesBase<G extends GraphDef>(
+  connectedBackend: GraphBackend,
+  baseStore: Store<G>,
+): boolean {
+  const baseBackend = storeBackend(baseStore);
+  return (
+    connectedBackend === baseBackend ||
+    isBackendDerivedFrom(connectedBackend, baseBackend) ||
+    isBackendDerivedFrom(baseBackend, connectedBackend) ||
+    sharesSerializedTransactionResource(connectedBackend, baseBackend)
+  );
+}
+
+/**
  * Working-copy strategy for a fork-capable host: `fork(baseStore)` asks the
  * host to produce a complete, independent copy of the underlying database —
  * not a public-interchange replay — and `connect(fork)` opens a backend on
@@ -378,11 +442,25 @@ function resolvedTableNamesEqual(
  *      the fork before rethrowing (mirroring the clone strategy's
  *      own-failure cleanup); a dispose failure never masks the original
  *      error.
- *   3. The connected backend's `close` is composed with the fork's `dispose`
+ *   3. The connected backend is checked for ALIASING the base's own backend
+ *      by `forkAliasesBase` — object identity with the base's backend,
+ *      derivation lineage in either direction (`isBackendDerivedFrom`), or a
+ *      shared serialized transaction resource
+ *      (`sharesSerializedTransactionResource`, `transaction-resource.ts`'s
+ *      existing owner of "two wrappers on one connection"). Without this, a
+ *      `connect()` that hands back the base's own backend (a cached factory
+ *      keyed by database name, say) would pass every later fence — the
+ *      table-name check, the base@V check both trivially agree with
+ *      themselves — while every fork write actually mutates the base and
+ *      closing the "fork" actually closes the base. An alias refuses BEFORE
+ *      wrapping: only the fork is disposed (never the connected backend — it
+ *      is the base's) before `create()` throws a {@link BranchError} naming
+ *      `connect()`.
+ *   4. The connected backend's `close` is composed with the fork's `dispose`
  *      through `wrapWithManagedClose` (a `deriveBackend` overlay, never a
  *      spread), so the caller's single `close()` on the resulting store's
  *      backend releases both the connection and the fork.
- *   4. `baseStore.revisionSchema` — the base's own resolved SQL schema getter
+ *   5. `baseStore.revisionSchema` — the base's own resolved SQL schema getter
  *      (an explicit `schema` option, or `backend.tableNames` otherwise; never
  *      re-derived by hand here) — is compared, table by table, against
  *      `createSqlSchema(connectedBackend.tableNames)`. A fork is the same
@@ -392,18 +470,22 @@ function resolvedTableNamesEqual(
  *      fork's rows were never written to. A mismatch closes the backend
  *      (releasing both the connection and the fork) before refusing with a
  *      {@link BranchError}.
- *   5. A fresh `Store` is attached with `createStore` — a zero-DDL attach,
+ *   6. A fresh `Store` is attached with `createStore` — a zero-DDL attach,
  *      since the fork already carries the base's schema and rows — using
  *      {@link forkStoreOptions}.
- *   6. `computeBaseVersion(forkStore)` is compared against `base` — the
+ *   7. `computeBaseVersion(forkStore)` is compared against `base` — the
  *      token `branch()` already stamped off the ORIGINAL base store, passed
- *      in rather than recomputed here: a fork must be the base, byte for
- *      byte, or it is not a fork, and comparing against the caller's own
+ *      in rather than recomputed here: comparing against the caller's own
  *      token (instead of a second, independently computed one) means an
  *      untracked base's content fingerprint is computed exactly once per
- *      branch. A mismatch closes the backend (releasing both the connection
- *      and the fork, mirroring step 4's composition) before refusing with a
- *      {@link BranchError}.
+ *      branch. Equality here proves base-token equality — schema plus a
+ *      revision anchor, or a live-content fingerprint — at the instant the
+ *      fork was taken; it is NOT a byte-for-byte physical audit (see
+ *      {@link ForkedWorkingCopyOptions.fork}'s doc comment for what the
+ *      fingerprint deliberately omits and why that is the fork mechanism's
+ *      contract, not this assertion's). A mismatch closes the backend
+ *      (releasing both the connection and the fork, mirroring step 5's
+ *      composition) before refusing with a {@link BranchError}.
  *
  * @param options - `{ fork, connect }` — see {@link ForkedWorkingCopyOptions}.
  */
@@ -427,6 +509,25 @@ export function forkedWorkingCopyStrategy<
           // Intentionally ignored — surface the original connect failure.
         }
         throw error;
+      }
+      if (forkAliasesBase(connectedBackend, baseStore)) {
+        // The connected backend IS the base's own backend (or shares its
+        // connection) — never close it here, the base still owns it and
+        // still needs it. Only the fork itself (the host-level handle,
+        // never a connection) is released.
+        try {
+          await fork.dispose?.();
+        } catch {
+          // Intentionally ignored — surface the aliasing refusal below.
+        }
+        throw new BranchError(
+          "Fork backend aliases its base: connect() returned the base " +
+            "store's own backend instead of an independent connection to " +
+            "the fork — directly (the same backend object), through " +
+            "backend derivation, or through a connection the two backends " +
+            "share. Writing to this working copy would mutate the base, " +
+            "and closing it would close the base's own backend.",
+        );
       }
       const backend = wrapWithManagedClose(connectedBackend, async () => {
         await fork.dispose?.();
@@ -462,8 +563,10 @@ export function forkedWorkingCopyStrategy<
           throw new BranchError(
             "Fork does not match its base: computeBaseVersion disagrees " +
               "between the forked store and the base store it was forked " +
-              "from. A working-copy fork must be byte-for-byte identical to " +
-              "its base at the instant it is taken.",
+              "from. This fence proves base-token equality (schema plus a " +
+              "revision anchor, or a live-content fingerprint) at the " +
+              "instant the fork was taken, not byte-for-byte physical " +
+              "identity — a working-copy fork is trusted to provide that.",
             { details: { forkVersion, baseVersion: base } },
           );
         }

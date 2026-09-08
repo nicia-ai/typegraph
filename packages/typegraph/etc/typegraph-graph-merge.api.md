@@ -2627,6 +2627,7 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
         version: number;
         hash: string;
     }> | undefined;
+    close: () => Promise<void>;
 }>;
 
 // @public

@@ -3248,6 +3248,11 @@ export async function planMergeIncremental<G extends GraphDef>(
     id: COMMITTED_TARGET_BRANCH,
     base: forkVersion,
     store: target,
+    // `target` is the caller's own live store, not a working copy this
+    // function created — modeling it as a GraphBranch is an internal device
+    // for reusing the branch-shaped merge machinery, so closing it here
+    // would close a backend the caller still owns.
+    close: (): Promise<void> => Promise.resolve(),
   };
   const anchors: MergePlanAnchors = {
     kind: "incremental",
@@ -5042,6 +5047,10 @@ export async function mergeIncremental<G extends GraphDef>(
     id: COMMITTED_TARGET_BRANCH,
     base: forkVersion,
     store: target,
+    // See the sibling targetBranch above (planMerge's incremental arm): a
+    // stand-in for the caller's own live target, never a working copy this
+    // function owns, so its close is a no-op.
+    close: (): Promise<void> => Promise.resolve(),
   };
   return resolveMerge(
     forkPoint,

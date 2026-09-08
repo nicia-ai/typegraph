@@ -71,6 +71,12 @@ export async function branch<G extends GraphDef>(
       id,
       base,
       store,
+      // Mirrors IngestionBranch's own close (ingestion-branch.ts): delegate
+      // to the working copy's backend, whose own close() is what makes this
+      // idempotent — a forked working copy's composed close (connection +
+      // host-level fork, see working-copy.ts) runs exactly once even if a
+      // caller calls this more than once.
+      close: async (): Promise<void> => storeBackend(store).close(),
       ...(schemaAnchor === undefined ?
         { schemaAnchor: undefined }
       : { schemaAnchor }),
