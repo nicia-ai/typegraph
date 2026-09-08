@@ -368,6 +368,51 @@ describe("compileVariableLengthQuery", () => {
       // The recursive term itself joins the normalized relation exactly once.
       expect(sql).toContain("e.tg_source_id = r.target_id");
       expect(sql).toContain("e.tg_source_kind = r.target_kind");
+      // `edgeKinds` and `inverseEdgeKinds` both name "RELATES_TO" here (an
+      // ordinary symmetric `direction: "both"` traversal on one edge kind):
+      // the merged kind filter must dedupe the union, not bind the same
+      // kind twice in one IN list (Ed-09).
+      expect(sql).not.toContain("'RELATES_TO', 'RELATES_TO'");
+      // No edge predicate and no identity frontier widening on this
+      // traversal, so the directed-edges CTE projects only the columns the
+      // recursive term structurally needs — not `e.*` (Ed-04's
+      // materialization regression).
+      expect(sql).not.toContain("SELECT e.*");
+      expect(sql).toContain(
+        "SELECT e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at,",
+      );
+    });
+
+    it("keeps the full e.* projection when an edge predicate targets a mixed-orientation traversal", () => {
+      const ast = createAst({
+        predicates: [
+          {
+            targetAlias: "e",
+            targetType: "edge",
+            expression: {
+              __type: "comparison",
+              op: "gte",
+              left: createFieldRef("e", ["props", "weight"], "number"),
+              right: { __type: "literal", value: 10, valueType: "number" },
+            },
+          },
+        ],
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      // The predicate reads `e.props`, which the narrowed column list
+      // (Ed-04) does not carry — the safe fallback keeps `e.*` whenever an
+      // edge predicate is present, so the property is still readable.
+      expect(sql).toContain("SELECT e.*,");
+      expect(sql).toContain("weight");
     });
 
     it("forces worktable-first join order on sqlite recursive steps", () => {

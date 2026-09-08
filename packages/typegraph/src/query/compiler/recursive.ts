@@ -617,8 +617,11 @@ function compileRecursiveCte(
    * lets the merged recursive term below join `recursive_cte` exactly
    * ONCE: standard SQL (and PostgreSQL in particular) refuses a recursive
    * term whose self-reference appears more than once, even split across a
-   * `UNION ALL` of two otherwise-independent branches — "recursive
-   * reference to query \"recursive_cte\" must not appear more than once".
+   * `UNION ALL` of two otherwise-independent branches — PostgreSQL raises
+   * "recursive reference to query \"recursive_cte\" must not appear within
+   * its non-recursive term" for this shape (verified against the base
+   * revision on PGlite; not the "must not appear more than once" wording
+   * this comment previously quoted).
    * SQLite's recursive-CTE implementation is looser and would have
    * accepted two self-joining branches, but a mechanism this lane exists to
    * cross backends with is not sound if only one dialect can run it — see
@@ -652,8 +655,25 @@ function compileRecursiveCte(
       (overlappingKinds) => compileKindFilter(overlappingKinds, "e.kind"),
     );
 
+    // `e.*` materializes every edge column (props included) into this CTE
+    // on every execution — measured to switch SQLite from a covering-index
+    // seek to a full MATERIALIZE + automatic index build (Ed-04). The
+    // recursive term only ever reads graph_id/kind (structural filters),
+    // the temporal columns, and the four tg_source_*/tg_target_* aliases
+    // derived below — UNLESS a predicate on this edge alias or the identity
+    // frontier widening can reference an arbitrary column (e.g. `e.props`
+    // via `whereEdge`), in which case only `e.*` is guaranteed to carry
+    // whatever they need. Narrow only in the provably safe case; keep the
+    // wildcard whenever either is present.
+    const requiresFullEdgeProjection =
+      edgePredicates.length > 0 || identityFrontierExpansion !== undefined;
+    const directedEdgeBaseColumns: SqlFragment =
+      requiresFullEdgeProjection ?
+        sql`e.*`
+      : sql`e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at`;
+
     const directArm = sql`
-      SELECT e.*,
+      SELECT ${directedEdgeBaseColumns},
         e.${sql.raw(directJoinField)} AS tg_source_id,
         e.${sql.raw(directJoinKindField)} AS tg_source_kind,
         e.${sql.raw(directTargetField)} AS tg_target_id,
@@ -662,7 +682,7 @@ function compileRecursiveCte(
       WHERE ${compileKindFilter(directEdgeKinds, "e.kind")}
     `;
     const inverseArm = sql`
-      SELECT e.*,
+      SELECT ${directedEdgeBaseColumns},
         e.${sql.raw(inverseJoinField)} AS tg_source_id,
         e.${sql.raw(inverseJoinKindField)} AS tg_source_kind,
         e.${sql.raw(inverseTargetField)} AS tg_target_id,
@@ -696,7 +716,11 @@ function compileRecursiveCte(
         targetField: "tg_target_id",
         joinKindField: "tg_source_kind",
         targetKindField: "tg_target_kind",
-        edgeKinds: [...directEdgeKinds, ...inverseEdgeKinds],
+        // Both inputs are already deduped individually (above); the union
+        // is not automatically, so a kind present in both — the ordinary
+        // `direction: "both"` case on one symmetric kind — would otherwise
+        // bind a duplicate parameter in the emitted `IN` list (Ed-09).
+        edgeKinds: [...new Set([...directEdgeKinds, ...inverseEdgeKinds])],
         edgeSource: sql.raw(directedEdgesCteName),
       });
   const baseSelectColumns = [
