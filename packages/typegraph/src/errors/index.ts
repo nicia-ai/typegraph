@@ -735,6 +735,20 @@ export type CardinalityErrorDetails = Readonly<{
 }>;
 
 /**
+ * The remediation suggestion for a {@link CardinalityError}, naming the
+ * option the caller actually set rather than the source-side one by default:
+ * a `direction: "target"` violation is never fixed by setting `cardinality`,
+ * so the suggestion must name `targetCardinality` for it.
+ */
+function cardinalityErrorSuggestion(details: CardinalityErrorDetails): string {
+  const option =
+    details.direction === "target" ? "targetCardinality" : "cardinality";
+  return details.cardinality === "one" || details.cardinality === "unique" ?
+      `Delete the existing edge before creating a new one, or use ${option} "many".`
+    : `Check if the ${option} constraint "${details.cardinality}" is correct for your use case.`;
+}
+
+/**
  * Thrown when cardinality constraint is violated.
  */
 export class CardinalityError extends TypeGraphError {
@@ -749,10 +763,7 @@ export class CardinalityError extends TypeGraphError {
       {
         details,
         category: "constraint",
-        suggestion:
-          details.cardinality === "one" || details.cardinality === "unique" ?
-            `Delete the existing edge before creating a new one, or use cardinality "many".`
-          : `Check if the cardinality constraint "${details.cardinality}" is correct for your use case.`,
+        suggestion: cardinalityErrorSuggestion(details),
         cause: options?.cause,
       },
     );

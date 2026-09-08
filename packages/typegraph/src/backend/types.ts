@@ -2532,7 +2532,7 @@ export type GraphBackend = Readonly<{
    *
    * Returns the contending ROWS, not the verdict: the axis a `uniques` row
    * belongs to is a fold over the graph's subclass component, and the key an
-   * edge's claim sits on is `EDGE_CARDINALITY_SPECS`' — both of which live
+   * edge's claim sits on is `edgeCardinalitySpec`'s — both of which live
    * above the backend, so a backend that decided either would be a second
    * spelling of a decision the fence already owns.
    *
@@ -4014,11 +4014,11 @@ export type HardDeleteUniquesByConcreteKindParams = Readonly<{
  * One edge cardinality claim, named by the components its axis, its key and its
  * holder-liveness predicate are all built from.
  *
- * The components are passed RAW rather than pre-rendered: `EDGE_CARDINALITY_SPECS`
- * (`store/claims/edge-claims.ts`) is the one table that decides which endpoints
- * the key covers and what a holder must still be, and both the TypeScript probe
- * and the SQL builder read it. A caller that rendered the axis and key itself
- * would be a second spelling of that decision.
+ * The components are passed RAW rather than pre-rendered: `edgeCardinalitySpec`
+ * (`store/claims/edge-claims.ts`) is the one function that decides which
+ * endpoints the key covers and what a holder must still be, and both the
+ * TypeScript probe and the SQL builder read it. A caller that rendered the
+ * axis and key itself would be a second spelling of that decision.
  */
 export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef &
   Readonly<{

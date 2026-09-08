@@ -142,7 +142,6 @@ export function edgeCardinalitySpec(
   return EDGE_CARDINALITY_SPECS[edgeCardinalityAxisName(ref)];
 }
 
-/** Every axis an edge kind's claims can sit on, for housekeeping reaps. */
 /** Parses one spec-table key back into the ref it names. */
 function edgeCardinalityAxisRefFromName(
   axisName: EdgeCardinalityAxisName,
@@ -157,6 +156,7 @@ function edgeCardinalityAxisRefFromName(
   };
 }
 
+/** Every axis an edge kind's claims can sit on, for housekeeping reaps. */
 export function edgeCardinalityAxesForKind(
   edgeKind: string,
 ): readonly string[] {
@@ -251,6 +251,30 @@ export function edgeCardinalityAxisReferences(
     references.push({ direction: "target", cardinality: targetCardinality });
   }
   return references;
+}
+
+/**
+ * THE axes, of {@link edgeCardinalityAxisReferences}, that count only the
+ * ACTIVE population — an edge born already ended never joins one of these
+ * (`claimsWhenBornEnded` is false), and a live row leaves one the moment it
+ * stops being active (deleted, or its `validTo` set), with no delete
+ * transition required.
+ *
+ * The one owner of "does this declaration carry an active-only axis?" for
+ * every reader that gates a reentry decision on it: the update path's
+ * resurrection/window-reopen probe and claim set, and the write-fence
+ * eligibility gate that decides whether clearing `validTo` needs a per-graph
+ * lock at all. A second inline spelling of this filter is exactly the drift
+ * Contract Discipline's "one predicate, one owner" rule exists to prevent —
+ * one copy narrowing the trigger or the other widening the fence would
+ * silently split what must stay one decision.
+ */
+export function activeOnlyAxisReferences(
+  declarations: EdgeCardinalityDeclarations,
+): readonly EdgeCardinalityAxisRef[] {
+  return edgeCardinalityAxisReferences(declarations).filter(
+    (ref) => !edgeCardinalitySpec(ref).claimsWhenBornEnded,
+  );
 }
 
 /**

@@ -476,9 +476,11 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
  * `edgeExistsBetween` filter on — so the fence's liveness predicate and the
  * probe's read the same shape.
  *
- * The `valid_to IS NULL` term and the to-endpoint terms are not spelled here:
- * they are read from {@link EDGE_CARDINALITY_SPECS}, the same table the
- * TypeScript probe reads.
+ * The `valid_to IS NULL` term and the endpoint terms are not spelled here:
+ * `holderLiveness` and `keyShape` are read from {@link edgeCardinalitySpec},
+ * the same table the TypeScript probe reads, and {@link endpointTerms}
+ * renders the from- and/or to-terms `keyShape` names — the one seam a new
+ * `keyShape` has to extend.
  */
 export function buildTakeOverEdgeClaim(
   tables: Tables,

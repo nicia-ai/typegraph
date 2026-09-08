@@ -141,6 +141,7 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { compareClaimTargets } from "../claims/axis";
 import {
+  activeOnlyAxisReferences,
   claimEdgeCardinalities,
   type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
@@ -149,7 +150,6 @@ import {
   edgeCardinalityClaims,
   edgeCardinalityClaimTarget,
   type EdgeCardinalityDeclarations,
-  edgeCardinalitySpec,
 } from "../claims/edge-claims";
 import {
   shouldCoalesceUpsert,
@@ -1960,9 +1960,7 @@ async function performEdgeUpdate<G extends GraphDef>(
   // row becomes takeable the moment the row ends, exactly as
   // `claimsWhenBornEnded` governs at create time.
   const reentersActivePopulation =
-    edgeCardinalityAxisReferences(declarations).some(
-      (ref) => !edgeCardinalitySpec(ref).claimsWhenBornEnded,
-    ) &&
+    activeOnlyAxisReferences(declarations).length > 0 &&
     effectiveValidTo === undefined &&
     (existing.deleted_at !== undefined || existing.valid_to !== undefined);
   if (reentersLivePopulation || reentersActivePopulation) {
@@ -1981,9 +1979,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     const reentryAxisReferences: readonly EdgeCardinalityAxisRef[] =
       reentersLivePopulation ?
         edgeCardinalityAxisReferences(declarations)
-      : edgeCardinalityAxisReferences(declarations).filter(
-          (ref) => !edgeCardinalitySpec(ref).claimsWhenBornEnded,
-        );
+      : activeOnlyAxisReferences(declarations);
     await checkEdgeCardinalityConstraints(
       {
         graphId: ctx.graphId,
@@ -2275,11 +2271,12 @@ export async function executeEdgeUpdate<G extends GraphDef>(
     edgeWritePlan(
       (
         input.clearValidTo === true &&
-          edgeCardinalityAxisReferences(
-            edgeCardinalityDeclarations(ctx, gate.kind),
-          ).some((ref) => !edgeCardinalitySpec(ref).claimsWhenBornEnded)
+          activeOnlyAxisReferences(edgeCardinalityDeclarations(ctx, gate.kind))
+            .length > 0
       ) ?
-        "edgeCardinality"
+        edgeWriteNeedsConstraintFence(
+          edgeCardinalityDeclarations(ctx, gate.kind),
+        )
       : undefined,
     ),
     backend,

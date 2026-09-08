@@ -456,21 +456,25 @@ describe("edgeCardinalityViolation Properties", () => {
   });
 
   describe("many is unrepresentable", () => {
-    it("every axis this module can build declares something", () => {
-      // `EdgeCardinalityAxisRef` excludes `many` by construction (it is
-      // `ConstrainedCardinality` / `ConstrainedTargetCardinality`), so there
-      // is no arm to test here — this test documents that omission rather
-      // than exercising a branch.
-      const references: readonly EdgeCardinalityAxisRef[] = [
-        { direction: "source", cardinality: "one" },
-        { direction: "source", cardinality: "unique" },
-        { direction: "source", cardinality: "oneActive" },
-        { direction: "target", cardinality: "one" },
-        { direction: "target", cardinality: "oneActive" },
-      ];
-      for (const ref of references) {
-        expect(ref.cardinality).not.toBe("many");
-      }
+    // `EdgeCardinalityAxisRef` excludes `many` by construction
+    // (`ConstrainedCardinality` / `ConstrainedTargetCardinality`), so there is
+    // no runtime branch to exercise — the invariant is enforced by the type
+    // system alone. This is a type-level pin, not a unit test: it fails
+    // `pnpm typecheck` (the literals below stop needing `@ts-expect-error`)
+    // if either union is ever widened back to include `"many"`.
+    it('a ref naming "many" on either axis fails to typecheck', () => {
+      const sourceMany: EdgeCardinalityAxisRef = {
+        direction: "source",
+        // @ts-expect-error "many" is not a ConstrainedCardinality.
+        cardinality: "many",
+      };
+      const targetMany: EdgeCardinalityAxisRef = {
+        direction: "target",
+        // @ts-expect-error "many" is not a ConstrainedTargetCardinality.
+        cardinality: "many",
+      };
+      expect(sourceMany).toBeDefined();
+      expect(targetMany).toBeDefined();
     });
   });
 

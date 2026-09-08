@@ -453,9 +453,10 @@ from the source side — a second pair declaration on the target side would be
 the same axis stated twice.
 
 `cardinality` and `targetCardinality` compose freely. All twelve
-combinations are accepted; three are *redundant* (the target bound already
-implies the pair bound) and are still honored, because refusing an author's
-explicit, true statement would be surprising:
+combinations are accepted; one is *redundant* (`unique` already implies the
+pair bound that `targetCardinality: "one"` would separately declare) and is
+still honored, because refusing an author's explicit, true statement would be
+surprising:
 
 | `cardinality` \ `targetCardinality` | `many` (default) | `one` | `oneActive` |
 | --- | --- | --- | --- |

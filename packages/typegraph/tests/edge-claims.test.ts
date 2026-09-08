@@ -20,6 +20,7 @@ import {
   edgeCardinalityAxis,
 } from "../src/store/claims/axis";
 import {
+  activeOnlyAxisReferences,
   type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
@@ -90,6 +91,48 @@ describe("edgeCardinalityAxisReferences", () => {
       });
     }
   }
+});
+
+describe("activeOnlyAxisReferences", () => {
+  // The single owner of "does this declaration carry an active-only axis?"
+  // (review finding D1-R2-01): the update path's reentry probe/claim split
+  // and the write-fence eligibility gate both fold through this function
+  // instead of re-spelling `claimsWhenBornEnded === false` inline. `oneActive`
+  // is the only cardinality (on either side) with `claimsWhenBornEnded:
+  // false`, so the expected set below is independent of the spec table's own
+  // internals — it would fail exactly the same way whether the bug lived in
+  // this function or in either of its two call sites.
+  const sourceValues = ["many", "one", "unique", "oneActive"] as const;
+  const targetValues = ["many", "one", "oneActive"] as const;
+  for (const cardinality of sourceValues) {
+    for (const targetCardinality of targetValues) {
+      it(`cardinality=${cardinality}, targetCardinality=${targetCardinality}`, () => {
+        const expected: EdgeCardinalityAxisRef[] = [];
+        if (cardinality === "oneActive") {
+          expected.push({ direction: "source", cardinality });
+        }
+        if (targetCardinality === "oneActive") {
+          expected.push({
+            direction: "target",
+            cardinality: targetCardinality,
+          });
+        }
+        expect(
+          activeOnlyAxisReferences({ cardinality, targetCardinality }),
+        ).toEqual(expected);
+      });
+    }
+  }
+
+  it("is always a subset of edgeCardinalityAxisReferences, in the same order", () => {
+    const declarations = {
+      cardinality: "oneActive",
+      targetCardinality: "oneActive",
+    } as const;
+    expect(activeOnlyAxisReferences(declarations)).toEqual(
+      edgeCardinalityAxisReferences(declarations),
+    );
+  });
 });
 
 describe("edgeCardinalityAxis", () => {

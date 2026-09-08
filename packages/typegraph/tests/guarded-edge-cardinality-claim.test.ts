@@ -822,6 +822,72 @@ describe("guarded edge cardinality claim", () => {
       const rows = await readClaimRows(fixture.backend, bothAxesGraph.id);
       expect(rows.filter((row) => row.edge_id === created.id)).toHaveLength(2);
     });
+
+    // The store never hands the port a two-axis plan — `usesGuardedCardinalityClaim`
+    // requires exactly one constrained axis, so the test above always takes the
+    // portable path. The port's own `claims.length > 1` refusal
+    // (`operation-backend-core.ts`, before the fused CTE builder runs) is
+    // therefore reachable only by calling `transaction.commands.execute`
+    // directly, bypassing the store gate — which is what this test does. Per
+    // AGENTS.md ("Every new command dimension ships with a custom-port
+    // refusal test that reaches the fallback and proves no partial row or
+    // sidecar write occurred"), this pins the port's OWN refusal rather than
+    // relying on the store never asking for it.
+    it("refuses a hand-built two-axis plan at the port before any SQL runs", async () => {
+      const fixture = await createRecordedPostgresStore(bothAxesGraph);
+      const from = await fixture.store.nodes.Person.create({
+        name: "port-from",
+      });
+      const to = await fixture.store.nodes.Person.create({ name: "port-to" });
+
+      fixture.reset();
+      const params = {
+        graphId: bothAxesGraph.id,
+        id: "two-axis-port-probe",
+        kind: "both",
+        fromKind: "Person",
+        fromId: from.id,
+        toKind: "Person",
+        toId: to.id,
+        props: {},
+      } as const;
+      const claims = edgeCardinalityClaims(
+        edgeCardinalityAxisReferences({
+          cardinality: "one",
+          targetCardinality: "one",
+        }),
+        {
+          graphId: params.graphId,
+          id: params.id,
+          kind: params.kind,
+          fromKind: params.fromKind,
+          fromId: params.fromId,
+          toKind: params.toKind,
+          toId: params.toId,
+        },
+      );
+      expect(claims).toHaveLength(2);
+
+      const result = await fixture.backend.transaction(async (transaction) =>
+        transaction.commands.execute(
+          {
+            kind: "edge.create",
+            plan: { entity: "edge", params, cardinalityClaims: claims },
+          },
+          graphCommandExecutionContext("transaction"),
+        ),
+      );
+      expect(result).toEqual({
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["cardinalityClaim"],
+      });
+      expect(fixture.statements).toEqual([]);
+      expect(await fixture.store.edges.both.find()).toEqual([]);
+      expect(await readClaimRows(fixture.backend, bothAxesGraph.id)).toEqual(
+        [],
+      );
+    });
     // MUTATION CHECK (verified): drop `targetCardinality` from `declarations`
     // in `validateAndPrepareEdgeCreate`
     // (`src/store/operations/edge-operations.ts`) — the same construction

@@ -365,11 +365,11 @@ export function registerConstraintFenceErrorIntegrationTests(
     });
 
     it("reports the same cardinality refusal from the probe and from the claim", async () => {
-      // The edge-cardinality family's own refuser is `edgeClaimRefusal`
-      // (`edge-claims.ts`), and it shares its owners (`checkCardinality`,
-      // `checkUniqueEdge`) with the probe (`checkCardinalityConstraint`) — the
-      // same "one predicate, one owner" shape the uniqueness and disjointness
-      // cases above pin. This case pins it for cardinality too.
+      // The edge-cardinality family's own refuser is `edgeCardinalityViolation`
+      // (`edge-claims.ts`), and both the probe (`checkEdgeCardinalityConstraints`)
+      // and the fence's claim-takeover path share that one owner — the same
+      // "one predicate, one owner" shape the uniqueness and disjointness cases
+      // above pin. This case pins it for cardinality too.
       const store = await context.createStore(errorGraph);
       const source = await store.nodes.FenceGhost.create({
         email: "reaper@identity.example",

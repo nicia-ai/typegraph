@@ -361,13 +361,14 @@ type NodeResurrectWork = Readonly<{
 }>;
 
 /**
- * One edge insert: the row params and the cardinality claim the row owes.
+ * One edge insert: the row params and the cardinality claims the row owes.
  *
  * An edge write obliges no DERIVED data — no uniqueness entries, no fulltext, no
- * embeddings — but a constrained kind owes a claim, and the claim is what fences
- * the axis its declaration spans. It is absent for an unconstrained kind and for
- * a born-ended row whose cardinality does not count it, which is what
- * `edgeCardinalityClaim` decides; the caller states the decision and this
+ * embeddings — but a constrained kind owes a claim per declared axis, and each
+ * claim is what fences the axis its declaration spans. The list is empty when
+ * the kind reserves nothing — an unconstrained kind on both axes, or a
+ * born-ended row whose axis does not count it — which is what
+ * `edgeCardinalityClaims` decides; the caller states the decision and this
  * surface applies it at its PRE-INSERT placement.
  *
  * The update and delete work records live in `edge-write-pipeline.ts` instead,
