@@ -21,7 +21,7 @@
  * `auditConstraintFences` is the reader: declarations in, violations out. It
  * is the ONE implementation of every violation predicate, shared by
  * `verifyConstraintFences` (the graph-wide audit below) and by the
- * ontology-tightening commit preflight (`src/schema/ontology-tightening-preflight.ts`),
+ * schema-tightening commit preflight (`src/schema/tightening-preflight.ts`),
  * so a live-graph audit and a proposed-schema probe can never disagree about
  * what counts as a violation.
  */
@@ -54,7 +54,10 @@ import {
   uniquenessAxisOfKinds,
   uniquenessClaimTarget,
 } from "./axis";
-import { edgeCardinalityClaimTarget } from "./edge-claims";
+import {
+  edgeCardinalityAxisReferences,
+  edgeCardinalityClaimTarget,
+} from "./edge-claims";
 
 /**
  * One claim axis more than one live claimant holds, OR one edge kind whose
@@ -369,10 +372,11 @@ function fenceDeclarations(
     ),
   );
   const edgeCardinalities = Object.entries(graph.edges).flatMap(
-    ([edgeKind, registration]): readonly EdgeCardinalityDeclaration[] => {
-      const cardinality = registration.cardinality ?? "many";
-      return cardinality === "many" ? [] : [{ edgeKind, cardinality }];
-    },
+    ([edgeKind, registration]): readonly EdgeCardinalityDeclaration[] =>
+      edgeCardinalityAxisReferences(registration).map((ref) => ({
+        ...ref,
+        edgeKind,
+      })),
   );
   const edgeEndpointKinds = buildGraphEdgeEndpointKinds(graph.edges);
   const edgeEndpointAllowances = [...edgeEndpointKinds.entries()]

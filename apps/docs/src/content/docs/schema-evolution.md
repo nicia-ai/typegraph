@@ -229,6 +229,65 @@ window the existing empty-kind removal fence carries.
 `store.verifyConstraintFences()` remains the post-hoc detector for exactly
 that window.
 
+## Edge cardinality tightenings are checked against your data
+
+Making an edge's `cardinality` or `targetCardinality` more restrictive — for
+example widening `many` to `one`, or adding `targetCardinality: "one"` to an
+edge that previously had none — runs the same kind of data check as an
+ontology tightening, inside the same schema-commit transaction, using the
+same fold every cardinality-aware layer shares
+(`edgeCardinalityAxisReferences`, see
+[Target cardinality](/core-concepts#target-cardinality)). Each axis this
+commit newly constrains — source or target, independently — is probed
+against the live population before the version is published:
+
+- **Source-side tightening** (`cardinality` narrowing) counts live edges per
+  source; a source already exceeding the new bound refuses the commit.
+- **Target-side tightening** (`targetCardinality` narrowing) counts live
+  edges per target instead, using the same probe shape with the endpoint
+  swapped — a target already exceeding the new bound refuses the commit.
+- An edge kind that tightens **both axes in the same commit** is checked
+  independently for each; either violation refuses the whole commit, and the
+  thrown error reports every newly-constrained axis, not just the first one
+  found.
+- A commit that declares a constrained `cardinality` or `targetCardinality`
+  on a **brand-new edge kind** owes this exact same check: a stored schema
+  with no entry for the kind reads as `many` on both axes, so any constrained
+  value the new kind declares differs from that default and is probed like
+  any other tightening. This is intentional — an edge kind can be re-added
+  after removal, with live rows already under it — but it means a purely
+  additive schema change (adding a kind) can still require the atomic
+  preflight primitive described below.
+
+Like an ontology tightening, this check needs the backend's atomic
+preflight-commit primitive (`commitSchemaVersionWithPreflight`); a backend
+that implements only `commitSchemaVersion` throws `ConfigurationError` code
+`EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` — see
+[Schema-tightening and constraint-fence audit guard codes](/errors#schema-tightening-and-constraint-fence-audit-guard-codes).
+
+A refused tightening throws `MigrationError` with
+`details.reason === "edge-cardinality-tightening-violated"`:
+
+```typescript
+try {
+  await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (
+    error instanceof MigrationError &&
+    error.details.reason === "edge-cardinality-tightening-violated"
+  ) {
+    console.log(error.details.axes); // → the newly-constrained axes
+    console.log(error.details.violations); // → the offending rows
+  }
+}
+```
+
+Resolve the offending rows (delete the excess edges, or loosen the target
+schema change), then retry. This check has the same residual window as the
+ontology tightening check above: it takes no additional lock, so a writer
+committing under the previous schema version between the probe and the
+version compare-and-swap is invisible to it.
+
 ## Breaking Changes
 
 These require explicit handling:
@@ -586,7 +645,8 @@ console.log("Current version:", active?.version);
 | Change property type           | Breaking       | No             |
 | Change onDelete behavior       | Warning        | Yes            |
 | Change unique constraints      | Warning        | Yes            |
-| Change edge cardinality        | Warning        | Yes            |
+| Change edge cardinality (source-side, `cardinality`) | Warning (data-checked if tightened) | Yes, if the check passes |
+| Change edge target cardinality (`targetCardinality`) | Warning (data-checked if tightened) | Yes, if the check passes |
 | Change edge endpoint kinds     | Warning        | Yes            |
 | Remove allowed source-dependent endpoint pairs | Breaking | No |
 

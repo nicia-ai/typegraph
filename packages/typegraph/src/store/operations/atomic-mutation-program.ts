@@ -28,6 +28,7 @@ import type { GraphDef } from "../../core/define-graph";
 import { DatabaseOperationError } from "../../errors";
 import type { KindRegistry } from "../../registry/kind-registry";
 import { hasOwnKey } from "../../utils/object";
+import { edgeCardinalityAxisReferences } from "../claims/edge-claims";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
 import type { CreateEdgeInput, CreateNodeInput } from "../types";
@@ -238,7 +239,7 @@ export function resolveAtomicEdgeConvergenceExecutor(
   if (registration?.matchIdentity === undefined) {
     return;
   }
-  if ((registration.cardinality ?? "many") !== "many") return;
+  if (edgeCardinalityAxisReferences(registration).length > 0) return;
   const declaredFields = registration.matchIdentity.fields;
   if (
     declaredFields.length !== input.matchOn.length ||
@@ -269,6 +270,24 @@ export function resolveAtomicEdgeBatchExecutor(
         hasOwnKey(input.graph.edges, item.kind) &&
         input.graph.edges[item.kind] !== undefined,
     )
+  ) {
+    return;
+  }
+  // A kind declaring BOTH axes claims two rows per edge; the native program
+  // matches claim results back to edges one-to-one
+  // (`executeAtomicEdgeBatch`), so it refuses the whole batch rather than
+  // silently dropping the second axis for the affected rows. The portable
+  // path (`createEdge`'s single-write route) handles a two-axis kind fine —
+  // it issues every claim in `claimEdgeCardinalities`'s loop, not a single
+  // matched statement.
+  if (
+    input.inputs.some((item) => {
+      const registration = input.graph.edges[item.kind];
+      return (
+        registration !== undefined &&
+        edgeCardinalityAxisReferences(registration).length > 1
+      );
+    })
   ) {
     return;
   }
@@ -381,7 +400,7 @@ function isAtomicResolvedEdgeKindEligible(
   const registration = input.graph.edges[input.kind];
   return (
     registration !== undefined &&
-    (registration.cardinality ?? "many") === "many" &&
+    edgeCardinalityAxisReferences(registration).length === 0 &&
     registration.matchIdentity === undefined
   );
 }

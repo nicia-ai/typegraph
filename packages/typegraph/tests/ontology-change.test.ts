@@ -66,6 +66,7 @@ function edgeDef(
     toKinds,
     properties: { type: "object", properties: {} },
     cardinality: "many",
+    targetCardinality: "many",
     endpointExistence: "notDeleted",
     description: undefined,
   };

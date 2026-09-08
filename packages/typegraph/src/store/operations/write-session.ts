@@ -80,7 +80,7 @@ import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { type Assert, type Equal } from "../../utils/type-assert";
 import {
-  claimEdgeCardinality,
+  claimEdgeCardinalities,
   claimEdgeCardinalityBatch,
 } from "../claims/edge-claims";
 import {
@@ -361,13 +361,14 @@ type NodeResurrectWork = Readonly<{
 }>;
 
 /**
- * One edge insert: the row params and the cardinality claim the row owes.
+ * One edge insert: the row params and the cardinality claims the row owes.
  *
  * An edge write obliges no DERIVED data — no uniqueness entries, no fulltext, no
- * embeddings — but a constrained kind owes a claim, and the claim is what fences
- * the axis its declaration spans. It is absent for an unconstrained kind and for
- * a born-ended row whose cardinality does not count it, which is what
- * `edgeCardinalityClaim` decides; the caller states the decision and this
+ * embeddings — but a constrained kind owes a claim per declared axis, and each
+ * claim is what fences the axis its declaration spans. The list is empty when
+ * the kind reserves nothing — an unconstrained kind on both axes, or a
+ * born-ended row whose axis does not count it — which is what
+ * `edgeCardinalityClaims` decides; the caller states the decision and this
  * surface applies it at its PRE-INSERT placement.
  *
  * The update and delete work records live in `edge-write-pipeline.ts` instead,
@@ -377,7 +378,8 @@ type NodeResurrectWork = Readonly<{
  */
 export type EdgeInsertWork = Readonly<{
   params: InsertEdgeParams;
-  claim: ClaimEdgeCardinalityParams | undefined;
+  /** Every axis this row reserves, in claim order. Empty when it reserves none. */
+  claims: readonly ClaimEdgeCardinalityParams[];
 }>;
 
 /**
@@ -386,7 +388,7 @@ export type EdgeInsertWork = Readonly<{
 function edgeBatchClaims(
   work: readonly EdgeInsertWork[],
 ): readonly ClaimEdgeCardinalityParams[] {
-  return work.flatMap((item) => (item.claim === undefined ? [] : [item.claim]));
+  return work.flatMap((item) => item.claims);
 }
 
 export type NodeWriteSession = Readonly<{
@@ -738,9 +740,7 @@ export function createWriteSession(
     // `compareClaimTargets`), so a batch and a peer batch take their row locks
     // in the same order.
     createEdge: async (work) => {
-      if (work.claim !== undefined) {
-        await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
-      }
+      await claimEdgeCardinalities(target, ctx.claimsVerdict(), work.claims);
       return edgeDispatch.one(work.params);
     },
 
@@ -749,18 +749,21 @@ export function createWriteSession(
         target.commands,
         command,
       );
+      // Membership, not exact-arity identity: a two-axis declaration's
+      // `unsupported` result still names only `"cardinalityClaim"` dimensions
+      // (repeated per unmet claim), and `.every` over that non-empty tuple
+      // recognizes it exactly as it recognized the one-axis case before this
+      // port ever fused more than one claim.
+      const claims = command.plan.cardinalityClaims ?? [];
       if (
         result.outcome === "unsupported" &&
-        result.dimensions.length === 1 &&
-        result.dimensions[0] === "cardinalityClaim" &&
+        result.dimensions.every(
+          (dimension) => dimension === "cardinalityClaim",
+        ) &&
         command.plan.schemaFence === undefined &&
-        command.plan.cardinalityClaim !== undefined
+        claims.length > 0
       ) {
-        await claimEdgeCardinality(
-          target,
-          ctx.claimsVerdict(),
-          command.plan.cardinalityClaim,
-        );
+        await claimEdgeCardinalities(target, ctx.claimsVerdict(), claims);
         const retryCommand: EdgeCreateCommand = {
           kind: "edge.create",
           plan: {
@@ -778,9 +781,7 @@ export function createWriteSession(
     },
 
     createEdgeNoReturn: async (work) => {
-      if (work.claim !== undefined) {
-        await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
-      }
+      await claimEdgeCardinalities(target, ctx.claimsVerdict(), work.claims);
       await runInsertNoReturn(edgeDispatch, work.params);
     },
 

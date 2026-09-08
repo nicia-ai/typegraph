@@ -111,11 +111,7 @@ import {
 } from "../../backend/types";
 import { validateEdgeEndpoints } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
-import {
-  type Cardinality,
-  type KindEntity,
-  type TemporalMode,
-} from "../../core/types";
+import { type KindEntity, type TemporalMode } from "../../core/types";
 import {
   CardinalityError,
   CompilerInvariantError,
@@ -145,11 +141,15 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { compareClaimTargets } from "../claims/axis";
 import {
-  claimEdgeCardinality,
-  edgeCardinalityClaim,
+  activeOnlyAxisReferences,
+  claimEdgeCardinalities,
+  type EdgeCardinalityAxisRef,
+  edgeCardinalityAxisReferences,
   edgeCardinalityClaimMode,
   edgeCardinalityClaimRefusal,
+  edgeCardinalityClaims,
   edgeCardinalityClaimTarget,
+  type EdgeCardinalityDeclarations,
 } from "../claims/edge-claims";
 import {
   shouldCoalesceUpsert,
@@ -160,7 +160,7 @@ import {
   type UpsertUpdateEdgeInput,
 } from "../collections/edge-collection";
 import {
-  checkCardinalityConstraint,
+  checkEdgeCardinalityConstraints,
   type ConstraintContext,
   type ConstraintFenceReason,
   edgeWriteNeedsConstraintFence,
@@ -315,26 +315,27 @@ function getEdgeRegistration<G extends GraphDef>(graph: G, kind: string) {
 
 type EdgeCreatePrepared = Readonly<{
   insertParams: InsertEdgeParams;
-  cardinality: Cardinality;
+  declarations: EdgeCardinalityDeclarations;
 }>;
 
 /**
  * One prepared create as the session's insert unit: the row params and the
- * cardinality claim the row owes.
+ * cardinality claims the row owes.
  *
- * ONE owner, shared by the single create and both batch shapes. The claim is a
- * pure function of the cardinality this preparation resolved, so deciding it
- * here keeps the decision beside the verdict it follows from; the session issues
- * it, because a claim write is a backend member only the seam may spell.
+ * ONE owner, shared by the single create and both batch shapes. The claim set
+ * is a pure function of the declarations this preparation resolved, so
+ * deciding it here keeps the decision beside the verdict it follows from; the
+ * session issues it, because a claim write is a backend member only the seam
+ * may spell.
  */
 function edgeInsertWork(prepared: EdgeCreatePrepared): EdgeInsertWork {
-  const claim = edgeCardinalityClaim(
-    prepared.cardinality,
+  const claims = edgeCardinalityClaims(
+    edgeCardinalityAxisReferences(prepared.declarations),
     prepared.insertParams,
   );
   return {
     params: prepared.insertParams,
-    claim,
+    claims,
   };
 }
 
@@ -456,27 +457,24 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   assertOrderedValidityWindow(`edge "${id}"`, validFrom, validTo);
 
   // Check cardinality constraints
-  const cardinality = registration.cardinality ?? "many";
+  const declarations: EdgeCardinalityDeclarations = registration;
   const constraintContext: ConstraintContext = {
     graphId: ctx.graphId,
     registry: ctx.registry,
     backend,
   };
   if (options?.validateCardinality ?? true) {
-    await checkCardinalityConstraint(
+    await checkEdgeCardinalityConstraints(
       constraintContext,
       kind,
-      cardinality,
-      fromKind,
-      input.fromId,
-      toKind,
-      input.toId,
+      edgeCardinalityAxisReferences(declarations),
+      { fromKind, fromId: input.fromId, toKind, toId: input.toId },
       validTo,
     );
   }
 
   return {
-    cardinality,
+    declarations,
     insertParams: buildInsertEdgeParams(
       ctx.graphId,
       id,
@@ -537,21 +535,23 @@ function assertEndpointRowLive(
 // ============================================================
 
 /**
- * The cardinality an edge create must honor, resolved from the graph def.
- * Also the input to {@link edgeWriteNeedsConstraintFence}, so "does this create
- * probe anything" and "what does it probe" are read from one place.
+ * The cardinality declarations an edge create must honor, resolved from the
+ * graph def. Also the input to {@link edgeWriteNeedsConstraintFence} and
+ * {@link edgeCardinalityAxisReferences}, so "does this create probe anything" and
+ * "what does it probe" are read from one place, source AND target alike.
  *
- * A kind this graph does not define answers `many`. Choosing the fence must not
- * become the thing that REPORTS an unknown kind: the write path raises
- * `KindNotFoundError` from inside the hooked transaction, where a caller's
- * `onError` hook observes it, and this runs before that transaction opens.
+ * A kind this graph does not define answers the empty declaration. Choosing
+ * the fence must not become the thing that REPORTS an unknown kind: the write
+ * path raises `KindNotFoundError` from inside the hooked transaction, where a
+ * caller's `onError` hook observes it, and this runs before that transaction
+ * opens.
  */
-function edgeCardinality<G extends GraphDef>(
+function edgeCardinalityDeclarations<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   kind: string,
-): Cardinality {
-  if (!hasOwnKey(ctx.graph.edges, kind)) return "many";
-  return getEdgeRegistration(ctx.graph, kind).cardinality ?? "many";
+): EdgeCardinalityDeclarations {
+  if (!hasOwnKey(ctx.graph.edges, kind)) return {};
+  return getEdgeRegistration(ctx.graph, kind);
 }
 
 /**
@@ -690,6 +690,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     convergeOn !== undefined && registration.matchIdentity !== undefined;
   const autocommitBackend =
     isBundledRootAutocommitEligible(backend) ? backend : undefined;
+  const declarations = edgeCardinalityDeclarations(ctx, kind);
   const candidate =
     hasOwnKey(ctx.graph.edges, kind) ?
       ({
@@ -699,7 +700,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         revisionTrackingEnabled: ctx.revisionTrackingEnabled,
         kindRegistered: true,
         convergesDynamically: convergeOn !== undefined && !durableConvergence,
-        cardinality: edgeCardinality(ctx, kind),
+        constrained: edgeCardinalityAxisReferences(declarations).length > 0,
       } as const)
     : undefined;
   const schemaFenceInFirstWrite =
@@ -711,7 +712,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     isAutocommitSingleStatementWrite({ kind: "edge", candidate });
   const plan = edgeWritePlan(
     convergeOn === undefined || durableConvergence ?
-      edgeWriteNeedsConstraintFence(edgeCardinality(ctx, kind))
+      edgeWriteNeedsConstraintFence(declarations)
     : "edgeMatchKeyConvergence",
   );
 
@@ -771,9 +772,15 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       });
     };
 
-    const declaredCardinality = edgeCardinality(ctx, kind);
+    const constrainedAxisCount =
+      edgeCardinalityAxisReferences(declarations).length;
+    // The guarded single-statement fast path carries exactly one claim
+    // (`buildInsertEdgeIfEndpointsLiveWithCardinalityClaim` reserves exactly
+    // one axis row) — a kind declaring BOTH axes always takes the portable
+    // claim-then-insert path, on every engine, per the fused command port's
+    // arity contract (`ManagedEdgeCreatePlan.cardinalityClaims`).
     const usesGuardedCardinalityClaim =
-      declaredCardinality !== "many" &&
+      constrainedAxisCount === 1 &&
       edgeCardinalityClaimMode(target, ctx.claimsVerdict()).kind === "guarded";
     const usesFusedCardinalityInsert = usesGuardedCardinalityClaim;
     // A constrained convergence has to see an incumbent match before it
@@ -790,7 +797,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     // remove those two RTTs even though this create leg carries a convergence
     // guard.
     const canFuseEndpointCheck =
-      declaredCardinality === "many" || usesGuardedCardinalityClaim;
+      constrainedAxisCount === 0 || usesGuardedCardinalityClaim;
     const durableIdentityArbitratedCreate =
       registration.matchIdentity !== undefined;
     let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
@@ -825,7 +832,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       if (
         durableIdentityArbitratedCreate &&
         convergeOn !== undefined &&
-        declaredCardinality !== "many"
+        constrainedAxisCount > 0
       ) {
         // A get-or-create that already has its endpoint/match winner must
         // resolve that winner before the cardinality probe: cardinality is a
@@ -849,7 +856,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       }
       const work = edgeInsertWork(prepared);
       const durableMatchIdentity = work.params.matchIdentity;
-      if (work.claim === undefined || durableMatchIdentity !== undefined) {
+      if (work.claims.length === 0 || durableMatchIdentity !== undefined) {
         const command: EdgeConvergeCreateCommand = {
           kind: "edge.converge-create",
           plan: {
@@ -888,8 +895,12 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           // converge command owns the former; retain the latter's claim row
           // in the same transaction after the edge exists. If claiming
           // refuses, the surrounding write frame rolls the command back.
-          if (durableMatchIdentity !== undefined && work.claim !== undefined) {
-            await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
+          if (durableMatchIdentity !== undefined && work.claims.length > 0) {
+            await claimEdgeCardinalities(
+              target,
+              ctx.claimsVerdict(),
+              work.claims,
+            );
           }
           return createdEdgeResult(rowToEdge(result.row));
         }
@@ -1025,8 +1036,8 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
               },
             }
           : {}),
-          ...(usesFusedCardinalityInsert && fusedWork.claim !== undefined ?
-            { cardinalityClaim: fusedWork.claim }
+          ...(usesFusedCardinalityInsert && fusedWork.claims.length > 0 ?
+            { cardinalityClaims: fusedWork.claims }
           : {}),
         },
       };
@@ -1216,7 +1227,7 @@ async function prepareEdgeBatchCreates<G extends GraphDef>(
     preparedCreates.push(prepared);
     registerPendingEdgeForCardinality(
       prepared.insertParams,
-      prepared.cardinality,
+      prepared.declarations,
     );
   }
 
@@ -1261,15 +1272,15 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
       { validateEndpoints: false, validateCardinality: false },
     );
     preparedCreates.push(prepared);
-    const claim = edgeInsertWork(prepared).claim;
-    if (claim === undefined) continue;
-    const target = edgeCardinalityClaimTarget(claim);
-    const targetKey = `${target.axis}\u0000${target.key}`;
-    if (claimedTargets.has(targetKey)) {
-      throw edgeCardinalityClaimRefusal(claim);
+    for (const claim of edgeInsertWork(prepared).claims) {
+      const target = edgeCardinalityClaimTarget(claim);
+      const targetKey = `${target.axis}\u0000${target.key}`;
+      if (claimedTargets.has(targetKey)) {
+        throw edgeCardinalityClaimRefusal(claim);
+      }
+      claimedTargets.add(targetKey);
+      claims.push(claim);
     }
-    claimedTargets.add(targetKey);
-    claims.push(claim);
   }
   return {
     claims: claims.toSorted((left, right) =>
@@ -1450,14 +1461,18 @@ async function assertAtomicEdgeBatchCardinality<G extends GraphDef>(
     const errors = await Promise.all(
       window.map(async (input) => {
         try {
-          await checkCardinalityConstraint(
+          await checkEdgeCardinalityConstraints(
             constraintContext,
             input.kind,
-            edgeCardinality(ctx, input.kind),
-            input.fromKind,
-            input.fromId,
-            input.toKind,
-            input.toId,
+            edgeCardinalityAxisReferences(
+              edgeCardinalityDeclarations(ctx, input.kind),
+            ),
+            {
+              fromKind: input.fromKind,
+              fromId: input.fromId,
+              toKind: input.toKind,
+              toId: input.toId,
+            },
             input.validTo,
           );
           return;
@@ -1786,7 +1801,7 @@ function batchFencesConstraintProbe<G extends GraphDef>(
 ): ConstraintFenceReason | undefined {
   for (const input of inputs) {
     const reason = edgeWriteNeedsConstraintFence(
-      edgeCardinality(ctx, input.kind),
+      edgeCardinalityDeclarations(ctx, input.kind),
     );
     if (reason !== undefined) return reason;
   }
@@ -1932,41 +1947,65 @@ async function performEdgeUpdate<G extends GraphDef>(
         : { validTo },
         existing.valid_to,
       );
-  const cardinality = edgeCardinality(ctx, input.identity.kind);
+  const declarations = edgeCardinalityDeclarations(ctx, input.identity.kind);
   const reentersLivePopulation =
     options?.clearDeleted === true && existing.deleted_at !== undefined;
-  // `let` earns its place: the claim is decided inside the re-entry branch and
-  // consumed by the work record built after it, and there is no expression form
-  // that keeps the branch's two other statements (probe, then decide) together.
-  let reentryClaim: ClaimEdgeCardinalityParams | undefined;
+  // `let` earns its place: the claims are decided inside the re-entry branch
+  // and consumed by the work record built after it, and there is no
+  // expression form that keeps the branch's two other statements (probe,
+  // then decide) together.
+  let reentryClaims: readonly ClaimEdgeCardinalityParams[] = [];
+  // Any declared axis that counts only the ACTIVE population reopens on a
+  // cleared `validTo` even without a delete transition — the axis's claim
+  // row becomes takeable the moment the row ends, exactly as
+  // `claimsWhenBornEnded` governs at create time.
   const reentersActivePopulation =
-    cardinality === "oneActive" &&
+    activeOnlyAxisReferences(declarations).length > 0 &&
     effectiveValidTo === undefined &&
     (existing.deleted_at !== undefined || existing.valid_to !== undefined);
   if (reentersLivePopulation || reentersActivePopulation) {
-    await checkCardinalityConstraint(
+    // A resurrection (`reentersLivePopulation`) vacated EVERY declared axis —
+    // `deleted_at` excludes this row from every counted population, active-only
+    // or not — so it re-probes and re-claims the full declaration, same as a
+    // create. A pure window reopen with no delete transition
+    // (`reentersActivePopulation` alone) is narrower: a non-active-only axis
+    // (`one`/`unique`, `holderLiveness: "live"`) never released its claim while
+    // this row stayed live and undeleted, so it must be EXCLUDED here, not
+    // re-probed — the probe below has no edge id to exclude the proposed
+    // holder by (unlike the SQL takeover statement's
+    // `competingLiveEdgePredicate`, which excludes it), so probing an axis
+    // this row already holds would count the row against itself and refuse a
+    // reopen nothing else contends for.
+    const reentryAxisReferences: readonly EdgeCardinalityAxisRef[] =
+      reentersLivePopulation ?
+        edgeCardinalityAxisReferences(declarations)
+      : activeOnlyAxisReferences(declarations);
+    await checkEdgeCardinalityConstraints(
       {
         graphId: ctx.graphId,
         registry: ctx.registry,
         backend: target,
       },
       input.identity.kind,
-      cardinality,
-      existing.from_kind,
-      existing.from_id,
-      existing.to_kind,
-      existing.to_id,
+      reentryAxisReferences,
+      {
+        fromKind: existing.from_kind,
+        fromId: existing.from_id,
+        toKind: existing.to_kind,
+        toId: existing.to_id,
+      },
       effectiveValidTo,
     );
-    // Re-entry re-admits this edge to the population its cardinality
-    // constrains, so it claims the axis exactly as a create does — BEFORE the
-    // update that re-admits it, because the probe above read a population no key
-    // fences. Both legs claim: a resurrect (`clearDeleted`) and a reopened
-    // `oneActive` window (#469) put the same row back into the same counted
-    // population, and a fence that covered only the first would leave the second
-    // unfenced. Decided here, ISSUED by the step that owns the row write, so the
-    // pair cannot be separated.
-    reentryClaim = edgeCardinalityClaim(cardinality, {
+    // Re-entry re-admits this edge to every population {@link
+    // reentryAxisReferences} above decided it left, so it claims exactly
+    // those axes — BEFORE the update that re-admits it, because the probe
+    // above read a population no key fences. Both legs claim: a resurrect
+    // (`clearDeleted`) and a reopened `oneActive`-shaped window (#469) put
+    // the same row back into the same counted population, and a fence that
+    // covered only the first would leave the second unfenced. Decided here,
+    // ISSUED by the step that owns the row write, so the pair cannot be
+    // separated.
+    reentryClaims = edgeCardinalityClaims(reentryAxisReferences, {
       graphId: ctx.graphId,
       id,
       kind: input.identity.kind,
@@ -2052,7 +2091,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     : validTo === undefined ? {}
     : { validTo }),
     ...(options?.clearDeleted === true && { clearDeleted: true }),
-    ...(reentryClaim === undefined ? {} : { claim: reentryClaim }),
+    claims: reentryClaims,
   };
 
   const row = await withUnmatchedEdgeUpdateRefusal(
@@ -2227,14 +2266,17 @@ export async function executeEdgeUpdate<G extends GraphDef>(
     ctx,
     opContext,
     // An in-place props update on a live edge re-derives no constraint verdict.
-    // Clearing an `oneActive` edge's end DOES: it re-admits the row to the
-    // counted active population.
+    // Clearing an active-only-tracking axis's end DOES: it re-admits the row
+    // to that axis's counted active population, on either side.
     edgeWritePlan(
       (
         input.clearValidTo === true &&
-          edgeCardinality(ctx, gate.kind) === "oneActive"
+          activeOnlyAxisReferences(edgeCardinalityDeclarations(ctx, gate.kind))
+            .length > 0
       ) ?
-        edgeWriteNeedsConstraintFence("oneActive")
+        edgeWriteNeedsConstraintFence(
+          edgeCardinalityDeclarations(ctx, gate.kind),
+        )
       : undefined,
     ),
     backend,
@@ -2283,7 +2325,9 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     edgeWritePlan(
       options?.coalesceUnchanged === true ? "edgeMatchKeyConvergence"
       : input.clearValidTo === true || options?.clearDeleted === true ?
-        edgeWriteNeedsConstraintFence(edgeCardinality(ctx, input.identity.kind))
+        edgeWriteNeedsConstraintFence(
+          edgeCardinalityDeclarations(ctx, input.identity.kind),
+        )
       : undefined,
     ),
     backend,
@@ -2521,7 +2565,7 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
     edgeWritePlan(
       needsConstraintFence ?
         edgeWriteNeedsConstraintFence(
-          edgeCardinality(ctx, first.input.identity.kind),
+          edgeCardinalityDeclarations(ctx, first.input.identity.kind),
         )
       : undefined,
     ),
@@ -2886,7 +2930,10 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
         // row only keeps the relation from growing by one row per hard-deleted
         // constrained edge. An unconstrained kind holds no claim and pays no
         // statement for one, the same rule its create follows.
-        holdsCardinalityClaim: edgeCardinality(ctx, expectedKind) !== "many",
+        holdsCardinalityClaim:
+          edgeCardinalityAxisReferences(
+            edgeCardinalityDeclarations(ctx, expectedKind),
+          ).length > 0,
       });
     },
   );

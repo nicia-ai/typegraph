@@ -502,9 +502,12 @@ fallback is acceptable.
 Turning revision tracking off does **not** turn off all serialization.
 *Constrained* writes now take the same per-graph mutual exclusion regardless of
 `revisionTracking` or `history`, because their check-then-write is only sound if
-nothing else writes the graph in between: edge cardinality (`one`, `unique`,
-`oneActive`, and the `getOrCreateByEndpoints` create and resurrect legs),
-node-kind disjointness on create, and a `kindWithSubClasses` uniqueness
+nothing else writes the graph in between: edge cardinality — both the
+source-side axis (`one`, `unique`, `oneActive`) and the independent
+[target-side axis](/core-concepts#target-cardinality) (`targetCardinality:
+"one" | "oneActive"`), including the `getOrCreateByEndpoints` create and
+resurrect legs on either axis — node-kind disjointness on create, and a
+`kindWithSubClasses` uniqueness
 constraint that actually expands to more than one kind — a scope covering a
 single kind probes exactly the row the uniques table's primary key then
 reserves, so that key is already its fence. Everything else — an unconstrained
@@ -1346,7 +1349,7 @@ keeps the complete graph schema and rejects the duplicate during staging,
 before entity resolution can review and collapse it. An ingestion branch
 materializes an honest working-copy schema with only node uniqueness deferred;
 schema validation, edge endpoint checks, disjointness, and edge cardinality
-still apply immediately.
+(both the source and target axis) still apply immediately.
 
 ```typescript
 import { asNodeId } from "@nicia-ai/typegraph";
@@ -1576,7 +1579,7 @@ subclass you can branch on:
 | `BranchError`                | `branch()` or `ingestionBranch()` could not materialize a working copy.                                                                                                                                                                                                        |
 | `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge).                                  |
-| `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. The resolved plan would violate a deterministic store constraint, such as edge cardinality or node uniqueness. Its category is `constraint`, its `cause` is the original typed store error, and its details expose the original constraint fields. No graph or provenance writes commit. |
+| `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. The resolved plan would violate a deterministic store constraint, such as source- or target-side edge cardinality or node uniqueness. Its category is `constraint`, its `cause` is the original typed store error (a `CardinalityError` with `details.direction` for a cardinality conflict), and its details expose the original constraint fields. No graph or provenance writes commit. |
 | `InvalidMergeOptionsError`   | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`.                         |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |
 | `MergeConflictError`         | A conflict could not be resolved under the configured policy.                                                                                                                                                                                                                 |

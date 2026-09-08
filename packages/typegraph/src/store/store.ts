@@ -213,18 +213,17 @@ import {
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
   loadAndVerifyGraph,
-  ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
   parseSerializedSchema,
   requiresMigration as requiresMigrationImpl,
   type SchemaManagerOptions,
   type SchemaValidationResult,
 } from "../schema/manager";
 import { type SchemaDiff } from "../schema/migration";
-import { prepareOntologyTighteningPreflight } from "../schema/ontology-tightening-preflight";
 import {
   serializeSchema,
   serializeSchemaPreservingUnknownFields,
 } from "../schema/serializer";
+import { prepareSchemaTighteningPreflight } from "../schema/tightening-preflight";
 import { type SerializedSchema } from "../schema/types";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -4346,7 +4345,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // unclassified — that function's own docblock explains why (ontology is out
     // of its scope by design). The ontology half is classified here instead,
     // against the exact after-document the commit is about to publish.
-    const ontologyPreflight = prepareOntologyTighteningPreflight({
+    const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
       graphId: this.graphId,
       fromVersion: activeRow.version,
       toVersion: activeRow.version + 1,
@@ -4389,7 +4388,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         )
       );
     const committed =
-      ontologyPreflight === undefined && identityCandidate === undefined ?
+      (
+        schemaTighteningPreflight === undefined &&
+        identityCandidate === undefined
+      ) ?
         classification.requireEmpty.length > 0 ?
           await commitEvolvedSchemaWhenRequiredKindsAreEmpty(
             this.#backend,
@@ -4418,7 +4420,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 this.graphId,
                 classification,
               ),
-            ontologyPreflight,
+            schemaTighteningPreflight?.run,
             identityCandidate === undefined ? undefined : (
               (target: SchemaCommitPreflightBackend) =>
                 identityCandidate.identitySchemaPreflight(
@@ -4428,8 +4430,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             ),
           ]),
           storedSchema,
-          identityCandidate === undefined && ontologyPreflight !== undefined ?
-            ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+          (
+            identityCandidate === undefined &&
+              schemaTighteningPreflight !== undefined
+          ) ?
+            schemaTighteningPreflight.capabilityError
           : undefined,
         );
     // Provision per-field vector tables + durable markers for any embedding

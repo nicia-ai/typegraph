@@ -10,6 +10,9 @@ import { z } from 'zod';
 const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
 
 // @public
+type Cardinality = "many" | "one" | "unique" | "oneActive";
+
+// @public
 export const CURRENT_GRAPH_EXTENSION_VERSION: 1;
 
 // @public
@@ -42,6 +45,8 @@ export type ExtensionEdgeDef = Readonly<{
     from: readonly string[];
     to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
+    cardinality?: Cardinality;
+    targetCardinality?: TargetCardinality;
 }>;
 
 // @public
@@ -382,6 +387,9 @@ type Result<T, E = Error> = Readonly<{
     success: false;
     error: E;
 }>;
+
+// @public
+type TargetCardinality = Exclude<Cardinality, "unique">;
 
 // @public
 class TypeGraphError extends Error {

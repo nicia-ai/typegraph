@@ -1,8 +1,9 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
-  EDGE_CARDINALITY_SPECS,
   edgeCardinalityClaimTarget,
+  type EdgeCardinalitySpec,
+  edgeCardinalitySpec,
 } from "../../../store/claims/edge-claims";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
@@ -38,6 +39,32 @@ function qualifiedAlias(
 }
 
 /**
+ * The endpoint terms {@link EdgeCardinalitySpec.keyShape} says a predicate
+ * must read: from-terms for `"from"`, to-terms for `"to"`, both for
+ * `"fromAndTo"`. The one renderer of that fold, so a source-axis predicate and
+ * a target-axis predicate cannot spell two different subsets of these
+ * columns.
+ */
+function endpointTerms(
+  edgesName: string,
+  edges: Tables["edges"],
+  keyShape: EdgeCardinalitySpec["keyShape"],
+  params: Readonly<
+    Pick<ClaimEdgeCardinalityParams, "fromKind" | "fromId" | "toKind" | "toId">
+  >,
+): SQL {
+  const fromTerms =
+    keyShape === "from" || keyShape === "fromAndTo" ?
+      sql` AND ${qualified(edgesName, edges.fromKind)} = ${params.fromKind} AND ${qualified(edgesName, edges.fromId)} = ${params.fromId}`
+    : sql``;
+  const toTerms =
+    keyShape === "to" || keyShape === "fromAndTo" ?
+      sql` AND ${qualified(edgesName, edges.toKind)} = ${params.toKind} AND ${qualified(edgesName, edges.toId)} = ${params.toId}`
+    : sql``;
+  return sql`${fromTerms}${toTerms}`;
+}
+
+/**
  * The live entity predicate a claim guards, excluding the proposed holder.
  * Both the guarded lock and guarded takeover use this exact fragment so the
  * fast path cannot disagree about what constitutes a claimless incumbent.
@@ -48,11 +75,7 @@ function competingLiveEdgePredicate(
 ): SQL {
   const { edges } = tables;
   const edgesName = getTableName(edges);
-  const spec = EDGE_CARDINALITY_SPECS[params.cardinality];
-  const toEndpointTerms =
-    spec.keyShape === "fromAndTo" ?
-      sql` AND ${qualified(edgesName, edges.toKind)} = ${params.toKind} AND ${qualified(edgesName, edges.toId)} = ${params.toId}`
-    : sql``;
+  const spec = edgeCardinalitySpec(params);
   const activeTerm =
     spec.holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
@@ -62,9 +85,7 @@ function competingLiveEdgePredicate(
     ${qualified(edgesName, edges.graphId)} = ${params.graphId}
       AND ${qualified(edgesName, edges.id)} <> ${params.edgeId}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}
-      AND ${qualified(edgesName, edges.fromKind)} = ${params.fromKind}
-      AND ${qualified(edgesName, edges.fromId)} = ${params.fromId}${toEndpointTerms}${activeTerm}
+      AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, params)}${activeTerm}
   `;
 }
 
@@ -116,11 +137,7 @@ function recordedClaimHolderIsLivePredicate(
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
   const edgesName = getTableName(edges);
-  const spec = EDGE_CARDINALITY_SPECS[params.cardinality];
-  const toEndpointTerms =
-    spec.keyShape === "fromAndTo" ?
-      sql` AND ${qualified(edgesName, edges.toKind)} = ${params.toKind} AND ${qualified(edgesName, edges.toId)} = ${params.toId}`
-    : sql``;
+  const spec = edgeCardinalitySpec(params);
   const activeTerm =
     spec.holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
@@ -129,9 +146,7 @@ function recordedClaimHolderIsLivePredicate(
     ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
       AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}
-      AND ${qualified(edgesName, edges.fromKind)} = ${params.fromKind}
-      AND ${qualified(edgesName, edges.fromId)} = ${params.fromId}${toEndpointTerms}${activeTerm}
+      AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, params)}${activeTerm}
   `;
 }
 
@@ -457,13 +472,15 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
  * caller-suppliable and graph-unique, so a hard-deleted id can be reused by a
  * DIFFERENT edge; a claim naming that id would otherwise read as a live holder
  * and block its axis forever. The extra terms are exactly the components the
- * axis and key were built from — and exactly the columns `countEdgesFrom` /
+ * axis and key were built from — and exactly the columns `countEdgesAtEndpoint` /
  * `edgeExistsBetween` filter on — so the fence's liveness predicate and the
  * probe's read the same shape.
  *
- * The `valid_to IS NULL` term and the to-endpoint terms are not spelled here:
- * they are read from {@link EDGE_CARDINALITY_SPECS}, the same table the
- * TypeScript probe reads.
+ * The `valid_to IS NULL` term and the endpoint terms are not spelled here:
+ * `holderLiveness` and `keyShape` are read from {@link edgeCardinalitySpec},
+ * the same table the TypeScript probe reads, and {@link endpointTerms}
+ * renders the from- and/or to-terms `keyShape` names — the one seam a new
+ * `keyShape` has to extend.
  */
 export function buildTakeOverEdgeClaim(
   tables: Tables,
@@ -473,13 +490,9 @@ export function buildTakeOverEdgeClaim(
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
   const edgesName = getTableName(edges);
-  const spec = EDGE_CARDINALITY_SPECS[params.cardinality];
+  const spec = edgeCardinalitySpec(params);
   const target = edgeCardinalityClaimTarget(params);
 
-  const toEndpointTerms =
-    spec.keyShape === "fromAndTo" ?
-      sql` AND ${qualified(edgesName, edges.toKind)} = ${params.toKind} AND ${qualified(edgesName, edges.toId)} = ${params.toId}`
-    : sql``;
   const activeTerm =
     spec.holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
@@ -498,9 +511,7 @@ export function buildTakeOverEdgeClaim(
         WHERE ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
           AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
           AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-          AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}
-          AND ${qualified(edgesName, edges.fromKind)} = ${params.fromKind}
-          AND ${qualified(edgesName, edges.fromId)} = ${params.fromId}${toEndpointTerms}${activeTerm}
+          AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, params)}${activeTerm}
       )
     RETURNING ${quotedColumn(edgeClaims.edgeId)} as holder_edge_id
   `;

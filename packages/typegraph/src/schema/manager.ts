@@ -56,13 +56,16 @@ import {
   matchIdentitiesEqual,
   type SchemaDiff,
 } from "./migration";
-import { prepareOntologyTighteningPreflight } from "./ontology-tightening-preflight";
 import {
   computeSchemaHash,
   getSchemaHash,
   serializeSchema,
   serializeSchemaPreservingUnknownFields,
 } from "./serializer";
+import {
+  type AtomicPreflightCapabilityError,
+  prepareSchemaTighteningPreflight,
+} from "./tightening-preflight";
 import { type SerializedSchema, serializedSchemaZod } from "./types";
 
 /**
@@ -470,10 +473,10 @@ export async function ensureSchema<G extends GraphDef>(
               {}
             : { schema: options.schema }),
           });
-      // Same reasoning, for the ontology tightening probe: derived here from
-      // the actual before/after documents this commit is about to publish,
-      // never accepted from the caller.
-      const ontologyPreflight = prepareOntologyTighteningPreflight({
+      // Same reasoning, for the schema tightening probe (ontology and edge
+      // cardinality): derived here from the actual before/after documents
+      // this commit is about to publish, never accepted from the caller.
+      const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
         graphId: graph.id,
         fromVersion: activeSchema.version,
         toVersion: activeSchema.version + 1,
@@ -483,7 +486,7 @@ export async function ensureSchema<G extends GraphDef>(
         changes: diff.ontology,
       });
       const preflight = composeSchemaCommitPreflight([
-        ontologyPreflight,
+        schemaTighteningPreflight?.run,
         identityPreflight,
       ]);
       const committedRow =
@@ -500,8 +503,11 @@ export async function ensureSchema<G extends GraphDef>(
             activeSchema.version,
             preflight,
             storedSchema,
-            identityPreflight === undefined ?
-              ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+            (
+              identityPreflight === undefined &&
+                schemaTighteningPreflight !== undefined
+            ) ?
+              schemaTighteningPreflight.capabilityError
             : undefined,
           );
       await options?.onAfterMigrate?.(hookContext);
@@ -766,36 +772,16 @@ function schemaNotInitializedError(
 /**
  * What a caller of `commitNewSchemaVersionWithPreflight` refuses with when
  * the backend cannot commit a preflight atomically. Reusing IDENTITY's code
- * for an ontology-only tightening would misdirect an operator on a graph
- * with identity disabled, so the primitive takes this bag rather than
- * hardcoding one message.
+ * for a tightening-only commit would misdirect an operator on a graph with
+ * identity disabled, so the primitive takes this bag rather than hardcoding
+ * one message. The tightening-specific bags live in `./tightening-preflight`,
+ * beside the decision that picks between them.
  */
-export type AtomicPreflightCapabilityError = Readonly<{
-  code: string;
-  message: string;
-  suggestion?: string;
-}>;
-
 const IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
   {
     code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
     message:
       "This backend cannot atomically commit identity data with a schema transition.",
-  };
-
-/**
- * Thrown when an ontology tightening (see `./ontology-tightening-preflight`)
- * needs the atomic preflight-commit primitive and the backend does not
- * implement it.
- */
-export const ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
-  {
-    code: "ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
-    message:
-      "This backend cannot atomically validate an ontology tightening against existing data as part of a schema transition.",
-    suggestion:
-      "Run this migration through a backend built by `createSqliteBackend` or " +
-      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
   };
 
 /**
@@ -1193,9 +1179,9 @@ export async function migrateSchema<G extends GraphDef>(
 
   // No BEFORE document, no ontology to tighten against: a v1 initial commit
   // has nothing preceding it (mirrors `initializeSchema`'s exclusion).
-  const ontologyPreflight =
+  const schemaTighteningPreflight =
     storedSchema === undefined ? undefined : (
-      prepareOntologyTighteningPreflight({
+      prepareSchemaTighteningPreflight({
         graphId: target.id,
         fromVersion: currentVersion,
         toVersion: currentVersion + 1,
@@ -1212,7 +1198,7 @@ export async function migrateSchema<G extends GraphDef>(
     (
       identityPreflight === undefined &&
       edgeMatchIdentityPreflight === undefined &&
-      ontologyPreflight === undefined
+      schemaTighteningPreflight === undefined
     ) ?
       guardedDrops.length > 0 ?
         await commitDroppedKindsOnlyWhenEmpty(
@@ -1247,12 +1233,15 @@ export async function migrateSchema<G extends GraphDef>(
               guardedDrops,
             ),
           edgeMatchIdentityPreflight,
-          ontologyPreflight,
+          schemaTighteningPreflight?.run,
           identityPreflight,
         ]),
         storedSchema,
-        identityPreflight === undefined && ontologyPreflight !== undefined ?
-          ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+        (
+          identityPreflight === undefined &&
+            schemaTighteningPreflight !== undefined
+        ) ?
+          schemaTighteningPreflight.capabilityError
         : undefined,
       );
   return committed.version;

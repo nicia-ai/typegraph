@@ -413,6 +413,78 @@ await store.edges.currentEmployer.create(alice, other, {}); // Throws Cardinalit
 The check queries existing edges and throws `CardinalityError` if violated.
 For `oneActive`, only edges with `validTo` unset count toward the limit.
 
+#### Target cardinality
+
+`targetCardinality` bounds the edges that point **at** one target node,
+independently of `cardinality`, which bounds the edges leaving one source:
+
+```typescript
+const graph = defineGraph({
+  edges: {
+    // Many-to-one ownership: a source may point at many targets, but each
+    // target may be pointed at by at most one live edge.
+    assignedTo: {
+      type: assignedTo,
+      from: [Person],
+      to: [Ticket],
+      targetCardinality: "one",
+    },
+
+    // At most one ACTIVE edge (valid_to IS NULL) into any target.
+    currentOwner: {
+      type: currentOwner,
+      from: [Person],
+      to: [Asset],
+      targetCardinality: "oneActive",
+    },
+  },
+});
+```
+
+| Target cardinality | Description |
+|---------------------|-------------|
+| `"many"` | No limit (default) |
+| `"one"` | At most one edge of this type into any target node |
+| `"oneActive"` | At most one edge with `valid_to IS NULL` into any target |
+
+There is no `"unique"` target cardinality: pair uniqueness is a property of
+the `(source, target)` pair, and `cardinality: "unique"` already declares it
+from the source side — a second pair declaration on the target side would be
+the same axis stated twice.
+
+`cardinality` and `targetCardinality` compose freely. All twelve
+combinations are accepted; one is *redundant* (`unique` already implies the
+pair bound that `targetCardinality: "one"` would separately declare) and is
+still honored, because refusing an author's explicit, true statement would be
+surprising:
+
+| `cardinality` \ `targetCardinality` | `many` (default) | `one` | `oneActive` |
+| --- | --- | --- | --- |
+| `many` (default) | unconstrained multigraph | many-to-one: a target has at most one incoming edge ever | many-to-one over open-ended edges only |
+| `one` | one outgoing per source (as above) | strict 1:1 over the live population | 1:1 where the target bound counts open-ended edges only |
+| `unique` | at most one edge per `(from, to)` pair (as above) | *redundant*: target `"one"` already implies pair uniqueness | pair uniqueness plus an active-only target bound |
+| `oneActive` | one open-ended outgoing per source (as above) | one open-ended out, at most one incoming ever | strict 1:1 over the open-ended population |
+
+Both axes are limits on **edge count**, not on distinct neighbours: a second
+distinct edge from the same source to an already-`targetCardinality: "one"`
+target is refused exactly like a second edge from a different source would
+be. The reservation is scoped to `(graph, edge kind, target kind, target
+id)` — the source kind is deliberately not part of the key, so two different
+source kinds contend for one target allowance, and two nodes with the same
+id under different target kinds or edge kinds never collide.
+
+The temporal rules mirror the source-side ones, read from the target end:
+`"one"` counts every non-deleted edge at the target (including edges with a
+stated validity end); `"oneActive"` counts only those whose `validTo` is
+unset. Soft-deleting an edge frees the slot it held on both axes; ending an
+edge (setting `validTo`) frees only an active-only (`"oneActive"`) slot,
+never a `"one"` slot; a resurrection or a reopened validity window
+reacquires every applicable reservation, on both axes.
+
+`CardinalityErrorDetails` names which endpoint's population was overrun via
+`direction: "source" | "target"`, alongside `toKind` / `toId` for the target
+endpoint (`fromKind` / `fromId` keep their existing meaning).
+
 ### Edge Operations
 
 ```typescript

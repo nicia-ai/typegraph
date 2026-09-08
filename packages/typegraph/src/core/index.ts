@@ -108,6 +108,7 @@ export {
   type NodeRegistration,
   type NodeType,
   type NullCheckOp,
+  type TargetCardinality,
   type TemporalMode,
   type UniqueConstraint,
   type UniquenessScope,
