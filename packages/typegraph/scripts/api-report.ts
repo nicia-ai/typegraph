@@ -483,15 +483,15 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // runner and attempt instead of a freshly-built Store-scoped context. This
 // is exactly the B8 `[STORE_RUNTIME]`-reachable set (`.`, `./graph-merge`,
 // `./interchange`, `./profiler`, `./provenance`, `./sqlite/local`,
-// `./postgres/pglite`), each +1 for `NodeDeletePolicy`: `.` 388→389,
-// `./graph-merge` 730→731, `./interchange` 713→714, `./postgres/pglite`
-// 710→711, `./profiler` 715→716, `./provenance` 721→722, `./sqlite/local`
-// 710→711. No other entrypoint renders `TransactionRuntime`/`StoreRuntime`,
+// `./postgres/pglite`), each +1 for `NodeDeletePolicy` on top of the D.1 baseline: `.` 389→390,
+// `./graph-merge` 734→735, `./interchange` 717→718, `./postgres/pglite`
+// 714→715, `./profiler` 719→720, `./provenance` 725→726, `./sqlite/local`
+// 714→715. No other entrypoint renders `TransactionRuntime`/`StoreRuntime`,
 // so no other entrypoint moved.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 389,
-    sha256: "616322c9babf73c8578d0d7c86a0108055bede2c76362addb80e940687cc987e",
+    count: 390,
+    sha256: "00fdac891db51d14a5f6df05c88229b1e9ea28204f4f4e2f3c732914557047bc",
   },
   "./adapters/drizzle/engine": {
     count: 325,
@@ -537,36 +537,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 734,
-    sha256: "10524fe7c2563e7ccfa0b2b19dc2a2e708a1497a398f858ec18ddfaa44728a56",
+    count: 735,
+    sha256: "def2a0f189d0cbc140855d58241be66a18dc0c5104ff72f742ade2adf0ffb0e2",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 717,
-    sha256: "2cdf5aea248a0c62c5150fb6c7d661e4b10dcef51fd4f51a6dd09d3ee56fd432",
+    count: 718,
+    sha256: "0349d134ca91f86028e660f9156fdc1ff7e25a006d7498f2ddbfd4d5dbd95ee6",
   },
   "./postgres/pglite": {
-    count: 714,
-    sha256: "db240c34a47d70b67e3991303e52ed39c3956e6ae50ce92014752f1f7e22f7c9",
+    count: 715,
+    sha256: "27a7ddd9282f9acc46fb177e783cf9de509de8918a20fb26d23cac9c028bb9ed",
   },
   "./profiler": {
-    count: 719,
-    sha256: "fc468ba6b73cbbfdf102ea4a4682ad90f6cf5880d7fe577c6d51663dd497e292",
+    count: 720,
+    sha256: "3e33547922081cf61a19afc162b52341a59c7f1386aee5a52c8dd43a6b294879",
   },
   "./provenance": {
-    count: 725,
-    sha256: "adb09e968c00cd950b13d563e5fb6dbc296ec81af2da0e398719fd7baba228e7",
+    count: 726,
+    sha256: "f610ceff1d8dcfad33e0302b787135a74070b878314c3a61b1e7d48c29e1c861",
   },
   "./schema": {
     count: 277,
     sha256: "40f55b05aab182551ad9c5ef9c763c7cc0ba1bc3ce32aaf43f1e8668f9417ebf",
   },
   "./sqlite/local": {
-    count: 714,
-    sha256: "db240c34a47d70b67e3991303e52ed39c3956e6ae50ce92014752f1f7e22f7c9",
+    count: 715,
+    sha256: "27a7ddd9282f9acc46fb177e783cf9de509de8918a20fb26d23cac9c028bb9ed",
   },
 };
 

@@ -4933,7 +4933,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
-    deleteNodeWithPolicy: (target: TransactionBackend, work: Readonly<{
+    deleteNodeWithPolicy: (target: GraphBackend | TransactionBackend, work: Readonly<{
         kind: string;
         id: string;
     }>, policy?: NodeDeletePolicy) => Promise<void>;
