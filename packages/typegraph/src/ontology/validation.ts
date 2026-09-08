@@ -1,15 +1,18 @@
 import {
   computeDisjointExpansionClosures,
+  computeEquivalenceClasses,
   expandDisjointSide,
 } from "../registry/kind-registry";
 import { computeTransitiveClosure } from "./closures";
 import {
   META_EDGE_BROADER,
   META_EDGE_DISJOINT_WITH,
+  META_EDGE_EQUIVALENT_TO,
   META_EDGE_HAS_PART,
   META_EDGE_INVERSE_OF,
   META_EDGE_NARROWER,
   META_EDGE_PART_OF,
+  META_EDGE_SAME_AS,
   META_EDGE_SUB_CLASS_OF,
   type MetaEdgeName,
 } from "./constants";
@@ -25,12 +28,33 @@ type OntologyValidationIssueCode =
   | "ONTOLOGY_SELF_LOOP"
   | "ONTOLOGY_DISJOINT_CONFLICT"
   | "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS"
+  | "ONTOLOGY_EQUIVALENCE_INVALID_CLASS"
   | "DUPLICATE_ONTOLOGY_RELATION";
 
 export type OntologyValidationIssue = Readonly<{
   relationIndex?: number;
   message: string;
   code: OntologyValidationIssueCode;
+  details: Readonly<Record<string, unknown>>;
+}>;
+
+/**
+ * `validateOntologyRelations`'s issue shape when called WITHOUT a `kinds`
+ * classifier: `detectInvalidEquivalenceClasses` returns immediately in that
+ * case (see its docstring), so `"ONTOLOGY_EQUIVALENCE_INVALID_CLASS"` is
+ * PROVABLY absent from the result, not merely unlikely. The no-`kinds`
+ * overload below encodes that as a type, which is what lets
+ * `graph-extension/validation.ts` assign an issue's `code` straight into a
+ * `GraphExtensionIssue` — a union that deliberately does not list this code
+ * (see `GRAPH_EXTENSION_ISSUE_CODES`) — without a cast.
+ */
+export type OntologyValidationIssueWithoutEquivalenceClass = Readonly<{
+  relationIndex?: number;
+  message: string;
+  code: Exclude<
+    OntologyValidationIssueCode,
+    "ONTOLOGY_EQUIVALENCE_INVALID_CLASS"
+  >;
   details: Readonly<Record<string, unknown>>;
 }>;
 
@@ -60,17 +84,44 @@ type NormalizedHierarchicalEdge = Readonly<{
 }>;
 
 /**
+ * Whether a name in an ontology relation is a REGISTERED node kind, a
+ * REGISTERED edge kind, or neither (an external IRI, or a kind this document
+ * only references). Supplied by whoever knows the kinds — the registry
+ * builder from its own maps, the deserializer from the serialized document's
+ * `nodes` and `edges` records. Absent when no classification is available, in
+ * which case the equivalence-class kind check is skipped and the
+ * merged-graph registry build is the gate.
+ */
+export type OntologyKindClassification = Readonly<{
+  isNodeKind: (name: string) => boolean;
+  isEdgeKind: (name: string) => boolean;
+}>;
+
+/**
  * Validates the semantic coherence shared by authored extensions, live graph
  * registries, and serialized-schema registries.
+ *
+ * Overloaded on whether `kinds` is supplied: without it, the equivalence-
+ * class check cannot run (see `detectInvalidEquivalenceClasses`), so the
+ * result is typed as never carrying `"ONTOLOGY_EQUIVALENCE_INVALID_CLASS"`.
  */
 export function validateOntologyRelations(
   ontology: readonly NamedOntologyRelation[],
+): readonly OntologyValidationIssueWithoutEquivalenceClass[];
+export function validateOntologyRelations(
+  ontology: readonly NamedOntologyRelation[],
+  kinds: OntologyKindClassification,
+): readonly OntologyValidationIssue[];
+export function validateOntologyRelations(
+  ontology: readonly NamedOntologyRelation[],
+  kinds?: OntologyKindClassification,
 ): readonly OntologyValidationIssue[] {
   const issues: OntologyValidationIssue[] = [];
   validateSelfLoopsAndDuplicates(ontology, issues);
   detectHierarchicalCycles(ontology, issues);
   detectDisjointExpansionConflicts(ontology, issues);
   detectMultipleInversePartners(ontology, issues);
+  detectInvalidEquivalenceClasses(ontology, kinds, issues);
   return issues;
 }
 
@@ -227,6 +278,82 @@ function detectMultipleInversePartners(
       recordInversePartner(relation.to, relation.from, index, partners, issues);
     }
   }
+}
+
+/**
+ * Refuses an equivalence class that is not a set of node kinds.
+ *
+ * D1 makes `equivalentTo` MUTUAL SUBSUMPTION between registered kinds, and
+ * subsumption is a node-kind relation: a node kind and an edge kind cannot
+ * subsume each other, and two edge kinds have no defined substitution
+ * semantics yet. The left parameter is widened only so an EDGE kind can be
+ * mapped to an external IRI, so a class is legal when it contains at most one
+ * registered edge kind and, if it contains one, no registered node kind.
+ *
+ * Transitivity is why this is a runtime check and not only a signature:
+ * `equivalentTo(edgeA, iri)` plus `equivalentTo(edgeB, iri)` puts two edge
+ * kinds in one class without either call spelling the pair.
+ *
+ * Only fires with a `kinds` classifier supplied — `buildValidatedKindRegistry`
+ * always supplies one (defaulting to the caller's own node/edge maps), so a
+ * graph's own ontology is always checked. `validateGraphExtension`'s
+ * document-scoped call omits `kinds` (an extension's ontology may name
+ * base-graph kinds it cannot classify on its own) and so never reaches this
+ * check; the graph-extension issue codes deliberately do NOT list
+ * `"ONTOLOGY_EQUIVALENCE_INVALID_CLASS"` for that reason. It only ever
+ * reaches a caller as a `ConfigurationError` thrown when the MERGED graph's
+ * `KindRegistry` is built (`buildKindRegistry`).
+ */
+function detectInvalidEquivalenceClasses(
+  ontology: readonly NamedOntologyRelation[],
+  kinds: OntologyKindClassification | undefined,
+  issues: OntologyValidationIssue[],
+): void {
+  if (kinds === undefined) return;
+  for (const members of computeEquivalenceClasses(ontology)) {
+    const edgeMembers = members.filter((member) => kinds.isEdgeKind(member));
+    if (edgeMembers.length === 0) continue;
+    const nodeMembers = members.filter((member) => kinds.isNodeKind(member));
+    const reason =
+      nodeMembers.length > 0 ? "mixed-node-and-edge"
+      : edgeMembers.length > 1 ? "multiple-edge-kinds"
+      : undefined;
+    if (reason === undefined) continue;
+    const relationIndex = findEquivalenceRelationIndex(ontology, members);
+    issues.push({
+      ...(relationIndex === undefined ? {} : { relationIndex }),
+      message:
+        reason === "mixed-node-and-edge" ?
+          `Equivalence class {${members.join(", ")}} mixes node kinds (${nodeMembers.join(", ")}) and edge kinds (${edgeMembers.join(", ")}); equivalentTo between registered kinds is mutual subsumption, which relates node kinds only.`
+        : `Equivalence class {${members.join(", ")}} contains more than one registered edge kind (${edgeMembers.join(", ")}); equivalentTo may map an edge kind to an external IRI, but two edge kinds have no substitution semantics.`,
+      code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+      details: {
+        reason,
+        members,
+        nodeKinds: nodeMembers,
+        edgeKinds: edgeMembers,
+      },
+    });
+  }
+}
+
+/** The first declared equivalence relation whose endpoints are in `members`. */
+function findEquivalenceRelationIndex(
+  ontology: readonly NamedOntologyRelation[],
+  members: readonly string[],
+): number | undefined {
+  const memberSet = new Set(members);
+  for (const [index, relation] of ontology.entries()) {
+    if (
+      (relation.metaEdge === META_EDGE_EQUIVALENT_TO ||
+        relation.metaEdge === META_EDGE_SAME_AS) &&
+      memberSet.has(relation.from) &&
+      memberSet.has(relation.to)
+    ) {
+      return index;
+    }
+  }
+  return undefined;
 }
 
 function recordInversePartner(

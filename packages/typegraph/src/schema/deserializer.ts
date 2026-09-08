@@ -149,7 +149,7 @@ export function deserializeSchema(
  * cannot be interpreted two different ways by two call sites.
  */
 export function buildRegistryFromSerializedSchema(
-  schema: Pick<SerializedSchema, "ontology" | "edges" | "identity">,
+  schema: Pick<SerializedSchema, "ontology" | "nodes" | "edges" | "identity">,
 ): KindRegistry {
   // Build empty node/edge kind maps (we don't have the actual Zod schemas)
   const nodeKinds = new Map<string, NodeType>();
@@ -165,6 +165,16 @@ export function buildRegistryFromSerializedSchema(
       }),
     ),
     edgeEndpoints: buildSerializedEdgeEndpointKinds(schema.edges),
+    // The registry above is built with EMPTY node/edge kind maps (no Zod
+    // schemas survive serialization), so the equivalence-class check needs
+    // its own classifier built from the document's own `nodes`/`edges`
+    // records, or every name would classify as neither and the check would
+    // silently pass a persisted schema `buildValidatedKindRegistry` would
+    // otherwise refuse.
+    kindClassification: {
+      isNodeKind: (name) => hasOwnKey(schema.nodes, name),
+      isEdgeKind: (name) => hasOwnKey(schema.edges, name),
+    },
     ...(schema.identity === undefined ? {} : { identity: schema.identity }),
   });
 }

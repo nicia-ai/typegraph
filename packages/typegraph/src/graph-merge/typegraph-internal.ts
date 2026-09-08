@@ -44,11 +44,6 @@ export type {
 } from "../identity/types";
 export { exportGraph, exportGraphStream } from "../interchange/export";
 export { importGraph, importGraphStream } from "../interchange/import";
-export { computeTransitiveClosure, isReachable } from "../ontology/closures";
-export {
-  META_EDGE_EQUIVALENT_TO,
-  META_EDGE_SAME_AS,
-} from "../ontology/constants";
 // The provenance ownership probe needs graph-scoped raw SQL to look for rows
 // under a graph id whose schema was never registered.
 export {
@@ -57,12 +52,10 @@ export {
 } from "../query/compiler/schema";
 export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+export { type KindRegistry } from "../registry/kind-registry";
 export { sortedReplacer } from "../schema/canonical";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
-export {
-  type OntologyIntrospection,
-  type UniqueIntrospection,
-} from "../store/introspect";
+export { type UniqueIntrospection } from "../store/introspect";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,

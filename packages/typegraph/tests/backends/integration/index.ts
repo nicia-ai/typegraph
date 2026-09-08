@@ -41,6 +41,7 @@ export { registerLateMaterializationIntegrationTests } from "./late-materializat
 export { registerLegacyClaimAxisIntegrationTests } from "./legacy-claim-axis";
 export { registerMigrateSchemaKindIntegrationTests } from "./migrate-schema-kinds";
 export { registerOntologyTighteningIntegrationTests } from "./ontology-tightening";
+export { registerOntologyEquivalenceIntegrationTests } from "./ontology-equivalence";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerPredicateIntegrationTests } from "./predicates";

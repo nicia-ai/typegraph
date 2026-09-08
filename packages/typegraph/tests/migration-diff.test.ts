@@ -1116,6 +1116,71 @@ describe("computeSchemaDiff", () => {
       expect(requireDefined(diff.ontology[0]).details).toContain("Person");
     });
 
+    it("classifies an added equivalentTo relation exactly like an added subClassOf relation", () => {
+      // D1's `equivalentTo` is mutual subsumption, but `diffOntology` is
+      // meta-edge-agnostic — it keys relations as `${metaEdge}:${from}:${to}`
+      // and assigns `severity: "safe"` to every addition regardless of which
+      // meta-edge it is. Pin that this stays true after the fold: an
+      // `equivalentTo` addition must produce the identical shape (module its
+      // own metaEdge/from/to text) a `subClassOf` addition does.
+      const before = createSchema({ version: 1 });
+      const afterSubClassOf = createSchema({
+        version: 2,
+        ontology: {
+          ...emptyOntology(),
+          relations: [
+            { metaEdge: "subClassOf", from: "Company", to: "Corporation" },
+          ],
+        },
+      });
+      const afterEquivalentTo = createSchema({
+        version: 2,
+        ontology: {
+          ...emptyOntology(),
+          relations: [
+            { metaEdge: "equivalentTo", from: "Company", to: "Corporation" },
+          ],
+        },
+      });
+
+      const subClassOfDiff = computeSchemaDiff(before, afterSubClassOf);
+      const equivalentToDiff = computeSchemaDiff(before, afterEquivalentTo);
+
+      const shapeOf = (
+        diff: ReturnType<typeof computeSchemaDiff>,
+      ): Readonly<{
+        hasChanges: boolean;
+        hasBreakingChanges: boolean;
+        isBackwardsCompatible: boolean;
+        entityCount: number;
+        type: string;
+        entity: string;
+        severity: string;
+      }> => ({
+        hasChanges: diff.hasChanges,
+        hasBreakingChanges: diff.hasBreakingChanges,
+        isBackwardsCompatible: isBackwardsCompatible(diff),
+        entityCount: diff.ontology.length,
+        type: requireDefined(diff.ontology[0]).type,
+        entity: requireDefined(diff.ontology[0]).entity,
+        severity: requireDefined(diff.ontology[0]).severity,
+      });
+
+      expect(shapeOf(equivalentToDiff)).toEqual(shapeOf(subClassOfDiff));
+      // Both are tightenings: they widen a subsumption component, so the
+      // classifier marks them `warning` and attaches the data probes a
+      // commit must run (see ontology-change.ts).
+      expect(shapeOf(equivalentToDiff)).toEqual({
+        hasChanges: true,
+        hasBreakingChanges: false,
+        isBackwardsCompatible: true,
+        entityCount: 1,
+        type: "added",
+        entity: "relation",
+        severity: "warning",
+      });
+    });
+
     it("detects removed relation as warning", () => {
       const before = createSchema({
         version: 1,

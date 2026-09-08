@@ -41,7 +41,7 @@ Type-level relationships enable sophisticated inference:
 | -------------- | ----------------------------------------- | ---------------------- |
 | `subClassOf`   | Instance inheritance (Podcast IS-A Media) | Query expansion        |
 | `broader`      | Hierarchical concept (ML broader than DL) | Topic navigation       |
-| `equivalentTo` | Same concept, different name              | Cross-system mapping   |
+| `equivalentTo` | Mutual subsumption between kinds, or a cross-system IRI mapping | Substitutable types + cross-system mapping |
 | `disjointWith` | Cannot be both (Person ≠ Organization)    | Constraint validation  |
 | `implies`      | Edge entailment (marriedTo implies knows) | Relationship inference |
 | `inverseOf`    | Edge pairs (manages/managedBy)            | Bidirectional queries  |

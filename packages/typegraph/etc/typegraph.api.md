@@ -2437,7 +2437,7 @@ export type EndpointPairErrorDetails = Readonly<{
 export const ENTITY_ALREADY_EXISTS_CODE = "ENTITY_ALREADY_EXISTS";
 
 // @public
-export function equivalentTo(kindA: NodeType, kindBOrIri: NodeType | string): OntologyRelation;
+export function equivalentTo(kindA: NodeType | AnyEdgeType, kindBOrIri: NodeType | string): OntologyRelation;
 
 // @public
 export type ErrorCategory = "user" | "constraint" | "system";
