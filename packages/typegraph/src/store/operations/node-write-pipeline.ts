@@ -177,8 +177,7 @@ export function nodeDeletePolicyRequiresPortablePath(
 ): boolean {
   return (
     policy !== undefined &&
-    (!policy.enforceDeleteBehavior ||
-      (policy.consumedEdgeIds?.size ?? 0) > 0)
+    (!policy.enforceDeleteBehavior || (policy.consumedEdgeIds?.size ?? 0) > 0)
   );
 }
 
@@ -243,10 +242,10 @@ async function enforceNodeDeleteBehavior(
     consumedEdgeIds === undefined ? connectedEdges : (
       connectedEdges.filter((edge) => !consumedEdgeIds.has(edge.id))
     );
+  if (unconsumedEdges.length === 0) return;
 
   switch (behavior) {
     case "restrict": {
-      if (unconsumedEdges.length === 0) return;
       throw new RestrictedDeleteError({
         nodeKind: args.kind,
         nodeId: args.id,
@@ -257,7 +256,6 @@ async function enforceNodeDeleteBehavior(
 
     case "cascade":
     case "disconnect": {
-      if (unconsumedEdges.length === 0) return;
       // Both behaviors remove connected edges. "cascade" signals intent to
       // remove dependent data; "disconnect" signals intent to sever the
       // relationship. The effect is identical because edges cannot exist

@@ -28,8 +28,8 @@ import {
   defineNode,
   RestrictedDeleteError,
 } from "../src";
-import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { transactionDeleteNodeWithPolicy } from "../src/store/runtime-port";
+import { createTestBackend } from "./test-utils";
 
 const Target = defineNode("Target", { schema: z.object({}) });
 const RestrictNode = defineNode("RestrictNode", { schema: z.object({}) });
@@ -56,156 +56,140 @@ function buildGraph(graphId: string) {
 
 describe("NodeDeletePolicy.consumedEdgeIds", () => {
   it("excludes a fully-consumed edge from the restrict count, allowing the delete", async () => {
-    const { backend } = createLocalSqliteBackend();
-    try {
-      const [store] = await createStoreWithSchema(
-        buildGraph("consumed_restrict_narrows_to_zero"),
-        backend,
-      );
-      const target = await store.nodes.Target.create({});
-      const restrictNode = await store.nodes.RestrictNode.create({});
-      const edge = await store.edges.link.create(restrictNode, target, {});
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      buildGraph("consumed_restrict_narrows_to_zero"),
+      backend,
+    );
+    const target = await store.nodes.Target.create({});
+    const restrictNode = await store.nodes.RestrictNode.create({});
+    const edge = await store.edges.link.create(restrictNode, target, {});
 
-      await store.transaction((tx) =>
+    await store.transaction((tx) =>
+      transactionDeleteNodeWithPolicy(
+        tx,
+        { kind: "RestrictNode", id: restrictNode.id },
+        {
+          enforceDeleteBehavior: true,
+          consumedEdgeIds: new Set([edge.id]),
+        },
+      ),
+    );
+
+    await expect(
+      store.nodes.RestrictNode.getById(restrictNode.id),
+    ).resolves.toBeUndefined();
+    // The consumed edge is excluded from THIS delete's restrict/cascade
+    // consideration entirely — it is neither an obstacle nor something this
+    // delete removes. It survives untouched, for whichever caller planned
+    // its consumption to delete it itself.
+    await expect(store.edges.link.getById(edge.id)).resolves.toBeDefined();
+  });
+
+  it("still counts an unconsumed edge against restrict even when a sibling edge is consumed", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      buildGraph("consumed_restrict_leaves_unconsumed_blocking"),
+      backend,
+    );
+    const consumedTarget = await store.nodes.Target.create({});
+    const unconsumedTarget = await store.nodes.Target.create({});
+    const restrictNode = await store.nodes.RestrictNode.create({});
+    const consumedEdge = await store.edges.link.create(
+      restrictNode,
+      consumedTarget,
+      {},
+    );
+    await store.edges.link.create(restrictNode, unconsumedTarget, {});
+
+    await expect(
+      store.transaction((tx) =>
         transactionDeleteNodeWithPolicy(
           tx,
           { kind: "RestrictNode", id: restrictNode.id },
           {
             enforceDeleteBehavior: true,
-            consumedEdgeIds: new Set([edge.id]),
-          },
-        ),
-      );
-
-      await expect(
-        store.nodes.RestrictNode.getById(restrictNode.id),
-      ).resolves.toBeUndefined();
-      // The consumed edge is excluded from THIS delete's restrict/cascade
-      // consideration entirely — it is neither an obstacle nor something this
-      // delete removes. It survives untouched, for whichever caller planned
-      // its consumption to delete it itself.
-      await expect(store.edges.link.getById(edge.id)).resolves.toBeDefined();
-    } finally {
-      await backend.close();
-    }
-  });
-
-  it("still counts an unconsumed edge against restrict even when a sibling edge is consumed", async () => {
-    const { backend } = createLocalSqliteBackend();
-    try {
-      const [store] = await createStoreWithSchema(
-        buildGraph("consumed_restrict_leaves_unconsumed_blocking"),
-        backend,
-      );
-      const consumedTarget = await store.nodes.Target.create({});
-      const unconsumedTarget = await store.nodes.Target.create({});
-      const restrictNode = await store.nodes.RestrictNode.create({});
-      const consumedEdge = await store.edges.link.create(
-        restrictNode,
-        consumedTarget,
-        {},
-      );
-      await store.edges.link.create(restrictNode, unconsumedTarget, {});
-
-      await expect(
-        store.transaction((tx) =>
-          transactionDeleteNodeWithPolicy(
-            tx,
-            { kind: "RestrictNode", id: restrictNode.id },
-            {
-              enforceDeleteBehavior: true,
-              consumedEdgeIds: new Set([consumedEdge.id]),
-            },
-          ),
-        ),
-      ).rejects.toMatchObject({
-        details: expect.objectContaining({ edgeCount: 1 }) as unknown,
-      });
-      // Refused: the node survives, live.
-      await expect(
-        store.nodes.RestrictNode.getById(restrictNode.id),
-      ).resolves.toBeDefined();
-    } finally {
-      await backend.close();
-    }
-  });
-
-  it("cascade removes only the unconsumed edge, leaving the consumed one for its own owner", async () => {
-    const { backend } = createLocalSqliteBackend();
-    try {
-      const [store] = await createStoreWithSchema(
-        buildGraph("consumed_cascade_removes_only_unconsumed"),
-        backend,
-      );
-      const consumedTarget = await store.nodes.Target.create({});
-      const unconsumedTarget = await store.nodes.Target.create({});
-      const cascadeNode = await store.nodes.CascadeNode.create({});
-      const consumedEdge = await store.edges.link.create(
-        cascadeNode,
-        consumedTarget,
-        {},
-      );
-      const unconsumedEdge = await store.edges.link.create(
-        cascadeNode,
-        unconsumedTarget,
-        {},
-      );
-
-      await store.transaction((tx) =>
-        transactionDeleteNodeWithPolicy(
-          tx,
-          { kind: "CascadeNode", id: cascadeNode.id },
-          {
-            enforceDeleteBehavior: true,
             consumedEdgeIds: new Set([consumedEdge.id]),
           },
         ),
-      );
+      ),
+    ).rejects.toMatchObject({
+      details: expect.objectContaining({ edgeCount: 1 }) as unknown,
+    });
+    // Refused: the node survives, live.
+    await expect(
+      store.nodes.RestrictNode.getById(restrictNode.id),
+    ).resolves.toBeDefined();
+  });
 
-      await expect(
-        store.nodes.CascadeNode.getById(cascadeNode.id),
-      ).resolves.toBeUndefined();
-      await expect(
-        store.edges.link.getById(unconsumedEdge.id),
-      ).resolves.toBeUndefined();
-      await expect(
-        store.edges.link.getById(consumedEdge.id),
-      ).resolves.toBeDefined();
-    } finally {
-      await backend.close();
-    }
+  it("cascade removes only the unconsumed edge, leaving the consumed one for its own owner", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      buildGraph("consumed_cascade_removes_only_unconsumed"),
+      backend,
+    );
+    const consumedTarget = await store.nodes.Target.create({});
+    const unconsumedTarget = await store.nodes.Target.create({});
+    const cascadeNode = await store.nodes.CascadeNode.create({});
+    const consumedEdge = await store.edges.link.create(
+      cascadeNode,
+      consumedTarget,
+      {},
+    );
+    const unconsumedEdge = await store.edges.link.create(
+      cascadeNode,
+      unconsumedTarget,
+      {},
+    );
+
+    await store.transaction((tx) =>
+      transactionDeleteNodeWithPolicy(
+        tx,
+        { kind: "CascadeNode", id: cascadeNode.id },
+        {
+          enforceDeleteBehavior: true,
+          consumedEdgeIds: new Set([consumedEdge.id]),
+        },
+      ),
+    );
+
+    await expect(
+      store.nodes.CascadeNode.getById(cascadeNode.id),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.edges.link.getById(unconsumedEdge.id),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.edges.link.getById(consumedEdge.id),
+    ).resolves.toBeDefined();
   });
 
   it("an absent consumedEdgeIds is byte-identical to today's plain restrict refusal", async () => {
-    const { backend } = createLocalSqliteBackend();
-    try {
-      const [store] = await createStoreWithSchema(
-        buildGraph("absent_consumed_edge_ids_matches_today"),
-        backend,
-      );
-      const target = await store.nodes.Target.create({});
-      const restrictNode = await store.nodes.RestrictNode.create({});
-      await store.edges.link.create(restrictNode, target, {});
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      buildGraph("absent_consumed_edge_ids_matches_today"),
+      backend,
+    );
+    const target = await store.nodes.Target.create({});
+    const restrictNode = await store.nodes.RestrictNode.create({});
+    await store.edges.link.create(restrictNode, target, {});
 
-      await expect(
-        store.transaction((tx) =>
-          transactionDeleteNodeWithPolicy(
-            tx,
-            { kind: "RestrictNode", id: restrictNode.id },
-            { enforceDeleteBehavior: true },
-          ),
+    await expect(
+      store.transaction((tx) =>
+        transactionDeleteNodeWithPolicy(
+          tx,
+          { kind: "RestrictNode", id: restrictNode.id },
+          { enforceDeleteBehavior: true },
         ),
-      ).rejects.toBeInstanceOf(RestrictedDeleteError);
-      await expect(
-        store.transaction((tx) =>
-          transactionDeleteNodeWithPolicy(tx, {
-            kind: "RestrictNode",
-            id: restrictNode.id,
-          }),
-        ),
-      ).rejects.toBeInstanceOf(RestrictedDeleteError);
-    } finally {
-      await backend.close();
-    }
+      ),
+    ).rejects.toBeInstanceOf(RestrictedDeleteError);
+    await expect(
+      store.transaction((tx) =>
+        transactionDeleteNodeWithPolicy(tx, {
+          kind: "RestrictNode",
+          id: restrictNode.id,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(RestrictedDeleteError);
   });
 });
