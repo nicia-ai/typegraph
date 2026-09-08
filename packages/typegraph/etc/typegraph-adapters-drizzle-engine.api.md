@@ -722,6 +722,7 @@ type CreateBaseSchemaMembersDeps = Readonly<{
     ensureGraphTemplatesTable: () => Promise<void>;
     fencesTableDdl: string;
     ensureEdgeMatchIdentityStorage: () => Promise<void>;
+    sinceIndexDdl: readonly [string, string];
 }>;
 
 // @public (undocumented)

@@ -24,8 +24,22 @@ is the one place graph-merge (and any other caller) picks a `lineage` source: th
 declared, else this recorded-relations one when history is on, else `undefined`. A new system index,
 `since_idx (graph_id, recorded_from)`, backs `changesSince` on both recorded relations; existing
 databases obtain it through the same index-materialization machinery that already backfills a
-missing system index lazily, with no manual migration step. The parity snapshot moves by exactly
-these two index declarations on both bundled backends — nothing else in the emitted DDL changes.
+missing system index lazily. The parity snapshot moves by exactly these two index declarations,
+plus one extra version-marker `INSERT`/`SELECT` round trip on each of four capture scenarios on
+both bundled backends (bootstrap publishing the new base-schema release below) — no other
+statement, and no graph-data write SQL, changes.
+
+`GraphBackend` adopters that ship their own `EngineProvisioning` gain a required base-schema
+release: `CURRENT_BASE_SCHEMA_VERSION` advances from 2 to 3, id `"lineage-since-index"`, adopting
+the two `since_idx` indexes above through `CREATE INDEX IF NOT EXISTS` (idempotent, safe to run
+concurrently, and a no-op on a fresh install whose generated DDL already carries them). The bump is
+one-way — there is no downgrade path — and deployment-visible: a database already stamped 3 is
+untouched, one stamped 2 is caught up in place on next open, and a store built against an
+`EngineProvisioning` whose adoption-step registry stops at 2 fails to construct
+(`CompilerInvariantError`, "adoption registry must end at the current version"). A custom SQL
+engine profile must register a version-3 adoption step (or accept the two indexes into its own
+fresh-install DDL and mark the step `bootstrap: "covered-by-generated-ddl"`) before upgrading past
+this release.
 
 `base@V`'s anchor gains a third form, `engine:<revision>`, chosen when a store has no
 `revisionTracking`/`history` but its backend declares `lineage` directly (a capturing store's

@@ -116,8 +116,11 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * `GraphBackend`'s member count, recorded so the classification's size is
  * visible. Adding a member moves this number and forces the new member into a
  * class — which is the point: whoever adds it decides whether it is a write.
+ * `lineage` (128→129) joined `catalog` in `PROVISIONING_MEMBERS`: both are
+ * optional, engine-supplied bags of read-only queries, never routed through
+ * the write pipeline.
  */
-const MEMBER_COUNT = 128;
+const MEMBER_COUNT = 129;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

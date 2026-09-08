@@ -63,6 +63,7 @@ import {
   ConfigurationError,
   StaleVersionError,
 } from "../../errors";
+import { sinceIndexAdoptionDdl } from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -1530,6 +1531,10 @@ export function buildPostgresEngineProfile(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
+    sinceIndexDdl: sinceIndexAdoptionDdl({
+      recordedNodes: getTableName(tables.recordedNodes),
+      recordedEdges: getTableName(tables.recordedEdges),
+    }),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /

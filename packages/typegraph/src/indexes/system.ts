@@ -27,6 +27,7 @@
  * rename actually happens, add a retired-suffixes list + drop path here.
  */
 import { quoteIdentifier, shortHash } from "../query/dialect/vector-strategy";
+import { requireDefined } from "../utils/presence";
 
 /** The TypeGraph relations that carry system indexes. */
 export type SystemIndexTable =
@@ -375,4 +376,38 @@ export function generateSystemIndexDDL(
     .join(", ");
   const concurrently = options.concurrent ? "CONCURRENTLY " : "";
   return `CREATE INDEX ${concurrently}IF NOT EXISTS ${name} ON ${table} (${columns});`;
+}
+
+/**
+ * Runtime DDL for the two recorded-relation `since_idx` indexes — the
+ * lineage capability's changed-since scan (`store/recorded-capture/
+ * lineage.ts`). Both dialect factories thread this into the base-schema
+ * version-3 adoption step (`engine/members/base-schema-members.ts`) the
+ * same way `fencesTableDdl` feeds version 2: a fresh bootstrap already
+ * carries these indexes through the schema factories' own system-index
+ * builders, but a database that reaches adoption without re-running
+ * bootstrap DDL (a reopen of an already-provisioned installation) needs
+ * this explicit `CREATE INDEX IF NOT EXISTS` pair. One owner for the
+ * declaration lookup keeps the two dialect factories from re-spelling the
+ * `suffix === "since_idx"` filter and risking drift between them.
+ */
+export function sinceIndexAdoptionDdl(
+  recordedTableNames: Readonly<{
+    recordedNodes: string;
+    recordedEdges: string;
+  }>,
+): readonly [string, string] {
+  function sinceIndexDdlFor(table: "recordedNodes" | "recordedEdges"): string {
+    const declaration = requireDefined(
+      SYSTEM_INDEX_DECLARATIONS.find(
+        (candidate) =>
+          candidate.table === table && candidate.suffix === "since_idx",
+      ),
+      `No "since_idx" system index is declared for "${table}".`,
+    );
+    return generateSystemIndexDDL(declaration, recordedTableNames[table], {
+      concurrent: false,
+    });
+  }
+  return [sinceIndexDdlFor("recordedNodes"), sinceIndexDdlFor("recordedEdges")];
 }

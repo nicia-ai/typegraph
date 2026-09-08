@@ -468,6 +468,10 @@ async function makeForkedPair(
     id: asBranchId("fork"),
     base,
     store: forkStore,
+    // `forkStore` is disposed via `dispose()` below, not through this
+    // branch — see `merge.ts`'s committed-target stand-ins for the same
+    // pattern of modeling a caller-owned store as a branch.
+    close: (): Promise<void> => Promise.resolve(),
     forkRevision,
   };
 

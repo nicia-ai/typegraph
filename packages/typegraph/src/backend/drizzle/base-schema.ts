@@ -30,6 +30,16 @@ export const BASE_SCHEMA_RELEASES = [
         "1b7ef8370ac366e48d1517a5eb98a3d4d6a1c71c2d8e74e77bd78367af0cc042",
     },
   },
+  {
+    version: 3,
+    id: "lineage-since-index",
+    orderedShapeDigests: {
+      postgres:
+        "e2d5832950a585e360cceae64d95d9b6b9cd2919878971ba1fb07a17b6b2efdb",
+      sqlite:
+        "da50d018730367a99e682daa4f3780869e6e5eae657a6b062c1b3a09631e92ed",
+    },
+  },
 ] as const;
 
 function currentBaseSchemaVersion(): number {

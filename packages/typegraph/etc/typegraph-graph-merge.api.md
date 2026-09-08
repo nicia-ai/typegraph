@@ -2643,6 +2643,7 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
         hash: string;
     }> | undefined;
     close: () => Promise<void>;
+    forkRevision?: EngineRevision | undefined;
 }>;
 
 // @public
