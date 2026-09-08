@@ -135,6 +135,13 @@ export type NodeDeletePolicy = Readonly<{
    * producer populates it yet, so it is always `undefined` today and every
    * delete's behavior is unchanged from before this field existed — proven by
    * the byte-identical-when-empty tests alongside this type.
+   *
+   * Honored on the SOFT-delete path only (`applyNodeSoftDelete`, via
+   * `enforceNodeDeleteBehavior`). `applyNodeHardDelete` and the batch delete
+   * path (`executeNodeDeleteBatch`) take no policy at all today and remove
+   * every connected edge unconditionally — a future cascade reaching either
+   * path (a hard-delete cascade, or a batched leaf-first sweep) must not
+   * populate `consumedEdgeIds` and expect it to be honored there.
    */
   consumedEdgeIds?: ReadonlySet<string>;
   /**
@@ -148,6 +155,32 @@ export type NodeDeletePolicy = Readonly<{
    */
   cascadeComposition?: boolean;
 }>;
+
+/**
+ * Whether a stated {@link NodeDeletePolicy} carries a dimension the fused
+ * atomic delete command cannot honor.
+ *
+ * The fused command is a single, read-free SQL shape: it has no notion of
+ * `consumedEdgeIds` and cannot skip its own delete-behavior enforcement. A
+ * policy stating EITHER dimension — `enforceDeleteBehavior: false` or a
+ * non-empty `consumedEdgeIds` — must therefore route around the fused
+ * command to the portable path (`enforceNodeDeleteBehavior`), which is the
+ * only path that reads and honors a policy at all. This is the ONE place
+ * that decision is made: a caller choosing between the fused and portable
+ * delete must call this rather than re-deriving the answer from a single
+ * field, so a third policy dimension cannot be added to
+ * {@link NodeDeletePolicy} without this predicate — and every caller of it —
+ * being forced to account for it.
+ */
+export function nodeDeletePolicyRequiresPortablePath(
+  policy: NodeDeletePolicy | undefined,
+): boolean {
+  return (
+    policy !== undefined &&
+    (!policy.enforceDeleteBehavior ||
+      (policy.consumedEdgeIds?.size ?? 0) > 0)
+  );
+}
 
 function uniquenessContext(ctx: NodeWriteContext, backend: Backend) {
   return createUniquenessContext(
@@ -546,6 +579,11 @@ export async function applyNodeSoftDelete(
  * backend's `hardDeleteNode` cascade; embeddings live in strategy-owned
  * per-`(kind, field)` tables the graph-agnostic cascade cannot reach, so they
  * are cleaned here.
+ *
+ * Takes no {@link NodeDeletePolicy}: enforcement always runs and there is no
+ * `consumedEdgeIds` narrowing on this path (see that field's doc). A future
+ * hard-delete cascade needs its own plumbing here before it can consume an
+ * edge on this path.
  */
 export async function applyNodeHardDelete(
   ctx: NodeWriteContext,

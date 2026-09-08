@@ -131,28 +131,38 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   rebuildIdentityClosure: () => Promise<void>;
   validateIdentity: () => Promise<void>;
   /**
-   * Soft-deletes one node under an explicit {@link NodeDeletePolicy}, going
-   * through the same portable delete path (`executeNodeDelete`) the public
-   * collection facade uses — hooks, delete-behavior enforcement, identity
-   * detachment, and sidecar cleanup all fire exactly as they do for
-   * `store.nodes[kind].delete(id)`. The public collection `delete(id)` takes
-   * no options by design (a merge-only flag does not belong on it, the
-   * `bulkInsert` precedent), so a caller that needs a non-default policy
-   * reaches an internal port instead.
+   * Deletes one node under an explicit {@link NodeDeletePolicy}, going through
+   * `executeNodeDelete` — the SAME entry point (fused-atomic-or-portable
+   * routing included) the public collection facade uses — against `target`
+   * directly. The public collection `delete(id)` takes no options by design
+   * (a merge-only flag does not belong on it, the `bulkInsert` precedent), so
+   * a caller that needs a non-default policy reaches an internal port
+   * instead.
    *
    * This Store-scoped variant builds its OWN operation context — an
    * immediate (unbuffered) hook runner and `attempt: 1` — so it is correct
    * only for a caller managing its own transaction directly against the raw
-   * backend (`backend.transaction(...)`), outside any `store.transaction`
-   * callback: nothing here is aware of a `store.transaction` in progress, so
-   * a caller invoking this INSIDE one would report `onOperationEnd` for the
-   * delete immediately, even if that outer transaction later rolls back. A
-   * caller already inside a `store.transaction` callback — today, merge
-   * apply — MUST use {@link transactionDeleteNodeWithPolicy} instead, which
-   * reaches that transaction's own buffered hook runner and attempt.
+   * backend, or calling against the root backend with no enclosing
+   * transaction at all, OUTSIDE any `store.transaction` callback: nothing
+   * here is aware of a `store.transaction` in progress, so a caller invoking
+   * this INSIDE one would report `onOperationEnd` for the delete immediately,
+   * even if that outer transaction later rolls back. A caller already inside
+   * a `store.transaction` callback MUST use
+   * {@link transactionDeleteNodeWithPolicy} instead, which reaches that
+   * transaction's own buffered hook runner and attempt — every production
+   * caller (merge apply) does this today.
+   *
+   * `target` accepts the root {@link GraphBackend} itself, not only a
+   * `TransactionBackend`, on purpose: `transactionDeleteNodeWithPolicy` is
+   * always transaction-scoped, and a transaction-scoped backend never
+   * exposes the fused atomic delete command (see `executeNodeDelete`'s
+   * `resolveAtomicNodeDeleteBatchExecutor` call) — so calling THIS port
+   * directly against the root backend is the only way, in production or in a
+   * test, to exercise the routing decision between the fused and portable
+   * delete paths at all.
    */
   deleteNodeWithPolicy: (
-    target: TransactionBackend,
+    target: GraphBackend | TransactionBackend,
     work: Readonly<{ kind: string; id: string }>,
     policy?: NodeDeletePolicy,
   ) => Promise<void>;
@@ -407,7 +417,14 @@ type TransactionNodeOperationHookRunner = <T>(
   fn: () => Promise<T>,
 ) => Promise<T>;
 
-type TransactionDeleteNodeWithPolicy = (
+/**
+ * A node delete bound to the transaction it is invoked from — see
+ * {@link transactionDeleteNodeWithPolicy}. Exported so a caller threading this
+ * seam through its own call stack (merge apply) names ONE type rather than
+ * redeclaring an identical structural alias that could drift from this port's
+ * actual shape.
+ */
+export type TransactionDeleteNodeWithPolicy = (
   work: Readonly<{ kind: string; id: string }>,
   policy?: NodeDeletePolicy,
 ) => Promise<void>;

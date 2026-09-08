@@ -230,6 +230,7 @@ import {
 } from "./autocommit-single-statement";
 import {
   type NodeDeletePolicy,
+  nodeDeletePolicyRequiresPortablePath,
   type NodeInsertSyncItem,
 } from "./node-write-pipeline";
 import {
@@ -3780,17 +3781,18 @@ export async function executeNodeDelete<G extends GraphDef>(
 
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  // The fused atomic executor has no notion of `policy.consumedEdgeIds`: its
-  // restrict check is a single, read-free SQL shape that cannot narrow the
-  // edges it counts. A policy narrowing this delete's behavior therefore
-  // always takes the portable path below, which is the only path that reads
-  // and honors `policy` (see `enforceNodeDeleteBehavior`) — the fused command
-  // is an optimization attempt, not evidence its dimensions ran, and must not
-  // be reached when a dimension it cannot honor is in play.
+  // The fused atomic executor has no notion of `policy`: its restrict check
+  // is a single, read-free SQL shape that cannot narrow the edges it counts
+  // and cannot skip its own enforcement. A policy stating a dimension it
+  // cannot honor therefore always takes the portable path below, which is
+  // the only path that reads and honors `policy` (see
+  // `enforceNodeDeleteBehavior`) — the fused command is an optimization
+  // attempt, not evidence its dimensions ran, and must not be reached when a
+  // dimension it cannot honor is in play. `nodeDeletePolicyRequiresPortablePath`
+  // is the one owner of that decision across every policy dimension.
   const atomicExecutor =
-    (policy?.consumedEdgeIds?.size ?? 0) > 0 ?
-      undefined
-    : resolveAtomicNodeDeleteBatchExecutor({
+    nodeDeletePolicyRequiresPortablePath(policy) ? undefined : (
+      resolveAtomicNodeDeleteBatchExecutor({
         backend,
         graph: ctx.graph,
         kind,
@@ -3800,7 +3802,8 @@ export async function executeNodeDelete<G extends GraphDef>(
         registry: ctx.registry,
         historyEnabled: ctx.historyEnabled,
         revisionTrackingEnabled: ctx.revisionTrackingEnabled,
-      });
+      })
+    );
   if (atomicExecutor !== undefined) {
     await runAtomicProgramWithHooks(
       ctx,
@@ -3902,6 +3905,11 @@ async function findConnectedEdgesForNodeBatch<G extends GraphDef>(
  * Batch collection methods deliberately omit per-item hooks for throughput.
  * Owning the write transaction here also prevents a per-item success from
  * being reported before the batch's outer COMMIT.
+ *
+ * Takes no {@link NodeDeletePolicy}: every item's delete-behavior enforcement
+ * always runs and there is no `consumedEdgeIds` narrowing on this path (see
+ * that field's doc). A future batched leaf-first cascade sweep needs its own
+ * plumbing here before it can consume an edge on this path.
  */
 export async function executeNodeDeleteBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
