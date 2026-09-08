@@ -86,6 +86,7 @@ const Account = defineNode("Account", {
 
 const knows = defineEdge("knows", { schema: z.object({}) });
 const reportsTo = defineEdge("reportsTo", { schema: z.object({}) });
+const dependsOn = defineEdge("dependsOn", { schema: z.object({}) });
 
 const SHARED_SCOPE_UNIQUE = {
   name: "staff_email",
@@ -122,6 +123,12 @@ const graph = defineGraph({
       from: [Person],
       to: [Person],
       cardinality: "one",
+    },
+    dependsOn: {
+      type: dependsOn,
+      from: [Person],
+      to: [Person],
+      acyclic: true,
     },
   },
   ontology: [
@@ -238,6 +245,16 @@ describe("constrained writes on a backend that cannot fence them", () => {
 
     await expect(store.edges.reportsTo.create(alice, bob, {})).rejects.toThrow(
       expectFenceRefusal("edgeCardinality"),
+    );
+  });
+
+  it("refuses an edge create whose acyclicity it cannot enforce", async () => {
+    const store = createStore(graph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+
+    await expect(store.edges.dependsOn.create(alice, bob, {})).rejects.toThrow(
+      expectFenceRefusal("edgeAcyclicity"),
     );
   });
 

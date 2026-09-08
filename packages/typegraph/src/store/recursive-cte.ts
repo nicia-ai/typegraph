@@ -287,7 +287,7 @@ function proposedSeedRow(
   const fromId = reversed ? edge.toId : edge.fromId;
   const toKind = reversed ? edge.fromKind : edge.toKind;
   const toId = reversed ? edge.fromId : edge.toId;
-  return sql`SELECT CAST(${edge.edgeId} AS TEXT), CAST(${fromKind} AS TEXT), CAST(${fromId} AS TEXT), CAST(${toKind} AS TEXT), CAST(${toId} AS TEXT)`;
+  return sql`(CAST(${edge.edgeId} AS TEXT), CAST(${fromKind} AS TEXT), CAST(${fromId} AS TEXT), CAST(${toKind} AS TEXT), CAST(${toId} AS TEXT))`;
 }
 
 /** The `seed` CTE body for both forms, oriented endpoints throughout. */
@@ -298,8 +298,12 @@ function buildAcyclicitySeed(
   schema: SqlSchema,
 ): SqlFragment {
   if (seed.kind === "proposed") {
+    // A `VALUES` row list, never `SELECT ... UNION ALL SELECT ...`: a batch
+    // create can propose thousands of origins in one probe, and SQLite caps
+    // a compound SELECT at `SQLITE_LIMIT_COMPOUND_SELECT` (500 terms by
+    // default) — a limit `VALUES` is not subject to.
     const rows = seed.edges.map((edge) => proposedSeedRow(edge, members));
-    return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (${sql.join(rows, sql` UNION ALL `)})`;
+    return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES ${sql.join(rows, sql`, `)})`;
   }
   const { forward, all } = kindKeys(members);
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);

@@ -20,6 +20,7 @@ export { registerContributionDiagnosticIntegrationTests } from "./contribution-d
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerDurableEdgeMatchIdentityIntegrationTests } from "./durable-edge-match-identity";
 export { registerEdgeCardinalityTighteningIntegrationTests } from "./edge-cardinality-tightening";
+export { registerEdgeAcyclicityIntegrationTests } from "./edge-acyclicity";
 export { registerEdgeCaseIntegrationTests } from "./edge-cases";
 export { registerEdgeClaimSelfHealIntegrationTests } from "./edge-claim-self-heal";
 export { registerEdgeOperationIntegrationTests } from "./edge-operations";

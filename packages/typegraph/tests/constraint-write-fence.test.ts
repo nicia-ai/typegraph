@@ -536,6 +536,10 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
     // The convergence key can include `matchOn` prop values, so no relation can
     // key it: still the lock alone, and stated as such.
     expect(CONSTRAINT_FENCE_BACKING.edgeMatchKeyConvergence).toBe("lockOnly");
+    // A cycle spans a whole reachable subgraph, not a tuple: no key could
+    // ever refuse a second claimant, so this stays `lockOnly` forever, not
+    // just until a claim relation gets invented for it.
+    expect(CONSTRAINT_FENCE_BACKING.edgeAcyclicity).toBe("lockOnly");
   });
 
   it("takes no lock for a kind-scoped node UPDATE either, not just its create", async () => {
