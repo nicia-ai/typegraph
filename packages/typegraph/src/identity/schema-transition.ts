@@ -17,12 +17,14 @@ import {
   lockRecordedGraphWrite,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
+import { nowIso } from "../utils/date";
 import {
   errorChain,
   isPostgresConcurrentDdlRaceError,
 } from "../utils/sql-errors";
 import { separationRebuildRequired } from "./separation";
 import {
+  combineSnapshotMembers,
   deleteAssertionsTouchingKinds,
   hasAssertionsTouchingKinds,
   type IdentityRebuildContext,
@@ -30,8 +32,11 @@ import {
   lockIdentityGraph,
   purgeAssertionsWithUnregisteredKinds,
   rebuildIdentityClosureForContext,
+  snapshotIdentityClosureClasses,
 } from "./service";
+import { noteClassTransitions } from "./service-mutation";
 import { type IdentityTarget } from "./sql-target";
+import { diffClosureTransitions } from "./transition-log";
 
 /** The identity relations a schema transition reads, writes, and locks. */
 function identityTableNames(schema: SqlSchema): IdentityTableNames {
@@ -567,6 +572,17 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     );
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
+    // Snapshotted before either cascade runs, and diffed against the
+    // rebuild's own result below: `rebuildIdentityClosureForContext` recomputes
+    // every class at once rather than handing back which ones it touched, so
+    // this is the only way to attribute a `kind-drop` / `schema-transition`
+    // note to what actually changed rather than fabricating a boundary on a
+    // commit that changed nothing.
+    const before = await snapshotIdentityClosureClasses(
+      target,
+      ctx.schema,
+      ctx.graphId,
+    );
     if (options.enablement) {
       await lockIdentityEnablementNodes(target, ctx.schema);
       // Enablement must not ADOPT rows the rebuild below cannot see. A database
@@ -591,18 +607,43 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     // live-endpoint interchange reads, yet still visible to raw ledger reads
     // and merge staging, where a later "no-op" merge would end them.
     const droppedNodeKinds = options.droppedNodeKinds ?? [];
-    if (droppedNodeKinds.length > 0) {
-      await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
-        deleteAssertionsTouchingKinds(
-          rawTarget,
-          ctx.schema,
-          ctx.graphId,
-          droppedNodeKinds,
-          touch,
-        ),
+    const removedAssertionIds: readonly string[] =
+      droppedNodeKinds.length > 0 ?
+        await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
+          deleteAssertionsTouchingKinds(
+            rawTarget,
+            ctx.schema,
+            ctx.graphId,
+            droppedNodeKinds,
+            touch,
+          ),
+        )
+      : [];
+    await rebuildIdentityClosureForContext({ ...ctx, backend: target });
+    const after = await snapshotIdentityClosureClasses(
+      target,
+      ctx.schema,
+      ctx.graphId,
+    );
+    const transitions = diffClosureTransitions(
+      combineSnapshotMembers(before, after),
+      before,
+      after,
+    );
+    if (transitions.length > 0) {
+      await withRecordedIdentityMutationTarget(
+        target,
+        (_rawTarget, _touch, noteTransition) => {
+          noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+            cause:
+              droppedNodeKinds.length > 0 ? "kind-drop" : "schema-transition",
+            assertionIds: removedAssertionIds,
+            validAt: nowIso(),
+          });
+          return Promise.resolve();
+        },
       );
     }
-    await rebuildIdentityClosureForContext({ ...ctx, backend: target });
   };
 }
 

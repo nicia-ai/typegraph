@@ -5,7 +5,10 @@ import {
   NodeNotFoundError,
   ValidationError,
 } from "../errors";
-import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
+import {
+  withRecordedIdentityDecision,
+  withRecordedIdentityMutationTarget,
+} from "../store/recorded-capture";
 import { nowIso } from "../utils/date";
 import {
   requireLiveEndpoints,
@@ -24,6 +27,7 @@ import {
   insertAssertionRows,
   loadAssertionsByIds,
   mergeCurrentClasses,
+  noteClassTransitions,
   replaceAffectedClosure,
   replaceSeparationForReferences,
   requireEndpointsCoverIdentityWindow,
@@ -38,6 +42,7 @@ import {
 } from "./service-types";
 import { type PlainNodeRef } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
+import { type IdentityDecisionProvenance } from "./transition-log";
 import {
   type ResolvedIdentityValidityWindow,
   resolveIdentityValidityWindow,
@@ -251,145 +256,214 @@ export async function importIdentityAssertionsIntoTarget(
   assertions: readonly IdentityTransferAssertion[],
   mode: "state" | "archival",
   ignoredAssertionIds: ReadonlySet<string> = new Set(),
+  // `"assert"` for a plain interchange import (union, matching what
+  // `mergeCurrentClasses` always does): the caller that instead applies a
+  // reviewed merge decision (`applyIdentityChangesForContext`) states
+  // `"reconcile"` explicitly — the cause is never inferred from context here.
+  cause: "assert" | "reconcile" = "assert",
 ): Promise<IdentityImportSummary> {
   let created = 0;
   let skipped = 0;
-  await withRecordedIdentityMutationTarget(target, async (rawTarget, touch) => {
-    const operationInstant = nowIso();
-    // Pre-pass: validate every shape in input order and normalize endpoints,
-    // then batch the two reads the loop would otherwise issue per item — the
-    // existing-row-by-id lookup and the current-endpoint liveness check.
-    const normalized = assertions.map((assertion) => ({
-      assertion,
-      ...validateTransferShape(ctx, assertion, mode, operationInstant),
-    }));
-    const existingById = await loadAssertionsByIds(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-      assertions.map((assertion) => assertion.id),
-    );
-    const currentEndpoints: PlainNodeRef[] = [];
-    const endedEndpoints: PlainNodeRef[] = [];
-    for (const { assertion, endpoints } of normalized) {
-      const [a, b] = endpoints;
-      if (assertion.validTo === undefined) {
-        currentEndpoints.push(a, b);
-      } else {
-        endedEndpoints.push(a, b);
-      }
-    }
-    const attributeMissingEndpoint = (
-      error: unknown,
-      ended: boolean,
-    ): never => {
-      // The batch checks lose per-assertion context; the first assertion of
-      // the checked kind touching the missing ref is the failing candidate.
-      if (error instanceof NodeNotFoundError) {
-        const missing = { kind: error.details.kind, id: error.details.id };
-        const failing = normalized.find(
-          ({ assertion, endpoints }) =>
-            (assertion.validTo !== undefined) === ended &&
-            endpoints.some(
-              (endpoint) =>
-                endpoint.kind === missing.kind && endpoint.id === missing.id,
-            ),
-        );
-        if (failing !== undefined) {
-          rethrowTaggedWithAssertion(error, failing.assertion.id, {
-            created,
-            skipped,
-          });
+  await withRecordedIdentityMutationTarget(
+    target,
+    async (rawTarget, touch, noteTransition) => {
+      const operationInstant = nowIso();
+      // Pre-pass: validate every shape in input order and normalize endpoints,
+      // then batch the two reads the loop would otherwise issue per item — the
+      // existing-row-by-id lookup and the current-endpoint liveness check.
+      const normalized = assertions.map((assertion) => ({
+        assertion,
+        ...validateTransferShape(ctx, assertion, mode, operationInstant),
+      }));
+      const existingById = await loadAssertionsByIds(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        assertions.map((assertion) => assertion.id),
+      );
+      const currentEndpoints: PlainNodeRef[] = [];
+      const endedEndpoints: PlainNodeRef[] = [];
+      for (const { assertion, endpoints } of normalized) {
+        const [a, b] = endpoints;
+        if (assertion.validTo === undefined) {
+          currentEndpoints.push(a, b);
+        } else {
+          endedEndpoints.push(a, b);
         }
       }
-      throw error;
-    };
-    try {
-      await requireLiveEndpoints(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        currentEndpoints,
-      );
-    } catch (error) {
-      attributeMissingEndpoint(error, false);
-    }
-    try {
-      await requireStructuralEndpoints(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        endedEndpoints,
-      );
-    } catch (error) {
-      attributeMissingEndpoint(error, true);
-    }
-    const windowValidator = await createIdentityWindowValidator(
-      ctx,
-      rawTarget,
-      normalized.map(({ endpoints, window }) => ({
-        references: endpoints,
-        window,
-      })),
-      operationInstant,
-      ignoredAssertionIds,
-    );
-
-    for (const { assertion, endpoints, window } of normalized) {
-      const [a, b] = endpoints;
-      try {
-        const sameId = existingById.get(assertion.id);
-        if (sameId !== undefined) {
-          const exact =
-            sameId.rel === assertion.relation &&
-            sameId.a_kind === a.kind &&
-            sameId.a_id === a.id &&
-            sameId.b_kind === b.kind &&
-            sameId.b_id === b.id &&
-            sameId.valid_from === assertion.validFrom &&
-            sameId.valid_to === assertion.validTo &&
-            sameId.ended_by_kind === assertion.endedBy?.kind &&
-            sameId.ended_by_id === assertion.endedBy?.id;
-          if (exact) {
-            skipped += 1;
-            continue;
-          }
-          throw new ConfigurationError(
-            `Identity assertion id ${assertion.id} already identifies different truth.`,
-            {
-              code: "IDENTITY_IMPORT_ID_CONFLICT",
-              graphId: ctx.graphId,
-              assertionId: assertion.id,
-            },
+      const attributeMissingEndpoint = (
+        error: unknown,
+        ended: boolean,
+      ): never => {
+        // The batch checks lose per-assertion context; the first assertion of
+        // the checked kind touching the missing ref is the failing candidate.
+        if (error instanceof NodeNotFoundError) {
+          const missing = { kind: error.details.kind, id: error.details.id };
+          const failing = normalized.find(
+            ({ assertion, endpoints }) =>
+              (assertion.validTo !== undefined) === ended &&
+              endpoints.some(
+                (endpoint) =>
+                  endpoint.kind === missing.kind && endpoint.id === missing.id,
+              ),
           );
+          if (failing !== undefined) {
+            rethrowTaggedWithAssertion(error, failing.assertion.id, {
+              created,
+              skipped,
+            });
+          }
         }
-
-        const exactWindow = await assertionForExactWindow(
+        throw error;
+      };
+      try {
+        await requireLiveEndpoints(
           rawTarget,
           ctx.schema,
           ctx.graphId,
-          assertion.relation,
-          a,
-          b,
-          window,
+          currentEndpoints,
         );
-        if (exactWindow !== undefined) {
-          skipped += 1;
-          continue;
-        }
-        if (window.effective === "current") {
-          const current = await currentAssertionForPair(
+      } catch (error) {
+        attributeMissingEndpoint(error, false);
+      }
+      try {
+        await requireStructuralEndpoints(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          endedEndpoints,
+        );
+      } catch (error) {
+        attributeMissingEndpoint(error, true);
+      }
+      const windowValidator = await createIdentityWindowValidator(
+        ctx,
+        rawTarget,
+        normalized.map(({ endpoints, window }) => ({
+          references: endpoints,
+          window,
+        })),
+        operationInstant,
+        ignoredAssertionIds,
+      );
+
+      for (const { assertion, endpoints, window } of normalized) {
+        const [a, b] = endpoints;
+        try {
+          const sameId = existingById.get(assertion.id);
+          if (sameId !== undefined) {
+            const exact =
+              sameId.rel === assertion.relation &&
+              sameId.a_kind === a.kind &&
+              sameId.a_id === a.id &&
+              sameId.b_kind === b.kind &&
+              sameId.b_id === b.id &&
+              sameId.valid_from === assertion.validFrom &&
+              sameId.valid_to === assertion.validTo &&
+              sameId.ended_by_kind === assertion.endedBy?.kind &&
+              sameId.ended_by_id === assertion.endedBy?.id;
+            if (exact) {
+              skipped += 1;
+              continue;
+            }
+            throw new ConfigurationError(
+              `Identity assertion id ${assertion.id} already identifies different truth.`,
+              {
+                code: "IDENTITY_IMPORT_ID_CONFLICT",
+                graphId: ctx.graphId,
+                assertionId: assertion.id,
+              },
+            );
+          }
+
+          const exactWindow = await assertionForExactWindow(
             rawTarget,
             ctx.schema,
             ctx.graphId,
             assertion.relation,
             a,
             b,
+            window,
           );
-          if (current !== undefined) {
+          if (exactWindow !== undefined) {
             skipped += 1;
             continue;
           }
+          if (window.effective === "current") {
+            const current = await currentAssertionForPair(
+              rawTarget,
+              ctx.schema,
+              ctx.graphId,
+              assertion.relation,
+              a,
+              b,
+            );
+            if (current !== undefined) {
+              skipped += 1;
+              continue;
+            }
+            await requireEndpointsCoverIdentityWindow(
+              rawTarget,
+              ctx.graphId,
+              [a, b],
+              window,
+            );
+            windowValidator.validate(
+              assertion.relation,
+              "import",
+              a,
+              b,
+              window,
+            );
+            // The temporal check owns historical correctness. The current check
+            // also exercises the materialized separation backstop/readiness guard
+            // before this row changes current derived state.
+            await validateCurrentRelation(
+              ctx,
+              rawTarget,
+              assertion.relation,
+              "import",
+              a,
+              b,
+            );
+            const inserted = await insertAssertion(
+              rawTarget,
+              ctx.schema,
+              ctx.graphId,
+              assertion.relation,
+              a,
+              b,
+              operationInstant,
+              touch,
+              { id: assertion.id, validFrom: window.validFrom },
+            );
+            existingById.set(inserted.id, inserted);
+            windowValidator.record(inserted);
+            created += 1;
+            if (assertion.relation === "same") {
+              const transitions = await mergeCurrentClasses(
+                rawTarget,
+                ctx.schema,
+                ctx.graphId,
+                a,
+                b,
+              );
+              noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+                cause,
+                assertionIds: [inserted.id],
+                validAt: operationInstant,
+              });
+            } else {
+              await replaceSeparationForReferences(
+                rawTarget,
+                ctx.schema,
+                ctx.graphId,
+                [a, b],
+              );
+            }
+            continue;
+          }
+
           await requireEndpointsCoverIdentityWindow(
             rawTarget,
             ctx.graphId,
@@ -397,79 +471,35 @@ export async function importIdentityAssertionsIntoTarget(
             window,
           );
           windowValidator.validate(assertion.relation, "import", a, b, window);
-          // The temporal check owns historical correctness. The current check
-          // also exercises the materialized separation backstop/readiness guard
-          // before this row changes current derived state.
-          await validateCurrentRelation(
-            ctx,
-            rawTarget,
-            assertion.relation,
-            "import",
-            a,
-            b,
-          );
-          const inserted = await insertAssertion(
-            rawTarget,
-            ctx.schema,
-            ctx.graphId,
-            assertion.relation,
-            a,
-            b,
-            operationInstant,
-            touch,
-            { id: assertion.id, validFrom: window.validFrom },
-          );
-          existingById.set(inserted.id, inserted);
-          windowValidator.record(inserted);
+
+          const timestamp = window.validFrom;
+          const row: IdentityAssertionStorageRow = {
+            graph_id: ctx.graphId,
+            id: assertion.id,
+            rel: assertion.relation,
+            a_kind: a.kind,
+            a_id: a.id,
+            b_kind: b.kind,
+            b_id: b.id,
+            valid_from: window.validFrom,
+            valid_to: window.validTo,
+            created_at: timestamp,
+            updated_at: window.validTo ?? window.validFrom,
+            deleted_at: undefined,
+            ended_by_kind: assertion.endedBy?.kind,
+            ended_by_id: assertion.endedBy?.id,
+          };
+          await insertAssertionRows(rawTarget, ctx.schema, [row]);
+          touch(ctx.graphId, row.id, row);
+          existingById.set(row.id, row);
+          windowValidator.record(row);
           created += 1;
-          if (assertion.relation === "same") {
-            await mergeCurrentClasses(rawTarget, ctx.schema, ctx.graphId, a, b);
-          } else {
-            await replaceSeparationForReferences(
-              rawTarget,
-              ctx.schema,
-              ctx.graphId,
-              [a, b],
-            );
-          }
-          continue;
+        } catch (error) {
+          rethrowTaggedWithAssertion(error, assertion.id, { created, skipped });
         }
-
-        await requireEndpointsCoverIdentityWindow(
-          rawTarget,
-          ctx.graphId,
-          [a, b],
-          window,
-        );
-        windowValidator.validate(assertion.relation, "import", a, b, window);
-
-        const timestamp = window.validFrom;
-        const row: IdentityAssertionStorageRow = {
-          graph_id: ctx.graphId,
-          id: assertion.id,
-          rel: assertion.relation,
-          a_kind: a.kind,
-          a_id: a.id,
-          b_kind: b.kind,
-          b_id: b.id,
-          valid_from: window.validFrom,
-          valid_to: window.validTo,
-          created_at: timestamp,
-          updated_at: window.validTo ?? window.validFrom,
-          deleted_at: undefined,
-          ended_by_kind: assertion.endedBy?.kind,
-          ended_by_id: assertion.endedBy?.id,
-        };
-        await insertAssertionRows(rawTarget, ctx.schema, [row]);
-        touch(ctx.graphId, row.id, row);
-        existingById.set(row.id, row);
-        windowValidator.record(row);
-        created += 1;
-      } catch (error) {
-        rethrowTaggedWithAssertion(error, assertion.id, { created, skipped });
       }
-    }
-  });
+    },
+  );
   return { created, skipped };
 }
 
@@ -477,53 +507,74 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   retractions: readonly IdentityTransferAssertion[],
   assertions: readonly IdentityTransferAssertion[],
+  // The governing merge decision, when this apply runs under a reviewed plan
+  // (PR-2). `undefined` for an ordinary interchange apply with no decision to
+  // attach — every note this call takes then carries `decision: undefined`,
+  // matching an unreviewed API write.
+  decision?: IdentityDecisionProvenance,
 ): Promise<Readonly<{ created: number; retracted: number }>> {
   if (retractions.length === 0 && assertions.length === 0) {
     return { created: 0, retracted: 0 };
   }
-  return runIdentityMutation(ctx, async (target, touch, markWritten) => {
-    const retracted = await retractPlannedAssertions(
-      ctx,
-      target,
-      retractions,
-      touch,
-    );
-    const { closureReferences, separationReferences } =
-      partitionRetractedEndpoints(retracted);
-    // Repair the closure from the retractions BEFORE importing: a batch that
-    // retracts same(a,b) and then asserts different(a,b) must validate the new
-    // assertion against a closure that already reflects the split, not the
-    // stale merged class the import validation would otherwise reject against.
-    if (closureReferences.length > 0) {
-      await replaceAffectedClosure(
-        target,
-        ctx.schema,
-        ctx.graphId,
-        closureReferences,
-        ctx.sameIdAcrossKinds,
-      );
-    }
-    await replaceSeparationForReferences(
-      target,
-      ctx.schema,
-      ctx.graphId,
-      separationReferences,
-    );
-    const summary = await importIdentityAssertionsIntoTarget(
-      ctx,
-      target,
-      assertions,
-      "archival",
-      new Set(retracted.map((assertion) => assertion.id)),
-    );
-    // The import records capture touches through its OWN recorded binding, so
-    // the mutation's wrapped touch never fires for created rows — an
-    // identity-only merge would otherwise leave the durable revision clock
-    // unmoved and every base@V token stale.
-    if (summary.created > 0) markWritten();
-    // ACTUAL ledger effects, not planned intents: rows the import created
-    // (idempotent exact/pair matches excluded) and rows the retraction ended
-    // (already-ended or unknown ids excluded).
-    return { created: summary.created, retracted: retracted.length };
-  });
+  return runIdentityMutation(
+    ctx,
+    async (target, touch, markWritten, noteTransition) => {
+      const applyBody = async (): Promise<
+        Readonly<{ created: number; retracted: number }>
+      > => {
+        const operationInstant = nowIso();
+        const retracted = await retractPlannedAssertions(
+          ctx,
+          target,
+          retractions,
+          touch,
+        );
+        const { closureReferences, separationReferences } =
+          partitionRetractedEndpoints(retracted);
+        // Repair the closure from the retractions BEFORE importing: a batch that
+        // retracts same(a,b) and then asserts different(a,b) must validate the new
+        // assertion against a closure that already reflects the split, not the
+        // stale merged class the import validation would otherwise reject against.
+        if (closureReferences.length > 0) {
+          const transitions = await replaceAffectedClosure(
+            target,
+            ctx.schema,
+            ctx.graphId,
+            closureReferences,
+            ctx.sameIdAcrossKinds,
+          );
+          noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+            cause: "reconcile",
+            assertionIds: retracted.map((assertion) => assertion.id),
+            validAt: operationInstant,
+          });
+        }
+        await replaceSeparationForReferences(
+          target,
+          ctx.schema,
+          ctx.graphId,
+          separationReferences,
+        );
+        const summary = await importIdentityAssertionsIntoTarget(
+          ctx,
+          target,
+          assertions,
+          "archival",
+          new Set(retracted.map((assertion) => assertion.id)),
+          "reconcile",
+        );
+        // The import records capture touches through its OWN recorded binding, so
+        // the mutation's wrapped touch never fires for created rows — an
+        // identity-only merge would otherwise leave the durable revision clock
+        // unmoved and every base@V token stale.
+        if (summary.created > 0) markWritten();
+        // ACTUAL ledger effects, not planned intents: rows the import created
+        // (idempotent exact/pair matches excluded) and rows the retraction ended
+        // (already-ended or unknown ids excluded).
+        return { created: summary.created, retracted: retracted.length };
+      };
+      if (decision === undefined) return applyBody();
+      return withRecordedIdentityDecision(target, decision, applyBody);
+    },
+  );
 }

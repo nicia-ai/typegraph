@@ -31,6 +31,11 @@ import {
 import { CompilerInvariantError, ConfigurationError } from "../errors";
 import { type IdentityTarget } from "../identity/sql-target";
 import { type IdentityAssertionStorageRow } from "../identity/storage-types";
+import {
+  type IdentityDecisionProvenance,
+  type IdentityTransitionDraft,
+  type IdentityTransitionNote,
+} from "../identity/transition-log";
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql as portableSql } from "../query/sql-fragment";
 import { asCompiledStatementSql } from "../query/sql-intent";
@@ -53,6 +58,7 @@ import {
   entityKey,
   flushEdges,
   flushIdentityAssertions,
+  flushIdentityTransitions,
   flushNodes,
   queryConnectedEdgeIds,
   type TouchedEdge,
@@ -119,6 +125,26 @@ type RecordedCaptureSession = Readonly<{
     id: string,
     afterImage?: IdentityAssertionStorageRow,
   ) => void;
+  /**
+   * Buffers one identity-transition note, stamping it with the graph id and
+   * the session's current ambient decision (see {@link withIdentityDecision}).
+   * Alongside `touched` in {@link checkpoint} / {@link restore}, and sealed by
+   * `flush` exactly as every other touch is.
+   */
+  noteIdentityTransition: (
+    graphId: string,
+    note: IdentityTransitionDraft,
+  ) => void;
+  /**
+   * Sets the ambient decision provenance every `noteIdentityTransition` call
+   * takes for the duration of `fn`, then restores the PREVIOUS ambient value —
+   * a plain save/restore, not a push/pop stack, so an exception inside `fn`
+   * cannot leak a decision into a later, unrelated write.
+   */
+  withIdentityDecision: <T>(
+    decision: IdentityDecisionProvenance,
+    fn: () => Promise<T>,
+  ) => Promise<T>;
   forceGraphRevision: (graphId: string) => void;
   checkpoint: () => RecordedCaptureCheckpoint;
   restore: (checkpoint: RecordedCaptureCheckpoint) => void;
@@ -133,6 +159,7 @@ type RecordedCaptureSession = Readonly<{
 type RecordedCaptureCheckpoint = Readonly<{
   touched: ReadonlyMap<string, TouchedEntity>;
   forcedGraphRevisions: ReadonlySet<string>;
+  identityTransitionNotes: readonly IdentityTransitionNote[];
 }>;
 
 export type RecordedFlushInstants = ReadonlyMap<string, string>;
@@ -237,6 +264,12 @@ function recordedCaptureSealedError(
 function createRecordedCaptureSession(): RecordedCaptureSession {
   const touched = new Map<string, TouchedEntity>();
   const forcedGraphRevisions = new Set<string>();
+  const identityTransitionNotes: IdentityTransitionNote[] = [];
+  // Ambient decision for `noteIdentityTransition`. A plain variable, not a
+  // stack: `withIdentityDecision` always restores it in a `finally`, so
+  // nesting still resolves to whichever call is innermost while it runs, and
+  // an exception cannot leave a stale decision attached to a later write.
+  let currentDecision: IdentityDecisionProvenance | undefined;
   // Sealed by flush(): a scope flushes exactly once, at its terminal point, so
   // any touch afterward means a graph write happened after capture lost its
   // flush window (e.g. a caller reused the withRecordedTransaction context after
@@ -281,6 +314,36 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       touch({ entity: "identity", graphId, id, afterImage });
     },
 
+    noteIdentityTransition(
+      graphId: string,
+      note: IdentityTransitionDraft,
+    ): void {
+      if (sealed) {
+        throw recordedCaptureSealedError({
+          entity: "identity-transition",
+          graphId,
+        });
+      }
+      identityTransitionNotes.push({
+        ...note,
+        graphId,
+        decision: currentDecision,
+      });
+    },
+
+    async withIdentityDecision<T>(
+      decision: IdentityDecisionProvenance,
+      fn: () => Promise<T>,
+    ): Promise<T> {
+      const previous = currentDecision;
+      currentDecision = decision;
+      try {
+        return await fn();
+      } finally {
+        currentDecision = previous;
+      }
+    },
+
     forceGraphRevision(graphId: string): void {
       if (sealed) throw recordedCaptureSealedError({ graphId });
       forcedGraphRevisions.add(graphId);
@@ -291,6 +354,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       return {
         touched: new Map(touched),
         forcedGraphRevisions: new Set(forcedGraphRevisions),
+        identityTransitionNotes: [...identityTransitionNotes],
       };
     },
 
@@ -302,6 +366,8 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       for (const graphId of checkpoint.forcedGraphRevisions) {
         forcedGraphRevisions.add(graphId);
       }
+      identityTransitionNotes.length = 0;
+      identityTransitionNotes.push(...checkpoint.identityTransitionNotes);
     },
 
     async flush(
@@ -325,11 +391,22 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       // flush() writes recorded rows directly (never via touch), so sealing here
       // does not block its own work.
       sealed = true;
-      if (touched.size === 0 && forcedGraphRevisions.size === 0)
+      if (
+        touched.size === 0 &&
+        forcedGraphRevisions.size === 0 &&
+        identityTransitionNotes.length === 0
+      )
         return new Map();
       const recordedByGraph = new Map<string, string>();
       const byGraph = groupBy(touched.values(), (entity) => entity.graphId);
       for (const graphId of forcedGraphRevisions) {
+        if (!byGraph.has(graphId)) byGraph.set(graphId, []);
+      }
+      const notesByGraph = groupBy(
+        identityTransitionNotes,
+        (note) => note.graphId,
+      );
+      for (const graphId of notesByGraph.keys()) {
         if (!byGraph.has(graphId)) byGraph.set(graphId, []);
       }
       for (const [graphId, entities] of byGraph) {
@@ -373,9 +450,18 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
           identityAssertions,
           recordedCommit.revision,
         );
+        await flushIdentityTransitions(
+          target,
+          schema,
+          graphId,
+          notesByGraph.get(graphId) ?? [],
+          recordedCommit.revision,
+          recordedCommit.recordedAt,
+        );
       }
       touched.clear();
       forcedGraphRevisions.clear();
+      identityTransitionNotes.length = 0;
       return recordedByGraph;
     },
   };
@@ -492,6 +578,23 @@ function ignoreIdentityTouch(): void {
   return;
 }
 
+function ignoreIdentityTransitionNote(): void {
+  return;
+}
+
+/**
+ * The callback `withRecordedIdentityMutationTarget` hands its caller for
+ * recording one class-membership transition, scoped to the graph the caller
+ * names — matching the `touch(graphId, id, afterImage)` calling convention.
+ * A no-op capture session (no history, or a non-capturing backend) resolves
+ * to {@link ignoreIdentityTransitionNote}, so every note site can call this
+ * unconditionally.
+ */
+export type IdentityTransitionNoteFunction = (
+  graphId: string,
+  note: IdentityTransitionDraft,
+) => void;
+
 /**
  * Both sides are {@link IdentityTarget}, not the backend union: what this hands
  * `fn` is the handle identity STATEMENTS run against, and the recorded binding
@@ -508,16 +611,41 @@ export async function withRecordedIdentityMutationTarget<T>(
       id: string,
       afterImage?: IdentityAssertionStorageRow,
     ) => void,
+    noteTransition: IdentityTransitionNoteFunction,
   ) => Promise<T>,
 ): Promise<T> {
   const binding = recordedTransactionBindings.get(target);
   if (binding === undefined) {
-    return fn(target, ignoreIdentityTouch);
+    return fn(target, ignoreIdentityTouch, ignoreIdentityTransitionNote);
   }
   binding.session.assertOpen();
-  return fn(binding.target, (graphId, id, afterImage) => {
-    binding.session.touchIdentityAssertion(graphId, id, afterImage);
-  });
+  return fn(
+    binding.target,
+    (graphId, id, afterImage) => {
+      binding.session.touchIdentityAssertion(graphId, id, afterImage);
+    },
+    (graphId, note) => {
+      binding.session.noteIdentityTransition(graphId, note);
+    },
+  );
+}
+
+/**
+ * Runs `fn` with every `noteIdentityTransition` call inside it stamped with
+ * `decision` — the seam `applyIdentityChangesForContext` (reconcile) uses so a
+ * governed merge apply's transitions carry the plan/review digests and branch
+ * ancestry that produced them. A target with no capture session (no history)
+ * simply runs `fn` — there is no ambient decision to attach to a note that
+ * will never be written.
+ */
+export async function withRecordedIdentityDecision<T>(
+  target: IdentityTarget,
+  decision: IdentityDecisionProvenance,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const binding = recordedTransactionBindings.get(target);
+  if (binding === undefined) return fn();
+  return binding.session.withIdentityDecision(decision, fn);
 }
 
 function createRecordedTransactionBackend(

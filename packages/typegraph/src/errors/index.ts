@@ -959,6 +959,45 @@ export class IdentitySeparationViolationError extends TypeGraphError {
   }
 }
 
+export type IdentityReplayErrorDetails =
+  | Readonly<{ code: "IDENTITY_REPLAY_REQUIRES_HISTORY"; graphId: string }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_LIMIT_EXCEEDED";
+      limit: number;
+      resumeFromRecorded: string;
+    }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
+      requestedFrom: string;
+      prunedBefore: string;
+    }>;
+
+/**
+ * Thrown by `store.identity.replay` / `transitionsOf` (and
+ * `pruneIdentityTransitions`'s own history precondition) when the transition
+ * log cannot answer a request: history capture is off, the requested range
+ * would return more boundaries than the caller's limit, or the requested
+ * range lies entirely below the retention watermark.
+ */
+export class IdentityReplayError extends TypeGraphError {
+  declare readonly details: IdentityReplayErrorDetails;
+
+  constructor(
+    message: string,
+    details: IdentityReplayErrorDetails,
+    options?: Readonly<{ suggestion?: string }>,
+  ) {
+    super(message, details.code, {
+      details,
+      category: "constraint",
+      ...(options?.suggestion === undefined ?
+        {}
+      : { suggestion: options.suggestion }),
+    });
+    this.name = "IdentityReplayError";
+  }
+}
+
 /**
  * Details for RestrictedDeleteError.
  */

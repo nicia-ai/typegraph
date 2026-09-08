@@ -1258,6 +1258,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.algorithmsAtCoordinate(coordinate),
       identityAtCoordinate: (coordinate) =>
         this.identityAtCoordinate(coordinate),
+      identityContext: () => {
+        this.#requireIdentityEnabled();
+        return this.#identityContext(this.#backend);
+      },
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
       deleteNodeWithPolicy: (target, work, policy) =>

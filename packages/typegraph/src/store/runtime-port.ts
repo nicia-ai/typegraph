@@ -23,6 +23,7 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
+import { type IdentityServiceContext } from "../identity/service-types";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
@@ -128,6 +129,16 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     coordinate: ReadCoordinate,
   ) => InternalGraphAlgorithms<G>;
   identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
+  /**
+   * @internal The full identity service context this Store builds writes and
+   * reads against — reached by the transition-log/replay module functions
+   * (`pruneIdentityTransitions`, and PR-3's `store.identity.replay` /
+   * `transitionsOf`), which are plain functions over
+   * `IdentityServiceContext<G>` like every other identity algorithm, rather
+   * than Store methods. Throws when the graph never declared `identity: {}`,
+   * the same guard `identityAtCoordinate` applies.
+   */
+  identityContext: () => IdentityServiceContext<G>;
   rebuildIdentityClosure: () => Promise<void>;
   validateIdentity: () => Promise<void>;
   /**
