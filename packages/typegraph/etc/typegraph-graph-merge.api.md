@@ -428,13 +428,7 @@ function buildProvenanceGraph(targetGraphId: string): Readonly<{
         };
     };
     edges: {};
-    ontology: readonly Readonly<{
-        metaEdge: MetaEdge;
-        from: NodeType | AnyEdgeType | string;
-        to: NodeType | AnyEdgeType | string;
-        via?: string;
-        partSide?: CompositionPartSide;
-    }>[];
+    ontology: readonly [];
     identity: undefined;
     defaults: Readonly<{
         onNodeDelete: DeleteBehavior;
@@ -4760,6 +4754,9 @@ type OntologyRelation = Readonly<{
 }>;
 
 // @public
+type OntologyTypeErased<G extends GraphDef> = number extends G["ontology"]["length"] ? true : false;
+
+// @public
 export function openProvenanceStore<G extends GraphDef>(target: Store<G>): Promise<Store<ProvenanceGraph>>;
 
 // @public
@@ -6707,7 +6704,7 @@ type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, 
 }>;
 
 // @public
-type SubsumptionAffected<G extends GraphDef, K extends string> = [
+type SubsumptionAffected<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? true : [
 Extract<G["ontology"][number], {
     metaEdge: {
         name: "subClassOf";
