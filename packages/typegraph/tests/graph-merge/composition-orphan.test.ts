@@ -27,17 +27,16 @@
  *    than re-cascading — and a delete-count hook proves EXACTLY the planned
  *    two nodes were deleted, not more.
  *
- * MUTATION CHECK (recorded in the lane's load-bearing note,
- * `lane-Ec2-load-bearing.md`, with the caveat it also states): flipping merge
- * apply's policy to `cascadeComposition: true` does NOT change either
- * scenario's outcome in THIS minimal two-node fixture — `executeNodeDelete`'s
- * own "already tombstoned" gate absorbs the resulting redundant delete
- * attempt as a silent no-op regardless of which of the two co-planned rows
- * the deletion loop reaches first. The runtime-cascade DISABLE mutation is
- * instead verified directly in `composition-cascade.test.ts` (disabling
- * `runCompositionCascade` itself fails six other tests), and this file's own
- * first scenario proves the orphan refusal fires with zero rows changed
- * regardless of `cascadeComposition`.
+ * MUTATION CHECK, with a caveat: flipping merge apply's policy to
+ * `cascadeComposition: true` does NOT change either scenario's outcome in
+ * THIS minimal two-node fixture — `executeNodeDelete`'s own "already
+ * tombstoned" gate absorbs the resulting redundant delete attempt as a
+ * silent no-op regardless of which of the two co-planned rows the deletion
+ * loop reaches first. The runtime-cascade DISABLE mutation is instead
+ * verified directly in `composition-cascade.test.ts` (disabling
+ * `runCompositionCascade` itself fails six other tests there), and this
+ * file's own first scenario proves the orphan refusal fires with zero rows
+ * changed regardless of `cascadeComposition`.
  */
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
@@ -244,6 +243,161 @@ describe.each(backendMatrix())(
       // apply trusted the plan rather than re-walking the closure and
       // attempting a redundant delete of the already-deleted part.
       expect(deletedIds.toSorted()).toEqual(["p1", "w1"]);
+    });
+  },
+);
+
+// ============================================================
+// Depth-2 fixture: Whole -[holds]- Part -[holdsLeaf]- Leaf
+//
+// `compositionOrphansAmong` walks the closure from the ROOT whole
+// (`Whole`), so a depth-2 member (`Leaf`) never has a directly declared
+// composition pair against the root. Its own immediate whole is `Part`,
+// realized by a DIFFERENT edge kind (`holdsLeaf`) than the one that binds
+// `Part` to `Whole` (`holds`). This is what regresses a fix that re-derives
+// "which pair realizes this membership" via
+// `registry.getCompositionEdge(member.kind, root.whole.kind)` instead of
+// reading the pair `planCompositionCascade` already resolved per member.
+// ============================================================
+
+const Leaf = defineNode("Leaf", { schema: z.object({}) });
+const holdsLeaf = defineEdge("holdsLeaf", { schema: z.object({}) });
+
+const nestedGraph = defineGraph({
+  id: "composition-orphan-nested-test",
+  nodes: {
+    Whole: { type: Whole },
+    Part: { type: Part, onDelete: "disconnect" },
+    Leaf: { type: Leaf, onDelete: "disconnect" },
+  },
+  edges: {
+    holds: { type: holds, from: [Part], to: [Whole], cardinality: "one" },
+    holdsLeaf: {
+      type: holdsLeaf,
+      from: [Leaf],
+      to: [Part],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    partOf(Part, Whole, { via: holds }),
+    partOf(Leaf, Part, { via: holdsLeaf }),
+  ],
+});
+type NestedG = typeof nestedGraph;
+
+describe.each(backendMatrix())(
+  "composition orphan conflict — depth 2 [$name]",
+  (entry) => {
+    let cleanups: (() => Promise<void>)[];
+
+    afterEach(async () => {
+      for (const cleanup of cleanups ?? []) {
+        await cleanup();
+      }
+      cleanups = [];
+    });
+
+    async function makeBackend(): Promise<GraphBackend> {
+      const fixture = await entry.make();
+      cleanups.push(fixture.cleanup);
+      return fixture.backend;
+    }
+
+    async function makeStore(): Promise<Store<NestedG>> {
+      const [store] = await createStoreWithSchema(
+        nestedGraph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      return store;
+    }
+
+    async function makeBranchOf(
+      forkPoint: Store<NestedG>,
+      id: ReturnType<typeof asBranchId>,
+    ): Promise<GraphBranch<NestedG>> {
+      const result = await branch<NestedG>(forkPoint, () => makeBackend(), {
+        id,
+      });
+      if (isErr(result)) throw result.error;
+      return result.data;
+    }
+
+    it("reports the orphan against its OWN immediate whole (Part), not the cascade root (Whole), for a part attached two levels deep", async () => {
+      cleanups = [];
+      // Fork point: Whole w1 with Part p1, no Leaf yet.
+      const forkPoint = await makeStore();
+      const whole = await forkPoint.nodes.Whole.create({}, { id: "w1" });
+      const part = await forkPoint.nodes.Part.create({}, { id: "p1" });
+      await forkPoint.edges.holds.create(part, whole, {});
+
+      const branchA = await makeBranchOf(forkPoint, BRANCH_A);
+      // The branch deletes the whole, cascading its own copy of Part.
+      await branchA.store.nodes.Whole.delete(whole.id);
+
+      // The TARGET: same fork-point state, but a Leaf was attached under
+      // Part AFTER the fork — two levels below the whole the branch deletes.
+      const target = await makeStore();
+      const targetWhole = await target.nodes.Whole.create({}, { id: "w1" });
+      const targetPart = await target.nodes.Part.create({}, { id: "p1" });
+      await target.edges.holds.create(targetPart, targetWhole, {});
+      const lateLeaf = await target.nodes.Leaf.create({}, { id: "l1" });
+      await target.edges.holdsLeaf.create(lateLeaf, targetPart, {});
+
+      // Before the fix: this throws a raw `TypeError` out of
+      // `requireDefined` (wrapped as `MergeError`/`GRAPH_MERGE_ERROR`)
+      // instead of returning a plan, because `getCompositionEdge("Leaf",
+      // "Whole")` is undefined — no pair declares Leaf directly under
+      // Whole.
+      const planResult = await planMergeIncremental<NestedG>({
+        forkPoint,
+        target,
+        branches: [branchA],
+      });
+      expect(isOk(planResult)).toBe(true);
+      if (!isOk(planResult)) throw planResult.error;
+      const artifact = planResult.data;
+
+      // MUTATION (verified): reverting `compositionOrphansAmong` to its
+      // pre-fix shape — a plain `orphans.push` (no dedupe) that re-derives
+      // the pair via `registry.getCompositionEdge(member.kind, whole.kind)`
+      // (the ROOT `whole` of the OUTER loop, not `member.whole`) — makes
+      // `isOk(planResult)` false above (the TypeError, wrapped as
+      // `GRAPH_MERGE_ERROR`). Reverting ONLY the pair-derivation while
+      // LEAVING the dedupe-by-part-key in place does not reliably reproduce
+      // the crash: `Part` "p1" is itself in `wholes` (it declares its own
+      // composition parts, via `holdsLeaf`), and `Part`'s OWN walk resolves
+      // Leaf's pair correctly (`whole.kind` IS `member`'s immediate whole at
+      // that call site) — if `wholes` happens to order `p1` before `w1`, the
+      // dedupe skips `w1`'s walk over the same member before it reaches the
+      // buggy line. The revert/restore check above is against the FULL
+      // pre-fix function, which is the reliable, order-independent
+      // reproduction.
+      expect(artifact.review.compositionOrphans).toEqual([
+        {
+          part: { kind: "Leaf", id: "l1" },
+          whole: { kind: "Part", id: "p1" },
+          viaEdgeKind: "holdsLeaf",
+        },
+      ]);
+
+      const applyResult = await applyMergePlan(target, artifact);
+      expect(isErr(applyResult)).toBe(true);
+      if (!isErr(applyResult)) throw new Error("expected apply to be refused");
+      expect(applyResult.error).toBeInstanceOf(MergeCompositionOrphanError);
+      expect(applyResult.error.code).toBe("MERGE_COMPOSITION_ORPHAN");
+
+      // Nothing changed.
+      await expect(
+        target.nodes.Whole.getById(targetWhole.id),
+      ).resolves.toBeDefined();
+      await expect(
+        target.nodes.Part.getById(targetPart.id),
+      ).resolves.toBeDefined();
+      await expect(
+        target.nodes.Leaf.getById(lateLeaf.id),
+      ).resolves.toBeDefined();
     });
   },
 );

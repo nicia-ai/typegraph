@@ -28,6 +28,7 @@ import {
 } from "../../src/graph-merge/merge";
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
 import type { MergePlanArtifactV1 } from "../../src/graph-merge/plan-schema";
+import { MERGE_PLAN_FORMAT_VERSION } from "../../src/graph-merge/plan-schema";
 import { constructMergePlanArtifact } from "../../src/graph-merge/plan-wire";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { Embedder, GraphBranch } from "../../src/graph-merge/types";
@@ -219,7 +220,7 @@ describe("public merge plan lifecycle", () => {
     }
 
     const malformed = await applyMergePlan(base, {
-      formatVersion: 1,
+      formatVersion: MERGE_PLAN_FORMAT_VERSION,
     } as unknown as typeof artifact);
     expect(isErr(malformed)).toBe(true);
     if (isErr(malformed))

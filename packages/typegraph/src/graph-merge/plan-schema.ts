@@ -3,7 +3,15 @@ import { z } from "zod";
 import { compareEntityRefs, compareMatchSources } from "./evidence";
 import type { JsonValue } from "./typegraph-internal";
 
-export const MERGE_PLAN_FORMAT_VERSION = 1 as const;
+// Bumped 1 -> 2 for the composition-orphan review field: a required field
+// added under the SAME version number would make `mergePlanArtifactV1Schema`
+// (`.strict()`) reject every plan artifact serialized before composition
+// existed as "malformed", when the correct signal is "this artifact predates
+// a format this library version understands" — `parseMergePlanArtifact`
+// reads `formatVersion` before any other validation specifically to draw
+// that distinction (`unsupported-version` vs `malformed`), and a same-version
+// field addition would defeat it silently by falling through to the schema.
+export const MERGE_PLAN_FORMAT_VERSION = 2 as const;
 export const MERGE_PLAN_DIGEST_ALGORITHM = "sha256" as const;
 
 export type MergePlanEntityRef = Readonly<{ kind: string; id: string }>;

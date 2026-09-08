@@ -3761,7 +3761,7 @@ export const MERGE_OPTION_DEFAULTS: {
 export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
 
 // @public (undocumented)
-export const MERGE_PLAN_FORMAT_VERSION: 1;
+export const MERGE_PLAN_FORMAT_VERSION: 2;
 
 // @public (undocumented)
 export const MERGE_REVIEW_FORMAT_VERSION: 1;

@@ -146,6 +146,7 @@ import type {
   MergePlanNodeUpsert,
   MergePlanTargetFence,
 } from "./plan-schema";
+import { MERGE_PLAN_FORMAT_VERSION } from "./plan-schema";
 import {
   constructMergePlanArtifact,
   validateMergePlanArtifact,
@@ -2687,6 +2688,18 @@ function resolvedNodeUpserts<G extends GraphDef>(
  * kind declares composition parts, re-read its LIVE parts closure
  * (`planCompositionCascade`) and report every member NOT itself present in
  * `plannedDeletionKeys`.
+ *
+ * `wholes` is every planned deletion whose kind is composition-capable, not
+ * only the deletion's own "root" wholes — a plan can delete two unrelated
+ * wholes whose closures do not reach each other, and both need their own
+ * walk to find orphans hanging off either. That, in turn, means the SAME
+ * live orphan can be found twice at depth >= 2: once via the outer whole's
+ * closure (which walks straight through an inner, also-planned-for-deletion
+ * whole down to the orphan) and once via that inner whole's OWN walk, since
+ * it is itself in `wholes`. A part has exactly one immediate whole at read
+ * time, so the two walks always agree byte-for-byte — deduping by
+ * `(part.kind, part.id)` is therefore lossless, keeping the first report
+ * found rather than collapsing two genuinely different orphans.
  */
 async function compositionOrphansAmong(
   ctx: Readonly<{
@@ -2698,7 +2711,7 @@ async function compositionOrphansAmong(
   wholes: readonly MergePlanEntityRef[],
   plannedDeletionKeys: ReadonlySet<MergeKey>,
 ): Promise<readonly MergePlanCompositionOrphan[]> {
-  const orphans: MergePlanCompositionOrphan[] = [];
+  const orphansByPart = new Map<MergeKey, MergePlanCompositionOrphan>();
   for (const whole of wholes) {
     if (ctx.registry.compositionEdgeKindsUnder(whole.kind).length === 0) {
       continue;
@@ -2711,21 +2724,23 @@ async function compositionOrphansAmong(
     );
     for (const member of cascadePlan.members) {
       if (plannedDeletionKeys.has(mergeKey(member.kind, member.id))) continue;
-      const pair = ctx.registry.getCompositionEdge(member.kind, whole.kind);
-      orphans.push({
+      const partKey = mergeKey(member.kind, member.id);
+      if (orphansByPart.has(partKey)) continue;
+      // `member.whole`/`member.viaEdgeKind` are the pair `planCompositionCascade`
+      // already resolved to admit this member in the first place — the
+      // member's OWN immediate whole, not necessarily the cascade root
+      // (`whole`, above) once the closure is more than one level deep.
+      // Re-deriving via `registry.getCompositionEdge(member.kind, whole.kind)`
+      // is wrong past depth 1 and is exactly the second spelling this plan
+      // carries the resolved pair to avoid.
+      orphansByPart.set(partKey, {
         part: { kind: member.kind, id: member.id },
-        whole,
-        // `planCompositionCascade` already resolved this exact pair to admit
-        // `member` in the first place, so an absent pair here would be that
-        // same should-be-impossible invariant, not a real absence.
-        viaEdgeKind: requireDefined(
-          pair?.viaEdgeKind,
-          `No declared composition pair for part "${member.kind}" under whole "${whole.kind}", though planCompositionCascade just admitted it.`,
-        ),
+        whole: member.whole,
+        viaEdgeKind: member.viaEdgeKind,
       });
     }
   }
-  return orphans;
+  return [...orphansByPart.values()];
 }
 
 /**
@@ -2826,7 +2841,7 @@ async function resolvedMergeArtifact<G extends GraphDef>(
     };
   });
   const input: MergePlanArtifactV1Input = {
-    formatVersion: 1,
+    formatVersion: MERGE_PLAN_FORMAT_VERSION,
     mode,
     target: targetFence,
     anchors,

@@ -31,6 +31,19 @@ type CompositionCascadeMember = Readonly<{
   id: string;
   /** The composition edge id binding this member to its whole in this cascade. */
   viaEdgeId: string;
+  /** The composition edge KIND realizing this member's membership (`row.kind`). */
+  viaEdgeKind: string;
+  /**
+   * This member's OWN immediate whole — the node it is directly a part of,
+   * which for a depth >= 2 member is an intermediate part, not the cascade's
+   * root. Consumers that need "which composition pair realizes this
+   * membership" read `viaEdgeKind`/`whole` off the member rather than
+   * re-deriving it via `registry.getCompositionEdge(member.kind, root.kind)`
+   * — that re-derivation is wrong past depth 1 (the root is not necessarily
+   * the immediate whole) and is exactly the kind of second spelling this
+   * module exists to avoid.
+   */
+  whole: CascadeNode;
 }>;
 
 export type CompositionCascadePlan = Readonly<{
@@ -100,6 +113,17 @@ function wholeSide(partSide: CompositionPartSide): "from" | "to" {
  * with no rows at all: no licensed rows is insufficient evidence that none
  * exist (the same disposition `findConnectedEdgesForNodeBatch` states),
  * never proof a childless round actually is one.
+ *
+ * DELIBERATE, not a missed capability check: every terminal (childless)
+ * round on a set-read-capable backend pays the per-frontier-node fallback
+ * read once to confirm the empty result, matching the sibling function's
+ * disposition rather than introducing a second way to answer "can this
+ * backend/graph answer this read with the set port". `findEdgesByHeterogeneousEndpointSet`
+ * itself applies no temporal filter beyond `excludeDeleted` (see
+ * `buildTemporalConditions`), so it always returns an ended-but-undeleted
+ * row exactly as `findEdgesConnectedTo` does — the population decision is
+ * `compositionEdgeCounts`' alone, applied to whichever read answered. See
+ * `tests/composition-cascade.test.ts`'s direct assertion on the set read.
  */
 async function readWholeSideEdges(
   ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
@@ -276,7 +300,13 @@ export async function planCompositionCascade(
       visited.add(key);
       nextFrontier.push(part);
       consumedEdgeIds.add(row.id);
-      discoveryOrder.push({ kind: part.kind, id: part.id, viaEdgeId: row.id });
+      discoveryOrder.push({
+        kind: part.kind,
+        id: part.id,
+        viaEdgeId: row.id,
+        viaEdgeKind: row.kind,
+        whole: wholeOfRow,
+      });
     }
     frontier = nextFrontier;
   }
