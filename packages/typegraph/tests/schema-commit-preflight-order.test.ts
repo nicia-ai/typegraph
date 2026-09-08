@@ -42,7 +42,7 @@ describe("composeSchemaCommitPreflight", () => {
     ]);
 
     expect(preflight).toBeDefined();
-    await preflight?.({} as SchemaCommitPreflightBackend);
+    await preflight({} as SchemaCommitPreflightBackend);
 
     expect(calls).toEqual([
       "dropped-kinds",
@@ -84,7 +84,7 @@ describe("composeSchemaCommitPreflight", () => {
         return Promise.resolve();
       },
     ]);
-    await preflight?.({} as SchemaCommitPreflightBackend);
+    await preflight({} as SchemaCommitPreflightBackend);
     expect(order).toEqual(["first-start", "first-end", "second-start"]);
   });
 });

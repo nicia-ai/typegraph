@@ -813,10 +813,16 @@ function requireCommitWithPreflight(
   return commitWithPreflight;
 }
 
+/** One step of a composed schema-commit preflight; `undefined` drops out. */
+type SchemaCommitPreflightStep =
+  ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined;
+
 /**
  * THE order a schema-commit preflight runs its steps in, and the one place
- * that order is spelled: structural gates that decide whether the commit is
- * legal at all (dropped-kinds / required-kinds-empty), then
+ * that order is spelled — called by every commit path that can owe more
+ * than one preflight step (`ensureSchema`'s auto-migrate branch,
+ * `migrateSchema`, `Store.evolve`): structural gates that decide whether the
+ * commit is legal at all (dropped-kinds / required-kinds-empty), then
  * `edgeMatchIdentityPreflight`, then the ontology-tightening preflight, then
  * the identity preflight (whose last act is the closure rebuild).
  *
@@ -827,16 +833,30 @@ function requireCommitWithPreflight(
  *
  * `undefined` steps drop out; an all-`undefined` list yields `undefined`,
  * which is the caller's signal to take the plain commit primitive and pay
- * for no transaction it does not need.
+ * for no transaction it does not need. The first overload is for a caller
+ * that always has at least one unconditional leading step (a structural
+ * gate that runs whether or not any of the changes it is checking exist —
+ * `assertDroppedKindsEmpty` and `assertEvolvedSchemaRequiredKindsEmpty` are
+ * both no-ops on an empty list, so they are safe to run unconditionally):
+ * its result is guaranteed defined, which lets `migrateSchema` and
+ * `Store.evolve` pass it straight to `commitNewSchemaVersionWithPreflight`'s
+ * required `preflight` parameter without an unsound narrowing.
  *
- * @internal Exported for `tests/schema-commit-preflight-order.test.ts`
- * only — not re-exported through `src/schema/index.ts` or the package root,
- * the same convention `commitNewSchemaVersionWithPreflight` already uses.
+ * @internal Exported for `tests/schema-commit-preflight-order.test.ts` only —
+ * not re-exported through `src/schema/index.ts` or the package root, the
+ * same convention `commitNewSchemaVersionWithPreflight` already uses.
  */
 export function composeSchemaCommitPreflight(
-  steps: readonly (
-    ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined
-  )[],
+  steps: readonly [
+    (target: SchemaCommitPreflightBackend) => Promise<void>,
+    ...(readonly SchemaCommitPreflightStep[]),
+  ],
+): (target: SchemaCommitPreflightBackend) => Promise<void>;
+export function composeSchemaCommitPreflight(
+  steps: readonly SchemaCommitPreflightStep[],
+): ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined;
+export function composeSchemaCommitPreflight(
+  steps: readonly SchemaCommitPreflightStep[],
 ): ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
   const defined = steps.filter(
     (step): step is (target: SchemaCommitPreflightBackend) => Promise<void> =>
@@ -1204,25 +1224,24 @@ export async function migrateSchema<G extends GraphDef>(
         backend,
         target,
         currentVersion,
-        async (transactionBackend) => {
-          // The emptiness fence moves inside the commit transaction here: the
-          // preflight-carrying primitive is the only one that can also run the
-          // identity rebuild atomically, so the probe runs alongside it rather
-          // than through `commitSchemaVersionIfKindsEmpty`.
-          await assertDroppedKindsEmpty(
-            transactionBackend,
-            target.id,
-            currentVersion,
-            guardedDrops,
-          );
-          await edgeMatchIdentityPreflight?.(transactionBackend);
-          // Ontology BEFORE identity: the identity closure is derived from
-          // the ontology being committed, so rebuilding it under an
-          // ontology the data falsifies is work a refusal would only throw
-          // away. See `composeSchemaCommitPreflight`'s docblock.
-          await ontologyPreflight?.(transactionBackend);
-          await identityPreflight?.(transactionBackend);
-        },
+        // The emptiness fence moves inside the commit transaction here: the
+        // preflight-carrying primitive is the only one that can also run the
+        // identity rebuild atomically, so the probe runs alongside it rather
+        // than through `commitSchemaVersionIfKindsEmpty`. Ordering — and the
+        // "ontology before identity" reasoning — is spelled once, at
+        // `composeSchemaCommitPreflight`.
+        composeSchemaCommitPreflight([
+          (transactionBackend) =>
+            assertDroppedKindsEmpty(
+              transactionBackend,
+              target.id,
+              currentVersion,
+              guardedDrops,
+            ),
+          edgeMatchIdentityPreflight,
+          ontologyPreflight,
+          identityPreflight,
+        ]),
         storedSchema,
         identityPreflight === undefined && ontologyPreflight !== undefined ?
           ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR

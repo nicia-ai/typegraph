@@ -207,6 +207,7 @@ import {
   commitNewSchemaVersion,
   commitNewSchemaVersionIfKindsEmpty,
   commitNewSchemaVersionWithPreflight,
+  composeSchemaCommitPreflight,
   ensureSchema as ensureSchemaImpl,
   getSchemaChanges,
   loadActiveSchemaWithBootstrap,
@@ -4407,22 +4408,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#backend,
           merged,
           activeRow.version,
-          async (target) => {
-            await assertEvolvedSchemaRequiredKindsEmpty(
-              target,
-              this.graphId,
-              classification,
-            );
-            // Ontology BEFORE identity: the identity closure is derived from
-            // the ontology being committed, so rebuilding it under an
-            // ontology the data falsifies is work a refusal would only
-            // throw away.
-            await ontologyPreflight?.(target);
-            await identityCandidate?.identitySchemaPreflight(
-              target,
-              identityProvisioning?.provisionInCommit ?? [],
-            );
-          },
+          // Ordering — and the "ontology before identity" reasoning — is
+          // spelled once, at `composeSchemaCommitPreflight` in
+          // `../schema/manager`.
+          composeSchemaCommitPreflight([
+            (target) =>
+              assertEvolvedSchemaRequiredKindsEmpty(
+                target,
+                this.graphId,
+                classification,
+              ),
+            ontologyPreflight,
+            identityCandidate === undefined ? undefined : (
+              (target: SchemaCommitPreflightBackend) =>
+                identityCandidate.identitySchemaPreflight(
+                  target,
+                  identityProvisioning?.provisionInCommit ?? [],
+                )
+            ),
+          ]),
           storedSchema,
           identityCandidate === undefined && ontologyPreflight !== undefined ?
             ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
