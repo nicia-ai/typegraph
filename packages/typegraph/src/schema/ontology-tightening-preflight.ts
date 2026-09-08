@@ -32,6 +32,15 @@ export type OntologyTighteningPreflightParams = Readonly<{
   toVersion: number;
   before: OntologySnapshot;
   after: OntologySnapshot;
+  /**
+   * The already-classified diff, when a caller computed one (`ensureSchema`
+   * and `Store.evolve` both diff `before`/`after` before reaching this
+   * preflight). Reusing it avoids reclassifying the identical
+   * `before`/`after` pair a second time in the same commit; `migrateSchema`
+   * and `evolve`'s dropped-kinds branch, which never compute a diff, omit
+   * this and classification runs internally, once.
+   */
+  changes?: readonly OntologyChange[];
 }>;
 
 /** The probes grouped by kind — at most one of each, per `ontologyTighteningProbes`. */
@@ -121,13 +130,14 @@ function buildOntologyTighteningViolatedError(
  * that window.
  *
  * @throws ConfigurationError if either `params.before` or `params.after`
- *   cannot be interpreted as a coherent ontology (propagates from
- *   `classifyOntologyChanges`).
+ *   cannot be interpreted as a coherent ontology and `params.changes` was
+ *   not supplied (propagates from `classifyOntologyChanges`).
  */
 export function prepareOntologyTighteningPreflight(
   params: OntologyTighteningPreflightParams,
 ): ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
-  const changes = classifyOntologyChanges(params.before, params.after);
+  const changes =
+    params.changes ?? classifyOntologyChanges(params.before, params.after);
   const probes = ontologyTighteningProbes(changes);
   if (probes.length === 0) return undefined;
 
@@ -143,7 +153,6 @@ export function prepareOntologyTighteningPreflight(
 
   return async (target: SchemaCommitPreflightBackend): Promise<void> => {
     const violations = await auditConstraintFences(target, {
-      graphId: params.graphId,
       declarations: {
         graphId: params.graphId,
         // Delta-scoped, not graph-wide: the audit reads only the pairs,

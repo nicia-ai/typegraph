@@ -479,6 +479,8 @@ export async function ensureSchema<G extends GraphDef>(
         toVersion: activeSchema.version + 1,
         before: storedSchema,
         after: currentSchema,
+        // `diff` above already classified this exact before/after pair.
+        changes: diff.ontology,
       });
       const preflight = composeSchemaCommitPreflight([
         ontologyPreflight,
@@ -575,7 +577,13 @@ export async function ensureSchema<G extends GraphDef>(
  *   the version required by the backend.
  * @throws ConfigurationError if no schema has been initialized for
  *   `graph.id` (the privileged migration step has not run, or the base
- *   tables do not exist on this connection).
+ *   tables do not exist on this connection); also if the stored or the
+ *   current ontology adds or removes a relation and cannot be interpreted
+ *   (`computeSchemaDiff` → `classifyOntologyChanges` — a schema document
+ *   written under an older, laxer validator can hold an ontology today's
+ *   hardening rejects). Callers built on this — `createVerifiedStore` and
+ *   `assertSchemaCurrent` — inherit this throw and do not distinguish it
+ *   from the uninitialized-schema case above.
  * @throws MigrationError if the persisted schema is behind the code
  *   graph — for **any** pending change, safe or breaking. The
  *   least-privilege runtime cannot migrate; "behind" means the
@@ -1774,6 +1782,12 @@ export async function isSchemaInitialized(
  * @param backend - The database backend
  * @param graph - The current graph definition
  * @returns The diff, or undefined if schema not initialized
+ * @throws ConfigurationError when the stored or the current ontology adds or
+ *   removes a relation and cannot be interpreted (`computeSchemaDiff` →
+ *   `classifyOntologyChanges`) — a schema document written under an older,
+ *   laxer validator can hold an ontology today's hardening rejects.
+ *   `requiresMigration`, built on this function, does not propagate this
+ *   throw; see its own docblock.
  */
 export async function getSchemaChanges<G extends GraphDef>(
   backend: GraphBackend,
@@ -1805,12 +1819,24 @@ export async function getSchemaChanges<G extends GraphDef>(
  * pre-flight with no DDL and no writes.
  *
  * Returns `true` when the schema has not been initialized yet (the privileged
- * bootstrap is required) and when the committed schema is behind `graph`.
+ * bootstrap is required), when the committed schema is behind `graph`, and
+ * when the stored or the current ontology adds or removes a relation whose
+ * coherence `getSchemaChanges` could not determine (`ConfigurationError` from
+ * `classifyOntologyChanges` — a schema document written under an older,
+ * laxer validator can hold an ontology today's hardening rejects). A document
+ * this predicate cannot interpret is, by construction, one the privileged
+ * path must look at, so this function never throws for that reason: it is
+ * the routing check a least-privilege runtime relies on to decide *before* a
+ * write discovers the migration wall mid-request, and a throw here would
+ * defeat that routing exactly when it matters most.
+ *
  * This is the predicate a least-privilege runtime checks to route to the
  * privileged path *before* a write discovers the migration wall mid-request.
  *
  * For the additive-vs-incompatible distinction, use `getSchemaChanges` and
- * {@link classifySchemaChanges} instead — this collapses both to `true`.
+ * {@link classifySchemaChanges} instead — this collapses both to `true`, and
+ * unlike `getSchemaChanges` it never throws `ConfigurationError` for an
+ * unclassifiable ontology.
  *
  * @param backend - The database backend
  * @param graph - The current graph definition
@@ -1820,7 +1846,13 @@ export async function requiresMigration<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
 ): Promise<boolean> {
-  const diff = await getSchemaChanges(backend, graph);
+  let diff: SchemaDiff | undefined;
+  try {
+    diff = await getSchemaChanges(backend, graph);
+  } catch (error) {
+    if (error instanceof ConfigurationError) return true;
+    throw error;
+  }
   if (diff === undefined) return true;
   return diff.hasChanges;
 }

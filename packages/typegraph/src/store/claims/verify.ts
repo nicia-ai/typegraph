@@ -393,9 +393,15 @@ function fenceDeclarations(
   };
 }
 
-/** What the audit reads and how it folds the rows. */
+/**
+ * What the audit reads and how it folds the rows.
+ *
+ * No top-level `graphId`: `declarations.graphId` is the only spelling of
+ * which graph this plan reads, so a caller cannot author two graph ids that
+ * silently drift out of agreement — the failure mode a second `graphId`
+ * field invites the moment a caller sets one and not the other.
+ */
 export type ConstraintFenceAuditPlan = Readonly<{
-  graphId: string;
   declarations: ReadConstraintFenceViolationsParams;
   uniquenessGroups: readonly UniquenessAxisGroup[];
   /** The registry the verdict is computed against — the PROPOSED one for a probe. */
@@ -461,14 +467,17 @@ export async function auditConstraintFences(
     ...uniquenessViolations(
       rows.contendedUniqueRows,
       plan.uniquenessGroups,
-      plan.graphId,
+      plan.declarations.graphId,
     ),
     ...disjointnessViolations(
       rows.disjointOverlaps,
       plan.registry,
-      plan.graphId,
+      plan.declarations.graphId,
     ),
-    ...edgeCardinalityViolations(rows.contendedEdgeRows, plan.graphId),
+    ...edgeCardinalityViolations(
+      rows.contendedEdgeRows,
+      plan.declarations.graphId,
+    ),
     ...edgeEndpointViolations(
       rows.misassignedEdgeEndpointRows ?? [],
       plan.declarations.edgeEndpointAllowances ?? [],
@@ -485,7 +494,6 @@ export async function verifyConstraintFences(
   context: VerifyConstraintFencesContext,
 ): Promise<readonly ConstraintFenceViolation[]> {
   return auditConstraintFences(context.backend, {
-    graphId: context.graphId,
     declarations: fenceDeclarations(
       context.graph,
       context.registry,
