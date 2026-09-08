@@ -59,7 +59,8 @@ Uses the same options as `traverse()`, but returns optional edge/node values in 
 |-----------|------|-------------|
 | `nodeKind` | `string` | The target node kind |
 | `nodeAlias` | `string` | Unique alias for referencing this node |
-| `options.includeSubClasses` | `boolean` | Include subclass kinds — and any kind declared `equivalentTo` the target — (default: `false`) |
+| `options.includeSubClasses` | `boolean` | Include subclass kinds — and any kind declared `equivalentTo` the target — (default: `true`) |
+| `options.includeNarrower` | `boolean` | Include `broader`/`narrower` descendant kinds instead of `subClassOf` descendants (default: `false`; mutually exclusive with `includeSubClasses`) |
 
 ## Direction
 

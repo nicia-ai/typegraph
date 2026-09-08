@@ -559,7 +559,7 @@ export type AllEdgeTypes<G extends GraphDef> = {
 export function defineGraph<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
   const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
@@ -576,7 +576,7 @@ export function defineGraph<
 function defineGraphUnchecked<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
   const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
@@ -654,7 +654,7 @@ function defineGraphUnchecked<
 export function defineInternalGraph<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
   const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,

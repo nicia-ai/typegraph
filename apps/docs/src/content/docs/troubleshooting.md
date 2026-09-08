@@ -244,10 +244,16 @@ store.query().from("Person", "p1").traverse("knows", "e").to("Person", "p2");
    .from("Person", "p") // Must match defineNode("Person", ...)
    ```
 
-2. **Missing includeSubClasses:** When querying a superclass
+2. **`includeSubClasses: false` narrowed the query:** Querying a superclass
+   returns its subtype rows by default. If you (or
+   `queryDefaults.includeSubClasses` on the store) explicitly narrowed with
+   `includeSubClasses: false`, only exact-kind rows come back:
 
    ```typescript
-   .from("Content", "c", { includeSubClasses: true })
+   // Returns Content rows AND every subClassOf(*, Content) row by default
+   .from("Content", "c")
+   // Narrows back to exact-kind Content rows only
+   .from("Content", "c", { includeSubClasses: false })
    ```
 
 3. **Strict predicate:** Check your filters aren't too restrictive

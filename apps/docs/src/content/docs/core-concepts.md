@@ -546,6 +546,15 @@ const graph = defineGraph({
 });
 ```
 
+`subClassOf(Company, Organization)` here requires `Company`'s schema to
+structurally extend `Organization`'s — checked at compile time and at
+registry build (see [Ontology](/ontology#subsumption-type-inheritance)).
+Because of that guarantee, querying `Organization` returns `Company` rows
+by default: `store.query().from("Organization", "o")` is polymorphic, with
+`o`'s `kind` widened to `string` and only `Organization`'s own properties
+statically typed on the alias. Pass `{ includeSubClasses: false }` to get
+back the exact-kind reading.
+
 ## Delete Behaviors
 
 Control what happens when nodes are deleted:

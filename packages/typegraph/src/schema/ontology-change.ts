@@ -604,7 +604,17 @@ export function classifyOntologyChanges(
   // pays for a registry build, and never risks surfacing an incoherent
   // legacy ontology's `ConfigurationError` on a commit that has nothing to
   // do with it.
-  const beforeRegistry = buildRegistryFromSerializedSchema(before);
+  // BEFORE is a delta input (disjointness, uniqueness groups, endpoint
+  // allowances), never a registry a store reads or writes through —
+  // enforcing structural subsumption on it would wedge the fix-forward
+  // migration that repairs an already-incoherent persisted document (see
+  // `StructuralSubsumptionMode`'s docblock). AFTER stays enforced (the
+  // default): a proposal that INTRODUCES an incompatible hierarchy is
+  // exactly what R2 requires this diff to catch before an upgrade.
+  const beforeRegistry = buildRegistryFromSerializedSchema(
+    before,
+    "unenforced-baseline",
+  );
   const afterRegistry = buildRegistryFromSerializedSchema(after);
 
   const context: RelationClassificationContext = {

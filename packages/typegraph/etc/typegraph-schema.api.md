@@ -1598,6 +1598,9 @@ export function isSchemaInitialized(backend: GraphBackend, graphId: string): Pro
 // @public
 export function isStructuralSubtype(child: JsonSchema, parent: JsonSchema): StructuralSubtypeResult;
 
+// @public
+export function isTypeLevelSubtype(child: JsonSchema, parent: JsonSchema): StructuralSubtypeResult;
+
 // @public (undocumented)
 type JsonPointer = string & {
     readonly __jsonPointer: unique symbol;
@@ -2013,6 +2016,9 @@ type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
 
 // @public
 type PredicateBuilder = Readonly<Record<string, FieldPredicateBuilder>>;
+
+// @public
+export function projectTypeVisible(schema: JsonSchema): JsonSchema;
 
 // @public
 type PurgeEdgeClaimsParams = Readonly<{

@@ -6,10 +6,12 @@
  */
 import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
+import { isSubsumptionMetaEdge } from "../ontology/constants";
 import { compareStrings } from "../utils/compare";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { canonicalEqual, sortedReplacer } from "./canonical";
+import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
   classifyOntologyChanges,
   type OntologyChange,
@@ -241,6 +243,18 @@ export type SchemaDiff = Readonly<{
  *   inherits the throw: `loadAndVerifyGraph` / `createVerifiedStore`,
  *   `getSchemaChanges`, and (through it) `requiresMigration` are audited at
  *   their own declarations.
+ * @throws ConfigurationError (C.2, `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE`
+ *   / `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` /
+ *   `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` /
+ *   `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE`) when `after` declares a
+ *   `subClassOf`/`equivalentTo`/`sameAs` hierarchy whose child does not
+ *   structurally extend its parent — including a hierarchy no relation in
+ *   this diff touched: a migration that only edits a node kind's property
+ *   schema can break an EXISTING hierarchy that kind already participates
+ *   in, so this diff builds and enforces the AFTER registry whenever a
+ *   changed node kind's name appears in `after.ontology.relations` under one
+ *   of those three meta-edges, even when `classifyOntologyChanges` found no
+ *   relation change to build one for.
  */
 export function computeSchemaDiff(
   before: SerializedSchema,
@@ -249,6 +263,14 @@ export function computeSchemaDiff(
   const nodeChanges = diffNodes(before.nodes, after.nodes);
   const edgeChanges = diffEdges(before.edges, after.edges);
   const ontologyChanges = classifyOntologyChanges(before, after);
+  // classifyOntologyChanges only builds (and thereby structurally enforces,
+  // C.2) a registry when a RELATION changed. A migration that edits only a
+  // node kind's PROPERTY schema never touches a relation, so without this
+  // check it would sail through the dry run and fail only at commit —
+  // exactly the gap `computeSchemaDiff`'s docblock now documents.
+  if (nodePropertyChangeMayAffectExistingSubsumption(nodeChanges, after)) {
+    buildRegistryFromSerializedSchema(after);
+  }
   const identityChange = diffIdentity(before.identity, after.identity);
   const annotationsChange = diffGraphAnnotations(
     before.annotations,
@@ -412,6 +434,39 @@ function diffNodes(
   }
 
   return changes;
+}
+
+/**
+ * Whether an added or modified node kind's property schema could have
+ * broken a `subClassOf`/`equivalentTo`/`sameAs` hierarchy this diff's
+ * relation-level classification never looked at, because no RELATION
+ * changed. A cheap name scan over `nodeChanges` and `after.ontology.relations`
+ * — the caller builds a registry (which structurally enforces, C.2) only
+ * when this returns `true`.
+ *
+ * A REMOVED node kind is excluded: it cannot violate a hierarchy going
+ * forward, and it carries no property schema in `after` to compare.
+ */
+function nodePropertyChangeMayAffectExistingSubsumption(
+  nodeChanges: readonly NodeChange[],
+  after: SerializedSchema,
+): boolean {
+  const changedKinds = new Set(
+    nodeChanges
+      .filter((change) => change.type !== "removed")
+      .map((change) => change.kind),
+  );
+  if (changedKinds.size === 0) return false;
+
+  for (const relation of after.ontology.relations) {
+    if (
+      isSubsumptionMetaEdge(relation.metaEdge) &&
+      (changedKinds.has(relation.from) || changedKinds.has(relation.to))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

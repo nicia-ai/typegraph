@@ -51,7 +51,7 @@ function makeNodePredicate(
 
 function makeMinimalAst(overrides: Partial<QueryAst> = {}): QueryAst {
   return {
-    start: { alias: "p", kinds: ["Person"], includeSubClasses: false },
+    start: { alias: "p", kinds: ["Person"], expansion: "exact" as const },
     traversals: [],
     predicates: [],
     projection: { fields: [] },

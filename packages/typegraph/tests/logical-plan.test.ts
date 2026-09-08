@@ -66,7 +66,7 @@ function createBaseAst(extra: Partial<QueryAst> = {}): QueryAst {
   return {
     start: {
       alias: "p",
-      includeSubClasses: false,
+      expansion: "exact" as const,
       kinds: ["Person"],
     },
     traversals: [],

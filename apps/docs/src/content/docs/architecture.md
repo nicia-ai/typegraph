@@ -591,7 +591,8 @@ nearest neighbor search efficiently.
 
 1. **Filter early**: Apply predicates as close to the source as possible
 2. **Limit results**: Always paginate large result sets
-3. **Use specific kinds**: Avoid `includeSubClasses` unless needed
+3. **Use specific kinds**: A supertype query expands its `WHERE kind IN (...)` set by
+   default; pass `{ includeSubClasses: false }` when the wider set isn't needed
 4. **Index JSON paths**: For frequently-filtered properties, add expression indexes
 5. **Batch writes**: Use transactions to reduce disk syncs and round-trips
 

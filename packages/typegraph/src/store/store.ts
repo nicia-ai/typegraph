@@ -1340,6 +1340,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #schemaMetadata: StoreSchemaMetadata;
   readonly #runtimeKindOwner = Object.freeze({});
   readonly #defaultTraversalExpansion: TraversalExpansion;
+  readonly #defaultIncludeSubClasses: boolean;
   // Stored verbatim so `evolve()` can construct the next Store with
   // identical options. Reconstructing from the individual private
   // fields would silently drop any future StoreOptions field a
@@ -1528,6 +1529,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#hooks = options?.hooks ?? {};
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
+    this.#defaultIncludeSubClasses =
+      options?.queryDefaults?.includeSubClasses ?? true;
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
@@ -7332,6 +7335,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         backend: queryBackend,
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
+        defaultIncludeSubClasses: this.#defaultIncludeSubClasses,
         runtimeKindTokenResolver: (token, entity) =>
           this.#resolveRuntimeKindToken(token, entity),
         ...(this.#schema !== undefined && { schema: this.#schema }),

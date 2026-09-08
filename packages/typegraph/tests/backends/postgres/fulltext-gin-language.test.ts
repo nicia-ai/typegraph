@@ -224,9 +224,12 @@ describe("fulltext GIN index usage (constant declared language)", () => {
     const backend = createPostgresBackend(drizzle(activePool));
     const [store] = await createStoreWithSchema(graph, backend);
 
+    // Supertype queries are polymorphic by default, so the single-language
+    // alias must narrow to the base kind explicitly; the mixed case below is
+    // what the default now produces.
     const single = store
       .query()
-      .from("GinArticle", "d")
+      .from("GinArticle", "d", { includeSubClasses: false })
       .whereNode("d", (document) => document.$fulltext.matches("signal", 10))
       .select((sel) => ({ id: sel.d.id }))
       .toSQL();

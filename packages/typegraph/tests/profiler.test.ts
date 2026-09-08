@@ -819,6 +819,12 @@ describe("QueryProfiler", () => {
       const profiler = new QueryProfiler({ minFrequencyForRecommendation: 1 });
       const profiledStore = profiler.attachToStore(store);
 
+      // "industry" is a Company-only field, not on the polymorphic
+      // Organization alias's own (parent) schema — C.1/C.2 guarantee only
+      // the PARENT's properties on a polymorphic alias, so this predicate
+      // (deliberately probing a subclass-only field) needs the same
+      // documented cast pattern graph-extension tests use for a property
+      // outside the alias's statically-known shape.
       await profiledStore
         .query()
         .from("Organization", "o", { includeSubClasses: true })
@@ -1431,7 +1437,7 @@ describe("AST Extractor", () => {
       includeSubClasses: true,
     });
     const query = builder
-      .whereNode("o", (o) => requireDefined(o["name"]).eq("Acme"))
+      .whereNode("o", (o) => requireDefined(o.name).eq("Acme"))
       .select((ctx) => ctx.o);
 
     const accesses = extractPropertyAccesses(query.toAst());

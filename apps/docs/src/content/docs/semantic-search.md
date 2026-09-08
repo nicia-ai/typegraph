@@ -556,6 +556,14 @@ search statement itself, so the engine ranks only eligible rows. A filter
 never costs you results: you get `limit` hits whenever `limit` matching
 nodes exist (on libSQL DiskANN, subject to the over-fetch bound above).
 
+`includeSubClasses` on the facade stays **opt-in** and defaults to
+`false` — a deliberate asymmetry with the query builder's `from()`/`to()`,
+which default to `includeSubClasses: true`. Searching across kinds also
+requires every expanded kind to share one declared metric (see below), so
+flipping the facade's default would need its own migration knob; see
+[Fulltext Search ▸ Options reference](/fulltext-search#options-reference)
+for the full rationale, which applies identically here.
+
 ```typescript
 // Top 10 most similar *published* documents, second page.
 const hits = await store.search.vector("Document", {

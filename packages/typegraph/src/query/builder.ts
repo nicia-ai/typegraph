@@ -210,6 +210,7 @@ function createQueryBuilderWithContext<
     registry,
     schemaIntrospector,
     defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
+    defaultIncludeSubClasses: options?.defaultIncludeSubClasses ?? true,
     identityEnabled:
       options?.identityEnabled ?? registry.identity !== undefined,
     identitySameIdAcrossKinds:
@@ -244,7 +245,7 @@ function createQueryBuilderWithContext<
     startAlias: "",
     currentAlias: "",
     startKinds: [],
-    includeSubClasses: false,
+    startExpansion: "exact",
     traversals: [],
     predicates: [],
     projection: [],

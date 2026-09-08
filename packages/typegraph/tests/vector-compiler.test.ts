@@ -45,7 +45,7 @@ function buildVectorAst(
     start: {
       alias: "d",
       kinds: ["Document"],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [],
     predicates: [
@@ -155,7 +155,7 @@ describe("vector compilation semantics", () => {
       start: {
         alias: "d",
         kinds: ["Document", "Memo"],
-        includeSubClasses: true,
+        expansion: "subClasses" as const,
       },
     };
 
