@@ -5,6 +5,7 @@ import {
   NodeNotFoundError,
   ValidationError,
 } from "../errors";
+import { type SqlSchema } from "../query/compiler/schema";
 import {
   withRecordedIdentityDecision,
   withRecordedIdentityMutationTarget,
@@ -40,9 +41,15 @@ import {
   type IdentityServiceContext,
   type IdentityTransferAssertion,
 } from "./service-types";
-import { type PlainNodeRef } from "./sql-target";
+import { type IdentityTarget, type PlainNodeRef } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
-import { type IdentityDecisionProvenance } from "./transition-log";
+import {
+  encodeIdentityTransitionRow,
+  type IdentityDecisionProvenance,
+  type IdentityTransitionTransfer,
+  insertIdentityTransitionValues,
+  writeIdentityTransitionRetentionWatermark,
+} from "./transition-log";
 import {
   type ResolvedIdentityValidityWindow,
   resolveIdentityValidityWindow,
@@ -501,6 +508,104 @@ export async function importIdentityAssertionsIntoTarget(
     },
   );
   return { created, skipped };
+}
+
+/** What `importIdentityTransitionsIntoTarget` reads off the service context. */
+type IdentityTransitionImportContext = Readonly<{
+  graphId: string;
+  schema: SqlSchema;
+}>;
+
+function transitionShapeError(
+  transitionId: string,
+  message: string,
+  code: string,
+): ValidationError {
+  return new ValidationError(message, {
+    issues: [{ path: "identity.transitions", message, code }],
+  });
+}
+
+/**
+ * Restores archival transition-log rows verbatim — no closure repair, no
+ * re-derived membership, no renumbering onto the destination graph's live
+ * revision sequence, because a restore records history, it does not relive
+ * it (design §7.3). Validates SHAPE only: `recordedRevision` must be
+ * non-decreasing across the array in the order given (every other shape
+ * constraint — a known cause, a well-formed `{kind, id}` ref — is already
+ * enforced by the interchange schema before a row reaches here).
+ *
+ * Sets the destination graph's retention watermark to the highest restored
+ * revision + 1 — or, when nothing was restored, to the payload's own carried
+ * watermark (a source that had already pruned everything still reports that
+ * honestly) — so `replay` surfaces the explanations-without-snapshots seam as
+ * `truncatedBefore` rather than silently claiming a complete history. The
+ * watermark write goes through the same monotonic `writeIdentityTransitionRetentionWatermark`
+ * `pruneIdentityTransitionsForContext` uses, so importing into a graph that
+ * already retains newer history can only raise the bound, never lower it.
+ */
+export async function importIdentityTransitionsIntoTarget(
+  ctx: IdentityTransitionImportContext,
+  target: IdentityTarget,
+  transitions: readonly IdentityTransitionTransfer[],
+  carriedWatermark: number | undefined,
+): Promise<Readonly<{ created: number; watermark: number | undefined }>> {
+  if (transitions.length === 0) {
+    if (carriedWatermark === undefined || carriedWatermark === 0) {
+      return { created: 0, watermark: undefined };
+    }
+    await writeIdentityTransitionRetentionWatermark(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      carriedWatermark,
+      nowIso(),
+    );
+    return { created: 0, watermark: carriedWatermark };
+  }
+  let previousRevision = Number.NEGATIVE_INFINITY;
+  for (const row of transitions) {
+    if (row.recordedRevision < previousRevision) {
+      throw transitionShapeError(
+        row.transitionId,
+        `Archival identity transitions must be ordered by non-decreasing recorded revision; ${row.transitionId} carries ${String(row.recordedRevision)} after ${String(previousRevision)}.`,
+        "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
+      );
+    }
+    previousRevision = row.recordedRevision;
+  }
+  const values = transitions.map((row) =>
+    encodeIdentityTransitionRow(
+      {
+        graphId: ctx.graphId,
+        cause: row.cause,
+        classRef: row.class,
+        priorClassRef: row.priorClass,
+        assertionIds: row.assertionIds,
+        decision: row.decision,
+        validAt: row.validAt,
+      },
+      row.recordedRevision,
+      row.recordedAt,
+      row.transitionId,
+    ),
+  );
+  await insertIdentityTransitionValues(target, ctx.schema, values);
+  const highestRestoredRevision = Math.max(
+    ...transitions.map((row) => row.recordedRevision),
+  );
+  const watermark = Math.max(
+    highestRestoredRevision + 1,
+    carriedWatermark ?? 0,
+  );
+  await writeIdentityTransitionRetentionWatermark(
+    target,
+    ctx.schema,
+    ctx.graphId,
+    watermark,
+    nowIso(),
+  );
+  return { created: transitions.length, watermark };
 }
 
 export async function applyIdentityChangesForContext<G extends GraphDef>(

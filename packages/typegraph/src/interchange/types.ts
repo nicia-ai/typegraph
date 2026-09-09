@@ -20,21 +20,23 @@ import { isCanonicalIsoDate } from "../utils/date";
  *
  * Read-side compatibility policy: the format is versioned separately from what
  * it *accepts*. A 1.0 document is a structurally valid 2.0 document — the only
- * 2.0 addition is the optional `identity` section — so import and
- * {@link GraphDataSchema} accept both `"1.0"` and `"2.0"` (see
+ * 2.0 addition is the optional `identity` section — and a 2.0 document is in
+ * turn a structurally valid 3.0 document — the only 3.0 addition is the
+ * optional `identity.transitions` / `identity.retention` archival fields — so
+ * import and {@link GraphDataSchema} accept `"1.0"`, `"2.0"`, and `"3.0"` (see
  * {@link AcceptedFormatVersionSchema}), while exports keep writing this
  * constant. Bump this only when exports must emit a new version; add the old
  * value to the accepted set rather than dropping read compatibility.
  */
-export const FORMAT_VERSION = "2.0" as const;
+export const FORMAT_VERSION = "3.0" as const;
 
 /**
  * Format versions accepted on the read side (import + `GraphDataSchema.parse`).
- * A pre-existing 1.0 export is a valid 2.0 document (the 2.0 change is the
- * additive optional `identity` section), so both validate; exports always write
- * {@link FORMAT_VERSION}.
+ * A pre-existing 1.0 or 2.0 export is a valid 3.0 document (the 3.0 change is
+ * the additive optional `identity.transitions` / `identity.retention` archival
+ * fields), so all three validate; exports always write {@link FORMAT_VERSION}.
  */
-const AcceptedFormatVersionSchema = z.enum(["1.0", "2.0"]);
+const AcceptedFormatVersionSchema = z.enum(["1.0", "2.0", "3.0"]);
 
 /**
  * A stored validity-window timestamp (`validFrom` / `validTo`). Must be a
@@ -155,15 +157,93 @@ export type InterchangeIdentityAssertion = z.infer<
   typeof InterchangeIdentityAssertionSchema
 >;
 
+/**
+ * The nine causes `IdentityTransitionCause` (`identity/transition-log.ts`)
+ * declares — spelled again here, rather than imported, because that module
+ * owns internal transition-writing semantics and this schema owns only the
+ * wire shape, matching this file's existing precedent of inlining
+ * `InterchangeIdentityAssertionSchema.relation` rather than importing
+ * `IdentityRelation`.
+ */
+const InterchangeIdentityTransitionCauseSchema = z.enum([
+  "assert",
+  "retract",
+  "fold",
+  "detach",
+  "restore",
+  "window-end",
+  "kind-drop",
+  "schema-transition",
+  "reconcile",
+]);
+
+const InterchangeIdentityTransitionDecisionSchema = z.object({
+  policy: z.string().optional(),
+  branchId: z.string().optional(),
+  branchAncestry: z.array(z.string()).optional(),
+  mergePlanDigest: z.string().optional(),
+  reviewDigest: z.string().optional(),
+  sourceId: z.string().optional(),
+});
+
+/**
+ * One archived identity transition-log row (§7.3): an explanation of why a
+ * class's membership changed, carried verbatim — `recordedRevision` and
+ * `recordedAt` are the SOURCE graph's own values, preserved rather than
+ * renumbered, because a restore records history, it does not relive it.
+ * Absent from `state`-mode interchange, which carries current truth only.
+ */
+export const InterchangeIdentityTransitionSchema = z.object({
+  transitionId: z.string().min(1),
+  cause: InterchangeIdentityTransitionCauseSchema,
+  recordedRevision: z.number().int().nonnegative(),
+  recordedAt: z.iso.datetime(),
+  validAt: ValidityTimestampSchema,
+  class: z.object({ kind: z.string().min(1), id: z.string().min(1) }),
+  priorClass: z
+    .object({ kind: z.string().min(1), id: z.string().min(1) })
+    .optional(),
+  assertionIds: z.array(z.string().min(1)),
+  decision: InterchangeIdentityTransitionDecisionSchema.optional(),
+});
+export type InterchangeIdentityTransition = z.infer<
+  typeof InterchangeIdentityTransitionSchema
+>;
+
+/**
+ * The retention watermark accompanying an `archival` export: the SOURCE
+ * graph's own `pruneIdentityTransitions` state at export time, so a reader of
+ * the raw interchange payload knows the transitions array excludes anything
+ * the source had already pruned. Distinct from the watermark import WRITES
+ * into the restored graph (§7.3), which is always the highest restored
+ * revision + 1 regardless of this value.
+ */
+export const InterchangeIdentityRetentionSchema = z.object({
+  prunedBeforeRevision: z.number().int().nonnegative(),
+  prunedAt: z.iso.datetime(),
+});
+export type InterchangeIdentityRetention = z.infer<
+  typeof InterchangeIdentityRetentionSchema
+>;
+
 export const InterchangeIdentitySchema = z.object({
   profile: z.literal("typegraph-identity-v1"),
   mode: IdentityInterchangeModeSchema,
   assertions: z.array(InterchangeIdentityAssertionSchema),
+  /**
+   * `archival` mode only. Absent (or empty) on `state` mode — state carries
+   * current truth, never explanation. Branch cloning and state export carry
+   * nothing here either, for the same reason (`working-copy.ts`).
+   */
+  transitions: z.array(InterchangeIdentityTransitionSchema).optional(),
+  /** `archival` mode only — the source graph's retention watermark. */
+  retention: InterchangeIdentityRetentionSchema.optional(),
 });
 export type InterchangeIdentity = z.infer<typeof InterchangeIdentitySchema>;
 
 const InterchangeIdentityHeaderSchema = InterchangeIdentitySchema.omit({
   assertions: true,
+  transitions: true,
 });
 
 // ============================================================
@@ -312,6 +392,12 @@ export const GraphInterchangeChunkSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("identity"),
     assertions: z.array(InterchangeIdentityAssertionSchema),
+  }),
+  // Archival-only, always after every "identity" chunk (see `importStream`'s
+  // ordering guard): the class-lineage transitions those assertions caused.
+  z.object({
+    type: z.literal("identity-transitions"),
+    transitions: z.array(InterchangeIdentityTransitionSchema),
   }),
 ]);
 

@@ -19,6 +19,10 @@ import {
   ExportStreamCancelledError,
   ExportStreamIdleTimeoutError,
 } from "../errors";
+import {
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
+} from "../identity/transition-log";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { nowIso } from "../utils/date";
@@ -35,6 +39,7 @@ import {
   type GraphInterchangeChunk,
   type InterchangeEdge,
   type InterchangeIdentityAssertion,
+  type InterchangeIdentityTransition,
   type InterchangeNode,
 } from "./types";
 
@@ -67,6 +72,7 @@ export async function exportGraph<G extends GraphDef>(
   const nodes: InterchangeNode[] = [];
   const edges: InterchangeEdge[] = [];
   const identityAssertions: InterchangeIdentityAssertion[] = [];
+  const identityTransitions: InterchangeIdentityTransition[] = [];
   let header: GraphDataHeader | undefined;
   for await (const chunk of exportGraphStream(store, options)) {
     switch (chunk.type) {
@@ -86,6 +92,10 @@ export async function exportGraph<G extends GraphDef>(
         identityAssertions.push(...chunk.assertions);
         break;
       }
+      case "identity-transitions": {
+        identityTransitions.push(...chunk.transitions);
+        break;
+      }
     }
   }
   if (header === undefined) {
@@ -99,7 +109,13 @@ export async function exportGraph<G extends GraphDef>(
     ...(identity === undefined ?
       {}
     : {
-        identity: { ...identity, assertions: identityAssertions },
+        identity: {
+          ...identity,
+          assertions: identityAssertions,
+          ...(identity.mode === "archival" ?
+            { transitions: identityTransitions }
+          : {}),
+        },
       }),
   };
 }
@@ -475,6 +491,15 @@ async function produceExportChunks<G extends GraphDef>(
   const nodeKinds = options.nodeKinds ?? getNodeKinds(store.graph);
   const edgeKinds = options.edgeKinds ?? getEdgeKinds(store.graph);
   const schemaVersion = await backend.getActiveSchema(graphId);
+  // Archival-only: the source graph's own retention watermark, so a reader of
+  // the raw payload knows the transitions section excludes anything the
+  // source had already pruned. Read from the same snapshot the rest of the
+  // export reads from, before the header is emitted, so a transactional
+  // export's header is consistent with everything that follows it.
+  const retention =
+    store.graph.identity === undefined || options.identityMode !== "archival" ?
+      undefined
+    : await storeRuntime(store).identityTransitionRetentionAtTarget(backend);
 
   await emit({
     type: "header",
@@ -492,6 +517,7 @@ async function produceExportChunks<G extends GraphDef>(
           identity: {
             profile: "typegraph-identity-v1" as const,
             mode: options.identityMode,
+            ...(retention === undefined ? {} : { retention }),
           },
         }),
     },
@@ -533,6 +559,82 @@ async function produceExportChunks<G extends GraphDef>(
     );
     if (page.assertions.length > 0) {
       await emit({ type: "identity", assertions: [...page.assertions] });
+    }
+    if (page.done) break;
+    after = requireDefined(page.nextAfter);
+  }
+  // Explanation, not truth: `archival` mode alone carries transitions —
+  // `state` mode carries current truth only, and neither branch cloning nor a
+  // fresh graph's own history should carry explanation for events it never
+  // lived through.
+  if (options.identityMode === "archival") {
+    await produceIdentityTransitionChunks(
+      store,
+      backend,
+      emit,
+      options.batchSize,
+    );
+  }
+}
+
+/**
+ * Widens the internal transfer shape's `readonly` array fields
+ * (`assertionIds`, `decision.branchAncestry`) to the mutable arrays the wire
+ * schema's `z.array(...)` fields infer — a structural, value-preserving copy,
+ * never a semantic transform.
+ */
+function wireTransition(
+  transition: IdentityTransitionTransfer,
+): InterchangeIdentityTransition {
+  const { decision, ...rest } = transition;
+  const { branchAncestry, ...decisionRest } = decision ?? {};
+  return {
+    ...rest,
+    assertionIds: [...transition.assertionIds],
+    ...(decision === undefined ?
+      {}
+    : {
+        decision: {
+          ...decisionRest,
+          ...(branchAncestry === undefined ?
+            {}
+          : { branchAncestry: [...branchAncestry] }),
+        },
+      }),
+  };
+}
+
+async function produceIdentityTransitionChunks<G extends GraphDef>(
+  store: Store<G>,
+  backend: GraphBackend | TransactionBackend,
+  emit: (chunk: GraphInterchangeChunk) => Promise<void>,
+  batchSize: number,
+): Promise<void> {
+  let after: IdentityTransitionCursor | undefined;
+  // At least one "identity-transitions" chunk is ALWAYS emitted, even when
+  // the graph has zero retained transitions (a fully-pruned source) — this is
+  // what lets the streaming importer set `identity.transitions` (possibly to
+  // `[]`) at all, so a carried retention watermark still reaches the restore
+  // path. `exportGraph`'s accumulator gets this for free (it always assigns
+  // `transitions: identityTransitions` for archival mode); the stream must
+  // emit the chunk itself to give an incremental consumer the same signal.
+  let emittedAny = false;
+  for (;;) {
+    const page = await storeRuntime(store).readIdentityTransitionPageAtTarget(
+      backend,
+      {
+        ...(after === undefined ? {} : { after }),
+        limit: batchSize,
+      },
+    );
+    if (page.transitions.length > 0 || !emittedAny) {
+      await emit({
+        type: "identity-transitions",
+        transitions: page.transitions.map((transition) =>
+          wireTransition(transition),
+        ),
+      });
+      emittedAny = true;
     }
     if (page.done) return;
     after = requireDefined(page.nextAfter);

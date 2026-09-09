@@ -187,6 +187,7 @@ import {
   type InterchangeEdge,
   type InterchangeIdentityAssertion,
   InterchangeIdentitySchema,
+  type InterchangeIdentityTransition,
   type InterchangeNode,
   type ResolvedImportOptions,
   type UnknownPropertyStrategy,
@@ -713,6 +714,7 @@ export async function importGraphStream<G extends GraphDef>(
   let header: GraphDataHeader | undefined;
   let receivedEdges = false;
   let receivedIdentity = false;
+  let receivedIdentityTransitions = false;
   let releaseImportLease: (() => void) | undefined;
 
   try {
@@ -775,7 +777,11 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream must start with a header.",
             );
           }
-          if (receivedEdges || receivedIdentity) {
+          if (
+            receivedEdges ||
+            receivedIdentity ||
+            receivedIdentityTransitions
+          ) {
             throw new Error(
               `Graph interchange stream cannot emit nodes after ${
                 receivedEdges ? "edges" : "identity assertions"
@@ -803,7 +809,7 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream must start with a header.",
             );
           }
-          if (receivedIdentity) {
+          if (receivedIdentity || receivedIdentityTransitions) {
             throw new Error(
               "Graph interchange stream cannot emit edges after identity assertions.",
             );
@@ -835,6 +841,11 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream emitted identity rows without an identity header.",
             );
           }
+          if (receivedIdentityTransitions) {
+            throw new Error(
+              "Graph interchange stream cannot emit identity assertions after identity transitions.",
+            );
+          }
           receivedIdentity = true;
           if (chunk.assertions.length === 0) break;
           mergeImportResult(
@@ -842,6 +853,29 @@ export async function importGraphStream<G extends GraphDef>(
             await importGraphData(
               store,
               graphDataForChunk(header, [], [], chunk.assertions),
+              { ...options, refreshStatistics: false },
+            ),
+          );
+          throwIfStreamChunkFailed(result, options);
+          break;
+        }
+        case "identity-transitions": {
+          if (header === undefined) {
+            throw new Error(
+              "Graph interchange stream must start with a header.",
+            );
+          }
+          if (header.identity === undefined) {
+            throw new Error(
+              "Graph interchange stream emitted identity transitions without an identity header.",
+            );
+          }
+          receivedIdentityTransitions = true;
+          mergeImportResult(
+            result,
+            await importGraphData(
+              store,
+              graphDataForChunk(header, [], [], [], chunk.transitions),
               { ...options, refreshStatistics: false },
             ),
           );
@@ -1221,6 +1255,46 @@ async function importIdentitySection<G extends GraphDef>(
     result.identity.skipped += progress.skipped;
     errors.push(entry);
   }
+  await importIdentityTransitionsSection(runtime, target, identity);
+}
+
+/**
+ * Restores an archival payload's `transitions` section, if any — a verbatim
+ * restore (§7.3): no closure repair, no renumbering, nothing reported back on
+ * {@link ImportResult} (there is no live-conflict dimension to count, unlike
+ * assertions). Never attempted for `state` mode, which carries current truth
+ * only; a `state` payload naming transitions is a shape defect and throws
+ * uncaught here, exactly like {@link validateIdentitySection}'s upfront schema
+ * check — a malformed archival payload is a precondition failure, not a
+ * per-row import outcome.
+ */
+async function importIdentityTransitionsSection<G extends GraphDef>(
+  runtime: ReturnType<typeof storeRuntime<G>>,
+  target: IdentityTarget,
+  identity: NonNullable<GraphData["identity"]>,
+): Promise<void> {
+  const transitions = identity.transitions ?? [];
+  if (identity.mode === "state") {
+    if (transitions.length === 0) return;
+    throw new ValidationError(
+      "State identity import cannot carry archival transitions.",
+      {
+        issues: [
+          {
+            path: "identity.transitions",
+            message: 'transitions is only valid for mode: "archival".',
+            code: "IDENTITY_STATE_IMPORT_TRANSITIONS",
+          },
+        ],
+      },
+    );
+  }
+  if (transitions.length === 0 && identity.retention === undefined) return;
+  await runtime.importIdentityTransitionsAtTarget(
+    target,
+    transitions,
+    identity.retention?.prunedBeforeRevision,
+  );
 }
 
 function identityImportProgress(
@@ -1276,6 +1350,12 @@ function graphDataForChunk(
   nodes: GraphData["nodes"],
   edges: GraphData["edges"],
   assertions: readonly InterchangeIdentityAssertion[],
+  // Present ONLY for the "identity-transitions" chunk — its absence (as
+  // opposed to an empty array) is what tells `importIdentityTransitionsSection`
+  // this reconstructed document carries no transitions section at all, so the
+  // nodes/edges/identity(assertions) chunk calls never redundantly re-write
+  // the retention watermark.
+  transitions?: readonly InterchangeIdentityTransition[],
 ): GraphData {
   const { identity, ...headerWithoutIdentity } = header;
   return {
@@ -1285,7 +1365,13 @@ function graphDataForChunk(
     ...(identity === undefined ?
       {}
     : {
-        identity: { ...identity, assertions: [...assertions] },
+        identity: {
+          ...identity,
+          assertions: [...assertions],
+          ...(transitions === undefined ?
+            {}
+          : { transitions: [...transitions] }),
+        },
       }),
   };
 }
