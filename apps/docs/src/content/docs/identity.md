@@ -496,8 +496,8 @@ flip rewrites the materialized identity closure and changes every
 `areSame`/`membersOf`/`includeIdentityMembers` answer against existing data —
 so it requires the same explicit `migrateSchema()` opt-in as any other
 breaking change; it never auto-migrates silently. Identity-relevant ontology
-changes (`disjointWith`, `equivalentTo`/deprecated `sameAs`, or `subClassOf`)
-are likewise persisted semantic migrations, not a local runtime toggle.
+changes (`disjointWith`, `equivalentTo`, or `subClassOf`) are likewise
+persisted semantic migrations, not a local runtime toggle.
 `createStoreWithSchema` and explicit `migrateSchema()` both rebuild and
 validate the closure atomically with the schema commit that carries the
 change. While the flip is unapplied, store construction refuses with
@@ -515,9 +515,12 @@ initialization — an empty database just makes them cheap no-ops.
 
 ## Migrating from type-level factories
 
-The ontology factories `sameAs(A, B)` and `differentFrom(A, B)` are deprecated:
-they relate **types**, not individual rows, and `differentFrom` never enforced
-instance identity. To migrate:
+The ontology factories `sameAs(A, B)` and `differentFrom(A, B)` were removed
+(see
+[Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](/schema-evolution#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis)):
+they related **types**, not individual rows, and `differentFrom` never
+enforced instance identity. To migrate code that used them for identity
+purposes:
 
 1. Add `identity: { sameIdAcrossKinds: "fold" }` to the graph.
 2. Open it with `createStoreWithSchema` so the capability is persisted and
@@ -525,7 +528,7 @@ instance identity. To migrate:
 3. Replace type-level facts with `store.identity` assertions between concrete
    node references.
 4. Use `equivalentTo` or `disjointWith` when the intended relation is genuinely
-   between kinds.
+   between kinds — `equivalentTo` is a drop-in replacement for `sameAs`.
 
 On PostgreSQL, first-time enablement waits for in-flight node writes before it
 builds the initial identity closure. Quiesce or restart any store instances

@@ -2,7 +2,7 @@
  * Compile-time type tests for C.1 (typed subsumption).
  *
  * Tests marked with @ts-expect-error verify that an incompatible
- * `subClassOf` / `equivalentTo` / `sameAs` pair is refused AT COMPILE TIME,
+ * `subClassOf` / `equivalentTo` pair is refused AT COMPILE TIME,
  * with the failure carrier (`StructuralSubtypeMismatch`) naming the
  * offending fields. Load-bearing: see
  * tests/property/typed-subsumption-agreement.test.ts for the runtime-side
@@ -17,7 +17,6 @@ import {
   defineGraph,
   defineNode,
   equivalentTo,
-  sameAs,
   type Store,
   subClassOf,
 } from "../src";
@@ -146,26 +145,6 @@ describe("C.1 — equivalentTo mutual structural contract", () => {
   it("allows the IRI form with no schema check", () => {
     const relation = equivalentTo(Person, "https://schema.org/Person");
     expect(relation.to).toBe("https://schema.org/Person");
-  });
-});
-
-describe("C.1 — sameAs carries the same contract as equivalentTo", () => {
-  it("compiles for an identical pair", () => {
-    const Gamma = defineNode("Gamma", {
-      schema: z.object({ y: z.number() }),
-    });
-    const Delta = defineNode("Delta", {
-      schema: z.object({ y: z.number() }),
-    });
-    // eslint-disable-next-line @typescript-eslint/no-deprecated
-    const relation = sameAs(Gamma, Delta);
-    expect(relation.metaEdge.name).toBe("sameAs");
-  });
-
-  it("refuses an incompatible pair — the deprecated alias is not an escape hatch", () => {
-    // @ts-expect-error - Person is missing Employee's employeeId field
-    // eslint-disable-next-line @typescript-eslint/no-deprecated
-    sameAs(Person, Employee);
   });
 });
 

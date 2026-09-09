@@ -4853,9 +4853,6 @@ type IndexWhereOperand = Readonly<{
 }>;
 
 // @public
-type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
-
-// @public
 type InsertEdgeParams = Readonly<{
     graphId: string;
     id: string;
@@ -5314,11 +5311,6 @@ type SerializedEdgeDef = Readonly<{
 // @public
 type SerializedMetaEdge = Readonly<{
     name: string;
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 

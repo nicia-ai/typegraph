@@ -23,7 +23,6 @@ import {
 } from "../core/types";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import { type IndexDeclaration } from "../indexes/types";
-import { type InferenceType } from "../ontology/types";
 import { type JsonPointer } from "../query/json-pointer";
 import { type CompositionPartSide } from "../registry/composition-relation";
 
@@ -55,16 +54,6 @@ const temporalModeZod = z.enum([
 const uniquenessScopeZod = z.enum(["kind", "kindWithSubClasses"]);
 
 const collationZod = z.enum(["binary", "caseInsensitive"]);
-
-const inferenceTypeZod = z.enum([
-  "subsumption",
-  "hierarchy",
-  "substitution",
-  "constraint",
-  "composition",
-  "association",
-  "none",
-]);
 
 const indexScopeZod = z.enum(["graphAndKind", "graph", "none"]);
 
@@ -403,14 +392,15 @@ export type JsonSchema = Readonly<{
 
 /**
  * Serialized representation of a meta-edge.
+ *
+ * `transitive`/`symmetric`/`reflexive`/`inverse`/`inference` were removed
+ * (roadmap F) — see `MetaEdgeProperties`'s docblock. The parsing zod schema
+ * (`serializedSchemaZod`, below) stays `.loose()` on this record, so an
+ * older document that still carries those keys still parses; they are
+ * simply never read.
  */
 export type SerializedMetaEdge = Readonly<{
   name: string;
-  transitive: boolean;
-  symmetric: boolean;
-  reflexive: boolean;
-  inverse: string | undefined;
-  inference: InferenceType;
   description: string | undefined;
 }>;
 
@@ -461,6 +451,16 @@ export type SerializedClosures = Readonly<{
  * Complete serialized ontology section.
  */
 export type SerializedOntology = Readonly<{
+  /**
+   * Derived state, computed 1:1 from `relations` by the serializer: one
+   * entry per meta-edge name any relation below currently uses. Carried for
+   * introspection (readers that want to list the meta-edges a schema
+   * touches without scanning every relation) — never an independent
+   * classification input. `classifyOntologyChanges`
+   * (`src/schema/ontology-change.ts`) diffs `relations` only; see that
+   * module's docblock for why a meta-edge name appearing or disappearing
+   * here is always a consequence of a relation change, not a distinct event.
+   */
   metaEdges: Record<string, SerializedMetaEdge>;
   relations: readonly SerializedOntologyRelation[];
   closures: SerializedClosures;
@@ -637,13 +637,12 @@ export const serializedSchemaZod = z
             z
               .object({
                 name: z.string(),
-                transitive: z.boolean(),
-                symmetric: z.boolean(),
-                reflexive: z.boolean(),
-                inference: inferenceTypeZod,
-                inverse: z.string().optional(),
                 description: z.string().optional(),
               })
+              // `.loose()`: an older document may still carry `transitive`/
+              // `symmetric`/`reflexive`/`inverse`/`inference` (removed,
+              // roadmap F) — they parse through unread rather than
+              // rejecting the document.
               .loose(),
           )
           .superRefine(

@@ -1223,8 +1223,8 @@ try {
 ```
 
 The `details.reason` value `"ontology-tightening-violated"` means an ontology
-change — adding `disjointWith`, `subClassOf`, `equivalentTo`, or `sameAs`, or
-removing `subClassOf`, `equivalentTo`, or `sameAs` — is false against rows
+change — adding `disjointWith`, `subClassOf`, or `equivalentTo`, or
+removing `subClassOf` or `equivalentTo` — is false against rows
 that already exist. `details.changes` carries only the ontology changes in
 this diff that required a data check (a `safe` or `breaking` change in the
 same commit is never included, even one alongside the change that was

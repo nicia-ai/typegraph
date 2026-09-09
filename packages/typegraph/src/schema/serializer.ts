@@ -542,6 +542,11 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
 
 /**
  * Serializes the complete ontology.
+ *
+ * `metaEdges` is derived 1:1 from `relations` — see
+ * `SerializedOntology.metaEdges`'s docblock — so it is computed here purely
+ * for introspection and carries no information `classifyOntologyChanges`
+ * (`src/schema/ontology-change.ts`) needs; that module diffs `relations`.
  */
 function serializeOntology(
   relations: readonly OntologyRelation[],
@@ -583,11 +588,6 @@ function serializeOntology(
 function serializeMetaEdge(metaEdge: MetaEdge): SerializedMetaEdge {
   return {
     name: metaEdge.name,
-    transitive: metaEdge.properties.transitive,
-    symmetric: metaEdge.properties.symmetric,
-    reflexive: metaEdge.properties.reflexive,
-    inverse: metaEdge.properties.inverse,
-    inference: metaEdge.properties.inference,
     description: metaEdge.properties.description,
   };
 }
