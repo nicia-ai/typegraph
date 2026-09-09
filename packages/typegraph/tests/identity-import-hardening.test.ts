@@ -16,6 +16,7 @@ import { IdentityContradictionError } from "../src/errors";
 import { type IdentityTransferAssertion } from "../src/identity/service";
 import {
   exportGraph,
+  exportGraphStream,
   importGraph,
   importGraphStream,
 } from "../src/interchange";
@@ -467,6 +468,55 @@ describe("archival identity import window bounds", () => {
     // unbounded replay call's requested range starts from (revision 0).
     const targetReplay = await target.identity.replay(alice);
     expect(targetReplay.truncatedBefore).toBeDefined();
+  });
+
+  it("streams the identity-transitions chunk through exportGraphStream / importGraphStream", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+    const sourceTransitions = await source.identity.transitionsOf(alice);
+    expect(sourceTransitions.length).toBeGreaterThan(0);
+
+    const chunks: GraphInterchangeChunk[] = [];
+    for await (const chunk of exportGraphStream(source, {
+      identityMode: "archival",
+    })) {
+      chunks.push(chunk);
+    }
+    expect(chunks.some((chunk) => chunk.type === "identity-transitions")).toBe(
+      true,
+    );
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const result = await importGraphStream(target, chunkStream(chunks), {
+      onConflict: "skip",
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.success).toBe(true);
+
+    const targetStreamedTransitions =
+      await target.identity.transitionsOf(alice);
+    const targetTransitionIds = new Set(
+      targetStreamedTransitions.map((transition) => transition.transitionId),
+    );
+    for (const sourceTransition of sourceTransitions) {
+      expect(targetTransitionIds.has(sourceTransition.transitionId)).toBe(true);
+    }
   });
 });
 
