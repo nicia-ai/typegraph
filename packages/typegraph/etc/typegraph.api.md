@@ -1096,11 +1096,6 @@ export const core: {
     readonly subClassOfMetaEdge: Readonly<{
         name: "subClassOf";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1108,11 +1103,6 @@ export const core: {
     readonly broaderMetaEdge: Readonly<{
         name: "broader";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1120,11 +1110,6 @@ export const core: {
     readonly narrowerMetaEdge: Readonly<{
         name: "narrower";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1132,11 +1117,6 @@ export const core: {
     readonly relatedToMetaEdge: Readonly<{
         name: "relatedTo";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1144,11 +1124,6 @@ export const core: {
     readonly equivalentToMetaEdge: Readonly<{
         name: "equivalentTo";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1156,11 +1131,6 @@ export const core: {
     readonly sameAsMetaEdge: Readonly<{
         name: "sameAs";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1168,11 +1138,6 @@ export const core: {
     readonly differentFromMetaEdge: Readonly<{
         name: "differentFrom";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1180,11 +1145,6 @@ export const core: {
     readonly disjointWithMetaEdge: Readonly<{
         name: "disjointWith";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1192,11 +1152,6 @@ export const core: {
     readonly partOfMetaEdge: Readonly<{
         name: "partOf";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1204,11 +1159,6 @@ export const core: {
     readonly hasPartMetaEdge: Readonly<{
         name: "hasPart";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1216,11 +1166,6 @@ export const core: {
     readonly inverseOfMetaEdge: Readonly<{
         name: "inverseOf";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1228,11 +1173,6 @@ export const core: {
     readonly impliesMetaEdge: Readonly<{
         name: "implies";
         properties: Readonly<{
-            transitive: boolean;
-            symmetric: boolean;
-            reflexive: boolean;
-            inverse: string | undefined;
-            inference: InferenceType;
             description: string | undefined;
         }>;
         __metaEdge: true;
@@ -1242,8 +1182,6 @@ export const core: {
     readonly narrower: typeof narrower;
     readonly relatedTo: typeof relatedTo;
     readonly equivalentTo: typeof equivalentTo;
-    readonly sameAs: typeof sameAs;
-    readonly differentFrom: typeof differentFrom;
     readonly disjointWith: typeof disjointWith;
     readonly partOf: typeof partOf;
     readonly hasPart: typeof hasPart;
@@ -1684,9 +1622,6 @@ interface DepthDecrementMap {
     // (undocumented)
     5: 4;
 }
-
-// @public @deprecated
-export function differentFrom(kindA: NodeType, kindB: NodeType): OntologyRelation;
 
 // @public
 export class DisjointError extends TypeGraphError {
@@ -4152,9 +4087,6 @@ type IndexWhereOperand = Readonly<{
 }>;
 
 // @public
-export type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
-
-// @public
 export type InitialQueryBuilder<G extends GraphDef, CoordinateState extends QueryCoordinateState = "open"> = QueryBuilder<G, EmptyAliasMap, EmptyEdgeAliasMap, EmptyRecursiveAliasMap, CoordinateState>;
 
 // @public
@@ -4799,9 +4731,6 @@ const META_EDGE_BRAND: "__metaEdge";
 const META_EDGE_EQUIVALENT_TO: "equivalentTo";
 
 // @public
-const META_EDGE_SAME_AS: "sameAs";
-
-// @public
 const META_EDGE_SUB_CLASS_OF: "subClassOf";
 
 // @public
@@ -4811,29 +4740,11 @@ export type MetaEdge<K extends string = string> = Readonly<{
     properties: MetaEdgeProperties;
 }>;
 
-// @public
-export function metaEdge<K extends string>(name: K, options?: MetaEdgeOptions): MetaEdge<K>;
-
 // @public (undocumented)
 type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
-export type MetaEdgeOptions = Readonly<{
-    transitive?: boolean;
-    symmetric?: boolean;
-    reflexive?: boolean;
-    inverse?: string;
-    inference?: InferenceType;
-    description?: string;
-}>;
-
-// @public
 export type MetaEdgeProperties = Readonly<{
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -5455,7 +5366,7 @@ export function offsetFragment<G extends GraphDef>(n: number): FlexibleQueryFrag
 // @public
 type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "metaEdge" | "relation";
+    entity: "relation";
     name: string;
     severity: ChangeSeverity;
     details: string;
@@ -6450,12 +6361,6 @@ export type RuntimeNodeReferenceFor<T extends RuntimeNodeKind> = T extends Runti
 // @public
 export type RuntimeNodeTypeFor<T extends RuntimeNodeKind> = T extends RuntimeNodeKind<infer K, infer S> ? NodeType<K, S> : never;
 
-// @public @deprecated (undocumented)
-export function sameAs<A extends NodeType, B extends NodeType>(kindA: A, kindB: B & EquivalentToCheck<A, B>): TypedOntologyRelation<typeof META_EDGE_SAME_AS, A, B>;
-
-// @public @deprecated (undocumented)
-export function sameAs(kindA: NodeType, kindBOrIri: string): OntologyRelation;
-
 // @public (undocumented)
 export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;
 
@@ -6730,11 +6635,6 @@ type SerializedEdgeDef = Readonly<{
 // @public
 type SerializedMetaEdge = Readonly<{
     name: string;
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
