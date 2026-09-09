@@ -164,18 +164,25 @@ import {
   ATOMIC_CONTRIBUTION_ASSERTION_FIXED_BIND_COUNT,
   ATOMIC_CONTRIBUTION_EVIDENCE_BIND_COUNT,
 } from "./operations/contribution-evidence";
+import { ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT } from "./operations/edge-claims";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
 
-// The set-based claim acquisition is the widest sidecar statement: five row
-// values, both endpoint probes, and the competing-holder predicate. `unique`
-// is the widest cardinality because that predicate binds both destination
-// fields as well as the source fields. Chunk every cardinality to that ceiling
-// so a mixed batch cannot cross the driver's per-statement bind budget.
-const ATOMIC_EDGE_CLAIM_PARAM_COUNT = 18;
+/**
+ * What a claim statement costs beyond its rows: the schema fence's graph id
+ * and expected version, and the claim timestamp.
+ *
+ * Every claim statement binds the same
+ * {@link ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT} values per proposed row —
+ * the relation they all drive from carries both endpoints regardless of which
+ * of them a cardinality's predicate reads — so one ceiling covers every
+ * cardinality and a mixed batch cannot cross the driver's per-statement bind
+ * budget.
+ */
+const ATOMIC_EDGE_CLAIM_FIXED_PARAM_COUNT = 3;
 const ATOMIC_EDGE_CONVERGENCE_PARAM_COUNT = 14;
 const ATOMIC_EDGE_CONVERGENCE_FIXED_PARAM_COUNT = 2;
 const ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT = 6;
@@ -2872,7 +2879,10 @@ export function createCommonOperationBackend(
           );
           const atomicEdgeClaimBatchSize = Math.max(
             1,
-            Math.floor((maxBindParameters - 2) / ATOMIC_EDGE_CLAIM_PARAM_COUNT),
+            Math.floor(
+              (maxBindParameters - ATOMIC_EDGE_CLAIM_FIXED_PARAM_COUNT) /
+                ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT,
+            ),
           );
           function appendClaimSlots<TResult>(
             slots: AtomicSqlProgram<TResult, unknown>["slots"][number][],
@@ -2886,43 +2896,39 @@ export function createCommonOperationBackend(
               claims,
               atomicEdgeClaimBatchSize,
             )) {
-              slots.push(
-                {
-                  statement: execution.compile(
-                    operationStrategy.buildDeleteStaleAtomicEdgeClaims(
-                      claimChunk,
-                      input.schemaFence,
-                      atomicSchemaFenceLockClause,
-                    ),
-                  ),
-                  cardinality: "none",
-                  decode,
-                },
-                {
-                  statement: execution.compile(
-                    operationStrategy.buildAcquireAtomicEdgeClaims(
-                      claimChunk,
-                      timestamp,
-                      input.schemaFence,
-                      atomicSchemaFenceLockClause,
-                    ),
-                  ),
-                  cardinality: "none",
-                  decode,
-                },
-                {
-                  statement: execution.compile(
-                    operationStrategy.buildAssertAtomicEdgeClaimsOwned(
-                      claimChunk,
-                      timestamp,
-                      input.schemaFence,
-                      atomicSchemaFenceLockClause,
-                    ),
-                  ),
-                  cardinality: "none",
-                  decode,
-                },
-              );
+              // Each builder renders one statement per cardinality group in
+              // the chunk. The three phases stay globally ordered — every
+              // stale release, then every acquisition, then every ownership
+              // assertion — because a chunk's groups are disjoint by axis and
+              // phase order is what the claim contract is stated in.
+              const phases = [
+                operationStrategy.buildDeleteStaleAtomicEdgeClaims(
+                  claimChunk,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+                operationStrategy.buildAcquireAtomicEdgeClaims(
+                  claimChunk,
+                  timestamp,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+                operationStrategy.buildAssertAtomicEdgeClaimsOwned(
+                  claimChunk,
+                  timestamp,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ];
+              for (const phase of phases) {
+                for (const statement of phase) {
+                  slots.push({
+                    statement: execution.compile(statement),
+                    cardinality: "none",
+                    decode,
+                  });
+                }
+              }
             }
           }
           if (input.resultMode === "count") {

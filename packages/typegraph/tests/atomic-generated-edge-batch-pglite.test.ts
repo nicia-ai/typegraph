@@ -80,20 +80,20 @@ describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
         } as const;
         const claim = requireDefined(edgeCardinalityClaim("one", params));
         const statements = [
-          buildDeleteStaleAtomicEdgeClaims(
+          ...buildDeleteStaleAtomicEdgeClaims(
             tables,
             [claim],
             schemaFence,
             drizzleSql`FOR SHARE`,
           ),
-          buildAcquireAtomicEdgeClaims(
+          ...buildAcquireAtomicEdgeClaims(
             tables,
             [claim],
             timestamp,
             schemaFence,
             drizzleSql`FOR SHARE`,
           ),
-          buildAssertAtomicEdgeClaimsOwned(
+          ...buildAssertAtomicEdgeClaimsOwned(
             tables,
             [claim],
             timestamp,
