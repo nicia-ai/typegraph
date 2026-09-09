@@ -27,6 +27,7 @@ import { z } from "zod";
 import {
   createStore,
   createStoreWithSchema,
+  createVerifiedStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -38,7 +39,10 @@ import {
   type EngineRecordedTimeMembers,
 } from "../src/backend/capabilities/recorded-time";
 import { isEngineNativeRecordedReadBinding } from "../src/backend/capabilities/recorded-time-ownership";
-import { deriveBackend } from "../src/backend/derive-backend";
+import {
+  deriveBackend,
+  deriveTransactionSessionBackend,
+} from "../src/backend/derive-backend";
 import { createSqlBackend } from "../src/backend/drizzle/engine";
 import { buildSqliteEngineProfile } from "../src/backend/drizzle/sqlite";
 import {
@@ -62,9 +66,11 @@ import {
   createSqlSchema,
 } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../src/query/sql-intent";
 import { buildKindRegistry } from "../src/registry";
 import { resolveLineage } from "../src/store/recorded-capture";
 import { storeCaptureEnabled } from "../src/store/runtime-port";
+import { requireDefined } from "../src/utils/presence";
 import { attachEngineNativeRecordedTime } from "./engine-native-recorded-time-fixture";
 import { toSqlString } from "./sql-test-utils";
 import { createTestBackend, matchingObject } from "./test-utils";
@@ -84,10 +90,67 @@ const graph = defineGraph({
   edges: { knows: { type: knows, from: [Widget], to: [Widget] } },
 });
 
+// A separate node/graph, scoped to the `getOrCreateByConstraint` receipt
+// case below: the uniqueness constraint that case needs is irrelevant (and
+// a small collision risk) for every other case in this file, which all
+// share `graph`/`Widget` freely.
+const UniqueWidget = defineNode("UniqueWidget", {
+  schema: z.object({ label: z.string() }),
+});
+const uniqueGraph = defineGraph({
+  id: "engine_native_recorded_time_unique",
+  nodes: {
+    UniqueWidget: {
+      type: UniqueWidget,
+      unique: [
+        {
+          name: "label_key",
+          fields: ["label"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+
+// A separate node/graph, scoped to the identity-only receipt case below:
+// `store.identity` exists only when `defineGraph` declares `identity`, and
+// a cross-kind fold needs two node kinds neither `graph` nor `uniqueGraph`
+// carries.
+const PersonRecord = defineNode("PersonRecord", {
+  schema: z.object({ name: z.string() }),
+});
+const AuthorRecord = defineNode("AuthorRecord", {
+  schema: z.object({ penName: z.string() }),
+});
+const identityGraph = defineGraph({
+  id: "engine_native_recorded_time_identity",
+  nodes: {
+    PersonRecord: { type: PersonRecord },
+    AuthorRecord: { type: AuthorRecord },
+  },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
 const ENGINE_REVISION: EngineRecordedRevision = {
   revision: "engine-r1",
   recordedAt: "2026-01-01T00:00:00.000Z",
 };
+
+async function captureConfigurationError(
+  promise: Promise<unknown>,
+): Promise<ConfigurationError> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof ConfigurationError) return error;
+    throw error;
+  }
+  throw new Error("Expected ConfigurationError");
+}
 
 function scriptedLineage(): LineageMembers {
   return {
@@ -128,6 +191,37 @@ function createEngineNativeBackend(
   return { backend: createSqlBackend(profile), lineage, sqlite };
 }
 
+/**
+ * Wraps an engine-native backend's committing session so every
+ * `lockSchemaVersionForWrite` acquisition on it is counted, regardless of
+ * which object identity (raw `txBackend` or the mutation witness's wrapped
+ * `writeTarget`) a caller reaches it through — used by the schema-fence
+ * leasing regression below.
+ */
+function countingUniqueGraphBackend(): Readonly<{
+  backend: GraphBackend;
+  schemaFenceCalls: () => number;
+}> {
+  const { backend } = createEngineNativeBackend([]);
+  let calls = 0;
+  const observingBackend = deriveBackend(backend, {
+    transaction: (fn, options) =>
+      backend.transaction((tx) => {
+        const lockSchemaVersionForWrite = requireDefined(
+          tx.lockSchemaVersionForWrite,
+        );
+        const countingTx = deriveTransactionSessionBackend(tx, {
+          lockSchemaVersionForWrite: (params) => {
+            calls += 1;
+            return lockSchemaVersionForWrite(params);
+          },
+        });
+        return fn(countingTx);
+      }, options),
+  });
+  return { backend: observingBackend, schemaFenceCalls: () => calls };
+}
+
 describe("engine-native recorded time: construction", () => {
   it("constructs with { history: true } and skips TypeGraph capture entirely", () => {
     const { backend } = createEngineNativeBackend([]);
@@ -147,6 +241,94 @@ describe("engine-native recorded time: construction", () => {
     // The backend's own engine anchor applies for graph-merge base tokens,
     // not the TypeGraph revision-anchor path.
     expect(store.revisionTrackingEnabled).toBe(false);
+  });
+
+  /**
+   * `assertHistorySchemaOnOpen` (the async open path's history-schema check)
+   * used to gate on `options.history === true` alone, so it probed for
+   * TypeGraph's own recorded relations on a database that — under
+   * engine-native ownership — never has any, refusing every engine-native
+   * `history: true` open with `RECORDED_SCHEMA_INCOMPATIBLE`. It must gate
+   * on TypeGraph OWNERSHIP instead (`resolveRecordedTimeOwnership(backend)
+   * === "typegraph-relations"`), through the one existing owner of that
+   * derivation.
+   *
+   * The bundled migration provisions the recorded relations unconditionally
+   * (they exist even on an engine-native store's database, simply unused),
+   * so this drops them after the first boot to reach the scenario the check
+   * actually guards against: a database whose recorded relations were
+   * dropped. Both async open paths that reach the check —
+   * `createStoreWithSchema` and `createVerifiedStore`, on the SAME
+   * already-bootstrapped database so the second open needs no separate
+   * base-schema install — must open an engine-native store over it.
+   * MUTATION-PROOF: restoring the old `options?.history !== true` gate
+   * (dropping the ownership check) makes both opens below throw
+   * `RECORDED_SCHEMA_INCOMPATIBLE` instead of resolving.
+   */
+  it("opens through both async store-opening paths on a database whose recorded relations were dropped", async () => {
+    const { backend } = createEngineNativeBackend([]);
+    await createStoreWithSchema(graph, backend, { history: true });
+    const schema = createSqlSchema(backend.tableNames);
+    if (backend.executeStatement === undefined) {
+      throw new Error("SQLite test backend must execute statements");
+    }
+    for (const table of [
+      schema.recordedNodesTable,
+      schema.recordedEdgesTable,
+      schema.recordedClockTable,
+    ]) {
+      await backend.executeStatement(
+        asCompiledStatementSql(sql`DROP TABLE ${table}`),
+      );
+    }
+
+    const [schemaStore] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    expect(schemaStore.recordedTimeOwnership).toBe("engine-native");
+
+    const [verifiedStore] = await createVerifiedStore(graph, backend, {
+      history: true,
+    });
+    expect(verifiedStore.recordedTimeOwnership).toBe("engine-native");
+  });
+
+  /**
+   * The negative control on the SAME scenario as the case above: dropping
+   * the recorded relations from a TypeGraph-OWNED store's database must
+   * still refuse both async open paths, proving the ownership gate above
+   * narrows the refusal to engine-native rather than disabling it.
+   */
+  it("still refuses both async store-opening paths for a TypeGraph-owned store over the same kind of database", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(graph, backend, { history: true });
+    const schema = createSqlSchema(backend.tableNames);
+    if (backend.executeStatement === undefined) {
+      throw new Error("SQLite test backend must execute statements");
+    }
+    for (const table of [
+      schema.recordedNodesTable,
+      schema.recordedEdgesTable,
+      schema.recordedClockTable,
+    ]) {
+      await backend.executeStatement(
+        asCompiledStatementSql(sql`DROP TABLE ${table}`),
+      );
+    }
+
+    const schemaOpenError = await captureConfigurationError(
+      createStoreWithSchema(graph, backend, { history: true }),
+    );
+    expect(schemaOpenError.details["code"]).toBe(
+      "RECORDED_SCHEMA_INCOMPATIBLE",
+    );
+
+    const verifiedOpenError = await captureConfigurationError(
+      createVerifiedStore(graph, backend, { history: true }),
+    );
+    expect(verifiedOpenError.details["code"]).toBe(
+      "RECORDED_SCHEMA_INCOMPATIBLE",
+    );
   });
 
   it("refuses revisionTracking: true without history", () => {
@@ -351,16 +533,75 @@ describe("engine-native recorded time: transaction receipts", () => {
   });
 
   /**
+   * `#buildTransactionContext` runs every write in a receipted engine-native
+   * transaction through the mutation witness's wrapped session
+   * (`writeTarget`), so `withTransactionSchemaFenceLease` and
+   * `withWriteTransactionSession` must key their lease/session maps on that
+   * SAME wrapped object — they key on object identity, and a write issued
+   * through the wrapper resolves nothing under a lease the raw `txBackend`
+   * registered under. Two constrained creates in one `transactionWithReceipt`
+   * call must therefore take exactly ONE `lockSchemaVersionForWrite`
+   * acquisition — the second create's `hasLeasedSchemaFence` check must see
+   * the first create's lease, matching a plain `store.transaction()` with no
+   * receipt requested at all (asserted immediately below as the positive
+   * control). MUTATION-PROOF: passing the raw `txBackend` (instead of
+   * `writeTarget`) to `withTransactionSchemaFenceLease` and
+   * `withWriteTransactionSession` in store.ts's `run()` closure makes the
+   * receipted count assertion fail — two acquisitions instead of one, since
+   * the lease registered under the raw target is invisible to a write issued
+   * through the wrapped one.
+   */
+  it("leases the schema fence once across two constrained creates in a receipted engine-native transaction", async () => {
+    // Positive control: a plain `store.transaction()` (no receipt, so the
+    // mutation witness never wraps anything) already leases the fence once
+    // across both constrained creates — this is the behavior the receipted
+    // case below must match.
+    const plain = countingUniqueGraphBackend();
+    const [plainStore] = await createStoreWithSchema(
+      uniqueGraph,
+      plain.backend,
+      { history: true },
+    );
+    await plainStore.transaction(async (tx) => {
+      await tx.nodes.UniqueWidget.getOrCreateByConstraint("label_key", {
+        label: "plain-first",
+      });
+      await tx.nodes.UniqueWidget.getOrCreateByConstraint("label_key", {
+        label: "plain-second",
+      });
+    });
+    expect(plain.schemaFenceCalls()).toBe(1);
+
+    const receipted = countingUniqueGraphBackend();
+    const [receiptedStore] = await createStoreWithSchema(
+      uniqueGraph,
+      receipted.backend,
+      { history: true },
+    );
+    await receiptedStore.transactionWithReceipt(async (tx) => {
+      await tx.nodes.UniqueWidget.getOrCreateByConstraint("label_key", {
+        label: "receipted-first",
+      });
+      await tx.nodes.UniqueWidget.getOrCreateByConstraint("label_key", {
+        label: "receipted-second",
+      });
+    });
+    expect(receipted.schemaFenceCalls()).toBe(1);
+  });
+
+  /**
    * A receipt was requested but the callback wrote nothing: `revisionNow`
    * must not run, and `receipt.recorded` stays undefined — matching
    * {@link TransactionReceipt.recorded}'s doc comment ("undefined when
    * history capture is off, the transaction is read-only, or no captured
    * writes were flushed") under engine-native ownership too, rather than
    * always stamping an `e1:` instant merely because a receipt was asked
-   * for. MUTATION-PROOF: dropping the `receiptRecorder.hasWrites()`
-   * conjunct in store.ts's `run()` closure makes this test fail —
-   * `outcome.receipt.recorded` becomes a defined `e1:` instant and
-   * `observedSessions` gains an entry for a transaction that wrote nothing.
+   * for. MUTATION-PROOF: reverting store.ts's `run()` closure to build
+   * `recordedByGraph` from `receiptRecorder?.snapshot().writes.total !== 0`
+   * instead of the mutation witness makes this test fail too (an empty
+   * callback still leaves `writes.total` at `0`, so this particular case is
+   * a weaker check than the three below — see that block's own doc comment
+   * for the mutation-proof that actually distinguishes the two).
    */
   it("stamps no recorded instant for a receipt requested on a no-op transaction", async () => {
     const observedSessions: TransactionBackend[] = [];
@@ -376,6 +617,124 @@ describe("engine-native recorded time: transaction receipts", () => {
     expect(outcome.receipt.recorded).toBeUndefined();
     expect(outcome.receipt.writes.total).toBe(0);
     expect(observedSessions).toHaveLength(0);
+  });
+
+  /**
+   * The three collection calls that always count as a write INTENT (the
+   * collection-level counters `receipt.writes` is built from) even when
+   * nothing changed: a delete of a missing id (`executeNodeDelete` gates on
+   * existence before ever calling `backend.deleteNode`, so the collection
+   * method resolves having called no write member at all), a
+   * `getOrCreateByConstraint` that finds the row (`action: "found"` — its
+   * intent counter fires the same whether it created or found, since the
+   * count is pinned before the call resolves), and a
+   * `coalesceUnchangedUpserts`-skipped upsert (the write pipeline never
+   * calls any backend write member at all). Each must leave
+   * `receipt.recorded` undefined and take no `revisionNow` round trip.
+   * MUTATION-PROOF for all three: reverting the two `store.ts` receipt sites
+   * from the mutation witness back to
+   * `receiptRecorder?.snapshot().writes.total !== 0` makes every case below
+   * fail — `receipt.recorded` becomes a defined `e1:` instant and
+   * `observedSessions` gains an entry for a transaction that changed no row,
+   * since the collection surface still counts each of these as a write
+   * intent.
+   */
+  it("stamps no recorded instant for a delete of a missing id", async () => {
+    const observedSessions: TransactionBackend[] = [];
+    const { backend } = createEngineNativeBackend(observedSessions);
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      await tx.nodes.Widget.delete("missing-id" as never);
+    });
+
+    expect(outcome.receipt.recorded).toBeUndefined();
+    expect(observedSessions).toHaveLength(0);
+  });
+
+  it("stamps no recorded instant when getOrCreateByConstraint finds the row already occupied", async () => {
+    const observedSessions: TransactionBackend[] = [];
+    const { backend } = createEngineNativeBackend(observedSessions);
+    const [store] = await createStoreWithSchema(uniqueGraph, backend, {
+      history: true,
+    });
+    await store.transaction(async (tx) => {
+      await tx.nodes.UniqueWidget.getOrCreateByConstraint("label_key", {
+        label: "w1",
+      });
+    });
+    const baselineSessions = observedSessions.length;
+
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      const result = await tx.nodes.UniqueWidget.getOrCreateByConstraint(
+        "label_key",
+        { label: "w1" },
+      );
+      expect(result.action).toBe("found");
+    });
+
+    expect(outcome.receipt.recorded).toBeUndefined();
+    expect(observedSessions).toHaveLength(baselineSessions);
+  });
+
+  it("stamps no recorded instant for a coalesced unchanged upsert", async () => {
+    const observedSessions: TransactionBackend[] = [];
+    const { backend } = createEngineNativeBackend(observedSessions);
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+      coalesceUnchangedUpserts: true,
+    });
+    await store.transaction(async (tx) => {
+      await tx.nodes.Widget.upsertById("w1", { label: "same" });
+    });
+    const baselineSessions = observedSessions.length;
+
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      await tx.nodes.Widget.upsertById("w1", { label: "same" });
+    });
+
+    expect(outcome.receipt.recorded).toBeUndefined();
+    expect(observedSessions).toHaveLength(baselineSessions);
+  });
+
+  /**
+   * Identity assertions bypass `buildRecordedWriteMembers`'s overlay
+   * entirely — `withRecordedIdentityMutationTarget` resolves the mutation
+   * witness through the WeakMap binding `registerRecordedIdentityMutationWitness`
+   * installs in store.ts, not through a wrapped write member. MUTATION-PROOF:
+   * reverting `withRecordedIdentityMutationTarget` (`recorded-capture.ts`) to
+   * read off a binding never registered for an engine-native transaction — or
+   * removing the `registerRecordedIdentityMutationWitness` call at either
+   * store.ts receipt site — makes this test fail: `receipt.recorded` comes
+   * back `undefined` and `observedSessions` gains no entry, even though the
+   * identity assertion committed.
+   */
+  it("stamps a recorded instant for a transaction whose only write is an identity assertion", async () => {
+    const observedSessions: TransactionBackend[] = [];
+    const { backend } = createEngineNativeBackend(observedSessions);
+    const [store] = await createStoreWithSchema(identityGraph, backend, {
+      history: true,
+    });
+    const person = await store.nodes.PersonRecord.create({ name: "Ada" });
+    const author = await store.nodes.AuthorRecord.create({
+      penName: "A. Lovelace",
+    });
+    const baselineSessions = observedSessions.length;
+
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      await tx.identity.assertSame(person, author);
+    });
+
+    expect(outcome.receipt.writes.identity.total).toBe(1);
+    expect(outcome.receipt.recorded).toBe(
+      createEngineRecordedInstant(
+        ENGINE_REVISION.revision,
+        ENGINE_REVISION.recordedAt,
+      ),
+    );
+    expect(observedSessions).toHaveLength(baselineSessions + 1);
   });
 });
 

@@ -313,6 +313,38 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     ],
   },
   {
+    path: "src/store/recorded-capture/write-touch.ts",
+    reason:
+      "The write-member overlay recorded-time capture's transaction backend AND the engine-native mutation witness both install; it wraps every write member and sits BELOW the session, so it cannot route through one.",
+    permanent: true,
+    allowedMembers: [
+      "insertNode",
+      "insertNodeIfAbsent",
+      "insertNodeIfAbsentWithSchemaFence",
+      "insertNodeWithSchemaFence",
+      "commands",
+      "updateNode",
+      "compareAndSetNode",
+      "updateNodeSet",
+      "deleteNode",
+      "hardDeleteNode",
+      "insertEdge",
+      "insertEdgesDurableBatchReturning",
+      "updateEdge",
+      "deleteEdge",
+      "deleteEdgesBatch",
+      "hardDeleteEdge",
+      "hardDeleteEdgesBatch",
+    ],
+    allowedImports: [
+      "nodeInsertDispatch",
+      "edgeInsertDispatch",
+      "runInsertNoReturn",
+      "runInsertBatch",
+      "runInsertBatchReturning",
+    ],
+  },
+  {
     path: "src/store/fulltext-rebuild.ts",
     reason:
       "Index maintenance that rebuilds the fulltext projection from committed rows. Not a graph write; no WritePlan applies.",

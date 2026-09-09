@@ -322,6 +322,7 @@ import {
   assertCurrentRecordedSchema,
   assertRecordedCaptureTransactionIsolation,
   assertRevisionTrackableBackend,
+  createMutationWitness,
   createRecordedBackend,
   createRecordedTransactionScope,
   ensureRevisionOrigin,
@@ -331,6 +332,7 @@ import {
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
+  registerRecordedIdentityMutationWitness,
   resetRevisionOrigin,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
@@ -3568,10 +3570,46 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           txBackend: TransactionBackend,
           nativeTransaction: TNativeTransaction | undefined,
         ): Promise<T> => {
+          // A receipt was requested AND this store is engine-native: wrap the
+          // committing session so every write member this transaction body
+          // calls is observed at the point it either changed a row or did
+          // not (`write-touch.ts`'s per-member decision — the same one
+          // TypeGraph-owned capture reads, not a second guess at it), rather
+          // than inferring "did this transaction write" from a
+          // collection-level write-INTENT count — that counts a call, not
+          // its effect, so a delete of a missing row or a coalesced no-op
+          // upsert would otherwise still stamp `recorded`. No receipt
+          // requested, or not engine-native: nothing to observe, so no
+          // wrapping. `writeTarget` is the single object
+          // every write in this attempt runs through — capture's decorator
+          // installs the same way, and the schema-fence lease / write-session
+          // maps below key on object identity, so leasing and wrapping must
+          // share the identical target or a write issued through the wrapper
+          // resolves a session/lease the raw `txBackend` registered under.
+          const mutationWitness =
+            this.#engineNativeHistory && receiptRecorder !== undefined ?
+              createMutationWitness()
+            : undefined;
+          const writeTarget =
+            mutationWitness === undefined ? txBackend : (
+              mutationWitness.wrap(txBackend)
+            );
+          if (mutationWitness !== undefined) {
+            // Identity assertions run through a wholly separate seam
+            // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
+            // does not cover — register the witness's sink against both
+            // object identities `writeTarget` can be reached through, the
+            // same binding capture uses for its own session-backed sink.
+            registerRecordedIdentityMutationWitness(
+              writeTarget,
+              txBackend,
+              mutationWitness.sink,
+            );
+          }
           const invokeTransaction = (): Promise<T> =>
             invoke(
               this.#buildTransactionContext(
-                txBackend,
+                writeTarget,
                 nativeTransaction,
                 runHooks,
                 receiptRecorder,
@@ -3586,12 +3624,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                   graphId: this.graphId,
                   schemaVersion: this.#schemaMetadata.schemaVersion,
                 },
-                txBackend,
+                writeTarget,
                 invokeTransaction,
               )
             : invokeTransaction();
           const output = await withWriteTransactionSession(
-            txBackend,
+            writeTarget,
             {
               graphId: this.graphId,
               schemaVersion: this.#schemaMetadata.schemaVersion,
@@ -3607,19 +3645,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // answers with the PENDING revision this transaction's writes will
           // land at once it commits, not the last one already committed
           // before it opened. Exactly once — never once per graph, since an
-          // engine-native store answers for exactly one. Only
-          // when a receipt was requested AND that receipt actually recorded a
-          // write — `TransactionReceipt.recorded` is undefined for a
-          // read-only or no-op transaction under either ownership form
-          // (`hasWrites()` is the same predicate the TypeGraph-owned path
-          // answers implicitly: an unflushed graph is simply absent from
-          // `recordedByGraph`), so a plain `store.transaction()` or an
-          // empty-body `transactionWithReceipt()` neither takes the extra
-          // round trip nor stamps an instant nothing earned.
-          if (
-            this.#engineNativeHistory &&
-            receiptRecorder?.hasWrites() === true
-          ) {
+          // engine-native store answers for exactly one. Only when the
+          // mutation witness actually saw a write — `TransactionReceipt.recorded`
+          // is undefined for a read-only or no-op transaction under either
+          // ownership form (the TypeGraph-owned path answers the same "nothing
+          // to stamp" case implicitly, by simply never flushing a row for a
+          // graph with no captured writes), so a plain `store.transaction()`
+          // or an empty-body `transactionWithReceipt()` neither takes the
+          // extra round trip nor stamps an instant nothing earned.
+          if (mutationWitness?.mutated === true) {
             recordedByGraph = new Map([
               [this.graphId, await this.#engineRecordedInstant(txBackend)],
             ]);
@@ -3906,12 +3940,33 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       await lockRecordedGraphWrite(scope.backend, this.graphId);
     }
     const receiptRecorder = createTransactionReceiptRecorder();
+    // See the matching comment at the other engine-native receipt site
+    // (`runAttempt` above): the witness observes real per-member mutations
+    // on the adopted session, not write intents, so a delete of a missing
+    // row or a coalesced no-op upsert through this context leaves
+    // `receipt.recorded` undefined.
+    const mutationWitness =
+      this.#engineNativeHistory ? createMutationWitness() : undefined;
+    const writeTarget =
+      mutationWitness === undefined ?
+        scope.backend
+      : mutationWitness.wrap(scope.backend);
+    if (mutationWitness !== undefined) {
+      // Same registration as the other engine-native receipt site: identity
+      // assertions bypass `wrap`'s overlay entirely, so the witness's sink
+      // needs its own binding to see one.
+      registerRecordedIdentityMutationWitness(
+        writeTarget,
+        scope.backend,
+        mutationWitness.sink,
+      );
+    }
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
     const result = await invoke(
       this.#buildTransactionContext(
-        scope.backend,
+        writeTarget,
         externalTx,
         undefined,
         receiptRecorder,
@@ -3924,13 +3979,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // revision this transaction's writes will land at once it commits, not
     // the last one already committed before it opened. The engine-native
     // counterpart to `flush()`, called once for this store's one graph, and
-    // only when the receipt actually recorded a write (`hasWrites()`; TypeGraph-owned
+    // only when the mutation witness actually saw a write (TypeGraph-owned
     // capture answers the same "nothing to stamp" case implicitly, by simply
     // never flushing a row for a graph with no captured writes). Either way
     // `transactionOutcome` reads this store's instant out of the returned map
     // (undefined when nothing was captured) into `receipt.recorded`.
     const recordedByGraph =
-      this.#engineNativeHistory && receiptRecorder.hasWrites() ?
+      mutationWitness?.mutated === true ?
         new Map([[this.graphId, await this.#engineRecordedInstant(txBackend)]])
       : await scope.flush();
     // Seal the context so a write through a retained `tx` after this returns
@@ -6813,6 +6868,11 @@ async function assertHistorySchemaOnOpen(
   options: StoreOptions | undefined,
 ): Promise<void> {
   if (options?.history !== true) return;
+  // Only a TypeGraph-owned store reads or writes the recorded relations
+  // this check verifies; an engine-native backend has none, and gating on
+  // `history` alone would refuse it with RECORDED_SCHEMA_INCOMPATIBLE for a
+  // table shape it was never going to touch.
+  if (resolveRecordedTimeOwnership(backend) !== "typegraph-relations") return;
   const schema =
     options.schema === undefined ?
       createSqlSchema(backend.tableNames)

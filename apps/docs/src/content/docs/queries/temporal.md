@@ -343,7 +343,14 @@ Under engine-native ownership:
 
 - `store.recordedNow()`, `store.revisionNow()`, and `TransactionReceipt.recorded`
   all come from the engine's own revision instead of TypeGraph's clock — one
-  call per transaction, not per graph.
+  call per transaction, not per graph. `TransactionReceipt.recorded` is
+  stamped only when a graph node/edge/identity write inside the transaction
+  actually changed a row — a delete of a missing id, an
+  `insertNodeIfAbsent` that found the row, and a coalesced no-op upsert all
+  leave it `undefined`, matching a read-only transaction. A transaction whose
+  only effect is a raw `tx.sql` statement also leaves it `undefined` even
+  though the engine's revision advances underneath it; use a graph collection
+  write when you need `receipt.recorded` to reflect the change.
 - `RecordedInstant` anchors use the engine form
   `e1:<opaque engine revision>:<ISO instant>` rather than
   `r1:<16-digit revision>:<ISO instant>`. The revision is an opaque,

@@ -51,9 +51,12 @@ the engine's own revision is available only under `history: true`); an external 
 binding is refused (`ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED`); `store.recordedNow()`,
 `store.revisionNow()`, and both transaction-commit sites that stamp `TransactionReceipt.recorded`
 now read the engine's revision through one owner, `#engineRecordedInstant(session)`, called once
-per transaction on the actual committing handle — never once per graph, and never when the
-transaction wrote nothing; and `store.asOfRecorded(instant)` refuses an instant minted under the
-OTHER ownership form (`RECORDED_INSTANT_OWNERSHIP_MISMATCH`) before any read compiles.
+per transaction on the actual committing handle — never once per graph, and never unless a graph
+node/edge/identity write inside the transaction actually changed a row (a mutation witness watches
+the write surface itself, not the collection-level write-intent counters `receipt.writes` is built
+from, so a delete of a missing id, a found-not-created `insertNodeIfAbsent`, or a coalesced no-op
+upsert all leave `recorded` undefined); and `store.asOfRecorded(instant)` refuses an instant minted
+under the OTHER ownership form (`RECORDED_INSTANT_OWNERSHIP_MISMATCH`) before any read compiles.
 `migrateLegacyRecordedTime` refuses under engine-native ownership
 (`ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED`): it rewrites TypeGraph's own recorded
 relations, which an engine-native backend does not have. Reconstructing identity at a recorded

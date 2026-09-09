@@ -739,6 +739,7 @@ const AUDITED_OVERLAY_FILES = [
   "src/store/operations/node-operations.ts",
   "src/store/operations/write-executor.ts",
   "src/store/recorded-capture.ts",
+  "src/store/recorded-capture/write-touch.ts",
   "src/store/recorded-read-service.ts",
   "src/store/store.ts",
 ];
