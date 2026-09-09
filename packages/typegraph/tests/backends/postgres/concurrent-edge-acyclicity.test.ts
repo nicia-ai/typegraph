@@ -36,22 +36,44 @@
  * waits indefinitely, so a lock-order regression would otherwise stall the
  * run rather than report; the timeout turns a hang into a failure.
  *
+ * ## §14.2 test 17 — a genuine engine cutoff mid-probe
+ *
+ * The in-process suite (`tests/edge-acyclicity.test.ts`) proves
+ * `EdgeAcyclicityIndeterminateError` is reported when the backend's
+ * `execute` throws a recognized cut-short code, but it SIMULATES that
+ * throw — it never actually asks a real engine to abandon a running
+ * statement. This is the one test that does: `SET LOCAL statement_timeout
+ * = '1ms'` inside the SAME transaction as an acyclic create over a
+ * 10^5-edge relation, so the reachability probe is genuinely still
+ * walking when PostgreSQL cancels the statement (`57014
+ * query_canceled`) — never "too small to notice a 1ms budget", which
+ * would make this a test of statement-dispatch latency instead of the
+ * probe itself. Asserts `EdgeAcyclicityIndeterminateError` and that no row
+ * was written; `isStatementCutShortError` classifying `57014` is what
+ * makes the write path report indeterminate rather than "no cycle" or a
+ * raw driver error. Skipped here (no `POSTGRES_URL` in this environment);
+ * the lead's Postgres lane exercises it.
+ *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
+import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createAdapterStore,
   createStore,
   defineEdge,
   defineGraph,
   defineNode,
   EdgeAcyclicityError,
+  EdgeAcyclicityIndeterminateError,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";
 
@@ -240,6 +262,77 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(rejected).toEqual([]);
         expect(fulfilled).toHaveLength(2);
         expect(await setup.edges.dependsOn.findFrom(a)).toHaveLength(2);
+      },
+    );
+
+    it(
+      "§14.2 test 17: a statement_timeout cutoff mid-probe reports EdgeAcyclicityIndeterminateError and writes nothing",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        const live = requirePostgres();
+        const setup = createStore(graph, createPostgresBackend(live.first));
+
+        // A 10^5-edge chain: long enough that the reachability probe is
+        // genuinely still walking it when the 1ms budget expires, not just
+        // dispatching the statement. Built in chunks well under Postgres's
+        // bound-parameter limit per statement.
+        const CHAIN_LENGTH = 100_000;
+        const CHUNK_SIZE = 2000;
+        const nodeIds = Array.from(
+          { length: CHAIN_LENGTH + 1 },
+          (_unused, index) => `chain-${String(index)}`,
+        );
+        for (let start = 0; start < nodeIds.length; start += CHUNK_SIZE) {
+          const chunkIds = nodeIds.slice(start, start + CHUNK_SIZE);
+          await setup.nodes.Task.bulkCreate(
+            chunkIds.map((id) => ({ props: { name: id }, id })),
+          );
+        }
+        for (let start = 0; start < CHAIN_LENGTH; start += CHUNK_SIZE) {
+          const end = Math.min(start + CHUNK_SIZE, CHAIN_LENGTH);
+          await setup.edges.dependsOn.bulkCreate(
+            Array.from({ length: end - start }, (_unused, offset) => {
+              const index = start + offset;
+              return {
+                from: { kind: "Task" as const, id: `chain-${String(index)}` },
+                to: {
+                  kind: "Task" as const,
+                  id: `chain-${String(index + 1)}`,
+                },
+              };
+            }),
+          );
+        }
+
+        // The closing edge, attempted inside a caller-adopted transaction
+        // with a 1ms statement budget: `tail -> head` would walk the ENTIRE
+        // chain to discover `head` already reaches `tail`.
+        const head = { kind: "Task" as const, id: "chain-0" };
+        const tail = {
+          kind: "Task" as const,
+          id: `chain-${String(CHAIN_LENGTH)}`,
+        };
+
+        const db = requireDefined(firstDb);
+        const adapterBackend = createPostgresBackend(db);
+        const adapterStore = createAdapterStore(graph, adapterBackend);
+
+        await expect(
+          db.transaction(async (sqlTx) => {
+            await sqlTx.execute(sql`SET LOCAL statement_timeout = '1ms'`);
+            const txStore = adapterStore.withTransaction(sqlTx);
+            await txStore.edges.dependsOn.create(tail, head);
+          }),
+        ).rejects.toThrow(EdgeAcyclicityIndeterminateError);
+
+        // No row was written: the caller's transaction rolled back on the
+        // thrown error, and the closing edge never lands.
+        const closingEdge = await setup.edges.dependsOn.find({
+          from: tail,
+          to: head,
+        });
+        expect(closingEdge).toEqual([]);
+        expect(await setup.edges.dependsOn.find({})).toHaveLength(CHAIN_LENGTH);
       },
     );
   },
