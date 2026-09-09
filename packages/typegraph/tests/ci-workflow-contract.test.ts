@@ -127,10 +127,10 @@ describe("CI workflow contract", () => {
         ),
       ) as Readonly<{ scripts: Readonly<Record<string, string>> }>
     ).scripts["build"];
-    expect(buildScript).toContain("--max-old-space-size=8192");
+    expect(buildScript).toContain("--max-old-space-size=12288");
     for (const workflowPath of [WORKFLOW_PATH, RELEASE_WORKFLOW_PATH]) {
       expect(readFileSync(workflowPath, "utf8")).toContain(
-        "NODE_OPTIONS: --max-old-space-size=8192",
+        "NODE_OPTIONS: --max-old-space-size=12288",
       );
     }
   });
