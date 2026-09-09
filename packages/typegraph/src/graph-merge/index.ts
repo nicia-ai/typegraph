@@ -41,7 +41,9 @@ export {
 export type {
   AcyclicityMergeConflictDetails,
   AcyclicityMergeConflictEdge,
+  IdentityMergeConflictCode,
   MergeConstraintConflictErrorDetails,
+  MergeErrorOptions,
 } from "./errors";
 export {
   AcyclicityMergeConflictError,
@@ -153,10 +155,18 @@ export { MERGE_REVIEW_FORMAT_VERSION } from "./review-schema";
 export type {
   BaseNodeLookup,
   CandidateSource,
+  IdentityPairingScope,
   KeylessConfig,
   SourceScope,
 } from "./sources";
-export type { IdentityAssertionWriteFacade } from "./typegraph-internal";
+export type { StagedIdentityAssertion, StagedRetraction } from "./staging";
+export type { RetractionCause } from "./state-diff";
+export type {
+  IdentityAssertionWriteFacade,
+  IdentityDecisionProvenance,
+  IdentityRelation,
+  IdentityTransferAssertion,
+} from "./typegraph-internal";
 export type {
   BaseAmbiguity,
   BaseVersion,

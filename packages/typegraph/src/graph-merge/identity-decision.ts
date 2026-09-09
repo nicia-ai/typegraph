@@ -54,7 +54,7 @@ export function branchAncestryFromAnchors(
  * exercise — a stated `onAssertionConflict` that no conflict ever reached is
  * not a decision the transition log should claim was made.
  */
-export function identityDecisionPolicy(
+function identityDecisionPolicy(
   reconciliations: readonly IdentityReconciliation[],
 ): string | undefined {
   const arms = new Set<string>();

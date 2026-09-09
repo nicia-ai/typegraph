@@ -591,6 +591,21 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // that only `ensureSchemaInternal` (imported directly by `store.ts`, never
 // re-exported) accepts, so it renders at no entrypoint at all — no ledger
 // entry to update for that change.
+// `IdentityDecisionProvenance` (+1 on `.`, `./graph-merge`, `./interchange`,
+// `./postgres/pglite`, `./profiler`, `./provenance` and `./sqlite/local`): the
+// graph-merge identity apply threads the governing merge decision through
+// `StoreRuntime.applyIdentityMergeAtTarget`, so the runtime port's declared
+// parameter type renders at every entrypoint that projects `StoreRuntime`.
+// Naming the type on the port is the point — a structurally-inlined copy of the
+// decision shape would be a second spelling of "what a governing decision is" —
+// and every one of these entries retires when the release slice exports
+// `IdentityDecisionProvenance` from the package barrel.
+//
+// `./graph-merge` nets DOWN despite that +1: the identity reconciliation
+// surface (`IdentityReconciliationOptions`, the conflict/decision types, the
+// staged-assertion shapes a policy callback receives, the pairing scope) is
+// exported deliberately from `src/graph-merge/index.ts` rather than left as
+// debt, which retires more forgotten exports than the port adds.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Roadmap F (meta-edge removal): removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in

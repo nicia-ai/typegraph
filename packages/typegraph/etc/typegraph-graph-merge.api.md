@@ -760,6 +760,12 @@ export function captureCandidateWriteSetTarget<G extends GraphDef>(target: Store
 type Cardinality = "many" | "one" | "unique" | "oneActive";
 
 // @public
+type CascadeCauseNode = Readonly<{
+    kind: string;
+    id: string;
+}>;
+
+// @public
 type CatalogBackend = Pick<GraphBackend, "catalog">;
 
 // @public
@@ -3004,6 +3010,34 @@ type IdentityAssertion<G extends GraphDef> = Readonly<{
     validTo?: string;
 }>;
 
+// @public
+export type IdentityAssertionConflict = Readonly<{
+    reason: IdentityAssertionConflictReason;
+    semanticKey: string;
+    a: EntityRef;
+    b: EntityRef;
+    relation: IdentityRelation;
+    base: readonly IdentityTransferAssertion[];
+    asserted: readonly StagedIdentityAssertion[];
+    retracted: readonly StagedRetraction[];
+}>;
+
+// @public
+export type IdentityAssertionConflictPolicy = "refuse" | "assertWins" | "retractWins" | "flag" | ((conflict: IdentityAssertionConflict) => IdentityAssertionDecision);
+
+// @public
+export type IdentityAssertionConflictReason = "retract-reassert" | "opposing-relations" | "id-reuse" | "cross-kind-pairing";
+
+// @public
+export type IdentityAssertionDecision = Readonly<{
+    kind: "assert";
+    assertionId: string;
+}> | Readonly<{
+    kind: "retract";
+}> | Readonly<{
+    kind: "unresolved";
+}>;
+
 // @public (undocumented)
 type IdentityAssertionId = string & Readonly<{
     [__identityAssertionId]: true;
@@ -3026,6 +3060,16 @@ type IdentityChange = Readonly<{
 }>;
 
 // @public
+export type IdentityDecisionProvenance = Readonly<{
+    policy?: string | undefined;
+    branchId?: string | undefined;
+    branchAncestry?: readonly string[] | undefined;
+    mergePlanDigest?: string | undefined;
+    reviewDigest?: string | undefined;
+    sourceId?: string | undefined;
+}>;
+
+// @public
 type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
     assertSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
     assertDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
@@ -3038,10 +3082,15 @@ type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
 }>;
 
 // @public
+export type IdentityMergeConflictCode = typeof MERGE_ERROR_CODES.identityConflict | typeof MERGE_ERROR_CODES.identitySeparationConflict | typeof MERGE_ERROR_CODES.identityUniquenessConflict | typeof MERGE_ERROR_CODES.identityProvenanceConflict;
+
+// @public
 export class IdentityMergeConflictError extends MergeError {
-    constructor(message: string, options?: MergeErrorOptions);
+    constructor(message: string, options?: MergeErrorOptions & Readonly<{
+        code?: IdentityMergeConflictCode;
+    }>);
     // (undocumented)
-    readonly code: "GRAPH_MERGE_IDENTITY_CONFLICT";
+    readonly code: IdentityMergeConflictCode;
 }
 
 // @public
@@ -3062,6 +3111,12 @@ type IdentityPair<G extends GraphDef> = Readonly<{
 }> & IdentityValidityWindow;
 
 // @public
+export type IdentityPairingScope = Readonly<{
+    pairing: "candidate" | "definitional";
+    assertions: readonly IdentityTransferAssertion[];
+}>;
+
+// @public
 type IdentityReadFacade<G extends GraphDef> = Readonly<{
     representativeOf: (ref: IdentityNodeRefInput<G>) => Promise<IdentityNodeReference<G> | undefined>;
     membersOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityNodeReference<G>[]>;
@@ -3072,7 +3127,29 @@ type IdentityReadFacade<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-type IdentityRelation = "same" | "different";
+export type IdentityReconciliation = Readonly<{
+    semanticKey: string;
+    a: EntityRef;
+    b: EntityRef;
+    relation: IdentityRelation;
+    survivorAssertionId: string;
+    supersededAssertionIds: readonly string[];
+    rule: "earliest-valid-from" | "code-point-id" | "committed-id" | "policy";
+    policy?: string | undefined;
+    branches: readonly BranchId[];
+}>;
+
+// @public
+export type IdentityReconciliationOptions = Readonly<{
+    pairing?: "off" | "candidate" | "definitional";
+    onAssertionConflict?: IdentityAssertionConflictPolicy;
+    onEdgeConflict?: "repoint" | "flag";
+    onUniquenessConflict?: "refuse" | "flag";
+    onProvenanceConflict?: "keepBoth" | "refuse";
+}>;
+
+// @public
+export type IdentityRelation = "same" | "different";
 
 // @public (undocumented)
 type IdentityServiceContext<G extends GraphDef> = Readonly<{
@@ -3099,11 +3176,49 @@ type IdentityTableNames = Readonly<{
     identityTransitionRetention: string;
 }>;
 
+// @public (undocumented)
+export type IdentityTransferAssertion = Readonly<{
+    id: string;
+    relation: "same" | "different";
+    a: PlainNodeRef;
+    b: PlainNodeRef;
+    validFrom: string;
+    validTo?: string | undefined;
+    endedBy?: PlainNodeRef | undefined;
+}>;
+
 // @public
 type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
     includeIdentityMembers?: boolean;
 }> : Readonly<{
     includeIdentityMembers?: never;
+}>;
+
+// @public
+export type IdentityUnresolvedConflict = Readonly<{
+    kind: "assertion";
+    reason: IdentityAssertionConflictReason;
+    semanticKey: string;
+    a: EntityRef;
+    b: EntityRef;
+    relation: IdentityRelation;
+    assertionIds: readonly string[];
+    branches: readonly BranchId[];
+}> | Readonly<{
+    kind: "separation";
+    a: EntityRef;
+    b: EntityRef;
+    assertionIds: readonly string[];
+    source?: MatchSource | undefined;
+}> | Readonly<{
+    kind: "uniqueness";
+    constraintName: string;
+    members: readonly EntityRef[];
+    assertionIds: readonly string[];
+}> | Readonly<{
+    kind: "provenance";
+    canonical: EntityRef;
+    contributions: readonly ProvenanceRecord[];
 }>;
 
 // @public
@@ -3718,6 +3833,16 @@ export type MatchSource = Readonly<{
     kind: "custom";
     sourceId: string;
     metadata?: JsonValue | undefined;
+}>
+/**
+* An explicit `same` identity assertion recalled the pair. `assertionIds`
+* names every assertion that attributes it, sorted, so the evidence points
+* back at the ledger rows a reviewer can read.
+*/
+| Readonly<{
+    kind: "identity";
+    sourceId: string;
+    assertionIds: readonly string[];
 }>;
 
 // @public
@@ -3812,6 +3937,9 @@ export const MERGE_ERROR_CODES: {
     readonly conflict: "GRAPH_MERGE_CONFLICT";
     readonly constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
     readonly identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT";
+    readonly identitySeparationConflict: "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT";
+    readonly identityUniquenessConflict: "GRAPH_MERGE_IDENTITY_UNIQUENESS_CONFLICT";
+    readonly identityProvenanceConflict: "GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT";
     readonly acyclicityConflict: "GRAPH_MERGE_ACYCLICITY_CONFLICT";
     readonly baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH";
     readonly planCapability: "GRAPH_MERGE_PLAN_CAPABILITY";
@@ -3839,6 +3967,13 @@ export const MERGE_OPTION_DEFAULTS: {
     readonly onComparisonCeiling: "error";
     readonly provenance: true;
     readonly persistProvenance: false;
+    readonly identity: {
+        readonly pairing: "off";
+        readonly onAssertionConflict: "refuse";
+        readonly onEdgeConflict: "repoint";
+        readonly onUniquenessConflict: "refuse";
+        readonly onProvenanceConflict: "keepBoth";
+    };
 };
 
 // @public (undocumented)
@@ -3912,7 +4047,7 @@ export class MergeError extends TypeGraphError {
 }
 
 // @public
-type MergeErrorOptions = Readonly<{
+export type MergeErrorOptions = Readonly<{
     details?: Record<string, unknown>;
     suggestion?: string;
     cause?: unknown;
@@ -3952,6 +4087,7 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
     clusterMaxDiameter?: number;
     branchOrder?: readonly BranchId[];
     provenanceWeights?: ReadonlyMap<BranchId, number>;
+    identity?: IdentityReconciliationOptions;
 }>;
 
 // @public (undocumented)
@@ -3981,6 +4117,8 @@ export type MergePlanApplied = Readonly<{
 export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
     beforeApply?: (reads: MergePlanReadContext<G>) => Promise<void>;
     afterApply?: (tx: TransactionContext<G>, applied: MergePlanApplied) => Promise<void>;
+    reviewDigest?: string;
+    sourceId?: string;
 }>;
 
 // @public
@@ -4158,6 +4296,10 @@ export type MergePlanMatchSource = Readonly<{
     kind: "custom";
     sourceId: string;
     metadata?: JsonValue | undefined;
+}> | Readonly<{
+    kind: "identity";
+    sourceId: string;
+    assertionIds: readonly string[];
 }>;
 
 // @public
@@ -4240,6 +4382,8 @@ export type MergePlanReview = Readonly<{
     warnings: readonly string[];
     compositionOrphans: readonly MergePlanCompositionOrphan[];
     diagnostics?: MergePlanDiagnostics | undefined;
+    identityReconciliations?: readonly JsonValue[] | undefined;
+    identityConflicts?: readonly JsonValue[] | undefined;
 }>;
 
 // @public (undocumented)
@@ -4326,6 +4470,8 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
         graphId: string;
         count: number;
     }>;
+    identityReconciliations: readonly IdentityReconciliation[];
+    identityConflicts: readonly IdentityUnresolvedConflict[];
 }>;
 
 // @public
@@ -4750,6 +4896,7 @@ export type NormalizedMergeOptions<G extends GraphDef = GraphDef> = Readonly<{
     candidateDiagnostics?: CandidateDiagnosticsOptions;
     branchOrder?: readonly BranchId[];
     provenanceWeights?: ReadonlyMap<BranchId, number>;
+    identity?: IdentityReconciliationOptions;
 }>;
 
 // @public
@@ -5699,6 +5846,14 @@ export type Result<T, E = Error> = Readonly<{
 }>;
 
 // @public
+export type RetractionCause = Readonly<{
+    kind: "explicit";
+}> | Readonly<{
+    kind: "cascade";
+    deletedNode: CascadeCauseNode;
+}>;
+
+// @public
 export function revalidateCandidateWriteSetReview<G extends GraphDef>(args: RevalidateCandidateWriteSetReviewArgs<G>): Promise<Result<MergeReviewRevalidation, MergeError>>;
 
 // @public (undocumented)
@@ -6082,6 +6237,7 @@ export type SourceScope = Readonly<{
     blockIndex?: string;
     keyless?: KeylessConfig;
     store?: BaseLookupStore;
+    identity?: IdentityPairingScope;
 }>;
 
 // @public
@@ -6209,6 +6365,17 @@ type SqlTableNames = Readonly<{
 type SqlTextChunk = Readonly<{
     kind: "text";
     value: string;
+}>;
+
+// @public
+export type StagedIdentityAssertion = Readonly<{
+    branchId: BranchId;
+    assertion: IdentityTransferAssertion;
+}>;
+
+// @public
+export type StagedRetraction = StagedIdentityAssertion & Readonly<{
+    cause: RetractionCause;
 }>;
 
 // @public
@@ -6546,7 +6713,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             kind: string;
             id: string;
         }> | undefined;
-    }>[]) => Promise<Readonly<{
+    }>[], decision?: IdentityDecisionProvenance) => Promise<Readonly<{
         created: number;
         retracted: number;
     }>>;

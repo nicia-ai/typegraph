@@ -3821,6 +3821,16 @@ export type IdentityContradictionErrorDetails = Readonly<{
 }>;
 
 // @public
+type IdentityDecisionProvenance = Readonly<{
+    policy?: string | undefined;
+    branchId?: string | undefined;
+    branchAncestry?: readonly string[] | undefined;
+    mergePlanDigest?: string | undefined;
+    reviewDigest?: string | undefined;
+    sourceId?: string | undefined;
+}>;
+
+// @public
 export class IdentityEndpointValidityError extends TypeGraphError {
     constructor(details: IdentityEndpointValidityErrorDetails);
     // (undocumented)
@@ -7344,7 +7354,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             kind: string;
             id: string;
         }> | undefined;
-    }>[]) => Promise<Readonly<{
+    }>[], decision?: IdentityDecisionProvenance) => Promise<Readonly<{
         created: number;
         retracted: number;
     }>>;
