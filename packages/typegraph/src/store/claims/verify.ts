@@ -339,7 +339,17 @@ function edgeCardinalityViolations(
     }>
   >();
   for (const row of rows) {
-    const target = edgeCardinalityClaimTarget({ ...row, graphId });
+    // `scope` is split out and re-added only when defined: `row.scope` is a
+    // required-but-nullable field (R9), so a bare `...row` would spell
+    // `scope: undefined` explicitly into the object literal below, which
+    // `exactOptionalPropertyTypes` refuses for `ClaimEdgeCardinalityParams`'
+    // OPTIONAL `scope`.
+    const { scope, ...rest } = row;
+    const target = edgeCardinalityClaimTarget({
+      ...rest,
+      graphId,
+      ...(scope === undefined ? {} : { scope }),
+    });
     const family = row.scope === undefined ? "edgeCardinality" : "composition";
     const identity = targetIdentity(target);
     const entry = byAxis.get(identity) ?? {

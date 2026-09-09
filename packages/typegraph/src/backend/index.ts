@@ -290,6 +290,7 @@ export type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
   CompareAndSetNodeParams,
+  CompositionClaimScope,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
   ContendedUniqueRow,

@@ -4161,6 +4161,13 @@ export type ContendedUniqueRow = Readonly<{
  * it for the declaration itself. The reader must never re-derive this from
  * the row's own (possibly dirty) endpoints: which query found the row already
  * says which axis it contends on.
+ *
+ * Required-but-nullable, not optional: a custom `readConstraintFenceViolationRows`
+ * implementation that omits the field would compile with `scope` silently
+ * `undefined` on every row, misclassifying every genuine composition row as
+ * an ordinary one — the exact drift this field exists to prevent. Spelling
+ * it `| undefined` forces a backend author to state the fact explicitly,
+ * even when the answer is "never composition" (`undefined` for every row).
  */
 export type ContendedEdgeRow = EdgeCardinalityAxisRef &
   Readonly<{
@@ -4170,7 +4177,7 @@ export type ContendedEdgeRow = EdgeCardinalityAxisRef &
     fromId: string;
     toKind: string;
     toId: string;
-    scope?: CompositionClaimScope;
+    scope: CompositionClaimScope | undefined;
   }>;
 
 /** One node id live under BOTH kinds of a declared disjoint pair. */

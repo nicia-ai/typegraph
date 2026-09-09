@@ -5459,6 +5459,7 @@ export function createCommonOperationBackend(
             fromId: row.from_id,
             toKind: row.to_kind,
             toId: row.to_id,
+            scope: undefined,
           });
         }
       }

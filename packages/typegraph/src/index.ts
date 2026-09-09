@@ -629,7 +629,13 @@ export type {
 // consumer narrowing `MigrationErrorDetails` on
 // `reason: "edge-cardinality-tightening-violated"` — same reasoning as the
 // ontology probe types above. Also available from the "./backend" subpath.
-export type { EdgeCardinalityDeclaration } from "./backend/types";
+// `CompositionClaimScope` is exported alongside it: it is `EdgeCardinalityDeclaration.scope`'s
+// only non-`undefined` member, so a consumer narrowing that field needs it
+// too, without reaching into `./backend/types` directly.
+export type {
+  CompositionClaimScope,
+  EdgeCardinalityDeclaration,
+} from "./backend/types";
 // `EdgeCardinalityDeclaration` and `CardinalityErrorDetails.direction` are
 // both built from these two: a consumer narrowing either one needs to name
 // the intersection member (`EdgeCardinalityAxisRef`) or the bare direction
