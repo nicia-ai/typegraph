@@ -2085,7 +2085,7 @@ type FindNodesByKindParams = Readonly<{
 }>;
 
 // @public
-export const FORMAT_VERSION: "2.0";
+export const FORMAT_VERSION: "3.0";
 
 // @public
 type FulltextAccessor = Readonly<{
@@ -2480,8 +2480,9 @@ export const GraphDataHeaderSchema: z.ZodObject<{
         description: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>], "type">;
     formatVersion: z.ZodEnum<{
-        "2.0": "2.0";
+        "3.0": "3.0";
         "1.0": "1.0";
+        "2.0": "2.0";
     }>;
     exportedAt: z.ZodISODateTime;
     identity: z.ZodOptional<z.ZodObject<{
@@ -2490,14 +2491,20 @@ export const GraphDataHeaderSchema: z.ZodObject<{
             archival: "archival";
         }>;
         profile: z.ZodLiteral<"typegraph-identity-v1">;
+        retention: z.ZodOptional<z.ZodObject<{
+            prunedBeforeRevision: z.ZodNumber;
+            prunedAt: z.ZodISODateTime;
+        }, z.core.$strip>>;
+        hasTransitions: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 
 // @public
 export const GraphDataSchema: z.ZodObject<{
     formatVersion: z.ZodEnum<{
-        "2.0": "2.0";
+        "3.0": "3.0";
         "1.0": "1.0";
+        "2.0": "2.0";
     }>;
     exportedAt: z.ZodISODateTime;
     source: z.ZodDiscriminatedUnion<[z.ZodObject<{
@@ -2565,6 +2572,44 @@ export const GraphDataSchema: z.ZodObject<{
                 kind: z.ZodString;
                 id: z.ZodString;
             }, z.core.$strip>>;
+        }, z.core.$strip>>;
+        transitions: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            transitionId: z.ZodString;
+            cause: z.ZodEnum<{
+                fold: "fold";
+                assert: "assert";
+                retract: "retract";
+                detach: "detach";
+                restore: "restore";
+                "window-end": "window-end";
+                "kind-drop": "kind-drop";
+                "schema-transition": "schema-transition";
+                reconcile: "reconcile";
+            }>;
+            recordedRevision: z.ZodNumber;
+            recordedAt: z.ZodISODateTime;
+            validAt: z.ZodISODateTime;
+            class: z.ZodObject<{
+                kind: z.ZodString;
+                id: z.ZodString;
+            }, z.core.$strip>;
+            priorClass: z.ZodOptional<z.ZodObject<{
+                kind: z.ZodString;
+                id: z.ZodString;
+            }, z.core.$strip>>;
+            assertionIds: z.ZodArray<z.ZodString>;
+            decision: z.ZodOptional<z.ZodObject<{
+                policy: z.ZodOptional<z.ZodString>;
+                branchId: z.ZodOptional<z.ZodString>;
+                branchAncestry: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                mergePlanDigest: z.ZodOptional<z.ZodString>;
+                reviewDigest: z.ZodOptional<z.ZodString>;
+                sourceId: z.ZodOptional<z.ZodString>;
+            }, z.core.$strip>>;
+        }, z.core.$strip>>>;
+        retention: z.ZodOptional<z.ZodObject<{
+            prunedBeforeRevision: z.ZodNumber;
+            prunedAt: z.ZodISODateTime;
         }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
@@ -2650,8 +2695,9 @@ export const GraphInterchangeChunkSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
             description: z.ZodOptional<z.ZodString>;
         }, z.core.$strip>], "type">;
         formatVersion: z.ZodEnum<{
-            "2.0": "2.0";
+            "3.0": "3.0";
             "1.0": "1.0";
+            "2.0": "2.0";
         }>;
         exportedAt: z.ZodISODateTime;
         identity: z.ZodOptional<z.ZodObject<{
@@ -2660,6 +2706,11 @@ export const GraphInterchangeChunkSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 archival: "archival";
             }>;
             profile: z.ZodLiteral<"typegraph-identity-v1">;
+            retention: z.ZodOptional<z.ZodObject<{
+                prunedBeforeRevision: z.ZodNumber;
+                prunedAt: z.ZodISODateTime;
+            }, z.core.$strip>>;
+            hasTransitions: z.ZodOptional<z.ZodBoolean>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
 }, z.core.$strip>, z.ZodObject<{
@@ -2718,6 +2769,42 @@ export const GraphInterchangeChunkSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         endedBy: z.ZodOptional<z.ZodObject<{
             kind: z.ZodString;
             id: z.ZodString;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"identity-transitions">;
+    transitions: z.ZodArray<z.ZodObject<{
+        transitionId: z.ZodString;
+        cause: z.ZodEnum<{
+            fold: "fold";
+            assert: "assert";
+            retract: "retract";
+            detach: "detach";
+            restore: "restore";
+            "window-end": "window-end";
+            "kind-drop": "kind-drop";
+            "schema-transition": "schema-transition";
+            reconcile: "reconcile";
+        }>;
+        recordedRevision: z.ZodNumber;
+        recordedAt: z.ZodISODateTime;
+        validAt: z.ZodISODateTime;
+        class: z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strip>;
+        priorClass: z.ZodOptional<z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strip>>;
+        assertionIds: z.ZodArray<z.ZodString>;
+        decision: z.ZodOptional<z.ZodObject<{
+            policy: z.ZodOptional<z.ZodString>;
+            branchId: z.ZodOptional<z.ZodString>;
+            branchAncestry: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            mergePlanDigest: z.ZodOptional<z.ZodString>;
+            reviewDigest: z.ZodOptional<z.ZodString>;
+            sourceId: z.ZodOptional<z.ZodString>;
         }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>], "type">;
@@ -2927,6 +3014,8 @@ type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
     retractSameAssertion: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertion<G> | undefined>;
     retractDifferentAssertion: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertion<G> | undefined>;
     bulkRetractAssertions: (ids: readonly IdentityAssertionId[]) => Promise<readonly IdentityAssertion<G>[]>;
+    transitionsOf: (ref: IdentityNodeRefInput<G>, options?: IdentityReplayOptions) => Promise<readonly IdentityTransition<G>[]>;
+    replay: (ref: IdentityNodeRefInput<G>, options?: IdentityReplayOptions) => Promise<IdentityReplay<G>>;
 }>;
 
 // @public (undocumented)
@@ -2969,6 +3058,26 @@ type IdentityReadFacade<G extends GraphDef> = Readonly<{
 type IdentityRelation = "same" | "different";
 
 // @public (undocumented)
+type IdentityReplay<G extends GraphDef> = Readonly<{
+    steps: readonly IdentityReplayStep<G>[];
+    truncatedBefore?: RecordedInstant | undefined;
+}>;
+
+// @public (undocumented)
+type IdentityReplayOptions = Readonly<{
+    fromRecorded?: string | undefined;
+    toRecorded?: string | undefined;
+    limit?: number | undefined;
+}>;
+
+// @public (undocumented)
+type IdentityReplayStep<G extends GraphDef> = Readonly<{
+    transition: IdentityTransition<G>;
+    before: readonly IdentityNodeReference<G>[];
+    after: readonly IdentityNodeReference<G>[];
+}>;
+
+// @public (undocumented)
 type IdentityServiceContext<G extends GraphDef> = Readonly<{
     graph: G;
     graphId: string;
@@ -2993,6 +3102,40 @@ type IdentityTableNames = Readonly<{
     identityTransitionRetention: string;
 }>;
 
+// @public (undocumented)
+type IdentityTransition<G extends GraphDef> = Readonly<{
+    transitionId: string;
+    cause: IdentityTransitionCause;
+    recorded: RecordedInstant;
+    validAt: string;
+    class: IdentityNodeReference<G>;
+    priorClass?: IdentityNodeReference<G> | undefined;
+    assertionIds: readonly IdentityAssertionId[];
+    decision?: IdentityDecisionProvenance | undefined;
+}>;
+
+// @public
+type IdentityTransitionCause = "assert" | "retract" | "fold" | "detach" | "restore" | "window-end" | "kind-drop" | "schema-transition" | "reconcile";
+
+// @public
+type IdentityTransitionCursor = Readonly<{
+    recordedRevision: number;
+    transitionId: string;
+}>;
+
+// @public
+type IdentityTransitionTransfer = Readonly<{
+    transitionId: string;
+    cause: IdentityTransitionCause;
+    recordedRevision: number;
+    recordedAt: string;
+    validAt: string;
+    class: PlainNodeRef;
+    priorClass?: PlainNodeRef | undefined;
+    assertionIds: readonly string[];
+    decision?: IdentityDecisionProvenance | undefined;
+}>;
+
 // @public
 type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
     includeIdentityMembers?: boolean;
@@ -3011,6 +3154,7 @@ type IdentityWriteSummary = Readonly<{
     sameAssertions: number;
     differentAssertions: number;
     retractions: number;
+    transitions: number;
     total: number;
 }>;
 
@@ -3327,6 +3471,15 @@ export const InterchangeIdentityAssertionSchema: z.ZodObject<{
 }, z.core.$strip>;
 
 // @public (undocumented)
+export type InterchangeIdentityRetention = z.infer<typeof InterchangeIdentityRetentionSchema>;
+
+// @public
+export const InterchangeIdentityRetentionSchema: z.ZodObject<{
+    prunedBeforeRevision: z.ZodNumber;
+    prunedAt: z.ZodISODateTime;
+}, z.core.$strip>;
+
+// @public (undocumented)
 export const InterchangeIdentitySchema: z.ZodObject<{
     profile: z.ZodLiteral<"typegraph-identity-v1">;
     mode: z.ZodEnum<{
@@ -3353,6 +3506,83 @@ export const InterchangeIdentitySchema: z.ZodObject<{
             kind: z.ZodString;
             id: z.ZodString;
         }, z.core.$strip>>;
+    }, z.core.$strip>>;
+    transitions: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        transitionId: z.ZodString;
+        cause: z.ZodEnum<{
+            fold: "fold";
+            assert: "assert";
+            retract: "retract";
+            detach: "detach";
+            restore: "restore";
+            "window-end": "window-end";
+            "kind-drop": "kind-drop";
+            "schema-transition": "schema-transition";
+            reconcile: "reconcile";
+        }>;
+        recordedRevision: z.ZodNumber;
+        recordedAt: z.ZodISODateTime;
+        validAt: z.ZodISODateTime;
+        class: z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strip>;
+        priorClass: z.ZodOptional<z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strip>>;
+        assertionIds: z.ZodArray<z.ZodString>;
+        decision: z.ZodOptional<z.ZodObject<{
+            policy: z.ZodOptional<z.ZodString>;
+            branchId: z.ZodOptional<z.ZodString>;
+            branchAncestry: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            mergePlanDigest: z.ZodOptional<z.ZodString>;
+            reviewDigest: z.ZodOptional<z.ZodString>;
+            sourceId: z.ZodOptional<z.ZodString>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>>;
+    retention: z.ZodOptional<z.ZodObject<{
+        prunedBeforeRevision: z.ZodNumber;
+        prunedAt: z.ZodISODateTime;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+
+// @public (undocumented)
+export type InterchangeIdentityTransition = z.infer<typeof InterchangeIdentityTransitionSchema>;
+
+// @public
+export const InterchangeIdentityTransitionSchema: z.ZodObject<{
+    transitionId: z.ZodString;
+    cause: z.ZodEnum<{
+        fold: "fold";
+        assert: "assert";
+        retract: "retract";
+        detach: "detach";
+        restore: "restore";
+        "window-end": "window-end";
+        "kind-drop": "kind-drop";
+        "schema-transition": "schema-transition";
+        reconcile: "reconcile";
+    }>;
+    recordedRevision: z.ZodNumber;
+    recordedAt: z.ZodISODateTime;
+    validAt: z.ZodISODateTime;
+    class: z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+    }, z.core.$strip>;
+    priorClass: z.ZodOptional<z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+    }, z.core.$strip>>;
+    assertionIds: z.ZodArray<z.ZodString>;
+    decision: z.ZodOptional<z.ZodObject<{
+        policy: z.ZodOptional<z.ZodString>;
+        branchId: z.ZodOptional<z.ZodString>;
+        branchAncestry: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        mergePlanDigest: z.ZodOptional<z.ZodString>;
+        reviewDigest: z.ZodOptional<z.ZodString>;
+        sourceId: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 
@@ -5648,6 +5878,22 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     }>[], mode: "state" | "archival") => Promise<Readonly<{
         created: number;
         skipped: number;
+    }>>;
+    readIdentityTransitionPageAtTarget: (target: GraphBackend | TransactionBackend, options: Readonly<{
+        after?: IdentityTransitionCursor;
+        limit: number;
+    }>) => Promise<Readonly<{
+        transitions: readonly IdentityTransitionTransfer[];
+        nextAfter?: IdentityTransitionCursor;
+        done: boolean;
+    }>>;
+    identityTransitionRetentionAtTarget: (target: GraphBackend | TransactionBackend) => Promise<Readonly<{
+        prunedBeforeRevision: number;
+        prunedAt: string;
+    }>>;
+    importIdentityTransitionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedWatermark: number | undefined) => Promise<Readonly<{
+        created: number;
+        watermark: number | undefined;
     }>>;
     applyIdentityMergeAtTarget: (target: GraphBackend | TransactionBackend, retractions: readonly Readonly<{
         id: string;

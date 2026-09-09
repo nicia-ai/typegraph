@@ -2090,6 +2090,24 @@ affected:
 - Rows-affected fidelity is intentionally out of scope for this first version; a
   future extension could ask backends to return row counts.
 
+On an identity-enabled graph, `writes.identity` counts `tx.identity`'s writers
+the same way: `sameAssertions`, `differentAssertions`, and `retractions`, plus
+`total` (their sum — the count of ledger truth rows the transaction produced).
+`writes.identity.transitions` sits beside `total`, not inside it: it is the
+number of identity transition-log notes the transaction's flush wrote, an
+annotation of the writes above rather than a fourth kind of write. It is
+always `0` when identity is disabled, when the store was opened without
+`history: true`, and on a `tx.measure()` scoped receipt — transitions are
+counted at commit-flush time, once per transaction, never per scope.
+
+```typescript
+const outcome = await store.transactionWithReceipt(async (tx) => {
+  await tx.identity.assertSame(alice, bob);
+});
+outcome.receipt.writes.identity;
+// { sameAssertions: 1, differentAssertions: 0, retractions: 0, transitions: 1, total: 1 }
+```
+
 When the store was created with `{ history: true }` and the transaction flushed
 captured writes, `receipt.recorded` is the recorded commit instant allocated for
 this store's graph by this transaction. It is `undefined` when history capture is

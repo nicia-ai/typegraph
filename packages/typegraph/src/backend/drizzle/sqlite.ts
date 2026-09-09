@@ -72,6 +72,7 @@ import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
   isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteDuplicateIdentityTransitionsRestoredAtColumnError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
 import {
@@ -176,6 +177,7 @@ import {
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
   planSqliteEdgeMatchIdentityAdoption,
+  planSqliteIdentityTransitionsRestoredAtAdoption,
   sqliteContributions,
 } from "./ddl";
 import {
@@ -1488,6 +1490,44 @@ export function buildSqliteEngineProfile(
     );
   }
 
+  async function ensureIdentityTransitionsRestoredAtColumn(): Promise<void> {
+    const identityTransitionsTableName = getTableName(tables.identityTransitions);
+    // Same "no ADD COLUMN IF NOT EXISTS" shape as `ensureEdgeMatchIdentityStorage`
+    // above, narrowed to one column and one retry: a concurrent cold start
+    // can race at most once here.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const columnRows = await executionAdapter.execute<{
+        name?: unknown;
+      }>(sql`PRAGMA table_info(${sql.identifier(identityTransitionsTableName)})`);
+      const columns = new Set(
+        columnRows.flatMap((row) =>
+          typeof row.name === "string" ? [row.name] : [],
+        ),
+      );
+      const statements = planSqliteIdentityTransitionsRestoredAtAdoption(
+        identityTransitionsTableName,
+        columns,
+      );
+      if (statements.length === 0) return;
+      try {
+        for (const statement of statements) {
+          await db.run(sql.raw(statement));
+        }
+        return;
+      } catch (error) {
+        if (
+          attempt === 1 ||
+          !isSqliteDuplicateIdentityTransitionsRestoredAtColumnError(error)
+        ) {
+          throw error;
+        }
+      }
+    }
+    throw new CompilerInvariantError(
+      "SQLite identity-transitions restored_at adoption exhausted its retry loop without returning or throwing.",
+    );
+  }
+
   async function readBaseSchemaVersion(): Promise<number | undefined> {
     try {
       const rows = await db
@@ -1612,6 +1652,7 @@ export function buildSqliteEngineProfile(
     identityTransitionRetentionTableDdl: generateSqliteCreateTableSQL(
       tables.identityTransitionRetention,
     ),
+    ensureIdentityTransitionsRestoredAtColumn,
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`

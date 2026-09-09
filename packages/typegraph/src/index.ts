@@ -111,6 +111,8 @@ export {
 
 export {
   asIdentityAssertionId,
+  IDENTITY_REPLAY_DEFAULT_LIMIT,
+  IDENTITY_REPLAY_MAX_LIMIT,
   type IdentityAssertion,
   type IdentityAssertionId,
   type IdentityAssertionResult,
@@ -126,8 +128,19 @@ export {
   type IdentityPair,
   type IdentityReadFacade,
   type IdentityRelation,
+  type IdentityReplay,
+  type IdentityReplayOptions,
+  type IdentityReplayStep,
+  type IdentityTransition,
+  type IdentityTransitionCause,
+  // The archival transition page a port implementer reads and writes through
+  // `StoreRuntime.readIdentityTransitionPageAtTarget` /
+  // `importIdentityTransitionsAtTarget`, named so the port is implementable.
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
   type IdentityValidityWindow,
   type IdentityWriteSummary,
+  pruneIdentityTransitions,
   rebuildIdentityClosure,
 } from "./identity";
 
@@ -386,6 +399,7 @@ export type {
   ErrorCategory,
   IdentityContradictionErrorDetails,
   IdentityEndpointValidityErrorDetails,
+  IdentityReplayErrorDetails,
   IdentitySeparationViolationErrorDetails,
   IdentityValidityWindowErrorDetails,
   InvalidEdgeWeightErrorDetails,
@@ -445,6 +459,7 @@ export {
   GraphAlgorithmConvergenceError,
   IdentityContradictionError,
   IdentityEndpointValidityError,
+  IdentityReplayError,
   IdentitySeparationViolationError,
   IdentityValidityWindowError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,

@@ -8,6 +8,7 @@ import {
 } from "../identity/types";
 import { type Assert, type Equal } from "../utils/type-assert";
 import type {
+  IDENTITY_HISTORY_NAMES,
   IDENTITY_READ_NAMES,
   IDENTITY_WRITE_NAMES,
 } from "./collection-surface";
@@ -40,7 +41,8 @@ type _receiptEdgeSurfaceIsComplete = Assert<
 type _receiptIdentitySurfaceIsComplete = Assert<
   Equal<
     | (typeof IDENTITY_READ_NAMES)[number]
-    | (typeof IDENTITY_WRITE_NAMES)[number],
+    | (typeof IDENTITY_WRITE_NAMES)[number]
+    | (typeof IDENTITY_HISTORY_NAMES)[number],
     keyof IdentityFacade<GraphDef>
   >
 >;
@@ -54,13 +56,30 @@ type _identityReadSplitIsHonest = Assert<
   >
 >;
 
-/** The receipt's identity counter buckets, minus the derived total. */
-type IdentityWriteCounterName = Exclude<keyof IdentityWriteSummary, "total">;
+/**
+ * The receipt's identity counter buckets, minus the derived `total` and
+ * `transitions` — `transitions` is an annotation count recorded through its
+ * own {@link TransactionReceiptRecorder.recordIdentityTransitions}, never
+ * through {@link TransactionReceiptRecorder.recordIdentity}, because it must
+ * not bump `identity.total` or the receipt's overall `total` the way a real
+ * write kind does.
+ */
+type IdentityWriteCounterName = Exclude<
+  keyof IdentityWriteSummary,
+  "total" | "transitions"
+>;
 
 export type TransactionReceiptRecorder = Readonly<{
   recordNode: (kind: string, count: number) => void;
   recordEdge: (kind: string, count: number) => void;
   recordIdentity: (kind: IdentityWriteCounterName, count: number) => void;
+  /**
+   * Records `count` identity transition-log notes flushed for this
+   * transaction's graph — an annotation of the writes `recordIdentity`
+   * already counted, so it touches only `identity.transitions`, never
+   * `identity.total` or the receipt's overall `total`.
+   */
+  recordIdentityTransitions: (count: number) => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
   /**
    * Seals the recorder: every subsequent write through a collection wrapped with
@@ -168,6 +187,7 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       sameAssertions: 0,
       differentAssertions: 0,
       retractions: 0,
+      transitions: 0,
       total: 0,
     },
     total: 0,
@@ -189,6 +209,11 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       counters.identity[kind] += count;
       counters.identity.total += count;
       counters.total += count;
+    },
+
+    recordIdentityTransitions(count): void {
+      if (count === 0) return;
+      counters.identity.transitions += count;
     },
 
     snapshot(recorded): TransactionReceipt {
@@ -241,6 +266,8 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     areSame: (a, b) => identity.areSame(a, b),
     areDifferent: (a, b) => identity.areDifferent(a, b),
     assertionsOf: (ref) => identity.assertionsOf(ref),
+    transitionsOf: (ref, options) => identity.transitionsOf(ref, options),
+    replay: (ref, options) => identity.replay(ref, options),
     async assertSame(a, b) {
       recorder.assertWritable();
       const result = await identity.assertSame(a, b);

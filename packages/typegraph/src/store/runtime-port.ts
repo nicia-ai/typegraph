@@ -24,7 +24,11 @@ import {
   type NodeType,
 } from "../core/types";
 import { type IdentityServiceContext } from "../identity/service-types";
-import { type IdentityDecisionProvenance } from "../identity/transition-log";
+import {
+  type IdentityDecisionProvenance,
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
+} from "../identity/transition-log";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
@@ -133,7 +137,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   /**
    * @internal The full identity service context this Store builds writes and
    * reads against — reached by the transition-log/replay module functions
-   * (`pruneIdentityTransitions`, and PR-3's `store.identity.replay` /
+   * (`pruneIdentityTransitions`, and `store.identity.replay` /
    * `transitionsOf`), which are plain functions over
    * `IdentityServiceContext<G>` like every other identity algorithm, rather
    * than Store methods. Throws when the graph never declared `identity: {}`,
@@ -368,6 +372,48 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     }>[],
     mode: "state" | "archival",
   ) => Promise<Readonly<{ created: number; skipped: number }>>;
+  /**
+   * @internal Reads one bounded page of a graph's ARCHIVAL identity
+   * transitions, ordered oldest first — the archival export's sole reader,
+   * mirroring `readIdentityAssertionPageAtTarget` above.
+   */
+  readIdentityTransitionPageAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    options: Readonly<{ after?: IdentityTransitionCursor; limit: number }>,
+  ) => Promise<
+    Readonly<{
+      transitions: readonly IdentityTransitionTransfer[];
+      nextAfter?: IdentityTransitionCursor;
+      done: boolean;
+    }>
+  >;
+  /**
+   * @internal Reads a graph's identity transition-retention watermark for
+   * archival export; `{ prunedBeforeRevision: 0, ... }` when nothing has been
+   * pruned.
+   */
+  identityTransitionRetentionAtTarget: (
+    target: GraphBackend | TransactionBackend,
+  ) => Promise<Readonly<{ prunedBeforeRevision: number; prunedAt: string }>>;
+  /**
+   * @internal Restores archival identity transitions inside an import
+   * transaction. `carriedWatermark` is the source graph's own retention
+   * watermark from the archival payload, used only when `transitions` is
+   * empty (see `importIdentityTransitionsIntoTarget`).
+   */
+  importIdentityTransitionsAtTarget: (
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
+    transitions: readonly IdentityTransitionTransfer[],
+    carriedWatermark: number | undefined,
+  ) => Promise<Readonly<{ created: number; watermark: number | undefined }>>;
   /**
    * `decision` is the governing merge decision, when the apply runs under one:
    * every identity transition the call causes carries it, so a fold a merged

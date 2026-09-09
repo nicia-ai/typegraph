@@ -4,15 +4,15 @@
  * each revision, on every backend `createIntegrationTestSuite` runs against —
  * the backend-parity rule (AGENTS.md) applied to the replay contract.
  *
- * Internal for PR-1: `identityReplay` is reached by module path, not through
- * a public `store.identity.replay` (that lands with PR-3).
+ * Exercises the PUBLIC facade (`store.identity.replay`), not the internal
+ * `identityReplay` module function it wraps: parity is asserted on what a
+ * caller actually gets, and the two could in principle diverge if a future
+ * change touched only the facade's own thin marshalling.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
-import { identityReplay } from "../../../src/identity/replay";
-import { storeRuntime } from "../../../src/store/runtime-port";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -51,8 +51,7 @@ export function registerIdentityReplayIntegrationTests(
       await store.identity.retractAssertion(same1.assertion.id);
       await store.identity.assertSame(a, b);
 
-      const ctx = storeRuntime(store).identityContext();
-      const replay = await identityReplay(ctx, a);
+      const replay = await store.identity.replay(a);
 
       // §9.2 L1's contract, at BOUNDARY granularity: four boundaries, causes
       // assert/assert/retract/assert. The retract boundary itself carries TWO

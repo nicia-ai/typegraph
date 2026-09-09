@@ -22,13 +22,17 @@ import {
   instantiateGraphTemplate,
   registerGraphTemplate,
 } from "../src";
+import { CURRENT_BASE_SCHEMA_VERSION } from "../src/backend/drizzle/base-schema";
 import {
   edgeMatchIdentityPairCheckName,
   edgeMatchIdentityUniqueIndexName,
   generatePostgresDDL,
   generatePostgresMigrationSQL,
+  generateSqliteCreateIndexSQL,
+  generateSqliteCreateTableSQL,
   generateSqliteMigrationSQL,
 } from "../src/backend/drizzle/ddl";
+import { tables as sqliteSchemaTables } from "../src/backend/drizzle/schema/sqlite";
 import {
   createPostgresBackend,
   createPostgresTables,
@@ -466,7 +470,7 @@ describe("deployment-wide base-schema adoption", () => {
           'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
         )
         .get();
-      expect(marker).toEqual({ version: 3 });
+      expect(marker).toEqual({ version: CURRENT_BASE_SCHEMA_VERSION });
     } finally {
       execSpy.mockRestore();
       competitor.close();
@@ -485,7 +489,9 @@ describe("deployment-wide base-schema adoption", () => {
     const client = sqliteClient(db);
     try {
       await createStoreWithSchema(graph, backend);
-      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(3);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
 
       dropLegacySqliteBaseShape(client, tableNames);
       const prepareSpy = vi.spyOn(client, "prepare");
@@ -493,7 +499,9 @@ describe("deployment-wide base-schema adoption", () => {
       // the relations this adoption owns, so unrelated warm-open probes do
       // not make this test a brittle total-call-count assertion.
       const [reopened] = await createStoreWithSchema(graph, backend);
-      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(3);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
       expect(
         client
           .prepare(`PRAGMA table_info("${tableNames.edges}")`)
@@ -546,7 +554,9 @@ describe("deployment-wide base-schema adoption", () => {
       // database this way — bootstrap's generated DDL only ever runs against
       // a brand-new relation set, never a reopened one.
       await createStoreWithSchema(graph, backend);
-      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(3);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
       client.exec("DROP TABLE typegraph_fences");
       client.exec(
         "UPDATE typegraph_base_schema_versions SET version = 1 WHERE installation = 1",
@@ -554,7 +564,9 @@ describe("deployment-wide base-schema adoption", () => {
 
       await createStoreWithSchema(graph, backend);
 
-      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(3);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
       expect(
         client
           .prepare(
@@ -562,6 +574,49 @@ describe("deployment-wide base-schema adoption", () => {
           )
           .get(),
       ).toEqual({ name: "typegraph_fences" });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-3 SQLite database up to version 4, adding the identity-transitions restored_at column", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      // Reach the current version the normal way, then roll the
+      // identity-transitions table back to its version-3 shape — no
+      // `restored_at` — and the marker back to 3, what a real version-3
+      // deployment left behind. The legacy CREATE TABLE is derived from the
+      // CURRENT schema (never hand-duplicated) with the one additive column
+      // stripped back out, so this test cannot drift from the real DDL.
+      await createStoreWithSchema(graph, backend);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      client.exec("DROP TABLE typegraph_identity_transitions");
+      const legacyCreateTable = generateSqliteCreateTableSQL(
+        sqliteSchemaTables.identityTransitions,
+      ).replace('"restored_at" TEXT,\n  ', "");
+      expect(legacyCreateTable).not.toContain("restored_at");
+      client.exec(legacyCreateTable);
+      for (const statement of generateSqliteCreateIndexSQL(
+        sqliteSchemaTables.identityTransitions,
+      )) {
+        client.exec(statement);
+      }
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 3 WHERE installation = 1",
+      );
+
+      await createStoreWithSchema(graph, backend);
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      const columns = client
+        .prepare(`PRAGMA table_info("typegraph_identity_transitions")`)
+        .all() as readonly Readonly<{ name: string }>[];
+      expect(columns.map((column) => column.name)).toContain("restored_at");
     } finally {
       await backend.close();
     }
@@ -585,7 +640,9 @@ describe("deployment-wide base-schema adoption", () => {
       client.exec(`DROP TABLE "${tableNames.baseSchemaVersions}"`);
 
       const [reopened] = await createStoreWithSchema(graph, backend);
-      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(3);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
       const indexes = client
         .prepare(`PRAGMA index_list("${tableNames.edges}")`)
         .all() as readonly Readonly<{ name: string }>[];
@@ -633,7 +690,7 @@ describe("deployment-wide base-schema adoption", () => {
       const marker = await client.query<{ version: number }>(
         `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
       );
-      expect(marker.rows[0]?.version).toBe(3);
+      expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
       const columns = await client.query<{ column_name: string }>(
         `SELECT column_name FROM information_schema.columns WHERE table_name = '${tableNames.edges}'`,
       );
@@ -649,7 +706,7 @@ describe("deployment-wide base-schema adoption", () => {
       const advancedMarker = await client.query<{ version: number }>(
         `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
       );
-      expect(advancedMarker.rows[0]?.version).toBe(3);
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
 
       const querySpy = vi.spyOn(client, "query");
       await createStoreWithSchema(graph, backend);
@@ -674,10 +731,58 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
+  it("catches an installed version-3 PostgreSQL/PGlite database up to version 4, adding the identity-transitions restored_at column", async () => {
+    const tableNames = {
+      baseSchemaVersions: "tg_base_schema_versions",
+      identityTransitions: "tg_identity_transitions",
+    } as const;
+    const tables = createPostgresTables(tableNames);
+    const client = await PGlite.create();
+    await client.exec(generatePostgresDDL(tables).join("\n\n"));
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      tables,
+      vector: false,
+    });
+    try {
+      await createStoreWithSchema(graph, backend);
+      const marker = await client.query<{ version: number }>(
+        `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
+      );
+      expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+
+      // Roll the identity-transitions table back to its version-3 shape —
+      // Postgres, unlike SQLite, supports DROP COLUMN unconditionally, so no
+      // hand-reconstructed legacy DDL is needed here — and the marker back
+      // to 3, what a real version-3 deployment left behind.
+      await client.exec(
+        [
+          `ALTER TABLE "${tableNames.identityTransitions}" DROP COLUMN "restored_at"`,
+          `UPDATE "${tableNames.baseSchemaVersions}" SET version = 3 WHERE installation = 1`,
+        ].join(";\n"),
+      );
+
+      await createStoreWithSchema(graph, backend);
+
+      const advancedMarker = await client.query<{ version: number }>(
+        `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const columns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = '${tableNames.identityTransitions}'`,
+      );
+      expect(columns.rows.map((row) => row.column_name)).toContain(
+        "restored_at",
+      );
+    } finally {
+      await backend.close();
+      await client.close();
+    }
+  });
+
   it.each([
     ["missing", undefined],
     ["stale", 0],
-    ["newer", 4],
+    ["newer", CURRENT_BASE_SCHEMA_VERSION + 1],
   ] as const)(
     "createVerifiedStore refuses a %s base marker without DDL",
     async (reason, version) => {
@@ -730,7 +835,7 @@ describe("deployment-wide base-schema adoption", () => {
           `SELECT version FROM typegraph_base_schema_versions WHERE installation = 1`,
         )
         .all() as readonly Readonly<{ version: number }>[];
-      expect(rows).toEqual([{ version: 3 }]);
+      expect(rows).toEqual([{ version: CURRENT_BASE_SCHEMA_VERSION }]);
     } finally {
       await backend.close();
     }
@@ -742,7 +847,7 @@ describe("deployment-wide base-schema adoption", () => {
     try {
       await createStoreWithSchema(graph, backend);
       client.exec(
-        "UPDATE typegraph_base_schema_versions SET version = 4 WHERE installation = 1",
+        `UPDATE typegraph_base_schema_versions SET version = ${String(CURRENT_BASE_SCHEMA_VERSION + 1)} WHERE installation = 1`,
       );
 
       await expect(backend.bootstrapTables?.()).rejects.toSatisfy(
@@ -750,7 +855,9 @@ describe("deployment-wide base-schema adoption", () => {
           error instanceof BaseSchemaMigrationError &&
           error.details.reason === "newer",
       );
-      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(4);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION + 1,
+      );
     } finally {
       await backend.close();
     }
@@ -771,7 +878,7 @@ describe("deployment-wide base-schema adoption", () => {
         if (!publishedNewerMarker && source.includes("CREATE TABLE")) {
           publishedNewerMarker = true;
           prepare(
-            "INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, 4, CURRENT_TIMESTAMP)",
+            `INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, ${String(CURRENT_BASE_SCHEMA_VERSION + 1)}, CURRENT_TIMESTAMP)`,
           ).run();
         }
         return prepare(source);
@@ -783,7 +890,9 @@ describe("deployment-wide base-schema adoption", () => {
           error.details.reason === "newer",
       );
       expect(publishedNewerMarker).toBe(true);
-      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(4);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION + 1,
+      );
     } finally {
       await backend.close();
     }

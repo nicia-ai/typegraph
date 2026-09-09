@@ -436,6 +436,16 @@ async function consumeTrustedChunks<G extends GraphDef>(
             "Use importGraphStream() for an export that carries identity truth.",
         );
       }
+      case "identity-transitions": {
+        // Same refusal as "identity" above, and unreachable in practice: the
+        // header check earlier in this loop already refuses a stream whose
+        // header declares `identity` at all, and archival export never emits
+        // this chunk type without one.
+        throw invalidStream(
+          "Trusted graph interchange import does not support identity transitions. " +
+            "Use importGraphStream() for an archival export that carries identity history.",
+        );
+      }
     }
   }
 

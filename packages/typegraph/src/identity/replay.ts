@@ -34,6 +34,7 @@ import {
   identityReplayRequiresHistoryError,
   type IdentityTransitionCause,
   type IdentityTransitionRow,
+  isRestoredTransitionRow,
   readIdentityTransitions,
   readTransitionRetentionDetails,
   transitionClassRef,
@@ -46,7 +47,7 @@ import {
 } from "./types";
 
 /** Default and maximum boundary counts a single `replay` call returns. */
-const IDENTITY_REPLAY_DEFAULT_LIMIT = 200;
+export const IDENTITY_REPLAY_DEFAULT_LIMIT = 200;
 export const IDENTITY_REPLAY_MAX_LIMIT = 2000;
 
 export type IdentityTransition<G extends GraphDef> = Readonly<{
@@ -60,7 +61,7 @@ export type IdentityTransition<G extends GraphDef> = Readonly<{
   decision?: IdentityDecisionProvenance | undefined;
 }>;
 
-type IdentityReplayStep<G extends GraphDef> = Readonly<{
+export type IdentityReplayStep<G extends GraphDef> = Readonly<{
   transition: IdentityTransition<G>;
   before: readonly IdentityNodeReference<G>[];
   after: readonly IdentityNodeReference<G>[];
@@ -383,9 +384,8 @@ async function walkedTransitionsFor<G extends GraphDef>(
 }
 
 /**
- * Every transition (§3.1's `transitionsOf`) touching `ref`'s class lineage,
- * ascending by recorded revision. `store.identity.transitionsOf` (PR-3) is a
- * thin wrapper over this.
+ * Every transition touching `ref`'s class lineage, ascending by recorded
+ * revision. `store.identity.transitionsOf` is a thin wrapper over this.
  */
 export async function identityTransitionsOf<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
@@ -397,12 +397,13 @@ export async function identityTransitionsOf<G extends GraphDef>(
 }
 
 /**
- * The full replay algorithm (§3.2): every transition touching `ref`'s class
+ * The full replay algorithm: every transition touching `ref`'s class
  * lineage, each paired with the class membership immediately before and
  * after it. `before(b_i) := after(b_{i-1})` for every boundary but the first —
- * sound because §2.3's cause set is exhaustive, so no membership-changing
- * revision can fall between two consecutive boundaries undetected.
- * `store.identity.replay` (PR-3) is a thin wrapper over this.
+ * sound because the transition cause set is exhaustive (see
+ * `IdentityTransitionCause`), so no membership-changing revision can fall
+ * between two consecutive boundaries undetected. `store.identity.replay` is
+ * a thin wrapper over this.
  */
 export async function identityReplay<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
@@ -433,7 +434,20 @@ export async function identityReplay<G extends GraphDef>(
     );
   }
 
-  const boundaries = distinctBoundaries(rows);
+  // Restored rows carry the SOURCE graph's own revision number, which
+  // interleaves arbitrarily with this graph's — a numeric watermark
+  // comparison cannot tell "a foreign row that happens to sit above the
+  // floor" from "this graph's own later history" apart (see
+  // `isRestoredTransitionRow`'s docblock, and the retention watermark's own
+  // "cannot vouch below N" contract, which is coarser and orthogonal). Steps
+  // are therefore built ONLY from this graph's own (never restored) rows;
+  // `transitionsOf` (no such filter) remains the complete answer for "what
+  // changed and why". Filtering the boundary set itself — not merely the
+  // rows matched at each boundary — also means the next NATIVE boundary
+  // computes its own fresh `before` here (`previousAfter` never chains
+  // through a boundary that held only restored rows).
+  const nativeRows = rows.filter((row) => !isRestoredTransitionRow(row));
+  const boundaries = distinctBoundaries(nativeRows);
 
   const steps: IdentityReplayStep<G>[] = [];
   let previousAfter: readonly IdentityNodeReference<G>[] | undefined;
@@ -442,7 +456,7 @@ export async function identityReplay<G extends GraphDef>(
       previousAfter ?? (await reconstructAt(ctx, seed, boundary - 1));
     const after = await reconstructAt(ctx, seed, boundary);
     previousAfter = after;
-    for (const row of rows) {
+    for (const row of nativeRows) {
       if (row.recorded_revision !== boundary) continue;
       steps.push({
         transition: publicTransition<G>(row),

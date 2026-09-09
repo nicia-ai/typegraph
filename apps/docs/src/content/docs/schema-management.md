@@ -272,6 +272,11 @@ only after a data check inside the commit transaction: see
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
 for what each one checks and how a refusal is reported.
 
+Enabling `identity` on an existing graph does not backfill identity
+transitions for events that happened before enablement — replay begins at
+the coordinate identity was turned on, not at the graph's own origin. See
+[Replay and identity history](/identity/#replay-and-identity-history).
+
 ### Breaking Changes (Require Manual Action)
 
 These changes require manual migration:

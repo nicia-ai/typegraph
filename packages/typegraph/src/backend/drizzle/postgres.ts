@@ -190,6 +190,7 @@ import {
   generatePgCreateTableSQL,
   generatePostgresDDL,
   generatePostgresEdgeMatchIdentityUpgradeDDL,
+  generatePostgresIdentityTransitionsRestoredAtAdoptionDDL,
   postgresContributions,
   postgresIdentifierRegclassName,
 } from "./ddl";
@@ -1344,6 +1345,23 @@ export function buildPostgresEngineProfile(
     }
   }
 
+  /**
+   * Ensures the identity-transitions table's `restored_at` column exists —
+   * the version-4 adoption step. Unlike `ensureEdgeMatchIdentityStorage`
+   * above, this needs no `pg_attribute` introspection: it is one nullable
+   * column, and Postgres's native `ADD COLUMN IF NOT EXISTS` is already
+   * idempotent. No "does the table exist yet" guard either — version-4's
+   * `adopt()` always runs after version-3's in the same ordered walk
+   * (`createBaseSchemaMembers`), and version-3 is what creates this table.
+   */
+  async function ensureIdentityTransitionsRestoredAtColumn(): Promise<void> {
+    await executeConcurrentCreateDdl(
+      generatePostgresIdentityTransitionsRestoredAtAdoptionDDL(
+        getTableName(tables.identityTransitions),
+      ),
+    );
+  }
+
   async function readBaseSchemaVersion(): Promise<number | undefined> {
     try {
       const rows = await db
@@ -1542,6 +1560,7 @@ export function buildPostgresEngineProfile(
     identityTransitionRetentionTableDdl: generatePgCreateTableSQL(
       tables.identityTransitionRetention,
     ),
+    ensureIdentityTransitionsRestoredAtColumn,
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /

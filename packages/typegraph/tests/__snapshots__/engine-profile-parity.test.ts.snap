@@ -1131,6 +1131,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   "assertion_ids" JSONB NOT NULL,
   "decision" JSONB,
   "tx_id" TEXT,
+  "restored_at" TIMESTAMPTZ,
   PRIMARY KEY ("graph_id", "transition_id")
 );",
   },
@@ -1351,6 +1352,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       3,
       "<<TIMESTAMP>>",
       3,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      1,
+      4,
+      "<<TIMESTAMP>>",
+      4,
+      "<<TIMESTAMP>>",
+      4,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
   },
@@ -2411,6 +2429,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   "assertion_ids" JSONB NOT NULL,
   "decision" JSONB,
   "tx_id" TEXT,
+  "restored_at" TIMESTAMPTZ,
   PRIMARY KEY ("graph_id", "transition_id")
 );",
   },
@@ -2631,6 +2650,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
       3,
       "<<TIMESTAMP>>",
       3,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      1,
+      4,
+      "<<TIMESTAMP>>",
+      4,
+      "<<TIMESTAMP>>",
+      4,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
   },
@@ -3296,6 +3332,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   "assertion_ids" TEXT NOT NULL,
   "decision" TEXT,
   "tx_id" TEXT,
+  "restored_at" TEXT,
   PRIMARY KEY ("graph_id", "transition_id")
 );",
   },
@@ -3504,6 +3541,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
       3,
       "<<TIMESTAMP>>",
       3,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      4,
+      "<<TIMESTAMP>>",
+      4,
+      "<<TIMESTAMP>>",
+      4,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },
@@ -4420,6 +4474,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   "assertion_ids" TEXT NOT NULL,
   "decision" TEXT,
   "tx_id" TEXT,
+  "restored_at" TEXT,
   PRIMARY KEY ("graph_id", "transition_id")
 );",
   },
@@ -4628,6 +4683,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
       3,
       "<<TIMESTAMP>>",
       3,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      4,
+      "<<TIMESTAMP>>",
+      4,
+      "<<TIMESTAMP>>",
+      4,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },

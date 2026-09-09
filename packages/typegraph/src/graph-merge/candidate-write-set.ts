@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  FORMAT_VERSION,
   type GraphData,
   importGraph,
   InterchangeIdentitySchema,
@@ -117,7 +118,7 @@ function sameCandidateTarget(
 
 function interchangeDocument(writeSet: CandidateWriteSet): GraphData {
   return {
-    formatVersion: "2.0",
+    formatVersion: FORMAT_VERSION,
     // Import does not use transport time. A constant keeps this adapter a pure
     // function of the candidate JSON and target snapshot.
     exportedAt: "1970-01-01T00:00:00.000Z",

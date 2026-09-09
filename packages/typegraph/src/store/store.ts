@@ -151,22 +151,31 @@ import {
   type IdentityRebuildContext,
   type IdentityServiceContext,
   type IdentityTransferAssertion,
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
   importIdentityAssertionsIntoTarget,
+  importIdentityTransitionsIntoTarget,
   liveNodeKindsSharingIds,
   loadAssertionsByIds,
   loadCurrentStructuralClasses,
   lockIdentityGraph,
   readIdentityAssertionPageAtTarget,
   readIdentityAssertionsForInterchange,
+  readIdentityTransitionPageForInterchange,
+  readTransitionRetentionDetails,
   rebuildIdentityClosureForContext,
   refKey,
   removeIdentityKindsForContext,
   requireNodeValidityEndCompatible,
   toTransferAssertion,
+  toTransitionTransfer,
   validateIdentityForContext,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
-import { type IdentityDecisionProvenance } from "../identity/transition-log";
+import {
+  type IdentityDecisionProvenance,
+  identityReplayRequiresHistoryError,
+} from "../identity/transition-log";
 import type {
   IdentityFacade,
   IdentityNode,
@@ -618,11 +627,14 @@ function transactionOutcome<T>(
   recordedByGraph: RecordedFlushInstants | undefined,
   graphId: string,
 ): TransactionOutcome<T> {
-  const recorded = recordedByGraph?.get(graphId);
+  const flushed = recordedByGraph?.get(graphId);
+  if (flushed !== undefined) {
+    recorder.recordIdentityTransitions(flushed.identityTransitions);
+  }
   return {
     result,
     receipt: recorder.snapshot(
-      recorded === undefined ? undefined : asRecordedInstant(recorded),
+      flushed === undefined ? undefined : asRecordedInstant(flushed.recordedAt),
     ),
   };
 }
@@ -1395,6 +1407,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.detachDeletedImportedIdentityNode(target, reference),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
+      readIdentityTransitionPageAtTarget: (target, options) =>
+        this.readIdentityTransitionPageAtTarget(target, options),
+      identityTransitionRetentionAtTarget: (target) =>
+        this.identityTransitionRetentionAtTarget(target),
+      importIdentityTransitionsAtTarget: (target, transitions, watermark) =>
+        this.importIdentityTransitionsAtTarget(target, transitions, watermark),
       applyIdentityMergeAtTarget: (target, retractions, assertions, decision) =>
         this.applyIdentityMergeAtTarget(
           target,
@@ -1706,6 +1724,86 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       target,
       assertions,
       mode,
+    );
+  }
+
+  /** @internal Reads one bounded page of a graph's ARCHIVAL identity transitions, oldest first. */
+  async readIdentityTransitionPageAtTarget(
+    target: GraphBackend | TransactionBackend,
+    options: Readonly<{ after?: IdentityTransitionCursor; limit: number }>,
+  ): Promise<
+    Readonly<{
+      transitions: readonly IdentityTransitionTransfer[];
+      nextAfter?: IdentityTransitionCursor;
+      done: boolean;
+    }>
+  > {
+    if (this.#graph.identity === undefined) {
+      return { transitions: [], done: true };
+    }
+    const page = await readIdentityTransitionPageForInterchange(
+      target,
+      this.#sqlSchema(),
+      this.graphId,
+      options,
+    );
+    return {
+      transitions: page.transitions.map((row) => toTransitionTransfer(row)),
+      ...(page.nextAfter === undefined ? {} : { nextAfter: page.nextAfter }),
+      done: page.done,
+    };
+  }
+
+  /** @internal Reads a graph's identity transition-retention watermark for archival export. */
+  identityTransitionRetentionAtTarget(
+    target: GraphBackend | TransactionBackend,
+  ): ReturnType<typeof readTransitionRetentionDetails> {
+    if (this.#graph.identity === undefined) {
+      return Promise.resolve({ prunedBeforeRevision: 0, prunedAt: nowIso() });
+    }
+    return readTransitionRetentionDetails(
+      target,
+      this.#sqlSchema(),
+      this.graphId,
+    );
+  }
+
+  /** @internal Restores archival identity transitions inside an import transaction. */
+  importIdentityTransitionsAtTarget(
+    target: IdentityTarget,
+    transitions: readonly IdentityTransitionTransfer[],
+    carriedWatermark: number | undefined,
+  ): ReturnType<typeof importIdentityTransitionsIntoTarget> {
+    if (transitions.length === 0 && carriedWatermark === undefined) {
+      return Promise.resolve({ created: 0, watermark: undefined });
+    }
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError(
+        "Cannot import identity transitions into an identity-disabled graph.",
+        {
+          code: "IDENTITY_IMPORT_REQUIRES_PROFILE",
+          graphId: this.graphId,
+        },
+      );
+    }
+    // A history-off graph has nowhere for `transitionsOf` / `replay` to ever
+    // read these rows back from (both refuse with the same error below
+    // `history: true`), so restoring them here would write data the store's
+    // own API can never surface again — and, worse, silently. `importGraph`
+    // / `importGraphStream` (`interchange/import.ts`) already refuse this
+    // UPFRONT, before any node or edge write, whenever the document or
+    // stream header names a transitions section or a non-zero retention
+    // watermark — this is the BACKSTOP every archival-transitions restore
+    // still passes through, catching any caller that reaches this method
+    // directly.
+    if (!this.#captureEnabled) {
+      throw identityReplayRequiresHistoryError(this.graphId);
+    }
+    return importIdentityTransitionsIntoTarget(
+      { graphId: this.graphId, schema: this.#sqlSchema() },
+      target,
+      transitions,
+      carriedWatermark,
     );
   }
 

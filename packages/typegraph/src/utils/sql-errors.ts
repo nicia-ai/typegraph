@@ -595,6 +595,20 @@ export function isSqliteDuplicateEdgeMatchIdentityColumnError(
   return false;
 }
 
+/** Whether a concurrent SQLite adopter already added the identity-transitions table's `restored_at` column we planned. */
+export function isSqliteDuplicateIdentityTransitionsRestoredAtColumnError(
+  error: unknown,
+): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    if (Reflect.get(link, "code") !== "SQLITE_ERROR") continue;
+    if (sqliteErrorMessage(link) === "duplicate column name: restored_at") {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Whether a durable convergence statement proved that the adapter's static
  * capability declaration has not been provisioned in this database yet.

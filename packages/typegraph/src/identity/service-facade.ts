@@ -18,6 +18,7 @@ import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { identityAssertionSemanticKey } from "./assertion-key";
 import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
+import { identityReplay, identityTransitionsOf } from "./replay";
 import {
   normalizeIdentityAssertionRow,
   type RawIdentityAssertionRow,
@@ -1007,6 +1008,14 @@ export function createIdentityFacade<G extends GraphDef>(
           return retracted.map((assertion) => publicAssertion<G>(assertion));
         },
       );
+    },
+
+    transitionsOf(ref, options) {
+      return identityTransitionsOf(ctx, ref, options);
+    },
+
+    replay(ref, options) {
+      return identityReplay(ctx, ref, options);
     },
   };
 }
