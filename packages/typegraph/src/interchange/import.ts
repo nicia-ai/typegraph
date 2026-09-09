@@ -87,6 +87,7 @@ import {
 } from "../core/types";
 import {
   CardinalityError,
+  CompositionError,
   ConfigurationError,
   DatabaseOperationError,
   DisjointError,
@@ -1815,12 +1816,14 @@ function isDeclaredConstraintRefusal(
   | UniquenessError
   | DisjointError
   | CardinalityError
+  | CompositionError
   | EdgeMatchIdentityConflictError
   | EdgeAcyclicityError {
   return (
     error instanceof UniquenessError ||
     error instanceof DisjointError ||
     error instanceof CardinalityError ||
+    error instanceof CompositionError ||
     error instanceof EdgeMatchIdentityConflictError ||
     error instanceof EdgeAcyclicityError
   );
