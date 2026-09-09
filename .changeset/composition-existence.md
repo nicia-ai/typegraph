@@ -12,6 +12,8 @@ Validating import tracks every required-existence part it creates and, once the 
 
 `store.verifyConstraintFences()` gains a `compositionExistence` family, reporting any LIVE required-existence part with no live whole; a schema commit newly declaring `existence: "required"` on an already-populated pair runs the same check as a tightening preflight and refuses a dirty graph rather than silently admitting orphans.
 
+Graph merge does not yet audit `existence: "required"`: merge's own composition-orphan check catches a live part left behind when the merge deletes its whole node, but not a required part whose composition edge is dropped or collapsed by canonicalization while both endpoints survive. Run `store.verifyConstraintFences()` against a merged store to catch that case until merge gains its own check — see [Limitations](/limitations#composition-existence-existence-required).
+
 ### Breaking
 
 - `CompositionPair` (internal to the registry; not part of the public entrypoint) gains a required `existence` field — anything constructing one directly, such as a test fixture, must add it.
