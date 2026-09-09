@@ -342,14 +342,28 @@ Three ontology APIs were removed: the custom `metaEdge()` factory (and its
 `MetaEdgeProperties`, and the deprecated `sameAs`/`differentFrom` factories.
 None of them ever drove runtime behavior beyond serialized introspection —
 see [Type-Level Annotations](/ontology#type-level-annotations) and the
-[Verified Support Matrix](/ontology#verified-support-matrix). Nothing about
-opening an EXISTING store changes: a schema document written before this
-release keeps loading, unmodified, with no action required.
+[Verified Support Matrix](/ontology#verified-support-matrix). A bare
+upgrade — deploying this release against an existing store with no
+accompanying ontology change — keeps loading the schema document unmodified
+and reports `status: "unchanged"`; no action is required for that case
+alone. **This does not mean every existing document is unaffected** — see
+the `metaEdge()` bullet immediately below for the one case where opening a
+store under this release rewrites the persisted document on its own.
 
-**If your code calls `metaEdge()`.** Delete the declaration. Move any
-free-form metadata you attached (a custom `description`, or the
-`transitive`/`inference`/etc. properties you set) into `annotations` on
-`defineGraph()` instead, and update whatever application code walked
+**If your code calls `metaEdge()`.** Delete the declaration, and **before
+upgrading**, copy any relation you actually rely on into `annotations` on
+`defineGraph()` — the custom `metaEdge()` factory is gone, so a graph that
+no longer declares the relation can no longer serialize it. The first
+`ensureSchema`/`createStoreWithSchema` call after upgrading auto-migrates:
+it classifies every one of the persisted document's relations naming your
+custom meta-edge as a `safe` removal (a custom name reaches no closure or
+write-path decision, so dropping it changes nothing the engine can
+observe) and commits a rewritten schema document with those relations
+gone — silently, with no opt-in and no warning. The only way to recover the
+dropped relation afterward is to read it back out of the now-inactive prior
+schema-version row. Move any other free-form metadata you attached (a
+custom `description`, or the `transitive`/`inference`/etc. properties you
+set) into `annotations` too, and update whatever application code walked
 `store.introspect().ontology` for that meta-edge's relations to instead walk
 the annotated data — see
 [Type-Level Annotations](/ontology#type-level-annotations) for a worked
