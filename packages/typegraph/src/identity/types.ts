@@ -11,6 +11,11 @@ import {
   type Node,
   type NodeRef,
 } from "../store/types";
+import {
+  type IdentityReplay,
+  type IdentityReplayOptions,
+  type IdentityTransition,
+} from "./replay";
 
 /**
  * The accepted *input* form for every identity facade method: a whole node or
@@ -189,6 +194,32 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
     bulkRetractAssertions: (
       ids: readonly IdentityAssertionId[],
     ) => Promise<readonly IdentityAssertion<G>[]>;
+    /**
+     * Every transition (assertion, retraction, fold, deletion, restore,
+     * window end, kind drop, or reconciliation decision) that changed
+     * `ref`'s identity class, ascending by recorded revision. Requires the
+     * store to be opened with `history: true`.
+     *
+     * Deliberately absent from {@link IdentityReadFacade}: it answers across
+     * every recorded coordinate, not the one a read-only lens is pinned to.
+     */
+    transitionsOf: (
+      ref: IdentityNodeRefInput<G>,
+      options?: IdentityReplayOptions,
+    ) => Promise<readonly IdentityTransition<G>[]>;
+    /**
+     * Pairs every transition touching `ref`'s identity class lineage with the
+     * class membership immediately before and after it, reconstructed through
+     * the same historical reader `asOf` / `asOfRecorded` reads use. Requires
+     * the store to be opened with `history: true`.
+     *
+     * Deliberately absent from {@link IdentityReadFacade}: it answers across
+     * every recorded coordinate, not the one a read-only lens is pinned to.
+     */
+    replay: (
+      ref: IdentityNodeRefInput<G>,
+      options?: IdentityReplayOptions,
+    ) => Promise<IdentityReplay<G>>;
   }>;
 
 /**
@@ -211,5 +242,13 @@ export type IdentityWriteSummary = Readonly<{
   sameAssertions: number;
   differentAssertions: number;
   retractions: number;
+  /**
+   * Identity transition-log notes flushed for this graph during the
+   * transaction. An ANNOTATION of the writes above, not a fourth kind of
+   * write — deliberately excluded from `total`, which stays the count of
+   * ledger truth rows the transaction produced. Always `0` when identity is
+   * disabled or opened without `history: true`.
+   */
+  transitions: number;
   total: number;
 }>;

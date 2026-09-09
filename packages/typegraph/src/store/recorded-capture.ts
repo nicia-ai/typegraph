@@ -162,7 +162,23 @@ type RecordedCaptureCheckpoint = Readonly<{
   identityTransitionNotes: readonly IdentityTransitionNote[];
 }>;
 
-export type RecordedFlushInstants = ReadonlyMap<string, string>;
+/**
+ * One graph's outcome from a recorded-capture flush: the allocated recorded
+ * instant, and how many identity transition notes this flush wrote for that
+ * graph (`0` when identity is disabled, opened without `history: true`, or
+ * nothing in the transaction changed a class) — the count `IdentityWriteSummary
+ * .transitions` is drawn from, so the receipt never re-derives it from a
+ * second reading of the notes buffer.
+ */
+export type RecordedGraphFlushResult = Readonly<{
+  recordedAt: string;
+  identityTransitions: number;
+}>;
+
+export type RecordedFlushInstants = ReadonlyMap<
+  string,
+  RecordedGraphFlushResult
+>;
 
 type RecordedFlushObserver = (instants: RecordedFlushInstants) => void;
 
@@ -397,7 +413,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
         identityTransitionNotes.length === 0
       )
         return new Map();
-      const recordedByGraph = new Map<string, string>();
+      const recordedByGraph = new Map<string, RecordedGraphFlushResult>();
       const byGraph = groupBy(touched.values(), (entity) => entity.graphId);
       for (const graphId of forcedGraphRevisions) {
         if (!byGraph.has(graphId)) byGraph.set(graphId, []);
@@ -416,7 +432,11 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
           graphId,
           ownsWriteLock,
         );
-        recordedByGraph.set(graphId, recordedCommit.instant);
+        const graphNotes = notesByGraph.get(graphId) ?? [];
+        recordedByGraph.set(graphId, {
+          recordedAt: recordedCommit.instant,
+          identityTransitions: graphNotes.length,
+        });
         const nodes = entities.filter(
           (entity): entity is TouchedNode => entity.entity === "node",
         );
@@ -454,7 +474,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
           target,
           schema,
           graphId,
-          notesByGraph.get(graphId) ?? [],
+          graphNotes,
           recordedCommit.revision,
           recordedCommit.recordedAt,
         );
