@@ -247,6 +247,22 @@ function validateIdentityOptions(
   if (identity === undefined) return undefined;
   const { onAssertionConflict, ...scalarInput } = identity;
   const scalar = identityOptionsScalarSchema.parse(scalarInput);
+  // Accepted or refused, never ignored. Both `"flag"` arms mean "drop the
+  // identity PAIRING and keep the data", which needs a plan rebuild with the
+  // offending identity candidate edges removed — machinery this release does
+  // not have. Refusing the value is the honest contract: a caller who states it
+  // learns the merge cannot honor it, instead of receiving a plan that silently
+  // applied the default.
+  if (scalar.onEdgeConflict === "flag") {
+    throw new Error(
+      'identity.onEdgeConflict: "flag" is not implemented: dropping an identity pairing whose repoint collides requires rebuilding the plan without that pairing. Use "repoint" (the default), which applies the repoint and reports the property disagreement through onPropertyConflict.',
+    );
+  }
+  if (scalar.onUniquenessConflict === "flag") {
+    throw new Error(
+      'identity.onUniquenessConflict: "flag" is not implemented: dropping an identity pairing whose fusion violates a unique constraint requires rebuilding the plan without that pairing. Use "refuse" (the default), which surfaces the violation through the existing constraint-conflict error.',
+    );
+  }
   return {
     pairing: scalar.pairing,
     onAssertionConflict: validateIdentityAssertionConflictPolicy(

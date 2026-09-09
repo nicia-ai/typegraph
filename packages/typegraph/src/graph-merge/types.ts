@@ -371,21 +371,31 @@ export type IdentityReconciliationOptions = Readonly<{
   onAssertionConflict?: IdentityAssertionConflictPolicy;
   /**
    * How an identity-paired cluster's repointed edge collides with another.
-   * `"repoint"` (default) applies the repoint; `"flag"` keeps the edge and
-   * records a typed conflict.
+   * `"repoint"` (default) applies the repoint, reporting any property
+   * disagreement through {@link MergeOptions.onPropertyConflict}.
+   *
+   * `"flag"` — drop the pairing, keep both edges — is REFUSED with an
+   * invalid-option error rather than silently applying the default: dropping a
+   * pairing requires rebuilding the plan without the offending identity
+   * candidate edge, which this release does not do.
    */
   onEdgeConflict?: "repoint" | "flag";
   /**
-   * How a resolved write set that still violates a unique constraint after
-   * an identity pairing is dropped is handled. `"refuse"` (default) fails
-   * the merge with the existing constraint-conflict error; `"flag"` drops
-   * the pairing (never the constraint) and records a typed conflict.
+   * How a resolved write set that violates a unique constraint because an
+   * identity pairing fused two members is handled. `"refuse"` (default)
+   * surfaces the violation through the existing constraint-conflict error.
+   *
+   * `"flag"` — drop the pairing, never the constraint — is REFUSED with an
+   * invalid-option error rather than silently applying the default, for the
+   * same reason as {@link IdentityReconciliationOptions.onEdgeConflict}.
    */
   onUniquenessConflict?: "refuse" | "flag";
   /**
-   * How contradictory source attribution across identity-paired members is
-   * handled. `"keepBoth"` (default) keeps every contribution; `"refuse"`
-   * fails the merge.
+   * How contradictory source attribution across the members of a cluster an
+   * identity assertion FUSED is handled. `"keepBoth"` (default) keeps every
+   * contribution, exactly as the merge always has; `"refuse"` fails the plan
+   * with `GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT`, naming the canonical
+   * entity and the contributions that disagree.
    */
   onProvenanceConflict?: "keepBoth" | "refuse";
 }>;

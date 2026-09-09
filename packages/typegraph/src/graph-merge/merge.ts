@@ -1877,6 +1877,13 @@ function buildInternalMergePlan<G extends GraphDef>(
     compareStrings(`${left.kind}|${left.id}`, `${right.kind}|${right.id}`),
   );
 
+  assertIdentityProvenanceAgreement(
+    options.identity?.onProvenanceConflict ?? "keepBoth",
+    survivingEdges,
+    canonicalOf,
+    provenanceRecords,
+  );
+
   return {
     canonicalEntities,
     survivingModifications: reconciledModifications.survivingModifications,
@@ -1975,6 +1982,69 @@ function buildInternalMergePlan<G extends GraphDef>(
       ),
     ),
   };
+}
+
+/**
+ * `onProvenanceConflict` — how a cluster that an identity assertion FUSED
+ * handles contradictory source attribution across its members.
+ *
+ * Only a cluster an `identity` match source actually pulled together is judged:
+ * every other cluster's multi-source provenance is the ordinary multi-branch
+ * case the merge has always kept, and re-classifying it here would change a
+ * default. `"keepBoth"` (the default, and today's behavior) keeps every
+ * contribution. `"refuse"` fails the plan naming the canonical entity and the
+ * contributions that disagree, for a caller whose source attribution is a
+ * correctness invariant rather than a record.
+ */
+function assertIdentityProvenanceAgreement(
+  policy: "keepBoth" | "refuse",
+  survivingEdges: readonly CandidateEdge[],
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+  provenanceRecords: readonly ProvenanceRecord[],
+): void {
+  if (policy === "keepBoth") return;
+  const identityPairedCanonicals = new Set<MergeKey>();
+  for (const edge of survivingEdges) {
+    if (!edge.evidence.sources.some((source) => source.kind === "identity")) {
+      continue;
+    }
+    identityPairedCanonicals.add(canonicalOf.get(edge.a) ?? edge.a);
+    identityPairedCanonicals.add(canonicalOf.get(edge.b) ?? edge.b);
+  }
+  if (identityPairedCanonicals.size === 0) return;
+  const byCanonical = new Map<MergeKey, ProvenanceRecord[]>();
+  for (const record of provenanceRecords) {
+    if (record.role !== "node") continue;
+    const key = mergeKey(record.canonicalKind, record.canonicalId);
+    if (!identityPairedCanonicals.has(key)) continue;
+    const records = byCanonical.get(key);
+    if (records === undefined) byCanonical.set(key, [record]);
+    else records.push(record);
+  }
+  for (const [canonical, records] of [...byCanonical].sort(([left], [right]) =>
+    compareMergeKeys(left, right),
+  )) {
+    const sources = new Set(records.map((record) => record.sourceId));
+    if (sources.size <= 1) continue;
+    throw new IdentityMergeConflictError(
+      `Identity-paired entity ${kindOf(canonical)}:${idOf(canonical)} carries contributions from ${sources.size} different sources (${[...sources].toSorted().join(", ")}), which options.identity.onProvenanceConflict: "refuse" does not accept.`,
+      {
+        code: MERGE_ERROR_CODES.identityProvenanceConflict,
+        details: {
+          conflict: {
+            kind: "provenance",
+            canonical: entityRef(canonical),
+            contributions: records,
+          } satisfies Extract<
+            IdentityUnresolvedConflict,
+            Readonly<{ kind: "provenance" }>
+          >,
+        },
+        suggestion:
+          'Reconcile the source attribution of the paired members, or set options.identity.onProvenanceConflict: "keepBoth" to keep every contribution.',
+      },
+    );
+  }
 }
 
 /**
