@@ -10,10 +10,14 @@
  * proving completeness directly: every integer revision in `(since, current]`
  * must carry direct evidence, not merely the largest one.
  *
- * `tests/graph-merge/lineage-capture-completeness.test.ts` already pins this
- * fix on SQLite; this file re-runs the identical scenario on PGlite so the
- * fix is proven backend-agnostic rather than SQLite-specific — the shared
- * query in `evidencedRevisionCount` gives no reason to expect divergence,
+ * The conformance case "reports unbounded when an interleaved non-capturing
+ * writer leaves a revision with no recorded evidence"
+ * (`tests/backends/integration/lineage-conformance.ts`, registered for both
+ * bundled backends from `tests/lineage-recorded-relations.test.ts`) pins this
+ * fix at the lineage level. This file adds the merge-level consequence on
+ * PGlite: the pruned diff falls back to the full comparison, so the
+ * tracking-only writer's change survives the merge — the shared query in
+ * `evidencedRevisionCount` gives no reason to expect divergence from SQLite,
  * but nothing here relies on that assumption going untested.
  */
 import {

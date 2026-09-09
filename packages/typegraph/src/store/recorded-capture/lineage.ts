@@ -108,16 +108,19 @@
  * subsequent commit to "close" a hole that already happened, because the
  * missing revision itself never gets evidence no matter what comes after.
  *
- * The one commit shape that can legitimately allocate a revision and leave
- * ZERO evidence behind is a kind-level hard delete
- * (`closeRecordedHardDeletedKind` in `flush.ts`, run when a schema migration
- * removes a node or edge kind) over a kind that currently has no live rows: the
+ * Two commit shapes can legitimately allocate a revision and leave ZERO
+ * evidence behind. A kind-level hard delete (`closeRecordedHardDeletedKind`
+ * in `flush.ts`, run when a schema migration removes a node or edge kind)
+ * over a kind that currently has no live rows: the
  * `UPDATE ... WHERE recorded_to = sentinel` it issues matches nothing, so
- * neither column moves at that revision. When this is the ONLY thing that
- * happened at that revision, the evidence count comes up one short of a
- * span that in truth changed nothing for this graph, and `changesSince`
- * reports `unbounded` even though the honest answer would have been an
- * empty `"keys"` delta. This is the capability's fail-open contract working
+ * neither column moves at that revision. And a forced revision
+ * (`forceRecordedGraphRevision`, which every `applyMergePlan` requests so an
+ * applied plan always advances the target's anchor, honored by `flush()`'s
+ * forced-revision branch with an empty entity list) when the plan carried no
+ * writes at all. When such a commit is the ONLY thing that happened at that
+ * revision, the evidence count comes up one short of a span that in truth
+ * changed nothing for this graph, and `changesSince` reports `unbounded`
+ * even though the honest answer would have been an empty `"keys"` delta. This is the capability's fail-open contract working
  * as designed: a false `unbounded` costs a caller an avoidable full
  * comparison, never a missed change, so it is accepted rather than special-cased.
  *
