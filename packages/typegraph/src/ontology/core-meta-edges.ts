@@ -102,10 +102,10 @@ const broaderMetaEdge = createMetaEdge(
 /**
  * Creates a broader ontology relation.
  */
-export function broader(
-  narrowerConcept: NodeType,
-  broaderConcept: NodeType,
-): OntologyRelation {
+export function broader<N extends NodeType, B extends NodeType>(
+  narrowerConcept: N,
+  broaderConcept: B,
+): TypedOntologyRelation<typeof META_EDGE_BROADER, N, B> {
   return {
     metaEdge: broaderMetaEdge,
     from: narrowerConcept,
@@ -125,10 +125,10 @@ const narrowerMetaEdge = createMetaEdge(
 /**
  * Creates a narrower ontology relation.
  */
-export function narrower(
-  broaderConcept: NodeType,
-  narrowerConcept: NodeType,
-): OntologyRelation {
+export function narrower<B extends NodeType, N extends NodeType>(
+  broaderConcept: B,
+  narrowerConcept: N,
+): TypedOntologyRelation<typeof META_EDGE_NARROWER, B, N> {
   return {
     metaEdge: narrowerMetaEdge,
     from: broaderConcept,
@@ -148,10 +148,10 @@ const relatedToMetaEdge = createMetaEdge(
 /**
  * Creates a relatedTo ontology relation.
  */
-export function relatedTo(
-  conceptA: NodeType,
-  conceptB: NodeType,
-): OntologyRelation {
+export function relatedTo<A extends NodeType, B extends NodeType>(
+  conceptA: A,
+  conceptB: B,
+): TypedOntologyRelation<typeof META_EDGE_RELATED_TO, A, B> {
   return {
     metaEdge: relatedToMetaEdge,
     from: conceptA,
@@ -203,14 +203,21 @@ export function equivalentTo<A extends NodeType, B extends NodeType>(
   kindA: A,
   kindB: B & EquivalentToCheck<A, B>,
 ): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, B>;
-export function equivalentTo(
-  kindA: NodeType | AnyEdgeType,
+export function equivalentTo<A extends NodeType | AnyEdgeType>(
+  kindA: A,
   kindBOrIri: string,
-): OntologyRelation;
-export function equivalentTo(
-  kindA: AnyEdgeType,
-  kindB: NodeType,
-): OntologyRelation;
+): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, string>;
+/* eslint-disable @typescript-eslint/unified-signatures -- the node-to-node
+   overload above constrains `A` to NodeType and applies EquivalentToCheck to
+   its partner; this edge-to-node form constrains `A` to AnyEdgeType and
+   carries no structural check. Merging the two would also admit
+   `equivalentTo(nodeKind, edgeKind)`, which this overload set refuses on
+   purpose (see the docblock above). */
+export function equivalentTo<A extends AnyEdgeType, B extends NodeType>(
+  kindA: A,
+  kindB: B,
+): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, B>;
+/* eslint-enable @typescript-eslint/unified-signatures */
 export function equivalentTo(
   kindA: NodeType | AnyEdgeType,
   kindBOrIri: NodeType | string,
@@ -262,10 +269,10 @@ const disjointWithMetaEdge = createMetaEdge(
 /**
  * Creates a disjointWith ontology relation.
  */
-export function disjointWith(
-  kindA: NodeType,
-  kindB: NodeType,
-): OntologyRelation {
+export function disjointWith<A extends NodeType, B extends NodeType>(
+  kindA: A,
+  kindB: B,
+): TypedOntologyRelation<typeof META_EDGE_DISJOINT_WITH, A, B> {
   return {
     metaEdge: disjointWithMetaEdge,
     from: kindA,
@@ -305,11 +312,11 @@ export type CompositionOptions = Readonly<{
  * `via` names the edge kind whose live rows realize this composition; a
  * typo is a compile error because it is the edge's TYPE, not its name.
  */
-export function partOf(
-  part: NodeType,
-  whole: NodeType,
+export function partOf<Part extends NodeType, Whole extends NodeType>(
+  part: Part,
+  whole: Whole,
   options: CompositionOptions,
-): OntologyRelation {
+): TypedOntologyRelation<typeof META_EDGE_PART_OF, Part, Whole> {
   return {
     metaEdge: partOfMetaEdge,
     from: part,
@@ -334,11 +341,11 @@ const hasPartMetaEdge = createMetaEdge(META_EDGE_HAS_PART, "Y has part X");
  * `via` names the edge kind whose live rows realize this composition; a
  * typo is a compile error because it is the edge's TYPE, not its name.
  */
-export function hasPart(
-  whole: NodeType,
-  part: NodeType,
+export function hasPart<Whole extends NodeType, Part extends NodeType>(
+  whole: Whole,
+  part: Part,
   options: CompositionOptions,
-): OntologyRelation {
+): TypedOntologyRelation<typeof META_EDGE_HAS_PART, Whole, Part> {
   return {
     metaEdge: hasPartMetaEdge,
     from: whole,
@@ -377,10 +384,10 @@ const impliesMetaEdge = createMetaEdge(
  * Creates an inverseOf ontology relation.
  * Edge A inverseOf edge B means traversing A is equivalent to traversing B backwards.
  */
-export function inverseOf(
-  edgeA: AnyEdgeType,
-  edgeB: AnyEdgeType,
-): OntologyRelation {
+export function inverseOf<A extends AnyEdgeType, B extends AnyEdgeType>(
+  edgeA: A,
+  edgeB: B,
+): TypedOntologyRelation<typeof META_EDGE_INVERSE_OF, A, B> {
   return {
     metaEdge: inverseOfMetaEdge,
     from: edgeA,
@@ -392,10 +399,10 @@ export function inverseOf(
  * Creates an implies ontology relation.
  * Edge A implies edge B means if A exists between two nodes, B should also exist.
  */
-export function implies(
-  edgeA: AnyEdgeType,
-  edgeB: AnyEdgeType,
-): OntologyRelation {
+export function implies<A extends AnyEdgeType, B extends AnyEdgeType>(
+  edgeA: A,
+  edgeB: B,
+): TypedOntologyRelation<typeof META_EDGE_IMPLIES, A, B> {
   return {
     metaEdge: impliesMetaEdge,
     from: edgeA,

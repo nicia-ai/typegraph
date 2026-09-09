@@ -21,7 +21,10 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { type PolymorphicNodeType } from "../../ontology/types";
+import {
+  type OntologyRelation,
+  type PolymorphicNodeType,
+} from "../../ontology/types";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
   type AggregateOrderSpec,
@@ -153,6 +156,26 @@ type OntologyTypeErased<G extends GraphDef> =
   number extends G["ontology"]["length"] ? true : false;
 
 /**
+ * True for an ontology-tuple element that is EXACTLY the untyped
+ * {@link OntologyRelation} — mutually assignable with it, rather than one of
+ * the `TypedOntologyRelation`s (`src/ontology/types.ts`) every meta-edge
+ * factory returns.
+ * The only way to produce one now is a caller's own annotation
+ * (`const relation: OntologyRelation = subClassOf(Child, Parent)`), which
+ * erases exactly the `metaEdge.name` / `to.kind` literals
+ * {@link SubsumptionAffected}'s `Extract` reads.
+ *
+ * Distributes over the element union, so `true extends
+ * BareOntologyRelation<...>` is "at least one element is bare".
+ */
+type BareOntologyRelation<Relation> =
+  Relation extends unknown ?
+    [OntologyRelation] extends [Relation] ?
+      true
+    : false
+  : never;
+
+/**
  * Whether kind `K` in graph `G` participates in a `subClassOf`/`equivalentTo`
  * relation that could hand a polymorphic-default query a row of a DIFFERENT
  * concrete kind: `K` is a `subClassOf` target, or `K` is either side of an
@@ -162,24 +185,27 @@ type OntologyTypeErased<G extends GraphDef> =
  * transitive-closure type engine. `false` (a graph with `ontology: []`, or a
  * kind no relation touches) costs zero type churn.
  *
- * **An {@link OntologyTypeErased} ontology widens conservatively.** Once the
- * tuple has lost its fixed length, every element has necessarily widened to
- * the untyped `OntologyRelation` shape too (a tuple can only lose its length
- * by losing the literal types that made each position distinct), so no
- * per-element `Extract` can rule out a `subClassOf` targeting `K` — without
- * this arm the check would silently answer `false`, an unsound
- * under-widening. This is deliberately scored on the WHOLE array's
- * tuple-ness, not on whether any individual union member happens to be a
- * bare `OntologyRelation`: `broader`, `disjointWith`, `inverseOf` and every
- * other non-C.1 meta-edge helper are typed to return plain `OntologyRelation`
- * by design, so a real tuple that legitimately mixes a typed `subClassOf`
- * with one of those untouched relations (`ontology: [subClassOf(Child,
- * Parent), inverseOf(knows, knows)]`) must NOT trip this arm — the tuple's
- * length is still the literal `2`, and the precise `Extract` test below
- * still finds `subClassOf`'s `to: { kind: K }` literal on its own element.
+ * The `Extract` reads the IRI-routed `equivalentTo(Kind, iri)` form too:
+ * every meta-edge factory returns a `TypedOntologyRelation` carrying
+ * its meta-edge name literal, the IRI overload included
+ * (`from: Kind, to: string`), so a kind whose only equivalence is to an
+ * external vocabulary term still widens — the registry folds an IRI-routed
+ * equivalence class into `subClassAncestors`/`subClassDescendants` exactly
+ * like a two-kind one, so rows of the co-registered kind really can come
+ * back.
+ *
+ * **Two arms widen conservatively rather than answer `false`.** An
+ * {@link OntologyTypeErased} ontology has lost its tuple length, so no
+ * per-element `Extract` can rule out a `subClassOf` targeting `K`; and a
+ * single {@link BareOntologyRelation} element — reachable only through a
+ * caller's own `OntologyRelation` annotation, since every factory is typed
+ * — has lost the very literals the `Extract` matches on. Either arm
+ * answering `false` would be an unsound under-widening: the alias would
+ * stay narrow while the runtime alias is genuinely polymorphic.
  */
 type SubsumptionAffected<G extends GraphDef, K extends string> =
   OntologyTypeErased<G> extends true ? true
+  : true extends BareOntologyRelation<G["ontology"][number]> ? true
   : [
     Extract<
       G["ontology"][number],

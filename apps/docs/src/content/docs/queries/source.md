@@ -102,6 +102,16 @@ By default (`includeSubClasses` absent, or explicitly `true`):
   own properties — are statically accessible; a subclass-only field needs
   `fromDynamic()` or a cast, the same way a graph-extension kind's field does
 
+**Annotating a relation as `OntologyRelation` widens every alias in the
+graph.** Every relation factory returns a typed relation carrying its
+meta-edge name and endpoint kinds, which is what lets the alias type tell
+"this relation does not touch my kind" from "this relation was never typed".
+Storing one in a variable annotated `OntologyRelation` (or the whole array in
+a `readonly OntologyRelation[]`) erases those literals, and the alias type
+then widens every kind in the graph conservatively rather than risk typing a
+polymorphic alias as exact. Let the relation types be inferred, or annotate
+with `typeof` the factory call, if you want the narrow types back.
+
 **Limitation — `evolve()`-declared subsumption isn't visible to the alias
 type.** The `kind`/`NodeId` widening above is computed from your
 compile-time graph definition. A `subClassOf` an [extension](/graph-extensions)

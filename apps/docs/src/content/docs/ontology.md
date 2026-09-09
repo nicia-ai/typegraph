@@ -818,7 +818,10 @@ function subClassOf<C extends NodeType, P extends NodeType>(
 Declares hierarchical relationship (narrower concept to broader concept).
 
 ```typescript
-function broader(narrower: NodeType, broader: NodeType): OntologyRelation;
+function broader<N extends NodeType, B extends NodeType>(
+  narrower: N,
+  broader: B,
+): TypedOntologyRelation<"broader", N, B>;
 ```
 
 #### `narrower(broader, narrower)`
@@ -826,7 +829,10 @@ function broader(narrower: NodeType, broader: NodeType): OntologyRelation;
 Declares hierarchical relationship (broader concept to narrower concept).
 
 ```typescript
-function narrower(broader: NodeType, narrower: NodeType): OntologyRelation;
+function narrower<B extends NodeType, N extends NodeType>(
+  broader: B,
+  narrower: N,
+): TypedOntologyRelation<"narrower", B, N>;
 ```
 
 #### `equivalentTo(kindA, kindBOrIri)`
@@ -841,10 +847,18 @@ node kinds, `equivalentTo` carries the same structural contract as
 `subClassOf`, checked in **both** directions.
 
 ```typescript
-function equivalentTo(
-  kindA: NodeType | AnyEdgeType,
-  kindBOrIri: NodeType | string
-): OntologyRelation;
+function equivalentTo<A extends NodeType, B extends NodeType>(
+  kindA: A,
+  kindB: B & EquivalentToCheck<A, B>,
+): TypedOntologyRelation<"equivalentTo", A, B>;
+function equivalentTo<A extends NodeType | AnyEdgeType>(
+  kindA: A,
+  iri: string,
+): TypedOntologyRelation<"equivalentTo", A, string>;
+function equivalentTo<A extends AnyEdgeType, B extends NodeType>(
+  kindA: A,
+  kindB: B,
+): TypedOntologyRelation<"equivalentTo", A, B>;
 ```
 
 #### `disjointWith(a, b)`
@@ -852,7 +866,10 @@ function equivalentTo(
 Declares mutual exclusion (types cannot share the same ID).
 
 ```typescript
-function disjointWith(a: NodeType, b: NodeType): OntologyRelation;
+function disjointWith<A extends NodeType, B extends NodeType>(
+  a: A,
+  b: B,
+): TypedOntologyRelation<"disjointWith", A, B>;
 ```
 
 #### `partOf(part, whole, options)`
@@ -870,11 +887,11 @@ type CompositionOptions = {
   partSide?: CompositionPartSide;
 };
 
-function partOf(
-  part: NodeType,
-  whole: NodeType,
+function partOf<Part extends NodeType, Whole extends NodeType>(
+  part: Part,
+  whole: Whole,
   options: CompositionOptions,
-): OntologyRelation;
+): TypedOntologyRelation<"partOf", Part, Whole>;
 ```
 
 #### `hasPart(whole, part, options)`
@@ -883,11 +900,11 @@ Declares a compositional relationship (whole to part) — the mirror of
 `partOf`. Declaring both directions for the same pair is redundant; pick one.
 
 ```typescript
-function hasPart(
-  whole: NodeType,
-  part: NodeType,
+function hasPart<Whole extends NodeType, Part extends NodeType>(
+  whole: Whole,
+  part: Part,
   options: CompositionOptions,
-): OntologyRelation;
+): TypedOntologyRelation<"hasPart", Whole, Part>;
 ```
 
 #### `relatedTo(a, b)`
@@ -896,7 +913,10 @@ Declares a symmetric association available through
 `registry.getRelatedKinds(kind)`. It has no query behavior.
 
 ```typescript
-function relatedTo(a: NodeType, b: NodeType): OntologyRelation;
+function relatedTo<A extends NodeType, B extends NodeType>(
+  a: A,
+  b: B,
+): TypedOntologyRelation<"relatedTo", A, B>;
 ```
 
 #### `inverseOf(edgeA, edgeB)`
@@ -904,7 +924,10 @@ function relatedTo(a: NodeType, b: NodeType): OntologyRelation;
 Declares edge types as inverses of each other.
 
 ```typescript
-function inverseOf(edgeA: AnyEdgeType, edgeB: AnyEdgeType): OntologyRelation;
+function inverseOf<A extends AnyEdgeType, B extends AnyEdgeType>(
+  edgeA: A,
+  edgeB: B,
+): TypedOntologyRelation<"inverseOf", A, B>;
 ```
 
 #### `implies(edgeA, edgeB)`
@@ -912,7 +935,10 @@ function inverseOf(edgeA: AnyEdgeType, edgeB: AnyEdgeType): OntologyRelation;
 Declares that one edge type implies another exists.
 
 ```typescript
-function implies(edgeA: AnyEdgeType, edgeB: AnyEdgeType): OntologyRelation;
+function implies<A extends AnyEdgeType, B extends AnyEdgeType>(
+  edgeA: A,
+  edgeB: B,
+): TypedOntologyRelation<"implies", A, B>;
 ```
 
 Each allowed pair in `edgeA` must be assignable to one allowed pair in `edgeB`

@@ -13,10 +13,12 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
+  broader,
   createQueryBuilder,
   defineGraph,
   defineNode,
   equivalentTo,
+  relatedTo,
   type Store,
   subClassOf,
 } from "../src";
@@ -283,5 +285,111 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
       // @ts-expect-error - includeSubClasses and includeNarrower are mutually exclusive
       builder.from("MediaAliasTest", "m", conflictingOptions);
     }).toThrow("cannot both be requested");
+  });
+});
+
+describe("R2 — typed relations and conservative widening", () => {
+  const IriMedia = defineNode("IriMedia", {
+    schema: z.object({ title: z.string() }),
+  });
+  const IriPerson = defineNode("IriPerson", {
+    schema: z.object({ name: z.string() }),
+  });
+
+  const iriGraph = defineGraph({
+    id: "r2_iri_equivalence",
+    nodes: { IriMedia: { type: IriMedia }, IriPerson: { type: IriPerson } },
+    edges: {},
+    ontology: [equivalentTo(IriMedia, "https://schema.org/CreativeWork")],
+  });
+  const iriRegistry = buildKindRegistry(iriGraph);
+
+  it("widens the alias of a kind whose only equivalence is IRI-routed", () => {
+    const query = createQueryBuilder<typeof iriGraph>(iriGraph.id, iriRegistry)
+      .from("IriMedia", "m")
+      .select((ctx) => ctx.m);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
+  });
+
+  it("keeps a kind the IRI equivalence does not name exact", () => {
+    // The other half of the load-bearing pair: before the IRI overload was
+    // typed it returned a bare `OntologyRelation`, which the conservative
+    // arm widens WHOLESALE — every kind in the graph, including this one.
+    // Only a relation carrying `from: { kind: "IriMedia" }` can widen one
+    // kind and leave the other alone.
+    const query = createQueryBuilder<typeof iriGraph>(iriGraph.id, iriRegistry)
+      .from("IriPerson", "p")
+      .select((ctx) => ctx.p);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<"IriPerson">();
+  });
+
+  it("keeps a kind exact when every tuple element is a typed non-subsumption relation", () => {
+    const TaxonomyMedia = defineNode("TaxonomyMedia", {
+      schema: z.object({ title: z.string() }),
+    });
+    const TaxonomyPodcast = defineNode("TaxonomyPodcast", {
+      schema: z.object({ title: z.string(), rssUrl: z.string() }),
+    });
+    const taxonomyGraph = defineGraph({
+      id: "r2_typed_tuple",
+      nodes: {
+        TaxonomyMedia: { type: TaxonomyMedia },
+        TaxonomyPodcast: { type: TaxonomyPodcast },
+      },
+      edges: {},
+      ontology: [
+        broader(TaxonomyPodcast, TaxonomyMedia),
+        relatedTo(TaxonomyMedia, TaxonomyPodcast),
+      ],
+    });
+    const taxonomyRegistry = buildKindRegistry(taxonomyGraph);
+    const query = createQueryBuilder<typeof taxonomyGraph>(
+      taxonomyGraph.id,
+      taxonomyRegistry,
+    )
+      .from("TaxonomyMedia", "m")
+      .select((ctx) => ctx.m);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<"TaxonomyMedia">();
+  });
+
+  it("widens every kind when one tuple element is annotated as a bare OntologyRelation", () => {
+    const AnnotatedMedia = defineNode("AnnotatedMedia", {
+      schema: z.object({ title: z.string() }),
+    });
+    const AnnotatedPerson = defineNode("AnnotatedPerson", {
+      schema: z.object({ name: z.string() }),
+    });
+    // The element — not the array — is annotated, so the tuple keeps its
+    // literal length `1` and `OntologyTypeErased` stays false. Only the
+    // per-element bare check can see this.
+    const annotatedRelation: OntologyRelation = broader(
+      AnnotatedPerson,
+      AnnotatedMedia,
+    );
+    const annotatedGraph = defineGraph({
+      id: "r2_annotated_element",
+      nodes: {
+        AnnotatedMedia: { type: AnnotatedMedia },
+        AnnotatedPerson: { type: AnnotatedPerson },
+      },
+      edges: {},
+      ontology: [annotatedRelation],
+    });
+    const annotatedRegistry = buildKindRegistry(annotatedGraph);
+    const query = createQueryBuilder<typeof annotatedGraph>(
+      annotatedGraph.id,
+      annotatedRegistry,
+    )
+      .from("AnnotatedPerson", "p")
+      .select((ctx) => ctx.p);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
   });
 });
