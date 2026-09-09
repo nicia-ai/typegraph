@@ -12,8 +12,14 @@
  * runtime merge logic.
  */
 
+import type { IdentityRelation } from "../identity/types";
 import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
-import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
+import type {
+  CandidateDiagnostics,
+  EntityRef,
+  MatchEvidence,
+  MatchSource,
+} from "./evidence";
 import type {
   EdgeId,
   GetNodeType,
@@ -524,6 +530,81 @@ export type DroppedItem =
   | Readonly<{ kind: "node"; id: NodeId<NodeType>; reason: string }>
   | Readonly<{ kind: "edge"; id: EdgeId; reason: string }>
   | Readonly<{ kind: "identity"; id: string; reason: string }>;
+
+/**
+ * WHY an identity assertion pair could not be arbitrated by rule: the shape of
+ * the disagreement, not the policy consulted about it.
+ *
+ * - `"retract-reassert"` — one branch retracted the pair's committed truth
+ *   while a DIFFERENT branch re-asserted it under a new id without retracting.
+ * - `"opposing-relations"` — branches asserted BOTH `same` and `different` for
+ *   one endpoint pair with overlapping validity windows.
+ * - `"id-reuse"` — one assertion id was staged for two different identity
+ *   truths. Never policy-resolvable: an id names one truth by construction, so
+ *   there is no arbitration to offer — see {@link IdentityAssertionDecision}.
+ * - `"cross-kind-pairing"` — a `same` assertion spans two different merge
+ *   KINDS, so no per-kind candidate scope can express it as a pairing edge.
+ */
+export type IdentityAssertionConflictReason =
+  "retract-reassert" | "opposing-relations" | "id-reuse" | "cross-kind-pairing";
+
+/**
+ * An identity-adjacent disagreement the merge could not resolve into a single
+ * write, recorded on {@link MergeReport.identityConflicts} instead of silently
+ * dropped. A plan carrying one is still APPLICABLE — `"flag"` means "keep the
+ * base truth, keep the data, tell the caller", exactly the posture `"flag"`
+ * already has for delete/modify ({@link DeleteModifyPolicy}). Only `"refuse"`
+ * fails the plan.
+ */
+export type IdentityUnresolvedConflict =
+  | Readonly<{
+      kind: "assertion";
+      reason: IdentityAssertionConflictReason;
+      semanticKey: string;
+      a: EntityRef;
+      b: EntityRef;
+      relation: IdentityRelation;
+      assertionIds: readonly string[];
+      branches: readonly BranchId[];
+    }>
+  | Readonly<{
+      kind: "separation";
+      a: EntityRef;
+      b: EntityRef;
+      assertionIds: readonly string[];
+      source: MatchSource;
+    }>
+  | Readonly<{
+      kind: "uniqueness";
+      constraintName: string;
+      members: readonly EntityRef[];
+      assertionIds: readonly string[];
+    }>
+  | Readonly<{
+      kind: "provenance";
+      canonical: EntityRef;
+      contributions: readonly ProvenanceRecord[];
+    }>;
+
+/**
+ * Visibility into a duplicate-assertion arbitration the merge already applied:
+ * two or more branches asserted the SAME semantic identity claim under
+ * DIFFERENT assertion ids, one survivor was chosen, and the rest were dropped
+ * (see {@link DroppedItem}). Recorded on
+ * {@link MergeReport.identityReconciliations} so the choice is visible rather
+ * than only inferable from the drop reasons.
+ */
+export type IdentityReconciliation = Readonly<{
+  semanticKey: string;
+  a: EntityRef;
+  b: EntityRef;
+  relation: IdentityRelation;
+  survivorAssertionId: string;
+  supersededAssertionIds: readonly string[];
+  rule: "earliest-valid-from" | "code-point-id" | "committed-id" | "policy";
+  policy?: string | undefined;
+  branches: readonly BranchId[];
+}>;
 
 /**
  * The {@link ValidityEndResolution.precedence} of an entry the INCREMENTAL TARGET
