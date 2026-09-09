@@ -2428,7 +2428,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -2450,9 +2450,9 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "QueryBuilderConfig",
-    "member": "defaultIncludeSubClasses",
+    "member": "defaultExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -2460,7 +2460,7 @@
     "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -2468,7 +2468,7 @@
     "declaration": "QueryBuilderState",
     "member": "startExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -2476,7 +2476,7 @@
     "declaration": "QueryStart",
     "member": "expansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -2484,7 +2484,7 @@
     "declaration": "QueryStart",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -3268,7 +3268,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -3290,9 +3290,9 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "QueryBuilderConfig",
-    "member": "defaultIncludeSubClasses",
+    "member": "defaultExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -3300,7 +3300,7 @@
     "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -3308,7 +3308,7 @@
     "declaration": "QueryBuilderState",
     "member": "startExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -3316,7 +3316,7 @@
     "declaration": "QueryStart",
     "member": "expansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -3324,7 +3324,7 @@
     "declaration": "QueryStart",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4108,7 +4108,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4130,9 +4130,9 @@
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "QueryBuilderConfig",
-    "member": "defaultIncludeSubClasses",
+    "member": "defaultExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4140,7 +4140,7 @@
     "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4148,7 +4148,7 @@
     "declaration": "QueryBuilderState",
     "member": "startExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4156,7 +4156,7 @@
     "declaration": "QueryStart",
     "member": "expansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4164,7 +4164,7 @@
     "declaration": "QueryStart",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4948,7 +4948,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4970,9 +4970,9 @@
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "QueryBuilderConfig",
-    "member": "defaultIncludeSubClasses",
+    "member": "defaultExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4980,7 +4980,7 @@
     "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4988,7 +4988,7 @@
     "declaration": "QueryBuilderState",
     "member": "startExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -4996,7 +4996,7 @@
     "declaration": "QueryStart",
     "member": "expansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -5004,7 +5004,7 @@
     "declaration": "QueryStart",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -5788,7 +5788,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -5810,9 +5810,9 @@
   {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "QueryBuilderConfig",
-    "member": "defaultIncludeSubClasses",
+    "member": "defaultExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -5820,7 +5820,7 @@
     "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -5828,7 +5828,7 @@
     "declaration": "QueryBuilderState",
     "member": "startExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -5836,7 +5836,7 @@
     "declaration": "QueryStart",
     "member": "expansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -5844,7 +5844,7 @@
     "declaration": "QueryStart",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -7068,7 +7068,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -7090,9 +7090,9 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "QueryBuilderConfig",
-    "member": "defaultIncludeSubClasses",
+    "member": "defaultExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -7100,7 +7100,7 @@
     "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -7108,7 +7108,7 @@
     "declaration": "QueryBuilderState",
     "member": "startExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -7116,7 +7116,7 @@
     "declaration": "QueryStart",
     "member": "expansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -7124,7 +7124,7 @@
     "declaration": "QueryStart",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -7988,7 +7988,7 @@
     "declaration": "PolymorphicNodeType",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -8010,9 +8010,9 @@
   {
     "entrypoint": "typegraph.api.md",
     "declaration": "QueryBuilderConfig",
-    "member": "defaultIncludeSubClasses",
+    "member": "defaultExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -8020,7 +8020,7 @@
     "declaration": "QueryBuilderState",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -8028,7 +8028,7 @@
     "declaration": "QueryBuilderState",
     "member": "startExpansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -8036,7 +8036,7 @@
     "declaration": "QueryStart",
     "member": "expansion",
     "kind": "required-member-added",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -8044,7 +8044,7 @@
     "declaration": "QueryStart",
     "member": "includeSubClasses",
     "kind": "member-removed",
-    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultIncludeSubClasses`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
+    "reason": "the query builder's subclass-expansion axis moves from a boolean `includeSubClasses` to a resolved `AliasExpansionAxis`, so the builder's internal state carries `startExpansion` / `expansion` and its config carries the store-level `defaultExpansion`, and a supertype alias resolves to `PolymorphicNodeType`. None of `QueryBuilderConfig`, `QueryBuilderState`, `QueryStart` or `PolymorphicNodeType` is exported from any entrypoint; they are the builder's internal state, reached only because the builder class constructors appear in the report. Declared in .changeset/typed-subsumption.md.",
     "issue": "#642"
   },
   {
@@ -9278,5 +9278,285 @@
     "kind": "required-member-added",
     "reason": "`GraphBackend.countEdgesFrom` is replaced by `countEdgesAtEndpoint`, whose params carry an `endpoint: \"from\" | \"to\"` discriminant and the endpoint identity as `endpointKind`/`endpointId` so the target axis can be counted; a custom backend renames its implementation and reads the discriminant. Declared in .changeset/edge-target-cardinality.md under \"Breaking changes\".",
     "issue": "#639"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SearchScopeOptions",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "`search()`'s `includeSubClasses?: boolean` is replaced by `expansion?: \"exact\" | \"subclasses\"`, the same option name and values the query builder states, so one vocabulary covers both. The default is unchanged (`\"exact\"` \u2014 the search facade is not polymorphic by default), and `includeSubClasses: true` becomes `expansion: \"subclasses\"`. Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "QueryBuilder.from(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "QueryBuilder.fromDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TraversalBuilder.to(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TraversalBuilder.toDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "SearchScopeOptions",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "`search()`'s `includeSubClasses?: boolean` is replaced by `expansion?: \"exact\" | \"subclasses\"`, the same option name and values the query builder states, so one vocabulary covers both. The default is unchanged (`\"exact\"` \u2014 the search facade is not polymorphic by default), and `includeSubClasses: true` becomes `expansion: \"subclasses\"`. Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "QueryBuilder.from(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "QueryBuilder.fromDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TraversalBuilder.to(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TraversalBuilder.toDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "SearchScopeOptions",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "`search()`'s `includeSubClasses?: boolean` is replaced by `expansion?: \"exact\" | \"subclasses\"`, the same option name and values the query builder states, so one vocabulary covers both. The default is unchanged (`\"exact\"` \u2014 the search facade is not polymorphic by default), and `includeSubClasses: true` becomes `expansion: \"subclasses\"`. Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "QueryBuilder.from(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "QueryBuilder.fromDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TraversalBuilder.to(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TraversalBuilder.toDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "SearchScopeOptions",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "`search()`'s `includeSubClasses?: boolean` is replaced by `expansion?: \"exact\" | \"subclasses\"`, the same option name and values the query builder states, so one vocabulary covers both. The default is unchanged (`\"exact\"` \u2014 the search facade is not polymorphic by default), and `includeSubClasses: true` becomes `expansion: \"subclasses\"`. Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "QueryBuilder.from(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "QueryBuilder.fromDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TraversalBuilder.to(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TraversalBuilder.toDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "SearchScopeOptions",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "`search()`'s `includeSubClasses?: boolean` is replaced by `expansion?: \"exact\" | \"subclasses\"`, the same option name and values the query builder states, so one vocabulary covers both. The default is unchanged (`\"exact\"` \u2014 the search facade is not polymorphic by default), and `includeSubClasses: true` becomes `expansion: \"subclasses\"`. Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "QueryBuilder.from(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "QueryBuilder.fromDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TraversalBuilder.to(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TraversalBuilder.toDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "SearchScopeOptions",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "`search()`'s `includeSubClasses?: boolean` is replaced by `expansion?: \"exact\" | \"subclasses\"`, the same option name and values the query builder states, so one vocabulary covers both. The default is unchanged (`\"exact\"` \u2014 the search facade is not polymorphic by default), and `includeSubClasses: true` becomes `expansion: \"subclasses\"`. Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "QueryBuilder.from(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "QueryBuilder.fromDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TraversalBuilder.to(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TraversalBuilder.toDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "SearchScopeOptions",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "`search()`'s `includeSubClasses?: boolean` is replaced by `expansion?: \"exact\" | \"subclasses\"`, the same option name and values the query builder states, so one vocabulary covers both. The default is unchanged (`\"exact\"` \u2014 the search facade is not polymorphic by default), and `includeSubClasses: true` becomes `expansion: \"subclasses\"`. Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "QueryBuilder.from(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "QueryBuilder.fromDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TraversalBuilder.to(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TraversalBuilder.toDynamic(options)",
+    "member": "includeSubClasses",
+    "kind": "member-removed",
+    "reason": "the two booleans `includeSubClasses` / `includeNarrower` are replaced by one `expansion: \"exact\" | \"subclasses\" | \"narrower\"` option on `from()`/`to()`/`fromDynamic()`/`toDynamic()`, so an alias states exactly one expansion axis and can no longer name a contradiction. A caller passes `{ expansion: \"exact\" }` where it passed `{ includeSubClasses: false }` and `{ expansion: \"subclasses\" }` where it passed `{ includeSubClasses: true }`; omitting the argument, `{}` and an explicit `undefined` all still mean \"take the store default\". Declared in .changeset/typed-subsumption.md under \"Breaking changes\".",
+    "issue": "#642"
   }
 ]
