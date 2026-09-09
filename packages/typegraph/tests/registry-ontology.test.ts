@@ -31,20 +31,24 @@ import {
   partOf,
   subClassOf,
 } from "../src";
-import { core } from "../src/ontology/core-meta-edges";
+import { metaEdgesByName } from "../src/ontology/core-meta-edges";
 import { buildKindRegistry } from "../src/registry";
 
 /**
- * `sameAs` has no public factory any more (roadmap F removed it): a document
+ * `sameAs` has no public factory any more (roadmap F removed it), and its
+ * meta-edge object is absent from the public `core` export too — a document
  * persisted before the removal that still names a `sameAs` relation must
- * keep loading and folding exactly like `equivalentTo` — `core.sameAsMetaEdge`
- * is the internal object `compileOntologyRelation`
- * (`src/graph-extension/compiler.ts`) and `buildRegistryFromSerializedSchema`
- * still resolve that name to, so building the relation directly from it here
- * exercises the same registry fold a persisted `sameAs` document would.
+ * keep loading and folding exactly like `equivalentTo`.
+ * `metaEdgesByName.sameAs` is the internal-only object
+ * `compileOntologyRelation` (`src/graph-extension/compiler.ts`) resolves
+ * that name to, so building the relation directly from it here exercises
+ * the same registry fold a persisted `sameAs` document would (whose
+ * relation carries the name as a plain string, not this object —
+ * `collectOntologyRelations`, `src/registry/kind-registry.ts`, switches on
+ * the name either way).
  */
 function sameAsRelation(kindA: NodeType, kindB: NodeType): OntologyRelation {
-  return { metaEdge: core.sameAsMetaEdge, from: kindA, to: kindB };
+  return { metaEdge: metaEdgesByName.sameAs, from: kindA, to: kindB };
 }
 
 const emptySchema = z.object({});

@@ -13,6 +13,7 @@ import {
   META_EDGE_RELATED_TO,
   META_EDGE_SAME_AS,
   META_EDGE_SUB_CLASS_OF,
+  type MetaEdgeName,
 } from "./constants";
 import {
   type EquivalentToCheck,
@@ -219,15 +220,20 @@ export function equivalentTo(
 
 /**
  * `sameAs`'s meta-edge object. The public `sameAs()`/`differentFrom()`
- * factories were removed (roadmap F, R1): a new graph definition cannot
- * construct a relation carrying either name any more. This object — and
- * {@link differentFromMetaEdge} below — stay as the meta-edges the closed
- * `ALL_META_EDGE_NAMES` set still recognizes, needed by two paths that
- * still interpret the name by string rather than through the deleted
- * factory: `buildRegistryFromSerializedSchema` (a persisted document that
- * predates the removal) and `compileOntologyRelation`
- * (`src/graph-extension/compiler.ts`, a declarative graph extension, which
- * looks every `ALL_META_EDGE_NAMES` member up by `${name}MetaEdge`).
+ * factories were removed (roadmap F, R1), and neither this object nor
+ * {@link differentFromMetaEdge} is a member of the public `core` export: a
+ * new graph definition cannot construct a relation carrying either name any
+ * more, whether through a factory or by reaching into `core` directly.
+ * `buildRegistryFromSerializedSchema` needs neither object — a persisted
+ * document's relations carry the meta-edge as a plain string name, and
+ * `collectOntologyRelations` (`src/registry/kind-registry.ts`) switches on
+ * that string. The one reader that still resolves a meta-edge NAME to its
+ * object is `compileOntologyRelation` (`src/graph-extension/compiler.ts`,
+ * compiling a declarative graph extension into the same `OntologyRelation`
+ * shape a compile-time factory produces): it looks every
+ * `ALL_META_EDGE_NAMES` member up by `${name}MetaEdge` through
+ * {@link metaEdgesByName} below, the one internal record both deprecated
+ * meta-edges are exported for.
  */
 const sameAsMetaEdge = createMetaEdge(
   META_EDGE_SAME_AS,
@@ -387,9 +393,12 @@ export function implies(
 
 /**
  * The core ontology module containing all built-in meta-edges and their
- * relation factory functions. `sameAsMetaEdge`/`differentFromMetaEdge` are
- * included (for `compileOntologyRelation`'s by-name lookup) with no paired
- * factory — see their declaration above.
+ * relation factory functions. Deliberately excludes `sameAsMetaEdge` and
+ * `differentFromMetaEdge` (roadmap F, R1 fix): a package consumer with
+ * `core` in hand cannot construct a `sameAs`/`differentFrom` relation by
+ * reaching into it any more than by calling the deleted factories — see
+ * {@link metaEdgesByName} below for the internal-only record that still
+ * carries them.
  */
 export const core = {
   // Meta-edges
@@ -398,8 +407,6 @@ export const core = {
   narrowerMetaEdge,
   relatedToMetaEdge,
   equivalentToMetaEdge,
-  sameAsMetaEdge,
-  differentFromMetaEdge,
   disjointWithMetaEdge,
   partOfMetaEdge,
   hasPartMetaEdge,
@@ -418,3 +425,37 @@ export const core = {
   inverseOf,
   implies,
 } as const;
+
+// ============================================================
+// Internal by-name lookup (NOT part of the public `core` export)
+// ============================================================
+
+/**
+ * Every built-in meta-edge by name, including `sameAs`/`differentFrom` —
+ * which have no public factory and are absent from the public `core`
+ * export above. This record exists solely for
+ * `compileOntologyRelation` (`src/graph-extension/compiler.ts`), the one
+ * reader that still resolves an `ALL_META_EDGE_NAMES` member to its
+ * `MetaEdge` object rather than through a factory, so a declarative graph
+ * extension naming `sameAs`/`differentFrom` compiles to the same
+ * `OntologyRelation` shape a persisted document's relation folds into
+ * (`collectOntologyRelations`, `src/registry/kind-registry.ts`, switches on
+ * the name either way).
+ *
+ * Not re-exported from `../ontology` or the package root — reach it only by
+ * importing `./core-meta-edges` directly from inside this package.
+ */
+export const metaEdgesByName: Readonly<Record<MetaEdgeName, MetaEdge>> = {
+  [META_EDGE_SUB_CLASS_OF]: subClassOfMetaEdge,
+  [META_EDGE_BROADER]: broaderMetaEdge,
+  [META_EDGE_NARROWER]: narrowerMetaEdge,
+  [META_EDGE_RELATED_TO]: relatedToMetaEdge,
+  [META_EDGE_EQUIVALENT_TO]: equivalentToMetaEdge,
+  [META_EDGE_SAME_AS]: sameAsMetaEdge,
+  [META_EDGE_DIFFERENT_FROM]: differentFromMetaEdge,
+  [META_EDGE_DISJOINT_WITH]: disjointWithMetaEdge,
+  [META_EDGE_PART_OF]: partOfMetaEdge,
+  [META_EDGE_HAS_PART]: hasPartMetaEdge,
+  [META_EDGE_INVERSE_OF]: inverseOfMetaEdge,
+  [META_EDGE_IMPLIES]: impliesMetaEdge,
+};

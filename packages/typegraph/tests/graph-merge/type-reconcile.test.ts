@@ -18,27 +18,28 @@ import {
   mostSpecificCommonKind,
   reconcileTypes,
 } from "../../src/graph-merge/type-reconcile";
-import { core } from "../../src/ontology/core-meta-edges";
+import { metaEdgesByName } from "../../src/ontology/core-meta-edges";
 import type { KindRegistry } from "../../src/registry/kind-registry";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend } from "./test-utils";
 
 /**
  * `sameAs` has no public factory any more (roadmap F removed it, alongside
- * `MetaEdgeOptions`/`InferenceType`). A document persisted before the
+ * `MetaEdgeOptions`/`InferenceType`), and its meta-edge object is absent
+ * from the public `core` export too. A document persisted before the
  * removal that still names a `sameAs` relation must keep loading and
  * folding exactly like `equivalentTo` (`collectOntologyRelations`,
- * `src/registry/kind-registry.ts`, still switches on the meta-edge NAME);
- * building the relation directly from the internal `core.sameAsMetaEdge`
- * object — the same object `buildRegistryFromSerializedSchema` and
- * `compileOntologyRelation` resolve that name to — exercises the identical
+ * `src/registry/kind-registry.ts`, still switches on the meta-edge NAME, a
+ * plain string in that path); building the relation directly from the
+ * internal `metaEdgesByName.sameAs` object — the same object
+ * `compileOntologyRelation` resolves that name to — exercises the identical
  * registry fold a persisted `sameAs` document would produce.
  */
 function sameAsRelation(
   kindA: NodeType,
   kindBOrIri: NodeType | string,
 ): OntologyRelation {
-  return { metaEdge: core.sameAsMetaEdge, from: kindA, to: kindBOrIri };
+  return { metaEdge: metaEdgesByName.sameAs, from: kindA, to: kindBOrIri };
 }
 
 /**

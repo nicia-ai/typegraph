@@ -209,6 +209,27 @@ describe("serializeSchema", () => {
     );
   });
 
+  it("serializes a metaEdges catalog entry with only name and description (roadmap F)", () => {
+    // Pins `SerializedMetaEdge`'s post-removal shape: `transitive`,
+    // `symmetric`, `reflexive`, `inverse`, and `inference` are gone, and
+    // nothing should silently start re-emitting them.
+    const graph = defineGraph({
+      id: "test_graph",
+      nodes: {
+        Organization: { type: Organization },
+        Company: { type: Company },
+      },
+      edges: {},
+      ontology: [subClassOf(Company, Organization)],
+    });
+
+    const serialized = serializeSchema(graph, 1);
+
+    expect(Object.keys(serialized.ontology.metaEdges.subClassOf ?? {})).toEqual(
+      ["name", "description"],
+    );
+  });
+
   it("serializes uniqueness constraints", () => {
     const graph = defineGraph({
       id: "test_graph",

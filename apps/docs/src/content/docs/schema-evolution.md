@@ -372,12 +372,26 @@ these keeps loading**, and reading `store.introspect()` on it still works:
 
 - A `metaEdges` catalog entry that still carries `transitive`/`symmetric`/
   `reflexive`/`inverse`/`inference` parses — those fields are simply never
-  read. The next schema write drops them (the serializer no longer emits
-  them).
+  read. The serializer no longer emits them, but only the next commit that
+  detects an actual semantic change rewrites the document — an upgrade with
+  no accompanying ontology change leaves the old document, extra fields and
+  all, in place, and pays the slower parse-and-diff path on every boot
+  instead of the schema-hash fast path (`ensureSchema`,
+  `src/schema/manager.ts`) until a real change lands.
 - A relation naming `sameAs` keeps folding into the equivalence closure
   exactly like `equivalentTo` — `registry.areEquivalent(A, B)`,
   `isAssignableTo`, and every other equivalence-driven check are unaffected.
 - A relation naming `differentFrom` keeps being inert, as it always was.
+
+**This is a one-way door for rolling deploys and rollback.** The narrowed
+`SerializedMetaEdge` shape only appears once a document gets rewritten (see
+above), but from that point on it cannot be read by a `@nicia-ai/typegraph`
+release older than this one — the pre-change `serializedSchemaZod` required
+`transitive`/`symmetric`/`reflexive`/`inference` on every `metaEdges` entry,
+so an older reader's `parseSerializedSchema` throws on the new shape instead
+of degrading. In a mixed-version fleet, upgrade every application instance
+sharing a database to this release or later before any of them commits a
+schema change, and do not roll back to an older release once one has.
 
 **Once your code moves a `sameAs(A, B)` to `equivalentTo(A, B)`, or deletes a
 `differentFrom(A, B)`, the next commit auto-migrates.** Both are classified

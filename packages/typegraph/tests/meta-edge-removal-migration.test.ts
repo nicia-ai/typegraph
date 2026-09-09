@@ -3,8 +3,8 @@
  * `InferenceType` union, `MetaEdgeProperties.{transitive,symmetric,reflexive,
  * inverse,inference}`, and the deprecated `sameAs`/`differentFrom` factories.
  *
- * Every test in this file is load-bearing (see
- * `lane-F-load-bearing.md` for the recorded revert/mutation checks):
+ * Every test in this file is load-bearing — each MUTATION CHECK comment
+ * below states in full the code change that must flip the test red:
  *
  * - "still loads": a document persisted by pre-removal code (an old-shape
  *   `metaEdges` catalog entry with the five now-internal fields, and a
@@ -100,11 +100,10 @@ describe("roadmap F: a pre-removal persisted document still loads", () => {
       defaults: { onNodeDelete: "restrict", temporalMode: "current" },
     };
 
-    // MUTATION CHECK (recorded in lane-F-load-bearing.md): changing the
-    // per-meta-edge zod object's `.loose()` (src/schema/types.ts) to
-    // `.strict()` makes this `safeParse` fail on the legacy `sameAs` entry's
-    // now-unrecognized `transitive`/`symmetric`/`reflexive`/`inverse`/
-    // `inference` fields — restored after the check.
+    // MUTATION CHECK: changing the per-meta-edge zod object's `.loose()`
+    // (src/schema/types.ts) to `.strict()` makes this `safeParse` fail on
+    // the legacy `sameAs` entry's now-unrecognized `transitive`/`symmetric`/
+    // `reflexive`/`inverse`/`inference` fields — restored after the check.
     const parsed = serializedSchemaZod.safeParse(legacyDocument);
     expect(parsed.success).toBe(true);
 
@@ -136,12 +135,12 @@ describe("roadmap F: migrating sameAs(A, B) to equivalentTo(A, B) auto-migrates"
 
     const diff = computeSchemaDiff(before, after);
 
-    // MUTATION CHECK (recorded in lane-F-load-bearing.md): restoring the
-    // dropped meta-edge-CATALOG diff arm in `classifyOntologyChanges`
-    // (`src/schema/ontology-change.ts`) — which unconditionally marked any
-    // meta-edge name disappearing from the catalog `breaking` — flips
-    // `hasBreakingChanges` to `true` here, since `sameAs` leaves the catalog
-    // in this exact migration. Restored after the check.
+    // MUTATION CHECK: restoring the dropped meta-edge-CATALOG diff arm in
+    // `classifyOntologyChanges` (`src/schema/ontology-change.ts`) — which
+    // unconditionally marked any meta-edge name disappearing from the
+    // catalog `breaking` — flips `hasBreakingChanges` to `true` here, since
+    // `sameAs` leaves the catalog in this exact migration. Restored after
+    // the check.
     expect(diff.hasBreakingChanges).toBe(false);
     expect(diff.isBackwardsCompatible).toBe(true);
     expect(diff.ontology).toHaveLength(2);
