@@ -6557,7 +6557,7 @@ type SqlTextChunk = Readonly<{
     value: string;
 }>;
 
-// @public
+// @public (undocumented)
 export type StagedIdentityAssertion = Readonly<{
     branchId: BranchId;
     assertion: IdentityTransferAssertion;
