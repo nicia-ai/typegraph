@@ -403,10 +403,11 @@ export type EdgeCardinalityViolationSubject = Readonly<{
  * Builds the public cardinality refusal for a lost claim.
  *
  * Both the ordinary claim path and the fused claim-plus-edge path call this
- * owner. Keeping the translation here prevents a backend result discriminator
- * from growing a second spelling of the same typed error.
+ * owner (through {@link claimRefusalFor}, the only caller). Keeping the
+ * translation here prevents a backend result discriminator from growing a
+ * second spelling of the same typed error.
  */
-export function edgeCardinalityClaimRefusal(
+function edgeCardinalityClaimRefusal(
   params: ClaimEdgeCardinalityParams,
 ): CardinalityError {
   // An incumbent count of one always violates every constrained cardinality;
@@ -431,12 +432,13 @@ export function edgeCardinalityClaimRefusal(
  * Builds the public composition refusal for a lost composition claim.
  *
  * Physically beside {@link edgeCardinalityClaimRefusal} rather than in
- * `composition-claims.ts` (its documented home, and where it is re-exported
- * from): both read the same {@link edgeCardinalitySpec} table to name the
- * PART side, and `composition-claims.ts` already imports from this module —
- * a back-import here would be a value-level cycle, the exact shape
- * `axis.ts`'s docblock records avoiding for its own type-only back-edge onto
- * this module.
+ * `composition-claims.ts` (its documented home): both read the same
+ * {@link edgeCardinalitySpec} table to name the PART side, and
+ * `composition-claims.ts` already imports from this module — a back-import
+ * here would be a value-level cycle, the exact shape `axis.ts`'s docblock
+ * records avoiding for its own type-only back-edge onto this module. Not
+ * exported: {@link claimRefusalFor}, in this same module, is the only
+ * caller.
  *
  * `incumbentEdgeId` is the one fact a caller can actually have in hand: the
  * claim statement's own `holder_edge_id` (or, for an in-batch collision, the
@@ -444,7 +446,7 @@ export function edgeCardinalityClaimRefusal(
  * identity — reading that would be a second query this refusal path does not
  * make — so `CompositionErrorDetails` names the edge, not the whole.
  */
-export function compositionClaimRefusal(
+function compositionClaimRefusal(
   params: ClaimEdgeCardinalityParams,
   incumbentEdgeId?: string,
 ): CompositionError {

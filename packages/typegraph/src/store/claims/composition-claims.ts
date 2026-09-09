@@ -7,12 +7,11 @@
  * EVERY declared composition pair, not one whole per realizing edge kind. It
  * therefore cannot be an ordinary per-edge-kind cardinality claim — two
  * different edge kinds attaching the same part must collide on one row. This
- * module is the ONE owner of that extra reservation: {@link compositionClaim}
+ * module is the ONE owner of that extra reservation: `compositionClaim`
  * decides whether one edge kind owes it, {@link edgeInsertClaims} folds it
  * into the claim SET every edge insert (or re-entry) issues, and
- * {@link compositionClaimRefusal} (re-exported from `./edge-claims`, its
- * physical home — see that file's docblock) is the one typed error a lost
- * claim raises.
+ * `compositionClaimRefusal` (`./edge-claims`, its physical home — see that
+ * file's docblock) is the one typed error a lost claim raises.
  */
 import {
   type ClaimEdgeCardinalityParams,
@@ -32,8 +31,6 @@ import {
   edgeCardinalitySpec,
   type EdgeClaimSubject,
 } from "./edge-claims";
-
-export { compositionClaimRefusal } from "./edge-claims";
 
 /**
  * THE oriented holder list every composition claim on this graph carries as
@@ -77,8 +74,11 @@ function compositionAxisRef(
 /**
  * THE composition claim an edge insert owes, or `undefined` when it owes
  * none (an ordinary, non-composition edge kind).
+ *
+ * Not exported beyond this module: {@link edgeInsertClaims} and
+ * {@link compositionReentryClaim} are the only two callers, both here.
  */
-export function compositionClaim(
+function compositionClaim(
   registry: KindRegistry,
   subject: EdgeClaimSubject,
 ): ClaimEdgeCardinalityParams | undefined {
