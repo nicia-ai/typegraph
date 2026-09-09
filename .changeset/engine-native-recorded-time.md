@@ -65,7 +65,8 @@ engine-native ownership always answers with the backend's own `lineage` (the co-
 above), never the recorded-relations one, since there are no recorded relations to derive it from.
 
 Public exports beside `LineageMembers`: `EngineRecordedTimeMembers`, `EngineRecordedRevision`,
-`RecordedTimeSession`, `RecordedTimeBackend`, `RecordedReadSource`, `RecordedSourceTable`.
+`RecordedTimeSession`, `RecordedTimeBackend`, `RecordedReadSource`, `RecordedSourceTable`. `Store`
+gains a readonly `recordedTimeOwnership` property, the store-level reader of the derived ownership.
 Documentation: [Engine-native recorded
 time](/queries/temporal#engine-native-recorded-time) covers the reader-facing contract and the
 `e1:`/`r1:` rule; [Supplying `recordedTime`](/backend-authoring#supplying-recordedtime) covers what

@@ -39,12 +39,14 @@ export function resolveRecordedTimeOwnership(
  * (`query/compiler/identity-traversal.ts`) only ever sees
  * `ctx.recordedReadBinding`, never the store or its backend.
  *
- * A binding's `kind` is `"engine-native"` exactly when
+ * A binding of kind `"engine-native"` implies that
  * {@link resolveRecordedTimeOwnership} answered `"engine-native"` for the
- * backend it was built from: `Store`'s constructor builds the engine-native
- * binding kind (`createEngineRecordedReadBinding`) only after that
- * derivation already held, and every other construction path leaves
- * `#recordedReadBinding` as the TypeGraph or external kind. `Store.
+ * backend it was built from: `Store`'s constructor builds that binding kind
+ * (`createEngineRecordedReadBinding`) only after the derivation already
+ * held. The converse does not hold: an engine-native backend constructed
+ * with neither `history` nor `recordedRead` binds nothing at all, so
+ * ownership is engine-native while no binding exists — but `asOfRecorded()`
+ * refuses such a store before any recorded read can reach this check. `Store.
  * identityAtCoordinate` — the other entry point a recorded identity read can
  * reach — therefore calls this same function over its own bound binding
  * rather than re-deriving the ownership from `#recordedTimeOwnership`, so

@@ -1134,8 +1134,10 @@ Every refusal specific to that form carries a stable `details.code`:
 | `ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` | `migrateLegacyRecordedTime` is called against an engine-native backend — the migration rewrites TypeGraph's own recorded relations, which an engine-native backend does not have. |
 | `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `store.asOfRecorded(instant)` receives an instant minted under the OTHER recorded-time ownership form — an `r1:` (TypeGraph-owned) instant against an engine-native store, or an `e1:` (engine-native) instant against a TypeGraph-owned store. |
 
-The first two fire at (or before) backend/store construction; the remaining
-five fire at the specific call that cannot be honored. None of these codes
+The profile refusal fires at backend construction; the two store-option
+refusals, and `RECORDED_TIME_UNAVAILABLE`'s construction arm, fire at
+`createStore`; the remaining codes, and `RECORDED_TIME_UNAVAILABLE`'s read
+arm, fire at the specific call that cannot be honored. None of these codes
 are members of `RECORDED_CAPTURE_GUARD_CODES` above — that set stays closed
 to the three TypeGraph-capture guards.
 

@@ -457,6 +457,11 @@ export async function runEngineNativeSimulationScenario(
   }
   expect(parseRecordedInstant(receiptRecorded).kind).toBe("engine");
   expect(recordedNowAfterOwnWrite).toBe(recordedNowBeforeOwnWrite);
+  // Simulation-only: the borrowed clock never advances on the engine-native
+  // store's own commit, so the pending receipt can never equal the
+  // post-commit recordedNow() here. A real engine advances its revision on
+  // commit and would make the two EQUAL; nothing in the contract requires
+  // this inequality.
   expect(receiptRecorded).not.toBe(recordedNowAfterOwnWrite);
   const receiptRevision = Number(
     parseRecordedInstant(receiptRecorded).revision,
