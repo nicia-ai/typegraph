@@ -10,6 +10,8 @@ export {
 export {
   type IdentityDecisionProvenance,
   type IdentityTransitionCause,
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
   pruneIdentityTransitions,
 } from "./transition-log";
 export type {

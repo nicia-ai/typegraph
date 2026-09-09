@@ -4059,13 +4059,13 @@ export type IdentityTransition<G extends GraphDef> = Readonly<{
 export type IdentityTransitionCause = "assert" | "retract" | "fold" | "detach" | "restore" | "window-end" | "kind-drop" | "schema-transition" | "reconcile";
 
 // @public
-type IdentityTransitionCursor = Readonly<{
+export type IdentityTransitionCursor = Readonly<{
     recordedRevision: number;
     transitionId: string;
 }>;
 
 // @public
-type IdentityTransitionTransfer = Readonly<{
+export type IdentityTransitionTransfer = Readonly<{
     transitionId: string;
     cause: IdentityTransitionCause;
     recordedRevision: number;
