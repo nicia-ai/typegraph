@@ -61,26 +61,16 @@ export function nodeWritePlan(
 }
 
 /**
- * The plan for a batched node write.
- *
- * Owns one decision the single-write builder does not: **a batch is
- * constrained when ANY member is.** One transaction means one fence, so a
- * single constrained member makes the whole write constrained, and the first
- * such member names the class a refusal would report.
- *
- * `node-operations.ts`'s private `nodeBatchFencesConstraintProbe` is the
- * pre-migration spelling of this fold; it is replaced by this builder in the
- * batch that moves those call sites (B1), not left as a second owner.
+ * THE "a batch is constrained when ANY member is" fold: one transaction
+ * means one fence, so a single constrained member makes the whole write
+ * constrained, and the first such member names the class a refusal would
+ * report. Every batched `WritePlan` builder below folds through this one
+ * function, so a call site can never re-spell its own `.find()`.
  */
-export function nodeBatchWritePlan(
+function foldBatchConstraintProbe(
   constraintProbes: readonly (ConstraintFenceReason | undefined)[],
-  requiresIdentityLock: boolean,
-): WritePlan<"node"> {
-  return {
-    entity: "node",
-    constraintProbe: constraintProbes.find((probe) => probe !== undefined),
-    requiresIdentityLock,
-  };
+): ConstraintFenceReason | undefined {
+  return constraintProbes.find((probe) => probe !== undefined);
 }
 
 /**
@@ -103,10 +93,9 @@ export function mixedWritePlan(
 }
 
 /**
- * The plan for a batched mixed (node + composition edge) write — item E2-13.
+ * The plan for a batched mixed (node + composition edge) write (item E.2).
  *
- * The SAME "a batch is constrained when ANY member is" fold
- * {@link nodeBatchWritePlan} owns, widened to `entity: "mixed"` for a
+ * Widens {@link foldBatchConstraintProbe}'s fold to `entity: "mixed"` for a
  * composition batch create: `executeNodeCreateBatch` and
  * `executeNodeCreateNoReturnBatch` (`node-operations.ts`) each fold TWO
  * probe sources — the node batch's own constraint probes and the composition
@@ -121,7 +110,7 @@ export function mixedBatchWritePlan(
 ): WritePlan<"mixed"> {
   return {
     entity: "mixed",
-    constraintProbe: constraintProbes.find((probe) => probe !== undefined),
+    constraintProbe: foldBatchConstraintProbe(constraintProbes),
     requiresIdentityLock,
   };
 }
