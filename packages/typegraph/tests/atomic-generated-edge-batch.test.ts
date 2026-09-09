@@ -10,6 +10,7 @@ import {
   CardinalityError,
   DatabaseOperationError,
   EdgeMatchIdentityConflictError,
+  partOf,
   StaleVersionError,
   ValidationError,
 } from "../src";
@@ -313,6 +314,72 @@ describe("generated edge batch store consumer", () => {
       await realBackend.close();
     }
   });
+
+  it("excludes a composition edge kind even when the mark and the registration would otherwise be eligible (E-b)", () => {
+    // A composition edge kind declares exactly ONE ordinary cardinality
+    // axis, same as `cardinalityGraph` below — the `length > 1` two-axis
+    // exclusion alone cannot see the SECOND claim `compositionClaim` adds.
+    // No separate exclusion is needed: `compositionAcyclicRelation`
+    // (src/store/acyclicity.ts) folds EVERY composition-realizing edge kind
+    // into D-10's union the moment any `partOf`/`hasPart` pair exists, so
+    // `edgeKindIsInAcyclicRelation` already answers `true` here — the exact
+    // mechanism `tests/backends/integration/composition-fence.ts`'s
+    // acyclicity cases already mutation-check.
+    const AmpPart = defineNode("AmpPart", { schema: z.object({}) });
+    const AmpWhole = defineNode("AmpWhole", { schema: z.object({}) });
+    const ampPartOf = defineEdge("ampPartOf", { schema: z.object({}) });
+    const compositionGraph = defineGraph({
+      id: "atomic-generated-edge-batch-composition",
+      nodes: { AmpPart: { type: AmpPart }, AmpWhole: { type: AmpWhole } },
+      edges: {
+        ampPartOf: {
+          type: ampPartOf,
+          from: [AmpPart],
+          to: [AmpWhole],
+          cardinality: "one",
+        },
+      },
+      ontology: [partOf(AmpPart, AmpWhole, { via: ampPartOf })],
+    });
+
+    const backend = {
+      capabilities: {
+        execution: { interactiveTransactions: false, atomicBatch: "root" },
+      },
+    } as GraphBackend;
+    const executor = vi.fn(() =>
+      Promise.resolve(1),
+    ) as unknown as AtomicEdgeBatchExecutor;
+    markBundledRootAutocommitEligible(backend);
+    declareAtomicBatchForTest(backend);
+    markBundledRootAtomicEdgeBatch(backend, executor);
+
+    expect(
+      resolveAtomicEdgeBatchExecutor({
+        backend,
+        graph: compositionGraph,
+        registry: buildKindRegistry(compositionGraph),
+        inputs: [
+          {
+            kind: "ampPartOf",
+            fromKind: "AmpPart",
+            fromId: "part-1",
+            toKind: "AmpWhole",
+            toId: "whole-1",
+            props: {},
+          },
+        ],
+        schemaVersion: 1,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeUndefined();
+  });
+  // MUTATION CHECK (verified, reverted): narrow `compositionAcyclicRelation`
+  // (src/store/acyclicity.ts) to return `undefined` unconditionally. This
+  // test then resolves the marked executor instead of `undefined` — the
+  // same mutation `tests/backends/integration/composition-fence.ts`'s
+  // "refuses a cross-kind cycle" case already reverts.
 
   it.each([
     ["one cardinality", cardinalityGraph],

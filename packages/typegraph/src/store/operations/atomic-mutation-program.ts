@@ -292,17 +292,21 @@ export function resolveAtomicEdgeBatchExecutor(
         // rows cannot express. Any acyclic kind in the batch sends the WHOLE
         // batch through the portable path, which probes the combined insert
         // once, after it lands.
-        !edgeKindIsInAcyclicRelation(input.graph, input.registry, item.kind) &&
-        // A composition edge kind owes a SECOND claim (the reserved
+        // This ALREADY excludes every composition edge kind, with no
+        // separate check needed: `compositionAcyclicRelation`
+        // (`src/store/acyclicity.ts`) folds every composition-realizing edge
+        // kind into D-10's union the moment the graph declares ANY
+        // `partOf`/`hasPart` pair, so `edgeKindIsInAcyclicRelation` answers
+        // `true` for such a kind regardless of whether ITS OWN write would
+        // close a cycle. That is load-bearing here for an unrelated reason:
+        // a composition edge kind owes a SECOND claim (the reserved
         // relation-wide axis, `compositionClaim`) beyond whatever ordinary
         // axis its own registration declares — a fact the two-axis check
         // below cannot see, because it counts only
-        // `edgeCardinalityAxisReferences`. Rather than teach that check a
-        // claim source it does not otherwise know about, any composition
-        // kind sends the whole batch through the portable path, exactly as
-        // an acyclic kind does — `assertMatchingFusedEdgeClaim`
-        // (`operation-backend-core.ts`) is the belt behind this gate.
-        !input.registry.isCompositionEdge(item.kind),
+        // `edgeCardinalityAxisReferences`. `assertMatchingFusedEdgeClaim`
+        // (`operation-backend-core.ts`) is the belt behind this gate, for
+        // both reasons alike.
+        !edgeKindIsInAcyclicRelation(input.graph, input.registry, item.kind),
     )
   ) {
     return;

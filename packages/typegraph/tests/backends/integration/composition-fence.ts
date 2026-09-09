@@ -378,13 +378,15 @@ export function registerCompositionFenceIntegrationTests(
         store.edges.cfIncludedIn.create(chapterA, anthology, {}),
       ).rejects.toBeInstanceOf(CompositionError);
     });
-    // MUTATION CHECK: let `resolveAtomicEdgeBatchExecutor`
-    // (src/store/operations/atomic-mutation-program.ts) return the fused
-    // executor for a composition kind (drop the `isCompositionEdge`
-    // exclusion). On a backend whose bundled root declares atomic batch
-    // support, the bulk create then fuses a single-claim program that never
-    // applies the composition claim, and the final `rejects` assertion
-    // above fails.
+    // MUTATION CHECK (verified, reverted, via
+    // tests/atomic-generated-edge-batch.test.ts's dedicated eligibility
+    // case — this suite's default backend never marks atomic-batch
+    // support, so the fused path is not reachable through THIS test):
+    // narrowing `compositionAcyclicRelation` to return `undefined` makes
+    // `resolveAtomicEdgeBatchExecutor` resolve the fused executor for a
+    // composition kind wherever a backend's bundled root declares atomic
+    // batch support, and the fused program never applies the composition
+    // claim.
 
     it("self-heals across a DIFFERENT edge kind once the incumbent is hard-deleted behind the store's back", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
