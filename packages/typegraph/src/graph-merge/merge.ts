@@ -113,6 +113,11 @@ import type {
   EntityRef,
 } from "./evidence";
 import { compareMatchEvidence, entityRef } from "./evidence";
+import {
+  branchAncestryFromAnchors,
+  branchAncestryOf,
+  mergeIdentityDecision,
+} from "./identity-decision";
 import type { IdentitySeparationFacts } from "./identity-pairing";
 import {
   captureIdentitySeparationFacts,
@@ -221,6 +226,7 @@ import type {
   UniqueIntrospection,
   ValidityEndMutation,
 } from "./typegraph-internal";
+import type { IdentityDecisionProvenance } from "./typegraph-internal";
 import {
   acyclicEdgeRelations,
   advanceRevisionClock,
@@ -2454,6 +2460,10 @@ async function applyIdentityRows<G extends GraphDef>(
   txBackend: TransactionBackend,
   assertions: readonly IdentityTransferAssertion[],
   retractions: readonly IdentityTransferAssertion[],
+  // The governing merge decision every transition this apply causes carries.
+  // Threaded to the ONE owner of "which decision is in force" — the capture
+  // session `applyIdentityChangesForContext` opens — never re-derived here.
+  decision: IdentityDecisionProvenance | undefined,
   assertConsistent?: () => Promise<void>,
 ): Promise<Readonly<{ asserted: number; retracted: number }>> {
   try {
@@ -2461,6 +2471,7 @@ async function applyIdentityRows<G extends GraphDef>(
       txBackend,
       retractions,
       assertions,
+      decision,
     );
     if (assertConsistent !== undefined) await assertConsistent();
     return { asserted: applied.created, retracted: applied.retracted };
@@ -2481,6 +2492,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
   target: Store<G>,
   txBackend: TransactionBackend,
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
+  decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
   const nodeDeletions = [...plan.nodeDeletions].map(([identity, kind]) => ({
     kind,
@@ -2512,6 +2524,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
     txBackend,
     [],
     earlyIdentityRetractions,
+    decision,
   );
   let committedNodes: number;
   try {
@@ -2585,6 +2598,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
     txBackend,
     plan.identityAssertions,
     plan.identityRetractions,
+    decision,
     () => assertMergedIdentityClassesConsistent(target, txBackend, plan),
   );
 
@@ -2641,6 +2655,7 @@ export async function commitPlan<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
   expectedBaseVersion?: BaseVersion,
+  decision?: IdentityDecisionProvenance,
 ): Promise<MergedCounts> {
   if (!storeBackend(target).capabilities.execution.interactiveTransactions) {
     throw new MergeError(
@@ -2686,6 +2701,7 @@ export async function commitPlan<G extends GraphDef>(
             target,
             transactionBackend(tx),
             (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
+            decision,
           );
         }, mergeCommitTransactionOptions(target)),
     ),
@@ -2990,6 +3006,12 @@ type ResolvedMerge<G extends GraphDef> = Readonly<{
   target: Store<G>;
   plan: MergePlan<G>;
   options: NormalizedMergeOptions<G>;
+  /**
+   * Root-first: the base (or fork-point) graph, then every branch merged. The
+   * ancestry the identity decision records for a `merge()` that never produced
+   * a durable plan artifact to read anchors from.
+   */
+  branchAncestry: readonly string[];
   expectedBaseVersion?: BaseVersion;
   incrementalGuard?: IncrementalCommitGuard<G>;
 }>;
@@ -3865,6 +3887,12 @@ async function resolveMerge<G extends GraphDef, Output>(
         target,
         plan,
         options,
+        branchAncestry: branchAncestryOf(
+          store.graphId,
+          [...branches]
+            .map((branch) => branch.id as string)
+            .toSorted((left, right) => compareStrings(left, right)),
+        ),
         ...(expectedBaseVersion === undefined ? {} : { expectedBaseVersion }),
         ...(incrementalGuard === undefined ? {} : { incrementalGuard }),
       }),
@@ -3898,10 +3926,22 @@ async function commitResolvedMerge<G extends GraphDef>(
   if (provenanceStore !== undefined && isErr(provenanceStore)) {
     throw provenanceStore.error;
   }
+  // An unreviewed `merge()` has no plan artifact and therefore no digest, but
+  // it still explains itself: the policy arm that actually decided and the
+  // branch ancestry it combined.
+  const decision = mergeIdentityDecision({
+    branchAncestry: resolved.branchAncestry,
+    reconciliations: plan.identityReconciliations,
+  });
   const merged =
     resolved.incrementalGuard === undefined ?
-      await commitPlan(target, plan, resolved.expectedBaseVersion)
-    : await commitIncrementalPlan(target, plan, resolved.incrementalGuard);
+      await commitPlan(target, plan, resolved.expectedBaseVersion, decision)
+    : await commitIncrementalPlan(
+        target,
+        plan,
+        resolved.incrementalGuard,
+        decision,
+      );
 
   const provenance: ProvenanceIndex =
     options.provenance ?
@@ -4569,6 +4609,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
   txBackend: TransactionBackend,
   artifact: MergePlanArtifactV2,
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
+  decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
   const committedNodes = await applyNodeRows(
     target,
@@ -4612,6 +4653,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
     txBackend,
     identityAssertions,
     identityRetractions,
+    decision,
     () =>
       storeRuntime(target).assertIdentityClassesConsistentAtTarget(
         txBackend,
@@ -4717,6 +4759,20 @@ export async function applyMergePlan<G extends GraphDef>(
       ),
     );
   }
+  // Built from evidence already in hand — the artifact's own digest, the
+  // anchors it names, the review digest the caller reviewed it under, and the
+  // policy arm the classifier actually exercised. Nothing here is read back or
+  // recomputed, and a field the apply cannot evidence stays absent.
+  const decision = mergeIdentityDecision({
+    branchAncestry: branchAncestryFromAnchors(artifact.anchors),
+    reconciliations: (artifact.review.identityReconciliations ??
+      []) as unknown as readonly IdentityReconciliation[],
+    mergePlanDigest: artifact.digest.value,
+    ...(options.reviewDigest === undefined ?
+      {}
+    : { reviewDigest: options.reviewDigest }),
+    ...(options.sourceId === undefined ? {} : { sourceId: options.sourceId }),
+  });
   try {
     const { beforeApply, afterApply } = options;
     const composed = beforeApply !== undefined || afterApply !== undefined;
@@ -4770,6 +4826,7 @@ export async function applyMergePlan<G extends GraphDef>(
             txBackend,
             artifact,
             (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
+            decision,
           );
           if (afterApply !== undefined) {
             assertMergeCallbackResult(
@@ -5725,6 +5782,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
   guard: IncrementalCommitGuard<G>,
+  decision?: IdentityDecisionProvenance,
 ): Promise<MergedCounts> {
   if (!storeBackend(target).capabilities.execution.interactiveTransactions) {
     throw new MergeError(
@@ -5806,6 +5864,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
             target,
             transactionBackend(tx),
             (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
+            decision,
           );
         }, mergeCommitTransactionOptions(target)),
     ),

@@ -50,6 +50,7 @@ export {
 } from "../identity/service-read";
 export type { IdentityServiceContext } from "../identity/service-types";
 export type { PlainNodeRef } from "../identity/sql-target";
+export type { IdentityDecisionProvenance } from "../identity/transition-log";
 export type {
   IdentityAssertionWriteFacade,
   IdentityFacade,
