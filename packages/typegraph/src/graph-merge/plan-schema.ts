@@ -147,6 +147,11 @@ export type MergePlanMatchSource =
       kind: "custom";
       sourceId: string;
       metadata?: JsonValue | undefined;
+    }>
+  | Readonly<{
+      kind: "identity";
+      sourceId: string;
+      assertionIds: readonly string[];
     }>;
 
 export type MergePlanSimilarityStrategy =
@@ -477,6 +482,13 @@ const matchSourceSchema = z.discriminatedUnion("kind", [
       metadata: z.json().optional(),
     })
     .strict(),
+  z
+    .object({
+      kind: z.literal("identity"),
+      sourceId: nonEmptyStringSchema,
+      assertionIds: z.array(nonEmptyStringSchema),
+    })
+    .strict(),
 ]);
 
 const similarityStrategySchema = z.discriminatedUnion("kind", [
@@ -587,30 +599,65 @@ const identityReconciliationSchema = z
   })
   .strict();
 
-/**
- * Only the `"assertion"` arm is validated today — the sole
- * {@link IdentityUnresolvedConflict} kind `planIdentityThreeWay` (identity-
- * three-way.ts) actually produces. The `"separation"` / `"uniqueness"` /
- * `"provenance"` arms are produced by the separation veto, the uniqueness
- * drop and the provenance refusal respectively.
- */
-const identityUnresolvedConflictSchema = z
+const identityProvenanceRecordSchema = z
   .object({
-    kind: z.literal("assertion"),
-    reason: z.enum([
-      "retract-reassert",
-      "opposing-relations",
-      "id-reuse",
-      "cross-kind-pairing",
-    ]),
-    semanticKey: nonEmptyStringSchema,
-    a: mergePlanEntityRefSchema,
-    b: mergePlanEntityRefSchema,
-    relation: z.enum(["same", "different"]),
-    assertionIds: z.array(nonEmptyStringSchema),
-    branches: z.array(nonEmptyStringSchema),
+    role: z.enum(["node", "edge"]),
+    canonicalId: nonEmptyStringSchema,
+    canonicalKind: nonEmptyStringSchema,
+    branchId: nonEmptyStringSchema,
+    sourceId: nonEmptyStringSchema,
   })
   .strict();
+
+/**
+ * Every arm of the public `IdentityUnresolvedConflict` union, validated
+ * STRICTLY rather than as opaque JSON: an entry the merge could not have
+ * produced fails at parse, where the plan artifact is read, rather than at the
+ * point a consumer reaches into a field that is not there.
+ */
+const identityUnresolvedConflictSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("assertion"),
+      reason: z.enum([
+        "retract-reassert",
+        "opposing-relations",
+        "id-reuse",
+        "cross-kind-pairing",
+      ]),
+      semanticKey: nonEmptyStringSchema,
+      a: mergePlanEntityRefSchema,
+      b: mergePlanEntityRefSchema,
+      relation: z.enum(["same", "different"]),
+      assertionIds: z.array(nonEmptyStringSchema),
+      branches: z.array(nonEmptyStringSchema),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("separation"),
+      a: mergePlanEntityRefSchema,
+      b: mergePlanEntityRefSchema,
+      assertionIds: z.array(nonEmptyStringSchema),
+      source: matchSourceSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("uniqueness"),
+      constraintName: nonEmptyStringSchema,
+      members: z.array(mergePlanEntityRefSchema),
+      assertionIds: z.array(nonEmptyStringSchema),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("provenance"),
+      canonical: mergePlanEntityRefSchema,
+      contributions: z.array(identityProvenanceRecordSchema),
+    })
+    .strict(),
+]);
 
 const mergePlanReviewSchema = z
   .object({
@@ -696,17 +743,7 @@ const mergePlanReviewSchema = z
         })
         .strict(),
     ),
-    provenanceRecords: z.array(
-      z
-        .object({
-          role: z.enum(["node", "edge"]),
-          canonicalId: nonEmptyStringSchema,
-          canonicalKind: nonEmptyStringSchema,
-          branchId: nonEmptyStringSchema,
-          sourceId: nonEmptyStringSchema,
-        })
-        .strict(),
-    ),
+    provenanceRecords: z.array(identityProvenanceRecordSchema),
     warnings: z.array(z.string()),
     compositionOrphans: z.array(
       z

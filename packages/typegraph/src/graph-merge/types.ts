@@ -634,7 +634,13 @@ export type IdentityUnresolvedConflict =
       a: EntityRef;
       b: EntityRef;
       assertionIds: readonly string[];
-      source: MatchSource;
+      /**
+       * The recall path that proposed the vetoed match. Absent only for a
+       * candidate edge carrying no attribution at all, which no shipped source
+       * produces — modelled as optional rather than asserted so a future
+       * source cannot make this a crash.
+       */
+      source?: MatchSource | undefined;
     }>
   | Readonly<{
       kind: "uniqueness";

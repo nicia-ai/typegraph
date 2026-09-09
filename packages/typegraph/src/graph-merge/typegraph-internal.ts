@@ -37,7 +37,19 @@ export {
   TypeGraphError,
   type TypeGraphErrorOptions,
 } from "../errors";
+export {
+  bulkIsSeparated,
+  IDENTITY_STORAGE_MISSING_CODE,
+} from "../identity/separation";
 export type { IdentityTransferAssertion } from "../identity/service";
+export { currentClassKey } from "../identity/service-mutation";
+export {
+  refKey as identityReferenceKeyOf,
+  loadCurrentStructuralClasses,
+  loadSpanningDifferentAssertion,
+} from "../identity/service-read";
+export type { IdentityServiceContext } from "../identity/service-types";
+export type { PlainNodeRef } from "../identity/sql-target";
 export type {
   IdentityAssertionWriteFacade,
   IdentityFacade,

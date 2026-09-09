@@ -91,8 +91,10 @@ import {
   AcyclicityMergeConflictError,
   BaseVersionMismatchError,
   describeCause,
+  IdentityMergeConflictError,
   InvalidMergeOptionsError,
   InvalidMergePlanError,
+  MERGE_ERROR_CODES,
   MergeCompositionOrphanError,
   MergeError,
   MergePlanCapabilityError,
@@ -110,7 +112,15 @@ import type {
   CandidateDiagnostics,
   EntityRef,
 } from "./evidence";
-import { compareMatchEvidence } from "./evidence";
+import { compareMatchEvidence, entityRef } from "./evidence";
+import type { IdentitySeparationFacts } from "./identity-pairing";
+import {
+  captureIdentitySeparationFacts,
+  isSeparatedPair,
+  NO_IDENTITY_SEPARATION_FACTS,
+  separatingAssertionIds,
+} from "./identity-pairing";
+import { identitySemanticKey } from "./identity-three-way";
 import { unwrapMergeBranches } from "./ingestion-branch";
 import {
   assertIdentityEndpointsNotDeleted,
@@ -174,6 +184,7 @@ import {
   baseKeySource,
   baseUniqueSource,
   CANDIDATE_SOURCES,
+  identitySource,
   keylessConfigFor,
   ontologyRetypeEdges,
 } from "./sources";
@@ -213,12 +224,14 @@ import type {
 import {
   acyclicEdgeRelations,
   advanceRevisionClock,
+  ConfigurationError,
   createSqlSchema,
   edgeKindIsInAcyclicRelation,
   forceRecordedGraphRevision,
   forceWriteTransactionRevision,
   getDialect,
   type GraphWriteLock,
+  IDENTITY_STORAGE_MISSING_CODE,
   lockRecordedGraphWrite,
   planCompositionCascade,
   readProposedEdgeAcyclicityViolations,
@@ -454,6 +467,261 @@ async function embedMissingPairTexts(
  * Returns `err` when a kind's `onComparisonCeiling: "error"` ceiling trips or a
  * `vector`/`hybrid` strategy hits the no-embedder guard.
  */
+/**
+ * The participant sets a fusion could occur WITHIN, so the separation probe
+ * costs one pair per pair the plan can actually merge rather than one per pair
+ * of participants.
+ *
+ * A cluster is always a subset of a connected component of the candidate-edge
+ * graph — the base and diameter guards only SPLIT components — so the
+ * components bound the transitive check exactly. Under
+ * `reconcileTypes: "ontology"` two staged nodes sharing a bare id can also fuse
+ * through a retype edge, so every bare id's members form one more group: a
+ * deliberately COARSER bound than `ontologyRetypeEdges` computes, chosen over
+ * a second call to it so the retype compatibility decision keeps one owner.
+ */
+function identityFusionGroups(
+  candidateEdges: readonly CandidateEdge[],
+  participants: readonly MergeKey[],
+  ontologyRetype: boolean,
+): readonly (readonly MergeKey[])[] {
+  const groups = connectedComponents(candidateEdges, participants).map(
+    (component) => component.members,
+  );
+  if (!ontologyRetype) return groups;
+  const byBareId = new Map<string, MergeKey[]>();
+  for (const key of participants) {
+    const bare = idOf(key);
+    const members = byBareId.get(bare);
+    if (members === undefined) byBareId.set(bare, [key]);
+    else members.push(key);
+  }
+  return [
+    ...groups,
+    ...[...byBareId.values()].filter((members) => members.length > 1),
+  ];
+}
+
+/**
+ * Captures the separation facts, translating the ONE state a stated
+ * `identity.pairing` cannot be honored in.
+ *
+ * `bulkIsSeparated` refuses rather than answering "not separated" when the
+ * separation relation was never provisioned or never filled for this graph (a
+ * store opened before the identity upgrade). With `pairing` OFF that refusal is
+ * exactly what it says — the graph's identity storage is incomplete — and
+ * propagates unchanged. With a pairing mode STATED it is also an option the
+ * merge accepted and cannot honor, so it is re-raised as an invalid-option
+ * refusal naming the relation and the upgrade path, rather than surfacing as an
+ * opaque storage fault the caller cannot connect to the option they set.
+ */
+async function captureSeparationFactsForPairing<G extends GraphDef>(
+  target: Store<G>,
+  pairing: "off" | "candidate" | "definitional",
+  groups: readonly (readonly MergeKey[])[],
+): Promise<IdentitySeparationFacts> {
+  try {
+    return await captureIdentitySeparationFacts(target, groups);
+  } catch (error) {
+    if (
+      pairing === "off" ||
+      !(error instanceof ConfigurationError) ||
+      error.code !== IDENTITY_STORAGE_MISSING_CODE
+    ) {
+      throw error;
+    }
+    throw new InvalidMergeOptionsError(
+      `options.identity.pairing: "${pairing}" needs the identity separation relation, which graph "${target.graphId}" has not provisioned or filled.`,
+      {
+        details: { option: "identity.pairing", graphId: target.graphId },
+        suggestion:
+          "Reopen the store so the identity upgrade provisions and fills the separation relation, then re-plan the merge.",
+        cause: error,
+      },
+    );
+  }
+}
+
+/**
+ * The always-on separation VETO at the candidate-edge application point: a
+ * class-lifted `different` between two candidate endpoints refuses the match at
+ * PLAN time, naming both entities and the assertion that separated them,
+ * instead of surviving into the commit and aborting on the separation
+ * relation's ordered-pair CHECK.
+ *
+ * The two edge kinds get different treatment because they mean different
+ * things. A SCORED edge is recall: similarity proposed a match the ledger
+ * forbids, so the proposal is dropped, the merge continues, and the drop is
+ * reported as a typed `separation` conflict. A FORCED edge is a DEFINITION — a
+ * shared unique value, a rediscovered base row, or a `same` assertion under
+ * `pairing: "definitional"` — so it is a direct contradiction between two
+ * definitional claims and the plan fails.
+ */
+function applyIdentitySeparationVeto(
+  candidateEdges: readonly CandidateEdge[],
+  facts: IdentitySeparationFacts,
+): Readonly<{
+  edges: readonly CandidateEdge[];
+  conflicts: readonly IdentityUnresolvedConflict[];
+}> {
+  const edges: CandidateEdge[] = [];
+  const conflicts: IdentityUnresolvedConflict[] = [];
+  for (const edge of candidateEdges) {
+    if (!isSeparatedPair(facts, edge.a, edge.b)) {
+      edges.push(edge);
+      continue;
+    }
+    const assertionIds = separatingAssertionIds(facts, edge.a, edge.b);
+    const [source] = edge.evidence.sources;
+    if (edge.evidence.decision === "definitional") {
+      throw new IdentityMergeConflictError(
+        `Identity separation refuses a definitional match between ${kindOf(edge.a)}:${idOf(edge.a)} and ${kindOf(edge.b)}:${idOf(edge.b)}: the identity ledger holds their classes apart.`,
+        {
+          code: MERGE_ERROR_CODES.identitySeparationConflict,
+          details: {
+            a: entityRef(edge.a),
+            b: entityRef(edge.b),
+            assertionIds,
+            sources: edge.evidence.sources,
+          },
+          suggestion:
+            "Retract the `different` assertion separating these entities, or stop proposing them as one match, then re-plan the merge.",
+        },
+      );
+    }
+    conflicts.push({
+      kind: "separation",
+      a: entityRef(edge.a),
+      b: entityRef(edge.b),
+      assertionIds,
+      ...(source === undefined ? {} : { source }),
+    });
+  }
+  return { edges, conflicts };
+}
+
+/**
+ * The always-on separation veto at the POST-CLUSTER application point: a
+ * TRANSITIVE fusion. `a`–`b` and `b`–`c` can each clear the threshold with no
+ * separated candidate edge among them, and the cluster still fuses `a` with
+ * `c`. A pure lookup into facts captured before planning, so plan construction
+ * stays synchronous.
+ */
+function assertClusterNotSeparated(
+  members: readonly MergeKey[],
+  facts: IdentitySeparationFacts,
+): void {
+  if (facts.separatedClassPairs.size === 0) return;
+  for (const [index, left] of members.entries()) {
+    for (const right of members.slice(index + 1)) {
+      if (!isSeparatedPair(facts, left, right)) continue;
+      throw new IdentityMergeConflictError(
+        `Identity separation refuses a merge cluster containing both ${kindOf(left)}:${idOf(left)} and ${kindOf(right)}:${idOf(right)}: the identity ledger holds their classes apart.`,
+        {
+          code: MERGE_ERROR_CODES.identitySeparationConflict,
+          details: {
+            a: entityRef(left),
+            b: entityRef(right),
+            assertionIds: separatingAssertionIds(facts, left, right),
+            cluster: members.map((member) => entityRef(member)),
+          },
+          suggestion:
+            "Retract the `different` assertion separating these entities, or raise the match threshold so the cluster no longer spans them, then re-plan the merge.",
+        },
+      );
+    }
+  }
+}
+
+const EMPTY_ASSERTIONS: readonly IdentityTransferAssertion[] = [];
+
+/** The identity pairing input for a merge that asked for no pairing at all. */
+const NO_IDENTITY_PAIRING: IdentityPairingPartition = {
+  sameByKind: new Map(),
+  crossKind: [],
+};
+
+type IdentityPairingPartition = Readonly<{
+  /** `same` assertions whose two endpoints share ONE kind, keyed by that kind. */
+  sameByKind: ReadonlyMap<string, readonly IdentityTransferAssertion[]>;
+  /** Cross-kind `same` assertions, reported rather than silently skipped. */
+  crossKind: readonly IdentityUnresolvedConflict[];
+}>;
+
+/**
+ * Splits the merge's `same` identity assertions into the per-kind pairing
+ * scopes the identity candidate source consumes, and the CROSS-KIND remainder
+ * it structurally cannot express.
+ *
+ * The assertions are read from the staging slices — every branch's staged
+ * assertion plus the inherited current truth — and NOT from the store, so the
+ * pairing source and the three-way classifier consume one slice and cannot
+ * disagree about which assertions exist.
+ *
+ * A `same` assertion spanning two different merge KINDS is neither dropped nor
+ * fatal: `orderEndpoints` keys on `(kind, id)` and a source scope is built per
+ * kind, so no per-kind scope can carry it. It is reported as a typed
+ * `cross-kind-pairing` conflict — the stated `pairing` option applied where it
+ * can be and refused visibly where it cannot, never ignored.
+ */
+function partitionIdentityPairingAssertions(
+  staging: StagingSet,
+): IdentityPairingPartition {
+  const retracted = new Set(
+    staging.retractedIdentityAssertions.map((staged) => staged.assertion.id),
+  );
+  const branchesById = new Map<string, BranchId[]>();
+  for (const staged of staging.newIdentityAssertions) {
+    const branches = branchesById.get(staged.assertion.id);
+    if (branches === undefined) {
+      branchesById.set(staged.assertion.id, [staged.branchId]);
+    } else {
+      branches.push(staged.branchId);
+    }
+  }
+  const byId = new Map<string, IdentityTransferAssertion>();
+  for (const assertion of staging.baseIdentityAssertions) {
+    byId.set(assertion.id, assertion);
+  }
+  for (const staged of staging.newIdentityAssertions) {
+    byId.set(staged.assertion.id, staged.assertion);
+  }
+  const sameByKind = new Map<string, IdentityTransferAssertion[]>();
+  const crossKind: Extract<
+    IdentityUnresolvedConflict,
+    Readonly<{ kind: "assertion" }>
+  >[] = [];
+  for (const assertion of byId.values()) {
+    // A retracted assertion states the branches STOPPED believing the pair is
+    // one entity; pairing on it would fuse exactly what the merge is ending.
+    if (assertion.relation !== "same" || retracted.has(assertion.id)) continue;
+    if (assertion.a.kind !== assertion.b.kind) {
+      crossKind.push({
+        kind: "assertion",
+        reason: "cross-kind-pairing",
+        semanticKey: identitySemanticKey(assertion),
+        a: { kind: assertion.a.kind, id: assertion.a.id as NodeId<NodeType> },
+        b: { kind: assertion.b.kind, id: assertion.b.id as NodeId<NodeType> },
+        relation: assertion.relation,
+        assertionIds: [assertion.id],
+        branches: (branchesById.get(assertion.id) ?? []).toSorted(
+          (left, right) => compareStrings(left, right),
+        ),
+      });
+      continue;
+    }
+    const forKind = sameByKind.get(assertion.a.kind);
+    if (forKind === undefined) sameByKind.set(assertion.a.kind, [assertion]);
+    else forKind.push(assertion);
+  }
+  return {
+    sameByKind,
+    crossKind: crossKind.toSorted((left, right) =>
+      compareStrings(left.semanticKey, right.semanticKey),
+    ),
+  };
+}
+
 async function generateAllCandidates<G extends GraphDef>(
   target: Store<G>,
   staging: StagingSet,
@@ -470,6 +738,7 @@ async function generateAllCandidates<G extends GraphDef>(
       baseMembers: readonly BaseMember[];
       diagnostics: readonly CandidateDiagnostic[];
       diagnosticsTotal: number;
+      identityConflicts: readonly IdentityUnresolvedConflict[];
     }>,
     MergeError
   >
@@ -480,10 +749,26 @@ async function generateAllCandidates<G extends GraphDef>(
   const diagnostics: CandidateDiagnostic[] = [];
   let diagnosticsTotal = 0;
   const byKind = newNodesByKind(staging);
-  const sources =
-    useBaseSources ?
+  // The identity pairing source is constructed ONLY when the caller asked for
+  // a pairing mode, so a merge that never sets `identity` drives precisely the
+  // sources it always has and every candidate it produces is byte-identical.
+  const identityPairing =
+    (
+      options.identity?.pairing === undefined ||
+      options.identity.pairing === "off"
+    ) ?
+      undefined
+    : options.identity.pairing;
+  const identityPairingScopes =
+    identityPairing === undefined ? NO_IDENTITY_PAIRING : (
+      partitionIdentityPairingAssertions(staging)
+    );
+  const sources = [
+    ...(useBaseSources ?
       [...CANDIDATE_SOURCES, baseUniqueSource, baseKeySource]
-    : CANDIDATE_SOURCES;
+    : CANDIDATE_SOURCES),
+    ...(identityPairing === undefined ? [] : [identitySource]),
+  ];
   // Base sources resolve staged nodes against the COMMITTED graph — the merge
   // TARGET, where prior runs' canonicals live — NOT the (possibly older) diff
   // reference. They coincide under the public snapshot path (target defaults to
@@ -537,6 +822,16 @@ async function generateAllCandidates<G extends GraphDef>(
             {}
           : { blockIndex: resolveConfig.blockIndex }),
           ...(keylessConfig === undefined ? {} : { keyless: keylessConfig }),
+          ...(identityPairing === undefined ?
+            {}
+          : {
+              identity: {
+                pairing: identityPairing,
+                assertions:
+                  identityPairingScopes.sameByKind.get(kind) ??
+                  EMPTY_ASSERTIONS,
+              },
+            }),
         };
 
         const pairs: CandidatePair[] = [];
@@ -608,6 +903,7 @@ async function generateAllCandidates<G extends GraphDef>(
   }
 
   return ok({
+    identityConflicts: identityPairingScopes.crossKind,
     // The ONE shared `(a, b)` edge comparator (id-first `(kind, id)` order), so this
     // stage emits edges in exactly the order clustering consumes them.
     edges: allEdges.sort((left, right) => compareCandidateEdges(left, right)),
@@ -963,6 +1259,8 @@ function buildInternalMergePlan<G extends GraphDef>(
   identityContext: PlanIdentityContext,
   storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>,
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
+  separationFacts: IdentitySeparationFacts,
+  identityCandidateConflicts: readonly IdentityUnresolvedConflict[],
   preferredBranchId?: BranchId,
 ): MergePlan<G> {
   const identity = planIdentityChanges(
@@ -1088,6 +1386,14 @@ function buildInternalMergePlan<G extends GraphDef>(
         options.clusterMaxDiameter,
       );
   const clusters = diameterGuard.clusters;
+  // (4c) the second application point of the always-on separation veto: a
+  // TRANSITIVE fusion no single candidate edge exposed. Runs on the FINAL
+  // clusters — after the base and diameter guards have split what they split —
+  // so a cluster the guards already severed is never refused for a pair it no
+  // longer contains.
+  for (const cluster of clusters) {
+    assertClusterNotSeparated(cluster.members, separationFacts);
+  }
   const baseSurvivingEdges = new Set(guard.survivingEdges);
   const survivingEdges = diameterGuard.survivingEdges.filter((edge) =>
     baseSurvivingEdges.has(edge),
@@ -1653,7 +1959,10 @@ function buildInternalMergePlan<G extends GraphDef>(
         identityReconciliationSortKey(right),
       ),
     ),
-    identityConflicts: identity.unresolved.toSorted((left, right) =>
+    identityConflicts: [
+      ...identity.unresolved,
+      ...identityCandidateConflicts,
+    ].toSorted((left, right) =>
       compareIdentityReportKeys(
         identityUnresolvedConflictSortKey(left),
         identityUnresolvedConflictSortKey(right),
@@ -3255,6 +3564,23 @@ async function resolveMerge<G extends GraphDef, Output>(
     }
   }
 
+  // Accepted or refused, never ignored: every `identity.*` arm describes work
+  // the identity ledger does, so a graph that declared no `identity` cannot
+  // honor any of them — and quietly running an ordinary merge under a stated
+  // identity policy is the API lying to its caller.
+  if (options.identity !== undefined && target.graph.identity === undefined) {
+    return err(
+      new InvalidMergeOptionsError(
+        `options.identity was stated, but graph "${target.graphId}" declares no identity profile, so no identity pairing, separation veto or assertion arbitration can run.`,
+        {
+          details: { option: "identity", graphId: target.graphId },
+          suggestion:
+            "Declare `identity: {}` on the graph (and upgrade the store) before stating merge identity options, or drop options.identity.",
+        },
+      ),
+    );
+  }
+
   try {
     // (2) stage the provenance-tagged union of every branch's diff. For the
     // incremental path, capture the committed target branch's node versions from
@@ -3330,6 +3656,42 @@ async function resolveMerge<G extends GraphDef, Output>(
       return err(candidates.error);
     }
 
+    // The separation veto is ON for every identity-enabled merge, independent
+    // of `identity.pairing`: a `different` assertion is an integrity fact, not
+    // a recall heuristic. The facts are captured ONCE here, before planning, so
+    // the candidate-edge veto below and the post-cluster transitive assertion
+    // inside `buildInternalMergePlan` read one fact set and cannot disagree —
+    // and so plan construction stays synchronous.
+    const separationFacts =
+      target.graph.identity === undefined ?
+        NO_IDENTITY_SEPARATION_FACTS
+      : await captureSeparationFactsForPairing(
+          target,
+          options.identity?.pairing ?? "off",
+          identityFusionGroups(
+            candidates.data.edges,
+            [
+              ...new Set([
+                ...[...stagedNewByKind].flatMap(([kind, entries]) =>
+                  entries.map((entry) => mergeKey(kind, entry.node.id)),
+                ),
+                ...candidates.data.baseMembers.map((member) =>
+                  mergeKeyOf(member),
+                ),
+              ]),
+            ],
+            options.reconcileTypes === "ontology",
+          ),
+        );
+    const veto = applyIdentitySeparationVeto(
+      candidates.data.edges,
+      separationFacts,
+    );
+    const identityCandidateConflicts = [
+      ...candidates.data.identityConflicts,
+      ...veto.conflicts,
+    ];
+
     // Same-id folding joins nodes no assertion names, so the plan-time
     // contradiction simulation needs the LIVE target peers sharing any staged
     // or base id. One kind-free indexed probe.
@@ -3391,7 +3753,7 @@ async function resolveMerge<G extends GraphDef, Output>(
     // (4–8) resolve the whole merge into a commit-ready plan.
     const plan = buildInternalMergePlan(
       staging,
-      candidates.data.edges,
+      veto.edges,
       candidates.data.warnings,
       candidates.data.diagnostics,
       candidates.data.diagnosticsTotal,
@@ -3402,6 +3764,8 @@ async function resolveMerge<G extends GraphDef, Output>(
       identityContext,
       storedIdentityRowsById,
       targetPeers,
+      separationFacts,
+      identityCandidateConflicts,
       preferredBranchId,
     );
 

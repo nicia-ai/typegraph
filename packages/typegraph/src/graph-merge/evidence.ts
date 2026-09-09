@@ -40,6 +40,16 @@ export type MatchSource =
       kind: "custom";
       sourceId: string;
       metadata?: JsonValue | undefined;
+    }>
+  /**
+   * An explicit `same` identity assertion recalled the pair. `assertionIds`
+   * names every assertion that attributes it, sorted, so the evidence points
+   * back at the ledger rows a reviewer can read.
+   */
+  | Readonly<{
+      kind: "identity";
+      sourceId: string;
+      assertionIds: readonly string[];
     }>;
 
 /** JSON-safe description of the strategy that actually scored a pair. */
@@ -114,6 +124,9 @@ const SOURCE_KIND_ORDER: Readonly<Record<MatchSource["kind"], number>> = {
   keyless: 4,
   retype: 5,
   custom: 6,
+  // APPENDED, never inserted: an existing source's ordering integer must not
+  // move, or every stored plan's source ordering changes with this release.
+  identity: 7,
 };
 
 /** Canonical JSON key for source deduplication and ordering. */
@@ -144,6 +157,15 @@ function sourceKey(source: MatchSource): string {
         SOURCE_KIND_ORDER.custom,
         source.sourceId,
         source.metadata === undefined ? "" : canonicalValueKey(source.metadata),
+      ]);
+    }
+    case "identity": {
+      return JSON.stringify([
+        SOURCE_KIND_ORDER.identity,
+        source.sourceId,
+        [...source.assertionIds].sort((left, right) =>
+          compareStrings(left, right),
+        ),
       ]);
     }
     default: {
