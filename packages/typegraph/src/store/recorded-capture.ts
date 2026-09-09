@@ -170,7 +170,7 @@ type RecordedCaptureCheckpoint = Readonly<{
  * .transitions` is drawn from, so the receipt never re-derives it from a
  * second reading of the notes buffer.
  */
-export type RecordedGraphFlushResult = Readonly<{
+type RecordedGraphFlushResult = Readonly<{
   recordedAt: string;
   identityTransitions: number;
 }>;
