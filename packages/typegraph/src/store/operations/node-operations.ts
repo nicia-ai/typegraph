@@ -174,6 +174,7 @@ import {
   checkDisjointnessConstraint,
   type ConstraintContext,
   type ConstraintFenceReason,
+  nodeDeleteNeedsConstraintFence,
   nodeWriteNeedsConstraintFence,
 } from "../constraints";
 import {
@@ -428,29 +429,22 @@ function nodeBatchConstraintProbes<G extends GraphDef>(
 }
 
 /**
- * WHICH constraint makes a node DELETE a constrained write.
+ * WHICH constraint makes a node DELETE a constrained write — the graph-def
+ * lookup only. The classification itself lives with the constraints
+ * ({@link file://../constraints.ts nodeDeleteNeedsConstraintFence}); this
+ * mirrors {@link nodeFencesConstraintProbe}'s split from
+ * `nodeWriteNeedsConstraintFence` above, so a new constraint kind teaches
+ * one function, not every write path that calls it.
  *
- * A composition whole — a kind declaring composition parts
- * (`compositionEdgeKindsUnder(kind).length > 0`) — cascades to those parts
- * under the per-graph write lock, so the closure `planCompositionCascade`
- * reads must be a snapshot no concurrent attach can defeat. The
- * classification is STATIC (a declared-schema property, decided before any
- * row read), which is what lets a part-less kind's delete stay unfenced on
- * every backend, interactive transactions or not — the declaration-property
- * fast path.
- *
- * `"edgeComposition"` is E-b's constant; until it lands this uses the
- * existing `"edgeCardinality"` reason (both name the same remediation class
- * to `CONSTRAINT_FENCE_ADVICE`: declare cardinality on the realizing edge).
+ * A kind this graph does not define answers `undefined`: choosing the fence
+ * must not become the thing that reports an unknown kind.
  */
 function nodeDeleteConstraintProbe<G extends GraphDef>(
   ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
   kind: string,
 ): ConstraintFenceReason | undefined {
   if (!hasOwnKey(ctx.graph.nodes, kind)) return undefined;
-  return ctx.registry.compositionEdgeKindsUnder(kind).length > 0 ?
-      "edgeCardinality"
-    : undefined;
+  return nodeDeleteNeedsConstraintFence(ctx.registry, kind);
 }
 
 /**

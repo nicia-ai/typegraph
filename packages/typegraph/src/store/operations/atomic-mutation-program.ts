@@ -334,8 +334,8 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   // any row is read: "does this kind declare parts?" is a property of the
   // registry, not of this particular delete.
   //
-  // A kind that is itself a composition PART (`compositionEdgeKindsOver`) is
-  // equally ineligible, for a second, independent reason: composition edges
+  // A kind that is itself a composition PART (`registry.isCompositionPart`)
+  // is equally ineligible, for a second, independent reason: composition edges
   // never count against `restrict`, on either end
   // (composition-contract-design.md's binding ruling), and only the portable
   // path's `enforceNodeDeleteBehavior` (`node-write-pipeline.ts`) knows how
@@ -347,8 +347,8 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   // (`enforceDeleteBehavior`, `consumedEdgeIds`); this guard owns the
   // registry-shaped one (static composition participation).
   if (
-    input.registry.compositionEdgeKindsUnder(input.kind).length > 0 ||
-    input.registry.compositionEdgeKindsOver(input.kind).length > 0
+    input.registry.isCompositionWhole(input.kind) ||
+    input.registry.isCompositionPart(input.kind)
   ) {
     return;
   }

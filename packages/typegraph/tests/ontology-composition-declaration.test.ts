@@ -528,6 +528,18 @@ describe("a valid multi-relation composition declaration", () => {
       "segmentOf",
     ]);
   });
+
+  it("isCompositionWhole/isCompositionPart classify each kind by its role, both ways for an intermediate kind", () => {
+    // Podcast is a whole only (declares parts, is never itself a part).
+    expect(registry.isCompositionWhole("Podcast")).toBe(true);
+    expect(registry.isCompositionPart("Podcast")).toBe(false);
+    // Segment is a part only (never itself declares parts).
+    expect(registry.isCompositionWhole("Segment")).toBe(false);
+    expect(registry.isCompositionPart("Segment")).toBe(true);
+    // Episode is BOTH: a whole (of Segment) and a part (of Podcast).
+    expect(registry.isCompositionWhole("Episode")).toBe(true);
+    expect(registry.isCompositionPart("Episode")).toBe(true);
+  });
 });
 
 // ============================================================
