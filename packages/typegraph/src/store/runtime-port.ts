@@ -66,13 +66,15 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * a second verdict for the same backend — the same reason `backend` itself
    * is exposed here rather than reconstructed.
    *
-   * Optional at this boundary — a `StoreRuntime`-shaped value is a
-   * contravariant (externally-authorable) position, so a new REQUIRED member
-   * here would be a breaking change (`scripts/api-surface-compat.ts`).
-   * Required after resolution instead, the same pattern
+   * Optional at this boundary, required after resolution — the same pattern
    * `CompileQueryOptions.recursiveTraversal` uses: the one real producer
    * (`store.ts`'s constructor) always populates it, and the one real
-   * consumer (`provenance/index.ts`) asserts it with `requireDefined`.
+   * consumer (`provenance/index.ts`) asserts it with `requireDefined`. This
+   * shim predates the ruling that `StoreRuntime` is an `@internal`,
+   * symbol-keyed port no external consumer can name; later members are added
+   * as plain required members, and the API-surface checker's findings for
+   * them are recorded in `etc/api-surface-exceptions.json` rather than
+   * shimmed. Kept as is so its consumer's assertion stays truthful.
    */
   uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
   /**

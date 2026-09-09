@@ -56,6 +56,13 @@ transaction's flush wrote, an annotation of the assertion/retraction writes
 
 ### Breaking changes
 
+- The identity transition log adds two relations, `typegraph_identity_transitions`
+  and `typegraph_identity_transition_retention`, which `ensureSchema` creates on
+  an identity-enabled graph. `createSqlSchema` accepts `identityTransitions` and
+  `identityTransitionRetention` as optional overrides alongside the existing
+  table names; a deployment whose migration tooling enumerates TypeGraph's
+  relations, or whose database role has restricted DDL, must account for both
+  before upgrading.
 - Restoring an archival export (`identityMode: "archival"`) whose source graph
   retains identity transitions or has ever pruned them now requires the
   restore target to be opened with `history: true`. `importGraph` and
