@@ -350,7 +350,11 @@ Under engine-native ownership:
   leave it `undefined`, matching a read-only transaction. A transaction whose
   only effect is a raw `tx.sql` statement also leaves it `undefined` even
   though the engine's revision advances underneath it; use a graph collection
-  write when you need `receipt.recorded` to reflect the change.
+  write when you need `receipt.recorded` to reflect the change. To observe
+  those writes, a receipted engine-native transaction routes every write
+  through an observing wrapper, so `transactionWithReceipt` does not use
+  session-scoped atomic batching where a plain `transaction` on the same
+  store would.
 - `RecordedInstant` anchors use the engine form
   `e1:<opaque engine revision>:<ISO instant>` rather than
   `r1:<16-digit revision>:<ISO instant>`. The revision is an opaque,
