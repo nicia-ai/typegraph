@@ -41,6 +41,7 @@ export {
   bulkIsSeparated,
   hasLiveDifferentAssertions,
   IDENTITY_STORAGE_MISSING_CODE,
+  separationFactsKnownEmpty,
 } from "../identity/separation";
 export type { IdentityTransferAssertion } from "../identity/service";
 export { currentClassKey } from "../identity/service-mutation";

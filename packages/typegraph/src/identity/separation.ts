@@ -387,6 +387,27 @@ function separationReadinessProven(
   return provenSeparationReadiness.get(registry)?.has(graphId) === true;
 }
 
+/**
+ * The public read of {@link separationReadinessProven}, for a caller that
+ * wants to SKIP its own "has this graph anything to separate" round trip
+ * rather than decide readiness itself.
+ *
+ * `graph-merge/identity-pairing.ts`'s plan-time capture asks the identical
+ * per-(registry, graphId) question `hasLiveDifferentAssertions` answers here —
+ * before this seam existed, it asked it with its own direct call, paying the
+ * round trip again even when an earlier `assertSame`/`assertDifferent` on the
+ * same Store handle had already proven it. One owner, two readers: this
+ * function never writes the memo — only {@link bulkIsSeparated}'s own
+ * zero-rows branch does that, so "true" here always traces back to a real
+ * probe this module ran itself.
+ */
+export function separationFactsKnownEmpty(
+  registry: KindRegistry,
+  graphId: string,
+): boolean {
+  return separationReadinessProven(registry, graphId);
+}
+
 function proveSeparationReadiness(
   registry: KindRegistry,
   graphId: string,

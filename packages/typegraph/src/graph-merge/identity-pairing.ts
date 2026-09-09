@@ -46,6 +46,7 @@ import {
   identityReferenceKeyOf,
   loadCurrentStructuralClasses,
   loadSpanningDifferentAssertion,
+  separationFactsKnownEmpty,
   storeRuntime,
 } from "./typegraph-internal";
 
@@ -156,6 +157,13 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   // separated here": it is the same fact `bulkIsSeparated` consults to decide
   // that an EMPTY separation relation is correct rather than unfilled.
   //
+  // `separationFactsKnownEmpty` is asked FIRST, never a second decision: it is
+  // the read side of the identical per-(registry, graphId) proof
+  // `bulkIsSeparated`'s own zero-rows branch maintains, so a graph an earlier
+  // `assertSame`/`assertDifferent` on this Store handle already proved
+  // separates-nothing skips the round trip here entirely rather than paying it
+  // again on every merge.
+  //
   // Consequence, deliberately: a legacy store whose separation relation was
   // never provisioned no longer refuses a stated `identity.pairing` when it
   // holds no `different` assertion either. Refusing there was a false alarm —
@@ -163,6 +171,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   // treats "no live `different` assertion" as proof that an empty relation is
   // correct. A store that does hold one still reaches the refusal below.
   if (
+    separationFactsKnownEmpty(ctx.registry, ctx.graphId) ||
     !(await hasLiveDifferentAssertions(
       ctx.backend,
       ctx.schema,
