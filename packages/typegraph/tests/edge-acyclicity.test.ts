@@ -577,7 +577,15 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
     const violations = await readEdgeAcyclicityViolations(ctx, [relation]);
     expect(violations).toHaveLength(1);
     expect(violations[0]?.relation).toBe("mixed-orientation");
-    expect(violations[0]?.edgeIds).toContain("e-reversed");
+    // All three edges close the cycle c -> a -> b -> c; asserting only
+    // `toContain("e-reversed")` leaves the reversed arm's next-node CASE
+    // projection unguarded — e-forward and e-closing are only reachable
+    // through a correctly-oriented reversed hop.
+    expect([...(violations[0]?.edgeIds ?? [])].toSorted()).toEqual([
+      "e-closing",
+      "e-forward",
+      "e-reversed",
+    ]);
   });
 });
 
