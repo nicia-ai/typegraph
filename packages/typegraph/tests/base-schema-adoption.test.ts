@@ -466,7 +466,7 @@ describe("deployment-wide base-schema adoption", () => {
           'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
         )
         .get();
-      expect(marker).toEqual({ version: 2 });
+      expect(marker).toEqual({ version: 3 });
     } finally {
       execSpy.mockRestore();
       competitor.close();
@@ -485,7 +485,7 @@ describe("deployment-wide base-schema adoption", () => {
     const client = sqliteClient(db);
     try {
       await createStoreWithSchema(graph, backend);
-      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(2);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(3);
 
       dropLegacySqliteBaseShape(client, tableNames);
       const prepareSpy = vi.spyOn(client, "prepare");
@@ -493,7 +493,7 @@ describe("deployment-wide base-schema adoption", () => {
       // the relations this adoption owns, so unrelated warm-open probes do
       // not make this test a brittle total-call-count assertion.
       const [reopened] = await createStoreWithSchema(graph, backend);
-      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(2);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(3);
       expect(
         client
           .prepare(`PRAGMA table_info("${tableNames.edges}")`)
@@ -546,7 +546,7 @@ describe("deployment-wide base-schema adoption", () => {
       // database this way — bootstrap's generated DDL only ever runs against
       // a brand-new relation set, never a reopened one.
       await createStoreWithSchema(graph, backend);
-      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(2);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(3);
       client.exec("DROP TABLE typegraph_fences");
       client.exec(
         "UPDATE typegraph_base_schema_versions SET version = 1 WHERE installation = 1",
@@ -554,7 +554,7 @@ describe("deployment-wide base-schema adoption", () => {
 
       await createStoreWithSchema(graph, backend);
 
-      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(2);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(3);
       expect(
         client
           .prepare(
@@ -585,7 +585,7 @@ describe("deployment-wide base-schema adoption", () => {
       client.exec(`DROP TABLE "${tableNames.baseSchemaVersions}"`);
 
       const [reopened] = await createStoreWithSchema(graph, backend);
-      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(2);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(3);
       const indexes = client
         .prepare(`PRAGMA index_list("${tableNames.edges}")`)
         .all() as readonly Readonly<{ name: string }>[];
@@ -633,7 +633,7 @@ describe("deployment-wide base-schema adoption", () => {
       const marker = await client.query<{ version: number }>(
         `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
       );
-      expect(marker.rows[0]?.version).toBe(2);
+      expect(marker.rows[0]?.version).toBe(3);
       const columns = await client.query<{ column_name: string }>(
         `SELECT column_name FROM information_schema.columns WHERE table_name = '${tableNames.edges}'`,
       );
@@ -649,7 +649,7 @@ describe("deployment-wide base-schema adoption", () => {
       const advancedMarker = await client.query<{ version: number }>(
         `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
       );
-      expect(advancedMarker.rows[0]?.version).toBe(2);
+      expect(advancedMarker.rows[0]?.version).toBe(3);
 
       const querySpy = vi.spyOn(client, "query");
       await createStoreWithSchema(graph, backend);
@@ -677,7 +677,7 @@ describe("deployment-wide base-schema adoption", () => {
   it.each([
     ["missing", undefined],
     ["stale", 0],
-    ["newer", 3],
+    ["newer", 4],
   ] as const)(
     "createVerifiedStore refuses a %s base marker without DDL",
     async (reason, version) => {
@@ -730,7 +730,7 @@ describe("deployment-wide base-schema adoption", () => {
           `SELECT version FROM typegraph_base_schema_versions WHERE installation = 1`,
         )
         .all() as readonly Readonly<{ version: number }>[];
-      expect(rows).toEqual([{ version: 2 }]);
+      expect(rows).toEqual([{ version: 3 }]);
     } finally {
       await backend.close();
     }
@@ -742,7 +742,7 @@ describe("deployment-wide base-schema adoption", () => {
     try {
       await createStoreWithSchema(graph, backend);
       client.exec(
-        "UPDATE typegraph_base_schema_versions SET version = 3 WHERE installation = 1",
+        "UPDATE typegraph_base_schema_versions SET version = 4 WHERE installation = 1",
       );
 
       await expect(backend.bootstrapTables?.()).rejects.toSatisfy(
@@ -750,7 +750,7 @@ describe("deployment-wide base-schema adoption", () => {
           error instanceof BaseSchemaMigrationError &&
           error.details.reason === "newer",
       );
-      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(3);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(4);
     } finally {
       await backend.close();
     }
@@ -771,7 +771,7 @@ describe("deployment-wide base-schema adoption", () => {
         if (!publishedNewerMarker && source.includes("CREATE TABLE")) {
           publishedNewerMarker = true;
           prepare(
-            "INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, 3, CURRENT_TIMESTAMP)",
+            "INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, 4, CURRENT_TIMESTAMP)",
           ).run();
         }
         return prepare(source);
@@ -783,7 +783,7 @@ describe("deployment-wide base-schema adoption", () => {
           error.details.reason === "newer",
       );
       expect(publishedNewerMarker).toBe(true);
-      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(3);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(4);
     } finally {
       await backend.close();
     }

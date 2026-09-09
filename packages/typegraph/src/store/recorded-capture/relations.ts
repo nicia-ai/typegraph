@@ -7,6 +7,7 @@ import {
 import { RECORDED_MAX_REVISION } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
+import { IDENTITY_TRANSITION_COLUMN_NAMES } from "../../identity/transition-log";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { generateId } from "../../utils/id";
 import { executeStatement } from "./guards";
@@ -302,6 +303,12 @@ export function recordedIdentityAssertionChunkSize(
   target: TransactionBackend,
 ): number {
   return recordedChunkSize(target, RECORDED_IDENTITY_ASSERTION_COLUMNS.length);
+}
+
+export function recordedIdentityTransitionChunkSize(
+  target: TransactionBackend,
+): number {
+  return recordedChunkSize(target, IDENTITY_TRANSITION_COLUMN_NAMES.length);
 }
 
 export function insertRecordedNodeRows(

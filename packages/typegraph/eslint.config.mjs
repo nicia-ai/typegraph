@@ -301,9 +301,9 @@ export const DIALECT_SEAM_RESTRICTIONS = [
  */
 export const DIALECT_LITERAL_EXEMPTIONS = [
   {
-    file: "src/store/store.ts",
+    file: "src/store/recorded-capture.ts",
     reason:
-      "Passes ownsWriteLock=true only for SQLite's BEGIN IMMEDIATE transactions, which already hold the write lock recorded-clock allocation would otherwise re-acquire — the one boolean flag this preflight path threads through.",
+      "transactionOwnsSqliteWriteLock is the one owner of whether a transaction handed to createRecordedTransactionScope already holds a SQLite write lock (its ownsWriteLock parameter) — every caller unable to prove that structurally (store.ts's schema-commit preflight, schema-transition.ts's own) calls this instead of re-spelling the dialect comparison inline.",
     permanent: true,
     sites: 1,
   },

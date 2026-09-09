@@ -8,7 +8,10 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
-import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
+import {
+  type IdentityTransitionNoteFunction,
+  withRecordedIdentityMutationTarget,
+} from "../store/recorded-capture";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
@@ -37,6 +40,7 @@ import {
   currentAssertionForPair,
   currentClassKey,
   insertAssertionRows,
+  noteClassTransitions,
   replaceAffectedClosure,
   replaceSeparationForReferences,
 } from "./service-mutation";
@@ -106,6 +110,7 @@ async function bulkAssertPairs<G extends GraphDef>(
     b: IdentityNodeRefInput<G>;
   }>[],
   touch: IdentityTouch,
+  noteTransition: IdentityTransitionNoteFunction,
 ): Promise<readonly IdentityAssertionResult<G>[]> {
   if (pairs.length === 0) return [];
   const normalizedPairs = pairs.map((pair) => {
@@ -281,13 +286,20 @@ async function bulkAssertPairs<G extends GraphDef>(
   await insertAssertionRows(target, ctx.schema, createdRows);
   for (const row of createdRows) touch(ctx.graphId, row.id, row);
   if (closureReferences.length > 0) {
-    await replaceAffectedClosure(
+    const transitions = await replaceAffectedClosure(
       target,
       ctx.schema,
       ctx.graphId,
       closureReferences,
       ctx.sameIdAcrossKinds,
     );
+    noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+      cause: "assert",
+      assertionIds: createdRows
+        .filter((row) => row.rel === "same")
+        .map((row) => row.id),
+      validAt: timestamp,
+    });
   } else {
     await replaceSeparationForReferences(
       target,
@@ -308,6 +320,7 @@ async function bulkAssertWindowedPairs<G extends GraphDef>(
   relation: IdentityRelation,
   pairs: readonly WindowedIdentityPair<G>[],
   touch: IdentityTouch,
+  noteTransition: IdentityTransitionNoteFunction,
   operationInstant: string,
 ): Promise<readonly IdentityAssertionResult<G>[]> {
   const windowRequests = pairs.map((pair) => {
@@ -335,6 +348,7 @@ async function bulkAssertWindowedPairs<G extends GraphDef>(
         pair.a,
         pair.b,
         touch,
+        noteTransition,
         window,
         operationInstant,
         windowValidator,
@@ -548,6 +562,7 @@ export async function runIdentityMutation<G extends GraphDef, T>(
     target: Backend,
     touch: IdentityTouch,
     markWritten: () => void,
+    noteTransition: IdentityTransitionNoteFunction,
   ) => Promise<T>,
 ): Promise<T> {
   // Track whether the mutation actually touched a row: a successful no-op
@@ -578,17 +593,23 @@ export async function runIdentityMutation<G extends GraphDef, T>(
     async (target) => {
       touchedBox.touched = false;
       await lockIdentityGraph(target, ctx.graphId);
-      return withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
-        fn(
-          rawTarget,
-          (graphId, id, afterImage) => {
-            touchedBox.touched = true;
-            touch(graphId, id, afterImage);
-          },
-          () => {
-            touchedBox.touched = true;
-          },
-        ),
+      return withRecordedIdentityMutationTarget(
+        target,
+        (rawTarget, touch, noteTransition) =>
+          fn(
+            rawTarget,
+            (graphId, id, afterImage) => {
+              touchedBox.touched = true;
+              touch(graphId, id, afterImage);
+            },
+            () => {
+              touchedBox.touched = true;
+            },
+            (graphId, note) => {
+              touchedBox.touched = true;
+              noteTransition(graphId, note);
+            },
+          ),
       );
     },
     { didWrite: () => touchedBox.touched },
@@ -764,123 +785,171 @@ export function createIdentityFacade<G extends GraphDef>(
     ...createIdentityReadFacade(ctx),
 
     assertSame(a, b, window) {
-      return runIdentityMutation(ctx, (target, touch) => {
-        const operationInstant = nowIso();
-        return assertPair(
-          ctx,
-          target,
-          "same",
-          a,
-          b,
-          touch,
-          hasExplicitIdentityValidityWindow(window) ? window : undefined,
-          operationInstant,
-        );
-      });
+      return runIdentityMutation(
+        ctx,
+        (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          return assertPair(
+            ctx,
+            target,
+            "same",
+            a,
+            b,
+            touch,
+            noteTransition,
+            hasExplicitIdentityValidityWindow(window) ? window : undefined,
+            operationInstant,
+          );
+        },
+      );
     },
 
     assertDifferent(a, b, window) {
-      return runIdentityMutation(ctx, (target, touch) => {
-        const operationInstant = nowIso();
-        return assertPair(
-          ctx,
-          target,
-          "different",
-          a,
-          b,
-          touch,
-          hasExplicitIdentityValidityWindow(window) ? window : undefined,
-          operationInstant,
-        );
-      });
+      return runIdentityMutation(
+        ctx,
+        (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          return assertPair(
+            ctx,
+            target,
+            "different",
+            a,
+            b,
+            touch,
+            noteTransition,
+            hasExplicitIdentityValidityWindow(window) ? window : undefined,
+            operationInstant,
+          );
+        },
+      );
     },
 
     bulkAssertSame(pairs) {
-      return runIdentityMutation(ctx, (target, touch) => {
-        if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
-          return bulkAssertPairs(ctx, target, "same", pairs, touch);
-        }
-        return bulkAssertWindowedPairs(
-          ctx,
-          target,
-          "same",
-          pairs,
-          touch,
-          nowIso(),
-        );
-      });
+      return runIdentityMutation(
+        ctx,
+        (target, touch, _markWritten, noteTransition) => {
+          if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
+            return bulkAssertPairs(
+              ctx,
+              target,
+              "same",
+              pairs,
+              touch,
+              noteTransition,
+            );
+          }
+          return bulkAssertWindowedPairs(
+            ctx,
+            target,
+            "same",
+            pairs,
+            touch,
+            noteTransition,
+            nowIso(),
+          );
+        },
+      );
     },
 
     bulkAssertDifferent(pairs) {
-      return runIdentityMutation(ctx, (target, touch) => {
-        if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
-          return bulkAssertPairs(ctx, target, "different", pairs, touch);
-        }
-        return bulkAssertWindowedPairs(
-          ctx,
-          target,
-          "different",
-          pairs,
-          touch,
-          nowIso(),
-        );
-      });
+      return runIdentityMutation(
+        ctx,
+        (target, touch, _markWritten, noteTransition) => {
+          if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
+            return bulkAssertPairs(
+              ctx,
+              target,
+              "different",
+              pairs,
+              touch,
+              noteTransition,
+            );
+          }
+          return bulkAssertWindowedPairs(
+            ctx,
+            target,
+            "different",
+            pairs,
+            touch,
+            noteTransition,
+            nowIso(),
+          );
+        },
+      );
     },
 
     retractAssertion(id) {
-      return runIdentityMutation(ctx, async (target, touch) => {
-        const ended = await retractById(ctx, target, id, touch);
-        if (ended !== undefined) {
-          const endpoints = [
-            { kind: ended.a_kind, id: ended.a_id },
-            { kind: ended.b_kind, id: ended.b_id },
-          ];
-          if (ended.rel === "same") {
-            await replaceAffectedClosure(
-              target,
-              ctx.schema,
-              ctx.graphId,
-              endpoints,
-              ctx.sameIdAcrossKinds,
-            );
-          } else {
-            await replaceSeparationForReferences(
-              target,
-              ctx.schema,
-              ctx.graphId,
-              endpoints,
-            );
+      return runIdentityMutation(
+        ctx,
+        async (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          const ended = await retractById(ctx, target, id, touch);
+          if (ended !== undefined) {
+            const endpoints = [
+              { kind: ended.a_kind, id: ended.a_id },
+              { kind: ended.b_kind, id: ended.b_id },
+            ];
+            if (ended.rel === "same") {
+              const transitions = await replaceAffectedClosure(
+                target,
+                ctx.schema,
+                ctx.graphId,
+                endpoints,
+                ctx.sameIdAcrossKinds,
+              );
+              noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+                cause: "retract",
+                assertionIds: [ended.id],
+                validAt: operationInstant,
+              });
+            } else {
+              await replaceSeparationForReferences(
+                target,
+                ctx.schema,
+                ctx.graphId,
+                endpoints,
+              );
+            }
           }
-        }
-        return ended === undefined ? undefined : publicAssertion<G>(ended);
-      });
+          return ended === undefined ? undefined : publicAssertion<G>(ended);
+        },
+      );
     },
 
     retractSameAssertion(firstInput, secondInput) {
-      return runIdentityMutation(ctx, async (target, touch) => {
-        const [a, b] = normalizePair(
-          registeredPlainRef(ctx, firstInput),
-          registeredPlainRef(ctx, secondInput),
-        );
-        const existing = await currentAssertionForPair(
-          target,
-          ctx.schema,
-          ctx.graphId,
-          "same",
-          a,
-          b,
-        );
-        if (existing === undefined) return;
-        const ended = await retractById(ctx, target, existing.id, touch);
-        await replaceAffectedClosure(
-          target,
-          ctx.schema,
-          ctx.graphId,
-          [a, b],
-          ctx.sameIdAcrossKinds,
-        );
-        return ended === undefined ? undefined : publicAssertion<G>(ended);
-      });
+      return runIdentityMutation(
+        ctx,
+        async (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          const [a, b] = normalizePair(
+            registeredPlainRef(ctx, firstInput),
+            registeredPlainRef(ctx, secondInput),
+          );
+          const existing = await currentAssertionForPair(
+            target,
+            ctx.schema,
+            ctx.graphId,
+            "same",
+            a,
+            b,
+          );
+          if (existing === undefined) return;
+          const ended = await retractById(ctx, target, existing.id, touch);
+          const transitions = await replaceAffectedClosure(
+            target,
+            ctx.schema,
+            ctx.graphId,
+            [a, b],
+            ctx.sameIdAcrossKinds,
+          );
+          noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+            cause: "retract",
+            assertionIds: [existing.id],
+            validAt: operationInstant,
+          });
+          return ended === undefined ? undefined : publicAssertion<G>(ended);
+        },
+      );
     },
 
     retractDifferentAssertion(firstInput, secondInput) {
@@ -908,27 +977,36 @@ export function createIdentityFacade<G extends GraphDef>(
     },
 
     bulkRetractAssertions(ids) {
-      return runIdentityMutation(ctx, async (target, touch) => {
-        const retracted = await retractByIds(ctx, target, ids, touch);
-        const { closureReferences, separationReferences } =
-          partitionRetractedEndpoints(retracted);
-        if (closureReferences.length > 0) {
-          await replaceAffectedClosure(
+      return runIdentityMutation(
+        ctx,
+        async (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          const retracted = await retractByIds(ctx, target, ids, touch);
+          const { closureReferences, separationReferences } =
+            partitionRetractedEndpoints(retracted);
+          if (closureReferences.length > 0) {
+            const transitions = await replaceAffectedClosure(
+              target,
+              ctx.schema,
+              ctx.graphId,
+              closureReferences,
+              ctx.sameIdAcrossKinds,
+            );
+            noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+              cause: "retract",
+              assertionIds: retracted.map((assertion) => assertion.id),
+              validAt: operationInstant,
+            });
+          }
+          await replaceSeparationForReferences(
             target,
             ctx.schema,
             ctx.graphId,
-            closureReferences,
-            ctx.sameIdAcrossKinds,
+            separationReferences,
           );
-        }
-        await replaceSeparationForReferences(
-          target,
-          ctx.schema,
-          ctx.graphId,
-          separationReferences,
-        );
-        return retracted.map((assertion) => publicAssertion<G>(assertion));
-      });
+          return retracted.map((assertion) => publicAssertion<G>(assertion));
+        },
+      );
     },
   };
 }

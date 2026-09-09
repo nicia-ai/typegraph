@@ -23,8 +23,10 @@ export {
 export type { IdentityRebuildContext } from "./service-maintenance";
 export {
   assertAffectedIdentityClassesConsistent,
+  combineSnapshotMembers,
   deleteAssertionsTouchingKinds,
   detachIdentityForNode,
+  fillLiveSingletons,
   foldIdentityForCreatedNodes,
   hasAssertionsTouchingKinds,
   liveNodeKindsSharingIds,
@@ -32,6 +34,7 @@ export {
   rebuildIdentityClosureForContext,
   removeIdentityKindsForContext,
   requireNodeValidityEndCompatible,
+  snapshotIdentityClosureClasses,
   validateIdentityForContext,
 } from "./service-maintenance";
 export { loadAssertionsByIds } from "./service-mutation";
