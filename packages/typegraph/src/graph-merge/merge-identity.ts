@@ -37,12 +37,10 @@
  * `IdentitySeparationViolationError` — an `IDENTITY_`-coded refusal — is
  * translated here like any other applier refusal.
  */
-import { identityAssertionSemanticKey } from "../identity/assertion-key";
 import {
   identityReferenceKey,
   normalizeIdentityPair,
 } from "../identity/reference";
-import { identityValidityWindowsOverlap } from "../identity/validity-window";
 import { encodeTupleKey } from "../utils/tuple-key";
 import type { CanonicalEntity } from "./canonicalize";
 import {
@@ -52,6 +50,13 @@ import {
   MergeError,
 } from "./errors";
 import {
+  assertNoOpposingIdentityRelationsRaw,
+  dedupeIdentityAssertionsRaw,
+  type IdentityAssertionConflictPolicy,
+  identityDedupeKey,
+  planIdentityThreeWay,
+} from "./identity-three-way";
+import {
   compareMergeKeys,
   compareStrings,
   idOf,
@@ -60,7 +65,7 @@ import {
   mergeKey,
   mergeKeyOf,
 } from "./node-key";
-import type { StagedIdentityAssertion, StagingSet } from "./staging";
+import type { StagingSet } from "./staging";
 import { assertTemporalIdentityClosureConsistent } from "./temporal-identity-closure";
 import {
   compareCodePoints,
@@ -75,7 +80,11 @@ import {
   type TransactionBackend,
   TypeGraphError,
 } from "./typegraph-internal";
-import type { DroppedItem } from "./types";
+import type {
+  DroppedItem,
+  IdentityReconciliation,
+  IdentityUnresolvedConflict,
+} from "./types";
 
 /**
  * The identity-relevant slice of a resolved merge plan: a STRUCTURAL subset of
@@ -103,38 +112,7 @@ function endpointTuple(
   return [assertion.a.kind, assertion.a.id, assertion.b.kind, assertion.b.id];
 }
 
-function identityEndpointKey(assertion: IdentityTransferAssertion): string {
-  return encodeTupleKey(endpointTuple(assertion));
-}
-
-function identitySemanticKey(assertion: IdentityTransferAssertion): string {
-  return identityAssertionSemanticKey(
-    assertion.relation,
-    assertion.a,
-    assertion.b,
-  );
-}
-
-function identityDedupeKey(assertion: IdentityTransferAssertion): string {
-  const semantic = identitySemanticKey(assertion);
-  if (assertion.validTo === undefined) return semantic;
-  return encodeTupleKey([semantic, assertion.validFrom, assertion.validTo]);
-}
-
-function compareIdentitySurvivors(
-  left: IdentityTransferAssertion,
-  right: IdentityTransferAssertion,
-): number {
-  const byValidity = compareCodePoints(left.validFrom, right.validFrom);
-  return byValidity === 0 ? compareCodePoints(left.id, right.id) : byValidity;
-}
-
-/**
- * Reason recorded when two branches asserted the SAME semantic pair and the
- * survivor rule kept only one of the two assertion ids.
- */
-export const DUPLICATE_IDENTITY_ASSERTION_DROP_REASON =
-  "identity:duplicate-assertion";
+export { DUPLICATE_IDENTITY_ASSERTION_DROP_REASON } from "./identity-three-way";
 
 /**
  * Reason recorded when node reconciliation collapsed both endpoints of a `same`
@@ -153,159 +131,6 @@ function droppedIdentityAssertion(
   reason: string,
 ): DroppedItem {
   return { kind: "identity", id: assertion.id, reason };
-}
-
-/**
- * Keeps one CURRENT assertion per semantic pair, while retaining every
- * distinct bounded window. Exact bounded duplicates still choose one survivor
- * and report the loser. Survivors come back in window-aware key order.
- *
- * An id in `committedIds` (already committed on the target with the exact
- * staged truth) ALWAYS wins over an uncommitted challenger, regardless of the
- * {@link compareIdentitySurvivors} order: the applier is idempotent per
- * dedupe key, so the challenger would never be written — picking it would
- * report an id as applied that never lands while listing the target's own row
- * as dropped. Between two ids of equal committed status the comparator
- * decides.
- */
-function dedupeIdentityAssertions(
-  assertions: readonly IdentityTransferAssertion[],
-  committedIds: ReadonlySet<string>,
-): Readonly<{
-  survivors: readonly IdentityTransferAssertion[];
-  dropped: readonly DroppedItem[];
-}> {
-  const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
-  const dropped: DroppedItem[] = [];
-  for (const assertion of assertions) {
-    const key = identityDedupeKey(assertion);
-    const previous = survivorBySemantic.get(key);
-    if (previous === undefined) {
-      survivorBySemantic.set(key, assertion);
-      continue;
-    }
-    const assertionCommitted = committedIds.has(assertion.id);
-    const previousCommitted = committedIds.has(previous.id);
-    const [survivor, loser] =
-      assertionCommitted === previousCommitted ?
-        compareIdentitySurvivors(assertion, previous) < 0 ?
-          ([assertion, previous] as const)
-        : ([previous, assertion] as const)
-      : assertionCommitted ? ([assertion, previous] as const)
-      : ([previous, assertion] as const);
-    survivorBySemantic.set(key, survivor);
-    // Two branches staging the IDENTICAL row (same id, same complete truth —
-    // e.g. both imported one interchange document) is ONE assertion, not a
-    // survivor and a loser: reporting the id as dropped while it is applied
-    // would make the report self-contradictory.
-    if (
-      loser.id === survivor.id &&
-      loser.validFrom === survivor.validFrom &&
-      (loser.validTo ?? undefined) === (survivor.validTo ?? undefined)
-    ) {
-      continue;
-    }
-    dropped.push(
-      droppedIdentityAssertion(loser, DUPLICATE_IDENTITY_ASSERTION_DROP_REASON),
-    );
-  }
-  return {
-    survivors: [...survivorBySemantic.values()].toSorted((left, right) =>
-      compareCodePoints(identityDedupeKey(left), identityDedupeKey(right)),
-    ),
-    dropped,
-  };
-}
-
-function assertNoOpposingIdentityRelations(
-  assertions: readonly IdentityTransferAssertion[],
-): void {
-  const byEndpoint = new Map<string, IdentityTransferAssertion[]>();
-  for (const assertion of assertions) {
-    const key = identityEndpointKey(assertion);
-    const group = byEndpoint.get(key) ?? [];
-    group.push(assertion);
-    byEndpoint.set(key, group);
-  }
-  for (const [endpoint, group] of byEndpoint) {
-    const same = group.filter((assertion) => assertion.relation === "same");
-    const different = group.filter(
-      (assertion) => assertion.relation === "different",
-    );
-    for (const sameAssertion of same) {
-      for (const differentAssertion of different) {
-        if (
-          !identityValidityWindowsOverlap(sameAssertion, differentAssertion)
-        ) {
-          continue;
-        }
-        throw new IdentityMergeConflictError(
-          "Branches asserted opposing identity relations for one endpoint pair.",
-          {
-            details: {
-              endpoint,
-              assertions: [sameAssertion, differentAssertion],
-            },
-          },
-        );
-      }
-    }
-  }
-}
-
-/**
- * Refuses the retract/reassert RACE: one branch retracts the assertion for a
- * semantic pair while a DIFFERENT branch re-asserts that pair under a new id
- * WITHOUT retracting it — the branches disagree about whether the old truth still
- * holds, and no rule can pick between "the pair is not asserted" and "the pair is
- * asserted under a new id".
- *
- * Two nearby shapes are NOT races and must merge cleanly:
- *
- *   - A single fork that retracts then re-asserts the same pair (a normal linear
- *     edit): its final state is simply "old id retracted, new id asserted".
- *   - CONVERGENT edits, where the re-asserting branch ALSO retracted the pair:
- *     every branch agrees the old assertion dies, and one went further by
- *     re-asserting. The merge applies both effects.
- *
- * Both hinge on which branch produced which change, so this consults the staged
- * (branch-tagged) retractions — grouping by semantic key alone would drop exactly
- * the provenance that separates a race from agreement.
- */
-function assertNoRetractReassertRace(staging: StagingSet): void {
-  const retractedBySemantic = new Map<string, StagedIdentityAssertion[]>();
-  for (const staged of staging.retractedIdentityAssertions) {
-    const key = identitySemanticKey(staged.assertion);
-    const retractions = retractedBySemantic.get(key) ?? [];
-    retractions.push(staged);
-    retractedBySemantic.set(key, retractions);
-  }
-  for (const staged of staging.newIdentityAssertions) {
-    const retractions =
-      retractedBySemantic.get(identitySemanticKey(staged.assertion)) ?? [];
-    const selfRetracted = retractions.some(
-      (retraction) => retraction.branchId === staged.branchId,
-    );
-    if (selfRetracted) {
-      continue;
-    }
-    const crossBranchRetraction = retractions.find(
-      (retraction) => retraction.assertion.id !== staged.assertion.id,
-    );
-    if (crossBranchRetraction !== undefined) {
-      throw new IdentityMergeConflictError(
-        "Branches contain a retract/reassert race for one identity pair.",
-        {
-          details: {
-            retractedAssertion: crossBranchRetraction.assertion,
-            retractedBy: crossBranchRetraction.branchId,
-            reassertedAssertion: staged.assertion,
-            reassertedBy: staged.branchId,
-          },
-        },
-      );
-    }
-  }
 }
 
 /**
@@ -338,54 +163,16 @@ export const RETRACTION_DELETION_OVERRULED_DROP_REASON =
 export const NO_STORED_ASSERTIONS: ReadonlyMap<string, LedgerAssertion> =
   new Map();
 
-/** @internal Exported for deterministic phase-level verification. */
-export function planIdentityChanges(
-  staging: StagingSet,
-  storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>,
-): Readonly<{
-  assertions: readonly IdentityTransferAssertion[];
-  retractions: readonly IdentityTransferAssertion[];
-  dropped: readonly DroppedItem[];
-}> {
-  assertNoOpposingIdentityRelations(
-    staging.newIdentityAssertions.map((staged) => staged.assertion),
-  );
-  assertNoRetractReassertRace(staging);
-  // One id, one truth — over the RAW staged assertions, BEFORE the semantic
-  // survivor dedupe: two branches staging one id for the same pair with
-  // different validFrom values collapse into one survivor under the semantic
-  // key (which excludes validity), so a later check would never see the
-  // collision — while the report would list the id as both applied and
-  // dropped.
-  assertOneIdOneTruth(
-    staging.newIdentityAssertions.map((staged) => staged.assertion),
-    NO_STORED_ASSERTIONS,
-  );
-
-  // Staged ids the target ALREADY holds with the exact staged truth. The
-  // survivor dedupe must prefer these: the applier is idempotent per semantic
-  // pair, so a freshly minted branch id can never displace the target's
-  // committed row — choosing it would report an id as applied that is never
-  // written while listing the target's own row as dropped.
-  const committedIds = new Set<string>(
-    staging.newIdentityAssertions
-      .map((staged) => staged.assertion)
-      .filter((assertion) => {
-        const stored = storedIdentityRowsById.get(assertion.id);
-        return (
-          stored !== undefined &&
-          assertionTruthKey(stored) === assertionTruthKey(assertion)
-        );
-      })
-      .map((assertion) => assertion.id),
-  );
-  const deduped = dedupeIdentityAssertions(
-    staging.newIdentityAssertions.map((staged) => staged.assertion),
-    committedIds,
-  );
-  const retractionById = new Map<string, IdentityTransferAssertion>();
+/**
+ * Structural (not policy) validation: one assertion id was staged for
+ * retraction under two different identity truths — a data-integrity fault no
+ * `onAssertionConflict` policy can arbitrate, so it is checked once, up
+ * front, independent of the three-way classification below.
+ */
+function assertRetractedIdsHaveOneTruth(staging: StagingSet): void {
+  const seenById = new Map<string, IdentityTransferAssertion>();
   for (const staged of staging.retractedIdentityAssertions) {
-    const previous = retractionById.get(staged.assertion.id);
+    const previous = seenById.get(staged.assertion.id);
     if (
       previous !== undefined &&
       assertionIdentityKey(previous) !== assertionIdentityKey(staged.assertion)
@@ -401,7 +188,81 @@ export function planIdentityChanges(
         },
       );
     }
-    retractionById.set(staged.assertion.id, staged.assertion);
+    seenById.set(staged.assertion.id, staged.assertion);
+  }
+}
+
+/**
+ * @internal Exported for deterministic phase-level verification.
+ *
+ * Plans every identity change for one merge: three-way classifies the staged
+ * assertions against the staged base slice ({@link planIdentityThreeWay}, which
+ * absorbs what used to be three separate inline arbitrations here — the
+ * duplicate-assertion survivor rule, the opposing-relations refusal, and the
+ * retract/reassert race refusal), then applies the duties that stay owned
+ * here regardless of policy: the raw one-id-one-truth checks, the
+ * committed-id set the classifier's survivor rule needs, the retraction
+ * target-truth filter against the target's ACTUAL stored rows (independent of
+ * — and stricter than — the staged base slice the classifier reasons about),
+ * and the assert/retract id-collision backstop.
+ */
+export function planIdentityChanges(
+  staging: StagingSet,
+  storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>,
+  onAssertionConflict: IdentityAssertionConflictPolicy = "refuse",
+): Readonly<{
+  assertions: readonly IdentityTransferAssertion[];
+  retractions: readonly IdentityTransferAssertion[];
+  dropped: readonly DroppedItem[];
+  reconciliations: readonly IdentityReconciliation[];
+  unresolved: readonly IdentityUnresolvedConflict[];
+}> {
+  // Staged ids the target ALREADY holds with the exact staged truth. The
+  // classifier's survivor rule must prefer these: the applier is idempotent
+  // per semantic pair, so a freshly minted branch id can never displace the
+  // target's committed row — choosing it would report an id as applied that
+  // is never written while listing the target's own row as dropped.
+  const committedIds = new Set<string>(
+    staging.newIdentityAssertions
+      .map((staged) => staged.assertion)
+      .filter((assertion) => {
+        const stored = storedIdentityRowsById.get(assertion.id);
+        return (
+          stored !== undefined &&
+          assertionTruthKey(stored) === assertionTruthKey(assertion)
+        );
+      })
+      .map((assertion) => assertion.id),
+  );
+  const classified = planIdentityThreeWay(
+    staging,
+    onAssertionConflict,
+    committedIds,
+  );
+
+  // One id, one truth — over the RAW staged assertions, never the classifier's
+  // survivors: two branches staging one id for the same pair with different
+  // validFrom values collapse into one survivor under the semantic key (which
+  // excludes validity), so a check reading the survivors would never see the
+  // collision — while the report would list the id as both applied and
+  // dropped.
+  //
+  // ORDER IS BEHAVIOR. A staging set that trips more than one check must
+  // report the same error it always has, so the two structural checks run
+  // where they always did relative to the classifier's own refusals:
+  // opposing-relations, then the retract/reassert race (both inside
+  // `planIdentityThreeWay`), then one-id-one-truth, then the retraction's
+  // two-truths check. The classifier throws nothing after those two arms, so
+  // running these afterwards over the raw slices is exactly that order.
+  assertOneIdOneTruth(
+    staging.newIdentityAssertions.map((staged) => staged.assertion),
+    NO_STORED_ASSERTIONS,
+  );
+  assertRetractedIdsHaveOneTruth(staging);
+
+  const retractionById = new Map<string, IdentityTransferAssertion>();
+  for (const retraction of classified.retractions) {
+    retractionById.set(retraction.id, retraction);
   }
   const retractions: IdentityTransferAssertion[] = [];
   const retractionDropped: DroppedItem[] = [];
@@ -428,7 +289,7 @@ export function planIdentityChanges(
   // diff and the retraction truth filter each break every construction we
   // know — so refuse typed if a future path assembles it.
   const survivingIds = new Set(
-    deduped.survivors.map((survivor) => survivor.id),
+    classified.assertions.map((survivor) => survivor.id),
   );
   for (const retraction of retractions) {
     if (survivingIds.has(retraction.id)) {
@@ -439,11 +300,15 @@ export function planIdentityChanges(
     }
   }
   return {
-    assertions: deduped.survivors,
+    assertions: [...classified.assertions].sort((left, right) =>
+      compareCodePoints(identityDedupeKey(left), identityDedupeKey(right)),
+    ),
     retractions: retractions.toSorted((left, right) =>
       compareCodePoints(left.id, right.id),
     ),
-    dropped: [...deduped.dropped, ...retractionDropped],
+    dropped: [...classified.dropped, ...retractionDropped],
+    reconciliations: classified.reconciliations,
+    unresolved: classified.unresolved,
   };
 }
 
@@ -623,11 +488,11 @@ export function remapIdentityAssertionEndpoints(
       })
       .map((assertion) => assertion.id),
   );
-  const deduped = dedupeIdentityAssertions(remapped, committedIds);
+  const deduped = dedupeIdentityAssertionsRaw(remapped, committedIds);
   // Node reconciliation can collapse previously distinct endpoint pairs onto
   // the same canonical pair, so the pre-reconciliation check above is not
   // sufficient on its own.
-  assertNoOpposingIdentityRelations(deduped.survivors);
+  assertNoOpposingIdentityRelationsRaw(deduped.survivors);
   return {
     assertions: deduped.survivors,
     dropped: [...dropped, ...deduped.dropped],

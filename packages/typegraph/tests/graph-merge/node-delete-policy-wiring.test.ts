@@ -75,6 +75,8 @@ function emptyPlan(): MergePlan<G> {
     warnings: [],
     identityAssertions: [],
     identityRetractions: [],
+    identityReconciliations: [],
+    identityConflicts: [],
     canonicalOf: new Map(),
   };
 }

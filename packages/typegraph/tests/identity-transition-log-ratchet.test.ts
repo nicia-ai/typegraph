@@ -184,6 +184,26 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
       "Imports IdentityDecisionProvenance / IdentityTransitionDraft / IdentityTransitionNote — the touch/noteTransition callback types the capture session's public surface is typed against. The one writer (flush.ts) INSERTs; this file only buffers notes callers hand it.",
   },
   {
+    file: "store/runtime-port.ts",
+    reason:
+      "Imports the IdentityDecisionProvenance type only, to declare the optional `decision` parameter graph-merge's identity apply threads through applyIdentityMergeAtTarget — a port signature, no relation access.",
+  },
+  {
+    file: "store/store.ts",
+    reason:
+      "Imports the IdentityDecisionProvenance type only, to implement that same port method and pass the decision through to applyIdentityChangesForContext — no relation access.",
+  },
+  {
+    file: "identity/index.ts",
+    reason:
+      "Re-exports the IdentityDecisionProvenance type onto the identity barrel (and from there the package barrel), because a backend or store author implementing applyIdentityMergeAtTarget needs the decision shape by name — a type re-export, no relation access.",
+  },
+  {
+    file: "graph-merge/typegraph-internal.ts",
+    reason:
+      "Re-exports the IdentityDecisionProvenance type through graph-merge's one seam onto the rest of the package, so the merge builds its decision against the owner's shape instead of re-spelling it — a type re-export, no relation access.",
+  },
+  {
     file: "store/recorded-capture/relations.ts",
     reason:
       "Imports IDENTITY_TRANSITION_COLUMN_NAMES for its .length only, to derive the per-statement chunk size flush.ts binds — column-count arithmetic, never a row.",

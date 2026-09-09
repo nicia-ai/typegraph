@@ -67,6 +67,16 @@ import { type IdentityAssertionStorageRow } from "./storage-types";
 const MAX_SEPARATION_INSERT_CHUNK_SIZE = 100;
 
 /**
+ * The one code every "this graph's derived identity storage is not readable"
+ * refusal carries — an absent relation and a never-filled one are the same fact
+ * for an operator, with the same remedy. Named so a consumer that must
+ * recognize the refusal (graph-merge's separation veto, which re-raises it as
+ * an invalid-option refusal when a merge stated `identity.pairing`) matches the
+ * value rather than re-spelling the string.
+ */
+export const IDENTITY_STORAGE_MISSING_CODE = "IDENTITY_STORAGE_MISSING";
+
+/**
  * The PERSISTED encoding of an identity class key.
  *
  * Deliberately its own function rather than a reuse of the service's in-memory
@@ -198,13 +208,17 @@ type RawSeparationRow = Readonly<{
 }>;
 
 /**
- * Whether the relation records two CURRENT classes as separated.
+ * Whether the relation records each of `pairs` as CURRENT classes separated —
+ * the batch generalization of the single-pair probe.
  *
- * One primary-key probe against `(graph_id, class_key_low, class_key_high)`,
- * standing in for resolving both classes' `different` assertions out of the
- * ledger and scanning them for one that spans the pair. Callers pass the class
- * keys in any order; putting them in the relation's `low < high` order is this
- * module's business, since it is the same ordering the writer applies.
+ * ONE round trip per bind-budget chunk of DISTINCT non-trivial pairs, standing
+ * in for resolving every pair's two identity classes' `different` assertions
+ * out of the ledger and scanning them for one that spans the pair. Callers
+ * pass each pair's class keys in any order; putting them in the relation's
+ * `low < high` order is this module's business, since it is the same ordering
+ * the writer applies. A pair naming one class twice is never separated from
+ * itself — `low = high` is what the relation's CHECK exists to reject — and is
+ * answered `false` without a round trip.
  *
  * Valid only for a current-mode read: the relation projects CURRENT assertions
  * onto CURRENT classes, so a valid-time or recorded coordinate has to
@@ -221,18 +235,88 @@ type RawSeparationRow = Readonly<{
  * "not separated" — {@link separationRebuildRequired} is what keeps it loud
  * until the handle is reopened (the reopen runs the fill).
  *
- * WHAT IT COSTS. The pair lookup and "does this graph have ANY row" travel in
- * ONE statement — a second seek on the same primary key, in the same round
- * trip — so a graph that uses separations pays nothing beyond that seek and the
- * ledger is not read at all. The ledger probe runs only when the graph has NO
- * separation rows AND the pair missed, which is also the only state where a
- * "false" could be an unfilled relation rather than an absent separation. Both
- * callers reach here having already resolved two identity classes through the
- * closure (a recursive CTE each), so the bounded `LIMIT 1` this adds in that
- * state is small against what the answer already cost.
+ * WHAT IT COSTS. The batch lookup and "does this graph have ANY row" travel in
+ * ONE statement per chunk — a `LEFT JOIN` onto the same primary-key seek, in
+ * the same round trip — so a graph that uses separations pays nothing beyond
+ * that seek, chunked to the bind budget, and the ledger is not read at all.
+ * Arity one costs exactly the statement the single-pair probe always has: one
+ * chunk, one round trip. The ledger probe runs at most ONCE PER CALL — it is a
+ * fact about the graph, not about any one pair — and only when every chunk's
+ * graph-rows flag came back empty, which is also the only state where a
+ * "false" could be an unfilled relation rather than an absent separation.
  *
  * @throws {ConfigurationError} `IDENTITY_STORAGE_MISSING` when the relation the
  * probe reads does not exist, or exists without this graph's fill.
+ */
+export async function bulkIsSeparated(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+  pairs: readonly Readonly<{ first: string; second: string }>[],
+  registry: KindRegistry,
+): Promise<readonly boolean[]> {
+  if (pairs.length === 0) return [];
+  // A class is never separated from itself: `low = high` is what the
+  // relation's CHECK exists to reject, so a trivial pair is answered without a
+  // round trip and never joins the batch below.
+  const ordered = pairs.map((pair) => orderedPair(pair.first, pair.second));
+  const uniqueNonTrivial = new Map<string, SeparationPair>();
+  for (const pair of ordered) {
+    if (pair.low === pair.high) continue;
+    uniqueNonTrivial.set(pairKey(pair), pair);
+  }
+  if (uniqueNonTrivial.size === 0) {
+    return ordered.map(() => false);
+  }
+
+  const chunkSize = identityChunkSize(target, {
+    fixedParameters: SEPARATION_PROBE_FIXED_PARAMETERS,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  const separated = new Set<string>();
+  let graphHasRows = false;
+  for (const pairChunk of chunk([...uniqueNonTrivial.values()], chunkSize)) {
+    const probe = await probeSeparationPairs(
+      target,
+      schema,
+      graphId,
+      pairChunk,
+    );
+    graphHasRows ||= probe.graphHasRows;
+    for (const key of probe.separatedPairs) separated.add(key);
+  }
+  // The fast path, unchanged: rows exist for this graph, so the relation is
+  // not in the unfilled state and the ledger is not read at all.
+  const anyUnresolved = [...uniqueNonTrivial.keys()].some(
+    (key) => !separated.has(key),
+  );
+  if (
+    !graphHasRows &&
+    anyUnresolved &&
+    !separationReadinessProven(registry, graphId)
+  ) {
+    // Zero rows is not an exceptional state: it is the STEADY state of every
+    // graph that holds only `same` assertions, so this is the path whose cost
+    // decides whether the guard is affordable. The proof runs at most once per
+    // Store handle, and once per call here regardless of how many pairs it
+    // covers — the fact it settles is about the graph, not any one pair.
+    if (await hasLiveDifferentAssertions(target, schema, graphId, registry)) {
+      throw separationUnfilledError(graphId, schema);
+    }
+    proveSeparationReadiness(registry, graphId);
+  }
+  return ordered.map(
+    (pair) => pair.low !== pair.high && separated.has(pairKey(pair)),
+  );
+}
+
+/**
+ * Whether the relation records two CURRENT classes as separated.
+ *
+ * @throws {ConfigurationError} `IDENTITY_STORAGE_MISSING` when the relation the
+ * probe reads does not exist, or exists without this graph's fill.
+ * @see {@link bulkIsSeparated}, the arity-N owner this reduces to.
  */
 export async function isSeparated(
   target: IdentityTarget,
@@ -242,31 +326,14 @@ export async function isSeparated(
   secondClassKey: string,
   registry: KindRegistry,
 ): Promise<boolean> {
-  // A class is never separated from itself: `low = high` is what the relation's
-  // CHECK exists to reject, so the probe is a guaranteed miss and the round
-  // trip buys nothing.
-  if (firstClassKey === secondClassKey) return false;
-  const probe = await probeSeparationPair(
+  const [result] = await bulkIsSeparated(
     target,
     schema,
     graphId,
-    orderedPair(firstClassKey, secondClassKey),
+    [{ first: firstClassKey, second: secondClassKey }],
+    registry,
   );
-  if (probe.pairSeparated) return true;
-  // The fast path, unchanged: rows exist for this graph, so the relation is not
-  // in the unfilled state and the ledger is not read at all. This statement is
-  // exactly the one the guard inherited — no proof rides along, no kind binds.
-  if (probe.graphHasRows) return false;
-  // Zero rows is not an exceptional state: it is the STEADY state of every
-  // graph that holds only `same` assertions, so this is the path whose cost
-  // decides whether the guard is affordable. The proof runs at most once per
-  // Store handle.
-  if (separationReadinessProven(registry, graphId)) return false;
-  if (await hasLiveDifferentAssertions(target, schema, graphId, registry)) {
-    throw separationUnfilledError(graphId, schema);
-  }
-  proveSeparationReadiness(registry, graphId);
-  return false;
+  return result ?? false;
 }
 
 /**
@@ -320,6 +387,27 @@ function separationReadinessProven(
   return provenSeparationReadiness.get(registry)?.has(graphId) === true;
 }
 
+/**
+ * The public read of {@link separationReadinessProven}, for a caller that
+ * wants to SKIP its own "has this graph anything to separate" round trip
+ * rather than decide readiness itself.
+ *
+ * `graph-merge/identity-pairing.ts`'s plan-time capture asks the identical
+ * per-(registry, graphId) question `hasLiveDifferentAssertions` answers here —
+ * before this seam existed, it asked it with its own direct call, paying the
+ * round trip again even when an earlier `assertSame`/`assertDifferent` on the
+ * same Store handle had already proven it. One owner, two readers: this
+ * function never writes the memo — only {@link bulkIsSeparated}'s own
+ * zero-rows branch does that, so "true" here always traces back to a real
+ * probe this module ran itself.
+ */
+export function separationFactsKnownEmpty(
+  registry: KindRegistry,
+  graphId: string,
+): boolean {
+  return separationReadinessProven(registry, graphId);
+}
+
 function proveSeparationReadiness(
   registry: KindRegistry,
   graphId: string,
@@ -329,14 +417,21 @@ function proveSeparationReadiness(
   provenSeparationReadiness.set(registry, proven);
 }
 
-/** What one probe of the relation establishes about a pair AND its graph. */
-type SeparationProbe = Readonly<{
-  pairSeparated: boolean;
+/** What one probe of the relation establishes about a chunk of pairs AND its graph. */
+type BulkSeparationProbe = Readonly<{
+  /** `pairKey`-encoded pairs the relation records as separated. */
+  separatedPairs: ReadonlySet<string>;
   graphHasRows: boolean;
 }>;
 
 /**
- * The pair lookup and "does this graph hold ANY row", in one statement.
+ * Fixed binds in {@link probeSeparationPairs}'s statement: `graph_id`, bound
+ * once in the graph-rows subquery and once in the matched-pairs subquery.
+ */
+const SEPARATION_PROBE_FIXED_PARAMETERS = 2;
+
+/**
+ * The batch pair lookup and "does this graph hold ANY row", in one statement.
  *
  * The readiness proof deliberately does NOT ride along here. Folding it in as a
  * `CASE`-guarded scalar subquery was measured and rejected: it made the
@@ -346,37 +441,55 @@ type SeparationProbe = Readonly<{
  * plan to prepare — while the graphs that DO hold rows would have paid the same
  * binds for a subquery whose arm is never taken. Cheap on paper, not on the
  * engine.
+ *
+ * The two subqueries are joined rather than left as independent scalars so
+ * arity N stays ONE round trip: the graph-rows scalar is always exactly one
+ * row, `LEFT JOIN`ed to however many of the chunk's pairs the relation
+ * actually holds (zero or more), which at arity one degenerates to exactly the
+ * single combined row the original probe returned.
  */
-async function probeSeparationPair(
+async function probeSeparationPairs(
   target: IdentityTarget,
   schema: SqlSchema,
   graphId: string,
-  pair: SeparationPair,
-): Promise<SeparationProbe> {
+  pairChunk: readonly SeparationPair[],
+): Promise<BulkSeparationProbe> {
   try {
+    const conditions = pairChunk.map(
+      (pair) =>
+        sql`(class_key_low = ${pair.low} AND class_key_high = ${pair.high})`,
+    );
     const rows = await target.execute<Readonly<Record<string, unknown>>>(
       asCompiledRowsSql(sql`
-        SELECT
-          (
-            SELECT COUNT(*) FROM ${schema.identitySeparationTable}
+        SELECT graph_probe.graph_rows AS graph_rows,
+               matched.class_key_low AS class_key_low,
+               matched.class_key_high AS class_key_high
+        FROM (
+          SELECT COUNT(*) AS graph_rows FROM (
+            SELECT 1 AS present FROM ${schema.identitySeparationTable}
             WHERE graph_id = ${graphId}
-              AND class_key_low = ${pair.low}
-              AND class_key_high = ${pair.high}
-          ) AS pair_rows,
-          (
-            SELECT COUNT(*) FROM (
-              SELECT 1 AS present FROM ${schema.identitySeparationTable}
-              WHERE graph_id = ${graphId}
-              LIMIT 1
-            ) graph_probe
-          ) AS graph_rows
+            LIMIT 1
+          ) graph_present
+        ) graph_probe
+        LEFT JOIN (
+          SELECT class_key_low, class_key_high
+          FROM ${schema.identitySeparationTable}
+          WHERE graph_id = ${graphId}
+            AND (${sql.join(conditions, sql` OR `)})
+        ) matched ON 1 = 1
       `),
     );
-    const row = rows[0];
-    return {
-      graphHasRows: countOf(row, "graph_rows") > 0,
-      pairSeparated: countOf(row, "pair_rows") > 0,
-    };
+    const separatedPairs = new Set<string>();
+    let graphHasRows = false;
+    for (const row of rows) {
+      if (countOf(row, "graph_rows") > 0) graphHasRows = true;
+      const low = row["class_key_low"];
+      const high = row["class_key_high"];
+      if (typeof low === "string" && typeof high === "string") {
+        separatedPairs.add(pairKey({ low, high }));
+      }
+    }
+    return { graphHasRows, separatedPairs };
   } catch (error) {
     // Never degrade to "not separated": a caller that cannot read the relation
     // has no basis for an answer, and the wrong answer here is the one that
@@ -417,7 +530,7 @@ function separationUnreadableError(
   return new ConfigurationError(
     "Operational Identity could not read the materialized separation relation.",
     {
-      code: "IDENTITY_STORAGE_MISSING",
+      code: IDENTITY_STORAGE_MISSING_CODE,
       graphId,
       tables: [schema.tables.identitySeparation],
     },
@@ -446,7 +559,7 @@ function separationUnfilledError(
   return new ConfigurationError(
     "Operational Identity found the separation relation present but never filled for this graph.",
     {
-      code: "IDENTITY_STORAGE_MISSING",
+      code: IDENTITY_STORAGE_MISSING_CODE,
       graphId,
       reason: "unfilled",
       tables: [schema.tables.identitySeparation],
@@ -576,7 +689,7 @@ async function hasSeparationRows(
  * a database whose closure is corrupt, which `validateIdentity()` reports and
  * which the CHECK still refuses at the next fusing write.
  */
-async function hasLiveDifferentAssertions(
+export async function hasLiveDifferentAssertions(
   target: IdentityTarget,
   schema: SqlSchema,
   graphId: string,

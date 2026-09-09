@@ -25,6 +25,7 @@ import {
 } from "../core/types";
 import { ConfigurationError } from "../errors";
 import { type IdentityServiceContext } from "../identity/service-types";
+import { type IdentityDecisionProvenance } from "../identity/transition-log";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import type { EvolutionPlan } from "../schema/evolution-plan";
@@ -377,6 +378,12 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     }>[],
     mode: "state" | "archival",
   ) => Promise<Readonly<{ created: number; skipped: number }>>;
+  /**
+   * `decision` is the governing merge decision, when the apply runs under one:
+   * every identity transition the call causes carries it, so a fold a merged
+   * node create triggered is attributed to the merge rather than filed as an
+   * anonymous `fold`. `undefined` for an apply with no governing decision.
+   */
   applyIdentityMergeAtTarget: (
     target: GraphBackend | TransactionBackend,
     retractions: readonly Readonly<{
@@ -397,6 +404,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       validTo?: string | undefined;
       endedBy?: Readonly<{ kind: string; id: string }> | undefined;
     }>[],
+    decision?: IdentityDecisionProvenance,
   ) => Promise<Readonly<{ created: number; retracted: number }>>;
   /**
    * Proves the identity classes of `seeds` carry no contradiction in the state

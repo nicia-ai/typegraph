@@ -83,7 +83,9 @@ export {
 export type {
   AcyclicityMergeConflictDetails,
   AcyclicityMergeConflictEdge,
+  IdentityMergeConflictCode,
   MergeConstraintConflictErrorDetails,
+  MergeErrorOptions,
 } from "./errors";
 export {
   AcyclicityMergeConflictError,
@@ -126,6 +128,11 @@ export type {
   MatchStrategy,
 } from "./evidence";
 export { branchForEvolution } from "./evolution-branch";
+export type {
+  IdentityAssertionConflict,
+  IdentityAssertionConflictPolicy,
+  IdentityAssertionDecision,
+} from "./identity-three-way";
 export { ingestionBranch } from "./ingestion-branch";
 export {
   applyMergePlan,
@@ -199,10 +206,18 @@ export { MERGE_REVIEW_FORMAT_VERSION } from "./review-schema";
 export type {
   BaseNodeLookup,
   CandidateSource,
+  IdentityPairingScope,
   KeylessConfig,
   SourceScope,
 } from "./sources";
-export type { IdentityAssertionWriteFacade } from "./typegraph-internal";
+export type { StagedIdentityAssertion, StagedRetraction } from "./staging";
+export type { RetractionCause } from "./state-diff";
+export type {
+  IdentityAssertionWriteFacade,
+  IdentityDecisionProvenance,
+  IdentityRelation,
+  IdentityTransferAssertion,
+} from "./typegraph-internal";
 export type {
   BaseAmbiguity,
   BaseVersion,
@@ -218,6 +233,10 @@ export type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IdentityAssertionConflictReason,
+  IdentityReconciliation,
+  IdentityReconciliationOptions,
+  IdentityUnresolvedConflict,
   IngestionBranch,
   IngestionNodeCollections,
   MergeBranch,
