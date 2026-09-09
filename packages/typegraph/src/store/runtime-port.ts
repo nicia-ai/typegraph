@@ -26,6 +26,7 @@ import {
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
+import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
 import {
   type InternalSubgraphOptions,
@@ -51,6 +52,26 @@ export const STORE_RUNTIME: unique symbol =
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
+  /**
+   * @internal Whether TypeGraph itself performs recorded-time capture for
+   * this store — recorded relations, a TypeGraph clock, the write-fence/
+   * schema-lock machinery capture needs. This is `Store`'s private
+   * `#captureEnabled`, distinct from the public `historyEnabled` getter
+   * (which answers "was `history: true` requested," true under
+   * engine-native ownership too, where the engine tracks history on its
+   * own and none of the TypeGraph-relations machinery below runs). A reader
+   * of a recorded relation's own columns — `recordedRelationsLineage`, the
+   * trusted-import bypass refusal, a revision-anchor lineage delta, the
+   * capture-only merge-transaction isolation choice — consults this member,
+   * never the public getter, so it cannot be fooled by an engine-native
+   * store into reading a recorded relation the engine never populates.
+   *
+   * Optional at this boundary for the same contravariant-reach reason as
+   * `uniqueSidecarBatch` below: the one real producer (`store.ts`'s
+   * constructor) always populates it, and a consumer asserts it with
+   * {@link storeCaptureEnabled}.
+   */
+  captureEnabled?: boolean;
   /**
    * @internal The `uniqueSidecarBatch` bundle's verdict, resolved once at
    * store construction against `backend` (ruling B8 spec item 2) and exposed
@@ -352,6 +373,25 @@ export function storeBackend<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
 ): GraphBackend {
   return storeRuntime(store).backend;
+}
+
+/**
+ * Whether TypeGraph itself performs recorded-time capture for `store` — see
+ * {@link StoreRuntime.captureEnabled}. Consult this, never the public
+ * `historyEnabled` getter, when the decision at hand is specifically about
+ * TypeGraph's own recorded relations (a reader of their columns, the
+ * capture-only merge-transaction isolation choice, the trusted-import
+ * bypass refusal): `historyEnabled` answers "was `history: true`
+ * requested," true for an engine-native store too, which never populates
+ * those relations.
+ */
+export function storeCaptureEnabled<G extends GraphDef>(
+  store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
+): boolean {
+  return requireDefined(
+    storeRuntime(store).captureEnabled,
+    "Cannot read this Store's capture flag. The Store may come from an incompatible TypeGraph version.",
+  );
 }
 
 /**

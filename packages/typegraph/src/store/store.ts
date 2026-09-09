@@ -27,6 +27,14 @@ import {
   CONTRIBUTION_HEALTH,
 } from "../backend/capabilities/bundle-registry";
 import {
+  type RecordedTimeSession,
+  requireRecordedTime,
+} from "../backend/capabilities/recorded-time";
+import {
+  type RecordedTimeOwnership,
+  resolveRecordedTimeOwnership,
+} from "../backend/capabilities/recorded-time-ownership";
+import {
   batchPointReadVerdict,
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
@@ -94,6 +102,7 @@ import {
 } from "../core/runtime-kind";
 import {
   asRecordedInstant,
+  createEngineRecordedInstant,
   type ReadCoordinate,
   type RecordedInstant,
   recordedInstantWallTime,
@@ -131,6 +140,7 @@ import {
 } from "../graph-extension/extension-types";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { planRemovals, stripGraphExtension } from "../graph-extension/remove";
+import { refuseEngineNativeRecordedIdentityRead } from "../identity/historical-sql";
 import {
   ensureIdentitySchemaStorage,
   identityKindCascadeNeeded,
@@ -183,6 +193,7 @@ import {
   type QueryCoordinateState,
 } from "../query/builder";
 import {
+  createEngineRecordedReadBinding,
   createRecordedReadBinding,
   createSqlSchema,
   type RecordedReadBinding,
@@ -689,6 +700,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;
   recordedReadBound: boolean;
+  recordedTimeOwnership: RecordedTimeOwnership;
   workingCopyOptions: WorkingCopyOptions;
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
@@ -1082,7 +1094,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     typeof RECORDED_REVISION_ORIGINS
   >;
   readonly #adapterBackend: AdapterBackend<TNativeTransaction> | undefined;
+  readonly #recordedTimeOwnership: RecordedTimeOwnership;
+  readonly #requestedHistory: boolean;
   readonly #captureEnabled: boolean;
+  readonly #engineNativeHistory: boolean;
   readonly #revisionTrackingEnabled: boolean;
   readonly #recordedReadBinding: RecordedReadBinding | undefined;
   readonly #registry: KindRegistry;
@@ -1145,17 +1160,77 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
     this.#baseBackend = asRawBackend(backend);
     this.#adapterBackend = adapterBackend;
-    this.#captureEnabled = options?.history === true;
+    this.#recordedTimeOwnership = resolveRecordedTimeOwnership(backend);
+    const requestedHistory = options?.history === true;
+    const requestedRevisionTracking = options?.revisionTracking === true;
+    if (
+      this.#recordedTimeOwnership === "engine-native" &&
+      requestedRevisionTracking
+    ) {
+      // Engine-native has no TypeGraph clock for `revisionTracking: true` to
+      // advance — the engine's own revision IS the tracking, and it only
+      // ever surfaces through `history: true`, whether or not `history` was
+      // also requested. Refusing only the without-history combination once
+      // let `{ history: true, revisionTracking: true }` construct
+      // successfully while silently forcing `revisionTrackingEnabled` back
+      // to false — an accepted option this backend cannot honor at all, not
+      // one it can honor only some of the time.
+      throw new ConfigurationError(
+        "revisionTracking: true is not supported under engine-native recorded time.",
+        { code: "ENGINE_NATIVE_REVISION_TRACKING_UNSUPPORTED" },
+        {
+          suggestion:
+            "Pass { history: true } instead — the engine's own recordedTime.revisionNow is the only revision this backend can track, and it is available under history: true whether or not revisionTracking is also requested.",
+        },
+      );
+    }
+    if (
+      this.#recordedTimeOwnership === "engine-native" &&
+      options?.recordedRead !== undefined
+    ) {
+      // An externally bound recorded relation is a TypeGraph-relations
+      // concept: engine-native has no recorded relation of its own for a
+      // caller to populate, and its own recorded reads are sourced from
+      // `recordedTime.source` instead.
+      throw new ConfigurationError(
+        "recordedRead is not supported under engine-native recorded time.",
+        { code: "ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED" },
+        {
+          suggestion:
+            "Use { history: true } to read this backend's own engine-native recorded time, or omit recordedRead.",
+        },
+      );
+    }
+    // `#requestedHistory` is the caller's own request — `options.history ===
+    // true` — regardless of which ownership form honors it; the public
+    // `historyEnabled` getter answers this, matching `HistoryStore<G>`'s
+    // static `historyEnabled: true` for either ownership. `#captureEnabled`
+    // means TypeGraph itself performs capture — recorded relations, a
+    // TypeGraph clock, the write-fence/schema-lock machinery capture needs —
+    // and stays scoped to `typegraph-relations` ownership: it is the flag a
+    // reader of a recorded relation's own columns must consult instead
+    // (`storeCaptureEnabled`, `src/store/runtime-port.ts`), never the public
+    // getter, or an engine-native store fools it into reading relations the
+    // engine never populates. Engine-native `history: true` gets NONE of
+    // TypeGraph's capture: the engine tracks history on its own, so
+    // `#engineNativeHistory` is a parallel, much narrower flag consulted only
+    // where the receipt/read wiring genuinely differs from TypeGraph-owned
+    // capture (construction below, recordedNow/revisionNow, and the two
+    // transaction-commit sites).
+    this.#requestedHistory = requestedHistory;
+    this.#captureEnabled =
+      requestedHistory && this.#recordedTimeOwnership === "typegraph-relations";
+    this.#engineNativeHistory =
+      requestedHistory && this.#recordedTimeOwnership === "engine-native";
     this.#revisionTrackingEnabled =
-      this.#captureEnabled || options?.revisionTracking === true;
+      this.#recordedTimeOwnership === "engine-native" ?
+        false
+      : this.#captureEnabled || requestedRevisionTracking;
     if (this.#revisionTrackingEnabled) {
       // Keyed on the resource `lockRecordedClock` fences (ruling F3): the
       // TypeGraph-owned clock row, which `history` and `revisionTracking`
-      // both reach. This construction path always allocates that clock —
-      // `resolveRecordedTimeOwnership` (`backend/capabilities/
-      // recorded-time-ownership.ts`) is not yet consulted here, so a
-      // backend that declares `recordedTime` gets no different treatment at
-      // this site.
+      // both reach here — unreachable under engine-native, whose
+      // `#revisionTrackingEnabled` is forced false above.
       const clockFencePlan = resolveWriteFencePlan(backend);
       if (clockFencePlan.kind === "unfenced") {
         refuseUnfencedClockAllocation(backend.dialect);
@@ -1187,8 +1262,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       options?.recordedRead,
     );
     this.#recordedReadBinding =
-      this.#captureEnabled ?
-        createRecordedReadBinding(readSchema)
+      this.#captureEnabled ? createRecordedReadBinding(readSchema)
+      : this.#engineNativeHistory ?
+        createEngineRecordedReadBinding(
+          requireRecordedTime(backend, "store construction"),
+          readSchema,
+        )
       : externalRecordedRead;
     this.#backend =
       this.#captureEnabled ?
@@ -1219,6 +1298,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
       backend: this.#backend,
+      captureEnabled: this.#captureEnabled,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
       // The query path's own construction, not a second spelling of it: a
       // caller that could only rebuild this object could not observe the one
@@ -1440,6 +1520,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // (empty) tables. Mirror the node recorded-read routing: the
     // relations-precondition backend overlay plus the recorded schema view.
     const recordedAsOf = coordinate.recorded?.asOf;
+    if (
+      recordedAsOf !== undefined &&
+      this.#recordedTimeOwnership === "engine-native"
+    ) {
+      refuseEngineNativeRecordedIdentityRead("identityAtCoordinate");
+    }
     const backend =
       recordedAsOf === undefined ?
         this.#backend
@@ -1718,12 +1804,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Whether recorded-time capture is enabled for this store.
+   * Whether this store was constructed with `history: true` — under EITHER
+   * recorded-time ownership form. Matches `HistoryStore<G>`'s static
+   * `historyEnabled: true`: a store this is true for always answers
+   * `asOfRecorded` and stamps recorded receipts, whether TypeGraph's own
+   * capture runs underneath (`typegraph-relations` ownership) or the
+   * engine tracks history on its own (`engine-native` ownership, where
+   * TypeGraph's recorded relations are never populated). A decision that
+   * specifically needs "does TypeGraph's own capture run" — a reader of a
+   * recorded relation's own columns — must consult `storeCaptureEnabled`
+   * (`src/store/runtime-port.ts`) instead; this getter would answer `true`
+   * for an engine-native store too and lead it to read relations the engine
+   * never populates.
    *
    * @internal
    */
   get historyEnabled(): boolean {
-    return this.#captureEnabled;
+    return this.#requestedHistory;
   }
 
   /**
@@ -1751,6 +1848,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   get recordedReadBound(): boolean {
     return this.#recordedReadBinding !== undefined;
+  }
+
+  /**
+   * Who allocates recorded-time revisions for this store: TypeGraph's own
+   * capture relations and clock, or this backend's engine through
+   * `recordedTime`. See {@link resolveRecordedTimeOwnership}.
+   *
+   * @internal
+   */
+  get recordedTimeOwnership(): RecordedTimeOwnership {
+    return this.#recordedTimeOwnership;
   }
 
   /**
@@ -2629,6 +2737,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * success), not the global clock.
    */
   async recordedNow(): Promise<RecordedInstant | undefined> {
+    if (this.#engineNativeHistory) {
+      return this.#engineRecordedInstant(this.#backend);
+    }
     if (!this.#captureEnabled) {
       throw new ConfigurationError(
         "recordedNow() requires a store created with { history: true }.",
@@ -2649,14 +2760,45 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * Reads this backend's engine-native recorded-time revision on `session`
+   * and mints the `e1:` {@link RecordedInstant} for it — the ONE place that
+   * calls `recordedTime.revisionNow`, consulted by {@link recordedNow} and
+   * {@link revisionNow} (both on the root backend) and by the two
+   * transaction-commit sites that stamp `TransactionReceipt.recorded` (on
+   * the committing session), so "what instant does this transaction get"
+   * has one owner beside `flush()`'s own TypeGraph-capture answer.
+   */
+  async #engineRecordedInstant(
+    session: RecordedTimeSession,
+  ): Promise<RecordedInstant> {
+    const recordedTime = requireRecordedTime(
+      this.#baseBackend,
+      "engine-native recorded time",
+    );
+    const revision = await recordedTime.revisionNow(session);
+    return createEngineRecordedInstant(revision.revision, revision.recordedAt);
+  }
+
+  /**
    * Returns the durable graph revision used by graph branching. It is undefined
    * until the first successful tracked write, which is itself a stable initial
    * anchor. Unlike {@link recordedNow}, this is also available on a live Store
    * created with `{ revisionTracking: true }`.
    *
+   * Under engine-native ownership, `revisionTrackingEnabled` is always
+   * false (the engine anchor applies instead), but a `history: true` store
+   * still answers from `recordedTime.revisionNow` on the root backend —
+   * the same source `recordedNow()` uses — so this and `recordedNow()`
+   * report the same value there, unlike under TypeGraph-owned tracking
+   * where `revisionTracking: true` without `history` gives this a value
+   * `recordedNow()` refuses to give.
+   *
    * @internal
    */
   async revisionNow(): Promise<RecordedInstant | undefined> {
+    if (this.#engineNativeHistory) {
+      return this.#engineRecordedInstant(this.#backend);
+    }
     if (!this.#revisionTrackingEnabled) return undefined;
     return readRecordedClock(this.#backend, this.#sqlSchema(), this.graphId);
   }
@@ -3443,7 +3585,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 invokeTransaction,
               )
             : invokeTransaction();
-          return withWriteTransactionSession(
+          const output = await withWriteTransactionSession(
             txBackend,
             {
               graphId: this.graphId,
@@ -3454,6 +3596,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             },
             invokeWithSchemaFenceLease,
           );
+          // The engine-native counterpart to capture's flush observer: read
+          // inside the transaction (before its outer COMMIT), on the SAME
+          // committing session `txBackend` is, exactly once — never once per
+          // graph, since an engine-native store answers for exactly one. Only
+          // when a receipt was requested AND that receipt actually recorded a
+          // write — `TransactionReceipt.recorded` is undefined for a
+          // read-only or no-op transaction under either ownership form
+          // (`hasWrites()` is the same predicate the TypeGraph-owned path
+          // answers implicitly: an unflushed graph is simply absent from
+          // `recordedByGraph`), so a plain `store.transaction()` or an
+          // empty-body `transactionWithReceipt()` neither takes the extra
+          // round trip nor stamps an instant nothing earned.
+          if (
+            this.#engineNativeHistory &&
+            receiptRecorder?.hasWrites() === true
+          ) {
+            recordedByGraph = new Map([
+              [this.graphId, await this.#engineRecordedInstant(txBackend)],
+            ]);
+          }
+          return output;
         };
         const result =
           this.#captureEnabled || this.#adapterBackend === undefined ?
@@ -3746,10 +3909,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         receiptRecorder,
       ),
     );
-    // Flush allocates the recorded commit instant for this transaction's graph;
+    // Flush allocates the recorded commit instant for this transaction's graph
+    // under TypeGraph-owned capture; under engine-native it is
+    // `recordedTime.revisionNow` read on this SAME adopted session, still
+    // inside the caller's transaction — the engine-native counterpart to
+    // `flush()`, called once for this store's one graph, and only when the
+    // receipt actually recorded a write (`hasWrites()`; TypeGraph-owned
+    // capture answers the same "nothing to stamp" case implicitly, by simply
+    // never flushing a row for a graph with no captured writes). Either way
     // `transactionOutcome` reads this store's instant out of the returned map
     // (undefined when nothing was captured) into `receipt.recorded`.
-    const recordedByGraph = await scope.flush();
+    const recordedByGraph =
+      this.#engineNativeHistory && receiptRecorder.hasWrites() ?
+        new Map([[this.graphId, await this.#engineRecordedInstant(txBackend)]])
+      : await scope.flush();
     // Seal the context so a write through a retained `tx` after this returns
     // fails loud instead of persisting a row the snapshotted receipt can't
     // count. Under history capture the capture session already sealed on flush

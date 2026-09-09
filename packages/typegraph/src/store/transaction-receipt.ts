@@ -63,6 +63,17 @@ export type TransactionReceiptRecorder = Readonly<{
   recordIdentity: (kind: IdentityWriteCounterName, count: number) => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
   /**
+   * Whether any write has been recorded yet (`writes.total !== 0`). The one
+   * place "did this transaction actually write anything" is answered — an
+   * engine-native commit site consults it before minting a
+   * `TransactionReceipt.recorded` instant, so a read-only or no-op
+   * transaction leaves `recorded` undefined exactly as
+   * {@link TransactionReceipt.recorded}'s doc comment promises under either
+   * recorded-time ownership form, rather than always stamping an instant a
+   * receipt was merely requested for.
+   */
+  hasWrites: () => boolean;
+  /**
    * Seals the recorder: every subsequent write through a collection wrapped with
    * it (see {@link wrapTransactionCollections}) throws. Used to fail loud when a
    * transaction context is retained and written through *after* its callback
@@ -189,6 +200,10 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       counters.identity[kind] += count;
       counters.identity.total += count;
       counters.total += count;
+    },
+
+    hasWrites(): boolean {
+      return counters.total !== 0;
     },
 
     snapshot(recorded): TransactionReceipt {

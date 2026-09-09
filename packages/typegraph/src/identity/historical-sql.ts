@@ -8,9 +8,35 @@ import {
   type RecordedInstantParts,
 } from "../core/temporal";
 import { type TemporalMode } from "../core/types";
+import { ConfigurationError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { type IdentityRelation } from "./types";
+
+/**
+ * THE refusal shared by every historical identity read entry point —
+ * {@link Store.identityAtCoordinate}'s facade and the query compiler's
+ * identity-traversal path alike — for a recorded coordinate under
+ * engine-native recorded time.
+ *
+ * `identityNodeSnapshotSource`/`identityAssertionSnapshotSource` below read a
+ * recorded relation's own columns (`schema.recordedNodesTable`/
+ * `recordedIdentityAssertionsTable`, `recorded_from`/`recorded_to`) directly
+ * rather than through the `RecordedReadSource` seam an engine-native binding
+ * satisfies — an engine-native backend has no such relation to read, so this
+ * refuses before either function ever runs, rather than emitting SQL against
+ * a relation that does not exist.
+ */
+export function refuseEngineNativeRecordedIdentityRead(surface: string): never {
+  throw new ConfigurationError(
+    `${surface} cannot reconstruct identity at a recorded coordinate under engine-native recorded time: identity history reads TypeGraph's own recorded relations directly, which an engine-native backend does not populate.`,
+    { code: "ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED", surface },
+    {
+      suggestion:
+        "Read identity at the current coordinate, or use a store whose recorded time is TypeGraph-owned (history/revisionTracking without an engine-native recordedTime member) for historical identity reconstruction.",
+    },
+  );
+}
 
 /**
  * Column list of the identity assertion relation, in storage order. Every

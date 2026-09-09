@@ -5,13 +5,17 @@
  * This allows the compiler to work with custom table names instead of
  * hard-coded defaults.
  */
+import {
+  type EngineRecordedRevision,
+  type EngineRecordedTimeMembers,
+} from "../../backend/capabilities/recorded-time";
 import { type VectorIndexType, type VectorMetric } from "../../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../../constants";
 import {
   parseRecordedInstant,
   type RecordedInstantParts,
 } from "../../core/temporal";
-import { ConfigurationError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { typeGraphGlobalSymbol } from "../../utils/global-symbol";
 import { isSqlFragment, sql, type SqlFragment } from "../sql-fragment";
 
@@ -392,6 +396,14 @@ export type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
  * it afterward. A binding whose `source` already scopes its rows to exactly
  * one revision (an engine-native temporal table expression, say) returns
  * `undefined` from `predicate` instead of re-spelling a redundant filter.
+ *
+ * `carriesInterval` names the other fact every binding-shape-aware reader
+ * needs: whether `source`'s rows carry the `recorded_from`/`recorded_to`
+ * columns a TypeGraph-relation-backed source's every revision has. A reader
+ * that needs to order or filter on that interval (`recorded-read-service.ts`'s
+ * point-read and scan `ORDER BY`) consults this instead of re-deriving the
+ * fact from `binding.kind` itself, so a fourth binding kind cannot leave one
+ * site still assuming a column the new binding's source does not have.
  */
 export type RecordedReadSource = Readonly<{
   source: (
@@ -402,6 +414,7 @@ export type RecordedReadSource = Readonly<{
     prefix: SqlFragment,
     revision: RecordedInstantParts,
   ) => SqlFragment | undefined;
+  carriesInterval: boolean;
 }>;
 
 /**
@@ -435,11 +448,24 @@ function typeGraphRelationRecordedReadSource(
       prefix: SqlFragment,
       revision: RecordedInstantParts,
     ): SqlFragment {
+      if (revision.kind !== "typegraph") {
+        // Every caller resolves `revision` by parsing the SAME coordinate this
+        // binding was bound to source rows from — reaching here with an
+        // engine-native (`e1`) revision would mean a coordinate minted for one
+        // ownership form reached the read binding of the other, which the
+        // construction-time and asOfRecorded ownership checks both refuse
+        // before a read is ever compiled.
+        throw new CompilerInvariantError(
+          "A TypeGraph-relation recorded read binding received an engine-native revision.",
+          { revisionKind: revision.kind },
+        );
+      }
       const recordedFrom = sql`${prefix}recorded_from`;
       const recordedTo = sql`${prefix}recorded_to`;
       const { revision: revisionNumber } = revision;
       return sql`${recordedFrom} <= ${revisionNumber} AND ${revisionNumber} < ${recordedTo}`;
     },
+    carriesInterval: true,
   };
 }
 
@@ -467,8 +493,84 @@ export type TypeGraphRecordedReadSource = Readonly<{
 }> &
   RecordedReadSource;
 
+const ENGINE_RECORDED_READ_SOURCE: unique symbol = typeGraphGlobalSymbol(
+  "engine-recorded-read-source-v1",
+);
+
+/**
+ * The recorded read binding for a backend that owns recorded time itself
+ * (`GraphBackend.recordedTime`, `backend/capabilities/recorded-time.ts`).
+ * `source` defers to `recordedTime.source`, converting the parsed
+ * engine-native revision into the `EngineRecordedRevision` shape that member
+ * expects; `predicate` always returns `undefined` — the engine's own source
+ * expression already scopes every row to exactly one revision, so there is no
+ * separate interval to layer on top the way the TypeGraph-relation source
+ * needs one.
+ */
+export type EngineRecordedReadSource = Readonly<{
+  kind: "engine-native";
+  schema: SqlSchema;
+  [ENGINE_RECORDED_READ_SOURCE]: true;
+}> &
+  RecordedReadSource;
+
 export type RecordedReadBinding =
-  ExternalRecordedReadSource | TypeGraphRecordedReadSource;
+  | ExternalRecordedReadSource
+  | TypeGraphRecordedReadSource
+  | EngineRecordedReadSource;
+
+/**
+ * Narrows a parsed recorded revision to the engine-native shape
+ * `EngineRecordedTimeMembers.source`/`revisionNow` traffic in. Symmetric with
+ * `typeGraphRelationRecordedReadSource`'s own guard: a TypeGraph-owned (`r1`)
+ * revision reaching an engine-native binding means a coordinate minted for
+ * the other ownership form got here, which construction and `asOfRecorded`
+ * both refuse ahead of any read.
+ */
+function requireEngineRecordedRevision(
+  revision: RecordedInstantParts,
+): EngineRecordedRevision {
+  if (revision.kind !== "engine") {
+    throw new CompilerInvariantError(
+      "An engine-native recorded read binding received a TypeGraph-owned revision.",
+      { revisionKind: revision.kind },
+    );
+  }
+  return { revision: revision.revision, recordedAt: revision.recordedAt };
+}
+
+/**
+ * Builds the recorded read binding for an engine-native backend, wrapping its
+ * `recordedTime` member as the {@link RecordedReadSource} seam every recorded
+ * read consults. `schema` is carried only for shape parity with the other two
+ * binding kinds (`recordedReadSqlSchema` still needs a live schema to copy the
+ * non-swapped table references from) — the engine's own `source` never reads
+ * from it.
+ */
+export function createEngineRecordedReadBinding(
+  recordedTime: EngineRecordedTimeMembers,
+  schema: SqlSchema,
+): EngineRecordedReadSource {
+  const readSchema = requireSqlSchema(
+    schema,
+    "engine recorded read binding schema",
+  );
+  return Object.freeze({
+    kind: "engine-native",
+    schema: readSchema,
+    [ENGINE_RECORDED_READ_SOURCE]: true as const,
+    source(table: RecordedSourceTable, revision: RecordedInstantParts) {
+      return recordedTime.source(
+        table,
+        requireEngineRecordedRevision(revision),
+      );
+    },
+    predicate(): undefined {
+      return;
+    },
+    carriesInterval: false,
+  });
+}
 
 export type RecordedRelationOptions = Readonly<{
   schema: SqlSchema;
@@ -570,12 +672,32 @@ function isTypeGraphRecordedReadSource(
   );
 }
 
+type EngineRecordedReadSourceCandidate = Readonly<{
+  kind?: unknown;
+  schema?: unknown;
+  [ENGINE_RECORDED_READ_SOURCE]?: unknown;
+}>;
+
+function isEngineRecordedReadSource(
+  source: unknown,
+): source is EngineRecordedReadSource {
+  if (typeof source !== "object" || source === null) return false;
+  const candidate = source as EngineRecordedReadSourceCandidate;
+  return (
+    candidate.kind === "engine-native" &&
+    candidate[ENGINE_RECORDED_READ_SOURCE] === true &&
+    isSqlSchema(candidate.schema) &&
+    Object.isFrozen(candidate)
+  );
+}
+
 function isRecordedReadBinding(
   binding: unknown,
 ): binding is RecordedReadBinding {
   return (
     isExternalRecordedReadSource(binding) ||
-    isTypeGraphRecordedReadSource(binding)
+    isTypeGraphRecordedReadSource(binding) ||
+    isEngineRecordedReadSource(binding)
   );
 }
 

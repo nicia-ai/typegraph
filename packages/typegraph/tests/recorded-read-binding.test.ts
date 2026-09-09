@@ -24,6 +24,7 @@ import { toSqlString } from "./sql-test-utils";
 import { createTestBackend } from "./test-utils";
 
 const SAMPLE_REVISION: RecordedInstantParts = {
+  kind: "typegraph",
   revision: 1,
   recordedAt: "2026-01-01T00:00:00.000Z",
 };

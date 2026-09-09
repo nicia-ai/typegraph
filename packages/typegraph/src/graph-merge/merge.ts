@@ -217,6 +217,7 @@ import {
   resolveLineage,
   runRetriedUnit,
   storeBackend,
+  storeCaptureEnabled,
   storeRuntime,
   transactionBackend,
   TypeGraphError,
@@ -2269,7 +2270,15 @@ function mergeCommitTransactionOptions<G extends GraphDef>(
   // allocates its durable clock inside the write transaction. Revision-anchored
   // merges hold that same per-graph lock before checking the anchor, which
   // closes the TOCTOU gap without asking a history store for SERIALIZABLE.
-  return target.historyEnabled ? undefined : MERGE_COMMIT_TX_OPTIONS;
+  //
+  // `storeCaptureEnabled`, not the public `historyEnabled` getter: the
+  // "durable clock allocated inside this transaction" rationale is specific
+  // to TypeGraph's own capture. An engine-native `history: true` store never
+  // allocates anything here — `revisionNow` just reads the committing
+  // session — so it takes the SAME SERIALIZABLE path a non-capturing store
+  // does, unchanged from before this store had a public `historyEnabled`
+  // that could answer `true` for it.
+  return storeCaptureEnabled(target) ? undefined : MERGE_COMMIT_TX_OPTIONS;
 }
 
 /**

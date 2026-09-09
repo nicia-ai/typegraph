@@ -63,7 +63,20 @@ export type EngineRecordedRevision = Readonly<{
  * capture-owned store — never once per graph.
  */
 export type EngineRecordedTimeMembers = Readonly<{
-  /** The table expression `table`'s recorded rows read from AS OF `revision`. */
+  /**
+   * The table expression `table`'s recorded rows read from AS OF `revision`.
+   *
+   * `table` is never called with `"identityAssertions"` today: a recorded
+   * identity read (`Store.identityAtCoordinate` and the query compiler's
+   * historical identity traversal) is refused outright under engine-native
+   * ownership before any read compiles
+   * (`refuseEngineNativeRecordedIdentityRead`), and the recorded read schema
+   * this member feeds (`recordedReadSqlSchema`) only ever sources `"nodes"`
+   * and `"edges"`. An implementation still must handle the case — the union
+   * is shared with the TypeGraph-relation-backed source, which every
+   * revision does support — until a later engine-native identity-read seam
+   * routes those reads through here instead of refusing them.
+   */
   source: (
     this: void,
     table: RecordedSourceTable,

@@ -256,4 +256,14 @@ describe("transaction receipt recorder", () => {
     expect(Object.entries(receipt.writes.nodes)).toEqual([]);
     expect(receipt.writes.total).toBe(0);
   });
+
+  it("hasWrites answers false until a non-zero write is recorded, then stays true", () => {
+    const recorder = createTransactionReceiptRecorder();
+
+    expect(recorder.hasWrites()).toBe(false);
+    recorder.recordNode("Person", 0);
+    expect(recorder.hasWrites()).toBe(false);
+    recorder.recordEdge("knows", 1);
+    expect(recorder.hasWrites()).toBe(true);
+  });
 });

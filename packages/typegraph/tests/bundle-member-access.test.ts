@@ -39,8 +39,8 @@ const DEFERRED_DECLARED_TOTAL = 217;
 const EXCLUDED_COUNT = 5;
 const TOTAL_ROW_COUNT = 319;
 const ANNOTATED_RESIDUE_KEYS = [
-  "backend/migrate-recorded-time.ts:160#executeStatement",
-  "backend/migrate-recorded-time.ts:167#executeStatement",
+  "backend/migrate-recorded-time.ts:161#executeStatement",
+  "backend/migrate-recorded-time.ts:168#executeStatement",
   "identity/sql-target.ts:101#executeStatement",
   "identity/sql-target.ts:155#executeStatement",
   "store/recorded-capture/guards.ts:76#executeStatement",

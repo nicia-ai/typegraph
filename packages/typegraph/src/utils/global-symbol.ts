@@ -8,6 +8,7 @@ type TypeGraphGlobalSymbolName =
   | "compare-and-set-absent-v1"
   | "store-runtime-v1"
   | "typegraph-recorded-read-source-v1"
+  | "engine-recorded-read-source-v1"
   | "transaction-runtime-v1";
 
 /** Returns a process-wide symbol shared across ESM/CJS package instances. */

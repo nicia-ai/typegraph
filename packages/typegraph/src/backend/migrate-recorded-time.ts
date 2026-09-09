@@ -24,6 +24,7 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { canonicalizeDatabaseTimestamp } from "../utils/date";
 import { requireCatalog } from "./capabilities/catalog";
+import { resolveRecordedTimeOwnership } from "./capabilities/recorded-time-ownership";
 import { resolvedTableNames } from "./table-names";
 import {
   type GraphBackend,
@@ -715,6 +716,20 @@ async function renameTable(
 export async function migrateLegacyRecordedTime(
   options: MigrateLegacyRecordedTimeOptions,
 ): Promise<MigrateLegacyRecordedTimeResult> {
+  if (resolveRecordedTimeOwnership(options.backend) === "engine-native") {
+    // The rewrite below targets TypeGraph's own recorded relations
+    // (`recorded_from`/`recorded_to` columns on `typegraph_recorded_*`
+    // tables); an engine-native backend keeps none of those, so there is
+    // nothing here for this migration to rewrite.
+    throw new ConfigurationError(
+      "migrateLegacyRecordedTime is not supported under engine-native recorded time.",
+      { code: "ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED" },
+      {
+        suggestion:
+          "This migration rewrites TypeGraph's own recorded relations, which an engine-native backend does not have.",
+      },
+    );
+  }
   const tables = resolvedTableNames(options.backend, options.tableNames);
   const mapTable = mappingTableName(tables, options.mappingTableName);
   const recordedTableDdl = options.backend.recordedTableDdl;

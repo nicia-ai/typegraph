@@ -202,6 +202,42 @@ function recordedTemporalFilter(
   });
 }
 
+/**
+ * The ORDER BY a recorded point read applies, letting `recordedGetByIds`
+ * detect an overlapping-interval anomaly deterministically. Meaningful only
+ * for a binding whose source carries the `recorded_from`/`recorded_to`
+ * interval (`binding.carriesInterval`) — a TypeGraph-relation-backed source
+ * returns every revision of a matching row, and `recorded_from` is what
+ * separates them; a binding without that interval already scopes its source
+ * to exactly one revision, so there is no such column to order by and no
+ * anomaly the ordering could surface — `recordedGetByIds`'s per-id duplicate
+ * check still catches a genuine violation regardless of row order.
+ */
+function recordedPointReadOrderBy(
+  binding: RecordedReadBinding,
+  aliasSql: SqlFragment,
+): SqlFragment {
+  return binding.carriesInterval ?
+      sql`ORDER BY ${aliasSql}.recorded_from`
+    : sql``;
+}
+
+/**
+ * The ORDER BY a recorded scan applies. `id ASC` drives pagination and
+ * dedup on every binding; the `recorded_from ASC` tiebreaker exists only to
+ * make a same-id anomaly's row order deterministic under a binding whose
+ * source carries the recorded-time interval — see
+ * {@link recordedPointReadOrderBy}.
+ */
+function recordedScanOrderBy(
+  binding: RecordedReadBinding,
+  aliasSql: SqlFragment,
+): SqlFragment {
+  return binding.carriesInterval ?
+      sql`ORDER BY ${aliasSql}.id ASC, ${aliasSql}.recorded_from ASC`
+    : sql`ORDER BY ${aliasSql}.id ASC`;
+}
+
 function recordedRelationInvariantError(
   params: Readonly<{
     graphId: string;
@@ -337,11 +373,12 @@ export function createRecordedReadService(
 
     const uniqueIds = [...new Set(ids)];
     const aliasSql = sql.raw(alias);
-    const temporalFilter = recordedTemporalFilter(
-      coordinate,
-      alias,
-      requireRecordedReadBinding(recordedReadBinding, "recorded-point-read"),
+    const binding = requireRecordedReadBinding(
+      recordedReadBinding,
+      "recorded-point-read",
     );
+    const temporalFilter = recordedTemporalFilter(coordinate, alias, binding);
+    const orderBy = recordedPointReadOrderBy(binding, aliasSql);
     const chunkResults = await withRelationsPrecondition(
       backend,
       Promise.all(
@@ -353,7 +390,7 @@ export function createRecordedReadService(
                 AND ${aliasSql}.kind = ${kind}
                 AND ${aliasSql}.id IN (${sqlValueList(idChunk)})
                 AND ${temporalFilter}
-              ORDER BY ${aliasSql}.recorded_from
+              ${orderBy}
             `),
           ),
         ),
@@ -391,11 +428,12 @@ export function createRecordedReadService(
         undefined
       : decodeRecordedScanCursor(options.after, scope);
     const aliasSql = sql.raw(alias);
-    const temporalFilter = recordedTemporalFilter(
-      coordinate,
-      alias,
-      requireRecordedReadBinding(recordedReadBinding, "recorded-scan"),
+    const binding = requireRecordedReadBinding(
+      recordedReadBinding,
+      "recorded-scan",
     );
+    const temporalFilter = recordedTemporalFilter(coordinate, alias, binding);
+    const orderBy = recordedScanOrderBy(binding, aliasSql);
     const rows = await withRelationsPrecondition(
       backend,
       backend.execute<Record<string, unknown>>(
@@ -405,7 +443,7 @@ export function createRecordedReadService(
             AND ${aliasSql}.kind = ${kind}
             ${after === undefined ? sql.raw("") : sql`AND ${aliasSql}.id > ${after}`}
             AND ${temporalFilter}
-          ORDER BY ${aliasSql}.id ASC, ${aliasSql}.recorded_from ASC
+          ${orderBy}
           LIMIT ${limit + 1}
         `),
       ),

@@ -728,22 +728,6 @@
     "issue": "#622"
   },
   {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "revision",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "recordedAt",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "ExternalRecordedReadSource",
     "member": "source",
@@ -757,22 +741,6 @@
     "member": "source",
     "kind": "member-removed",
     "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "revision",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "recordedAt",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
     "issue": "#622"
   },
   {
@@ -792,22 +760,6 @@
     "issue": "#622"
   },
   {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "revision",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "recordedAt",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "ExternalRecordedReadSource",
     "member": "source",
@@ -821,22 +773,6 @@
     "member": "source",
     "kind": "member-removed",
     "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "revision",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "recordedAt",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
     "issue": "#622"
   },
   {
@@ -856,22 +792,6 @@
     "issue": "#622"
   },
   {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "revision",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "recordedAt",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "ExternalRecordedReadSource",
     "member": "source",
@@ -888,22 +808,6 @@
     "issue": "#622"
   },
   {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "revision",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "recordedAt",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "ExternalRecordedReadSource",
     "member": "source",
@@ -917,22 +821,6 @@
     "member": "source",
     "kind": "member-removed",
     "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "revision",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "RecordedInstantParts",
-    "member": "recordedAt",
-    "kind": "required-member-added",
-    "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
     "issue": "#622"
   },
   {
@@ -1269,6 +1157,398 @@
     "member": "recordedAt",
     "kind": "required-member-added",
     "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor, createStore's overloads, rebuildIdentityClosure, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "StoreCore is reached at a contravariant (parameter) position through WorkingCopyStrategy.create(baseStore: Store<G>, base: BaseVersion), an existing public callable a caller implements to supply a custom working-copy strategy to branch(). No code hand-authors a Store-shaped object literal to pass as that parameter; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor, exportGraph, exportGraphStream, trustedImportGraph, trustedImportGraphStream, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor, ProfiledStore.attachToStore, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
     "issue": "#622"
   }
 ]

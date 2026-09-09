@@ -641,6 +641,25 @@ async function lockRecordedClock(
   }
 }
 
+/**
+ * Narrows a parsed `previousRevision` to TypeGraph's own numeric clock shape.
+ * This module allocates ONLY TypeGraph-owned commits — an engine-native
+ * backend never touches a TypeGraph clock at all, so it never reaches
+ * `allocateRecordedCommit` — so a caller-supplied `previousRevision` that
+ * parses as an engine-native (`e1`) anchor can only be a caller mistake.
+ */
+function requireTypeGraphClockParts(
+  parts: ReturnType<typeof parseRecordedInstant>,
+): RecordedClockParts {
+  if (parts.kind !== "typegraph") {
+    throw new ConfigurationError(
+      "allocateRecordedCommit's previousRevision must be a TypeGraph-owned (r1) recorded instant.",
+      { revisionKind: parts.kind },
+    );
+  }
+  return parts;
+}
+
 export async function allocateRecordedCommit(
   target: RecordedClockBackend,
   schema: SqlSchema,
@@ -652,7 +671,9 @@ export async function allocateRecordedCommit(
   const previous =
     previousRevision === undefined ?
       await readRecordedClockParts(target, schema, graphId)
-    : parseRecordedInstant(previousRevision, "previous recorded revision");
+    : requireTypeGraphClockParts(
+        parseRecordedInstant(previousRevision, "previous recorded revision"),
+      );
   const { revision, recordedAt } = nextRecordedCommitParts(previous);
   if (revision >= RECORDED_MAX_REVISION) {
     throw new ConfigurationError(

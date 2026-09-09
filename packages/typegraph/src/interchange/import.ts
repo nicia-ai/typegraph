@@ -143,7 +143,11 @@ import {
   type WriteTransactionMode,
 } from "../store/operations/write-transaction";
 import { runRecordedTransactionSavepoint } from "../store/recorded-capture";
-import { storeBackend, storeRuntime } from "../store/runtime-port";
+import {
+  storeBackend,
+  storeCaptureEnabled,
+  storeRuntime,
+} from "../store/runtime-port";
 import { type Store } from "../store/store";
 import {
   assertOrderedValidityWindow,
@@ -517,7 +521,12 @@ async function importGraphData<G extends GraphDef>(
       uniqueSidecarBatch,
       statementExecution,
       schemaVersion: store.introspect().schemaVersion,
-      historyEnabled: store.historyEnabled,
+      // `storeCaptureEnabled`, not the public `historyEnabled` getter: this
+      // feeds the write pipeline's `ctx.historyEnabled`, which decides
+      // whether node/edge-operations write to TypeGraph's own recorded
+      // relations — engine-native `history: true` never does, even though
+      // the public getter now answers `true` for it too.
+      historyEnabled: storeCaptureEnabled(store),
       revisionTrackingEnabled: store.revisionTrackingEnabled,
       revisionSchema: store.revisionSchema,
       // HOW this caller takes position 3. `lockIdentityImportTarget` is

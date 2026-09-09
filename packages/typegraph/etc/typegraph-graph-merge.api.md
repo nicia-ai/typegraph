@@ -1848,7 +1848,24 @@ type EncodeTilde<S extends string> = S extends `${infer Head}~${infer Tail}` ? `
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public (undocumented)
+const ENGINE_RECORDED_READ_SOURCE: unique symbol;
+
+// @public (undocumented)
 const ENGINE_REVISION_BRAND: unique symbol;
+
+// @public
+type EngineRecordedInstantParts = Readonly<{
+    kind: "engine";
+    revision: string;
+    recordedAt: string;
+}>;
+
+// @public
+type EngineRecordedReadSource = Readonly<{
+    kind: "engine-native";
+    schema: SqlSchema;
+    [ENGINE_RECORDED_READ_SOURCE]: true;
+}> & RecordedReadSource;
 
 // @public
 type EngineRecordedRevision = Readonly<{
@@ -5247,19 +5264,17 @@ type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
 
-// @public (undocumented)
-type RecordedInstantParts = Readonly<{
-    revision: number;
-    recordedAt: string;
-}>;
+// @public
+type RecordedInstantParts = TypeGraphRecordedInstantParts | EngineRecordedInstantParts;
 
 // @public (undocumented)
-type RecordedReadBinding = ExternalRecordedReadSource | TypeGraphRecordedReadSource;
+type RecordedReadBinding = ExternalRecordedReadSource | TypeGraphRecordedReadSource | EngineRecordedReadSource;
 
 // @public
 type RecordedReadSource = Readonly<{
     source: (table: RecordedSourceTable, revision: RecordedInstantParts) => SqlFragment;
     predicate: (prefix: SqlFragment, revision: RecordedInstantParts) => SqlFragment | undefined;
+    carriesInterval: boolean;
 }>;
 
 // @public
@@ -5331,6 +5346,9 @@ type RecordedTableNames = Readonly<{
 
 // @public
 type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
+
+// @public
+type RecordedTimeOwnership = "typegraph-relations" | "engine-native";
 
 // @public
 type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
@@ -6051,6 +6069,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     revisionTrackingEnabled: boolean;
     revisionSchema: SqlSchema;
     recordedReadBound: boolean;
+    recordedTimeOwnership: RecordedTimeOwnership;
     workingCopyOptions: WorkingCopyOptions;
     nodes: GraphNodeCollections<G>;
     edges: GraphEdgeCollections<G>;
@@ -6170,6 +6189,7 @@ interface StoreRef<in out T> {
 // @internal
 type StoreRuntime<G extends GraphDef> = Readonly<{
     backend: GraphBackend;
+    captureEnabled?: boolean;
     uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
     queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
@@ -6807,6 +6827,13 @@ type TypeGraphErrorOptions = Readonly<{
     category: ErrorCategory;
     suggestion?: string;
     cause?: unknown;
+}>;
+
+// @public
+type TypeGraphRecordedInstantParts = Readonly<{
+    kind: "typegraph";
+    revision: number;
+    recordedAt: string;
 }>;
 
 // @public (undocumented)
