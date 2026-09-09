@@ -83,6 +83,7 @@ import {
   type SubgraphOptions,
   type SubgraphProject,
   type SubgraphResult,
+  type SubgraphResultEdgeKinds,
 } from "./subgraph";
 import {
   type BulkFindEdgesFromParams,
@@ -127,8 +128,9 @@ export type StoreViewSubgraphOptions<
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
   P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  C extends boolean | undefined = undefined,
 > = Omit<
-  SubgraphOptions<G, EK, NK, P>,
+  SubgraphOptions<G, EK, NK, P, C>,
   "temporalMode" | "asOf" | "recordedAsOf"
 >;
 
@@ -895,14 +897,15 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: StoreViewSubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    options: StoreViewSubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     const internalOptions = {
       ...options,
       ...withCoordinate(this.coordinate),
-    } as InternalSubgraphOptions<G, EK, NK, P>;
+    } as InternalSubgraphOptions<G, EK, NK, P, C>;
     return storeRuntime(this.store).subgraphAtCoordinate(
       rootId,
       internalOptions,

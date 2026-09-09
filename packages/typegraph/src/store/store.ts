@@ -384,6 +384,7 @@ import {
   type SubgraphOptions,
   type SubgraphProject,
   type SubgraphResult,
+  type SubgraphResultEdgeKinds,
 } from "./subgraph";
 import {
   createTransactionReceiptRecorder,
@@ -788,10 +789,11 @@ type StoreCore<G extends GraphDef> = Readonly<{
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ) => Promise<SubgraphResult<G, NK, EK, P>>;
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
   clear: () => Promise<void>;
   refreshStatistics: () => Promise<void>;
   materializeIndexes: (
@@ -3383,10 +3385,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     // The public surface is valid-time only (`recordedAsOf` is typed `never`).
     // Guard JS callers who bypass the type so a leaked recorded pin can't
     // silently switch this read onto the recorded relation; recorded subgraph
@@ -3415,10 +3418,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: InternalSubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    options: InternalSubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     const coordinate = resolveReadCoordinate(
       options.temporalMode ?? this.#graph.defaults.temporalMode,
       options.asOf,

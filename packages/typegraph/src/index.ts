@@ -702,6 +702,7 @@ export type {
   SubgraphNodeResult,
   SubgraphOptions,
   SubgraphResult,
+  SubgraphResultEdgeKinds,
   SubsetEdge,
   SubsetNode,
 } from "./store/subgraph";

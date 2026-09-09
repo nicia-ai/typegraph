@@ -2601,9 +2601,14 @@ honor the option meaningfully and throws `ConfigurationError`
 (`COMPOSITION_NO_PARTS_DECLARED`) rather than silently running as if
 `composition` were absent.
 
-Composition edges added this way are not necessarily members of the
-compile-time `edges` list, so list them there too if you want typed access
-to their rows in `adjacency` / `reverseAdjacency`.
+Which composition edge kinds join depends on the ROOT's runtime kind, so
+the exact set is not knowable at compile time. `composition: true`
+therefore widens the result's edge-key type to the graph's whole edge-kind
+union: every key the traversal can produce is reachable through
+`adjacency` / `reverseAdjacency`, and no key outside the graph's own edges
+ever appears. With `composition` absent or `false`, the key type is the
+`edges` list you named, exactly as before. (A `composition` whose value is
+only known to be a `boolean` widens too — the conservative reading.)
 
 #### Subgraph Projection
 
