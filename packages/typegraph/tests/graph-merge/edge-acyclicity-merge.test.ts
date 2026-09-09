@@ -14,9 +14,12 @@
  * this reads it), resolved to their FINAL `(kind, id)` via
  * `finalEdgeEndpoint`. It calls `readProposedEdgeAcyclicityViolations`, the
  * lock-free preview built on the SAME `assertEdgeRelationsAcyclic` /
- * `buildEdgeAcyclicityProbe` SQL the write path uses — including the D-4
- * seed-hop through the plan's own not-yet-committed rows — so a plan-time
- * verdict and an eventual write verdict can never disagree.
+ * `buildEdgeAcyclicityProbe` SQL the write path uses. This is the ONE caller
+ * that passes the `"planned"` seed form (the D-4 seed-hop through the
+ * plan's own not-yet-committed rows, `src/store/recursive-cte.ts`) — every
+ * real write path passes `"proposed"` instead, which has no seed-hop and
+ * joins `typegraph_edges` directly (item D.2 perf ruling, 2026-09-08) — so a
+ * plan-time verdict and an eventual write verdict can never disagree.
  *
  * `resolveMerge` is shared by every entry point (`merge`, `mergeAgainstBase`,
  * `planMerge`, `planMergeIncremental`, `mergeIncremental`), so the check
@@ -35,13 +38,14 @@
  * `tests/backends/integration/edge-acyclicity.ts` ("refuses an in-batch
  * cycle in bulkCreate with zero rows committed").
  *
- * Mutation check (recorded in the lane's load-bearing log): reverting the
- * seed-hop (`buildAcyclicityCandidates`, src/store/recursive-cte.ts) back to
- * live-edges-only makes `planMerge()` resolve `ok` for the purely-proposed
- * cycle in case (a) below instead of refusing — the plan "passes" — and a
- * subsequent `applyMergePlan()` call on that plan then refuses via the
- * unchanged apply-time path (`MergeConstraintConflictError` /
- * `EdgeAcyclicityError`), never committing the cycle.
+ * Mutation check (recorded in the lane's load-bearing log): changing
+ * `readProposedEdgeAcyclicityViolations`'s probe call (src/store/acyclicity.ts)
+ * from `kind: "planned"` back to `kind: "proposed"` — which has no seed-hop
+ * — makes `planMerge()` resolve `ok` for the purely-proposed cycle in case
+ * (a) below instead of refusing — the plan "passes" — and a subsequent
+ * `applyMergePlan()`-equivalent write then refuses via the unchanged
+ * apply-time path (`MergeConstraintConflictError` / `EdgeAcyclicityError`),
+ * never committing the cycle.
  */
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {

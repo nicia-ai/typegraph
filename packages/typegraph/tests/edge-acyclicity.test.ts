@@ -37,6 +37,7 @@ import {
   acyclicEdgeRelations,
   acyclicRelationForEdgeKind,
   assertEdgeRelationsAcyclic,
+  type ProposedRelationEdge,
   readEdgeAcyclicityViolations,
 } from "../src/store/acyclicity";
 import { edgeWriteNeedsConstraintFence } from "../src/store/constraints";
@@ -496,18 +497,20 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
     expect(rendered).toContain("VALUES");
   });
 
-  it("compiles the CASE-oriented seed/candidates source for the relation-wide (audit) seed (pin)", () => {
+  it("compiles the CASE-oriented direct join for the relation-wide (audit) seed, no candidates CTE (pin)", () => {
     const rendered = renderSqlite(seedFragment({ kind: "relation" })).sql;
     expect(rendered).toMatch(/CASE WHEN/i);
-    // Orientation is normalized ONCE, in the `candidates` source (see
-    // buildAcyclicityCandidates's docblock): the `ancestry` recursive step
-    // itself is always a plain equality join against `candidates`, even for
-    // a mixed-orientation relation, so the OR-joined recursive term this pin
-    // used to check for no longer exists.
+    // The `"relation"` (audit) seed form joins `typegraph_edges` directly —
+    // no `candidates` CTE — so a mixed-orientation relation's `ancestry`
+    // recursive step is ONE join with an OR of two index-seekable arms (see
+    // buildAcyclicityAncestryStepDirect's docblock), never a compound.
+    expect(rendered).not.toContain("candidates(");
     const ancestryTerm = rendered.slice(
       rendered.indexOf("ancestry(origin_key"),
     );
-    expect(ancestryTerm).not.toMatch(/\bOR\b/);
+    expect(ancestryTerm).toMatch(/\bOR\b/);
+    expect(ancestryTerm).toContain("from_kind");
+    expect(ancestryTerm).toContain("to_kind");
   });
 
   it("walks the reversed member in its TRUE relation direction, not its stored (from, to) direction", async () => {
@@ -579,19 +582,35 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
 });
 
 // ============================================================
-// D-4 (reaffirmed 2026-09-08): a cycle formed ENTIRELY from proposed rows,
-// with nothing live yet — the case `buildAcyclicityRecursiveTerm`'s old
-// live-edges-only walk could never see. `assertEdgeRelationsAcyclic` is the
-// write-path predicate; `readProposedEdgeAcyclicityViolations` is the
-// lock-free preview the graph-merge planner uses for the SAME question
-// before any write happens (`src/graph-merge/merge.ts`).
+// D-4 (reaffirmed 2026-09-08), re-audited for the `"proposed"`/`"planned"`
+// seed split (perf ruling, same date): a cycle formed ENTIRELY from rows
+// with nothing live yet is only found by hopping through a `seed` source
+// that is NOT yet in the table — the `"planned"` form. `assertEdgeRelationsAcyclic`
+// (the write-path predicate) now passes `"proposed"`, which asserts its
+// rows are ALREADY inserted whenever it proposes more than one — every real
+// write path satisfies this by probing after its own insert (see
+// `AcyclicityProbeSeed`'s docblock, `src/store/recursive-cte.ts`), so the two
+// tests below insert the edges directly through the backend first, exactly
+// as `assertBatchEdgesRelationsAcyclic` does via `bulkCreate`.
+// `readProposedEdgeAcyclicityViolations` is the ONE caller that still probes
+// genuinely unwritten rows — the graph-merge plan-time preview
+// (`src/graph-merge/merge.ts`) — via the `"planned"` form, unaffected by
+// this split.
 //
 // Mutation check (recorded in the lane's load-bearing log): reverting
-// `buildAcyclicityCandidates` to omit the seed source when
-// `seed.kind === "proposed"` (i.e. `ancestry` walks only live edges, as
-// before this change) makes BOTH tests below fail — `assertEdgeRelationsAcyclic`
-// resolves instead of throwing, and `readProposedEdgeAcyclicityViolations`
-// returns `[]` instead of the violation.
+// `buildAcyclicityAncestryStepDirect` back to joining the old compound
+// `candidates` CTE for the `"proposed"` form makes no test here fail (the
+// direct-join and compound shapes agree on already-live rows), which is
+// exactly the point — the mutation that would be caught is the PERFORMANCE
+// one (`MATERIALIZE candidates` reappearing), pinned by the plan-shape tests
+// in `tests/backends/{sqlite,postgres}/edge-acyclicity-query-plan.test.ts`,
+// not by an outcome assertion here. The outcome-level mutation this describe
+// block DOES catch: reverting `readProposedEdgeAcyclicityViolations` (in
+// `src/store/acyclicity.ts`) to pass `kind: "proposed"` instead of
+// `kind: "planned"` makes the "readProposedEdgeAcyclicityViolations reports
+// the same cycle" test below fail — a genuinely unwritten three-edge cycle
+// then resolves with `[]` instead of reporting the violation, because the
+// `"proposed"` form no longer hops through unwritten rows.
 // ============================================================
 
 async function seedThreeNodes(
@@ -633,10 +652,41 @@ function threeEdgeCycle(nodes: Readonly<{ a: string; b: string; c: string }>) {
   ];
 }
 
-describe("D-4: seed-hop — a cycle formed entirely from proposed rows, no live edges", () => {
-  it("assertEdgeRelationsAcyclic refuses a three-edge cycle proposed in ONE call, no live edges", async () => {
+/**
+ * Inserts every edge in `edges` directly through the backend, bypassing the
+ * acyclicity fence — the same pattern the mixed-orientation and
+ * `verifyConstraintFences` tests above use to put rows in the table without
+ * routing through the (fenced) store API. Mirrors what a real batch write
+ * already did by the time it calls `assertEdgeRelationsAcyclic` with more
+ * than one `"proposed"` row: `assertBatchEdgesRelationsAcyclic` runs its
+ * probe strictly AFTER `bulkCreate`'s own insert.
+ */
+async function insertEdgesDirectly(
+  backend: GraphBackend,
+  edges: readonly ProposedRelationEdge[],
+): Promise<void> {
+  for (const edge of edges) {
+    await backend.insertEdge({
+      graphId: graph.id,
+      id: edge.edgeId,
+      kind: edge.edgeKind,
+      fromKind: edge.fromKind,
+      fromId: edge.fromId,
+      toKind: edge.toKind,
+      toId: edge.toId,
+      props: {},
+    });
+  }
+}
+
+describe('D-4: the `"proposed"` form\'s direct join sees a cycle among ALREADY-INSERTED rows', () => {
+  it("assertEdgeRelationsAcyclic refuses a three-edge cycle already inserted in this transaction (bulkCreate's own shape)", async () => {
     const backend = createTestBackend();
     const nodes = await seedThreeNodes(backend);
+    const edges = threeEdgeCycle(nodes);
+    // `"proposed"` asserts its rows are already inserted whenever it names
+    // more than one — exactly what a real bulkCreate does before probing.
+    await insertEdgesDirectly(backend, edges);
 
     await expect(
       assertEdgeRelationsAcyclic(
@@ -649,15 +699,16 @@ describe("D-4: seed-hop — a cycle formed entirely from proposed rows, no live 
           lock: uncapturedGraphWriteLock(),
           operation: "test",
         },
-        threeEdgeCycle(nodes),
+        edges,
       ),
     ).rejects.toThrow(expect.objectContaining({ name: "EdgeAcyclicityError" }));
   });
 
-  it("does NOT refuse three proposed edges that do not close a cycle", async () => {
+  it("does NOT refuse two already-inserted edges that do not close a cycle", async () => {
     const backend = createTestBackend();
     const nodes = await seedThreeNodes(backend);
     const chain = threeEdgeCycle(nodes).slice(0, 2); // a->b, b->c only
+    await insertEdgesDirectly(backend, chain);
 
     await expect(
       assertEdgeRelationsAcyclic(

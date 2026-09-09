@@ -204,10 +204,10 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/recursive-cte.ts",
-    line: "return sql`WITH RECURSIVE ${seedCte}, candidates(from_kind, from_id, to_kind, to_id) AS (${candidatesCte}), ${ancestry} ${limited}`;",
+    line: "return sql`WITH RECURSIVE ${body}`;",
     site: "G",
     reason:
-      "buildEdgeAcyclicityProbe (item D.2) runs the exhaustive, set-semantics reachability walk an `acyclic: true` edge kind's write path and audit both probe; the D-4 seed-hop folds the live-edge and proposed-seed sources into the `candidates` CTE ancestry joins once.",
+      "buildEdgeAcyclicityProbe (item D.2) runs the exhaustive, set-semantics reachability walk an `acyclic: true` edge kind's write path, audit, and merge plan-time preview all probe; `body` is assembled beforehand by buildProbeBodyDirect (write path / audit: `ancestry` joins `typegraph_edges` directly, an index seek) or buildProbeBodyPlanned (the merge preview's `\"planned\"` seed form only: `ancestry` hops through a compound `candidates` CTE, the ONE seed form that still pays SQLite's full-relation materialization).",
   },
 ];
 
