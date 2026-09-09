@@ -332,6 +332,7 @@ export type {
 // ============================================================
 
 export type {
+  CompositionExistence,
   CompositionOptions,
   CompositionPartSide,
   MetaEdge,
@@ -369,6 +370,7 @@ export type {
   CardinalityErrorDetails,
   CompositionCycleErrorDetails,
   CompositionErrorDetails,
+  CompositionExistenceErrorDetails,
   ContributionRebuildRefusal,
   ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
@@ -419,6 +421,7 @@ export {
   CompilerInvariantError,
   CompositionCycleError,
   CompositionError,
+  CompositionExistenceError,
   ConfigurationError,
   ContributionRebuildUnsupportedError,
   ContributionUnavailableError,
@@ -691,6 +694,7 @@ export type {
   BulkOperationHookContext,
   CompareAndSetAbsent,
   CompareAndSetExpected,
+  CompositionWholeRef,
   ConstraintNames,
   CreateEdgeInput,
   CreateNodeInput,
@@ -718,6 +722,7 @@ export type {
   Node,
   NodeBulkFindByIndexOptions,
   NodeCollection,
+  NodeCreateOptions,
   NodeGetOrCreateByConstraintOptions,
   NodeGetOrCreateByConstraintResult,
   NodeRef,

@@ -1219,6 +1219,86 @@ export class CompositionError extends TypeGraphError {
   }
 }
 
+/**
+ * Details for CompositionExistenceError.
+ *
+ * `partId` is absent on a bare create refusal (`situation: "create"`): the
+ * node has not been assigned an id yet at the point the refusal is decided,
+ * since deciding it is what keeps the row from ever being written.
+ * `edgeKind`/`edgeId` are present only on `situation: "detach"`, where an
+ * existing composition edge row is what the caller is trying to end,
+ * soft-delete, or hard-delete. `currentWhole` is present only on
+ * `situation: "existing"` (a `getOrCreateByConstraint` call whose `partOf`
+ * resolved to `"found"`/`"updated"`), and only when the node has a whole to
+ * name — a part with no whole at all still refuses (the option is stated,
+ * not honored), just with no whole to report.
+ */
+export type CompositionExistenceErrorDetails = Readonly<{
+  partKind: string;
+  partId?: string;
+  situation: "create" | "detach" | "existing";
+  edgeKind?: string;
+  edgeId?: string;
+  currentWhole?: Readonly<{ kind: string; id: string }>;
+}>;
+
+/**
+ * Thrown when a write would leave a required-existence composition part
+ * (`existence: "required"`) with no live whole (a bare create with no
+ * `partOf`, or a detach that would orphan a currently-live part), or when a
+ * `getOrCreateByConstraint` call stating `partOf` resolves to an already-
+ * existing node (`"found"`/`"updated"`) — an accepted option this API
+ * cannot honor without silently dropping it.
+ *
+ * Its own class rather than a `CompositionError` code: `CompositionError` is
+ * R4's "at most one whole" refusal; this is R-E.2's "at least one whole while
+ * live, and a whole is never silently re-assigned" refusal — a different
+ * invariant with a different shape (no incumbent edge to name on the create
+ * leg). Shares `CompositionError`'s `"constraint"` category.
+ */
+export class CompositionExistenceError extends TypeGraphError {
+  declare readonly details: CompositionExistenceErrorDetails;
+
+  constructor(
+    details: CompositionExistenceErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    const partLabel = `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
+    const message = ((): string => {
+      switch (details.situation) {
+        case "create": {
+          return `Cannot create ${partLabel}: this kind requires a whole (\`existence: "required"\`), and no \`partOf\` was given.`;
+        }
+        case "detach": {
+          return `Cannot detach ${partLabel} from its whole via "${details.edgeKind}"${
+            details.edgeId === undefined ? "" : ` (edge ${details.edgeId})`
+          }: this kind requires a whole (\`existence: "required"\`) and the part is still live.`;
+        }
+        case "existing": {
+          return (
+            `Cannot apply \`partOf\` to ${partLabel}: the node already exists` +
+            (details.currentWhole === undefined ?
+              " with no whole."
+            : ` with whole ${details.currentWhole.kind}/${details.currentWhole.id}.`)
+          );
+        }
+      }
+    })();
+    super(message, "COMPOSITION_WHOLE_REQUIRED", {
+      details,
+      category: "constraint",
+      suggestion:
+        details.situation === "create" ?
+          `Pass \`partOf: { kind, id }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`
+        : details.situation === "detach" ?
+          `Soft-delete or hard-delete the part itself first (which frees its composition edge), or reparent it to a new whole before detaching the old one.`
+        : `Reparent through an explicit edge create/update instead of getOrCreateByConstraint's \`partOf\`, which only applies to a genuinely new (or resurrected) node.`,
+      cause: options?.cause,
+    });
+    this.name = "CompositionExistenceError";
+  }
+}
+
 // ============================================================
 // Concurrency Errors (category: "system")
 // ============================================================

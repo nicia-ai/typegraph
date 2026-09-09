@@ -1,4 +1,5 @@
 import {
+  type CompositionExistence,
   type CompositionPartSide,
   isCompositionMetaEdge,
   normalizePartWhole,
@@ -31,6 +32,8 @@ export type NamedOntologyRelation = Readonly<{
   via?: string;
   /** R5's orientation. Meaningful only alongside `via`. */
   partSide?: CompositionPartSide;
+  /** Item E.2. Meaningful only alongside `via`. */
+  existence?: CompositionExistence;
 }>;
 
 type OntologyValidationIssueCode =
@@ -42,7 +45,8 @@ type OntologyValidationIssueCode =
   | "DUPLICATE_ONTOLOGY_RELATION"
   | "ONTOLOGY_COMPOSITION_VIA_REQUIRED"
   | "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN"
-  | "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN";
+  | "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN"
+  | "ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN";
 
 export type OntologyValidationIssue = Readonly<{
   relationIndex?: number;
@@ -479,6 +483,14 @@ function validateCompositionShape(
         message: `Meta-edge "${relation.metaEdge}" cannot carry a \`partSide\`; only partOf/hasPart may.`,
         code: "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN",
         details: { metaEdge: relation.metaEdge, partSide: relation.partSide },
+      });
+    }
+    if (relation.existence !== undefined) {
+      issues.push({
+        relationIndex: index,
+        message: `Meta-edge "${relation.metaEdge}" cannot carry an \`existence\`; only partOf/hasPart may.`,
+        code: "ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN",
+        details: { metaEdge: relation.metaEdge, existence: relation.existence },
       });
     }
   }
