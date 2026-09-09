@@ -71,6 +71,34 @@ export const DISJOINT_CONSTRAINT_NAME = `${AXIS_SEPARATOR}disjointWith`;
 export const COMPOSITION_RELATION_NAME = `${AXIS_SEPARATOR}composition`;
 
 /**
+ * THE printable form of an acyclic relation's name, for the one place such a
+ * name crosses into a public field — `EdgeAcyclicityErrorDetails.relation`,
+ * `EdgeAcyclicityIndeterminateErrorDetails.relation`, and
+ * `EdgeAcyclicityViolation.relation` (which `ConstraintFenceViolation`
+ * carries verbatim). A standalone `acyclic: true` relation is named after its
+ * own edge kind (`src/store/acyclicity.ts`'s `standaloneAcyclicRelation`) and
+ * is already printable — `assertClaimAxisSafe` refuses any kind name
+ * containing {@link AXIS_SEPARATOR} — so this only ever has work to do for
+ * {@link COMPOSITION_RELATION_NAME} itself.
+ *
+ * The reserved prefix stays on the relation's INTERNAL name
+ * (`AcyclicEdgeRelation.name`, used for grouping and as this graph's one
+ * composition relation's identity) precisely because no real kind name can
+ * spell it — swapping in a printable internal name would reopen the
+ * collision {@link assertClaimAxisSafe} exists to close, this time against a
+ * user's own `acyclic: true` edge kind. Stripping it here, at display time
+ * only, is what keeps the raw U+001E out of a thrown message or a
+ * `details`/`ConstraintFenceViolation` field a caller might log, serialize,
+ * or compare — the same treatment {@link DISJOINT_CONSTRAINT_NAME} gets by
+ * never being surfaced at all (`DisjointError` names the two kinds instead).
+ */
+export function displayAcyclicRelationName(name: string): string {
+  return name.startsWith(AXIS_SEPARATOR) ?
+      name.slice(AXIS_SEPARATOR.length)
+    : name;
+}
+
+/**
  * THE axis a disjointness claim is written at: the registry's own canonical
  * pair label, prefixed so it cannot collide with a kind.
  *

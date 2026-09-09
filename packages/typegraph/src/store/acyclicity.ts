@@ -36,7 +36,10 @@ import { groupBy } from "../utils/array";
 import { compareStrings } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
 import { isStatementCutShortError } from "../utils/sql-errors";
-import { COMPOSITION_RELATION_NAME } from "./claims/axis";
+import {
+  COMPOSITION_RELATION_NAME,
+  displayAcyclicRelationName,
+} from "./claims/axis";
 import { type GraphWriteLock } from "./recorded-capture/clock";
 import {
   type AcyclicityProbeSeed,
@@ -97,10 +100,15 @@ export function standaloneAcyclicRelation(
  * neither edge kind is acyclic alone.
  *
  * Named after {@link COMPOSITION_RELATION_NAME} (the same reserved axis the
- * composition CLAIM is written at, `src/store/claims/axis.ts`) purely for a
- * readable relation name in a refusal — the acyclicity relation and the
- * claim relation are two independent invariants (R4 vs D-10) that happen to
- * share one reserved string because both are graph-wide, not per-edge-kind.
+ * composition CLAIM is written at, `src/store/claims/axis.ts`) — the
+ * acyclicity relation and the claim relation are two independent invariants
+ * (R4 vs D-10) that happen to share one reserved string because both are
+ * graph-wide, not per-edge-kind. The reserved separator is what keeps this
+ * name from ever colliding with a standalone `acyclic: true` relation (which
+ * is named after its own edge kind, and no edge kind may spell the
+ * separator — `assertClaimAxisSafe`); every place this name reaches a public
+ * error or audit field reads it through {@link displayAcyclicRelationName}
+ * first, so the separator itself is never something a caller sees.
  */
 export function compositionAcyclicRelation(
   registry: KindRegistry,
@@ -158,14 +166,37 @@ export function acyclicEdgeRelations(
   return relations;
 }
 
-/** The relation an edge of this kind belongs to, or `undefined`. */
+/**
+ * The relation an edge of this kind belongs to, or `undefined`.
+ *
+ * Ordinarily an edge kind matches at most one relation. It can match TWO when
+ * a composition-realizing edge kind is also independently declared
+ * `acyclic: true` on its own registration — a standalone singleton
+ * (`standaloneAcyclicRelation`) named after the kind itself, alongside the
+ * composition union it already participates in. When that happens the
+ * COMPOSITION relation wins, EXPLICITLY (matched by
+ * {@link COMPOSITION_RELATION_NAME}), rather than as an artifact of
+ * {@link acyclicEdgeRelations}' name sort — `COMPOSITION_RELATION_NAME`'s
+ * reserved U+001E prefix happens to sort before every printable kind name,
+ * but that is an accident of code-point order, not a decision this function
+ * should depend on. Preferring composition is safe for cycle detection: its
+ * membership is a strict superset of the standalone singleton's one member,
+ * so any cycle the singleton alone could have caught is still caught — the
+ * refusal simply names the (correct, wider) `"composition"` relation instead
+ * of the kind's own name.
+ */
 export function acyclicRelationForEdgeKind(
   graph: GraphDef,
   registry: KindRegistry,
   edgeKind: string,
 ): AcyclicEdgeRelation | undefined {
-  return acyclicEdgeRelations(graph, registry).find((relation) =>
+  const matches = acyclicEdgeRelations(graph, registry).filter((relation) =>
     relation.members.some((member) => member.edgeKind === edgeKind),
+  );
+  if (matches.length <= 1) return matches[0];
+  return (
+    matches.find((relation) => relation.name === COMPOSITION_RELATION_NAME) ??
+    matches[0]
   );
 }
 
@@ -297,7 +328,7 @@ async function runAcyclicityProbe(
     if (!isStatementCutShortError(error)) throw error;
     throw new EdgeAcyclicityIndeterminateError(
       {
-        relation: relation.name,
+        relation: displayAcyclicRelationName(relation.name),
         operation: ctx.operation,
         graphId: ctx.graphId,
       },
@@ -383,7 +414,7 @@ export async function assertEdgeRelationsAcyclic(
     if (relation === undefined) continue;
     if (edge.fromKind === edge.toKind && edge.fromId === edge.toId) {
       throw new EdgeAcyclicityError({
-        relation: relation.name,
+        relation: displayAcyclicRelationName(relation.name),
         edgeKind: edge.edgeKind,
         edgeId: edge.edgeId,
         fromKind: edge.fromKind,
@@ -416,7 +447,7 @@ export async function assertEdgeRelationsAcyclic(
       edges.find((edge) => violatingOriginKeys.includes(edge.edgeId)) ??
       requireDefined(edges[0]);
     throw new EdgeAcyclicityError({
-      relation: relation.name,
+      relation: displayAcyclicRelationName(relation.name),
       edgeKind: violatingEdge.edgeKind,
       edgeId: violatingEdge.edgeId,
       fromKind: violatingEdge.fromKind,
@@ -452,7 +483,7 @@ export async function readEdgeAcyclicityViolations(
     if (originKeys.length === 0) continue;
     violations.push({
       family: "edgeAcyclicity",
-      relation: relation.name,
+      relation: displayAcyclicRelationName(relation.name),
       edgeIds: [...originKeys].toSorted(compareStrings),
     });
   }
@@ -540,7 +571,7 @@ export async function readProposedEdgeAcyclicityViolations(
     if (edgeIds.length === 0) continue;
     violations.push({
       family: "edgeAcyclicity",
-      relation: relationName,
+      relation: displayAcyclicRelationName(relationName),
       edgeIds,
     });
   }
