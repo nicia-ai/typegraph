@@ -144,22 +144,43 @@ async function buildBackend(
 }
 
 /**
- * Every `Task` id, in a chain: `task-0 -> task-1 -> ... -> task-{size-1}`.
- *
- * `dependsOn` (the acyclic kind) is seeded with one sequential `create` per
- * edge rather than the chunked `bulkCreate` the other two kinds use. A
- * `bulkCreate` batch runs `assertBatchEdgesRelationsAcyclic` ONCE across
- * every row in the chunk as simultaneous origins (§ design note 9.3): for a
- * chunk that is itself a contiguous run of a chain, origin `k`'s walk
- * traverses the rest of the SAME chunk's suffix, so a `CHUNK`-edge chunk
- * costs O(`CHUNK`^2) rather than O(`CHUNK`) — fine at the small chunk sizes
- * elsewhere in this file, but 2000^2 row-pairs is exactly the cliff this
- * shape hits. Appending one edge at a time never has this cost: the fresh
- * `to` endpoint has no outgoing edges yet, so each single-edge probe is O(1)
- * regardless of chain length (the same reason `benchChainAppend`'s measured
- * loop is cheap) — which is also the realistic way an application grows an
- * acyclic chain, so this is the representative seeding cost, not a
- * benchmark-only workaround.
+ * Seeds edges the way each kind can afford. `plainMany` (no claim, no fence)
+ * takes chunked `bulkCreate`; the two fenced kinds take one sequential
+ * `create` per edge. For `dependsOn` that avoids the O(CHUNK^2) in-batch
+ * acyclicity probe over a contiguous chain run (design note §9.3). For
+ * `cardinalityOne` it avoids the atomic claim program's N-arm statements
+ * (`buildDeleteStaleAtomicEdgeClaims` / `buildAcquireAtomicEdgeClaims`), whose
+ * PostgreSQL executor cost grows super-linearly in the chunk size — a
+ * 2000-row chunk ran for minutes at more than 2 GB of backend memory before
+ * the OOM killer took it (tracked as a follow-up issue). Sequential creates
+ * are also the realistic way an application grows a fenced relation, so this
+ * is the representative seeding cost, not a benchmark-only shortcut.
+ */
+async function seedEdges(
+  store: BenchStore,
+  edgeKind: "plainMany" | "cardinalityOne" | "dependsOn",
+  edges: readonly Readonly<{
+    from: Readonly<{ kind: "Task"; id: string }>;
+    to: Readonly<{ kind: "Task"; id: string }>;
+  }>[],
+): Promise<void> {
+  if (edgeKind !== "plainMany") {
+    for (const edge of edges) {
+      await store.edges[edgeKind].create(edge.from, edge.to);
+    }
+    return;
+  }
+  // Chunked so one bulkCreate statement never exceeds a reasonable bind
+  // budget at 10^5 edges.
+  const CHUNK = 2000;
+  for (let start = 0; start < edges.length; start += CHUNK) {
+    await store.edges[edgeKind].bulkCreate(edges.slice(start, start + CHUNK));
+  }
+}
+
+/**
+ * Every `Task` id, in a chain: `task-0 -> task-1 -> ... -> task-{size-1}`,
+ * seeded through {@link seedEdges}.
  */
 async function seedChain(
   store: BenchStore,
@@ -170,24 +191,14 @@ async function seedChain(
     Array.from({ length: size }, () => ({ props: {} })),
   );
   const ids = nodes.map((node) => node.id);
-  if (edgeKind === "dependsOn") {
-    for (let index = 0; index < nodes.length - 1; index += 1) {
-      await store.edges[edgeKind].create(nodes[index]!, nodes[index + 1]!);
-    }
-    return ids;
-  }
-  // Chunked so one bulkCreate statement never exceeds a reasonable bind
-  // budget at 10^5 edges.
-  const CHUNK = 2000;
-  for (let start = 0; start < ids.length - 1; start += CHUNK) {
-    const end = Math.min(start + CHUNK, ids.length - 1);
-    await store.edges[edgeKind].bulkCreate(
-      Array.from({ length: end - start }, (_unused, offset) => {
-        const index = start + offset;
-        return { from: nodes[index]!, to: nodes[index + 1]! };
-      }),
-    );
-  }
+  await seedEdges(
+    store,
+    edgeKind,
+    Array.from({ length: nodes.length - 1 }, (_unused, index) => ({
+      from: nodes[index]!,
+      to: nodes[index + 1]!,
+    })),
+  );
   return ids;
 }
 
@@ -224,10 +235,7 @@ async function seedForest(
       edges.push({ from: nodes[base + 1]!, to: nodes[base + 3]! });
     }
   }
-  const CHUNK = 2000;
-  for (let start = 0; start < edges.length; start += CHUNK) {
-    await store.edges[edgeKind].bulkCreate(edges.slice(start, start + CHUNK));
-  }
+  await seedEdges(store, edgeKind, edges);
   return roots;
 }
 
