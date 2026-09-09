@@ -664,6 +664,7 @@ type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends Nod
     targetCardinality?: TargetCardinality;
     endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -749,6 +750,7 @@ type ExtensionEdgeDef = Readonly<{
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -1962,7 +1964,7 @@ type NullCheckOp = "isNull" | "isNotNull";
 // @public
 export type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "relation";
+    entity: "relation" | "edgeRegistration";
     name: string;
     severity: ChangeSeverity;
     details: string;
@@ -1979,6 +1981,9 @@ export type OntologyDataProbe = Readonly<{
 }> | Readonly<{
     kind: "edgeEndpointAssignability";
     allowances: readonly EdgeEndpointAllowance[];
+}> | Readonly<{
+    kind: "edgeAcyclicity";
+    edgeKinds: readonly string[];
 }>;
 
 // @public
@@ -2293,6 +2298,7 @@ export type SerializedEdgeDef = Readonly<{
         name: string;
         fields: readonly string[];
     }>;
+    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;

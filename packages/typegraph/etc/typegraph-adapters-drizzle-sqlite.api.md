@@ -4539,6 +4539,7 @@ type ExtensionEdgeDef = Readonly<{
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -6760,6 +6761,7 @@ type SerializedEdgeDef = Readonly<{
         name: string;
         fields: readonly string[];
     }>;
+    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;

@@ -785,6 +785,13 @@ describe("single-statement autocommit eligibility", () => {
       expect(eligible({ revisionTrackingEnabled: true })).toBe(false);
       expect(eligible({ kindRegistered: false })).toBe(false);
       expect(eligible({ convergesDynamically: true })).toBe(false);
+      // `constrained` folds BOTH origins `edgeWriteNeedsConstraintFence`
+      // classifies — a constrained cardinality axis (source or target) and
+      // `acyclic: true` — since no native single-statement program applies
+      // either check; such a create must decline the fused path and
+      // re-enter the portable one. Each origin's own contribution to this
+      // fold is unit-tested separately (constraint-fence-capability.test.ts,
+      // edge-acyclicity.test.ts).
       expect(eligible({ constrained: true })).toBe(false);
       expect(eligible({ backend: deriveBackend(backend, {}) })).toBe(false);
     } finally {

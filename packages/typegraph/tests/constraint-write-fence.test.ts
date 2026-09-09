@@ -79,6 +79,12 @@ const Team = defineNode("Team", {
 const knows = defineEdge("knows", { schema: z.object({}) });
 /** Cardinality `one`: an application count probe no database key repeats. */
 const reportsTo = defineEdge("reportsTo", { schema: z.object({}) });
+/**
+ * `cardinality: "many", acyclic: true` (item D.2): the reachability probe
+ * has no database key behind it either — `CONSTRAINT_FENCE_BACKING.
+ * edgeAcyclicity === "lockOnly"` — so it is fenced the same way.
+ */
+const dependsOn = defineEdge("dependsOn", { schema: z.object({}) });
 
 const SHARED_SCOPE_UNIQUE = {
   name: "shared_email",
@@ -114,6 +120,13 @@ const graph = defineGraph({
       from: [Person],
       to: [Person],
       cardinality: "one",
+    },
+    dependsOn: {
+      type: dependsOn,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+      acyclic: true,
     },
   },
   ontology: [
@@ -202,6 +215,34 @@ describe("constrained writes take the per-graph write fence", () => {
     await store.edges.knows.create(alice, bob, {});
 
     expect(graphWriteLockCount(statements)).toBe(0);
+  });
+
+  it("fences a many-cardinality ACYCLIC edge create and orders the lock before its reachability probe (D2-01)", async () => {
+    // Load-bearing: mutate `edgeWriteNeedsConstraintFence`
+    // (src/store/constraints.ts) to return `undefined` for the acyclic arm
+    // and this assertion drops from 1 to 0 — the exact regression D2-01
+    // found unguarded (11/12 cross-backend cases still passed with the fence
+    // silently dropped, because none of them observed the lock STATEMENT
+    // itself).
+    const { store, statements, reset } = await createLoggedStore();
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+
+    reset();
+    await store.edges.dependsOn.create(alice, bob, {});
+
+    expect(graphWriteLockCount(statements)).toBe(1);
+    const lockIndex = graphWriteLockIndex(statements);
+    const probeIndex = firstIndexMatching(statements, "WITH RECURSIVE");
+    const insertIndex = firstIndexMatching(
+      statements,
+      'INSERT INTO "typegraph_edges"',
+    );
+    expect(lockIndex).toBeGreaterThanOrEqual(0);
+    // The reachability probe must run INSIDE the fence, or its verdict is
+    // computed outside the exclusion it depends on.
+    expect(probeIndex).toBeGreaterThan(lockIndex);
+    expect(insertIndex).toBeGreaterThan(probeIndex);
   });
 
   it("fences getOrCreateByEndpoints even at cardinality many, because it converges on a match key", async () => {
@@ -536,6 +577,10 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
     // The convergence key can include `matchOn` prop values, so no relation can
     // key it: still the lock alone, and stated as such.
     expect(CONSTRAINT_FENCE_BACKING.edgeMatchKeyConvergence).toBe("lockOnly");
+    // A cycle spans a whole reachable subgraph, not a tuple: no key could
+    // ever refuse a second claimant, so this stays `lockOnly` forever, not
+    // just until a claim relation gets invented for it.
+    expect(CONSTRAINT_FENCE_BACKING.edgeAcyclicity).toBe("lockOnly");
   });
 
   it("takes no lock for a kind-scoped node UPDATE either, not just its create", async () => {

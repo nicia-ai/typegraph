@@ -449,12 +449,36 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   (alongside the schema-reads block), so a consumer of
 //   `"@nicia-ai/typegraph"` alone can name every field of a narrowed
 //   `ConstraintFenceViolation` or `MigrationErrorDetails` without a subpath
-//   import. Its debt therefore stays at the pre-batch baseline (388), not
-//   388→392. Gate: every added symbol at every OTHER moved entrypoint is one
-//   of the four names above (never `OntologyChange` itself, which is
-//   pre-existing debt everywhere including `.`), `.` is the one entrypoint
-//   this batch leaves unchanged, no OTHER entrypoint's debt decreased, and
-//   exactly 13 entrypoints moved.
+//   import. IN THIS BATCH's OWN commit, its debt therefore stayed at the
+//   pre-batch baseline (388), not 388→392 — item D.2 below moves `.` on top
+//   of that baseline instead. Gate (item A's own commit): every added symbol
+//   at every OTHER moved entrypoint is one of the four names above (never
+//   `OntologyChange` itself, which is pre-existing debt everywhere including
+//   `.`), `.` is the one entrypoint this batch leaves unchanged, no OTHER
+//   entrypoint's debt decreased, and exactly 13 entrypoints moved in this
+//   commit (a later batch, item D.2, moves more — see below).
+//
+// Edge acyclicity batch (roadmap §3.D.2, item D.2): the store's
+// `assertEdgeRelationsAcyclic` / `readEdgeAcyclicityViolations` add a fifth
+// `ConstraintFenceViolation` member (`src/store/claims/verify.ts`),
+// `EdgeAcyclicityViolation` (`src/store/acyclicity.ts`) — internal, exported
+// by name at NO entrypoint, unlike item A's `EdgeEndpointAllowance` /
+// `MisassignedEdgeEndpointRow`. A consumer narrowing `ConstraintFenceViolation`
+// to `{ family: "edgeAcyclicity" }` can therefore never import its shape by
+// name from any subpath, including `.` itself. Measured, not assumed: every
+// one of item A's SEVEN `ConstraintFenceViolation`-reaching entrypoints gains
+// exactly this one name, +1 apiece, on top of item A's own baseline —
+// `.` (388→389), `./graph-merge` (730→731), `./interchange` (713→714),
+// `./postgres/pglite` (710→711), `./profiler` (715→716), `./provenance`
+// (721→722), and `./sqlite/local` (710→711). No other entrypoint moves:
+// `./schema`, the six `./adapters/drizzle/*` sub-entrypoints, `./backend`,
+// `./core`, `./graph-extension`, `./adapters/drizzle/indexes`, and
+// `./indexes` never reach `ConstraintFenceViolation` at all. Gate: every
+// moved entrypoint gains exactly one name (`EdgeAcyclicityViolation`), `.`
+// is no longer exempt the way it was in item A (a batch CAN move it — the
+// exemption was about item A's four names specifically, not a standing
+// invariant), no entrypoint's debt decreased, and exactly 7 entrypoints
+// moved in THIS commit.
 //
 // Target-side edge cardinality (issue #610): every entrypoint that reaches
 // `GraphBackend`, `ManagedEdgeCreatePlan`, `CardinalityErrorDetails`,
@@ -575,8 +599,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // saw its count change — every value here is measured lower than before,
   // never raised.
   ".": {
-    count: 409,
-    sha256: "7824e616def98a5b1feef6ba2be854fa49f316738d07f054d4070dc688fc1fd9",
+    count: 410,
+    sha256: "bb66b071623f7b108adbc99c1d640e6d3aa47f29f1645a38480cca0c24f2f06f",
   },
   "./adapters/drizzle/engine": {
     count: 325,
@@ -622,28 +646,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 747,
-    sha256: "5480b9d7a89e0e0f2668d383d03d8fc4e1a3bbd8b58aae83233d66a1b4816001",
+    count: 748,
+    sha256: "c187929ddca1a50181743f0596e48cb227734229b7072a6bb7b6f24cefd2ad8d",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 730,
-    sha256: "6d0d77dd03ecf969db6a91324e5952cbfc308a0d0106fd58e69e3599e2b0660e",
+    count: 731,
+    sha256: "0b30f3e7aa6c67f472c314186b575333a0112c5eed5006e74f51911693a2742e",
   },
   "./postgres/pglite": {
-    count: 727,
-    sha256: "6b3c7d786ccb45d5799ec53740102d7320fb354d124464361dee2f56b14ea029",
+    count: 728,
+    sha256: "7725262707583bee58057f22f2ac57a2782847cdbc6338bece386bc7d6da3078",
   },
   "./profiler": {
-    count: 732,
-    sha256: "be9ed04c5366084d2b8477203792836e481ba3c768f6d420e89600a1c60d93e7",
+    count: 733,
+    sha256: "bb063f317d9cdebe410899ba3dd9bac2bac52ff7fd591763589536eda7812830",
   },
   "./provenance": {
-    count: 738,
-    sha256: "42e9feb4027962c20cf90f7815e96b37f1bddc4ff140132ea064206108f468dc",
+    count: 739,
+    sha256: "dc7a03b329be5d96eda158c8096ca1ce67da74ce95a84e478c3fe463e495eb2e",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -659,8 +683,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "b2605158261e8e8a5d0ca0aaf9bffc9b64a081187f39e0ace5d0e4f577353ade",
   },
   "./sqlite/local": {
-    count: 727,
-    sha256: "6b3c7d786ccb45d5799ec53740102d7320fb354d124464361dee2f56b14ea029",
+    count: 728,
+    sha256: "7725262707583bee58057f22f2ac57a2782847cdbc6338bece386bc7d6da3078",
   },
 };
 

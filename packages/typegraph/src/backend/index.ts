@@ -213,6 +213,7 @@ export {
   executeAuthoritativeGraphCommand,
   graphCommandExecutionContext,
   normalizeGraphCommandIsolation,
+  observesPostFenceCommits,
 } from "./command-contract";
 export type {
   AtomicMutationProgramConformanceCase,

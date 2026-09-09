@@ -35,6 +35,7 @@ import {
   type GraphData,
   ImportOptionsSchema,
 } from "../src/interchange/types";
+import { getDialect } from "../src/query/dialect";
 import { runWritePlan } from "../src/store/operations/write-executor";
 import { mixedWritePlan } from "../src/store/operations/write-plan";
 import { storeBackend, storeRuntime } from "../src/store/runtime-port";
@@ -766,6 +767,9 @@ describe.each(ENGINES)("import write-plan attempt state (%s)", (engine) => {
     const options = ImportOptionsSchema.parse({ onConflict: "skip" });
     const attemptInputs: ImportAttemptInputs<typeof RETRY_ACCEPTANCE_GRAPH> = {
       graphId,
+      graph: store.graph,
+      schema: store.revisionSchema,
+      dialect: getDialect(backend.dialect),
       registry,
       data,
       nodeSchemas: buildNodeSchemaMap(store.graph),
@@ -800,13 +804,14 @@ describe.each(ENGINES)("import write-plan attempt state (%s)", (engine) => {
           },
           mixedWritePlan(undefined, true),
           backend,
-          (session, target, overlaidSession, _lock, transactionMode) =>
+          (session, target, overlaidSession, lock, transactionMode) =>
             runImportWritePlanAttempt(
               attemptInputs,
               session,
               target,
               overlaidSession,
               transactionMode,
+              lock,
             ),
         ),
     );

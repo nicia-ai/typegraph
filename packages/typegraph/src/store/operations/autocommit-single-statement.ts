@@ -46,7 +46,13 @@ export type EdgeAutocommitSingleStatementCandidate = Readonly<{
   revisionTrackingEnabled: boolean;
   kindRegistered: boolean;
   convergesDynamically: boolean;
-  /** Whether the edge kind declares any cardinality axis, source or target. */
+  /**
+   * Whether the edge kind declares any cardinality axis, source or target, or
+   * `acyclic: true` — the same {@link edgeWriteNeedsConstraintFence} fold the
+   * write path itself consults. No native single-statement program applies
+   * either check, so a constrained edge declines both fused paths below and
+   * re-enters the portable route, which probes and refuses.
+   */
   constrained: boolean;
 }>;
 

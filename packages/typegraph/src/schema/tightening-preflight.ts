@@ -18,6 +18,12 @@
  */
 import { type SchemaCommitPreflightBackend } from "../backend/types";
 import { MigrationError } from "../errors";
+import { createSqlSchema } from "../query/compiler/schema";
+import { getDialect } from "../query/dialect";
+import {
+  readEdgeAcyclicityViolations,
+  standaloneAcyclicRelation,
+} from "../store/acyclicity";
 import {
   auditConstraintFences,
   type ConstraintFenceViolation,
@@ -111,6 +117,8 @@ type GroupedProbes = Readonly<{
   endpoints?:
     | Extract<OntologyDataProbe, { kind: "edgeEndpointAssignability" }>
     | undefined;
+  acyclicity?:
+    Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
 }>;
 
 function groupProbesByKind(
@@ -123,6 +131,8 @@ function groupProbesByKind(
   let endpoints:
     | Extract<OntologyDataProbe, { kind: "edgeEndpointAssignability" }>
     | undefined;
+  let acyclicity:
+    Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
   for (const probe of probes) {
     switch (probe.kind) {
       case "nodeDisjointness": {
@@ -137,9 +147,13 @@ function groupProbesByKind(
         endpoints = probe;
         break;
       }
+      case "edgeAcyclicity": {
+        acyclicity = probe;
+        break;
+      }
     }
   }
-  return { disjointness, uniqueness, endpoints };
+  return { disjointness, uniqueness, endpoints, acyclicity };
 }
 
 /** The first couple of violations, rendered for a refusal message. */
@@ -272,7 +286,7 @@ export function prepareSchemaTighteningPreflight(
   );
 
   const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
-    const violations = await auditConstraintFences(target, {
+    const claimBackedViolations = await auditConstraintFences(target, {
       declarations: {
         graphId: params.graphId,
         // Delta-scoped, not graph-wide: the audit reads only the pairs,
@@ -289,6 +303,31 @@ export function prepareSchemaTighteningPreflight(
       uniquenessGroups,
       registry: proposedRegistry,
     });
+
+    // `edgeAcyclicity` does NOT go through `auditConstraintFences` /
+    // `readConstraintFenceViolations` (the non-recursive row-shape port every
+    // other family above reads through): folding the recursive predicate
+    // behind it would create a second implementation of "is there a cycle".
+    // It runs `readEdgeAcyclicityViolations` directly, scoped to exactly the
+    // edge kinds THIS commit newly declares `acyclic: true` on — the same
+    // delta-scoping discipline as every family above.
+    const acyclicityViolations =
+      grouped.acyclicity === undefined ?
+        []
+      : await readEdgeAcyclicityViolations(
+          {
+            graphId: params.graphId,
+            schema: createSqlSchema(target.tableNames),
+            dialect: getDialect(target.dialect),
+            target,
+            operation: "schema-commit:acyclic-tightening",
+          },
+          grouped.acyclicity.edgeKinds.map((edgeKind) =>
+            standaloneAcyclicRelation(edgeKind),
+          ),
+        );
+
+    const violations = [...claimBackedViolations, ...acyclicityViolations];
     if (violations.length === 0) return;
 
     const cardinalityViolations = violations.filter(

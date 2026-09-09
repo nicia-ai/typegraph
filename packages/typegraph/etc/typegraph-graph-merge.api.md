@@ -16,6 +16,32 @@ const __identityAssertionId: unique symbol;
 const __nodeId: unique symbol;
 
 // @public
+export type AcyclicityMergeConflictDetails = Readonly<{
+    relation: string;
+    edges: readonly AcyclicityMergeConflictEdge[];
+    [key: string]: unknown;
+}>;
+
+// @public
+export type AcyclicityMergeConflictEdge = Readonly<{
+    edgeId: string;
+    edgeKind: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
+export class AcyclicityMergeConflictError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_ACYCLICITY_CONFLICT";
+    // (undocumented)
+    readonly details: AcyclicityMergeConflictDetails;
+}
+
+// @public
 type AggregateComparisonPredicate = Readonly<{
     __type: "aggregate_comparison";
     op: ComparisonOp;
@@ -977,7 +1003,7 @@ type ConstraintFenceViolation = Readonly<{
     edgeKind: string;
     allowedPairs: readonly (readonly [string, string])[];
     edges: readonly MisassignedEdgeEndpointRow[];
-}>;
+}> | EdgeAcyclicityViolation;
 
 // @public
 type ConstraintFenceViolationRows = Readonly<{
@@ -1472,6 +1498,13 @@ type EdgeAccessor<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? D
 }> & EdgePropsAccessor<E>;
 
 // @public
+type EdgeAcyclicityViolation = Readonly<{
+    family: "edgeAcyclicity";
+    relation: string;
+    edgeIds: readonly string[];
+}>;
+
+// @public
 type EdgeAlias<E extends AnyEdgeType = EdgeType, Optional extends boolean = false> = Readonly<{
     type: E;
     alias: string;
@@ -1785,6 +1818,7 @@ type EdgeIntrospection = Readonly<{
     cardinality: Cardinality;
     targetCardinality: TargetCardinality;
     endpointExistence: EndpointExistence;
+    acyclic: boolean;
     properties: JsonSchema;
     annotations: KindAnnotations | undefined;
     deprecated: boolean;
@@ -1825,6 +1859,7 @@ type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends Nod
     targetCardinality?: TargetCardinality;
     endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -2015,6 +2050,7 @@ type ExtensionEdgeDef = Readonly<{
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -3760,6 +3796,7 @@ export const MERGE_ERROR_CODES: {
     readonly conflict: "GRAPH_MERGE_CONFLICT";
     readonly constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
     readonly identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT";
+    readonly acyclicityConflict: "GRAPH_MERGE_ACYCLICITY_CONFLICT";
     readonly baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH";
     readonly planCapability: "GRAPH_MERGE_PLAN_CAPABILITY";
     readonly planInvalid: "GRAPH_MERGE_PLAN_INVALID";
@@ -4761,7 +4798,7 @@ type ObjectPredicate = Readonly<{
 // @public
 type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "relation";
+    entity: "relation" | "edgeRegistration";
     name: string;
     severity: ChangeSeverity;
     details: string;
@@ -4778,6 +4815,9 @@ type OntologyDataProbe = Readonly<{
 }> | Readonly<{
     kind: "edgeEndpointAssignability";
     allowances: readonly EdgeEndpointAllowance[];
+}> | Readonly<{
+    kind: "edgeAcyclicity";
+    edgeKinds: readonly string[];
 }>;
 
 // @public (undocumented)
@@ -5872,6 +5912,7 @@ type SerializedEdgeDef = Readonly<{
         name: string;
         fields: readonly string[];
     }>;
+    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;

@@ -125,6 +125,7 @@ import {
 } from "../../errors";
 import { validateEdgeProps } from "../../errors/validation";
 import { type SqlSchema } from "../../query/compiler/schema";
+import { getDialect } from "../../query/dialect";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { chunk } from "../../utils/array";
@@ -139,6 +140,12 @@ import { generateId } from "../../utils/id";
 import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import {
+  type AcyclicityProbeContext,
+  assertEdgeRelationsAcyclic,
+  edgeKindIsInAcyclicRelation,
+  type ProposedRelationEdge,
+} from "../acyclicity";
 import { compareClaimTargets } from "../claims/axis";
 import {
   activeOnlyAxisReferences,
@@ -388,6 +395,17 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   options?: Readonly<{
     validateEndpoints?: boolean;
     validateCardinality?: boolean;
+    /**
+     * Whether this call owes the acyclicity probe when the edge kind
+     * declares `acyclic: true`. Defaults to `true`; callers that already
+     * covered it earlier in the same write frame (or that will re-probe the
+     * combined post-insert set, as batch create does) pass `false` so the
+     * relation is not walked twice for one write. `lock` is required
+     * whenever the probe actually runs — see
+     * `assertEdgeRelationsAcyclic`'s isolation-freshness guard.
+     */
+    validateAcyclicity?: boolean;
+    lock?: GraphWriteLock;
   }>,
 ): Promise<EdgeCreatePrepared> {
   const kind = input.kind;
@@ -473,6 +491,34 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     );
   }
 
+  // Check acyclicity. Independent of `validateCardinality`: unlike
+  // cardinality, acyclicity has no database key that could back it
+  // (`CONSTRAINT_FENCE_BACKING.edgeAcyclicity === "lockOnly"`), so a
+  // guarded-claim or durable-identity create that skips the cardinality
+  // READ still owes this probe when the kind participates in an acyclic
+  // relation (`edgeAcyclic`, the one owner of this decision — not this
+  // registration's own `acyclic` key, which a composed member can lack
+  // while still belonging to the relation).
+  if ((options?.validateAcyclicity ?? true) && edgeAcyclic(ctx, kind)) {
+    const lock = requireDefined(
+      options?.lock,
+      "an acyclic edge create reached validateAndPrepareEdgeCreate with no write lock",
+    );
+    await assertEdgeRelationsAcyclic(
+      acyclicityProbeContext(ctx, backend, lock, "edges.create"),
+      [
+        {
+          edgeId: id,
+          edgeKind: kind,
+          fromKind,
+          fromId: input.fromId,
+          toKind,
+          toId: input.toId,
+        },
+      ],
+    );
+  }
+
   return {
     declarations,
     insertParams: buildInsertEdgeParams(
@@ -552,6 +598,44 @@ function edgeCardinalityDeclarations<G extends GraphDef>(
 ): EdgeCardinalityDeclarations {
   if (!hasOwnKey(ctx.graph.edges, kind)) return {};
   return getEdgeRegistration(ctx.graph, kind);
+}
+
+/**
+ * Whether this edge kind participates in an acyclic relation. A kind this
+ * graph does not define answers `false`, matching {@link edgeCardinality}'s
+ * unknown-kind default. Delegates to
+ * {@link file://../acyclicity.ts edgeKindIsInAcyclicRelation}, the one owner
+ * of this decision, rather than re-reading `registration.acyclic` here.
+ */
+function edgeAcyclic<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+): boolean {
+  return edgeKindIsInAcyclicRelation(ctx.graph, kind);
+}
+
+/**
+ * The `AcyclicityProbeContext` every acyclicity assertion in this module
+ * builds — three call sites share this exact shape (`edges.create`,
+ * `edges.bulkCreate`, `edges.resurrect`), reading `graph`/`schema` from `ctx`
+ * and deriving `dialect` from whichever write target the call is fenced
+ * against.
+ */
+function acyclicityProbeContext<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  operation: string,
+): AcyclicityProbeContext {
+  return {
+    graphId: ctx.graphId,
+    graph: ctx.graph,
+    schema: ctx.revisionSchema,
+    dialect: getDialect(target.dialect),
+    target,
+    lock,
+    operation,
+  };
 }
 
 /**
@@ -700,7 +784,11 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         revisionTrackingEnabled: ctx.revisionTrackingEnabled,
         kindRegistered: true,
         convergesDynamically: convergeOn !== undefined && !durableConvergence,
-        constrained: edgeCardinalityAxisReferences(declarations).length > 0,
+        constrained:
+          edgeWriteNeedsConstraintFence({
+            ...declarations,
+            acyclic: edgeAcyclic(ctx, kind),
+          }) !== undefined,
       } as const)
     : undefined;
   const schemaFenceInFirstWrite =
@@ -712,7 +800,10 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     isAutocommitSingleStatementWrite({ kind: "edge", candidate });
   const plan = edgeWritePlan(
     convergeOn === undefined || durableConvergence ?
-      edgeWriteNeedsConstraintFence(declarations)
+      edgeWriteNeedsConstraintFence({
+        ...declarations,
+        acyclic: edgeAcyclic(ctx, kind),
+      })
     : "edgeMatchKeyConvergence",
   );
 
@@ -756,7 +847,14 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           input,
           id,
           target,
-          { validateEndpoints: true, validateCardinality },
+          {
+            validateEndpoints: true,
+            validateCardinality,
+            // Already probed by the always-run first call below, under the
+            // same lock this diagnostic reruns after; a second probe here
+            // would just repeat the same read.
+            validateAcyclicity: false,
+          },
         );
         if (transactionMode === "none") {
           // A noninteractive root has no safe plain-write fallback. Probe
@@ -769,6 +867,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       return validateAndPrepareEdgeCreate(ctx, input, id, target, {
         validateEndpoints: true,
         validateCardinality,
+        validateAcyclicity: false,
       });
     };
 
@@ -806,6 +905,13 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         !durableIdentityArbitratedCreate &&
         !usesGuardedCardinalityClaim &&
         !delaysCardinalityProbe,
+      // Always run here, unlike cardinality: this is the one call every
+      // create path reaches before any insert branch (fused, durable, or
+      // plain), and acyclicity has no database key that could enforce it
+      // the way a guarded cardinality claim or a durable-identity command
+      // does. Every later re-validate call in this frame passes `false`.
+      validateAcyclicity: true,
+      lock,
     });
 
     // A converging create owns both the match-key read and the endpoint
@@ -852,6 +958,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
           validateEndpoints: !canFuseEndpointCheck,
           validateCardinality: true,
+          validateAcyclicity: false,
         });
       }
       const work = edgeInsertWork(prepared);
@@ -979,6 +1086,12 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
             await validateAndPrepareEdgeCreate(ctx, input, id, target, {
               validateEndpoints: true,
               validateCardinality: false,
+              // This call exists only to raise the typed endpoint error
+              // before the already-decided identity conflict is thrown; no
+              // insert follows, so an acyclicity probe would be pure waste
+              // and could even mask the identity conflict with a cycle
+              // refusal.
+              validateAcyclicity: false,
             });
             throw identityConflict;
           }
@@ -1010,6 +1123,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
           validateEndpoints: !canFuseEndpointCheck,
           validateCardinality: true,
+          validateAcyclicity: false,
         });
       }
     }
@@ -1223,6 +1337,14 @@ async function prepareEdgeBatchCreates<G extends GraphDef>(
       input,
       id,
       validationBackend,
+      // Acyclicity's recursive reachability probe cannot be overlaid the
+      // way the in-batch cardinality/endpoint cache above is: it is
+      // executed through `execute`, not intercepted per predicate. An
+      // acyclic kind's batch is checked once, combined, against every row
+      // this batch inserts, after the insert lands (see the batch create
+      // callers below) — probing here would also miss in-batch cycles
+      // entirely (each row's probe would see only committed state).
+      { validateAcyclicity: false },
     );
     preparedCreates.push(prepared);
     registerPendingEdgeForCardinality(
@@ -1269,7 +1391,16 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
       input,
       input.id ?? generateId(),
       backend,
-      { validateEndpoints: false, validateCardinality: false },
+      {
+        validateEndpoints: false,
+        validateCardinality: false,
+        // Never reached for an acyclic kind: `resolveAtomicEdgeBatchExecutor`
+        // declines eligibility whenever any input's kind is acyclic, so this
+        // native-program preparation never sees one. Stated explicitly
+        // rather than left to the `true` default, which would need a lock
+        // this preparation does not have.
+        validateAcyclicity: false,
+      },
     );
     preparedCreates.push(prepared);
     for (const claim of edgeInsertWork(prepared).claims) {
@@ -1648,7 +1779,7 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
     ctx,
     edgeWritePlan(batchFencesConstraintProbe(ctx, inputs)),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const { batchInsertWork } = await prepareEdgeBatchCreates(
         ctx,
         inputs,
@@ -1679,10 +1810,22 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
           requireDefined(session.createEdgesDurable)(batchInsertWork),
         );
         assertDurableBatchRows(batchInsertWork, rows);
+        await assertBatchEdgesRelationsAcyclic(
+          ctx,
+          target,
+          lock,
+          batchInsertWork,
+        );
         return;
       }
       await withAlreadyExistsTranslation("edge", () =>
         session.createEdgesNoReturn(batchInsertWork),
+      );
+      await assertBatchEdgesRelationsAcyclic(
+        ctx,
+        target,
+        lock,
+        batchInsertWork,
       );
     },
   );
@@ -1735,7 +1878,7 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
     ctx,
     edgeWritePlan(batchFencesConstraintProbe(ctx, inputs)),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const { batchInsertWork } = await prepareEdgeBatchCreates(
         ctx,
         inputs,
@@ -1778,11 +1921,23 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
           requireDefined(session.createEdgesDurable)(batchInsertWork),
         );
         assertDurableBatchRows(batchInsertWork, rows);
+        await assertBatchEdgesRelationsAcyclic(
+          ctx,
+          target,
+          lock,
+          batchInsertWork,
+        );
         return rows.map((row) => rowToEdge(row));
       }
 
       const rows = await withAlreadyExistsTranslation("edge", () =>
         session.createEdges(batchInsertWork),
+      );
+      await assertBatchEdgesRelationsAcyclic(
+        ctx,
+        target,
+        lock,
+        batchInsertWork,
       );
 
       return rows.map((row) => rowToEdge(row));
@@ -1793,19 +1948,59 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
 /**
  * A batch fences when ANY item in it does: the batch shares one transaction, so
  * one constrained item makes the whole transaction a constrained write. A batch
- * of purely `many` edges still takes no lock.
+ * of purely `many`, non-acyclic edges still takes no lock.
  */
 function batchFencesConstraintProbe<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
 ): ConstraintFenceReason | undefined {
   for (const input of inputs) {
-    const reason = edgeWriteNeedsConstraintFence(
-      edgeCardinalityDeclarations(ctx, input.kind),
-    );
+    const reason = edgeWriteNeedsConstraintFence({
+      ...edgeCardinalityDeclarations(ctx, input.kind),
+      acyclic: edgeAcyclic(ctx, input.kind),
+    });
     if (reason !== undefined) return reason;
   }
   return undefined;
+}
+
+/** The proposed edges a batch create's post-insert acyclicity probe answers for. */
+function proposedRelationEdgesFromInsertWork(
+  batchInsertWork: readonly EdgeInsertWork[],
+): readonly ProposedRelationEdge[] {
+  return batchInsertWork.map((work) => ({
+    edgeId: work.params.id,
+    edgeKind: work.params.kind,
+    fromKind: work.params.fromKind,
+    fromId: work.params.fromId,
+    toKind: work.params.toKind,
+    toId: work.params.toId,
+  }));
+}
+
+/**
+ * The batch acyclicity probe: run once against every row this batch just
+ * inserted, treating them all as origins in one combined recursive walk.
+ *
+ * Run AFTER the insert, never before: the in-batch overlay
+ * (`createEdgeBatchValidationBackend`) that lets cardinality/endpoint checks
+ * see earlier rows in the same batch intercepts `countEdgesFrom` /
+ * `edgeExistsBetween`, not a recursive `execute` statement, so it cannot
+ * account for an in-batch cycle. Inserting first and then checking the whole
+ * committed set together is what makes an in-batch cycle (`a→b` and `b→a` in
+ * one `bulkCreate`) visible at all, and a thrown `EdgeAcyclicityError` here
+ * rolls the whole transaction back — no partial batch commits.
+ */
+async function assertBatchEdgesRelationsAcyclic<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  batchInsertWork: readonly EdgeInsertWork[],
+): Promise<void> {
+  await assertEdgeRelationsAcyclic(
+    acyclicityProbeContext(ctx, target, lock, "edges.bulkCreate"),
+    proposedRelationEdgesFromInsertWork(batchInsertWork),
+  );
 }
 
 /**
@@ -1903,6 +2098,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     matchProps?: Record<string, unknown>;
   }>,
   resolvedExisting?: BackendEdgeRow,
+  lock?: GraphWriteLock,
 ): Promise<Edge> {
   const id = input.id;
 
@@ -1996,6 +2192,35 @@ async function performEdgeUpdate<G extends GraphDef>(
       },
       effectiveValidTo,
     );
+    // Acyclicity's population is soft-delete-only (§5): a resurrection
+    // (`clearDeleted`) re-admits the edge and is checked; reopening an
+    // `oneActive` window alone (`reentersActivePopulation` with no
+    // `clearDeleted`) never removed the edge from the acyclicity
+    // population in the first place, so it is deliberately NOT checked
+    // here — checking it would over-fence a path §5 rules must stay free.
+    if (reentersLivePopulation && edgeAcyclic(ctx, input.identity.kind)) {
+      await assertEdgeRelationsAcyclic(
+        acyclicityProbeContext(
+          ctx,
+          target,
+          requireDefined(
+            lock,
+            "an acyclic edge resurrection reached performEdgeUpdate with no write lock",
+          ),
+          "edges.resurrect",
+        ),
+        [
+          {
+            edgeId: id,
+            edgeKind: input.identity.kind,
+            fromKind: existing.from_kind,
+            fromId: existing.from_id,
+            toKind: existing.to_kind,
+            toId: existing.to_id,
+          },
+        ],
+      );
+    }
     // Re-entry re-admits this edge to every population {@link
     // reentryAxisReferences} above decided it left, so it claims exactly
     // those axes — BEFORE the update that re-admits it, because the probe
@@ -2144,6 +2369,7 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
     matchProps?: Record<string, unknown>;
   }>,
   resolvedExisting?: BackendEdgeRow,
+  lock?: GraphWriteLock,
 ): Promise<Edge> {
   for (let attempt = 1; attempt <= EDGE_UPDATE_ATTEMPTS; attempt += 1) {
     try {
@@ -2154,6 +2380,7 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
         target,
         options,
         attempt === 1 ? resolvedExisting : undefined,
+        lock,
       );
     } catch (error) {
       if (!(error instanceof EdgeUpdateTargetMoved)) throw error;
@@ -2274,14 +2501,26 @@ export async function executeEdgeUpdate<G extends GraphDef>(
           activeOnlyAxisReferences(edgeCardinalityDeclarations(ctx, gate.kind))
             .length > 0
       ) ?
+        // `clearValidTo` alone never re-admits an edge to the acyclicity
+        // population (§5); the axis-presence guard above already proves an
+        // active-only cardinality axis is declared, so this fold reports
+        // `"edgeCardinality"` before it would ever read an `acyclic` field.
         edgeWriteNeedsConstraintFence(
           edgeCardinalityDeclarations(ctx, gate.kind),
         )
       : undefined,
     ),
     backend,
-    (session, target) =>
-      performEdgeUpdateConverging(ctx, input, session, target),
+    (session, target, _overlaidSession, lock) =>
+      performEdgeUpdateConverging(
+        ctx,
+        input,
+        session,
+        target,
+        undefined,
+        undefined,
+        lock,
+      ),
     { didWrite: writeResultAlwaysChanges },
   );
 }
@@ -2325,13 +2564,19 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     edgeWritePlan(
       options?.coalesceUnchanged === true ? "edgeMatchKeyConvergence"
       : input.clearValidTo === true || options?.clearDeleted === true ?
-        edgeWriteNeedsConstraintFence(
-          edgeCardinalityDeclarations(ctx, input.identity.kind),
-        )
+        edgeWriteNeedsConstraintFence({
+          ...edgeCardinalityDeclarations(ctx, input.identity.kind),
+          // Only a resurrection re-admits to the acyclicity population
+          // (§5); `clearValidTo` alone must not take this fence for that
+          // reason.
+          acyclic:
+            options?.clearDeleted === true &&
+            edgeAcyclic(ctx, input.identity.kind),
+        })
       : undefined,
     ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       if (options?.coalesceUnchanged === true && !options.clearDeleted) {
         const existing =
           options.matchOn !== undefined && options.matchProps !== undefined ?
@@ -2371,6 +2616,8 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
         session,
         target,
         options,
+        undefined,
+        lock,
       );
       return { edge, wrote: true };
     },
@@ -2560,17 +2807,22 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
   const needsConstraintFence = entries.some(
     (entry) => entry.clearDeleted || entry.input.clearValidTo === true,
   );
+  const needsAcyclicityFence = entries.some(
+    (entry) =>
+      entry.clearDeleted && edgeAcyclic(ctx, entry.input.identity.kind),
+  );
   return runWritePlan(
     ctx,
     edgeWritePlan(
       needsConstraintFence ?
-        edgeWriteNeedsConstraintFence(
-          edgeCardinalityDeclarations(ctx, first.input.identity.kind),
-        )
+        edgeWriteNeedsConstraintFence({
+          ...edgeCardinalityDeclarations(ctx, first.input.identity.kind),
+          acyclic: needsAcyclicityFence,
+        })
       : undefined,
     ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const resolvedRows =
         (
           target.capabilities.execution.interactiveTransactions &&
@@ -2590,6 +2842,7 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
             target,
             entry.clearDeleted ? { clearDeleted: true } : undefined,
             resolvedRows?.get(entry.input.id),
+            lock,
           ),
         );
       }

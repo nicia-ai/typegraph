@@ -39,11 +39,18 @@ import type {
 import { subClassComponent } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
+import { createSqlSchema } from "../../query/compiler/schema";
+import { getDialect } from "../../query/dialect";
 import { buildGraphEdgeKindFacts } from "../../registry/builders";
 import { expandEdgeEndpointAllowance } from "../../registry/edge-endpoint-allowance";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { groupBy } from "../../utils/array";
 import { compareStrings } from "../../utils/compare";
+import {
+  acyclicEdgeRelations,
+  type EdgeAcyclicityViolation,
+  readEdgeAcyclicityViolations,
+} from "../acyclicity";
 import {
   type ClaimOwner,
   type ClaimTarget,
@@ -90,7 +97,8 @@ export type ConstraintFenceViolation =
       allowedPairs: readonly (readonly [string, string])[];
       /** Live edges sitting outside all of them. */
       edges: readonly MisassignedEdgeEndpointRow[];
-    }>;
+    }>
+  | EdgeAcyclicityViolation;
 
 /** What the audit needs to know: the graph, its registry, and where to read. */
 export type VerifyConstraintFencesContext = Readonly<{
@@ -341,23 +349,53 @@ function edgeEndpointViolations(
 }
 
 /**
+ * The family order for the two members with no `target`: after every
+ * claim-backed family, in this fixed order between themselves.
+ */
+const UNTARGETED_FAMILY_ORDER = [
+  "edgeEndpointAssignability",
+  "edgeAcyclicity",
+] as const;
+
+/** Narrows to the two claim-backed families, both of which carry `target`. */
+function hasClaimTarget(
+  violation: ConstraintFenceViolation,
+): violation is Extract<ConstraintFenceViolation, { target: ClaimTarget }> {
+  return "target" in violation;
+}
+
+/**
  * THE canonical order violations are reported in: claim families first
- * (their existing {@link compareClaimTargets} order), then
- * `edgeEndpointAssignability` ordered by edge kind.
+ * (their existing {@link compareClaimTargets} order), then the untargeted
+ * families in {@link UNTARGETED_FAMILY_ORDER}, each ordered by its own key
+ * (`edgeEndpointAssignability` by edge kind, `edgeAcyclicity` by relation).
  */
 function compareConstraintFenceViolations(
   left: ConstraintFenceViolation,
   right: ConstraintFenceViolation,
 ): number {
-  if (
-    left.family === "edgeEndpointAssignability" &&
-    right.family === "edgeEndpointAssignability"
-  ) {
-    return compareStrings(left.edgeKind, right.edgeKind);
+  const leftHasTarget = hasClaimTarget(left);
+  const rightHasTarget = hasClaimTarget(right);
+  if (leftHasTarget && rightHasTarget) {
+    return compareClaimTargets(left.target, right.target);
   }
-  if (left.family === "edgeEndpointAssignability") return 1;
-  if (right.family === "edgeEndpointAssignability") return -1;
-  return compareClaimTargets(left.target, right.target);
+  if (leftHasTarget) return -1;
+  if (rightHasTarget) return 1;
+
+  const leftUntargetedRank = UNTARGETED_FAMILY_ORDER.indexOf(left.family);
+  const rightUntargetedRank = UNTARGETED_FAMILY_ORDER.indexOf(right.family);
+  if (leftUntargetedRank !== rightUntargetedRank) {
+    return leftUntargetedRank - rightUntargetedRank;
+  }
+  return (
+      left.family === "edgeEndpointAssignability" &&
+        right.family === "edgeEndpointAssignability"
+    ) ?
+      compareStrings(left.edgeKind, right.edgeKind)
+    : compareStrings(
+        (left as EdgeAcyclicityViolation).relation,
+        (right as EdgeAcyclicityViolation).relation,
+      );
 }
 
 /** The declarations the audit reads, one list per family. */
@@ -487,13 +525,23 @@ export async function auditConstraintFences(
 
 /**
  * THE fence audit. Reads only; reports every claim axis whose population
- * already carries more than one live claimant, and every edge kind whose live
- * rows sit outside every declared endpoint pair.
+ * already carries more than one live claimant, every edge kind whose live
+ * rows sit outside every declared endpoint pair, and every acyclic relation
+ * already carrying a cycle.
+ *
+ * The `edgeAcyclicity` family does NOT go through
+ * `readConstraintFenceViolations` (the backend port every other family
+ * reads through): that port is a row-shape port for non-recursive families
+ * — "one statement with a correlated EXISTS" per family — and putting the
+ * recursive predicate behind it would create a second implementation of "is
+ * there a cycle", the write path's and the backend's. It instead runs
+ * `readEdgeAcyclicityViolations` directly through `context.backend.execute`,
+ * which every `GraphBackend` has.
  */
 export async function verifyConstraintFences(
   context: VerifyConstraintFencesContext,
 ): Promise<readonly ConstraintFenceViolation[]> {
-  return auditConstraintFences(context.backend, {
+  const claimBacked = await auditConstraintFences(context.backend, {
     declarations: fenceDeclarations(
       context.graph,
       context.registry,
@@ -502,4 +550,22 @@ export async function verifyConstraintFences(
     uniquenessGroups: uniquenessAxisGroups(context.graph, context.registry),
     registry: context.registry,
   });
+
+  const acyclicRelations = acyclicEdgeRelations(context.graph);
+  if (acyclicRelations.length === 0) return claimBacked;
+
+  const acyclicity = await readEdgeAcyclicityViolations(
+    {
+      graphId: context.graphId,
+      schema: createSqlSchema(context.backend.tableNames),
+      dialect: getDialect(context.backend.dialect),
+      target: context.backend,
+      operation: "verifyConstraintFences",
+    },
+    acyclicRelations,
+  );
+
+  return [...claimBacked, ...acyclicity].toSorted(
+    compareConstraintFenceViolations,
+  );
 }

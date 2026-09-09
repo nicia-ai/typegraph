@@ -292,6 +292,8 @@ export type ExtensionEdgeDef = Readonly<{
   properties?: Readonly<Record<string, ExtensionPropertyType>>;
   cardinality?: Cardinality;
   targetCardinality?: TargetCardinality;
+  /** See `EdgeRegistration.acyclic`. A runtime-authored edge may declare it. */
+  acyclic?: boolean;
 }>;
 
 // ============================================================

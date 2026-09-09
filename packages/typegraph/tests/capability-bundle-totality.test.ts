@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("34 reasoned entries sum to 102 accesses; 50 deferred entries sum to 230", () => {
+  it("34 reasoned entries sum to 105 accesses; 50 deferred entries sum to 230", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -157,7 +157,7 @@ describe("capability bundle totality (T9)", () => {
     // and inspects its required storage on that session: 94 -> 96.
     // The exact-session heterogeneous node upsert adds six guarded backend
     // member accesses across Store dispatch and recorded wrappers: 96 -> 102.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(102);
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(105);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.
@@ -165,6 +165,7 @@ describe("capability bundle totality (T9)", () => {
     // of six live access sites: 223 -> 229.
     // The composition cascade adds one heterogeneous endpoint-set consumer:
     // 229 -> 230.
+    // Edge acyclicity adds three tableNames reads: 102 -> 105.
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(230);
   });
 });

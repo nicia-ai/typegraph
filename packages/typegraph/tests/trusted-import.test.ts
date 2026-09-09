@@ -708,6 +708,29 @@ describe("trusted import", () => {
     );
   });
 
+  it("rejects an acyclic edge kind", async () => {
+    const Task = defineNode("TrustedTask", { schema: z.object({}) });
+    const dependsOn = defineEdge("trustedDependsOn", {
+      schema: z.object({}),
+    });
+    const graph = defineGraph({
+      id: "trusted_import_reject_acyclicity",
+      nodes: { TrustedTask: { type: Task } },
+      edges: {
+        trustedDependsOn: {
+          type: dependsOn,
+          from: [Task],
+          to: [Task],
+          acyclic: true,
+        },
+      },
+    });
+    const store = createStore(graph, createTestBackend());
+    await expect(trustedImportGraph(store, graphData([]))).rejects.toEqual(
+      expectReason("acyclicity_unsupported"),
+    );
+  });
+
   it.each([
     { name: "source-only", cardinality: { cardinality: "one" as const } },
     {

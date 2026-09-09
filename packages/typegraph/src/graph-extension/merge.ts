@@ -229,6 +229,7 @@ export function mergeGraphExtension<G extends GraphDef>(
       to,
       cardinality: edge.cardinality,
       targetCardinality: edge.targetCardinality,
+      ...(edge.acyclic === true ? { acyclic: true } : {}),
     });
   }
 

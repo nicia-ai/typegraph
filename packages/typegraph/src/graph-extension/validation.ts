@@ -196,6 +196,7 @@ const EDGE_BODY_KEYS: ReadonlySet<string> = new Set([
   "properties",
   "cardinality",
   "targetCardinality",
+  "acyclic",
 ]);
 const CARDINALITY_VALUES = ["many", "one", "unique", "oneActive"] as const;
 const TARGET_CARDINALITY_VALUES = ["many", "one", "oneActive"] as const;
@@ -660,6 +661,14 @@ function validateEdgeDocument(
   );
   if (!targetCardinalityResult.ok) return undefined;
 
+  const acyclic = validateOptionalBoolean(
+    raw["acyclic"],
+    `${path}/acyclic`,
+    "`acyclic`",
+    "INVALID_DOCUMENT_SHAPE",
+    issues,
+  );
+
   return compactUndefined<ExtensionEdgeDef>({
     description,
     annotations,
@@ -668,6 +677,7 @@ function validateEdgeDocument(
     properties,
     cardinality: cardinalityResult.value,
     targetCardinality: targetCardinalityResult.value,
+    acyclic,
   });
 }
 
