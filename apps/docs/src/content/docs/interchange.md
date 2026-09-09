@@ -48,7 +48,7 @@ const jsonSchema = toJSONSchema(GraphDataSchema);
 
 ```typescript
 interface GraphData {
-  formatVersion: "2.0";
+  formatVersion: "3.0";
   exportedAt: string; // ISO datetime
   source: {
     type: "typegraph-export" | "external";
@@ -90,6 +90,36 @@ interface GraphData {
       validFrom: string;
       validTo?: string;
     }>;
+    // `archival` mode only — see "Archival identity transitions" below.
+    transitions?: Array<{
+      transitionId: string;
+      cause:
+        | "assert"
+        | "retract"
+        | "fold"
+        | "detach"
+        | "restore"
+        | "window-end"
+        | "kind-drop"
+        | "schema-transition"
+        | "reconcile";
+      recordedRevision: number;
+      recordedAt: string;
+      validAt: string;
+      class: { kind: string; id: string };
+      priorClass?: { kind: string; id: string };
+      assertionIds: string[];
+      decision?: {
+        policy?: string;
+        branchId?: string;
+        branchAncestry?: string[];
+        mergePlanDigest?: string;
+        reviewDigest?: string;
+        sourceId?: string;
+      };
+    }>;
+    // `archival` mode only, and only when the source has ever pruned.
+    retention?: { prunedBeforeRevision: number; prunedAt: string };
   };
 }
 ```
@@ -105,12 +135,35 @@ at or before that instant, in which case it is imported with no lower bound
 
 ### Format Version Compatibility
 
-Exports always write `formatVersion: "2.0"`. The read side — both
+Exports always write `formatVersion: "3.0"`. The read side — both
 `importGraph`/`importGraphStream` and `GraphDataSchema.parse` — additionally
-accepts `"1.0"`. A 1.0 document is structurally a valid 2.0 document: the only
-2.0 change is the additive optional `identity` section, so pre-existing 1.0
-exports validate and import unchanged. You never need to rewrite the version
-field of an older backup; validation and import handle both.
+accepts `"1.0"` and `"2.0"`. A 1.0 document is structurally a valid 2.0
+document (the only 2.0 change is the additive optional `identity` section),
+and a 2.0 document is in turn a structurally valid 3.0 document (the only 3.0
+change is the additive optional `identity.transitions` / `identity.retention`
+archival fields), so pre-existing 1.0 and 2.0 exports validate and import
+unchanged. You never need to rewrite the version field of an older backup;
+validation and import handle all three.
+
+### Archival identity transitions
+
+On a `history: true` graph, `exportGraph(store, { identityMode: "archival" })`
+additionally carries every retained identity transition, plus the source's
+own retention watermark when it has ever pruned. State export and working-copy branch cloning carry
+neither field — a clone's own history starts at its clone revision, and
+current-truth state export is not a backup of explanation.
+
+Restoring `identity.transitions` validates shape only (a known cause, a
+well-formed reference, a non-decreasing `recordedRevision` sequence) and
+inserts every row verbatim, never re-deriving membership or touching the
+target's closure. The restore then sets the destination's own retention
+watermark to the highest restored revision + 1, so a replay over the
+restored graph (`store.identity.replay`, see the
+[identity guide](/identity/#replay-and-identity-history)) reports
+`truncatedBefore` for that range: the explanations survived the round trip,
+but the snapshots they narrate did not, and replay says so rather than
+silently claiming a complete history. A `state`-mode document naming a
+`transitions` section is refused.
 
 ## Exporting Data
 

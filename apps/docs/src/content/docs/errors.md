@@ -316,6 +316,38 @@ deletion bounds. Future or inverted identity windows are user-category input
 errors. A second non-identical open window and an endpoint-window conflict are
 constraint-category errors. Both classes are package-root exports.
 
+### `IdentityReplayError`
+
+Thrown by `store.identity.replay` / `transitionsOf` (and by
+`pruneIdentityTransitions`'s own history precondition) when the transition log
+cannot answer a request. Its code names the reason:
+
+- `IDENTITY_REPLAY_REQUIRES_HISTORY` — the store was opened without
+  `history: true`; there is no transition log to annotate reads with. Open
+  with `createStore(graph, backend, { history: true })`.
+- `IDENTITY_REPLAY_LIMIT_EXCEEDED` — the lineage walk found more boundaries
+  than the requested `limit` (default 200, maximum 2000). `details
+  .resumeFromRecorded` names a cursor; pass it as `fromRecorded` to page.
+- `IDENTITY_REPLAY_HISTORY_TRUNCATED` — the requested range lies entirely
+  below the graph's retention watermark (see
+  [`pruneIdentityTransitions`](/identity/#retention)); `details.prunedBefore`
+  names the watermark.
+- `IDENTITY_REPLAY_WALK_INCOMPLETE` — an internal safety ceiling on the
+  lineage walk's own reads was hit; narrow `fromRecorded`/`toRecorded` or
+  prune older history.
+
+```typescript
+import { IdentityReplayError } from "@nicia-ai/typegraph";
+
+try {
+  await store.identity.replay(alice, { limit: 50 });
+} catch (error) {
+  if (error instanceof IdentityReplayError) {
+    console.log(error.details.code);
+  }
+}
+```
+
 ### `IdentityMergeConflictError`
 
 Detected at merge **plan time** when the branches being merged carry opposing
@@ -328,6 +360,15 @@ convergent, not a conflict, and merges cleanly), or a branch asserts an
 identity relation over a node another branch deleted. Extends `MergeError`, so
 an `instanceof MergeError` catch covers it alongside the other merge failures.
 
+The same error class also covers two policy-driven identity conflicts under
+the `identity` merge option bag (see the
+[graph merge guide](/graph-merge/#identity-conflicts)): a forced
+identity-paired match crossing a class-lifted `different` assertion
+(`GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT`), and `onProvenanceConflict:
+"refuse"` finding contradictory branch attribution across a fused cluster
+(`GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT`). Check `error.code` to
+distinguish them from the default `GRAPH_MERGE_IDENTITY_CONFLICT`.
+
 `merge()` and `IdentityMergeConflictError` are both exported from
 `@nicia-ai/typegraph/graph-merge`, not the package root. `merge()` takes an
 array of branches and never throws a `MergeError` — it **returns** a
@@ -339,7 +380,7 @@ import { merge, IdentityMergeConflictError, isErr } from "@nicia-ai/typegraph/gr
 const result = await merge(store, [branch]);
 if (isErr(result)) {
   if (result.error instanceof IdentityMergeConflictError) {
-    console.log(result.error.code); // "GRAPH_MERGE_IDENTITY_CONFLICT"
+    console.log(result.error.code); // "GRAPH_MERGE_IDENTITY_CONFLICT", "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT", or "GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT"
     console.log(result.error.details);
   }
   throw result.error;
@@ -1718,7 +1759,13 @@ try {
 | `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | user | Identity assertion ends before it starts |
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
+| `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store opened without `history: true` |
+| `IDENTITY_REPLAY_LIMIT_EXCEEDED` | `IdentityReplayError` | constraint | The lineage walk found more boundaries than the requested `limit` |
+| `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
+| `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | The lineage walk's internal read ceiling was hit before the seed set converged |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
+| `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A forced identity-paired match crosses a class-lifted `different` assertion |
+| `GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT` | `IdentityMergeConflictError` | system | `onProvenanceConflict: "refuse"` found contradictory branch attribution across a fused cluster |
 | `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions |

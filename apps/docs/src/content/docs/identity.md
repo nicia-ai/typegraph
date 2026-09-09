@@ -276,6 +276,96 @@ materialized closure used by current reads and by `asOf(now)` reads is
 identical — a fixed-point reconstruction of "current" never needs to
 special-case valid-time skew on the folding edge itself.
 
+## Replay and identity history
+
+A store opened with `history: true` retains an explanation, not just a
+current answer, for every event that changed a class's membership:
+
+```typescript
+const [store] = await createAdapterStoreWithSchema(graph, backend, {
+  history: true,
+});
+```
+
+`store.identity.transitionsOf(ref)` returns every transition touching
+`ref`'s class lineage, oldest first — an assertion, a retraction, a same-ID
+fold, a delete or restore, a validity-window end, a kind drop, a schema
+transition, or a reconciliation decision made by a governed graph merge:
+
+```typescript
+const transitions = await store.identity.transitionsOf(alice);
+for (const transition of transitions) {
+  console.log(transition.cause, transition.recorded, transition.assertionIds);
+}
+```
+
+| Cause | Fires when |
+| --- | --- |
+| `assert` | An explicit `same` assertion (or a merge's own union) fused two classes |
+| `retract` | A retraction split a class back apart |
+| `fold` | A same-ID fold conducted a newly created or resurrected node into a class |
+| `detach` | A same-ID fold stopped conducting (the node changed kind, or the peer was removed) |
+| `restore` | A soft-deleted node's undelete brought it back into visibility |
+| `window-end` | A node's or assertion's validity window closed, ending its contribution |
+| `kind-drop` | A schema change removed a kind, hard-deleting the identity assertions it touched |
+| `schema-transition` | A schema evolution reinterpreted membership under new `sameIdAcrossKinds` or ontology rules |
+| `reconcile` | A reviewed graph merge's identity policy made the call (see [Graph merge](/graph-merge/)) |
+
+`store.identity.replay(ref, options?)` pairs every transition with the class
+membership immediately before and after it, reconstructed through the exact
+same historical reader `asOf` and `asOfRecorded` reads use
+(`historicalIdentityReconstructionCtes`) — **replay can never disagree with a
+live read**, because it is not a second copy of membership. The transition
+log carries no members of its own; it is an explanation layer over the one
+reconstruction path every historical read already goes through.
+
+```typescript
+const { steps, truncatedBefore } = await store.identity.replay(alice, {
+  limit: 100,
+});
+for (const step of steps) {
+  console.log(step.transition.cause, step.before, "→", step.after);
+}
+```
+
+`options.fromRecorded` / `toRecorded` bound the range by recorded instant;
+`options.limit` (default 200, maximum 2000) caps the number of boundaries a
+single call returns, throwing `IDENTITY_REPLAY_LIMIT_EXCEEDED` with a
+`resumeFromRecorded` cursor when there are more. Both `replay` and
+`transitionsOf` throw `IDENTITY_REPLAY_REQUIRES_HISTORY` on a store opened
+without `history: true` — there is nothing for them to annotate.
+
+`replay` and `transitionsOf` live on `store.identity` and `tx.identity`
+only, never on a coordinate-pinned read lens (`store.asOf(t).identity`,
+`store.snapshot().identity`): both answer **across** every recorded
+coordinate, which a lens pinned to one coordinate cannot honor.
+
+### Retention
+
+Retained transitions are pruned only on explicit operator action — there is
+no automatic retention policy:
+
+```typescript
+import { pruneIdentityTransitions } from "@nicia-ai/typegraph";
+
+await pruneIdentityTransitions(store, { beforeRecorded: someEarlierInstant });
+```
+
+A prune deletes every transition strictly before the given recorded instant
+and advances the graph's retention watermark monotonically — pruning at an
+earlier point than the current watermark is a successful no-op, never a
+rollback. Per the same rule `rebuildIdentityClosure` follows, **a prune does
+not advance the content revision**: it destroys retained explanation, never
+truth, so branch staleness tracks truth, not explanation.
+
+Once anything has been pruned, `replay` reports the gap honestly rather than
+silently answering from an incomplete log: a call whose range lies entirely
+below the watermark throws `IDENTITY_REPLAY_HISTORY_TRUNCATED`, and an
+open-ended call that reaches back past the watermark returns a
+`truncatedBefore` recorded instant on its result instead of throwing.
+`transitionsOf` is unaffected by pruning beyond returning fewer rows — it
+never throws for a truncated range.
+
 ## Identity-expanded traversal
 
 Traversal expansion is per hop and defaults off:
@@ -360,7 +450,7 @@ cheaper question by a wide margin.
 
 ## Interchange and branch merge
 
-Interchange format `2.0` optionally carries an identity section. State export
+Interchange format `3.0` optionally carries an identity section. State export
 (the default) includes current assertions. Import into a populated target is
 target-oriented: an existing current semantic pair keeps its target assertion
 ID and `validFrom`. Working-copy branch cloning imports into an empty target and
@@ -397,6 +487,44 @@ deleted. Weigh that trade-off deliberately for a backup: without
 `includeDeleted`, soft-deleted endpoints and the assertions that reference them
 are silently absent; with it, those nodes come back alive. Recorded side
 tables are not part of interchange.
+
+### Archival transitions and the retention watermark
+
+On a `history: true` graph, an archival export additionally carries every
+retained transition (see [Replay and identity history](#replay-and-identity-history)
+above) and, when the source has ever pruned, the source's own retention
+watermark:
+
+```typescript
+const archive = await exportGraph(store, {
+  identityMode: "archival",
+  includeDeleted: true,
+});
+archive.identity?.transitions; // every retained transition, verbatim
+archive.identity?.retention; // { prunedBeforeRevision, prunedAt } — absent if nothing was ever pruned
+```
+
+State export and working-copy branch cloning carry **no** transitions —
+a clone's own history starts at its clone revision, and current-truth state
+export is not a backup of explanation. `state`-mode identity import refuses
+a document naming a `transitions` section.
+
+Restoring a `transitions` section validates **shape only**: a known cause, a
+well-formed `{ kind, id }` reference on every `class` / `priorClass`, and a
+non-decreasing `recordedRevision` sequence across the array. It never
+touches the target's closure and never re-derives membership — the rows are
+inserted verbatim, carrying the source's own revision numbers and
+timestamps, because a restore records history, it does not relive it.
+
+That is also why the restore sets the destination's retention watermark to
+the **highest restored revision + 1** (or to the archive's own carried
+watermark, when nothing was restored) rather than leaving it at zero: the
+imported rows explain revisions that never happened, in that numbering, on
+the destination graph. `replay` over a restored archive therefore answers
+`transitionsOf` fully but reports `truncatedBefore` for the restored range —
+an honest signal that the *explanations* survived the round trip but the
+*snapshots* they narrate did not, rather than a replay that silently claims
+a complete history it cannot actually reconstruct.
 
 Graph merge includes identity truth in staleness fingerprints and diffs.
 Duplicate current assertions use the earliest `validFrom`, then the
