@@ -115,9 +115,22 @@ describe("CI workflow contract", () => {
   });
 
   it("gives CI and release declaration builds enough worker heap", () => {
+    // The build script carries the declaration-bundling ceiling itself, so a
+    // local `pnpm build` never depends on an ambient NODE_OPTIONS; the
+    // workflow-wide ceiling covers the remaining steps and must not fall
+    // below the script's own.
+    const buildScript = (
+      JSON.parse(
+        readFileSync(
+          fileURLToPath(new URL("../package.json", import.meta.url)),
+          "utf8",
+        ),
+      ) as Readonly<{ scripts: Readonly<Record<string, string>> }>
+    ).scripts["build"];
+    expect(buildScript).toContain("--max-old-space-size=8192");
     for (const workflowPath of [WORKFLOW_PATH, RELEASE_WORKFLOW_PATH]) {
       expect(readFileSync(workflowPath, "utf8")).toContain(
-        "NODE_OPTIONS: --max-old-space-size=6144",
+        "NODE_OPTIONS: --max-old-space-size=8192",
       );
     }
   });
