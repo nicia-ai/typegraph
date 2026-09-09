@@ -1021,7 +1021,7 @@ function markedAtomicMutationSetBackend(): GraphBackend {
   return backend;
 }
 
-describe("resolveAtomicNodeResolvedMutationSetExecutor: composition gate (item E2-3)", () => {
+describe("resolveAtomicNodeResolvedMutationSetExecutor: composition gate (item E.2)", () => {
   const ArmPart = defineNode("ArmPart", { schema: z.object({}) });
   const ArmWhole = defineNode("ArmWhole", { schema: z.object({}) });
   const armPartOf = defineEdge("armPartOf", { schema: z.object({}) });

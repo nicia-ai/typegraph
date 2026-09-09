@@ -913,7 +913,7 @@ describe("atomic node batch store consumer", () => {
 });
 
 // ============================================================
-// Item E2-3: the composition gates on the fused node-create programs.
+// Item E.2: the composition gates on the fused node-create programs.
 //
 // `resolveAtomicNodeBatchExecutor` and `resolveAtomicNodeReplacementBatchProgram`
 // each decline (return `undefined`) for a composition dimension a fused
@@ -954,7 +954,7 @@ const compositionOptionalGraph = defineGraph({
   ontology: [partOf(CompPart, CompWhole, { via: compPartOf })],
 });
 
-describe("atomic node batch eligibility: composition gate (item E2-3)", () => {
+describe("atomic node batch eligibility: composition gate (item E.2)", () => {
   it("resolveAtomicNodeBatchExecutor declines a required-existence kind with no partOf", () => {
     const backend = rootBackend(false);
     markAtomicRoot(backend);

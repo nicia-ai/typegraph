@@ -205,9 +205,9 @@ function previewViolations(
  * {@link requiredCompositionPartKinds} (`../store/operations/composition-create`)
  * rather than re-spelling "which part kinds does a required existence pair
  * name" a second time, so this probe can never admit an `existence:
- * "optional"` pair's part kind (which can never violate `compositionExistence`
- * — see ruling E2-6) or miss a subclass of a declared required part kind
- * (ruling E2-5) — reads {@link readCompositionUnattachedParts} for the
+ * "optional"` pair's part kind (which can never violate `compositionExistence`)
+ * or miss a subclass of a declared required part kind — reads
+ * {@link readCompositionUnattachedParts} for the
  * result, dedupes, one owner of "which part kinds does this probe's
  * edge-kind list name", shared by nothing else because this preflight is
  * its only caller.

@@ -244,7 +244,7 @@ describe("generated edge batch store consumer", () => {
     ).toBeUndefined();
   });
 
-  it("declines a composition edge kind realizing a required-existence part (item E2-3)", () => {
+  it("declines a composition edge kind realizing a required-existence part (item E.2)", () => {
     // `assertCompositionExistencePreserved` reads the part row under the
     // held write lock — a decision this read-free fused command cannot
     // express, so a required-existence composition edge kind must take the
@@ -305,7 +305,7 @@ describe("generated edge batch store consumer", () => {
   // (src/store/operations/atomic-mutation-program.ts). This assertion then
   // fails.
 
-  it("accepts a composition edge kind whose part is optional-existence (item E2-3)", () => {
+  it("accepts a composition edge kind whose part is optional-existence (item E.2)", () => {
     const AedOptPart = defineNode("AedOptPart", { schema: z.object({}) });
     const AedOptWhole = defineNode("AedOptWhole", { schema: z.object({}) });
     const aedOptPartOf = defineEdge("aedOptPartOf", { schema: z.object({}) });
