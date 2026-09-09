@@ -172,6 +172,17 @@ export type OntologyDataProbe =
        * restricted to these edge kinds.
        */
       edgeKinds: readonly string[];
+    }>
+  | Readonly<{
+      kind: "compositionRequiredWhole";
+      /**
+       * The realizing (`via`) edge kinds of the `partOf`/`hasPart` pairs
+       * added this commit that ALSO declare `existence: "required"`. Item
+       * E.2: `prepareSchemaTighteningPreflight` audits these edge kinds'
+       * required part kinds for a live part with no live whole — the same
+       * delta-scoping discipline as `compositionSingleWhole`.
+       */
+      edgeKinds: readonly string[];
     }>;
 
 /**
@@ -536,6 +547,7 @@ function isKnownMetaEdgeName(name: string): name is MetaEdgeName {
 function classifyKnownRelationSeverity(
   direction: "added" | "removed",
   metaEdge: MetaEdgeName,
+  relation: SerializedOntologyRelation,
 ): RelationSeverity {
   switch (metaEdge) {
     case META_EDGE_DISJOINT_WITH: {
@@ -559,9 +571,24 @@ function classifyKnownRelationSeverity(
     }
     case META_EDGE_PART_OF:
     case META_EDGE_HAS_PART: {
-      return direction === "added" ?
-          { severity: "warning", probeKinds: ["compositionSingleWhole"] }
-        : { severity: "breaking", probeKinds: [] };
+      if (direction !== "added") {
+        return { severity: "breaking", probeKinds: [] };
+      }
+      // Item E.2: `existence` is folded into `relationMapKey`, so flipping
+      // an already-declared pair to `"required"` diffs as remove + add
+      // rather than vanishing — it lands HERE, on the `added` arm, same as
+      // a brand-new pair. Under-probed by `compositionSingleWhole` alone:
+      // the added pair's data must ALSO be checked for a live part with no
+      // live whole, which `compositionRequiredWhole` does. Removing
+      // `existence: "required"` (or removing the pair) is a LOOSENING — the
+      // `removed` arm above stays unprobed.
+      return {
+        severity: "warning",
+        probeKinds:
+          relation.existence === "required" ?
+            ["compositionSingleWhole", "compositionRequiredWhole"]
+          : ["compositionSingleWhole"],
+      };
     }
     case META_EDGE_BROADER:
     case META_EDGE_NARROWER:
@@ -578,15 +605,15 @@ function classifyKnownRelationSeverity(
 
 function classifyRelationSeverity(
   direction: "added" | "removed",
-  metaEdge: string,
+  relation: SerializedOntologyRelation,
 ): RelationSeverity {
-  if (!isKnownMetaEdgeName(metaEdge)) {
+  if (!isKnownMetaEdgeName(relation.metaEdge)) {
     // Custom / unregistered meta-edge name: reaches no arm of
     // `collectOntologyRelations`, so it feeds no closure and drives no
     // write-path decision.
     return { severity: "safe", probeKinds: [] };
   }
-  return classifyKnownRelationSeverity(direction, metaEdge);
+  return classifyKnownRelationSeverity(direction, relation.metaEdge, relation);
 }
 
 // ============================================================
@@ -615,9 +642,10 @@ function buildProbe(
     case "edgeEndpointAssignability": {
       return { kind, allowances: context.endpointAllowances };
     }
-    case "compositionSingleWhole": {
+    case "compositionSingleWhole":
+    case "compositionRequiredWhole": {
       // `relation.via` is always present here: `classifyKnownRelationSeverity`
-      // only attaches this probe kind to a `partOf`/`hasPart` relation, and
+      // only attaches either probe kind to a `partOf`/`hasPart` relation, and
       // R3 (schema load) already refuses one persisted without `via` before
       // this classifier ever sees it.
       return {
@@ -656,7 +684,7 @@ function classifyRelation(
 
   const { severity, probeKinds } = classifyRelationSeverity(
     direction,
-    relation.metaEdge,
+    relation,
   );
   const probes = probeKinds.map((kind) => buildProbe(kind, context, relation));
 
@@ -794,7 +822,7 @@ function groupKey(group: UniquenessComponentProbeGroup): string {
  *
  * Deterministic order: `nodeDisjointness`, `nodeUniquenessComponent`, then
  * `edgeEndpointAssignability`, then `edgeAcyclicity`, then
- * `compositionSingleWhole`.
+ * `compositionSingleWhole`, then `compositionRequiredWhole`.
  */
 export function ontologyTighteningProbes(
   changes: readonly OntologyChange[],
@@ -804,6 +832,7 @@ export function ontologyTighteningProbes(
   const allowances = new Map<string, EdgeEndpointAllowance>();
   const acyclicEdgeKinds = new Set<string>();
   const compositionEdgeKinds = new Set<string>();
+  const compositionRequiredWholeEdgeKinds = new Set<string>();
 
   for (const change of changes) {
     for (const probe of change.probes ?? []) {
@@ -830,6 +859,11 @@ export function ontologyTighteningProbes(
         case "compositionSingleWhole": {
           for (const edgeKind of probe.edgeKinds)
             compositionEdgeKinds.add(edgeKind);
+          break;
+        }
+        case "compositionRequiredWhole": {
+          for (const edgeKind of probe.edgeKinds)
+            compositionRequiredWholeEdgeKinds.add(edgeKind);
           break;
         }
       }
@@ -871,6 +905,14 @@ export function ontologyTighteningProbes(
     result.push({
       kind: "compositionSingleWhole",
       edgeKinds: [...compositionEdgeKinds].toSorted(compareStrings),
+    });
+  }
+  if (compositionRequiredWholeEdgeKinds.size > 0) {
+    result.push({
+      kind: "compositionRequiredWhole",
+      edgeKinds: [...compositionRequiredWholeEdgeKinds].toSorted(
+        compareStrings,
+      ),
     });
   }
   return result;
