@@ -64,7 +64,6 @@ export {
   readProposedEdgeAcyclicityViolations,
 } from "../store/acyclicity";
 export { type UniqueIntrospection } from "../store/introspect";
-export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
