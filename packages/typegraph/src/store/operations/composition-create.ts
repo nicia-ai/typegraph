@@ -34,8 +34,7 @@ import {
   type CreateEdgeInput,
   type CreateNodeInput,
 } from "../types";
-
-
+import { compositionEdgeCounts } from "./composition-cascade";
 
 /**
  * What one node create owes on the composition axis: the declared pair and
@@ -170,6 +169,38 @@ export function compositionEdgeHasRequiredExistencePart(
 }
 
 /**
+ * THE answer to "does this composition edge row attach its part to a live
+ * whole AT THE CURRENT READ INSTANT" — ignoring `deleted_at`, valid-time is
+ * everything `assertCompositionExistencePreserved`, `findLiveCompositionWhole`
+ * (and, through it, the import assertion and `verifyConstraintFences`'s
+ * `compositionExistence` audit) share, so the four never re-spell it apart
+ * and drift.
+ *
+ * Reuses {@link compositionEdgeCounts} (`./composition-cascade.ts`), the one
+ * owner of "does a composition edge row still count as a live membership
+ * under its pair's declared whole-side population" — that predicate already
+ * IS the temporal notion this one needs: a `population: "one"` binding
+ * persists for the row's entire life (ended or not), while a
+ * `population: "oneActive"` binding ends the moment the window closes. This
+ * function adds only the `deleted_at` gate `compositionEdgeCounts`'s callers
+ * are each individually documented to apply themselves.
+ */
+function edgeCurrentlyAttachesPart(
+  registry: KindRegistry,
+  partKind: string,
+  edge: Pick<EdgeRow, "kind" | "deleted_at" | "valid_to">,
+): boolean {
+  if (edge.deleted_at !== undefined) return false;
+  const partSide = registry.compositionPartSide(edge.kind);
+  if (partSide === undefined) return false;
+  const population = requireDefined(
+    registry.compositionPopulation(partKind),
+    `compositionPopulation(${partKind}) is undefined for a row on a known composition edge kind`,
+  );
+  return compositionEdgeCounts({ partSide, population }, edge);
+}
+
+/**
  * THE refusal every path that would separate a live required part from its
  * whole raises: ending a composition edge's open window, soft-deleting it,
  * or hard-deleting it.
@@ -213,6 +244,16 @@ export async function assertCompositionExistencePreserved(
 
   if (ctx.registry.compositionExistence(part.kind) !== "required") return;
 
+  // A row that no longer currently attaches (an already-ended
+  // `population: "oneActive"` window) has nothing left to detach: the
+  // moment of detachment already passed when the window closed, so this
+  // write — ending an already-ended window again, or soft-/hard-deleting a
+  // row that is no longer an attachment — cannot be what orphans the part.
+  // Reads the SAME predicate `findLiveCompositionWhole` reads, so a row this
+  // refusal protects is never invisible to `verifyConstraintFences`, and a
+  // row that audit already reports unattached is never refused here.
+  if (!edgeCurrentlyAttachesPart(ctx.registry, part.kind, edge)) return;
+
   const partRow = await backend.getNode(ctx.graphId, part.kind, part.id);
   const partIsLive = partRow !== undefined && partRow.deleted_at === undefined;
   if (!partIsLive) return;
@@ -246,7 +287,6 @@ export async function findLiveCompositionWhole(
     nodeId: concreteId,
   });
   for (const edge of connected) {
-    if (edge.deleted_at !== undefined) continue;
     const partSide = registry.compositionPartSide(edge.kind);
     if (partSide === undefined) continue;
     const isPartHere =
@@ -254,6 +294,7 @@ export async function findLiveCompositionWhole(
         edge.from_kind === concreteKind && edge.from_id === concreteId
       : edge.to_kind === concreteKind && edge.to_id === concreteId;
     if (!isPartHere) continue;
+    if (!edgeCurrentlyAttachesPart(registry, concreteKind, edge)) continue;
     return partSide === "from" ?
         { kind: edge.to_kind, id: edge.to_id }
       : { kind: edge.from_kind, id: edge.from_id };
@@ -261,14 +302,25 @@ export async function findLiveCompositionWhole(
   return undefined;
 }
 
-/** Every concrete node kind the proposed/live registry declares a required-existence composition part. */
+/**
+ * Every concrete node kind the proposed/live registry declares a
+ * required-existence composition part — expanded through
+ * `expandSubClasses` so a SUBCLASS of a declared required part kind (which
+ * `resolveCompositionCreate` already refuses to create without a whole, via
+ * `isAssignableTo`) is scanned too. A pair's `partKind` names the kind the
+ * ontology was declared against; a live row of a subclass never declared
+ * directly is exactly as required-and-orphanable as one of the declared
+ * kind itself.
+ */
 export function requiredCompositionPartKinds(
   registry: KindRegistry,
 ): readonly string[] {
   const partKinds = new Set<string>();
   for (const pair of registry.compositionRelation().pairs) {
     if (registry.compositionExistence(pair.partKind) === "required") {
-      partKinds.add(pair.partKind);
+      for (const concreteKind of registry.expandSubClasses(pair.partKind)) {
+        partKinds.add(concreteKind);
+      }
     }
   }
   return [...partKinds];
@@ -331,5 +383,3 @@ export async function readCompositionUnattachedParts(
   }
   return unattached;
 }
-
-export {type CompositionWholeRef} from "../types";

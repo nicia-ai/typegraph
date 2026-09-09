@@ -264,7 +264,11 @@ import {
   writeResultAlwaysChanges,
 } from "./write-executor";
 import { type NodeUpdateFences } from "./write-fences";
-import { mixedWritePlan, nodeWritePlan } from "./write-plan";
+import {
+  mixedBatchWritePlan,
+  mixedWritePlan,
+  nodeWritePlan,
+} from "./write-plan";
 import {
   type NodeCreateWork,
   type NodeWriteSession,
@@ -2794,6 +2798,10 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       projectionFusionEligible &&
       supportsNodeInsertProjections(target, projections);
 
+    // Item E2-14: reads `prepared.insertParams`, the SAME source the batch
+    // paths read, rather than `input` directly — one owner for "what
+    // validity window does the composition edge inherit from its part",
+    // shared by every create shape.
     const attachCompositionEdge = (): Promise<void> =>
       attachCompositionCreateEdge(
         ctx,
@@ -2803,10 +2811,12 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         compositionWork,
         id,
         {
-          ...(input.validFrom === undefined ?
+          ...(prepared.insertParams.validFrom === undefined ?
             {}
-          : { validFrom: input.validFrom }),
-          ...(input.validTo === undefined ? {} : { validTo: input.validTo }),
+          : { validFrom: prepared.insertParams.validFrom }),
+          ...(prepared.insertParams.validTo === undefined ?
+            {}
+          : { validTo: prepared.insertParams.validTo }),
         },
       );
 
@@ -3133,19 +3143,18 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 
   await runWritePlan(
     nodeWritePlanContext(ctx),
-    mixedWritePlan(
-      nodeBatchConstraintProbes(ctx, inputs, "create").find(
-        (probe) => probe !== undefined,
-      ) ??
-        compositionWorks
+    mixedBatchWritePlan(
+      [
+        ...nodeBatchConstraintProbes(ctx, inputs, "create"),
+        ...compositionWorks
           .filter((work): work is CompositionCreateWork => work !== undefined)
           .map((work) =>
             edgeWriteNeedsConstraintFence({
               ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
               composition: true,
             }),
-          )
-          .find((probe) => probe !== undefined),
+          ),
+      ],
       nodeBatchCreateRequiresIdentityLock(ctx, inputs),
     ),
     backend,
@@ -3313,19 +3322,18 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 
   return runWritePlan(
     nodeWritePlanContext(ctx),
-    mixedWritePlan(
-      nodeBatchConstraintProbes(ctx, inputs, "create").find(
-        (probe) => probe !== undefined,
-      ) ??
-        compositionWorks
+    mixedBatchWritePlan(
+      [
+        ...nodeBatchConstraintProbes(ctx, inputs, "create"),
+        ...compositionWorks
           .filter((work): work is CompositionCreateWork => work !== undefined)
           .map((work) =>
             edgeWriteNeedsConstraintFence({
               ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
               composition: true,
             }),
-          )
-          .find((probe) => probe !== undefined),
+          ),
+      ],
       nodeRequiresIdentityLock(ctx),
     ),
     backend,
@@ -5553,7 +5561,20 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     // Step 6: Resolve within-batch duplicates by copying the first occurrence's result
     for (const { index, sourceIndex } of duplicateOf) {
       const sourceResult = requireDefined(results[sourceIndex]);
-      if (partOf !== undefined) {
+      // Item E2-8: a duplicate of a row THIS SAME CALL created or
+      // resurrected already had the caller's stated `partOf` honored at the
+      // source occurrence (`resolveCompositionCreate`'s work, applied when
+      // that row was written) — refusing the duplicate here would refuse
+      // the very whole this call itself just applied. The ambiguity
+      // `refuseExistingPartOf` exists to catch is real only against a row
+      // this call did NOT just place: `"found"` (pre-existing, untouched)
+      // and `"updated"` (pre-existing, props changed) both predate this
+      // call's stated `partOf` and so still refuse it.
+      if (
+        partOf !== undefined &&
+        sourceResult.action !== "created" &&
+        sourceResult.action !== "resurrected"
+      ) {
         await refuseExistingPartOf(
           ctx,
           backend,

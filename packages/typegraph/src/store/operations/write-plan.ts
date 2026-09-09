@@ -101,3 +101,27 @@ export function mixedWritePlan(
 ): WritePlan<"mixed"> {
   return { entity: "mixed", constraintProbe, requiresIdentityLock };
 }
+
+/**
+ * The plan for a batched mixed (node + composition edge) write — item E2-13.
+ *
+ * The SAME "a batch is constrained when ANY member is" fold
+ * {@link nodeBatchWritePlan} owns, widened to `entity: "mixed"` for a
+ * composition batch create: `executeNodeCreateBatch` and
+ * `executeNodeCreateNoReturnBatch` (`node-operations.ts`) each fold TWO
+ * probe sources — the node batch's own constraint probes and the composition
+ * edges the batch's `partOf`/required-existence items owe — into one
+ * verdict. Passing both probe arrays through ONE combined list keeps that a
+ * single fold instead of two independent `.find()` calls the two call sites
+ * would otherwise each re-spell.
+ */
+export function mixedBatchWritePlan(
+  constraintProbes: readonly (ConstraintFenceReason | undefined)[],
+  requiresIdentityLock: boolean,
+): WritePlan<"mixed"> {
+  return {
+    entity: "mixed",
+    constraintProbe: constraintProbes.find((probe) => probe !== undefined),
+    requiresIdentityLock,
+  };
+}
