@@ -37,6 +37,68 @@ const CtAnthology = defineNode("CtAnthology", { schema: z.object({}) });
 const ctChapterOf = defineEdge("ctChapterOf", { schema: z.object({}) });
 const ctIncludedIn = defineEdge("ctIncludedIn", { schema: z.object({}) });
 
+// Item E2-1: flipping an already-declared pair's `existence`.
+const CtSegment = defineNode("CtSegment", { schema: z.object({}) });
+const CtEpisode = defineNode("CtEpisode", { schema: z.object({}) });
+const ctSegmentOf = defineEdge("ctSegmentOf", { schema: z.object({}) });
+
+function buildFlipGraph(id: string, required: boolean) {
+  return defineGraph({
+    id,
+    nodes: { CtSegment: { type: CtSegment }, CtEpisode: { type: CtEpisode } },
+    edges: {
+      ctSegmentOf: {
+        type: ctSegmentOf,
+        from: [CtSegment],
+        to: [CtEpisode],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      partOf(CtSegment, CtEpisode, {
+        via: ctSegmentOf,
+        ...(required ? { existence: "required" as const } : {}),
+      }),
+    ],
+  });
+}
+
+// Item E2-6: two DIFFERENT part kinds sharing one realizing edge kind, only
+// one of which is tightened to `existence: "required"`.
+const CtTag = defineNode("CtTag", { schema: z.object({}) });
+const CtClip = defineNode("CtClip", { schema: z.object({}) });
+const CtEpisode2 = defineNode("CtEpisode2", { schema: z.object({}) });
+const ctSharedOf = defineEdge("ctSharedOf", { schema: z.object({}) });
+
+function buildSharedEdgeGraph(id: string, clipRequired: boolean) {
+  return defineGraph({
+    id,
+    nodes: {
+      CtTag: { type: CtTag },
+      CtClip: { type: CtClip },
+      CtEpisode2: { type: CtEpisode2 },
+    },
+    edges: {
+      ctSharedOf: {
+        type: ctSharedOf,
+        from: [CtTag, CtClip],
+        to: [CtEpisode2],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      // CtTag stays `existence: "optional"` across both versions — an
+      // unattached CtTag is legal forever and must never block a commit
+      // that only tightens its edge-kind sibling, CtClip.
+      partOf(CtTag, CtEpisode2, { via: ctSharedOf }),
+      partOf(CtClip, CtEpisode2, {
+        via: ctSharedOf,
+        ...(clipRequired ? { existence: "required" as const } : {}),
+      }),
+    ],
+  });
+}
+
 function buildGraph(id: string, composed: boolean) {
   return defineGraph({
     id,
@@ -144,5 +206,75 @@ export function registerCompositionTighteningIntegrationTests(
         upgradedStore.edges.ctIncludedIn.create(chapter, anthology, {}),
       ).rejects.toMatchObject({ code: "COMPOSITION_WHOLE_OCCUPIED" });
     });
+
+    it('item E2-1: flipping an already-declared pair to existence: "required" refuses a dirty graph', async () => {
+      const id = "composition_tightening_flip_required";
+      const store = await context.createStore(buildFlipGraph(id, false));
+      const orphan = await store.nodes.CtSegment.create({});
+
+      // The flip diffs as remove (old, `existence: "optional"`) + add (new,
+      // `existence: "required"`) — the REMOVE half is unconditionally
+      // `breaking` (dropping a composition declaration is a
+      // read/write-semantics change), so this reaches the data preflight
+      // only through the explicit `migrateSchema()` path, exactly like any
+      // other breaking change. `ensureSchema`/`createAdapterStoreWithSchema`
+      // would refuse it as `"breaking-change"` before ever probing the data.
+      const error = await migrateSchema(
+        context.getBackend(),
+        buildFlipGraph(id, true),
+        await activeVersion(context, id),
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(MigrationError);
+      const details = (error as MigrationError).details;
+      if (details.reason !== "ontology-tightening-violated") {
+        throw new Error(
+          `expected ontology-tightening-violated, got ${details.reason}`,
+        );
+      }
+      const violation = details.violations.find(
+        (candidate) => candidate.family === "compositionExistence",
+      );
+      expect(violation).toBeDefined();
+      if (violation?.family !== "compositionExistence") {
+        throw new Error("expected a compositionExistence violation");
+      }
+      expect(violation.partKind).toBe("CtSegment");
+      expect(violation.parts).toEqual([{ kind: "CtSegment", id: orphan.id }]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK: drop `relation.existence ?? ""` from `relationMapKey`
+    // (src/schema/ontology-change.ts). The flip then keys identically
+    // before/after, `classifyOntologyChanges` sees no relation change at
+    // all, and the migration above succeeds — `activeVersion` reads 2
+    // instead of 1.
+
+    it("item E2-6: tightening one part kind never blocks on an unrelated OPTIONAL sibling sharing its edge kind", async () => {
+      const id = "composition_tightening_shared_edge_kind";
+      const store = await context.createStore(buildSharedEdgeGraph(id, false));
+      // Legal forever: CtTag's existence stays "optional" in both versions.
+      await store.nodes.CtTag.create({});
+
+      const version = await migrateSchema(
+        context.getBackend(),
+        buildSharedEdgeGraph(id, true),
+        await activeVersion(context, id),
+      );
+      expect(version).toBe(2);
+
+      const [upgradedStore] = await createAdapterStoreWithSchema(
+        buildSharedEdgeGraph(id, true),
+        context.getBackend(),
+      );
+      await expect(upgradedStore.nodes.CtClip.create({})).rejects.toThrow(
+        /required/i,
+      );
+    });
+    // MUTATION CHECK: in `readCompositionUnattachedPartsForEdgeKinds`
+    // (src/schema/tightening-preflight.ts), drop the
+    // `requiredPartKinds.has(concreteKind)` filter (scan every pair sharing
+    // the probe's edge kinds, not only the required ones). The unattached
+    // CtTag planted above then makes the migration refuse, and `migrateSchema`
+    // throws instead of returning `2`.
   });
 }

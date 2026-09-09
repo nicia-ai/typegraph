@@ -32,7 +32,10 @@ import {
   type ConstraintFenceViolation,
   uniquenessAxisGroupFor,
 } from "../store/claims/verify";
-import { readCompositionUnattachedParts } from "../store/operations/composition-create";
+import {
+  readCompositionUnattachedParts,
+  requiredCompositionPartKinds,
+} from "../store/operations/composition-create";
 import { requireDefined } from "../utils/presence";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
@@ -197,11 +200,17 @@ function previewViolations(
 }
 
 /**
- * Item E.2. Resolves the delta's `via` edge kinds to their DECLARED part
- * kinds against the PROPOSED registry, dedupes, and reads
- * {@link readCompositionUnattachedParts} for them — one owner of "which part
- * kinds does this probe's edge-kind list name", shared by nothing else
- * because this preflight is its only caller.
+ * Item E.2. Resolves the delta's `via` edge kinds to their REQUIRED-existence
+ * part kinds against the PROPOSED registry — reusing
+ * {@link requiredCompositionPartKinds} (`../store/operations/composition-create`)
+ * rather than re-spelling "which part kinds does a required existence pair
+ * name" a second time, so this probe can never admit an `existence:
+ * "optional"` pair's part kind (which can never violate `compositionExistence`
+ * — see ruling E2-6) or miss a subclass of a declared required part kind
+ * (ruling E2-5) — reads {@link readCompositionUnattachedParts} for the
+ * result, dedupes, one owner of "which part kinds does this probe's
+ * edge-kind list name", shared by nothing else because this preflight is
+ * its only caller.
  */
 async function readCompositionUnattachedPartsForEdgeKinds(
   proposedRegistry: KindRegistry,
@@ -209,10 +218,16 @@ async function readCompositionUnattachedPartsForEdgeKinds(
   graphId: string,
   edgeKinds: readonly string[],
 ): Promise<readonly ConstraintFenceViolation[]> {
+  const requiredPartKinds = new Set(
+    requiredCompositionPartKinds(proposedRegistry),
+  );
   const partKinds = new Set<string>();
   for (const pair of proposedRegistry.compositionRelation().pairs) {
-    if (edgeKinds.includes(pair.viaEdgeKind)) {
-      partKinds.add(pair.partKind);
+    if (!edgeKinds.includes(pair.viaEdgeKind)) continue;
+    for (const concreteKind of proposedRegistry.expandSubClasses(
+      pair.partKind,
+    )) {
+      if (requiredPartKinds.has(concreteKind)) partKinds.add(concreteKind);
     }
   }
   if (partKinds.size === 0) return [];

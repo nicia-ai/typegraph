@@ -251,7 +251,13 @@ function relationDescription(relation: SerializedOntologyRelation): string {
  * edge) must diff as remove + add rather than disappearing as a no-op, so
  * both `via` and `partSide` are folded into the key alongside the three
  * original fields, through the same injective tuple encoding the claim keys
- * use for exactly this reason (`src/utils/tuple-key.ts`).
+ * use for exactly this reason (`src/utils/tuple-key.ts`). `existence` is
+ * folded in too: flipping an already-declared pair's `existence` from
+ * `"optional"` (or unset) to `"required"` tightens the pair against
+ * existing data exactly like a brand-new required pair does, so it must
+ * diff as remove + add rather than disappearing as a no-op that skips
+ * `classifyKnownRelationSeverity`'s `added` arm entirely — see the comment
+ * there.
  */
 function relationMapKey(relation: SerializedOntologyRelation): string {
   return encodeTupleKey([
@@ -260,6 +266,7 @@ function relationMapKey(relation: SerializedOntologyRelation): string {
     relation.to,
     relation.via ?? "",
     relation.partSide ?? "",
+    relation.existence ?? "",
   ]);
 }
 
