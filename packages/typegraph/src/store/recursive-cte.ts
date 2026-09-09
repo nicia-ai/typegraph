@@ -305,6 +305,64 @@ function reversedForEdgeKind(
   );
 }
 
+/** {@link orientedEndpointColumns}'s return shape: the row's "part" (`match`) and "whole" (`next`) endpoint columns. */
+type OrientedEndpointColumns = Readonly<{
+  matchKind: SqlFragment;
+  matchId: SqlFragment;
+  nextKind: SqlFragment;
+  nextId: SqlFragment;
+}>;
+
+/**
+ * The ONE owner of "which stored endpoint (`from` or `to`) is the relation's
+ * part (`match`) and which is the whole (`next`), for a table-aliased edges
+ * row." Every member forward — the only shape D.2 itself ever produces — is
+ * a plain column pair with no `CASE`, byte-identical to a hand-written
+ * `SELECT` (the benchmark's index-only-scan assumption, §7.6, depends on
+ * this). A relation with a reversed member (item E) instead needs a `CASE`
+ * on the row's own `kind` to pick the pair per row.
+ *
+ * `buildAcyclicitySeed`'s `"relation"` form, `buildLiveEdgeCandidates`, and
+ * `buildAcyclicityAncestryStepDirect`'s next-node projection all call this
+ * instead of re-spelling the `CASE` — see AGENTS.md "one predicate, one
+ * owner". `buildAcyclicityAncestryStepDirect`'s JOIN predicate is the one
+ * caller that CANNOT use `matchKind`/`matchId` here: a `CASE`-wrapped
+ * equality is not sargable, and that predicate must stay an OR of two
+ * plain-column arms for SQLite's OR-optimization / PostgreSQL's `BitmapOr`
+ * to seek both `typegraph_edges_from_idx` and `typegraph_edges_to_idx` (see
+ * that function's own docblock). `proposedSeedRow` answers the identical
+ * question at the single-edge, JS-value level via {@link reversedForEdgeKind}
+ * rather than a `SqlFragment` — both trace back to `member.reversed` on
+ * `members` with no independent re-derivation of the decision.
+ */
+function orientedEndpointColumns(
+  members: readonly AcyclicRelationMember[],
+  alias: string,
+): OrientedEndpointColumns {
+  const { forward, all } = kindKeys(members);
+  const fromKind = sql.raw(`${alias}.from_kind`);
+  const fromId = sql.raw(`${alias}.from_id`);
+  const toKind = sql.raw(`${alias}.to_kind`);
+  const toId = sql.raw(`${alias}.to_id`);
+
+  if (forward.length === all.length) {
+    return {
+      matchKind: fromKind,
+      matchId: fromId,
+      nextKind: toKind,
+      nextId: toId,
+    };
+  }
+
+  const isForwardRow = compileKindFilter(sql.raw(`${alias}.kind`), forward);
+  return {
+    matchKind: sql`CASE WHEN ${isForwardRow} THEN ${fromKind} ELSE ${toKind} END`,
+    matchId: sql`CASE WHEN ${isForwardRow} THEN ${fromId} ELSE ${toId} END`,
+    nextKind: sql`CASE WHEN ${isForwardRow} THEN ${toKind} ELSE ${fromKind} END`,
+    nextId: sql`CASE WHEN ${isForwardRow} THEN ${toId} ELSE ${fromId} END`,
+  };
+}
+
 /** One literal `seed` row for the `"proposed"` form, oriented part->whole. */
 function proposedSeedRow(
   edge: ProposedRelationEdge,
@@ -339,29 +397,13 @@ function buildAcyclicitySeed(
     const rows = seed.edges.map((edge) => proposedSeedRow(edge, members));
     return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES ${sql.join(rows, sql`, `)})`;
   }
-  const { forward, all } = kindKeys(members);
+  const { all } = kindKeys(members);
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);
-  const isForwardRow =
-    forward.length === all.length ?
-      undefined
-    : compileKindFilter(sql.raw("e.kind"), forward);
-  const fromKindColumn =
-    isForwardRow === undefined ?
-      sql`e.from_kind`
-    : sql`CASE WHEN ${isForwardRow} THEN e.from_kind ELSE e.to_kind END`;
-  const fromIdColumn =
-    isForwardRow === undefined ?
-      sql`e.from_id`
-    : sql`CASE WHEN ${isForwardRow} THEN e.from_id ELSE e.to_id END`;
-  const toKindColumn =
-    isForwardRow === undefined ?
-      sql`e.to_kind`
-    : sql`CASE WHEN ${isForwardRow} THEN e.to_kind ELSE e.from_kind END`;
-  const toIdColumn =
-    isForwardRow === undefined ?
-      sql`e.to_id`
-    : sql`CASE WHEN ${isForwardRow} THEN e.to_id ELSE e.from_id END`;
-  return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (SELECT e.id, ${fromKindColumn}, ${fromIdColumn}, ${toKindColumn}, ${toIdColumn} FROM ${schema.edgesTable} e WHERE e.graph_id = ${graphId} AND ${edgeKindFilter} AND e.deleted_at IS NULL)`;
+  const { matchKind, matchId, nextKind, nextId } = orientedEndpointColumns(
+    members,
+    "e",
+  );
+  return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (SELECT e.id, ${matchKind}, ${matchId}, ${nextKind}, ${nextId} FROM ${schema.edgesTable} e WHERE e.graph_id = ${graphId} AND ${edgeKindFilter} AND e.deleted_at IS NULL)`;
 }
 
 /**
@@ -378,7 +420,7 @@ function buildLiveEdgeCandidates(
   graphId: string,
   schema: SqlSchema,
 ): SqlFragment {
-  const { forward, reversed, all } = kindKeys(members);
+  const { all } = kindKeys(members);
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);
   const commonWhere = [
     sql`e.graph_id = ${graphId}`,
@@ -386,23 +428,19 @@ function buildLiveEdgeCandidates(
     sql`e.deleted_at IS NULL`,
   ];
 
-  // The common case, and the only one D.2 itself ever produces: every member
-  // forward. No CASE and no OR, so this shape is byte-identical to what the
-  // benchmark's index-only scan assumption (§7.6) requires.
-  if (reversed.length === 0) {
-    return sql`SELECT e.from_kind, e.from_id, e.to_kind, e.to_id FROM ${schema.edgesTable} e WHERE ${sql.join(commonWhere, sql` AND `)}`;
-  }
-
-  // A relation composed of both part->whole and whole->part realizing edges
-  // (item E). Each member still seeks its OWN natural endpoint column; the
-  // CASE only chooses which pair of columns is the "part" and which is the
-  // "whole" per row.
-  const forwardFilter = compileKindFilter(sql.raw("e.kind"), forward);
-  const fromKindColumn = sql`CASE WHEN ${forwardFilter} THEN e.from_kind ELSE e.to_kind END`;
-  const fromIdColumn = sql`CASE WHEN ${forwardFilter} THEN e.from_id ELSE e.to_id END`;
-  const toKindColumn = sql`CASE WHEN ${forwardFilter} THEN e.to_kind ELSE e.from_kind END`;
-  const toIdColumn = sql`CASE WHEN ${forwardFilter} THEN e.to_id ELSE e.from_id END`;
-  return sql`SELECT ${fromKindColumn}, ${fromIdColumn}, ${toKindColumn}, ${toIdColumn} FROM ${schema.edgesTable} e WHERE ${sql.join(commonWhere, sql` AND `)}`;
+  // `orientedEndpointColumns` returns plain columns (no CASE, no OR) when
+  // every member is forward — the common case, and the only one D.2 itself
+  // ever produces — so this stays byte-identical to what the benchmark's
+  // index-only scan assumption (§7.6) requires. A relation composed of both
+  // part->whole and whole->part realizing edges (item E) instead gets a
+  // CASE picking which pair of columns is the "part" and which is the
+  // "whole" per row; each member still seeks its OWN natural endpoint
+  // column.
+  const { matchKind, matchId, nextKind, nextId } = orientedEndpointColumns(
+    members,
+    "e",
+  );
+  return sql`SELECT ${matchKind}, ${matchId}, ${nextKind}, ${nextId} FROM ${schema.edgesTable} e WHERE ${sql.join(commonWhere, sql` AND `)}`;
 }
 
 /**
@@ -499,29 +537,38 @@ function buildAcyclicityAncestryStepDirect(
 ): SqlFragment {
   const { forward, reversed, all } = kindKeys(members);
   const commonWhere = [sql`e.graph_id = ${graphId}`, sql`e.deleted_at IS NULL`];
+  // The "next node" projection is shared via `orientedEndpointColumns`. The
+  // JOIN predicate below is NOT: see that function's docblock for why a
+  // CASE-wrapped equality can't stand in for the OR-of-arms shape here.
+  const { nextKind, nextId } = orientedEndpointColumns(members, "e");
 
   if (reversed.length === 0) {
     const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);
     const joinPredicate = sql`e.from_kind = a.node_kind AND e.from_id = a.node_id`;
     const whereClauses = [...commonWhere, edgeKindFilter];
     if (forceWorktableOuterJoinOrder) {
-      return sql`SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...whereClauses, joinPredicate], sql` AND `)}`;
+      return sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...whereClauses, joinPredicate], sql` AND `)}`;
     }
-    return sql`SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(whereClauses, sql` AND `)}`;
+    return sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(whereClauses, sql` AND `)}`;
   }
 
+  // A `CASE`-wrapped equality (`CASE WHEN ... END = a.node_kind`) is not
+  // sargable, so the JOIN predicate stays a hand-written OR of two
+  // plain-column, index-seekable arms rather than routing through
+  // `orientedEndpointColumns`'s `matchKind`/`matchId` — that's what lets
+  // SQLite's OR-optimization and PostgreSQL's `BitmapOr` seek both
+  // `typegraph_edges_from_idx` and `typegraph_edges_to_idx` in one step (see
+  // this function's own docblock above).
   const forwardFilter = compileKindFilter(sql.raw("e.kind"), forward);
   const reversedFilter = compileKindFilter(sql.raw("e.kind"), reversed);
   const forwardArm = sql`(${forwardFilter} AND e.from_kind = a.node_kind AND e.from_id = a.node_id)`;
   const reversedArm = sql`(${reversedFilter} AND e.to_kind = a.node_kind AND e.to_id = a.node_id)`;
   const joinPredicate = sql`(${forwardArm} OR ${reversedArm})`;
-  const toKindColumn = sql`CASE WHEN ${forwardFilter} THEN e.to_kind ELSE e.from_kind END`;
-  const toIdColumn = sql`CASE WHEN ${forwardFilter} THEN e.to_id ELSE e.from_id END`;
 
   if (forceWorktableOuterJoinOrder) {
-    return sql`SELECT a.origin_key, ${toKindColumn}, ${toIdColumn} FROM ancestry a CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...commonWhere, joinPredicate], sql` AND `)}`;
+    return sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...commonWhere, joinPredicate], sql` AND `)}`;
   }
-  return sql`SELECT a.origin_key, ${toKindColumn}, ${toIdColumn} FROM ancestry a JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(commonWhere, sql` AND `)}`;
+  return sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(commonWhere, sql` AND `)}`;
 }
 
 /** Everything {@link buildProbeBodyPlanned} and {@link buildProbeBodyDirect} need beyond their own seed form. */
