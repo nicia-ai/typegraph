@@ -35,6 +35,7 @@ import { buildKindRegistry } from "../src/registry";
 import {
   type CompositionIssueCode,
   inferCompositionPartSide,
+  partitionCompositionEdgeKindsByDirection,
 } from "../src/registry/composition-relation";
 import { type EdgeKindFacts } from "../src/registry/edge-kind-facts";
 import { matchingObject } from "./test-utils";
@@ -729,6 +730,76 @@ describe("two realizing edges over one (part, whole) pair (E-a-2)", () => {
       "edgeA",
       "edgeB",
     ]);
+  });
+});
+
+// ============================================================
+// partitionCompositionEdgeKindsByDirection — direct unit tests (Ed-r2-3)
+// ============================================================
+//
+// `QueryBuilder#navigateComposition` (parts()/wholes()) and
+// `buildSubgraphCompositionReachableCte` (subgraph({ composition: true }))
+// both call this one function instead of each re-spelling "resolve this
+// edge kind's part side, then its direction" — see the composition-relation
+// module doc comment on `partitionCompositionEdgeKindsByDirection`.
+
+describe("partitionCompositionEdgeKindsByDirection", () => {
+  const Podcast = defineNode("Podcast", { schema: emptySchema });
+  const Episode = defineNode("Episode", { schema: emptySchema });
+  const episodeOf = defineEdge("episodeOf", { schema: emptySchema });
+
+  const graph = defineGraph({
+    id: "composition-partition-direction",
+    nodes: { Podcast: { type: Podcast }, Episode: { type: Episode } },
+    edges: {
+      episodeOf: {
+        type: episodeOf,
+        from: [Episode],
+        to: [Podcast],
+        cardinality: "one",
+      },
+    },
+    ontology: [partOf(Episode, Podcast, { via: episodeOf })],
+  });
+  const registry = buildKindRegistry(graph);
+
+  it("partitions a part->whole edge kind reversed toward parts and forward toward wholes", () => {
+    expect(
+      partitionCompositionEdgeKindsByDirection(
+        registry,
+        ["episodeOf"],
+        "parts",
+      ),
+    ).toEqual({ outEdgeKinds: [], inEdgeKinds: ["episodeOf"] });
+    expect(
+      partitionCompositionEdgeKindsByDirection(
+        registry,
+        ["episodeOf"],
+        "wholes",
+      ),
+    ).toEqual({ outEdgeKinds: ["episodeOf"], inEdgeKinds: [] });
+  });
+
+  it("throws — never silently defaults — on an edge kind with no recorded part side", () => {
+    // MUTATION CHECK: before Ed-r2-3, `QueryBuilder#navigateComposition`
+    // silently defaulted a missing part side to "from"
+    // (`registry.compositionPartSide(edgeKind) ?? "from"`) while
+    // `buildSubgraphCompositionReachableCte` threw via `requireDefined` —
+    // one predicate, two disagreeing owners. Extracting both call sites
+    // onto this shared function is what makes them agree: reverting this
+    // function's `requireDefined` back to `?? "from"` makes this assertion
+    // fail (no throw; returns `{ outEdgeKinds: [], inEdgeKinds:
+    // ["notComposition"] }` instead, walking the wrong direction) —
+    // verified and reverted.
+    expect(() =>
+      partitionCompositionEdgeKindsByDirection(
+        registry,
+        ["notComposition"],
+        "parts",
+      ),
+    ).toThrow(
+      '"notComposition" is not a composition edge kind, but was returned by the registry\'s composition edge-kind reader.',
+    );
   });
 });
 

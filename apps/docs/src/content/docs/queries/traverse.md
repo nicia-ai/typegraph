@@ -290,6 +290,15 @@ from your ontology. To opt out for a single traversal, pass `expand: "none"`. To
 for all traversals, set `queryDefaults.traversalExpansion` in `createStore` options.
 :::
 
+## Composition Traversals
+
+When the edge you'd traverse is a declared [composition](/ontology#composition)
+relation (`partOf` / `hasPart`), `parts()` and `wholes()` are shorter than
+`traverse().recursive().to(...)` and stay correct as the relation grows across
+edge kinds and orientations — see [Recursive ▸ Composition Shortcuts: `parts()`
+and `wholes()`](/queries/recursive#composition-shortcuts-parts-and-wholes) for
+the full picture.
+
 ## Runtime-declared kinds
 
 For kinds and edges added at runtime via [graph

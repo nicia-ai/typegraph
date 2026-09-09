@@ -25,7 +25,11 @@ export {
 export { ExecutableQuery } from "./executable-query";
 export { executeOneStatementBatch } from "./one-statement-batch";
 export { PreparedQuery } from "./prepared-query";
-export { type IdentityTraversalOption, QueryBuilder } from "./query-builder";
+export {
+  type CompositionNavigationOptions,
+  type IdentityTraversalOption,
+  QueryBuilder,
+} from "./query-builder";
 export {
   createExecutableRelation,
   createProjectionRelation,

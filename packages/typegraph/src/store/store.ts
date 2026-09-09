@@ -3689,6 +3689,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       dialect: getDialect(this.#backend.dialect),
       schema: this.#schema,
       recordedReadBinding: this.#recordedReadBinding,
+      registry: this.#registry,
       options,
     });
   }

@@ -53,6 +53,7 @@ export type {
   BatchResults,
   CommonPropertyKeys,
   CompiledOneStatementRead,
+  CompositionNavigationOptions,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,

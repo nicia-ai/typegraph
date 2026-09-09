@@ -174,6 +174,17 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
       "buildReachableCte compiles a fixed/variable-length traversal into a bounded reachable set.",
   },
   {
+    // Same file and (post-refactor) identical source line as site B: both
+    // functions share `prepareReachableCte`'s base case and close with the
+    // same `WITH RECURSIVE reachable AS (...)` template, so this entry is
+    // the second occurrence the multiset comparison (siteKey) expects.
+    file: "store/recursive-cte.ts",
+    line: "return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;",
+    site: "G",
+    reason:
+      "buildDirectedReachableCte compiles the composition-navigation directed-groups traversal (Ed-01) into the same bounded reachable set, sharing buildReachableCte's base case via prepareReachableCte.",
+  },
+  {
     file: "identity/service-read.ts",
     line: "WITH RECURSIVE",
     site: "C",
@@ -545,7 +556,7 @@ describe("recursion inventory ratchet", () => {
   it("finds a case-, whitespace-, and escape-sequence-variant phrase a same-case single-space match would miss", () => {
     // A same-case, exact-single-space `String.indexOf` (the defect this
     // test guards against) matches none of these four lines, so a new
-    // seventh emission site written in any of these shapes would be
+    // eighth emission site written in any of these shapes would be
     // invisible in BOTH ratchet directions: no `undeclared` row (the
     // phrase never matches) and no `stale` row (the seven declared sites are
     // unaffected). The fourth shape — `\n` typed literally as two source
@@ -582,7 +593,7 @@ describe("recursion inventory ratchet", () => {
     // M-9, reproduced in miniature: the round-1 formulation counted FILES
     // holding the phrase with a comment-blind scan and compared that count
     // to 6. On this tree `grep -rl "WITH RECURSIVE" src --include=*.ts | wc
-    // -l` is 8 for exactly 6 real emission sites (EMISSION_SITES.length),
+    // -l` is 8 for exactly 7 real emission sites (EMISSION_SITES.length),
     // because two files hold the phrase only in a doc comment. This
     // fixture reproduces the shape in miniature: at least four comment
     // lines a raw, line-oriented scan cannot distinguish from code, and
