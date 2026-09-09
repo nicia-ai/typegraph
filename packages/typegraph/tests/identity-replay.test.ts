@@ -7,8 +7,8 @@
  * `identityReplay` / `identityTransitionsOf` are reached by module path
  * throughout most of this file (the fine-grained refusal/limit/watermark
  * cases below); the trailing "public facade surface" suite exercises the
- * PR-3 release surface, `store.identity.replay` / `transitionsOf` and their
- * transaction-facade counterparts, directly.
+ * public release surface, `store.identity.replay` / `transitionsOf` and
+ * their transaction-facade counterparts, directly.
  */
 import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
@@ -269,16 +269,15 @@ describe("identity replay", () => {
 });
 
 /**
- * PR-3's public release: `store.identity.replay` / `transitionsOf` are now
+ * The public release surface: `store.identity.replay` / `transitionsOf` are
  * the package's own facade methods (`createIdentityFacade`), not merely the
  * internal `identityReplay` / `identityTransitionsOf` functions the suite
- * above reaches by path. The Lead ruling
- * (identity-reconciliation-design.md:5) puts both on `IdentityFacade` (store
- * and transaction) and deliberately NOT on `IdentityReadFacade`: a
+ * above reaches by path. Both live on `IdentityFacade` (store and
+ * transaction) and deliberately NOT on `IdentityReadFacade`: a
  * coordinate-pinned read-only lens cannot honor a method that answers across
  * every recorded coordinate.
  */
-describe("identity replay — public facade surface (PR-3)", () => {
+describe("identity replay — public facade surface", () => {
   it("store.identity and tx.identity both expose replay and transitionsOf, agreeing on already-committed history", async () => {
     const store = await buildAbcStore();
     const a = { kind: "Person" as const, id: "a" };

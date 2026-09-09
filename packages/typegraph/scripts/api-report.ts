@@ -579,12 +579,9 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //
 // This is internal-convenience debt, not a user-facing requirement (G1R3-05):
 // `identityContext()`'s two consumers, replay and prune, are plain functions
-// over `IdentityServiceContext<G>`. PR-3, which brings `store.identity.replay`
-// / `transitionsOf` to the public surface, is expected to either narrow
-// `identityContext()`'s declared return to the exported slice those consumers
-// need, or export `IdentityServiceContext`/`PlainNodeRef` deliberately — either
-// way retiring these seven +2 entries, so this batch reads as staged rather
-// than permanent.
+// over `IdentityServiceContext<G>`. The release batch below evaluates, and
+// declines, both ways of retiring these seven +2 entries — see that batch's
+// own comment for the reasoning; this one stays permanent, not staged.
 //
 // `ensureSchema`'s `historyEnabled` extra moved off the public
 // `SchemaManagerOptions` (G1R3-04) onto an unexported `EnsureSchemaInternalOptions`
@@ -609,15 +606,16 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // exported deliberately from `src/graph-merge/index.ts` rather than left as
 // debt, which retires more forgotten exports than the port adds.
 //
-// PR-3 release batch (this had not been run since the `identityContext()`
-// batch above landed either, so `.`'s baseline already carried that batch's
-// `IdentityServiceContext` / `PlainNodeRef`, unmentioned by name below
-// because this batch changes neither count on `.`):
+// Release batch, publishing replay and archival restore (this had not been
+// run since the `identityContext()` batch above landed either, so `.`'s
+// baseline already carried that batch's `IdentityServiceContext` /
+// `PlainNodeRef`, unmentioned by name below because this batch changes
+// neither count on `.`):
 //
 // `IdentityFacade` gains `replay` / `transitionsOf`
 // (`IdentityReplay`, `IdentityReplayOptions`, `IdentityReplayStep`,
 // `IdentityTransition`, `IdentityTransitionCause` in their signatures, all
-// exported deliberately from the package barrel — PR-3 item 1), and
+// exported deliberately from the package barrel), and
 // `StoreRuntime` gains the archival-restore port members
 // `readIdentityTransitionPageAtTarget` / `importIdentityTransitionsAtTarget`
 // (`IdentityTransitionCursor` / `IdentityTransitionTransfer`, internal
@@ -643,7 +641,7 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // module's central mutation runner, called from every write site — so
 // narrowing the return would cascade into re-typing `runIdentityMutation`
 // across the whole module, exactly the kind of internal-semantics change
-// PR-3 is scoped not to make. Exporting `IdentityServiceContext` /
+// this release is scoped not to make. Exporting `IdentityServiceContext` /
 // `PlainNodeRef` publicly (this file's other named option) was also
 // declined: `pruneIdentityTransitions`'s own public signature (`store:
 // Store<G>`, an options bag) never mentions either type, so exporting two

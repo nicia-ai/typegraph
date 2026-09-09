@@ -137,7 +137,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   /**
    * @internal The full identity service context this Store builds writes and
    * reads against — reached by the transition-log/replay module functions
-   * (`pruneIdentityTransitions`, and PR-3's `store.identity.replay` /
+   * (`pruneIdentityTransitions`, and `store.identity.replay` /
    * `transitionsOf`), which are plain functions over
    * `IdentityServiceContext<G>` like every other identity algorithm, rather
    * than Store methods. Throws when the graph never declared `identity: {}`,
