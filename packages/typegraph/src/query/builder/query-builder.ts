@@ -28,7 +28,7 @@ import {
   UnsupportedPredicateError,
 } from "../../errors";
 import { type PolymorphicNodeType } from "../../ontology/types";
-import { compositionTraversalDirection } from "../../registry/composition-relation";
+import { partitionCompositionEdgeKindsByDirection } from "../../registry/composition-relation";
 import { isInteropProbeKey } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -755,7 +755,10 @@ export class QueryBuilder<
    *
    * Refuses rather than silently returning zero rows: an alias whose kind
    * declares no composition parts throws `ConfigurationError` with code
-   * `COMPOSITION_NO_PARTS_DECLARED`.
+   * `COMPOSITION_NO_PARTS_DECLARED`; an `{ from }` naming an alias this
+   * query does not have throws `COMPOSITION_UNKNOWN_ALIAS` instead — not the
+   * former, which would misdiagnose a typo'd alias as a composition
+   * problem.
    */
   parts<
     NA extends string,
@@ -860,7 +863,26 @@ export class QueryBuilder<
     validateSqlIdentifier(nodeAlias);
     const registry = this.#config.registry;
     const fromAlias = options?.from ?? this.#state.currentAlias;
-    const sourceKinds = this.#getKindNamesForAlias(fromAlias) ?? [];
+    const sourceKinds = this.#getKindNamesForAlias(fromAlias);
+    if (sourceKinds === undefined) {
+      const knownAliases = [
+        this.#state.startAlias,
+        ...this.#state.traversals.map((traversal) => traversal.nodeAlias),
+      ];
+      throw new ConfigurationError(
+        `.${relation}("${nodeAlias}", { from: "${fromAlias}" }) was called, but this query has no alias "${fromAlias}". ` +
+          `Known aliases: ${knownAliases.map((known) => `"${known}"`).join(", ")}.`,
+        {
+          code: "COMPOSITION_UNKNOWN_ALIAS",
+          relation,
+          alias: fromAlias,
+          knownAliases,
+        },
+        {
+          suggestion: `Pass the alias of a node already in this query as { from: ... }, e.g. one of ${knownAliases.map((known) => `"${known}"`).join(", ")}.`,
+        },
+      );
+    }
 
     const edgeKindsUnder = (kind: string): readonly string[] =>
       relation === "parts" ?
@@ -918,19 +940,15 @@ export class QueryBuilder<
       }
     }
 
-    // §1.7 orientation table, derived through the one shared mapping
-    // (`compositionTraversalDirection`) `subgraph({ composition: true })`
-    // also uses, so the two navigators cannot drift on which way an edge is
-    // walked (Ed-01): a `part -> whole` edge ("from") reaches its parts
-    // reversed ("in") and its wholes forward ("out"); a `whole -> part`
-    // edge ("to") is the mirror.
-    const outEdgeKinds: string[] = [];
-    const inEdgeKinds: string[] = [];
-    for (const edgeKind of edgeKinds) {
-      const partSide = registry.compositionPartSide(edgeKind) ?? "from";
-      const direction = compositionTraversalDirection(partSide, relation);
-      (direction === "out" ? outEdgeKinds : inEdgeKinds).push(edgeKind);
-    }
+    // §1.7 orientation table, derived through the one shared partition
+    // (`partitionCompositionEdgeKindsByDirection`) `subgraph({ composition:
+    // true })` also uses, so the two navigators cannot drift on which way
+    // an edge is walked (Ed-01) or on what happens when an edge kind has no
+    // recorded part side (Ed-r2-3): a `part -> whole` edge ("from") reaches
+    // its parts reversed ("in") and its wholes forward ("out"); a
+    // `whole -> part` edge ("to") is the mirror.
+    const { outEdgeKinds, inEdgeKinds } =
+      partitionCompositionEdgeKindsByDirection(registry, edgeKinds, relation);
 
     // Uniform orientation (either set empty) needs no `inverseEdgeKinds` —
     // the direct-only compiled branch — and pays nothing beyond a plain

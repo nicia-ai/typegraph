@@ -459,6 +459,39 @@ export function registerCompositionNavigationIntegrationTests(
       ).toThrow(expect.objectContaining({ code: "CONFIGURATION_ERROR" }));
     });
 
+    it("parts() with an unknown `from` alias refuses naming the alias, not COMPOSITION_NO_PARTS_DECLARED", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      await seedCompositionFixtures(store);
+
+      // MUTATION CHECK (Ed-r2-5): before this fix,
+      // `this.#getKindNamesForAlias(fromAlias) ?? []` collapsed "no such
+      // alias" into "this kind declares no composition parts" — the query
+      // above threw `COMPOSITION_NO_PARTS_DECLARED` naming kinds
+      // "(unknown)" instead of naming the actual typo'd alias, misdiagnosing
+      // a typo as a composition-declaration problem. Reverting the
+      // `#getKindNamesForAlias(fromAlias) === undefined` branch below (back
+      // to `?? []`) makes this assertion fail (`details.code` comes back
+      // `COMPOSITION_NO_PARTS_DECLARED` instead of
+      // `COMPOSITION_UNKNOWN_ALIAS`) — verified and reverted.
+      // `from` is typed `keyof Aliases & string`, so only a JS caller (or a
+      // cast, as here) can name an alias the query does not have — the
+      // typed surface would refuse this at compile time.
+      expect(() =>
+        store
+          .query()
+          .from("CnPodcast", "p")
+          .parts("x", { from: "pod" as never }),
+      ).toThrow(
+        expect.objectContaining({
+          code: "CONFIGURATION_ERROR",
+          details: matchingObject({
+            code: "COMPOSITION_UNKNOWN_ALIAS",
+            alias: "pod",
+          }),
+        }),
+      );
+    });
+
     it("parts() on a kind declaring no composition parts refuses", async () => {
       const store = await context.createStore(compositionNavigationGraph);
 

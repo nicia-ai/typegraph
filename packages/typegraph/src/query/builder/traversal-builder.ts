@@ -736,6 +736,15 @@ export class TraversalBuilder<
    * `keyof AliasMap` is `string` — every `A` would fail the collision check
    * vacuously. The real duplicate-alias guard already ran, against the real
    * `Aliases`, on `QueryBuilder.parts`/`.wholes`'s own public signature.
+   *
+   * Validates like `toDynamic`, not merely `to`'s compile-time endpoint
+   * check: an empty `kinds` array refuses rather than silently compiling to
+   * a filter no row can match, each kind must be registered
+   * (`KindNotFoundError` otherwise), and each runs `#assertValidEndpoint`.
+   * `parts()`/`wholes()`'s own registry-derived `targetKindList` pays
+   * nothing for this — it is already registered and endpoint-valid by
+   * construction — but `toKindSet` is a public finalizer like its siblings,
+   * so it cannot skip the checks they apply (Ed-r2-2).
    */
   toKindSet<A extends string>(
     kinds: readonly string[],
@@ -748,6 +757,21 @@ export class TraversalBuilder<
     CoordinateState
   > {
     validateSqlIdentifier(alias);
+
+    if (kinds.length === 0) {
+      throw new ConfigurationError(
+        `toKindSet(alias: "${alias}") requires at least one kind; an empty kind set would compile to a filter no row can match instead of refusing the invalid traversal.`,
+        { code: "EMPTY_KIND_SET", alias },
+      );
+    }
+    for (const kind of kinds) {
+      if (!this.#config.registry.hasNodeType(kind)) {
+        throw new KindNotFoundError(kind, "node", {
+          graphId: this.#config.graphId,
+        });
+      }
+      this.#assertValidEndpoint(kind);
+    }
 
     const baseState = this.#stateWithTraversal(alias, kinds);
     const newState: QueryBuilderState = {

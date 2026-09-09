@@ -48,12 +48,11 @@ import {
 } from "../query/schema-introspector";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
-import { compositionTraversalDirection } from "../registry/composition-relation";
+import { partitionCompositionEdgeKindsByDirection } from "../registry/composition-relation";
 import type { KindRegistry } from "../registry/kind-registry";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
 import { hasOwnKey } from "../utils/object";
-import { requireDefined } from "../utils/presence";
 import { buildDirectedReachableCte, buildReachableCte } from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
 import {
@@ -617,27 +616,23 @@ export async function executeSubgraph<
 
   /**
    * The composition closure's own reachable CTE: walks toward PARTS only,
-   * with each realizing edge kind's direction derived from
-   * `registry.compositionPartSide` through the same
-   * `compositionTraversalDirection` mapping `parts()`/`wholes()` use, never
-   * a flat `"both"` (Ed-01). `"both"` would also climb from a mid-tree root
-   * to its ancestors and re-descend into every sibling subtree — R4 (one
-   * whole per part) makes the upward walk deterministic, which is exactly
-   * what lets the downward re-descent pick up siblings undetected.
+   * with each realizing edge kind's direction derived through the same
+   * `partitionCompositionEdgeKindsByDirection` helper `parts()`/`wholes()`
+   * use, never a flat `"both"` (Ed-01). `"both"` would also climb from a
+   * mid-tree root to its ancestors and re-descend into every sibling
+   * subtree — R4 (one whole per part) makes the upward walk deterministic,
+   * which is exactly what lets the downward re-descent pick up siblings
+   * undetected.
    */
   function buildSubgraphCompositionReachableCte(
     edgeKindsForTraversal: readonly string[],
   ): SqlFragment {
-    const outEdgeKinds: string[] = [];
-    const inEdgeKinds: string[] = [];
-    for (const edgeKind of edgeKindsForTraversal) {
-      const partSide = requireDefined(
-        params.registry.compositionPartSide(edgeKind),
-        `"${edgeKind}" is not a composition edge kind, but was returned by compositionEdgeKindsUnder.`,
+    const { outEdgeKinds, inEdgeKinds } =
+      partitionCompositionEdgeKindsByDirection(
+        params.registry,
+        edgeKindsForTraversal,
+        "parts",
       );
-      const direction = compositionTraversalDirection(partSide, "parts");
-      (direction === "out" ? outEdgeKinds : inEdgeKinds).push(edgeKind);
-    }
     return buildDirectedReachableCte({
       graphId: ctx.graphId,
       sourceId: ctx.rootId,

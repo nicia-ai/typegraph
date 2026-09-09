@@ -181,21 +181,60 @@ export function inferCompositionPartSide(
  * A `part -> whole` edge (`partSide: "from"`) reaches its parts by walking
  * "in" (reversed) and its wholes by walking "out" (its own direction); a
  * `whole -> part` edge (`partSide: "to"`, the `has_*` convention) is the
- * mirror. Every composition navigator — the query builder's `parts()`/
- * `wholes()` and `subgraph({ composition: true })`'s parts closure — derives
- * its traversal direction through this one function so the two paths cannot
- * drift on which way an edge is walked (see the composition-navigation
- * lane's Ed-01 finding: `subgraph` once re-derived this as a flat
- * direction: "both", which climbs to ancestors and re-descends into
- * siblings instead of reaching only the descendants).
+ * mirror. Not exported: every composition navigator — the query builder's
+ * `parts()`/`wholes()` and `subgraph({ composition: true })`'s parts
+ * closure — derives its traversal direction through
+ * {@link partitionCompositionEdgeKindsByDirection} below, which is the one
+ * caller of this mapping, so the two paths cannot drift on which way an
+ * edge is walked (see the composition-navigation lane's Ed-01 finding:
+ * `subgraph` once re-derived this as a flat direction: "both", which climbs
+ * to ancestors and re-descends into siblings instead of reaching only the
+ * descendants).
  */
-export function compositionTraversalDirection(
+function compositionTraversalDirection(
   partSide: CompositionPartSide,
   towards: "parts" | "wholes",
 ): "out" | "in" {
   const directionTowardParts: "out" | "in" = partSide === "from" ? "in" : "out";
   if (towards === "parts") return directionTowardParts;
   return directionTowardParts === "in" ? "out" : "in";
+}
+
+/**
+ * Partitions a set of composition edge kinds into the two directions
+ * {@link compositionTraversalDirection} assigns them to reach `towards`.
+ *
+ * THE one owner of "resolve this edge kind's part side, then its
+ * direction" — `parts()`/`wholes()` (`QueryBuilder#navigateComposition`)
+ * and `subgraph({ composition: true })`
+ * (`buildSubgraphCompositionReachableCte`) both call this instead of each
+ * re-spelling the loop, so they cannot disagree on what happens when an
+ * edge kind returned by `compositionEdgeKindsUnder`/`compositionEdgeKindsOver`
+ * turns out to have no entry in `partSideByEdgeKind` — a registry-build
+ * defect, or an ontology loaded from a persisted schema. Both callers now
+ * throw the same named-invariant message instead of one refusing loudly and
+ * the other silently defaulting to `"from"` and walking the wrong direction
+ * (Ed-r2-3).
+ */
+export function partitionCompositionEdgeKindsByDirection(
+  registry: KindRegistry,
+  edgeKinds: Iterable<string>,
+  towards: "parts" | "wholes",
+): Readonly<{
+  outEdgeKinds: readonly string[];
+  inEdgeKinds: readonly string[];
+}> {
+  const outEdgeKinds: string[] = [];
+  const inEdgeKinds: string[] = [];
+  for (const edgeKind of edgeKinds) {
+    const partSide = requireDefined(
+      registry.compositionPartSide(edgeKind),
+      `"${edgeKind}" is not a composition edge kind, but was returned by the registry's composition edge-kind reader.`,
+    );
+    const direction = compositionTraversalDirection(partSide, towards);
+    (direction === "out" ? outEdgeKinds : inEdgeKinds).push(edgeKind);
+  }
+  return { outEdgeKinds, inEdgeKinds };
 }
 
 // ============================================================
