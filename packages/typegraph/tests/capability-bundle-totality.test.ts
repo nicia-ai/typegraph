@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("31 reasoned entries sum to 91 accesses; 50 deferred entries sum to 217", () => {
+  it("31 reasoned entries sum to 91 accesses; 50 deferred entries sum to 218", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -134,8 +134,10 @@ describe("capability bundle totality (T9)", () => {
     // scanner excludes wholesale — so its measured access count is 0 and
     // the floor is unchanged. The forked working-copy strategy then reads
     // the connected backend's `tableNames` to fence them against the base
-    // store's resolved schema — 90 -> 91.
+    // store's resolved schema — 90 -> 91. The composition delete cascade's
+    // parts-closure read then added a 5th `findEdgesByHeterogeneousEndpointSet`
+    // consumer, raising its ceiling by one — 217 -> 218.
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(91);
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(218);
   });
 });

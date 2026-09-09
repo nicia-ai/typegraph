@@ -1046,6 +1046,48 @@ export class RestrictedDeleteError extends TypeGraphError {
   }
 }
 
+/**
+ * Details for CompositionCycleError.
+ */
+export type CompositionCycleErrorDetails = Readonly<{
+  wholeKind: string;
+  wholeId: string;
+  revisitedKind: string;
+  revisitedId: string;
+}>;
+
+/**
+ * Thrown when a composition parts closure revisits a node already in the
+ * walk — an INSTANCE-level cycle, not a library invariant violation.
+ * Reflexive composition (a kind declaring `partOf`/`hasPart` against
+ * itself) is permitted at the kind level, and nothing yet refuses the
+ * corresponding cycle when the realizing edges are written, so two nodes
+ * (or a longer ring) can end up mutually `partOf` each other. The cascade's
+ * visited set catches this deterministically rather than looping or
+ * silently truncating, but the affected nodes stay undeletable through the
+ * ordinary delete path until the cycle is broken by hand.
+ */
+export class CompositionCycleError extends TypeGraphError {
+  declare readonly details: CompositionCycleErrorDetails;
+
+  constructor(
+    details: CompositionCycleErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Composition parts closure of "${details.wholeKind}/${details.wholeId}" revisited "${details.revisitedKind}/${details.revisitedId}": an instance-level cycle exists among reflexive composition edges.`,
+      "COMPOSITION_CYCLE_DETECTED",
+      {
+        details,
+        category: "constraint",
+        suggestion: `Delete or reassign one of the composition edges that closes this cycle (the "${details.revisitedKind}/${details.revisitedId}" ↔ ancestor link), then retry the delete.`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "CompositionCycleError";
+  }
+}
+
 // ============================================================
 // Concurrency Errors (category: "system")
 // ============================================================

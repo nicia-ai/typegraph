@@ -1168,7 +1168,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "heterogeneousEndpointSetRead",
-    ceiling: 4,
+    // 5th consumer: `store/operations/composition-cascade.ts`'s
+    // `planCompositionCascade`, reading one round's whole-side composition
+    // edges the same way `findConnectedEdgesForNodeBatch`
+    // (`node-operations.ts`) already does.
+    ceiling: 5,
   },
   fulltextSearch: {
     kind: "deferred",

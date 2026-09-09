@@ -375,6 +375,13 @@ export type StoreHooks = Readonly<{
    * `withTransaction` / `withRecordedTransaction` — the commit belongs to
    * the caller and cannot be observed, so this fires when the operation
    * completes within the still-open transaction.)
+   *
+   * A composition whole's delete cascades to its parts (see
+   * [Composition Cascade](https://typegraph.dev/limitations#composition-cascade))
+   * inside the SAME transaction, but each cascaded part delete is not itself
+   * a caller-issued operation: this hook fires exactly once, for the whole's
+   * own delete. A consumer relying on this hook for cache invalidation or
+   * audit must independently account for a composition whole's parts.
    */
   onOperationEnd?: (
     ctx: OperationHookContext,

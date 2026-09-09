@@ -3498,6 +3498,8 @@ class KindRegistry {
     isAssignableToAny(concreteKind: string, targetKinds: readonly string[]): boolean;
     isBroaderThan(broaderConcept: string, narrowerConcept: string): boolean;
     isCompositionEdge(edgeKind: string): boolean;
+    isCompositionPart(kind: string): boolean;
+    isCompositionWhole(kind: string): boolean;
     isNarrowerThan(narrowerConcept: string, broaderConcept: string): boolean;
     isPartOf(part: string, whole: string): boolean;
     isSubClassOf(child: string, parent: string): boolean;
@@ -3760,6 +3762,7 @@ export const MERGE_ERROR_CODES: {
     readonly evidence: "GRAPH_MERGE_EVIDENCE";
     readonly candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET";
     readonly review: "GRAPH_MERGE_REVIEW";
+    readonly compositionOrphan: "MERGE_COMPOSITION_ORPHAN";
 };
 
 // @public
@@ -3777,13 +3780,24 @@ export const MERGE_OPTION_DEFAULTS: {
 export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
 
 // @public (undocumented)
-export const MERGE_PLAN_FORMAT_VERSION: 1;
+export const MERGE_PLAN_FORMAT_VERSION: 2;
 
 // @public (undocumented)
 export const MERGE_REVIEW_FORMAT_VERSION: 1;
 
 // @public
 export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G>;
+
+// @public
+export class MergeCompositionOrphanError extends MergeError {
+    constructor(details: MergePlanCompositionOrphan);
+    // (undocumented)
+    readonly code: "MERGE_COMPOSITION_ORPHAN";
+    // (undocumented)
+    readonly details: MergePlanCompositionOrphan;
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
+}
 
 // @public
 export class MergeConflictError extends MergeError {
@@ -3905,10 +3919,10 @@ export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-export type MergePlanArtifact = MergePlanArtifactV1;
+export type MergePlanArtifact = MergePlanArtifactV2;
 
 // @public (undocumented)
-export type MergePlanArtifactV1 = Readonly<{
+export type MergePlanArtifactV2 = Readonly<{
     formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
     digest: MergePlanDigest;
     mode: "snapshot" | "incremental";
@@ -3922,7 +3936,7 @@ export type MergePlanArtifactV1 = Readonly<{
 }>;
 
 // @public (undocumented)
-export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
 
 // @public (undocumented)
 export type MergePlanBranchAnchor = Readonly<{
@@ -3955,6 +3969,13 @@ export class MergePlanCapabilityError extends MergeError {
     // (undocumented)
     protected static readonly errorCategory = "user";
 }
+
+// @public
+export type MergePlanCompositionOrphan = Readonly<{
+    part: MergePlanEntityRef;
+    whole: MergePlanEntityRef;
+    viaEdgeKind: string;
+}>;
 
 // @public (undocumented)
 export type MergePlanDiagnostics = Readonly<{
@@ -4152,6 +4173,7 @@ export type MergePlanReview = Readonly<{
     baseAmbiguities: readonly JsonValue[];
     provenanceRecords: readonly JsonValue[];
     warnings: readonly string[];
+    compositionOrphans: readonly MergePlanCompositionOrphan[];
     diagnostics?: MergePlanDiagnostics | undefined;
 }>;
 

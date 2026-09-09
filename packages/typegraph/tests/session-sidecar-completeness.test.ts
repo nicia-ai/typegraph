@@ -614,6 +614,45 @@ const CASES: Record<keyof WriteSession, Case> = {
     row: "updateNode",
     plan: NODE_PLAN,
   },
+  deleteCompositionEdges: {
+    run: async (raw) => {
+      // A CONSTRAINED kind, exactly as `purgeEdge`'s fixture: the claim
+      // release is a statement this case can observe, which an
+      // unconstrained kind's edge would not exercise.
+      await raw.insertNode({
+        graphId: GRAPH_ID,
+        kind: "Doc",
+        id: "cascade-edges",
+        props: documentProps("cascade-edges"),
+      });
+      await raw.insertNode({
+        graphId: GRAPH_ID,
+        kind: "Doc",
+        id: "cascade-edges-b",
+        props: documentProps("cascade-edges-b"),
+      });
+      await raw.insertEdge({
+        graphId: GRAPH_ID,
+        kind: "owns",
+        id: "edge-owns-cascade",
+        fromKind: "Doc",
+        fromId: "cascade-edges",
+        toKind: "Doc",
+        toId: "cascade-edges-b",
+        props: {},
+      });
+      // eslint-disable-next-line unicorn/consistent-function-scoping -- every case returns its row work the same way; hoisting this one would make the table read as if it were different.
+      return (session) =>
+        session.deleteCompositionEdges(["edge-owns-cascade"], "hard");
+    },
+    // The composition cascade's explicit consumed-edge cleanup routes
+    // through the SAME batched delete `retireNode` / `purgeNode` use, even
+    // for a single edge id.
+    sidecars: ["purgeEdgeClaims"],
+    row: "hardDeleteEdgesBatch",
+    postRowClaims: ["purgeEdgeClaims"],
+    plan: EDGE_PLAN,
+  },
   reviseNodeSet: {
     run: async (raw) => {
       await seed(raw, "k");

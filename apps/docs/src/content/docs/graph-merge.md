@@ -725,6 +725,32 @@ that change with no conflict; only fields multiple branches changed to differing
 values become conflicts. This holds for node *and* edge properties, so disjoint
 edits compose instead of clobbering each other.
 
+### Composition orphans
+
+A branch that deletes a composition whole (see [Composition](/ontology#composition))
+can conflict with a part attached to it on the target *after* the branch point,
+or independently of it — the branch's diff carries no deletion for that part,
+so applying the plan as trusted would leave it pointing at a whole that no
+longer exists.
+
+`planMerge` and `planMergeIncremental` scan for this against the target's
+current state and report every finding in `MergePlanReview.compositionOrphans`:
+
+```typescript
+type MergePlanCompositionOrphan = {
+  part: { kind: string; id: string };
+  whole: { kind: string; id: string };
+  viaEdgeKind: string; // the realizing composition edge
+};
+```
+
+This is a best-effort, unlocked dry-run read, surfaced for an operator to act
+on before approving the plan. `applyMergePlan` re-verifies the same finding
+inside the apply transaction, under the per-graph write lock, and refuses with
+`MergeCompositionOrphanError` (see [Errors](/errors#mergecompositionorphanerror))
+if it still recurs there — so a plan-time report that comes back empty is not
+a guarantee against a concurrent attach racing the eventual apply.
+
 ## Edges follow their entities
 
 When nodes collapse, their edges must too. After clustering, Graph Merge:
