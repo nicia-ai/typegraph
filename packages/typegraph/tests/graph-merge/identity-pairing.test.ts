@@ -826,22 +826,18 @@ describe.each(backendMatrix())(
      */
     it("skips the live-different round trip a merge no longer needs once an earlier assertSame already proved it", async () => {
       let liveDifferentProbes = 0;
-      function countLiveDifferentProbe<T>(
-        base: Readonly<{
-          execute: (query: CompiledRowsSql) => Promise<readonly T[]>;
-        }>,
-      ) {
-        return (query: CompiledRowsSql): Promise<readonly T[]> => {
-          const text = query.chunks
-            .map((chunk) => (chunk.kind === "text" ? chunk.value : ""))
-            .join("");
-          if (text.includes("live_different")) liveDifferentProbes += 1;
-          return base.execute(query);
-        };
+      function isLiveDifferentProbe(query: CompiledRowsSql): boolean {
+        const text = query.chunks
+          .map((chunk) => (chunk.kind === "text" ? chunk.value : ""))
+          .join("");
+        return text.includes("live_different");
       }
       const rawBackend = await makeBackend();
       const backend = deriveBackend(rawBackend, {
-        execute: countLiveDifferentProbe(rawBackend),
+        execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+          if (isLiveDifferentProbe(query)) liveDifferentProbes += 1;
+          return rawBackend.execute<T>(query);
+        },
         // Reads inside `assertSame`'s own transaction run against the
         // TRANSACTION target, not the root backend's `execute` — wrap that
         // target too, the same way the create-round-trips harness does.
@@ -850,7 +846,12 @@ describe.each(backendMatrix())(
             (tx) =>
               fn(
                 deriveBackend(tx, {
-                  execute: countLiveDifferentProbe(tx),
+                  execute: <T>(
+                    query: CompiledRowsSql,
+                  ): Promise<readonly T[]> => {
+                    if (isLiveDifferentProbe(query)) liveDifferentProbes += 1;
+                    return tx.execute<T>(query);
+                  },
                 }),
               ),
             options,
