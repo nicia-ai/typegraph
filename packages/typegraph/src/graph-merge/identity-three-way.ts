@@ -43,9 +43,7 @@ import type {
  * Two assertions sharing this key describe the same claim about the same
  * pair, whatever window each one carries.
  */
-function identitySemanticKey(
-  assertion: IdentityTransferAssertion,
-): string {
+function identitySemanticKey(assertion: IdentityTransferAssertion): string {
   return identityAssertionSemanticKey(
     assertion.relation,
     assertion.a,
