@@ -215,8 +215,9 @@ export type InterchangeIdentityTransition = z.infer<
  * graph's own `pruneIdentityTransitions` state at export time, so a reader of
  * the raw interchange payload knows the transitions array excludes anything
  * the source had already pruned. Distinct from the watermark import WRITES
- * into the restored graph (§7.3), which is always the highest restored
- * revision + 1 regardless of this value.
+ * into the restored graph, which is always the DESTINATION's own current
+ * recorded revision + 1 (see `importIdentityTransitionsIntoTarget`) —
+ * this value is never written verbatim into a foreign graph's watermark.
  */
 export const InterchangeIdentityRetentionSchema = z.object({
   prunedBeforeRevision: z.number().int().nonnegative(),

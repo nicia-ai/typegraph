@@ -576,6 +576,15 @@ async function produceExportChunks<G extends GraphDef>(
   // `state` mode carries current truth only, and neither branch cloning nor a
   // fresh graph's own history should carry explanation for events it never
   // lived through.
+  //
+  // Deliberately NOT scoped by `options.nodeKinds`, unlike the assertions
+  // page above: `readIdentityTransitionPageForInterchange` walks the whole
+  // log every archival export, so a `nodeKinds`-filtered archival export
+  // still carries transitions naming excluded kinds. Restoring such an
+  // export into a target that never receives those kinds' nodes inserts
+  // transitions whose class refs the target's shape-only restore validation
+  // does not check for referential presence (identity.md, "Archival
+  // transitions and the retention watermark").
   if (options.identityMode === "archival") {
     await produceIdentityTransitionChunks(
       store,

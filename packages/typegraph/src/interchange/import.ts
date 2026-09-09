@@ -782,10 +782,12 @@ export async function importGraphStream<G extends GraphDef>(
             receivedIdentity ||
             receivedIdentityTransitions
           ) {
+            const after =
+              receivedEdges ? "edges"
+              : receivedIdentity ? "identity assertions"
+              : "identity transitions";
             throw new Error(
-              `Graph interchange stream cannot emit nodes after ${
-                receivedEdges ? "edges" : "identity assertions"
-              }.`,
+              `Graph interchange stream cannot emit nodes after ${after}.`,
             );
           }
           if (chunk.nodes.length === 0) break;
@@ -1354,7 +1356,11 @@ function graphDataForChunk(
   // opposed to an empty array) is what tells `importIdentityTransitionsSection`
   // this reconstructed document carries no transitions section at all, so the
   // nodes/edges/identity(assertions) chunk calls never redundantly re-write
-  // the retention watermark.
+  // the retention watermark. `header.identity.retention`, when the source
+  // carried one, is stripped on those same three chunk calls for the same
+  // reason: left in, every chunk would reconstruct a `retention`-bearing
+  // identity section and re-invoke the watermark write once per chunk
+  // instead of once for the whole stream.
   transitions?: readonly InterchangeIdentityTransition[],
 ): GraphData {
   const { identity, ...headerWithoutIdentity } = header;
@@ -1369,7 +1375,7 @@ function graphDataForChunk(
           ...identity,
           assertions: [...assertions],
           ...(transitions === undefined ?
-            {}
+            { retention: undefined }
           : { transitions: [...transitions] }),
         },
       }),
