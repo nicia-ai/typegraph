@@ -280,9 +280,16 @@ export function registerCompositionFenceIntegrationTests(
       // closes folderA -> folderB -> folderA in the union relation. The two
       // parts (folderA, folderB) are distinct, so R4's claim is untouched —
       // this is purely D-10's acyclicity.
-      await expect(
-        store.edges.cfContainsB.create(folderB, folderA, {}),
-      ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+      const error = await store.edges.cfContainsB
+        .create(folderB, folderA, {})
+        .catch((error_: unknown) => error_);
+      expect(error).toBeInstanceOf(EdgeAcyclicityError);
+      // The relation name reaching the public error is the printable
+      // "composition", never the reserved U+001E-prefixed claim axis it is
+      // stored as internally (R1).
+      expect((error as EdgeAcyclicityError).details.relation).toBe(
+        "composition",
+      );
     });
     // MUTATION CHECK: narrow `compositionAcyclicRelation`
     // (src/store/acyclicity.ts) to return `undefined` (or restrict
@@ -304,9 +311,13 @@ export function registerCompositionFenceIntegrationTests(
       // closes the cycle A -> B -> A. Walked forward (the defect this test
       // exists to catch), the union would see A -> B twice and report no
       // cycle.
-      await expect(
-        store.edges.cfContainsC.create(folderA, folderB, {}),
-      ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+      const error = await store.edges.cfContainsC
+        .create(folderA, folderB, {})
+        .catch((error_: unknown) => error_);
+      expect(error).toBeInstanceOf(EdgeAcyclicityError);
+      expect((error as EdgeAcyclicityError).details.relation).toBe(
+        "composition",
+      );
     });
     // MUTATION CHECK: hard-code `reversed: false` in `compositionAcyclicRelation`
     // (src/store/acyclicity.ts) instead of reading
@@ -580,6 +591,65 @@ export function registerCompositionFenceIntegrationTests(
     // axis with 2 edge ids, so `family: "composition"` becomes truthy above
     // and the genuine `edgeCardinality` violation disappears (verified,
     // reverted).
+
+    it("verifyConstraintFences resolves (no raw TypeError) over a composition row whose part-side endpoint kind is undeclared (E4)", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const backend = store.backend;
+      // `CfBook` is never a declared composition PART kind anywhere in this
+      // graph — it is only ever a WHOLE (`cfChapterOf`, `cfSectionOf`) — so
+      // `registry.compositionPopulation("CfBook")` is `undefined`. Using it
+      // as `cfChapterOf`'s `from` endpoint (declared `from: [CfChapter]`) is
+      // exactly the input that used to throw a raw TypeError when
+      // `edgeCardinalityViolations` re-derived the composition claim per row
+      // instead of reading the row's own `scope` (E4). Two rows sharing this
+      // same (bogus) part identity is what makes the composition audit's
+      // peer query select both, so the throw — if it regressed — would fire
+      // during THIS test's `verifyConstraintFences()` call, not silently.
+      const fakePart = await store.nodes.CfBook.create({});
+      const wholeA = await store.nodes.CfBook.create({});
+      const wholeB = await store.nodes.CfBook.create({});
+      await backend.insertEdge({
+        graphId: store.graphId,
+        id: "cf-bad-part-row-a",
+        kind: "cfChapterOf",
+        fromKind: "CfBook",
+        fromId: fakePart.id,
+        toKind: "CfBook",
+        toId: wholeA.id,
+        props: {},
+      });
+      await backend.insertEdge({
+        graphId: store.graphId,
+        id: "cf-bad-part-row-b",
+        kind: "cfChapterOf",
+        fromKind: "CfBook",
+        fromId: fakePart.id,
+        toKind: "CfBook",
+        toId: wholeB.id,
+        props: {},
+      });
+
+      const violations = await store.verifyConstraintFences();
+      const endpointViolation = violations.find(
+        (violation) =>
+          violation.family === "edgeEndpointAssignability" &&
+          violation.edgeKind === "cfChapterOf",
+      );
+      expect(endpointViolation).toBeDefined();
+      if (endpointViolation?.family !== "edgeEndpointAssignability") {
+        throw new Error("expected an edgeEndpointAssignability violation");
+      }
+      expect(
+        endpointViolation.edges.map((edge) => edge.edgeId).toSorted(),
+      ).toEqual(["cf-bad-part-row-a", "cf-bad-part-row-b"].toSorted());
+    });
+    // REVERT CHECK: reintroduce a per-row `registry.compositionPopulation()`
+    // lookup on the fence-audit read path (for example, re-deriving the
+    // composition claim in `edgeCardinalityViolations` instead of reading
+    // `row.scope`, or resolving the part's population while enriching a
+    // composition violation's payload). `store.verifyConstraintFences()`
+    // above then throws `"cfChapterOf" is a composition edge kind but
+    // "CfBook" has no recorded composition population` instead of resolving.
 
     it("two concurrent attaches of one part to two different wholes: exactly one commits", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
