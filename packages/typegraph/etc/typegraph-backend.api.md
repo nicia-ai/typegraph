@@ -1335,6 +1335,7 @@ export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef & Readonly<{
     fromId: string;
     toKind: string;
     toId: string;
+    scope?: CompositionClaimScope;
 }>;
 
 // @public
@@ -1454,6 +1455,15 @@ export type CompiledStatementSql = IntentSql<"statement">;
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
+export type CompositionClaimScope = Readonly<{
+    kind: "composition";
+    holders: readonly Readonly<{
+        edgeKind: string;
+        partSide: "from" | "to";
+    }>[];
+}>;
+
+// @public
 type CompositionPartSide = "from" | "to";
 
 // @public
@@ -1486,6 +1496,7 @@ export type ContendedEdgeRow = EdgeCardinalityAxisRef & Readonly<{
     fromId: string;
     toKind: string;
     toId: string;
+    scope: CompositionClaimScope | undefined;
 }>;
 
 // @public
@@ -1931,6 +1942,7 @@ type EdgeCardinalityAxisRef = Readonly<{
 // @public
 export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
     edgeKind: string;
+    scope?: CompositionClaimScope;
 }>;
 
 // @public
@@ -4058,7 +4070,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly tableNames: {
         readonly kind: "reasoned";
         readonly reason: "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.";
-        readonly accesses: 27;
+        readonly accesses: 28;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";

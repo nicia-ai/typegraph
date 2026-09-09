@@ -809,6 +809,7 @@ type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef & Readonly<{
     fromId: string;
     toKind: string;
     toId: string;
+    scope?: CompositionClaimScope;
 }>;
 
 // @public
@@ -941,6 +942,15 @@ type CompileQueryOptions = Readonly<{
 type ComposableQuery = QueryAst | SetOperation;
 
 // @public
+type CompositionClaimScope = Readonly<{
+    kind: "composition";
+    holders: readonly Readonly<{
+        edgeKind: string;
+        partSide: "from" | "to";
+    }>[];
+}>;
+
+// @public
 type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
     from?: keyof Aliases & string;
     maxHops?: number;
@@ -999,6 +1009,10 @@ type ConstraintFenceViolation = Readonly<{
     target: ClaimTarget;
     edgeIds: readonly string[];
 }> | Readonly<{
+    family: "composition";
+    target: ClaimTarget;
+    edgeIds: readonly string[];
+}> | Readonly<{
     family: "edgeEndpointAssignability";
     edgeKind: string;
     allowedPairs: readonly (readonly [string, string])[];
@@ -1026,6 +1040,7 @@ type ContendedEdgeRow = EdgeCardinalityAxisRef & Readonly<{
     fromId: string;
     toKind: string;
     toId: string;
+    scope: CompositionClaimScope | undefined;
 }>;
 
 // @public
@@ -1575,6 +1590,7 @@ type EdgeCardinalityAxisRef = Readonly<{
 // @public
 type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
     edgeKind: string;
+    scope?: CompositionClaimScope;
 }>;
 
 // @public
@@ -4817,6 +4833,9 @@ type OntologyDataProbe = Readonly<{
     allowances: readonly EdgeEndpointAllowance[];
 }> | Readonly<{
     kind: "edgeAcyclicity";
+    edgeKinds: readonly string[];
+}> | Readonly<{
+    kind: "compositionSingleWhole";
     edgeKinds: readonly string[];
 }>;
 
