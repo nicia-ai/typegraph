@@ -95,6 +95,15 @@ type BenchStore = Store<typeof graph>;
 
 type BackendHandle = Readonly<{
   backend: GraphBackend;
+  /**
+   * Refreshes planner statistics after a bulk seed. Both engines plan the
+   * fenced claim statements from table statistics; a 10^5-row seed followed
+   * by a measured insert on stale statistics measures a mis-planned
+   * statement, not the probe (PostgreSQL chose a nested-loop anti-join with
+   * the edge id as a join filter over the whole graph — minutes per insert).
+   * Production databases reach the same state through autovacuum / ANALYZE.
+   */
+  refreshStatistics: () => Promise<void>;
   close: () => Promise<void>;
 }>;
 
@@ -112,6 +121,10 @@ async function buildBackend(
     );
     return {
       backend,
+      refreshStatistics: async () => {
+        if (backend.executeRaw !== undefined)
+          await backend.executeRaw("ANALYZE", []);
+      },
       close: async () => {
         await backend.close();
         if (tempDir !== undefined)
@@ -121,7 +134,13 @@ async function buildBackend(
   }
   const pool = new Pool({ connectionString: getPostgresUrl() });
   const backend = createPostgresBackend(drizzleNodePostgres(pool));
-  return { backend, close: () => pool.end() };
+  return {
+    backend,
+    refreshStatistics: async () => {
+      await pool.query("ANALYZE");
+    },
+    close: () => pool.end(),
+  };
 }
 
 /**
@@ -235,6 +254,7 @@ async function benchChainAppend(
 ): Promise<void> {
   const [store] = await createStoreWithSchema(graph, backendHandle.backend);
   const ids = await seedChain(store, edgeKind, size);
+  await backendHandle.refreshStatistics();
   // Rolls forward each iteration: a `cardinality: "one"` edge allows only
   // one outgoing edge per source, so re-appending from the SAME tail on
   // every sample would refuse from the second iteration on.
@@ -263,6 +283,7 @@ async function benchChainPrepend(
 ): Promise<void> {
   const [store] = await createStoreWithSchema(graph, backendHandle.backend);
   const ids = await seedChain(store, edgeKind, size);
+  await backendHandle.refreshStatistics();
   const head = { kind: "Task" as const, id: ids[0]! };
   const label = `acyclicity:${edgeKind}:chain-prepend:${String(size)}`;
   const {
@@ -288,6 +309,7 @@ async function benchForest(
   const treeCount = Math.max(1, Math.floor(size / 4));
   const [store] = await createStoreWithSchema(graph, backendHandle.backend);
   const roots = await seedForest(store, edgeKind, treeCount);
+  await backendHandle.refreshStatistics();
   // A fresh node above an EXISTING tree's root: the walk from that root
   // must traverse the whole (small, ~4-node) tree before concluding "not
   // found", and — this is the point of the shape — must not touch any of
@@ -411,6 +433,8 @@ async function explainAcyclicityProbe(
     try {
       const [store] = await createStoreWithSchema(graph, backend);
       const ids = await seedChain(store, "dependsOn", size);
+      if (backend.executeRaw !== undefined)
+        await backend.executeRaw("ANALYZE", []);
       const fresh = await store.nodes.Task.create({});
       const head = { kind: "Task" as const, id: ids[0]! };
       statements.splice(0);
@@ -458,6 +482,7 @@ async function explainAcyclicityProbe(
     const { backend, statements } = buildCapturingPostgresBackend(pool);
     const [store] = await createStoreWithSchema(graph, backend);
     const ids = await seedChain(store, "dependsOn", size);
+    await pool.query("ANALYZE");
     const fresh = await store.nodes.Task.create({});
     const head = { kind: "Task" as const, id: ids[0]! };
     statements.splice(0);
