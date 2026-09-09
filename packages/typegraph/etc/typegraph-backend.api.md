@@ -4060,7 +4060,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly tableNames: {
         readonly kind: "reasoned";
         readonly reason: "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.";
-        readonly accesses: 26;
+        readonly accesses: 27;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";
