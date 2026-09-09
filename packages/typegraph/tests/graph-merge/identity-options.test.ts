@@ -267,7 +267,7 @@ describe("T6 — the identity policy is inside the review digest", () => {
     // sides being computed by the current code would make this test unable to
     // fail — an unconditional `identity` emission would move both together.
     const stored = {
-      ...JSON.parse(JSON.stringify(review)),
+      ...(JSON.parse(JSON.stringify(review)) as typeof review),
       options: PRE_RELEASE_OPTION_EVIDENCE,
     };
     const applying = await reviewArgs(undefined);
