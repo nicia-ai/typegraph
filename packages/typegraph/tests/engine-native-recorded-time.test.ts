@@ -9,13 +9,15 @@
  * capability.test.ts`'s own module doc says so), so every store-level case
  * here scripts `EngineRecordedTimeMembers` + `LineageMembers` onto a REAL
  * SQLite profile (`buildSqliteEngineProfile`) the same way `tests/recorded-
- * time-transaction-threading.test.ts` does for `lineage` alone — a plain
- * object literal is not `deriveEngineProfile`'s applicable seam here
- * (`provisioning` is not one of its derivable keys; see that file's own doc
- * comment for why), so this mutates the SAME `provisioning` object in place
- * before handing the profile to `createSqlBackend`. The compile-only cases
- * (the recorded read seam, the identity refusal) need no backend at all and
- * follow `tests/recorded-read-source-seam.test.ts`'s pattern instead.
+ * time-transaction-threading.test.ts` does for `lineage` alone, through the
+ * shared `attachEngineNativeRecordedTime` fixture (`./engine-native-
+ * recorded-time-fixture`) — a plain object literal is not
+ * `deriveEngineProfile`'s applicable seam here (`provisioning` is not one
+ * of its derivable keys; see that file's own doc comment for why), so this
+ * mutates the SAME `provisioning` object in place before handing the
+ * profile to `createSqlBackend`. The compile-only cases (the recorded read
+ * seam, the identity refusal) need no backend at all and follow `tests/
+ * recorded-read-source-seam.test.ts`'s pattern instead.
  */
 import RealDatabase from "better-sqlite3";
 import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
@@ -63,6 +65,7 @@ import { sql } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry";
 import { resolveLineage } from "../src/store/recorded-capture";
 import { storeCaptureEnabled } from "../src/store/runtime-port";
+import { attachEngineNativeRecordedTime } from "./engine-native-recorded-time-fixture";
 import { toSqlString } from "./sql-test-utils";
 import { createTestBackend, matchingObject } from "./test-utils";
 
@@ -91,24 +94,6 @@ function scriptedLineage(): LineageMembers {
     revision: () => Promise.resolve("engine-r0" as EngineRevision),
     changesSince: () => Promise.resolve({ kind: "unbounded" }),
   };
-}
-
-/**
- * Attaches BOTH co-required members onto a bundled profile's provisioning
- * object in place — see the module doc for why this, rather than
- * `deriveEngineProfile`, is the sanctioned way to script a bundled profile.
- */
-function attachEngineNativeRecordedTime(
-  provisioning: object,
-  recordedTime: EngineRecordedTimeMembers,
-  lineage: LineageMembers,
-): void {
-  const target = provisioning as {
-    recordedTime?: EngineRecordedTimeMembers;
-    lineage?: LineageMembers;
-  };
-  target.recordedTime = recordedTime;
-  target.lineage = lineage;
 }
 
 /**
