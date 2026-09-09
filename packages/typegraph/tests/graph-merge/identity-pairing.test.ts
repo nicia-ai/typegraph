@@ -465,6 +465,73 @@ describe.each(backendMatrix())(
     });
 
     /**
+     * `onProvenanceConflict: "refuse"` — for a caller whose source attribution
+     * is a correctness invariant rather than a record. Only a cluster an
+     * identity assertion FUSED is judged: two members contributed under
+     * different source ids disagree, and the plan fails naming the canonical
+     * entity and the contributions.
+     */
+    it("refuses an identity-paired entity whose members disagree on provenance", async () => {
+      const store = await makeStore();
+      const source = unwrap(
+        await branch(store, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "a3@example.test" },
+        { id: "a3" },
+      );
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "b3@example.test" },
+        { id: "b3" },
+      );
+      await source.store.identity.assertSame(
+        { kind: "Person", id: "a3" },
+        { kind: "Person", id: "b3" },
+      );
+
+      const result = await merge(store, [source], {
+        branchOrder: [BRANCH_A],
+        identity: { pairing: "definitional", onProvenanceConflict: "refuse" },
+      });
+      if (isOk(result)) throw new Error("expected a provenance refusal");
+      expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+      expect(result.error.code).toBe(
+        "GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT",
+      );
+      expect(result.error.details["conflict"]).toMatchObject({
+        kind: "provenance",
+        canonical: { kind: "Person", id: "a3" },
+      });
+      // Nothing was written: the refusal is a plan-time one.
+      expect(await livePersonIds(store)).toEqual([]);
+
+      // The DEFAULT keeps every contribution and merges the same fixture, so
+      // the refusal is the policy's doing and not the pairing's.
+      const keeping = await makeStore();
+      const keepingSource = unwrap(
+        await branch(keeping, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await keepingSource.store.nodes.Person.create(
+        { name: "Ada", email: "a3@example.test" },
+        { id: "a3" },
+      );
+      await keepingSource.store.nodes.Person.create(
+        { name: "Ada", email: "b3@example.test" },
+        { id: "b3" },
+      );
+      await keepingSource.store.identity.assertSame(
+        { kind: "Person", id: "a3" },
+        { kind: "Person", id: "b3" },
+      );
+      const kept = await merge(keeping, [keepingSource], {
+        branchOrder: [BRANCH_A],
+        identity: { pairing: "definitional" },
+      });
+      if (isErr(kept)) throw kept.error;
+      expect(await livePersonIds(keeping)).toEqual(["a3"]);
+    });
+
+    /**
      * A cross-kind `same` assertion cannot be expressed as a per-kind pairing
      * edge — `orderEndpoints` keys on `(kind, id)` and a source scope is built
      * per kind. It is reported as a typed conflict rather than skipped, so a
@@ -506,6 +573,54 @@ describe.each(backendMatrix())(
       });
       // Reported, not fatal: both nodes still merge as themselves.
       expect(await livePersonIds(store)).toEqual(["p1"]);
+    });
+
+    /**
+     * A `same` assertion whose endpoints are not both staged new nodes of the
+     * kind cannot be expressed as a pairing edge either — candidate generation
+     * proposes over the nodes in scope. It is reported for the same reason the
+     * cross-kind case is: a stated `pairing` that cannot be applied must be
+     * visibly refused, never silently skipped.
+     */
+    it("reports a same assertion whose endpoint is not a staged new node", async () => {
+      const store = await makeStore();
+      // Committed on the TARGET before the branch forks, so it is base truth
+      // and never a staged new node.
+      await store.nodes.Person.create(
+        { name: "Ada", email: "committed@example.test" },
+        { id: "committed" },
+      );
+      const source = unwrap(
+        await branch(store, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "fresh@example.test" },
+        { id: "fresh" },
+      );
+      await source.store.identity.assertSame(
+        { kind: "Person", id: "committed" },
+        { kind: "Person", id: "fresh" },
+      );
+
+      const result = await merge(store, [source], {
+        branchOrder: [BRANCH_A],
+        identity: { pairing: "definitional" },
+      });
+      if (isErr(result)) throw result.error;
+      expect(
+        result.data.identityConflicts.filter(
+          (conflict) =>
+            conflict.kind === "assertion" &&
+            conflict.reason === "out-of-scope-pairing",
+        ),
+      ).toMatchObject([
+        {
+          a: { kind: "Person", id: "committed" },
+          b: { kind: "Person", id: "fresh" },
+        },
+      ]);
+      // Reported, not fatal, and nothing was fused.
+      expect(await livePersonIds(store)).toEqual(["committed", "fresh"]);
     });
 
     /**

@@ -261,6 +261,7 @@ import type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IdentityAssertionConflictReason,
   IdentityReconciliation,
   IdentityUnresolvedConflict,
   MergeBranch,
@@ -693,15 +694,25 @@ type IdentityPairingPartition = Readonly<{
  * pairing source and the three-way classifier consume one slice and cannot
  * disagree about which assertions exist.
  *
- * A `same` assertion spanning two different merge KINDS is neither dropped nor
- * fatal: `orderEndpoints` keys on `(kind, id)` and a source scope is built per
- * kind, so no per-kind scope can carry it. It is reported as a typed
- * `cross-kind-pairing` conflict — the stated `pairing` option applied where it
- * can be and refused visibly where it cannot, never ignored.
+ * Two shapes of assertion are neither dropped nor fatal, because a per-kind
+ * candidate scope structurally cannot carry them — the stated `pairing` option
+ * is applied where it can be and refused VISIBLY where it cannot, never
+ * ignored:
+ *
+ *   - CROSS-KIND: `orderEndpoints` keys on `(kind, id)` and a source scope is
+ *     built per kind, so no scope spans two kinds.
+ *   - OUT OF SCOPE: an endpoint that is not a staged new node of its kind (a
+ *     committed target row, or a node no branch staged). Candidate generation
+ *     proposes over the nodes in scope, and this one is not among them.
  */
 function partitionIdentityPairingAssertions(
   staging: StagingSet,
+  stagedNewByKind: ReadonlyMap<string, readonly StagedNewNode[]>,
 ): IdentityPairingPartition {
+  const stagedNewKeys = new Set<MergeKey>();
+  for (const [kind, items] of stagedNewByKind) {
+    for (const item of items) stagedNewKeys.add(mergeKey(kind, item.node.id));
+  }
   const retracted = new Set(
     staging.retractedIdentityAssertions.map((staged) => staged.assertion.id),
   );
@@ -722,6 +733,7 @@ function partitionIdentityPairingAssertions(
     byId.set(staged.assertion.id, staged.assertion);
   }
   const sameByKind = new Map<string, IdentityTransferAssertion[]>();
+  /** Every `same` assertion no per-kind candidate scope can express. */
   const crossKind: Extract<
     IdentityUnresolvedConflict,
     Readonly<{ kind: "assertion" }>
@@ -730,10 +742,18 @@ function partitionIdentityPairingAssertions(
     // A retracted assertion states the branches STOPPED believing the pair is
     // one entity; pairing on it would fuse exactly what the merge is ending.
     if (assertion.relation !== "same" || retracted.has(assertion.id)) continue;
-    if (assertion.a.kind !== assertion.b.kind) {
+    const unpairable: IdentityAssertionConflictReason | undefined =
+      assertion.a.kind === assertion.b.kind ? (
+        !stagedNewKeys.has(mergeKeyOf(assertion.a)) ||
+        !stagedNewKeys.has(mergeKeyOf(assertion.b))
+      ) ?
+        "out-of-scope-pairing"
+      : undefined
+      : "cross-kind-pairing";
+    if (unpairable !== undefined) {
       crossKind.push({
         kind: "assertion",
-        reason: "cross-kind-pairing",
+        reason: unpairable,
         semanticKey: identitySemanticKey(assertion),
         a: { kind: assertion.a.kind, id: assertion.a.id as NodeId<NodeType> },
         b: { kind: assertion.b.kind, id: assertion.b.id as NodeId<NodeType> },
@@ -828,7 +848,7 @@ async function generateAllCandidates<G extends GraphDef>(
     : options.identity.pairing;
   const identityPairingScopes =
     identityPairing === undefined ? NO_IDENTITY_PAIRING : (
-      partitionIdentityPairingAssertions(staging)
+      partitionIdentityPairingAssertions(staging, byKind)
     );
   const sources =
     useBaseSources ?
