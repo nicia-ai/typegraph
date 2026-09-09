@@ -399,7 +399,8 @@ describe("archival identity import window bounds", () => {
 
   // Load-bearing (L10): the archival round trip carries the transitions
   // section verbatim and the restore watermark reports the
-  // explanations-without-snapshots seam honestly (design §7.3).
+  // explanations-without-snapshots seam honestly (identity.md, "Archival
+  // transitions and the retention watermark").
   it("archival round trip carries transitions and the watermark (L10)", async () => {
     const [source] = await createAdapterStoreWithSchema(
       graph,
@@ -444,9 +445,9 @@ describe("archival identity import window bounds", () => {
     expect(result.errors).toEqual([]);
     expect(result.success).toBe(true);
 
-    // `transitionsOf` answers FULLY from a restored archive (design §7.3):
-    // every restored transition is visible by walking from either endpoint's
-    // current class canonical. The target's own set is a SUPERSET of the
+    // `transitionsOf` answers FULLY from a restored archive: every restored
+    // transition is visible by walking from either endpoint's current class
+    // canonical. The target's own set is a SUPERSET of the
     // restored ids — importing the still-open assertion is itself a genuine
     // merge on the target, and that generates its own new "assert" note on
     // top of the transplanted explanatory history, exactly as any other
@@ -464,10 +465,326 @@ describe("archival identity import window bounds", () => {
 
     // `replay`, by contrast, reports the seam honestly rather than silently
     // claiming a complete history: the restore set the watermark to the
-    // highest restored revision + 1, which is above every boundary an
-    // unbounded replay call's requested range starts from (revision 0).
+    // target's own current revision + 1 at restore time, which — since the
+    // target committed at least the alice/bob creates before this import —
+    // is above 0, the point an unbounded replay call's requested range
+    // starts from.
     const targetReplay = await target.identity.replay(alice);
     expect(targetReplay.truncatedBefore).toBeDefined();
+  });
+
+  it("refuses a state-mode payload naming a transitions section (IDENTITY_STATE_IMPORT_TRANSITIONS)", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+
+    const stateExport = await exportGraph(source);
+    expect(stateExport.identity?.mode).toBe("state");
+    const archivalExport = await exportGraph(source, {
+      identityMode: "archival",
+    });
+    const archivalTransitions = archivalExport.identity?.transitions;
+    expect(archivalTransitions?.length).toBeGreaterThan(0);
+    const tampered: GraphData = {
+      ...stateExport,
+      identity: {
+        ...requireDefined(stateExport.identity),
+        transitions: archivalTransitions,
+      },
+    };
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await expect(
+      importGraph(target, tampered, { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_STATE_IMPORT_TRANSITIONS",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it("refuses an archival payload whose recorded revision decreases (IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE)", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    const first = await source.identity.assertSame(alice, bob);
+    await source.identity.retractAssertion(first.assertion.id);
+    await source.identity.assertSame(alice, bob);
+
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const transitions = requireDefined(archive.identity?.transitions);
+    expect(transitions.length).toBeGreaterThanOrEqual(2);
+    // Reversing preserves every row's own (valid) recordedRevision, but
+    // delivers them out of order — exactly the "same rows, wrong order"
+    // shape defect the monotonicity check exists to catch.
+    const tampered: GraphData = {
+      ...archive,
+      identity: {
+        ...requireDefined(archive.identity),
+        transitions: transitions.toReversed(),
+      },
+    };
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await expect(
+      importGraph(target, tampered, { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  // Load-bearing (G3-01 fix): the restore watermark must be resolved on the
+  // DESTINATION's own recorded-revision scale, never the source's — writing
+  // a foreign, source-scale number would misclassify the destination's own
+  // later, fully-retained transitions as pruned. Revert check: change
+  // `destinationFloor` back to `Math.max(highestRestoredRevision + 1,
+  // carriedWatermark ?? 0)` in `importIdentityTransitionsIntoTarget`
+  // (service-interchange-write.ts) and this test's final assertion fails —
+  // `truncatedBefore` swallows the target's own never-pruned transition.
+  it("does not misclassify the destination's own later transitions as pruned after an archival restore", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    const first = await source.identity.assertSame(sourceAlice, sourceBob);
+    await source.identity.retractAssertion(first.assertion.id);
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await importGraph(target, archive, { onConflict: "skip" });
+
+    const alice = { kind: "Person" as const, id: "alice" };
+    const targetAssertions = await target.identity.assertionsOf(alice);
+    const openAssertion = requireDefined(
+      targetAssertions.find((assertion) => assertion.validTo === undefined),
+    );
+    // A brand-new transition the TARGET itself records after the restore —
+    // never pruned, never restored, purely this graph's own later history.
+    await target.identity.retractAssertion(openAssertion.id);
+
+    const replay = await target.identity.replay(alice);
+    const retractedNow = requireDefined(
+      replay.steps.find((step) => step.transition.cause === "retract"),
+    );
+    const truncatedBefore = requireDefined(replay.truncatedBefore);
+    expect(
+      retractedNow.transition.recorded.localeCompare(truncatedBefore),
+    ).toBeGreaterThanOrEqual(0);
+    await expect(
+      target.identity.replay(alice, {
+        toRecorded: retractedNow.transition.recorded,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  // Load-bearing (G3-02 fix): a restored transition's row carries the
+  // SOURCE graph's own revision number, which `replay` must never pair with
+  // a membership snapshot reconstructed on the DESTINATION's historical
+  // reader — that pairs a foreign transition with a fabricated before/after
+  // that has nothing to do with it. Revert check: remove the `boundary <
+  // watermark` `continue` in `identityReplay` (replay.ts) and this test's
+  // `steps` assertion fails — the restored boundaries reappear as steps
+  // despite sitting below `truncatedBefore`.
+  it("excludes restored pre-restore boundaries from replay steps", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const sourceTransitions = requireDefined(archive.identity?.transitions);
+    expect(sourceTransitions.length).toBeGreaterThan(0);
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    // Advance the TARGET's own clock well past every revision number the
+    // archive's transitions carry, so the destination's real floor at
+    // restore time sits above all of them — exactly the case where a
+    // restored boundary and a live one could otherwise collide.
+    for (let index = 0; index < sourceTransitions.length + 5; index += 1) {
+      await target.nodes.Company.create(
+        { name: `filler-${String(index)}` },
+        { id: `filler-${index}` },
+      );
+    }
+    await importGraph(target, archive, { onConflict: "skip" });
+
+    const alice = { kind: "Person" as const, id: "alice" };
+    // `transitionsOf` (unaffected by the watermark) still answers fully.
+    const targetTransitions = await target.identity.transitionsOf(alice);
+    expect(targetTransitions.length).toBeGreaterThanOrEqual(
+      sourceTransitions.length,
+    );
+
+    const replay = await target.identity.replay(alice);
+    expect(replay.truncatedBefore).toBeDefined();
+    // Every restored transition sits strictly below the destination's own
+    // floor, so none of them may surface as a fabricated replay step.
+    const restoredTransitionIds = new Set(
+      sourceTransitions.map((transition) => transition.transitionId),
+    );
+    for (const step of replay.steps) {
+      expect(restoredTransitionIds.has(step.transition.transitionId)).toBe(
+        false,
+      );
+    }
+  });
+
+  // Load-bearing (G3-03 fix): re-importing the identical archival document —
+  // `importGraph(..., { onConflict: "skip" })` re-run over the same
+  // archive, exactly what a repeated backup restore does — must not crash
+  // with a raw driver UNIQUE-constraint error on `transition_id`. Revert
+  // check: drop `ON CONFLICT (graph_id, transition_id) DO NOTHING` from
+  // `insertIdentityTransitionValues` (transition-log.ts) and the second
+  // `importGraph` call below rejects with a driver error instead of
+  // resolving.
+  it("re-imports the same archival transitions document without crashing", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const firstImport = await importGraph(target, archive, {
+      onConflict: "skip",
+    });
+    expect(firstImport.success).toBe(true);
+    const alice = { kind: "Person" as const, id: "alice" };
+    const transitionsAfterFirst = await target.identity.transitionsOf(alice);
+
+    const secondImport = await importGraph(target, archive, {
+      onConflict: "skip",
+    });
+    expect(secondImport.success).toBe(true);
+    expect(secondImport.errors).toEqual([]);
+    // Verbatim restore of the SAME rows: re-importing must not duplicate them.
+    const transitionsAfterSecond = await target.identity.transitionsOf(alice);
+    expect(transitionsAfterSecond.length).toBe(transitionsAfterFirst.length);
+  });
+
+  it("refuses to restore archival transitions into a target opened without history: true", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+    const archive = await exportGraph(source, { identityMode: "archival" });
+    expect(archive.identity?.transitions?.length).toBeGreaterThan(0);
+
+    // A history-off target has no way to ever read these rows back
+    // (`transitionsOf` / `replay` both refuse without `history: true`), so
+    // restoring them here must refuse up front rather than write data the
+    // store's own API can never surface again.
+    const target = await createInitializedStore(graph, createTestBackend());
+    await expect(
+      importGraph(target, archive, { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "IdentityReplayError",
+      details: matchingObject({ code: "IDENTITY_REPLAY_REQUIRES_HISTORY" }),
+    });
   });
 
   it("streams the identity-transitions chunk through exportGraphStream / importGraphStream", async () => {

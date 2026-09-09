@@ -1,4 +1,5 @@
 import { type GraphDef } from "../core/define-graph";
+import { recordedInstantRevision } from "../core/temporal";
 import {
   ConfigurationError,
   IdentityValidityWindowError,
@@ -7,6 +8,7 @@ import {
 } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import {
+  readRecordedClock,
   withRecordedIdentityDecision,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
@@ -530,17 +532,28 @@ function transitionShapeError(
  * Restores archival transition-log rows verbatim — no closure repair, no
  * re-derived membership, no renumbering onto the destination graph's live
  * revision sequence, because a restore records history, it does not relive
- * it (design §7.3). Validates SHAPE only: `recordedRevision` must be
+ * it (see "Archival transitions and the retention watermark" in the identity
+ * documentation). Validates SHAPE only: `recordedRevision` must be
  * non-decreasing across the array in the order given (every other shape
  * constraint — a known cause, a well-formed `{kind, id}` ref — is already
  * enforced by the interchange schema before a row reaches here).
  *
- * Sets the destination graph's retention watermark to the highest restored
- * revision + 1 — or, when nothing was restored, to the payload's own carried
- * watermark (a source that had already pruned everything still reports that
- * honestly) — so `replay` surfaces the explanations-without-snapshots seam as
- * `truncatedBefore` rather than silently claiming a complete history. The
- * watermark write goes through the same monotonic `writeIdentityTransitionRetentionWatermark`
+ * Sets the destination graph's retention watermark to the DESTINATION's own
+ * current recorded revision + 1 — never to a number the payload carries.
+ * `carriedWatermark` and every restored row's `recordedRevision` are minted
+ * by the SOURCE graph's clock, which is a different counter than this
+ * graph's: writing either straight into this graph's watermark would
+ * misclassify this destination's own later, fully-retained transitions as
+ * pruned the moment its own clock happens to reach a number below the
+ * foreign one. Reading THIS graph's clock at restore time and adding one
+ * gives an honest floor on this graph's own timeline — every earlier
+ * revision on the destination's OWN axis (there are none yet the first time
+ * a fresh graph restores) is truly unexplained here, and every later one the
+ * destination goes on to record for real is, by the clock's own
+ * monotonicity, always at or above this floor. `replay` then surfaces the
+ * explanations-without-snapshots seam as `truncatedBefore` rather than
+ * silently claiming a complete history. The watermark write goes through the
+ * same monotonic `writeIdentityTransitionRetentionWatermark`
  * `pruneIdentityTransitionsForContext` uses, so importing into a graph that
  * already retains newer history can only raise the bound, never lower it.
  */
@@ -558,6 +571,15 @@ export async function importIdentityTransitionsIntoTarget(
   // `noteTransition` is used: a restore inserts historical rows verbatim, it
   // does not touch live entities or note a NEW transition.
   return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+    const destinationClock = await readRecordedClock(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    );
+    const destinationFloor =
+      destinationClock === undefined ? 1 : (
+        recordedInstantRevision(destinationClock) + 1
+      );
     if (transitions.length === 0) {
       if (carriedWatermark === undefined || carriedWatermark === 0) {
         return { created: 0, watermark: undefined };
@@ -566,10 +588,10 @@ export async function importIdentityTransitionsIntoTarget(
         rawTarget,
         ctx.schema,
         ctx.graphId,
-        carriedWatermark,
+        destinationFloor,
         nowIso(),
       );
-      return { created: 0, watermark: carriedWatermark };
+      return { created: 0, watermark: destinationFloor };
     }
     let previousRevision = Number.NEGATIVE_INFINITY;
     for (const row of transitions) {
@@ -599,21 +621,14 @@ export async function importIdentityTransitionsIntoTarget(
       ),
     );
     await insertIdentityTransitionValues(rawTarget, ctx.schema, values);
-    const highestRestoredRevision = Math.max(
-      ...transitions.map((row) => row.recordedRevision),
-    );
-    const watermark = Math.max(
-      highestRestoredRevision + 1,
-      carriedWatermark ?? 0,
-    );
     await writeIdentityTransitionRetentionWatermark(
       rawTarget,
       ctx.schema,
       ctx.graphId,
-      watermark,
+      destinationFloor,
       nowIso(),
     );
-    return { created: transitions.length, watermark };
+    return { created: transitions.length, watermark: destinationFloor };
   });
 }
 
@@ -621,10 +636,10 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   retractions: readonly IdentityTransferAssertion[],
   assertions: readonly IdentityTransferAssertion[],
-  // The governing merge decision, when this apply runs under a reviewed plan
-  // (PR-2). `undefined` for an ordinary interchange apply with no decision to
-  // attach — every note this call takes then carries `decision: undefined`,
-  // matching an unreviewed API write.
+  // The governing merge decision, when this apply runs under a reviewed
+  // graph-merge plan. `undefined` for an ordinary interchange apply with no
+  // decision to attach — every note this call takes then carries
+  // `decision: undefined`, matching an unreviewed API write.
   decision?: IdentityDecisionProvenance,
 ): Promise<Readonly<{ created: number; retracted: number }>> {
   if (retractions.length === 0 && assertions.length === 0) {

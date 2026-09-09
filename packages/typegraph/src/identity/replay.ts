@@ -383,9 +383,8 @@ async function walkedTransitionsFor<G extends GraphDef>(
 }
 
 /**
- * Every transition (§3.1's `transitionsOf`) touching `ref`'s class lineage,
- * ascending by recorded revision. `store.identity.transitionsOf` (PR-3) is a
- * thin wrapper over this.
+ * Every transition touching `ref`'s class lineage, ascending by recorded
+ * revision. `store.identity.transitionsOf` is a thin wrapper over this.
  */
 export async function identityTransitionsOf<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
@@ -397,12 +396,13 @@ export async function identityTransitionsOf<G extends GraphDef>(
 }
 
 /**
- * The full replay algorithm (§3.2): every transition touching `ref`'s class
+ * The full replay algorithm: every transition touching `ref`'s class
  * lineage, each paired with the class membership immediately before and
  * after it. `before(b_i) := after(b_{i-1})` for every boundary but the first —
- * sound because §2.3's cause set is exhaustive, so no membership-changing
- * revision can fall between two consecutive boundaries undetected.
- * `store.identity.replay` (PR-3) is a thin wrapper over this.
+ * sound because the transition cause set is exhaustive (see
+ * `IdentityTransitionCause`), so no membership-changing revision can fall
+ * between two consecutive boundaries undetected. `store.identity.replay` is
+ * a thin wrapper over this.
  */
 export async function identityReplay<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
@@ -438,6 +438,21 @@ export async function identityReplay<G extends GraphDef>(
   const steps: IdentityReplayStep<G>[] = [];
   let previousAfter: readonly IdentityNodeReference<G>[] | undefined;
   for (const boundary of boundaries) {
+    // A boundary below the retention watermark names a transition this
+    // graph cannot honestly explain from a snapshot: either it was pruned
+    // (and would not appear in `rows` at all), or it arrived through an
+    // archival restore, whose row carries the SOURCE graph's revision
+    // number, not this graph's own. Reconstructing "before"/"after" for it
+    // through THIS graph's historical reader would pair a foreign
+    // transition with a destination membership snapshot that has nothing to
+    // do with it — exactly the fabricated pair `truncatedBefore` exists to
+    // warn callers away from. `transitionsOf` (no watermark filtering) is
+    // still the complete answer for "what changed and why"; `replay` answers
+    // "and what did membership look like" only from the retained region
+    // forward. Skipping BEFORE any reconstruction also means the next
+    // retained boundary computes its own fresh `before` here (`previousAfter`
+    // stays unset) rather than chaining off a fabricated step.
+    if (watermark > 0 && boundary < watermark) continue;
     const before =
       previousAfter ?? (await reconstructAt(ctx, seed, boundary - 1));
     const after = await reconstructAt(ctx, seed, boundary);

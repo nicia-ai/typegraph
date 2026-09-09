@@ -303,6 +303,15 @@ export function encodeIdentityTransitionRow(
  * `TransactionBackend`), a restore carries rows whose revision, timestamp and
  * id are the SOURCE graph's own — already fully encoded — and runs through
  * `IdentityTarget`, the identity module's own write facet.
+ *
+ * `ON CONFLICT (graph_id, transition_id) DO NOTHING`: a restore is verbatim
+ * (this function never renumbers), so a `transition_id` collision on the
+ * same graph can only mean the archival document is being imported again —
+ * `importGraph(..., { onConflict: "skip" })` re-run over the same archive,
+ * or two archives sharing history. The colliding row is by construction the
+ * same row, so silently keeping the one already there is correct; without
+ * this clause the second import throws a raw driver UNIQUE-constraint error
+ * that never reaches `ImportResult.errors`.
  */
 export async function insertIdentityTransitionValues(
   target: IdentityTarget,
@@ -321,6 +330,7 @@ export async function insertIdentityTransitionValues(
       sql`
         INSERT INTO ${schema.identityTransitionsTable} (${IDENTITY_TRANSITION_COLUMNS})
         VALUES ${sql.join(valueChunk, sql`, `)}
+        ON CONFLICT (graph_id, transition_id) DO NOTHING
       `,
     );
   }
@@ -554,10 +564,14 @@ export type IdentityTransitionPage = Readonly<{
  * export's sole reader.
  *
  * Unlike {@link readIdentityTransitions} (scoped by class-key lineage, for
- * replay's fixed-point walk), this reader takes no `classRefs` scope: it
- * walks the whole graph's log once, in export order, exactly as
- * `readIdentityAssertionPageAtTarget` (`interchange-read.ts`) walks the
- * assertions table. `transition_id` is a random nanoid, so the tie-break
+ * replay's fixed-point walk), this reader takes no `classRefs` scope AND no
+ * `nodeKinds` scope: it always walks the whole graph's log, in export order.
+ * `readIdentityAssertionPageAtTarget` (`interchange-read.ts`) is similarly
+ * unscoped by class-key lineage, but — unlike this reader — DOES honor a
+ * `nodeKinds`-filtered archival export; a `nodeKinds`-filtered archival
+ * export therefore still carries transitions naming excluded kinds (see
+ * `export.ts`'s call site and identity.md's "Archival transitions and the
+ * retention watermark"). `transition_id` is a random nanoid, so the tie-break
  * goes through the same `binaryText` collation-safety seam that reader uses
  * for assertion ids: left bare, `ORDER BY transition_id` sorts under the
  * column's collation, which is locale-dependent on PostgreSQL and would page
@@ -763,9 +777,9 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
 /**
  * Prunes a graph's retained identity transitions.
  *
- * INTERNAL for PR-1: not exported from `src/index.ts`. The public surface
- * (`store.identity.replay` / `transitionsOf`, and this function's export from
- * the package barrel) lands with PR-3's release slice.
+ * An explicit operator action with no automatic retention policy — see
+ * "Retention" in the identity documentation. Requires the store to be opened
+ * with `history: true`.
  */
 export async function pruneIdentityTransitions<G extends GraphDef>(
   store: Store<G>,

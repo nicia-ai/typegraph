@@ -172,7 +172,10 @@ import {
   validateIdentityForContext,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
-import { type IdentityDecisionProvenance } from "../identity/transition-log";
+import {
+  type IdentityDecisionProvenance,
+  identityReplayRequiresHistoryError,
+} from "../identity/transition-log";
 import type {
   IdentityFacade,
   IdentityNode,
@@ -1782,6 +1785,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           graphId: this.graphId,
         },
       );
+    }
+    // A history-off graph has nowhere for `transitionsOf` / `replay` to ever
+    // read these rows back from (both refuse with the same error below
+    // `history: true`), so restoring them here would write data the store's
+    // own API can never surface again — and, worse, silently. Refuse at the
+    // one seam every archival-transitions restore passes through rather than
+    // let the rows and watermark land write-only.
+    if (!this.#captureEnabled) {
+      throw identityReplayRequiresHistoryError(this.graphId);
     }
     return importIdentityTransitionsIntoTarget(
       { graphId: this.graphId, schema: this.#sqlSchema() },
