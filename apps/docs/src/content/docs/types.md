@@ -516,21 +516,6 @@ There is no `"unique"` target cardinality: pair uniqueness is a property of
 the `(source, target)` pair, already declared from the source side by
 `Cardinality`'s `"unique"` value.
 
-### `InferenceType`
-
-Controls how ontology relationships affect queries.
-
-```typescript
-type InferenceType =
-  | "subsumption"   // Query for X includes subclass instances
-  | "hierarchy"     // Enables broader/narrower traversal
-  | "substitution"  // Can substitute equivalent types
-  | "constraint"    // Validation rules
-  | "composition"   // Part-whole navigation
-  | "association"   // Discovery/recommendation
-  | "none";         // No automatic inference
-```
-
 ## Query Types
 
 ### `VariableLengthSpec`

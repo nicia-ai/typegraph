@@ -36,8 +36,8 @@ These changes are backwards compatible and auto-migrate without intervention:
 - Changing per-kind annotations (UI hints, audit policy, etc.)
 - Changing graph-scoped annotations (display metadata, capabilities, etc.)
 
-Adding `disjointWith`, `subClassOf`, `equivalentTo`, or `sameAs` — and removing
-`subClassOf`, `equivalentTo`, or `sameAs` — auto-migrate too, but only after a
+Adding `disjointWith`, `subClassOf`, or `equivalentTo` — and removing
+`subClassOf` or `equivalentTo` — auto-migrate too, but only after a
 data check. See
 [Ontology tightenings are checked against your data](#ontology-tightenings-are-checked-against-your-data)
 below.
@@ -174,19 +174,26 @@ publishing the new version:
 | Meta-edge                                    | Added                                             | Removed                                           |
 | --------------------------------------------- | -------------------------------------------------- | -------------------------------------------------- |
 | `disjointWith`                                | Warning — checked against live nodes               | Safe                                                |
-| `subClassOf`, `equivalentTo`, `sameAs`        | Warning — checked against live nodes               | Warning — checked against live edges               |
+| `subClassOf`, `equivalentTo`                  | Warning — checked against live nodes               | Warning — checked against live edges               |
 | `inverseOf`, `implies`                        | Breaking                                            | Breaking                                            |
-| `broader`, `narrower`, `partOf`, `hasPart`, `relatedTo`, `differentFrom` | Safe | Safe |
+| `broader`, `narrower`, `partOf`, `hasPart`, `relatedTo` | Safe | Safe |
+
+`sameAs` and `differentFrom` no longer have a public factory to author them
+with (see
+[Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis)
+below), but a document persisted before the removal can still name one: the
+classifier treats a `sameAs` relation exactly like `equivalentTo` above, and
+a `differentFrom` relation exactly like the always-safe row.
 
 - **Adding `disjointWith`** is checked against every live node: if two nodes
   already share an id under kinds the new relation makes mutually exclusive
   (directly, or via `subClassOf` propagation), the commit refuses.
-- **Adding `subClassOf`, `equivalentTo`, or `sameAs`** is checked two ways: it
+- **Adding `subClassOf` or `equivalentTo`** is checked two ways: it
   can propagate an existing `disjointWith` down to a kind that was not
   disjoint before (same check as above), and it can merge two previously
   independent `kindWithSubClasses` uniqueness components — if both already
   hold a live row under the same key, the commit refuses.
-- **Removing `subClassOf`, `equivalentTo`, or `sameAs`** can shrink an edge
+- **Removing `subClassOf` or `equivalentTo`** can shrink an edge
   kind's admitted endpoint pairs. If a live edge's endpoints rely on the
   subsumption the relation provided, the commit refuses.
 - **Removing `disjointWith`** never invalidates anything — loosening a
@@ -290,7 +297,7 @@ version compare-and-swap is invisible to it.
 
 ## Structural subsumption is checked before you upgrade
 
-Separately from the data check above, a `subClassOf`/`equivalentTo`/`sameAs`
+Separately from the data check above, a `subClassOf`/`equivalentTo`
 hierarchy is checked for a **schema-shape** violation — the child's schema
 no longer structurally extends the parent's — and this check happens before
 the data check, before any commit: `getSchemaChanges(backend, graph)` throws
@@ -326,6 +333,61 @@ schema-authoring fix (loosen the parent, tighten the child, or replace
 delta input the diff never writes through, so an already-incoherent
 persisted document can still be repaired by a fix-forward migration that
 removes the offending relation.
+
+## Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs
+
+Three ontology APIs were removed: the custom `metaEdge()` factory (and its
+`MetaEdgeOptions`), the public `InferenceType` union and the
+`transitive`/`symmetric`/`reflexive`/`inverse`/`inference` members of
+`MetaEdgeProperties`, and the deprecated `sameAs`/`differentFrom` factories.
+None of them ever drove runtime behavior beyond serialized introspection —
+see [Type-Level Annotations](/ontology#type-level-annotations) and the
+[Verified Support Matrix](/ontology#verified-support-matrix). Nothing about
+opening an EXISTING store changes: a schema document written before this
+release keeps loading, unmodified, with no action required.
+
+**If your code calls `metaEdge()`.** Delete the declaration. Move any
+free-form metadata you attached (a custom `description`, or the
+`transitive`/`inference`/etc. properties you set) into `annotations` on
+`defineGraph()` instead, and update whatever application code walked
+`store.introspect().ontology` for that meta-edge's relations to instead walk
+the annotated data — see
+[Type-Level Annotations](/ontology#type-level-annotations) for a worked
+example.
+
+**If your code calls `sameAs(A, B)`.** Replace it with `equivalentTo(A, B)`
+— behaviorally identical in every release `sameAs` ever shipped in (the
+registry always folded `sameAs` into the same equivalence closure as
+`equivalentTo`; that fold is exactly how a persisted `sameAs` relation keeps
+being interpreted below).
+
+**If your code calls `differentFrom(A, B)`.** Delete the call. It was
+decorative — the registry never enforced it — so removing it changes
+nothing your application could observe. For actual cross-kind instance
+identity, enable the graph-level TypeGraph Identity Profile
+(`identity: { sameIdAcrossKinds: "fold" }`) and use `store.identity`.
+
+**A store opened against a persisted document that still has one of
+these keeps loading**, and reading `store.introspect()` on it still works:
+
+- A `metaEdges` catalog entry that still carries `transitive`/`symmetric`/
+  `reflexive`/`inverse`/`inference` parses — those fields are simply never
+  read. The next schema write drops them (the serializer no longer emits
+  them).
+- A relation naming `sameAs` keeps folding into the equivalence closure
+  exactly like `equivalentTo` — `registry.areEquivalent(A, B)`,
+  `isAssignableTo`, and every other equivalence-driven check are unaffected.
+- A relation naming `differentFrom` keeps being inert, as it always was.
+
+**Once your code moves a `sameAs(A, B)` to `equivalentTo(A, B)`, or deletes a
+`differentFrom(A, B)`, the next commit auto-migrates.** Both are classified
+by the same relation-level severity table as any other ontology change (see
+[Ontology tightenings are checked against your data](#ontology-tightenings-are-checked-against-your-data)
+above): migrating `sameAs` to `equivalentTo` is a relation removed
+(`warning`, checked against live edges) plus a relation added (`warning`,
+checked against live nodes) — never `breaking` — and dropping
+`differentFrom` is a relation removed (`safe`). Neither requires an explicit
+`migrateSchema()`.
 
 ## Breaking Changes
 
@@ -672,8 +734,8 @@ console.log("Current version:", active?.version);
 | Add edge type                  | Safe           | Yes            |
 | Add optional property          | Safe           | Yes            |
 | Add `broader`/`narrower`/`partOf`/`hasPart`/`relatedTo` | Safe | Yes |
-| Add `disjointWith`, `subClassOf`, `equivalentTo`, `sameAs` | Warning (data-checked) | Yes, if the check passes |
-| Remove `subClassOf`, `equivalentTo`, `sameAs` | Warning (data-checked) | Yes, if the check passes |
+| Add `disjointWith`, `subClassOf`, `equivalentTo` | Warning (data-checked) | Yes, if the check passes |
+| Remove `subClassOf`, `equivalentTo` | Warning (data-checked) | Yes, if the check passes |
 | Remove `disjointWith`          | Safe           | Yes            |
 | Add/remove `inverseOf`, `implies` | Breaking    | No             |
 | Change kind annotations           | Safe           | Yes            |
