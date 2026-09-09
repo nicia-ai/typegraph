@@ -35,6 +35,7 @@ import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 import {
   isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteDuplicateIdentityTransitionsRestoredAtColumnError,
   isSqliteMissingEdgeMatchIdentityColumnError,
 } from "../../utils/sql-errors";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
@@ -43,6 +44,7 @@ import { CURRENT_BASE_SCHEMA_VERSION } from "../drizzle/base-schema";
 import {
   generateSqliteMigrationSQL,
   planSqliteEdgeMatchIdentityAdoption,
+  planSqliteIdentityTransitionsRestoredAtAdoption,
   quoteDdlIdentifier,
 } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
@@ -81,6 +83,52 @@ export type {
 
 const nodeRequire = createRequire(import.meta.url);
 
+/**
+ * Ensures the identity-transitions table's `restored_at` column exists —
+ * the v4 adoption step. Unlike v1's edge-match-identity `ADD COLUMN`
+ * migration, nothing in `installationSql` references this column, so a
+ * missing one on an existing v3 table raises no exception to catch: this is
+ * called unconditionally after `installationSql` runs, exactly mirroring
+ * `ensureIdentityTransitionsRestoredAtColumn` in `drizzle/sqlite.ts`'s async
+ * engine profile (the same plan function, the same duplicate-column retry
+ * shape) for this synchronous, exception-free path.
+ */
+function ensureLocalSqliteIdentityTransitionsRestoredAtColumn(
+  sqlite: Database.Database,
+  tables: SqliteTables,
+): void {
+  const identityTransitionsTableName = getTableName(tables.identityTransitions);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const rows = sqlite
+      .prepare(
+        `PRAGMA table_info(${quoteDdlIdentifier(identityTransitionsTableName)})`,
+      )
+      .all() as readonly Readonly<{ name?: unknown }>[];
+    const columns = new Set(
+      rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
+    );
+    const statements = planSqliteIdentityTransitionsRestoredAtAdoption(
+      identityTransitionsTableName,
+      columns,
+    );
+    if (statements.length === 0) return;
+    try {
+      sqlite.exec(statements.join("\n"));
+      return;
+    } catch (error) {
+      if (
+        attempt === 1 ||
+        !isSqliteDuplicateIdentityTransitionsRestoredAtColumnError(error)
+      ) {
+        throw error;
+      }
+    }
+  }
+  throw new CompilerInvariantError(
+    "Local SQLite identity-transitions restored_at adoption exhausted its retry loop without returning or throwing.",
+  );
+}
+
 function installLocalSqliteBaseSchema(
   sqlite: Database.Database,
   tables: SqliteTables,
@@ -89,16 +137,14 @@ function installLocalSqliteBaseSchema(
   // v2 (the fences relation), v3 (the recorded-relations' and recorded
   // identity-assertions relation's `since_idx` indexes), and v4 (the identity
   // transition log plus its retention watermark) need no adoption logic beyond
-  // what `generateSqliteMigrationSQL` already emits: a brand-new relation or
-  // index is fully covered by its own `CREATE TABLE IF NOT EXISTS` /
-  // `CREATE INDEX IF NOT EXISTS`, on both a fresh database and one that
-  // already has every OTHER base table or index. Only v1's
-  // edge-match-identity `ADD COLUMN` migration — handled by the catch block
-  // below — needed runtime introspection this synchronous path writes by
-  // hand instead of running `BaseSchemaLifecycle`'s async state machine.
-  if (CURRENT_BASE_SCHEMA_VERSION !== 4) {
+  // what `generateSqliteMigrationSQL` already emits. v1's edge-match-identity
+  // `ADD COLUMN` migration — handled by the catch block below — and v5's
+  // identity-transitions `restored_at` column — handled by the unconditional
+  // call after it — both needed runtime introspection this synchronous path
+  // writes by hand instead of running `BaseSchemaLifecycle`'s async state machine.
+  if (CURRENT_BASE_SCHEMA_VERSION !== 5) {
     throw new CompilerInvariantError(
-      "The synchronous managed SQLite installation path only implements base-schema v1 through v4 adoption.",
+      "The synchronous managed SQLite installation path only implements base-schema v1 through v5 adoption.",
       { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
     );
   }
@@ -121,7 +167,7 @@ function installLocalSqliteBaseSchema(
       );
       try {
         sqlite.exec([...adoptionSql, installationSql].join("\n"));
-        return;
+        break;
       } catch (repairError) {
         if (
           attempt === 2 ||
@@ -131,10 +177,8 @@ function installLocalSqliteBaseSchema(
         }
       }
     }
-    throw new CompilerInvariantError(
-      "Local SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
-    );
   }
+  ensureLocalSqliteIdentityTransitionsRestoredAtColumn(sqlite, tables);
 }
 
 // ============================================================

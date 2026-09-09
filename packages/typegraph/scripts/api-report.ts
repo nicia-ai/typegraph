@@ -579,12 +579,9 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //
 // This is internal-convenience debt, not a user-facing requirement (G1R3-05):
 // `identityContext()`'s two consumers, replay and prune, are plain functions
-// over `IdentityServiceContext<G>`. PR-3, which brings `store.identity.replay`
-// / `transitionsOf` to the public surface, is expected to either narrow
-// `identityContext()`'s declared return to the exported slice those consumers
-// need, or export `IdentityServiceContext`/`PlainNodeRef` deliberately — either
-// way retiring these seven +2 entries, so this batch reads as staged rather
-// than permanent.
+// over `IdentityServiceContext<G>`. The release batch below evaluates, and
+// declines, both ways of retiring these seven +2 entries — see that batch's
+// own comment for the reasoning; this one stays permanent, not staged.
 //
 // `ensureSchema`'s `historyEnabled` extra moved off the public
 // `SchemaManagerOptions` (G1R3-04) onto an unexported `EnsureSchemaInternalOptions`
@@ -608,6 +605,60 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // staged-assertion shapes a policy callback receives, the pairing scope) is
 // exported deliberately from `src/graph-merge/index.ts` rather than left as
 // debt, which retires more forgotten exports than the port adds.
+//
+// Ruling (2026-09-09): the five `IdentityDecisionProvenance` entries above
+// stay PERMANENT debt, not retired. The only retirement this ledger's own
+// discipline allows is re-exporting the type from each of those five narrow
+// barrels — `./interchange`, `./postgres/pglite`, `./profiler`,
+// `./provenance`, `./sqlite/local` — purely to move a count, which is
+// exactly the "export machinery invented to avoid debt" this file's header
+// forbids and the identical `IdentityServiceContext` / `PlainNodeRef` ruling
+// two comments below already declined for the same reason. None of those
+// five barrels has a type-surface reason of its own to name a merge
+// decision's shape.
+//
+// Release batch, publishing replay and archival restore (this had not been
+// run since the `identityContext()` batch above landed either, so `.`'s
+// baseline already carried that batch's `IdentityServiceContext` /
+// `PlainNodeRef`, unmentioned by name below because this batch changes
+// neither count on `.`):
+//
+// `IdentityFacade` gains `replay` / `transitionsOf`
+// (`IdentityReplay`, `IdentityReplayOptions`, `IdentityReplayStep`,
+// `IdentityTransition`, `IdentityTransitionCause` in their signatures, all
+// exported deliberately from the package barrel), and
+// `StoreRuntime` gains the archival-restore port members
+// `readIdentityTransitionPageAtTarget` / `importIdentityTransitionsAtTarget`
+// (`IdentityTransitionCursor` / `IdentityTransitionTransfer`, internal
+// wire-transfer shapes owned by `transition-log.ts`, exported nowhere).
+// That is seven names, and every one of them renders at the six
+// Store-bearing entrypoints exactly as `IdentityDecisionProvenance` already
+// does two comments up — `./interchange`, `./profiler`, `./graph-merge`,
+// `./provenance`, `./sqlite/local`, `./postgres/pglite`, +7 apiece — because
+// none of those narrow barrels re-exports the five deliberately-public
+// names, the same "has no business re-exporting an identity type" reasoning
+// that already applies to `IdentityDecisionProvenance` there.
+//
+// `.` moves only +2: the five deliberately-exported names are exported AT
+// `.` itself, so they are not forgotten there — only the two never-exported
+// transfer types (`IdentityTransitionCursor`, `IdentityTransitionTransfer`)
+// newly render, through the same `StoreRuntime` reachability
+// `IdentityServiceContext` / `PlainNodeRef` already established.
+//
+// Narrowing `identityContext()`'s declared return (the retirement path this
+// file's own comment above named as "expected") was evaluated and NOT
+// taken: `identityContext()`'s sole consumer, `pruneIdentityTransitionsForContext`,
+// hands the context straight to `runIdentityMutation` — the identity
+// module's central mutation runner, called from every write site — so
+// narrowing the return would cascade into re-typing `runIdentityMutation`
+// across the whole module, exactly the kind of internal-semantics change
+// this release is scoped not to make. Exporting `IdentityServiceContext` /
+// `PlainNodeRef` publicly (this file's other named option) was also
+// declined: `pruneIdentityTransitions`'s own public signature (`store:
+// Store<G>`, an options bag) never mentions either type, so exporting two
+// backend-shaped internal types would add public surface with no caller who
+// needs it, purely to move a ledger number. That debt stays as documented,
+// unretired.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Roadmap F (meta-edge removal): removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
@@ -687,28 +738,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 751,
-    sha256: "8730044e7a059541aed796a599e6c6a5c298f37d4a207ec70120c3debb66cae7",
+    count: 758,
+    sha256: "4b2c41546be6c05a88c6b1e813399e77546616ca72c140eb938bcec09ba1b58e",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 736,
-    sha256: "3f69434dbf424609139beb0c5b60b7dd986654907d7297878b142b6fb84bbd5e",
+    count: 743,
+    sha256: "e9f06c93667ccf88527220336bd8cf8a3eb8fdaeaa6004675552271882f5e234",
   },
   "./postgres/pglite": {
-    count: 733,
-    sha256: "78fb46193f0808bad988b030121a9dbbac755388b3b8b86430d43231cf043e9d",
+    count: 740,
+    sha256: "224d36d55ac1e109c8f78066667a8eab48773c0bdde9e9454502c8211746bca9",
   },
   "./profiler": {
-    count: 738,
-    sha256: "1ebfe3d3375aa0fb825520e84168d5a143450f2ee2df6c685f79d0a9a971c09e",
+    count: 745,
+    sha256: "52deeee74965fd90d8ff982efbf43cca8627fc775b52fd2e14e3b79385fbd77b",
   },
   "./provenance": {
-    count: 744,
-    sha256: "15509713f4fe4a6c54155939de968c070e38f12d8353b65f3ad8a89d12d52a02",
+    count: 751,
+    sha256: "6625194f4f93f356297df62d9fef7bbc9d7d605b09dcdd3985f0b3727f02aa40",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -724,8 +775,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "d151d64d59d863a37d75027fe51e40ae149a0f2fe122f5ff6751dcc9971a35c8",
   },
   "./sqlite/local": {
-    count: 733,
-    sha256: "78fb46193f0808bad988b030121a9dbbac755388b3b8b86430d43231cf043e9d",
+    count: 740,
+    sha256: "224d36d55ac1e109c8f78066667a8eab48773c0bdde9e9454502c8211746bca9",
   },
 };
 

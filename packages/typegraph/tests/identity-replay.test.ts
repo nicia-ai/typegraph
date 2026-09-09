@@ -4,8 +4,11 @@
  * transition log's own `class`/`priorClass` columns, only from
  * `historicalIdentityReconstructionCtes` via `loadHistoricalClasses`.
  *
- * `identityReplay` / `identityTransitionsOf` reached by module path — internal,
- * PR-1 (no public `store.identity.replay` yet).
+ * `identityReplay` / `identityTransitionsOf` are reached by module path
+ * throughout most of this file (the fine-grained refusal/limit/watermark
+ * cases below); the trailing "public facade surface" suite exercises the
+ * public release surface, `store.identity.replay` / `transitionsOf` and
+ * their transaction-facade counterparts, directly.
  */
 import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
@@ -262,5 +265,79 @@ describe("identity replay", () => {
         error.details.requestedTo === beforePruneRecorded
       );
     });
+  });
+});
+
+/**
+ * The public release surface: `store.identity.replay` / `transitionsOf` are
+ * the package's own facade methods (`createIdentityFacade`), not merely the
+ * internal `identityReplay` / `identityTransitionsOf` functions the suite
+ * above reaches by path. Both live on `IdentityFacade` (store and
+ * transaction) and deliberately NOT on `IdentityReadFacade`: a
+ * coordinate-pinned read-only lens cannot honor a method that answers across
+ * every recorded coordinate.
+ */
+describe("identity replay — public facade surface", () => {
+  it("store.identity and tx.identity both expose replay and transitionsOf, agreeing on already-committed history", async () => {
+    const store = await buildAbcStore();
+    const a = { kind: "Person" as const, id: "a" };
+    const b = { kind: "Person" as const, id: "b" };
+    await store.identity.assertSame(a, b);
+
+    const storeTransitions = await store.identity.transitionsOf(a);
+    expect(storeTransitions.length).toBeGreaterThan(0);
+    const storeReplay = await store.identity.replay(a);
+    expect(storeReplay.steps.length).toBe(storeTransitions.length);
+
+    await store.transaction(async (tx) => {
+      const txTransitions = await tx.identity.transitionsOf(a);
+      expect(txTransitions).toEqual(storeTransitions);
+      const txReplay = await tx.identity.replay(a);
+      expect(txReplay).toEqual(storeReplay);
+    });
+  });
+
+  // Load-bearing (receipts, "enabled + history" arm): end-to-end wiring from
+  // the recorded-capture flush through to `IdentityWriteSummary.transitions`,
+  // beside the disabled/history-off arms covered by
+  // `tests/transaction-receipt.test.ts` (recorder unit) and
+  // `tests/backends/integration/identity.ts` (history: false). Revert check:
+  // in `transactionOutcome` (`src/store/store.ts`), drop the
+  // `recorder.recordIdentityTransitions(flushed.identityTransitions)` call —
+  // `writes.identity.transitions` reports `0` here despite the assertSame
+  // above having noted a transition, and this assertion fails.
+  it("reports a nonzero writes.identity.transitions for a history-enabled graph", async () => {
+    const store = await buildAbcStore();
+    const a = { kind: "Person" as const, id: "a" };
+    const b = { kind: "Person" as const, id: "b" };
+
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      await tx.identity.assertSame(a, b);
+    });
+
+    expect(outcome.receipt.writes.identity.transitions).toBeGreaterThan(0);
+    expect(outcome.receipt.writes.identity.sameAssertions).toBe(1);
+    expect(outcome.receipt.writes.total).toBe(
+      outcome.receipt.writes.identity.sameAssertions +
+        outcome.receipt.writes.identity.differentAssertions +
+        outcome.receipt.writes.identity.retractions,
+    );
+  });
+
+  // Load-bearing (API-surface): revert check — add `replay` and
+  // `transitionsOf` to `createIdentityReadFacade`'s returned object (the
+  // read-only lens `store.asOf(...).identity` is built from) and this test's
+  // `"replay" in view.identity` / `"transitionsOf" in view.identity`
+  // assertions flip to `true` and fail. `pnpm exec vitest run
+  // tests/identity-replay.test.ts --maxWorkers=2`.
+  it("a coordinate-pinned IdentityReadFacade (store.asOf(...).identity) does NOT expose replay or transitionsOf", async () => {
+    const store = await buildAbcStore();
+    const view = store.asOf(nowIso());
+    expect("replay" in view.identity).toBe(false);
+    expect("transitionsOf" in view.identity).toBe(false);
+    // The full read surface is otherwise intact — this is a narrow exclusion,
+    // not a broken lens.
+    expect(typeof view.identity.membersOf).toBe("function");
+    expect(typeof view.identity.assertionsOf).toBe("function");
   });
 });

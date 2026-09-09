@@ -1,11 +1,14 @@
 import { type GraphDef } from "../core/define-graph";
+import { recordedInstantRevision } from "../core/temporal";
 import {
   ConfigurationError,
   IdentityValidityWindowError,
   NodeNotFoundError,
   ValidationError,
 } from "../errors";
+import { type SqlSchema } from "../query/compiler/schema";
 import {
+  readRecordedClock,
   withRecordedIdentityDecision,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
@@ -40,9 +43,16 @@ import {
   type IdentityServiceContext,
   type IdentityTransferAssertion,
 } from "./service-types";
-import { type PlainNodeRef } from "./sql-target";
+import { type IdentityTarget, type PlainNodeRef } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
-import { type IdentityDecisionProvenance } from "./transition-log";
+import {
+  encodeIdentityTransitionRow,
+  hasNativeIdentityTransitions,
+  type IdentityDecisionProvenance,
+  type IdentityTransitionTransfer,
+  insertIdentityTransitionValues,
+  writeIdentityTransitionRetentionWatermark,
+} from "./transition-log";
 import {
   type ResolvedIdentityValidityWindow,
   resolveIdentityValidityWindow,
@@ -503,14 +513,157 @@ export async function importIdentityAssertionsIntoTarget(
   return { created, skipped };
 }
 
+/** What `importIdentityTransitionsIntoTarget` reads off the service context. */
+type IdentityTransitionImportContext = Readonly<{
+  graphId: string;
+  schema: SqlSchema;
+}>;
+
+function transitionShapeError(
+  transitionId: string,
+  message: string,
+  code: string,
+): ValidationError {
+  return new ValidationError(message, {
+    issues: [{ path: "identity.transitions", message, code }],
+  });
+}
+
+/**
+ * Restores archival transition-log rows verbatim — no closure repair, no
+ * re-derived membership, no renumbering onto the destination graph's live
+ * revision sequence, because a restore records history, it does not relive
+ * it (see "Archival transitions and the retention watermark" in the identity
+ * documentation). Validates SHAPE only: `recordedRevision` must be
+ * non-decreasing across the array in the order given (every other shape
+ * constraint — a known cause, a well-formed `{kind, id}` ref — is already
+ * enforced by the interchange schema before a row reaches here).
+ *
+ * Every inserted row is marked `restored_at` (the restore's own wall time),
+ * regardless of what the wire payload carried — see
+ * `encodeIdentityTransitionRow`'s docblock. That marker, not a revision
+ * comparison, is what keeps `identityReplay` from ever pairing one of these
+ * rows with a fabricated before/after: a restored row's `recordedRevision`
+ * is minted by the SOURCE graph's own clock and interleaves arbitrarily with
+ * this graph's, so no floor on this graph's axis could separate "restored"
+ * from "native" by number alone.
+ *
+ * The retention watermark is a SEPARATE, coarser signal — "this graph cannot
+ * vouch for a complete history below revision N on its own axis" — and is
+ * only ever advanced here when {@link hasNativeIdentityTransitions} answers
+ * `false`, i.e. this graph has recorded no identity transitions of its own
+ * yet. Advancing it unconditionally (the original design here) would, for a
+ * graph that already has its own retained history, stamp a
+ * destination-clock-derived floor over transitions the restore never
+ * touched — misreporting `truncatedBefore`, and `IDENTITY_REPLAY_HISTORY_TRUNCATED`,
+ * for classes the restore had nothing to do with. A graph with no native
+ * rows yet has nothing of its own for that floor to misclassify, so setting
+ * it there stays sound: reading THIS graph's clock at restore time and
+ * adding one gives an honest floor on this graph's own timeline (there is no
+ * earlier revision on it yet), and every later one the destination goes on
+ * to record for real is, by the clock's own monotonicity, always at or
+ * above it. The watermark write goes through the same monotonic
+ * `writeIdentityTransitionRetentionWatermark` `pruneIdentityTransitionsForContext`
+ * uses, so a graph that later restores again can only raise its own floor,
+ * never lower it.
+ */
+export async function importIdentityTransitionsIntoTarget(
+  ctx: IdentityTransitionImportContext,
+  target: IdentityTarget,
+  transitions: readonly IdentityTransitionTransfer[],
+  carriedWatermark: number | undefined,
+): Promise<Readonly<{ created: number; watermark: number | undefined }>> {
+  // Raw identity statements run through the capture-approved handle
+  // `withRecordedIdentityMutationTarget` resolves — under `history: true` the
+  // target this function was HANDED refuses `executeStatement` outright (raw
+  // SQL bypasses recorded-time capture), exactly as every other identity
+  // relation writer already goes through this seam. Neither `touch` nor
+  // `noteTransition` is used: a restore inserts historical rows verbatim, it
+  // does not touch live entities or note a NEW transition.
+  return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+    const destinationClock = await readRecordedClock(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    );
+    const destinationFloor =
+      destinationClock === undefined ? 1 : (
+        recordedInstantRevision(destinationClock) + 1
+      );
+    const restoredAt = nowIso();
+    const hasOwnHistory = await hasNativeIdentityTransitions(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    );
+    if (transitions.length === 0) {
+      if (
+        carriedWatermark === undefined ||
+        carriedWatermark === 0 ||
+        hasOwnHistory
+      ) {
+        return { created: 0, watermark: undefined };
+      }
+      await writeIdentityTransitionRetentionWatermark(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        destinationFloor,
+        restoredAt,
+      );
+      return { created: 0, watermark: destinationFloor };
+    }
+    let previousRevision = Number.NEGATIVE_INFINITY;
+    for (const row of transitions) {
+      if (row.recordedRevision < previousRevision) {
+        throw transitionShapeError(
+          row.transitionId,
+          `Archival identity transitions must be ordered by non-decreasing recorded revision; ${row.transitionId} carries ${String(row.recordedRevision)} after ${String(previousRevision)}.`,
+          "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
+        );
+      }
+      previousRevision = row.recordedRevision;
+    }
+    const values = transitions.map((row) =>
+      encodeIdentityTransitionRow(
+        {
+          graphId: ctx.graphId,
+          cause: row.cause,
+          classRef: row.class,
+          priorClassRef: row.priorClass,
+          assertionIds: row.assertionIds,
+          decision: row.decision,
+          validAt: row.validAt,
+        },
+        row.recordedRevision,
+        row.recordedAt,
+        row.transitionId,
+        restoredAt,
+      ),
+    );
+    await insertIdentityTransitionValues(rawTarget, ctx.schema, values);
+    if (hasOwnHistory) {
+      return { created: transitions.length, watermark: undefined };
+    }
+    await writeIdentityTransitionRetentionWatermark(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+      destinationFloor,
+      restoredAt,
+    );
+    return { created: transitions.length, watermark: destinationFloor };
+  });
+}
+
 export async function applyIdentityChangesForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   retractions: readonly IdentityTransferAssertion[],
   assertions: readonly IdentityTransferAssertion[],
-  // The governing merge decision, when this apply runs under a reviewed plan
-  // (PR-2). `undefined` for an ordinary interchange apply with no decision to
-  // attach — every note this call takes then carries `decision: undefined`,
-  // matching an unreviewed API write.
+  // The governing merge decision, when this apply runs under a reviewed
+  // graph-merge plan. `undefined` for an ordinary interchange apply with no
+  // decision to attach — every note this call takes then carries
+  // `decision: undefined`, matching an unreviewed API write.
   decision?: IdentityDecisionProvenance,
 ): Promise<Readonly<{ created: number; retracted: number }>> {
   if (retractions.length === 0 && assertions.length === 0) {

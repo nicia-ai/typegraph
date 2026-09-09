@@ -48,7 +48,7 @@ const jsonSchema = toJSONSchema(GraphDataSchema);
 
 ```typescript
 interface GraphData {
-  formatVersion: "2.0";
+  formatVersion: "3.0";
   exportedAt: string; // ISO datetime
   source: {
     type: "typegraph-export" | "external";
@@ -90,6 +90,36 @@ interface GraphData {
       validFrom: string;
       validTo?: string;
     }>;
+    // `archival` mode only — see "Archival identity transitions" below.
+    transitions?: Array<{
+      transitionId: string;
+      cause:
+        | "assert"
+        | "retract"
+        | "fold"
+        | "detach"
+        | "restore"
+        | "window-end"
+        | "kind-drop"
+        | "schema-transition"
+        | "reconcile";
+      recordedRevision: number;
+      recordedAt: string;
+      validAt: string;
+      class: { kind: string; id: string };
+      priorClass?: { kind: string; id: string };
+      assertionIds: string[];
+      decision?: {
+        policy?: string;
+        branchId?: string;
+        branchAncestry?: string[];
+        mergePlanDigest?: string;
+        reviewDigest?: string;
+        sourceId?: string;
+      };
+    }>;
+    // `archival` mode only, and only when the source has ever pruned.
+    retention?: { prunedBeforeRevision: number; prunedAt: string };
   };
 }
 ```
@@ -105,12 +135,62 @@ at or before that instant, in which case it is imported with no lower bound
 
 ### Format Version Compatibility
 
-Exports always write `formatVersion: "2.0"`. The read side — both
+Exports always write `formatVersion: "3.0"`. The read side — both
 `importGraph`/`importGraphStream` and `GraphDataSchema.parse` — additionally
-accepts `"1.0"`. A 1.0 document is structurally a valid 2.0 document: the only
-2.0 change is the additive optional `identity` section, so pre-existing 1.0
-exports validate and import unchanged. You never need to rewrite the version
-field of an older backup; validation and import handle both.
+accepts `"1.0"` and `"2.0"`. A 1.0 document is structurally a valid 2.0
+document (the only 2.0 change is the additive optional `identity` section),
+and a 2.0 document is in turn a structurally valid 3.0 document (the only 3.0
+change is the additive optional `identity.transitions` / `identity.retention`
+archival fields), so pre-existing 1.0 and 2.0 exports validate and import
+unchanged. You never need to rewrite the version field of an older backup;
+validation and import handle all three.
+
+### Archival identity transitions
+
+On a `history: true` graph, `exportGraph(store, { identityMode: "archival" })`
+additionally carries every retained identity transition, plus the source's
+own retention watermark when it has ever pruned. State export and working-copy branch cloning carry
+neither field — a clone's own history starts at its clone revision, and
+current-truth state export is not a backup of explanation.
+
+Restoring `identity.transitions` validates shape only (a known cause, a
+well-formed reference, a non-decreasing `recordedRevision` sequence) and
+inserts every row verbatim, never re-deriving membership or touching the
+target's closure. Every restored row is marked internally as such — a
+restore always inserts rows this graph did not record itself, regardless of
+what the archive's own history looks like. A replay over the restored graph
+(`store.identity.replay`, see the [identity guide](/identity/#replay-and-identity-history))
+uses that marker, never a `recordedRevision` comparison, to exclude every
+restored transition from its `steps` (a restored row's revision is minted by
+the SOURCE graph's own clock and interleaves arbitrarily with the
+destination's), so `transitionsOf` answers fully while `replay` never pairs
+a restored transition with a fabricated before/after.
+
+The restore also sets the destination's own retention watermark to the
+destination's own current recorded revision + 1 at restore time — but only
+when the destination has no identity transitions of its own yet. A graph
+that already retains its own history keeps its existing watermark
+untouched, so an unrelated restore can never misreport that graph's own,
+fully-retained classes as truncated. `replay` reports the watermark, when
+set, as `truncatedBefore`.
+
+A `state`-mode document naming a `transitions` section is refused. Archival
+transitions export is always whole-graph — an export's `nodeKinds` filter
+does not scope the transitions section the way it scopes assertions.
+
+A document (or stream) naming a `transitions` section, or carrying a
+non-zero `retention` watermark, into a target opened without `history:
+true` is refused with `IDENTITY_REPLAY_REQUIRES_HISTORY`, before writing any
+node, edge, or identity assertion. On the streaming protocol, the
+`identity-transitions` chunk always arrives last (after nodes, edges, and
+the `identity` assertions chunk), so `importGraphStream` reads a
+`hasTransitions` boolean on the streamed header's `identity` object — set
+whenever the export's transitions section is non-empty — to know this
+before that chunk arrives. **This is a breaking change**: restoring an
+archival export from a `history: true` source that carries retained
+transitions or a retention watermark now requires the target to also be
+opened with `history: true`; previously the transitions section did not
+exist, so nothing was silently dropped, but nothing could refuse it either.
 
 ## Exporting Data
 

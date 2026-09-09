@@ -12,7 +12,7 @@ import {
   IdentityEndpointValidityError,
   rebuildIdentityClosure,
 } from "../../../src";
-import { exportGraph } from "../../../src/interchange";
+import { exportGraph, importGraph } from "../../../src/interchange";
 import { inverseOf } from "../../../src/ontology";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
@@ -82,6 +82,26 @@ async function provisionIdentityTraversalStore(
   );
   return store;
 }
+
+/**
+ * Two independent `history: true` graphs, sharing a graph id namespace with
+ * every other fixture in this suite only by coexisting on the same backend —
+ * a genuine SOURCE and TARGET pair for the archival-transitions restore round
+ * trip below, on every backend `createIntegrationTestSuite` runs against.
+ */
+const RestorePerson = defineNode("Person", { schema: z.object({}) });
+const identityRestoreSourceGraph = defineGraph({
+  id: "identity_restore_source_parity",
+  nodes: { Person: { type: RestorePerson } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+const identityRestoreTargetGraph = defineGraph({
+  id: "identity_restore_target_parity",
+  nodes: { Person: { type: RestorePerson } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
 
 /**
  * Same node and edge kinds as {@link identityTraversalGraph} under the other
@@ -682,6 +702,10 @@ export function registerIdentityIntegrationTests(
         sameAssertions: 2,
         differentAssertions: 0,
         retractions: 1,
+        // `context.getStore()` opens without `history: true`, so no
+        // transition notes are ever buffered — this is the "history off"
+        // case the receipts load-bearing test also pins.
+        transitions: 0,
         total: 3,
       });
       expect(outcome.receipt.writes.total).toBe(3);
@@ -792,6 +816,70 @@ export function registerIdentityIntegrationTests(
 
       expect(document.nodes.map((node) => node.id)).toEqual([first.id]);
       expect(document.identity?.assertions).toEqual([]);
+    });
+
+    it("restores archival identity transitions and the retention watermark, and tolerates a re-import", async () => {
+      const backend = context.getStore().backend;
+      const [source] = await createStoreWithSchema(
+        identityRestoreSourceGraph,
+        backend,
+        { history: true },
+      );
+      const a = { kind: "Person" as const, id: "restore-a" };
+      const b = { kind: "Person" as const, id: "restore-b" };
+      await source.nodes.Person.create({}, { id: a.id });
+      await source.nodes.Person.create({}, { id: b.id });
+      const first = await source.identity.assertSame(a, b);
+      await source.identity.retractAssertion(first.assertion.id);
+      await source.identity.assertSame(a, b);
+      const archive = await exportGraph(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      const sourceTransitions = requireDefined(archive.identity?.transitions);
+      expect(sourceTransitions.length).toBeGreaterThan(0);
+
+      const [target] = await createStoreWithSchema(
+        identityRestoreTargetGraph,
+        backend,
+        { history: true },
+      );
+      const firstImport = await importGraph(target, archive, {
+        onConflict: "skip",
+      });
+      expect(firstImport.success).toBe(true);
+
+      // `transitionsOf` answers fully (restore is complete); none of the
+      // RESTORED transitions may surface as a `replay` step — that would
+      // pair a foreign transition with a fabricated before/after.
+      const targetTransitions = await target.identity.transitionsOf(a);
+      expect(targetTransitions.length).toBeGreaterThanOrEqual(
+        sourceTransitions.length,
+      );
+      const replay = await target.identity.replay(a);
+      const restoredTransitionIds = new Set(
+        sourceTransitions.map((transition) => transition.transitionId),
+      );
+      for (const step of replay.steps) {
+        expect(restoredTransitionIds.has(step.transition.transitionId)).toBe(
+          false,
+        );
+      }
+      expect(replay.truncatedBefore).toBeDefined();
+
+      // A second, identical import — `ON CONFLICT (graph_id, transition_id)
+      // DO NOTHING` — must not raise a raw driver UNIQUE-constraint error on
+      // EITHER dialect, and must not duplicate the restored rows.
+      const secondImport = await importGraph(target, archive, {
+        onConflict: "skip",
+      });
+      expect(secondImport.success).toBe(true);
+      expect(secondImport.errors).toEqual([]);
+      const targetTransitionsAfterSecond =
+        await target.identity.transitionsOf(a);
+      expect(targetTransitionsAfterSecond.length).toBe(
+        targetTransitions.length,
+      );
     });
 
     it("makes current reads equal a valid-time view at now", async () => {

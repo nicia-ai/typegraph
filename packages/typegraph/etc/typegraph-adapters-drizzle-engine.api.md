@@ -746,6 +746,7 @@ type CreateBaseSchemaMembersDeps = Readonly<{
     ensureEdgeMatchIdentityStorage: () => Promise<void>;
     identityTransitionsTableDdl: readonly string[];
     identityTransitionRetentionTableDdl: string;
+    ensureIdentityTransitionsRestoredAtColumn: () => Promise<void>;
 }>;
 
 // @public (undocumented)
@@ -2978,6 +2979,23 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
                 enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            restoredAt: drizzle_orm_pg_core.PgColumn<{
+                name: "restored_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
@@ -6561,6 +6579,25 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
             }>;
             txId: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            restoredAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "restored_at";
                 tableName: string;
                 dataType: "string";
                 columnType: "SQLiteText";

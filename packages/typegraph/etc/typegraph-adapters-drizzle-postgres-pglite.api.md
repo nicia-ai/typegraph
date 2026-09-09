@@ -2533,6 +2533,23 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
                 identity: undefined;
                 generated: undefined;
             }, {}, {}>;
+            restoredAt: drizzle_orm_pg_core.PgColumn<{
+                name: "restored_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
         };
         dialect: "pg";
     }>;

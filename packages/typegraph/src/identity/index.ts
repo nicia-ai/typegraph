@@ -1,5 +1,19 @@
 export { rebuildIdentityClosure } from "./rebuild";
-export type { IdentityDecisionProvenance } from "./transition-log";
+export {
+  IDENTITY_REPLAY_DEFAULT_LIMIT,
+  IDENTITY_REPLAY_MAX_LIMIT,
+  type IdentityReplay,
+  type IdentityReplayOptions,
+  type IdentityReplayStep,
+  type IdentityTransition,
+} from "./replay";
+export {
+  type IdentityDecisionProvenance,
+  type IdentityTransitionCause,
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
+  pruneIdentityTransitions,
+} from "./transition-log";
 export type {
   IdentityAssertion,
   IdentityAssertionId,

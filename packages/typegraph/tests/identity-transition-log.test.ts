@@ -3,8 +3,10 @@
  * through recorded-capture checkpoint/restore exactly like every other touch,
  * sealed with the session, and absent entirely with `history: false`.
  *
- * `readIdentityTransitions` reads by module path — internal, PR-1 (no public
- * `store.identity.transitionsOf` yet).
+ * `readIdentityTransitions` reads by module path directly — it is the
+ * internal reader `identityTransitionsOf` (`replay.ts`) and the public
+ * `store.identity.transitionsOf` both walk through, not a second copy of
+ * the query.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
