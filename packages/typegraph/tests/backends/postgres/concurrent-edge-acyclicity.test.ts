@@ -270,39 +270,35 @@ describe.runIf(process.env["POSTGRES_URL"])(
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const setup = createStore(graph, createPostgresBackend(live.first));
 
         // A 10^5-edge chain: long enough that the reachability probe is
-        // genuinely still walking it when the 1ms budget expires, not just
-        // dispatching the statement. Built in chunks well under Postgres's
-        // bound-parameter limit per statement.
+        // genuinely still walking it when the 1ms budget expires (the walk
+        // costs microseconds per hop), not just dispatching the statement.
+        // Seeded with two set-based INSERTs straight into the store's tables
+        // rather than through the store: a chain this long is the shape a
+        // per-row or per-batch acyclicity probe is slowest on, and the seed
+        // is fixture setup, not the behavior under test. Node and edge ids
+        // are derived from a generated series so the rows are exactly what
+        // `nodes.Task.bulkCreate` / `edges.dependsOn.bulkCreate` would have
+        // written for the same ids.
         const CHAIN_LENGTH = 100_000;
-        const CHUNK_SIZE = 2000;
-        const nodeIds = Array.from(
-          { length: CHAIN_LENGTH + 1 },
-          (_unused, index) => `chain-${String(index)}`,
-        );
-        for (let start = 0; start < nodeIds.length; start += CHUNK_SIZE) {
-          const chunkIds = nodeIds.slice(start, start + CHUNK_SIZE);
-          await setup.nodes.Task.bulkCreate(
-            chunkIds.map((id) => ({ props: { name: id }, id })),
-          );
-        }
-        for (let start = 0; start < CHAIN_LENGTH; start += CHUNK_SIZE) {
-          const end = Math.min(start + CHUNK_SIZE, CHAIN_LENGTH);
-          await setup.edges.dependsOn.bulkCreate(
-            Array.from({ length: end - start }, (_unused, offset) => {
-              const index = start + offset;
-              return {
-                from: { kind: "Task" as const, id: `chain-${String(index)}` },
-                to: {
-                  kind: "Task" as const,
-                  id: `chain-${String(index + 1)}`,
-                },
-              };
-            }),
-          );
-        }
+        const db = requireDefined(firstDb);
+        const graphId = graph.id;
+        await db.execute(sql`
+          INSERT INTO typegraph_nodes (graph_id, id, kind, props, created_at, updated_at)
+          SELECT ${graphId}, 'chain-' || i, 'Task',
+                 jsonb_build_object('name', 'chain-' || i), now(), now()
+          FROM generate_series(0, ${CHAIN_LENGTH}) AS s(i)
+        `);
+        await db.execute(sql`
+          INSERT INTO typegraph_edges (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, created_at, updated_at)
+          SELECT ${graphId}, 'chain-edge-' || i, 'dependsOn',
+                 'Task', 'chain-' || i, 'Task', 'chain-' || (i + 1),
+                 '{}'::jsonb, now(), now()
+          FROM generate_series(0, ${CHAIN_LENGTH - 1}) AS s(i)
+        `);
+        await db.execute(sql`ANALYZE typegraph_edges`);
+        const setup = createStore(graph, createPostgresBackend(live.first));
 
         // The closing edge, attempted inside a caller-adopted transaction
         // with a 1ms statement budget: `tail -> head` would walk the ENTIRE
@@ -313,7 +309,6 @@ describe.runIf(process.env["POSTGRES_URL"])(
           id: `chain-${String(CHAIN_LENGTH)}`,
         };
 
-        const db = requireDefined(firstDb);
         const adapterBackend = createPostgresBackend(db);
         const adapterStore = createAdapterStore(graph, adapterBackend);
 
