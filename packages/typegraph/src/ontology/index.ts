@@ -3,8 +3,6 @@ export {
   broader,
   type CompositionOptions,
   core,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
-  differentFrom,
   disjointWith,
   equivalentTo,
   hasPart,
@@ -13,8 +11,6 @@ export {
   narrower,
   partOf,
   relatedTo,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
-  sameAs,
   subClassOf,
 } from "./core-meta-edges";
 
@@ -46,7 +42,6 @@ export {
 // Types
 export {
   getTypeName,
-  type InferenceType,
   isMetaEdge,
   META_EDGE_BRAND,
   type MetaEdge,

@@ -116,13 +116,10 @@ describe("a `via` change diffs as remove + add, not a no-op", () => {
     const after = serializeSchema(graphWithVia(edgeNew, "edgeNew"), 2);
 
     const diff = computeSchemaDiff(before, after);
-    const relationChanges = diff.ontology.filter(
-      (change) => change.entity === "relation",
-    );
 
-    expect(relationChanges).toHaveLength(2);
-    const removed = relationChanges.find((change) => change.type === "removed");
-    const added = relationChanges.find((change) => change.type === "added");
+    expect(diff.ontology).toHaveLength(2);
+    const removed = diff.ontology.find((change) => change.type === "removed");
+    const added = diff.ontology.find((change) => change.type === "added");
     expect(removed?.details).toBe(
       'Relation partOf(Pa:rt, Wh|ole) via "edgeOld" was removed',
     );

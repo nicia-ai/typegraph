@@ -209,6 +209,27 @@ describe("serializeSchema", () => {
     );
   });
 
+  it("serializes a metaEdges catalog entry with only name and description (roadmap F)", () => {
+    // Pins `SerializedMetaEdge`'s post-removal shape: `transitive`,
+    // `symmetric`, `reflexive`, `inverse`, and `inference` are gone, and
+    // nothing should silently start re-emitting them.
+    const graph = defineGraph({
+      id: "test_graph",
+      nodes: {
+        Organization: { type: Organization },
+        Company: { type: Company },
+      },
+      edges: {},
+      ontology: [subClassOf(Company, Organization)],
+    });
+
+    const serialized = serializeSchema(graph, 1);
+
+    expect(
+      Object.keys(serialized.ontology.metaEdges["subClassOf"] ?? {}),
+    ).toEqual(["name", "description"]);
+  });
+
   it("serializes uniqueness constraints", () => {
     const graph = defineGraph({
       id: "test_graph",
@@ -589,9 +610,11 @@ describe("computeSchemaDiff", () => {
       serializeSchema(newGraph, 2),
     );
 
-    // Adding subClassOf relation adds both the meta-edge and the relation
+    // Adding a subClassOf relation is one relation-level ontology change.
+    // `SerializedOntology.metaEdges` is derived state (see its docblock)
+    // and is not an independent classification input.
     const addedItems = diff.ontology.filter((o) => o.type === "added");
-    expect(addedItems.length).toBeGreaterThanOrEqual(1);
-    expect(addedItems.some((o) => o.entity === "relation")).toBe(true);
+    expect(addedItems).toHaveLength(1);
+    expect(addedItems[0]).toMatchObject({ entity: "relation" });
   });
 });

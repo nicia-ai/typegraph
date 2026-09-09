@@ -8,7 +8,6 @@ import {
   equivalentTo,
   type NodeType,
   type OntologyRelation,
-  sameAs,
 } from "..";
 
 const Person = defineNode("Person", {
@@ -44,15 +43,6 @@ expectType<OntologyRelation>(
 // in ontology/validation.ts exists precisely because this has no compile-time
 // spelling: only a shared-IRI chain can put two edge kinds in one class).
 expectError(equivalentTo(worksAt, employedBy));
-
-// `sameAs` is the deprecated `equivalentTo` alias and is deliberately NOT
-// widened — it is scheduled for removal (roadmap R1) and no interop case
-// needs the edge-to-IRI shape on it.
-expectError(sameAs(worksAt, "https://schema.org/worksFor"));
-
-// `sameAs`'s existing NodeType-only shape still typechecks. Same C.1
-// narrowing as equivalentTo above -- assignable, not identical.
-expectAssignable<OntologyRelation>(sameAs(Person, Individual));
 
 declare const anyEdge: AnyEdgeType;
 declare const anyNode: NodeType;

@@ -1037,23 +1037,18 @@ describe("computeSchemaDiff", () => {
   // ============================================================
 
   describe("ontology changes", () => {
-    it("detects added meta-edge as safe change", () => {
+    // `SerializedOntology.metaEdges` is derived 1:1 from `relations` by the
+    // serializer (see its docblock in `src/schema/types.ts`) — the classifier
+    // has exactly one owner for ontology-change severity, the relation-level
+    // diff below, so these two cases exercise that diff directly rather than
+    // a synthetic catalog-only change a real serializer never produces.
+    it("detects an added relation with an inert meta-edge as a safe change", () => {
       const before = createSchema({ version: 1 });
       const after = createSchema({
         version: 2,
         ontology: {
           ...emptyOntology(),
-          metaEdges: {
-            subClassOf: {
-              name: "subClassOf",
-              transitive: true,
-              symmetric: false,
-              reflexive: false,
-              inverse: undefined,
-              inference: "none",
-              description: undefined,
-            },
-          },
+          relations: [{ metaEdge: "broader", from: "Employee", to: "Person" }],
         },
       });
 
@@ -1064,28 +1059,18 @@ describe("computeSchemaDiff", () => {
       expect(diff.ontology).toHaveLength(1);
       expect(diff.ontology[0]).toMatchObject({
         type: "added",
-        entity: "metaEdge",
-        name: "subClassOf",
+        entity: "relation",
         severity: "safe",
       });
+      expect(requireDefined(diff.ontology[0]).details).toContain("broader");
     });
 
-    it("detects removed meta-edge as breaking change", () => {
+    it("detects a removed inverseOf relation as a breaking change", () => {
       const before = createSchema({
         version: 1,
         ontology: {
           ...emptyOntology(),
-          metaEdges: {
-            subClassOf: {
-              name: "subClassOf",
-              transitive: true,
-              symmetric: false,
-              reflexive: false,
-              inverse: undefined,
-              inference: "none",
-              description: undefined,
-            },
-          },
+          relations: [{ metaEdge: "inverseOf", from: "likes", to: "likedBy" }],
         },
       });
       const after = createSchema({ version: 2 });
@@ -1097,8 +1082,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.ontology).toHaveLength(1);
       expect(diff.ontology[0]).toMatchObject({
         type: "removed",
-        entity: "metaEdge",
-        name: "subClassOf",
+        entity: "relation",
         severity: "breaking",
       });
     });
@@ -1371,17 +1355,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         ontology: {
           ...emptyOntology(),
-          metaEdges: {
-            subClassOf: {
-              name: "subClassOf",
-              transitive: true,
-              symmetric: false,
-              reflexive: false,
-              inverse: undefined,
-              inference: "none",
-              description: undefined,
-            },
-          },
+          relations: [{ metaEdge: "broader", from: "Employee", to: "Person" }],
         },
       });
 

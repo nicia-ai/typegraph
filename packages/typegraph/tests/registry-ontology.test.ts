@@ -8,7 +8,9 @@
  * Key ontology relations:
  *   - subClassOf(Child, Parent) - Type inheritance
  *   - broader(Specific, General) - Concept hierarchy
- *   - equivalentTo(A, B) / sameAs(A, B) - Type equivalence
+ *   - equivalentTo(A, B) - Type equivalence (`sameAs` was a deprecated
+ *     alias, removed; a persisted document that still names it loads and
+ *     folds identically — see the "sameAs" describe block below)
  *   - disjointWith(A, B) - Types that cannot overlap
  *   - partOf(Part, Whole) / hasPart(Whole, Part) - Composition
  */
@@ -24,11 +26,31 @@ import {
   equivalentTo,
   hasPart,
   narrower,
+  type NodeType,
+  type OntologyRelation,
   partOf,
-  sameAs,
   subClassOf,
 } from "../src";
+import { ALL_META_EDGE_NAMES } from "../src/ontology/constants";
+import { metaEdgesByName } from "../src/ontology/core-meta-edges";
 import { buildKindRegistry } from "../src/registry";
+
+/**
+ * `sameAs` has no public factory any more (roadmap F removed it), and its
+ * meta-edge object is absent from the public `core` export too — a document
+ * persisted before the removal that still names a `sameAs` relation must
+ * keep loading and folding exactly like `equivalentTo`.
+ * `metaEdgesByName.sameAs` is the internal-only object
+ * `compileOntologyRelation` (`src/graph-extension/compiler.ts`) resolves
+ * that name to, so building the relation directly from it here exercises
+ * the same registry fold a persisted `sameAs` document would (whose
+ * relation carries the name as a plain string, not this object —
+ * `collectOntologyRelations`, `src/registry/kind-registry.ts`, switches on
+ * the name either way).
+ */
+function sameAsRelation(kindA: NodeType, kindB: NodeType): OntologyRelation {
+  return { metaEdge: metaEdgesByName.sameAs, from: kindA, to: kindB };
+}
 
 const emptySchema = z.object({});
 
@@ -188,8 +210,7 @@ describe("sameAs - Alias for equivalentTo", () => {
       Account: { type: Account },
     },
     edges: {},
-    // eslint-disable-next-line @typescript-eslint/no-deprecated -- pins the migration-period alias behavior
-    ontology: [sameAs(User, Account)],
+    ontology: [sameAsRelation(User, Account)],
   });
 
   const registry = buildKindRegistry(graph);
@@ -197,6 +218,23 @@ describe("sameAs - Alias for equivalentTo", () => {
   it("works the same as equivalentTo", () => {
     expect(registry.areEquivalent("User", "Account")).toBe(true);
   });
+});
+
+describe("metaEdgesByName - internal by-name lookup correspondence", () => {
+  // `metaEdgesByName` is a hand-written literal keyed by every
+  // `MetaEdgeName`; nothing else pins that key N maps to the meta-edge
+  // object actually NAMED N. `compileOntologyRelation`
+  // (`src/graph-extension/compiler.ts`) trusts this correspondence
+  // unconditionally when resolving a declarative graph extension's
+  // `metaEdge` string — a mis-mapped entry (e.g. `sameAs` pointing at
+  // `equivalentToMetaEdge`) would compile and persist under the wrong
+  // name with no other test catching it.
+  it.each(ALL_META_EDGE_NAMES)(
+    "metaEdgesByName[%s] carries that name",
+    (name) => {
+      expect(metaEdgesByName[name].name).toBe(name);
+    },
+  );
 });
 
 describe("disjointWith - Mutually Exclusive Types", () => {

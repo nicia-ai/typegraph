@@ -9,34 +9,22 @@ import { type CompositionPartSide } from "../registry/composition-relation";
 export const META_EDGE_BRAND = "__metaEdge" as const;
 
 // ============================================================
-// Inference Types
-// ============================================================
-
-/**
- * How a meta-edge affects queries and validation.
- */
-export type InferenceType =
-  | "subsumption" // Query for X includes instances of subclasses
-  | "hierarchy" // Enables broader/narrower traversal
-  | "substitution" // Can substitute equivalent types
-  | "constraint" // Validation rules
-  | "composition" // Part-whole navigation
-  | "association" // Discovery/recommendation
-  | "none"; // No automatic inference
-
-// ============================================================
 // Meta-Edge Properties
 // ============================================================
 
 /**
  * Properties of a meta-edge.
+ *
+ * `transitive`/`symmetric`/`reflexive`/`inverse`/`inference` were removed
+ * (roadmap F): no registry or closure code ever read them off a `MetaEdge` —
+ * every behavioral decision for a built-in meta-edge is hardcoded per literal
+ * name in `collectOntologyRelations` (`src/registry/kind-registry.ts`) and
+ * `classifyKnownRelationSeverity` (`src/schema/ontology-change.ts`). They
+ * were serialized-introspection metadata only. See
+ * `apps/docs/src/content/docs/schema-evolution.md`'s upgrade notes for the
+ * migration; free-form per-relation metadata belongs in `annotations`.
  */
 export type MetaEdgeProperties = Readonly<{
-  transitive: boolean; // A→B, B→C implies A→C
-  symmetric: boolean; // A→B implies B→A
-  reflexive: boolean; // A→A is always true
-  inverse: string | undefined; // Name of inverse meta-edge
-  inference: InferenceType; // How this affects queries
   description: string | undefined;
 }>;
 

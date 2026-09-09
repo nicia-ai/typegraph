@@ -1527,9 +1527,6 @@ type IndexWhereOperand = Readonly<{
     valueType: ValueType | undefined;
 }>;
 
-// @public
-type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
-
 // @public (undocumented)
 export function initializeSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: Readonly<{
     schema?: SqlSchema;
@@ -1801,11 +1798,6 @@ type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
 type MetaEdgeProperties = Readonly<{
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -1970,7 +1962,7 @@ type NullCheckOp = "isNull" | "isNotNull";
 // @public
 export type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "metaEdge" | "relation";
+    entity: "relation";
     name: string;
     severity: ChangeSeverity;
     details: string;
@@ -2308,11 +2300,6 @@ export type SerializedEdgeDef = Readonly<{
 // @public
 export type SerializedMetaEdge = Readonly<{
     name: string;
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 

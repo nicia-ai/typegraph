@@ -2911,9 +2911,6 @@ export type IndexWhereOperand = Readonly<{
 }>;
 
 // @public
-export type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
-
-// @public
 export type InListParameterOptions = Readonly<{
     negated: boolean;
     elementType: ValueType | undefined;
@@ -3635,11 +3632,6 @@ export type SerializedEdgeDef = Readonly<{
 // @public
 export type SerializedMetaEdge = Readonly<{
     name: string;
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 

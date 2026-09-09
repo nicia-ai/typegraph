@@ -550,9 +550,6 @@ type IndexWhereOperand = Readonly<{
 }>;
 
 // @public
-type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
-
-// @public
 export function isEdgeTargetMap(value: unknown): value is EdgeTargetMap;
 
 // @public
@@ -605,29 +602,11 @@ type MetaEdge<K extends string = string> = Readonly<{
     properties: MetaEdgeProperties;
 }>;
 
-// @public
-export function metaEdge<K extends string>(name: K, options?: MetaEdgeOptions): MetaEdge<K>;
-
 // @public (undocumented)
 type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
-export type MetaEdgeOptions = Readonly<{
-    transitive?: boolean;
-    symmetric?: boolean;
-    reflexive?: boolean;
-    inverse?: string;
-    inference?: InferenceType;
-    description?: string;
-}>;
-
-// @public
 type MetaEdgeProperties = Readonly<{
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
