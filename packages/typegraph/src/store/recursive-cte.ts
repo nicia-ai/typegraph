@@ -673,12 +673,14 @@ export function buildEdgeAcyclicityProbe(
   const anchor = sql`SELECT s.origin_key, s.to_kind, s.to_id FROM seed s`;
 
   const closingSelect = sql`SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id`;
-  // A single-edge proposed seed stops at the first witness: both engines
-  // pipeline a recursive CTE, so a `LIMIT 1` short-circuits the walk instead
-  // of running to fixpoint. Several origins must return every offending one
-  // so a refusal can name the edge, so no LIMIT is added there.
+  // A single-edge row-list seed (`"proposed"` OR `"planned"` — a single row
+  // has only one possible `origin_key`) stops at the first witness: both
+  // engines pipeline a recursive CTE, so a `LIMIT 1` short-circuits the walk
+  // instead of running to fixpoint. Several origins must return every
+  // offending one so a refusal can name the edge, so no LIMIT is added
+  // there. `"relation"` has no `edges` to count and always runs unlimited.
   const limited =
-    options.seed.kind === "proposed" && options.seed.edges.length === 1 ?
+    options.seed.kind !== "relation" && options.seed.edges.length === 1 ?
       sql`${closingSelect} LIMIT 1`
     : closingSelect;
 
