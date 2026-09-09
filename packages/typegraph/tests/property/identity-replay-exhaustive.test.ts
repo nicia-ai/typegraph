@@ -16,7 +16,7 @@
  * — a read path that never touches the transition log — so agreement between
  * it and `replay` is the whole equivalence pin, not a tautology.
  *
- * Scope for PR-1: assertSame, assertDifferent, retractAssertion, node create
+ * Scope: assertSame, assertDifferent, retractAssertion, node create
  * (including same-id cross-kind folds and resurrections), soft delete, hard
  * delete, and window-end (narrowing a live member's `validTo`, the same
  * `store.nodes[kind].update(id, {}, { validTo })` shape

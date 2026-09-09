@@ -606,6 +606,17 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // exported deliberately from `src/graph-merge/index.ts` rather than left as
 // debt, which retires more forgotten exports than the port adds.
 //
+// Ruling (2026-09-09): the five `IdentityDecisionProvenance` entries above
+// stay PERMANENT debt, not retired. The only retirement this ledger's own
+// discipline allows is re-exporting the type from each of those five narrow
+// barrels — `./interchange`, `./postgres/pglite`, `./profiler`,
+// `./provenance`, `./sqlite/local` — purely to move a count, which is
+// exactly the "export machinery invented to avoid debt" this file's header
+// forbids and the identical `IdentityServiceContext` / `PlainNodeRef` ruling
+// two comments below already declined for the same reason. None of those
+// five barrels has a type-surface reason of its own to name a merge
+// decision's shape.
+//
 // Release batch, publishing replay and archival restore (this had not been
 // run since the `identityContext()` batch above landed either, so `.`'s
 // baseline already carried that batch's `IdentityServiceContext` /
