@@ -122,8 +122,8 @@ async function buildBackend(
     return {
       backend,
       refreshStatistics: async () => {
-        if (backend.executeRaw !== undefined)
-          await backend.executeRaw("ANALYZE", []);
+        if (backend.executeDdl !== undefined)
+          await backend.executeDdl("ANALYZE");
       },
       close: async () => {
         await backend.close();
@@ -456,8 +456,7 @@ async function explainAcyclicityProbe(
     try {
       const [store] = await createStoreWithSchema(graph, backend);
       const ids = await seedChain(store, "dependsOn", size);
-      if (backend.executeRaw !== undefined)
-        await backend.executeRaw("ANALYZE", []);
+      if (backend.executeDdl !== undefined) await backend.executeDdl("ANALYZE");
       const fresh = await store.nodes.Task.create({});
       const head = { kind: "Task" as const, id: ids[0]! };
       statements.splice(0);
