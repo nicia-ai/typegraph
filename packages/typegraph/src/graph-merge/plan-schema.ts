@@ -236,6 +236,10 @@ export type MergePlanReview = Readonly<{
   warnings: readonly string[];
   compositionOrphans: readonly MergePlanCompositionOrphan[];
   diagnostics?: MergePlanDiagnostics | undefined;
+  /** Optional, omitted when empty — see plan-G2 §4.2's format-version note. */
+  identityReconciliations?: readonly JsonValue[] | undefined;
+  /** Optional, omitted when empty — see plan-G2 §4.2's format-version note. */
+  identityConflicts?: readonly JsonValue[] | undefined;
 }>;
 
 export type MergePlanProvenanceOptions = Readonly<{
@@ -564,6 +568,49 @@ const diagnosticsSchema = z
   })
   .strict();
 
+const identityReconciliationSchema = z
+  .object({
+    semanticKey: nonEmptyStringSchema,
+    a: mergePlanEntityRefSchema,
+    b: mergePlanEntityRefSchema,
+    relation: z.enum(["same", "different"]),
+    survivorAssertionId: nonEmptyStringSchema,
+    supersededAssertionIds: z.array(nonEmptyStringSchema),
+    rule: z.enum([
+      "earliest-valid-from",
+      "code-point-id",
+      "committed-id",
+      "policy",
+    ]),
+    policy: z.string().optional(),
+    branches: z.array(nonEmptyStringSchema),
+  })
+  .strict();
+
+/**
+ * Only the `"assertion"` arm is validated today — the sole
+ * {@link IdentityUnresolvedConflict} kind `planIdentityThreeWay` (identity-
+ * three-way.ts) actually produces. The `"separation"` / `"uniqueness"` /
+ * `"provenance"` arms are owed when their producers land (plan-G2 §2/§3).
+ */
+const identityUnresolvedConflictSchema = z
+  .object({
+    kind: z.literal("assertion"),
+    reason: z.enum([
+      "retract-reassert",
+      "opposing-relations",
+      "id-reuse",
+      "cross-kind-pairing",
+    ]),
+    semanticKey: nonEmptyStringSchema,
+    a: mergePlanEntityRefSchema,
+    b: mergePlanEntityRefSchema,
+    relation: z.enum(["same", "different"]),
+    assertionIds: z.array(nonEmptyStringSchema),
+    branches: z.array(nonEmptyStringSchema),
+  })
+  .strict();
+
 const mergePlanReviewSchema = z
   .object({
     resolutions: z.array(entityResolutionSchema),
@@ -670,6 +717,11 @@ const mergePlanReviewSchema = z
         .strict(),
     ),
     diagnostics: diagnosticsSchema.optional(),
+    // Optional and omitted when empty (the `diagnostics` precedent above): a
+    // merge that reconciled nothing produces a review object byte-identical
+    // to today's, so `MERGE_PLAN_FORMAT_VERSION` stays unchanged (plan-G2 §4.2).
+    identityReconciliations: z.array(identityReconciliationSchema).optional(),
+    identityConflicts: z.array(identityUnresolvedConflictSchema).optional(),
   })
   .strict();
 

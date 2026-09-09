@@ -105,7 +105,11 @@ import {
   translateMergeCommitError,
   UnsupportedMergePlanVersionError,
 } from "./errors";
-import type { CandidateDiagnostic, CandidateDiagnostics } from "./evidence";
+import type {
+  CandidateDiagnostic,
+  CandidateDiagnostics,
+  EntityRef,
+} from "./evidence";
 import { compareMatchEvidence } from "./evidence";
 import { unwrapMergeBranches } from "./ingestion-branch";
 import {
@@ -238,6 +242,8 @@ import type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IdentityReconciliation,
+  IdentityUnresolvedConflict,
   MergeBranch,
   MergedCounts,
   MergeIncrementalArgs as MergeIncrementalArguments,
@@ -933,6 +939,10 @@ export type MergePlan<G extends GraphDef> = Readonly<{
   // validation layers (the plan-time filter and the in-transaction freshness
   // guard) compare it to the target's row before the id is ended.
   identityRetractions: readonly IdentityTransferAssertion[];
+  /** Duplicate-assertion survivor picks the three-way classifier resolved. */
+  identityReconciliations: readonly IdentityReconciliation[];
+  /** Identity-assertion conflicts a resolving `onAssertionConflict` kept rather than refused. */
+  identityConflicts: readonly IdentityUnresolvedConflict[];
 }>;
 
 /**
@@ -955,7 +965,11 @@ function buildInternalMergePlan<G extends GraphDef>(
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
   preferredBranchId?: BranchId,
 ): MergePlan<G> {
-  const identity = planIdentityChanges(staging, storedIdentityRowsById);
+  const identity = planIdentityChanges(
+    staging,
+    storedIdentityRowsById,
+    options.identity?.onAssertionConflict,
+  );
   const provenanceRecords: ProvenanceRecord[] = [];
   // The contributions already recorded, keyed by `contributionKey` — the sidecar
   // row's own identity, so a repeat is the same row written twice and never new
@@ -1633,7 +1647,93 @@ function buildInternalMergePlan<G extends GraphDef>(
       }),
     identityAssertions: identityRemap.assertions,
     identityRetractions: survivingRetractions,
+    identityReconciliations: identity.reconciliations.toSorted((left, right) =>
+      compareIdentityReportKeys(
+        identityReconciliationSortKey(left),
+        identityReconciliationSortKey(right),
+      ),
+    ),
+    identityConflicts: identity.unresolved.toSorted((left, right) =>
+      compareIdentityReportKeys(
+        identityUnresolvedConflictSortKey(left),
+        identityUnresolvedConflictSortKey(right),
+      ),
+    ),
   };
+}
+
+/**
+ * Order-independent sort key: `semanticKey` then the endpoint pair for the
+ * `assertion` shape (§4.1), degrading to whatever identifying fields the
+ * other {@link IdentityUnresolvedConflict} kinds carry — never insertion
+ * order, which would depend on which branch's diff happened to stage the
+ * item first.
+ */
+type IdentityReportSortKey = Readonly<{
+  semanticKey: string;
+  a: EntityRef;
+  b: EntityRef;
+}>;
+
+function identityReconciliationSortKey(
+  reconciliation: IdentityReconciliation,
+): IdentityReportSortKey {
+  return {
+    semanticKey: reconciliation.semanticKey,
+    a: reconciliation.a,
+    b: reconciliation.b,
+  };
+}
+
+const UNKEYED_ENTITY_REF: EntityRef = { kind: "", id: "" as EntityRef["id"] };
+
+function identityUnresolvedConflictSortKey(
+  conflict: IdentityUnresolvedConflict,
+): IdentityReportSortKey {
+  switch (conflict.kind) {
+    case "assertion": {
+      return {
+        semanticKey: conflict.semanticKey,
+        a: conflict.a,
+        b: conflict.b,
+      };
+    }
+    case "separation": {
+      return { semanticKey: conflict.kind, a: conflict.a, b: conflict.b };
+    }
+    case "uniqueness": {
+      return {
+        semanticKey: `${conflict.kind}|${conflict.constraintName}`,
+        a: conflict.members[0] ?? UNKEYED_ENTITY_REF,
+        b: conflict.members[1] ?? UNKEYED_ENTITY_REF,
+      };
+    }
+    case "provenance": {
+      return {
+        semanticKey: conflict.kind,
+        a: conflict.canonical,
+        b: UNKEYED_ENTITY_REF,
+      };
+    }
+  }
+}
+
+function compareIdentityReportKeys(
+  left: IdentityReportSortKey,
+  right: IdentityReportSortKey,
+): number {
+  const bySemanticKey = compareStrings(left.semanticKey, right.semanticKey);
+  if (bySemanticKey !== 0) return bySemanticKey;
+  const byA = compareMergeKeys(
+    mergeKey(left.a.kind, left.a.id),
+    mergeKey(right.a.kind, right.a.id),
+  );
+  return byA === 0 ?
+      compareMergeKeys(
+        mergeKey(left.b.kind, left.b.id),
+        mergeKey(right.b.kind, right.b.id),
+      )
+    : byA;
 }
 
 /**
@@ -2916,6 +3016,21 @@ async function resolvedMergeArtifact<G extends GraphDef>(
       ...(plan.candidateDiagnostics === undefined ?
         {}
       : { diagnostics: plan.candidateDiagnostics }),
+      // Optional and omitted when empty (plan-G2 §4.2): a merge that
+      // reconciled nothing produces a review object byte-identical to
+      // today's, so the plan's stored format version never moves.
+      ...(plan.identityReconciliations.length === 0 ?
+        {}
+      : {
+          identityReconciliations:
+            plan.identityReconciliations as unknown as readonly JsonValue[],
+        }),
+      ...(plan.identityConflicts.length === 0 ?
+        {}
+      : {
+          identityConflicts:
+            plan.identityConflicts as unknown as readonly JsonValue[],
+        }),
     },
     provenance: {
       includeInReport: options.provenance,
@@ -3464,6 +3579,8 @@ async function commitResolvedMerge<G extends GraphDef>(
       {}
     : { candidateDiagnostics: plan.candidateDiagnostics }),
     ...(provenancePersisted === undefined ? {} : { provenancePersisted }),
+    identityReconciliations: plan.identityReconciliations,
+    identityConflicts: plan.identityConflicts,
   };
 }
 
@@ -4196,6 +4313,10 @@ function reportFromArtifact<G extends GraphDef>(
           .diagnostics as unknown as CandidateDiagnostics,
       }),
     ...(provenancePersisted === undefined ? {} : { provenancePersisted }),
+    identityReconciliations: (artifact.review.identityReconciliations ??
+      []) as unknown as readonly IdentityReconciliation[],
+    identityConflicts: (artifact.review.identityConflicts ??
+      []) as unknown as readonly IdentityUnresolvedConflict[],
   };
 }
 
