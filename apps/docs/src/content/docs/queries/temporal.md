@@ -322,6 +322,69 @@ checkpoints with `migrateRecordedAnchor({ backend, graphId, anchor })`. See
 [Migrating preview recorded time](/schema-management#migrating-preview-recorded-time).
 :::
 
+### Engine-native recorded time
+
+Everything above describes **TypeGraph-owned** recorded time: `history: true`
+captures into TypeGraph's own recorded relations and clock. A backend can
+instead track recorded time itself — declare `EngineProvisioning.recordedTime`
+on it — and `history: true` then reads and writes through the engine's own
+temporal storage; TypeGraph's capture relations, clock, and write-fence-gated
+clock allocation are never engaged.
+
+Which ownership a store reads under is **derived**, never an option you set:
+it is `"engine-native"` exactly when the backend declares `recordedTime`,
+`"typegraph-relations"` otherwise. Neither bundled SQLite nor PostgreSQL
+profile declares it, so every example on this page runs under
+`"typegraph-relations"` as shown; see [Supplying
+`recordedTime`](/backend-authoring#supplying-recordedtime) for what a
+third-party engine implements to opt in.
+
+Under engine-native ownership:
+
+- `store.recordedNow()`, `store.revisionNow()`, and `TransactionReceipt.recorded`
+  all come from the engine's own revision instead of TypeGraph's clock — one
+  call per transaction, not per graph.
+- `RecordedInstant` anchors use the engine form
+  `e1:<opaque engine revision>:<ISO instant>` rather than
+  `r1:<16-digit revision>:<ISO instant>`. The revision is an opaque,
+  engine-assigned token, never parsed as a number, so ordering two `e1:`
+  anchors (`compareRecordedInstants`) falls back to the timestamp component
+  only — two engine revisions minted within the same millisecond compare
+  equal even though they are distinct commits, unlike a `r1:` anchor's strict
+  per-commit counter. `recordedInstantWallTime(instant)` works for either
+  form; `recordedInstantRevision(instant)` throws for an `e1:` anchor, since
+  there is no TypeGraph numeric revision to return.
+- `store.asOfRecorded(instant)` requires an instant minted under the SAME
+  store's own ownership form. An engine-native store refuses an `r1:`
+  instant, and a TypeGraph-owned store refuses an `e1:` instant, both with a
+  `ConfigurationError` (`RECORDED_INSTANT_OWNERSHIP_MISMATCH`) — an anchor
+  from one ownership form is never valid against the other, even against a
+  different store over the same data.
+- No recorded relation is read or written. (A profile built on the bundled
+  schema factories still creates the recorded tables as part of its base DDL
+  — they just stay empty.) `recordedRead: recordedRelation({ schema })`
+  (above) and `migrateLegacyRecordedTime` are both refused: neither has a
+  TypeGraph-owned recorded relation to bind or migrate.
+- `revisionTracking: true` is refused whether or not `history: true` is also
+  requested — there is no TypeGraph clock for it to advance; the engine's
+  own revision is the only tracking engine-native has, and it is available
+  only under `history: true`.
+- Reconstructing identity at a recorded coordinate — `store.identityAtCoordinate`
+  at a past instant, and any query that reaches the historical identity
+  traversal — is refused: identity history reads TypeGraph's own recorded
+  relations directly, which an engine-native backend does not populate. Read
+  identity at the current coordinate instead, or use a TypeGraph-owned store
+  for historical identity reconstruction.
+
+Everything else on this page — `asOfRecorded`'s diagonal composition with
+`asOf`, the recorded view surface's read shape, `includeTombstones`
+composition — behaves the same under either ownership form; only the anchor
+grammar, the write mechanics, and the refusals above differ. See [Lineage and
+pruned diffs](/graph-merge#lineage-and-pruned-diffs) for how graph-merge
+derives a change delta under engine-native ownership — from the engine's own
+`lineage`, never from recorded relations, since none exist to derive one
+from.
+
 ### Writing with history enabled
 
 Capture flushes at transaction commit, so writes must go through the store's
