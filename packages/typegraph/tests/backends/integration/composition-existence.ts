@@ -30,7 +30,7 @@ import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
 const EeSegment = defineNode("EeSegment", { schema: z.object({}) });
-/** A SUBCLASS of a required-existence part kind, never declared as its own composition pair (item E2-5). */
+/** A SUBCLASS of a required-existence part kind, never declared as its own composition pair (subclass existence inheritance). */
 const EeSubSegment = defineNode("EeSubSegment", { schema: z.object({}) });
 const EeEpisode = defineNode("EeEpisode", { schema: z.object({}) });
 const EePodcast = defineNode("EePodcast", { schema: z.object({}) });
@@ -40,7 +40,7 @@ const EeCollection = defineNode("EeCollection", { schema: z.object({}) });
 /** A `has_*`-shaped realizing edge (whole -> part), for orientation coverage. */
 const EeTrack = defineNode("EeTrack", { schema: z.object({}) });
 const EeAlbum = defineNode("EeAlbum", { schema: z.object({}) });
-/** A `population: "oneActive"` required part, for item E2-4's temporal coverage. */
+/** A `population: "oneActive"` required part, for the temporal (valid-time) coverage below. */
 const EeLiveClip = defineNode("EeLiveClip", { schema: z.object({}) });
 const EeShow = defineNode("EeShow", { schema: z.object({}) });
 
@@ -100,7 +100,7 @@ function buildGraph(id: string) {
       }),
       // EeSubSegment is never declared its own composition pair — it
       // inherits EeSegment's required existence purely through subsumption
-      // (item E2-5).
+      // (subclass existence inheritance, below).
       subClassOf(EeSubSegment, EeSegment),
       // EeTag is optional-existence.
       partOf(EeTag, EeCollection, { via: eeTagOf }),
@@ -108,7 +108,7 @@ function buildGraph(id: string) {
       hasPart(EeAlbum, EeTrack, { via: eeHasTrack, existence: "required" }),
       // `population: "oneActive"` (`cardinality: "oneActive"` above):
       // ending the window is a genuine detachment, unlike EeSegment's
-      // `population: "one"` pair (item E2-4).
+      // `population: "one"` pair (the temporal coverage below).
       partOf(EeLiveClip, EeShow, {
         via: eeLiveClipOf,
         existence: "required",
@@ -452,7 +452,7 @@ export function registerCompositionExistenceIntegrationTests(
     // `verifyConstraintFences` (src/store/claims/verify.ts) — the graph
     // reads clean even with the planted orphan above.
 
-    it("case 11b: verifyConstraintFences reports an unattached SUBCLASS of a required part kind (item E2-5)", async () => {
+    it("case 11b: verifyConstraintFences reports an unattached SUBCLASS of a required part kind", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       // EeSubSegment is never named by any composition pair directly — it
       // is required-existence only because it is a subclass of EeSegment.
@@ -483,24 +483,93 @@ export function registerCompositionExistenceIntegrationTests(
     // `verifyConstraintFences` even though `EeSegment`'s own orphan (case
     // 11) still reports.
 
-    it("case 12: a composition edge born already-ended (`oneActive`) is unattached, and cleaning it up is not refused (item E2-4)", async () => {
+    it("case 12: a create whose `oneActive` composition edge would be born already-ended (unattaching) is refused, and writes no row", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const show = await store.nodes.EeShow.create({});
       // `validTo` is forwarded straight onto the composition edge
-      // (`attachCompositionCreateEdge`): the edge is born with its window
-      // already closed, never passing through `performEdgeUpdate`'s
-      // "ending an open window" detach refusal at all.
-      const clip = await store.nodes.EeLiveClip.create(
+      // (`attachCompositionCreateEdge`): a `population: "oneActive"` edge
+      // born with its window already closed would never attach its part at
+      // all, which `resolveCompositionCreate`'s "a required part always has
+      // a live whole" rule must refuse just as it refuses a bare create
+      // with no `partOf` — admitting it would leave a state
+      // `store.verifyConstraintFences()` immediately reports as a
+      // violation.
+      const error = await store.nodes.EeLiveClip.create(
         {},
         {
           partOf: { kind: "EeShow", id: show.id },
           validTo: "2000-01-01T00:00:00.000Z",
         },
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(CompositionExistenceError);
+      expect((error as CompositionExistenceError).details.situation).toBe(
+        "create",
+      );
+      expect((error as CompositionExistenceError).details.partKind).toBe(
+        "EeLiveClip",
       );
 
-      // `population: "oneActive"` ends the attachment the moment the window
-      // closes, so this part is unattached — verifyConstraintFences must
-      // say so, not report the graph clean.
+      // No node row, and no composition edge row, survive the refused
+      // create — the whole write plan (node + composition edge) is one
+      // transaction.
+      expect(await store.nodes.EeLiveClip.find({})).toEqual([]);
+      const connectedEdges = await store.backend.findEdgesConnectedTo({
+        graphId: store.graphId,
+        nodeKind: "EeShow",
+        nodeId: show.id,
+      });
+      expect(connectedEdges).toEqual([]);
+
+      // The graph never reaches a state `verifyConstraintFences` would
+      // have to report — refused at create time, not merely detected
+      // afterward.
+      const violations = await store.verifyConstraintFences();
+      expect(
+        violations.some(
+          (candidate) =>
+            candidate.family === "compositionExistence" &&
+            candidate.partKind === "EeLiveClip",
+        ),
+      ).toBe(false);
+    });
+    // MUTATION CHECK: in `attachCompositionCreateEdge`
+    // (src/store/operations/node-operations.ts), delete the
+    // `edgeCurrentlyAttachesPart` guard this fix added (the create then
+    // succeeds unconditionally once the composition edge is built). The
+    // `create` call above then resolves instead of rejecting, and the
+    // subsequent `find({})`/`verifyConstraintFences` assertions fail.
+
+    it("case 12b: an already-unattached `oneActive` composition edge (planted through the RAW backend, bypassing case 12's create-time guard) is unattached, and cleaning it up is not refused", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const show = await store.nodes.EeShow.create({});
+      // Born attaching, through the ordinary store path.
+      const clip = await store.nodes.EeLiveClip.create(
+        {},
+        { partOf: { kind: "EeShow", id: show.id } },
+      );
+      const [connectedEdge] = await store.backend.findEdgesConnectedTo({
+        graphId: store.graphId,
+        nodeKind: "EeLiveClip",
+        nodeId: clip.id,
+      });
+      const edgeId = requireDefined(connectedEdge).id;
+
+      // Backdates the window through the RAW backend member, bypassing the
+      // store's own `assertCompositionExistencePreserved` refusal entirely
+      // (case 7c already proves the ORDINARY store path refuses this same
+      // mutation) — the dirty-database / bypassed-validation shape case 8
+      // uses for the analogous node-side scenario. `population: "oneActive"`
+      // ends the attachment the moment the window closes, so this part is
+      // now unattached — verifyConstraintFences must say so, not report the
+      // graph clean.
+      await store.backend.updateEdge({
+        graphId: store.graphId,
+        id: edgeId,
+        props: {},
+        validTo: "2000-01-01T00:00:00.000Z",
+      });
+
       const violations = await store.verifyConstraintFences();
       const violation = violations.find(
         (candidate) =>
@@ -514,18 +583,9 @@ export function registerCompositionExistenceIntegrationTests(
       expect(violation.parts).toEqual([{ kind: "EeLiveClip", id: clip.id }]);
 
       // The edge is no longer an attachment, so deleting it is not what
-      // would orphan the part — it is already orphaned. Read it through the
-      // backend directly: the store's own temporal `find` may exclude an
-      // already-ended row from its default window.
-      const [connectedEdge] = await store.backend.findEdgesConnectedTo({
-        graphId: store.graphId,
-        nodeKind: "EeLiveClip",
-        nodeId: clip.id,
-      });
+      // would orphan the part — it is already orphaned.
       await expect(
-        store.edges.eeLiveClipOf.hardDelete(
-          asEdgeId(requireDefined(connectedEdge).id),
-        ),
+        store.edges.eeLiveClipOf.hardDelete(asEdgeId(edgeId)),
       ).resolves.toBeUndefined();
     });
     // MUTATION CHECK: in `assertCompositionExistencePreserved`
@@ -536,7 +596,7 @@ export function registerCompositionExistenceIntegrationTests(
     // `hardDelete` above then rejects with `CompositionExistenceError`
     // instead of resolving.
 
-    it("getOrCreateByConstraint (E2-1): partOf applied on created, refused on found/updated naming the current whole", async () => {
+    it("getOrCreateByConstraint: partOf applied on created, refused on found/updated naming the current whole", async () => {
       const store = await context.createStore(buildKeyedGraph(nextGraphId()));
       const episodeA = await store.nodes.EeEpisode.create({});
       const episodeB = await store.nodes.EeEpisode.create({});
@@ -597,7 +657,7 @@ export function registerCompositionExistenceIntegrationTests(
     // segment's whole stays `episodeA` (never reassigned) instead of
     // `episodeB`.
 
-    it("bulkGetOrCreateByConstraint (item E2-8): a within-batch duplicate of a row THIS CALL just created honors the same stated whole", async () => {
+    it("bulkGetOrCreateByConstraint: a within-batch duplicate of a row THIS CALL just created honors the same stated whole", async () => {
       const store = await context.createStore(buildKeyedGraph(nextGraphId()));
       const episode = await store.nodes.EeEpisode.create({});
 

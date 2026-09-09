@@ -238,6 +238,7 @@ import {
 import {
   buildCompositionCreateEdgeInput,
   type CompositionCreateWork,
+  edgeCurrentlyAttachesPart,
   findLiveCompositionWhole,
   resolveCompositionCreate,
 } from "./composition-create";
@@ -433,11 +434,10 @@ function nodeFencesConstraintProbe<G extends GraphDef>(
 /**
  * The per-item constraint probes a batch write plan folds.
  *
- * "A batch fences when ANY item does" is `nodeBatchWritePlan`'s rule
- * (`write-plan.ts`); this only supplies the per-item classifications it (or,
- * for a composition batch's `mixedWritePlan`, the equivalent manual
- * `.find((probe) => probe !== undefined)` fold at the call site) folds, so
- * the rule has one spelling instead of one here and one in the plan builder.
+ * "A batch fences when ANY item does" is `foldBatchConstraintProbe`'s rule
+ * (`write-plan.ts`), which `mixedBatchWritePlan` applies to this function's
+ * output — this only supplies the per-item classifications, so the fold
+ * itself has one spelling rather than one here and one in the plan builder.
  */
 function nodeBatchConstraintProbes<G extends GraphDef>(
   ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
@@ -2585,6 +2585,20 @@ async function batchCheckUniqueAcrossKinds(
  * sole owner of the claim; this adds none. A no-op when `work` is
  * `undefined` (the ordinary, no-`partOf` create), so every call site can
  * call it unconditionally.
+ *
+ * Item E.2: a required-existence part must never be BORN unattached.
+ * `resolveCompositionCreate` already refuses a bare create with no `partOf`
+ * for that reason, but the node's own validity window (`temporal`, forwarded
+ * verbatim onto the composition edge) can still make the edge it DOES
+ * create non-attaching from the start — e.g. a `population: "oneActive"`
+ * pair created with a `validTo` already in the past. Left unchecked, that
+ * create would succeed and `store.verifyConstraintFences()` would
+ * immediately report the row as a `compositionExistence` violation. Checked
+ * here, against the edge input this call is ABOUT to issue, with
+ * `edgeCurrentlyAttachesPart` — the same predicate
+ * `assertCompositionExistencePreserved`/`findLiveCompositionWhole`/the
+ * constraint-fence audit all read — rather than a second, drift-prone
+ * spelling of "does this edge attach".
  */
 async function attachCompositionCreateEdge<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -2596,6 +2610,20 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
   temporal: Readonly<{ validFrom?: string | null; validTo?: string }> = {},
 ): Promise<void> {
   if (work === undefined) return;
+  if (
+    ctx.registry.compositionExistence(work.partKind) === "required" &&
+    !edgeCurrentlyAttachesPart(ctx.registry, work.partKind, {
+      kind: work.pair.viaEdgeKind,
+      deleted_at: undefined,
+      valid_to: temporal.validTo,
+    })
+  ) {
+    throw new CompositionExistenceError({
+      partKind: work.partKind,
+      partId,
+      situation: "create",
+    });
+  }
   const edgeInput = buildCompositionCreateEdgeInput(work, partId, temporal);
   const preparedEdge = await validateAndPrepareEdgeCreate(
     ctx,
@@ -2613,7 +2641,7 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
 }
 
 /**
- * Item E.2 (ruling E2-1). Refuses `partOf` stated against an already-
+ * Item E.2. Refuses `partOf` stated against an already-
  * existing node — a `getOrCreateByConstraint` call whose match resolved to
  * `"found"` or `"updated"` — naming the node's current whole when it has a
  * live one. Shared by the single-item and bulk entries so neither re-spells
@@ -2798,7 +2826,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       projectionFusionEligible &&
       supportsNodeInsertProjections(target, projections);
 
-    // Item E2-14: reads `prepared.insertParams`, the SAME source the batch
+    // Item E.2: reads `prepared.insertParams`, the SAME source the batch
     // paths read, rather than `input` directly — one owner for "what
     // validity window does the composition edge inherit from its part",
     // shared by every create shape.
@@ -5558,30 +5586,20 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       }
     }
 
-    // Step 6: Resolve within-batch duplicates by copying the first occurrence's result
+    // Step 6: Resolve within-batch duplicates by copying the first occurrence's result.
+    //
+    // Item E.2: no `refuseExistingPartOf` call belongs here. `partOf` is one
+    // value for this whole batch call, and step 5 already calls
+    // `refuseExistingPartOf` — and THROWS — for every "found" or "updated"
+    // result whenever `partOf !== undefined`. So by the time this loop runs,
+    // either `partOf === undefined` (nothing to refuse), or every surviving
+    // result's action is "created" or "resurrected" (a duplicate of one of
+    // THOSE already had the caller's stated `partOf` honored when that row
+    // was written — `resolveCompositionCreate`'s work — so refusing it here
+    // would refuse the very whole this call itself just applied). Step 5
+    // owns the refusal completely; this step only copies.
     for (const { index, sourceIndex } of duplicateOf) {
       const sourceResult = requireDefined(results[sourceIndex]);
-      // Item E2-8: a duplicate of a row THIS SAME CALL created or
-      // resurrected already had the caller's stated `partOf` honored at the
-      // source occurrence (`resolveCompositionCreate`'s work, applied when
-      // that row was written) — refusing the duplicate here would refuse
-      // the very whole this call itself just applied. The ambiguity
-      // `refuseExistingPartOf` exists to catch is real only against a row
-      // this call did NOT just place: `"found"` (pre-existing, untouched)
-      // and `"updated"` (pre-existing, props changed) both predate this
-      // call's stated `partOf` and so still refuse it.
-      if (
-        partOf !== undefined &&
-        sourceResult.action !== "created" &&
-        sourceResult.action !== "resurrected"
-      ) {
-        await refuseExistingPartOf(
-          ctx,
-          backend,
-          sourceResult.node.kind,
-          sourceResult.node.id,
-        );
-      }
       results[index] = { node: sourceResult.node, action: "found" };
     }
 

@@ -173,8 +173,11 @@ export function compositionEdgeHasRequiredExistencePart(
  * whole AT THE CURRENT READ INSTANT" — ignoring `deleted_at`, valid-time is
  * everything `assertCompositionExistencePreserved`, `findLiveCompositionWhole`
  * (and, through it, the import assertion and `verifyConstraintFences`'s
- * `compositionExistence` audit) share, so the four never re-spell it apart
- * and drift.
+ * `compositionExistence` audit) share, so none of them re-spell it apart and
+ * drift. `attachCompositionCreateEdge` (`node-operations.ts`) also reuses it
+ * ahead of the write, against the not-yet-persisted edge's own
+ * `kind`/`validTo` — the CREATE-time mirror of the same question, refusing a
+ * required part's composition edge that would be born already unattaching.
  *
  * Reuses {@link compositionEdgeCounts} (`./composition-cascade.ts`), the one
  * owner of "does a composition edge row still count as a live membership
@@ -185,7 +188,7 @@ export function compositionEdgeHasRequiredExistencePart(
  * function adds only the `deleted_at` gate `compositionEdgeCounts`'s callers
  * are each individually documented to apply themselves.
  */
-function edgeCurrentlyAttachesPart(
+export function edgeCurrentlyAttachesPart(
   registry: KindRegistry,
   partKind: string,
   edge: Pick<EdgeRow, "kind" | "deleted_at" | "valid_to">,
@@ -269,9 +272,19 @@ export async function assertCompositionExistencePreserved(
 
 /**
  * The live whole a composition part currently holds, if any — read to name
- * it in `CompositionExistenceError`'s `situation: "existing"` message
- * (ruling E2-1). `undefined` when `concreteKind` is not a composition part
- * at all, or the part currently has no live whole.
+ * it in `CompositionExistenceError`'s `situation: "existing"` message (the
+ * ruling that `partOf` stated against an already-existing node found by
+ * `getOrCreateByConstraint` is refused, naming the node's current whole).
+ * `undefined` when `concreteKind` is not a composition part at all, or the
+ * part currently has no live whole.
+ *
+ * `excludeEdgeIds` (default none) skips a connected edge by id regardless of
+ * its own liveness — item E.2's merge plan-time preview
+ * (`unattachedRequiredPartOrphansAmong`, `src/graph-merge/merge.ts`) uses it
+ * to ask "does this part have a live whole AFTER this merge's own planned
+ * edge deletions land", against a backend that still shows those edges as
+ * live (nothing has been written yet at plan time), without a second,
+ * plan-aware spelling of this predicate.
  */
 export async function findLiveCompositionWhole(
   registry: KindRegistry,
@@ -279,6 +292,7 @@ export async function findLiveCompositionWhole(
   graphId: string,
   concreteKind: string,
   concreteId: string,
+  excludeEdgeIds?: ReadonlySet<string>,
 ): Promise<CompositionWholeRef | undefined> {
   if (!registry.isCompositionPart(concreteKind)) return undefined;
   const connected = await backend.findEdgesConnectedTo({
@@ -287,6 +301,7 @@ export async function findLiveCompositionWhole(
     nodeId: concreteId,
   });
   for (const edge of connected) {
+    if (excludeEdgeIds?.has(edge.id) === true) continue;
     const partSide = registry.compositionPartSide(edge.kind);
     if (partSide === undefined) continue;
     const isPartHere =
