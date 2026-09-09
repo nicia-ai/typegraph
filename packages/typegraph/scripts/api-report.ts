@@ -608,6 +608,48 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // staged-assertion shapes a policy callback receives, the pairing scope) is
 // exported deliberately from `src/graph-merge/index.ts` rather than left as
 // debt, which retires more forgotten exports than the port adds.
+//
+// PR-3 release batch (this had not been run since the `identityContext()`
+// batch above landed either, so `.`'s baseline already carried that batch's
+// `IdentityServiceContext` / `PlainNodeRef`, unmentioned by name below
+// because this batch changes neither count on `.`):
+//
+// `IdentityFacade` gains `replay` / `transitionsOf`
+// (`IdentityReplay`, `IdentityReplayOptions`, `IdentityReplayStep`,
+// `IdentityTransition`, `IdentityTransitionCause` in their signatures, all
+// exported deliberately from the package barrel — PR-3 item 1), and
+// `StoreRuntime` gains the archival-restore port members
+// `readIdentityTransitionPageAtTarget` / `importIdentityTransitionsAtTarget`
+// (`IdentityTransitionCursor` / `IdentityTransitionTransfer`, internal
+// wire-transfer shapes owned by `transition-log.ts`, exported nowhere).
+// That is seven names, and every one of them renders at the six
+// Store-bearing entrypoints exactly as `IdentityDecisionProvenance` already
+// does two comments up — `./interchange`, `./profiler`, `./graph-merge`,
+// `./provenance`, `./sqlite/local`, `./postgres/pglite`, +7 apiece — because
+// none of those narrow barrels re-exports the five deliberately-public
+// names, the same "has no business re-exporting an identity type" reasoning
+// that already applies to `IdentityDecisionProvenance` there.
+//
+// `.` moves only +2: the five deliberately-exported names are exported AT
+// `.` itself, so they are not forgotten there — only the two never-exported
+// transfer types (`IdentityTransitionCursor`, `IdentityTransitionTransfer`)
+// newly render, through the same `StoreRuntime` reachability
+// `IdentityServiceContext` / `PlainNodeRef` already established.
+//
+// Narrowing `identityContext()`'s declared return (the retirement path this
+// file's own comment above named as "expected") was evaluated and NOT
+// taken: `identityContext()`'s sole consumer, `pruneIdentityTransitionsForContext`,
+// hands the context straight to `runIdentityMutation` — the identity
+// module's central mutation runner, called from every write site — so
+// narrowing the return would cascade into re-typing `runIdentityMutation`
+// across the whole module, exactly the kind of internal-semantics change
+// PR-3 is scoped not to make. Exporting `IdentityServiceContext` /
+// `PlainNodeRef` publicly (this file's other named option) was also
+// declined: `pruneIdentityTransitions`'s own public signature (`store:
+// Store<G>`, an options bag) never mentions either type, so exporting two
+// backend-shaped internal types would add public surface with no caller who
+// needs it, purely to move a ledger number. That debt stays as documented,
+// unretired.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Roadmap F (meta-edge removal): removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
@@ -640,8 +682,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `.` (see `src/index.ts`), so neither registers as forgotten here — the
   // debt is back to its pre-E.2 baseline for this entrypoint specifically.
   ".": {
-    count: 410,
-    sha256: "bb66b071623f7b108adbc99c1d640e6d3aa47f29f1645a38480cca0c24f2f06f",
+    count: 412,
+    sha256: "f097b0b36d2545c8b320292f4cd5b89bcf6b8e1575cd86497bc1b6dd106c72dd",
   },
   "./adapters/drizzle/engine": {
     count: 327,

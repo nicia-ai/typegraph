@@ -3807,6 +3807,12 @@ export type IdConfig = Readonly<{
 }>;
 
 // @public
+export const IDENTITY_REPLAY_DEFAULT_LIMIT = 200;
+
+// @public (undocumented)
+export const IDENTITY_REPLAY_MAX_LIMIT = 2000;
+
+// @public
 export type IdentityAssertion<G extends GraphDef> = Readonly<{
     id: IdentityAssertionId;
     relation: IdentityRelation;
@@ -3906,6 +3912,8 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonl
     retractSameAssertion: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertion<G> | undefined>;
     retractDifferentAssertion: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertion<G> | undefined>;
     bulkRetractAssertions: (ids: readonly IdentityAssertionId[]) => Promise<readonly IdentityAssertion<G>[]>;
+    transitionsOf: (ref: IdentityNodeRefInput<G>, options?: IdentityReplayOptions) => Promise<readonly IdentityTransition<G>[]>;
+    replay: (ref: IdentityNodeRefInput<G>, options?: IdentityReplayOptions) => Promise<IdentityReplay<G>>;
 }>;
 
 // @public
@@ -3937,6 +3945,53 @@ export type IdentityReadFacade<G extends GraphDef> = Readonly<{
 
 // @public
 export type IdentityRelation = "same" | "different";
+
+// @public (undocumented)
+export type IdentityReplay<G extends GraphDef> = Readonly<{
+    steps: readonly IdentityReplayStep<G>[];
+    truncatedBefore?: RecordedInstant | undefined;
+}>;
+
+// @public
+export class IdentityReplayError extends TypeGraphError {
+    constructor(message: string, details: IdentityReplayErrorDetails, options?: Readonly<{
+        suggestion?: string;
+    }>);
+    // (undocumented)
+    readonly details: IdentityReplayErrorDetails;
+}
+
+// @public (undocumented)
+export type IdentityReplayErrorDetails = Readonly<{
+    code: "IDENTITY_REPLAY_REQUIRES_HISTORY";
+    graphId: string;
+}> | Readonly<{
+    code: "IDENTITY_REPLAY_LIMIT_EXCEEDED";
+    limit: number;
+    resumeFromRecorded: string;
+}> | Readonly<{
+    code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
+    requestedFrom?: string;
+    requestedTo: string;
+    prunedBefore: string;
+}> | Readonly<{
+    code: "IDENTITY_REPLAY_WALK_INCOMPLETE";
+    ceiling: number;
+}>;
+
+// @public (undocumented)
+export type IdentityReplayOptions = Readonly<{
+    fromRecorded?: string | undefined;
+    toRecorded?: string | undefined;
+    limit?: number | undefined;
+}>;
+
+// @public (undocumented)
+export type IdentityReplayStep<G extends GraphDef> = Readonly<{
+    transition: IdentityTransition<G>;
+    before: readonly IdentityNodeReference<G>[];
+    after: readonly IdentityNodeReference<G>[];
+}>;
 
 // @public
 export class IdentitySeparationViolationError extends TypeGraphError {
@@ -3988,6 +4043,40 @@ type IdentityTableNames = Readonly<{
     identityTransitionRetention: string;
 }>;
 
+// @public (undocumented)
+export type IdentityTransition<G extends GraphDef> = Readonly<{
+    transitionId: string;
+    cause: IdentityTransitionCause;
+    recorded: RecordedInstant;
+    validAt: string;
+    class: IdentityNodeReference<G>;
+    priorClass?: IdentityNodeReference<G> | undefined;
+    assertionIds: readonly IdentityAssertionId[];
+    decision?: IdentityDecisionProvenance | undefined;
+}>;
+
+// @public
+export type IdentityTransitionCause = "assert" | "retract" | "fold" | "detach" | "restore" | "window-end" | "kind-drop" | "schema-transition" | "reconcile";
+
+// @public
+type IdentityTransitionCursor = Readonly<{
+    recordedRevision: number;
+    transitionId: string;
+}>;
+
+// @public
+type IdentityTransitionTransfer = Readonly<{
+    transitionId: string;
+    cause: IdentityTransitionCause;
+    recordedRevision: number;
+    recordedAt: string;
+    validAt: string;
+    class: PlainNodeRef;
+    priorClass?: PlainNodeRef | undefined;
+    assertionIds: readonly string[];
+    decision?: IdentityDecisionProvenance | undefined;
+}>;
+
 // @public
 export type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
     includeIdentityMembers?: boolean;
@@ -4021,6 +4110,7 @@ export type IdentityWriteSummary = Readonly<{
     sameAssertions: number;
     differentAssertions: number;
     retractions: number;
+    transitions: number;
     total: number;
 }>;
 
@@ -5759,6 +5849,14 @@ export type PropsAccessor<N extends NodeType> = Readonly<{
 }>;
 
 // @public
+export function pruneIdentityTransitions<G extends GraphDef>(store: Store<G>, options: Readonly<{
+    beforeRecorded: string;
+}>): Promise<Readonly<{
+    pruned: number;
+    prunedBeforeRevision: number;
+}>>;
+
+// @public
 type PurgeEdgeClaimsParams = Readonly<{
     graphId: string;
     edgeIds: readonly string[];
@@ -7370,6 +7468,22 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     }>[], mode: "state" | "archival") => Promise<Readonly<{
         created: number;
         skipped: number;
+    }>>;
+    readIdentityTransitionPageAtTarget: (target: GraphBackend | TransactionBackend, options: Readonly<{
+        after?: IdentityTransitionCursor;
+        limit: number;
+    }>) => Promise<Readonly<{
+        transitions: readonly IdentityTransitionTransfer[];
+        nextAfter?: IdentityTransitionCursor;
+        done: boolean;
+    }>>;
+    identityTransitionRetentionAtTarget: (target: GraphBackend | TransactionBackend) => Promise<Readonly<{
+        prunedBeforeRevision: number;
+        prunedAt: string;
+    }>>;
+    importIdentityTransitionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedWatermark: number | undefined) => Promise<Readonly<{
+        created: number;
+        watermark: number | undefined;
     }>>;
     applyIdentityMergeAtTarget: (target: GraphBackend | TransactionBackend, retractions: readonly Readonly<{
         id: string;
