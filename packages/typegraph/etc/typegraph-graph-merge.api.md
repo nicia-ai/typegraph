@@ -3481,6 +3481,8 @@ class KindRegistry {
     isAssignableToAny(concreteKind: string, targetKinds: readonly string[]): boolean;
     isBroaderThan(broaderConcept: string, narrowerConcept: string): boolean;
     isCompositionEdge(edgeKind: string): boolean;
+    isCompositionPart(kind: string): boolean;
+    isCompositionWhole(kind: string): boolean;
     isNarrowerThan(narrowerConcept: string, broaderConcept: string): boolean;
     isPartOf(part: string, whole: string): boolean;
     isSubClassOf(child: string, parent: string): boolean;
@@ -3771,21 +3773,14 @@ export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G
 
 // @public
 export class MergeCompositionOrphanError extends MergeError {
-    constructor(details: MergeCompositionOrphanErrorDetails);
+    constructor(details: MergePlanCompositionOrphan);
     // (undocumented)
     readonly code: "MERGE_COMPOSITION_ORPHAN";
     // (undocumented)
-    readonly details: MergeCompositionOrphanErrorDetails;
+    readonly details: MergePlanCompositionOrphan;
     // (undocumented)
     protected static readonly errorCategory = "constraint";
 }
-
-// @public
-export type MergeCompositionOrphanErrorDetails = Readonly<{
-    part: MergePlanEntityRef;
-    whole: MergePlanEntityRef;
-    viaEdgeKind: string;
-}>;
 
 // @public
 export class MergeConflictError extends MergeError {
@@ -3907,10 +3902,10 @@ export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-export type MergePlanArtifact = MergePlanArtifactV1;
+export type MergePlanArtifact = MergePlanArtifactV2;
 
 // @public (undocumented)
-export type MergePlanArtifactV1 = Readonly<{
+export type MergePlanArtifactV2 = Readonly<{
     formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
     digest: MergePlanDigest;
     mode: "snapshot" | "incremental";
@@ -3924,7 +3919,7 @@ export type MergePlanArtifactV1 = Readonly<{
 }>;
 
 // @public (undocumented)
-export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
 
 // @public (undocumented)
 export type MergePlanBranchAnchor = Readonly<{

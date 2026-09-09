@@ -815,6 +815,23 @@ export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 ext
 export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 extends AliasMap, A3 extends AliasMap, A4 extends AliasMap, A5 extends AliasMap, E1 extends EdgeAliasMap, E2 extends EdgeAliasMap, E3 extends EdgeAliasMap, E4 extends EdgeAliasMap, E5 extends EdgeAliasMap, R1 extends RecursiveAliasMap, R2 extends RecursiveAliasMap, R3 extends RecursiveAliasMap, R4 extends RecursiveAliasMap, R5 extends RecursiveAliasMap>(f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>, f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>, f3: QueryFragment<G, A3, A4, E3, E4, R3, R4>, f4: QueryFragment<G, A4, A5, E4, E5, R4, R5>): QueryFragment<G, A1, A5, E1, E5, R1, R5>;
 
 // @public
+export class CompositionCycleError extends TypeGraphError {
+    constructor(details: CompositionCycleErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: CompositionCycleErrorDetails;
+}
+
+// @public
+export type CompositionCycleErrorDetails = Readonly<{
+    wholeKind: string;
+    wholeId: string;
+    revisitedKind: string;
+    revisitedId: string;
+}>;
+
+// @public
 export type CompositionOptions = Readonly<{
     via: AnyEdgeType;
     partSide?: CompositionPartSide;
@@ -4529,6 +4546,8 @@ class KindRegistry {
     isAssignableToAny(concreteKind: string, targetKinds: readonly string[]): boolean;
     isBroaderThan(broaderConcept: string, narrowerConcept: string): boolean;
     isCompositionEdge(edgeKind: string): boolean;
+    isCompositionPart(kind: string): boolean;
+    isCompositionWhole(kind: string): boolean;
     isNarrowerThan(narrowerConcept: string, broaderConcept: string): boolean;
     isPartOf(part: string, whole: string): boolean;
     isSubClassOf(child: string, parent: string): boolean;
