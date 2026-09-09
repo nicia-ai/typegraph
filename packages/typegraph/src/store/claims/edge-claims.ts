@@ -164,26 +164,28 @@ function edgeCardinalityAxisRefFromName(
 /**
  * Every axis an edge kind's claims can sit on, for housekeeping reaps.
  *
- * Always includes the reserved composition axis alongside the kind's own
- * five ordinary axes: composition's axis is relation-wide rather than
- * per-edge-kind (§R4), so the caller cannot name it from `edgeKind` alone the
- * way it names the other five. Sweeping it on every edge-kind removal is
- * over-broad rather than unsafe — the composition claim's fence is a live
- * ENTITY-relation check (`competingLiveEdgePredicate`), never the claim row's
- * mere existence, so a swept row for a still-live composition edge of a
- * different kind is simply re-acquired on that edge's next write.
+ * Deliberately NOT extended to the reserved composition axis
+ * ({@link COMPOSITION_RELATION_NAME}): unlike the five ordinary axes here,
+ * that one is relation-wide rather than per-edge-kind, so sweeping it on
+ * every removed edge kind would reap OTHER, still-live composition edge
+ * kinds' rows too — over-broad in a way this function's callers (kind
+ * removal) do not expect and this module's own zero-behavior-change golden
+ * snapshot (`tests/claim-owner-sql-golden.test.ts`) pins against. Safe
+ * either way — the composition claim's fence is a live ENTITY-relation
+ * check (`competingLiveEdgePredicate`), never the claim row's mere
+ * existence — but reaping a removed COMPOSITION edge kind's own rows
+ * specifically is left as a known gap rather than widening this shared
+ * function; `purgeEdgeClaims` (edge-id-keyed, axis-agnostic) already reaps
+ * them correctly whenever the holding edges themselves are hard-deleted.
  */
 export function edgeCardinalityAxesForKind(
   edgeKind: string,
 ): readonly string[] {
-  return [
-    ...(
-      Object.keys(EDGE_CARDINALITY_SPECS) as readonly EdgeCardinalityAxisName[]
-    ).map((axisName) =>
-      edgeCardinalityAxis(edgeCardinalityAxisRefFromName(axisName), edgeKind),
-    ),
-    COMPOSITION_RELATION_NAME,
-  ];
+  return (
+    Object.keys(EDGE_CARDINALITY_SPECS) as readonly EdgeCardinalityAxisName[]
+  ).map((axisName) =>
+    edgeCardinalityAxis(edgeCardinalityAxisRefFromName(axisName), edgeKind),
+  );
 }
 
 /**

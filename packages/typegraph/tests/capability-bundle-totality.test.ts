@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("31 reasoned entries sum to 94 accesses; 50 deferred entries sum to 218", () => {
+  it("31 reasoned entries sum to 95 accesses; 50 deferred entries sum to 218", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -141,8 +141,12 @@ describe("capability bundle totality (T9)", () => {
     // `tableNames` once more to build the `SqlSchema` its plan-time preview
     // needs — 93 -> 94. The composition delete cascade's parts-closure read
     // then added a 5th `findEdgesByHeterogeneousEndpointSet` consumer,
-    // raising its ceiling by one — 217 -> 218.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(94);
+    // raising its ceiling by one — 217 -> 218. Item E's composition
+    // tightening then adds one more `tableNames` access on top of that: the
+    // preflight's SEPARATE D-10 check over the full proposed composition
+    // relation builds its own `SqlSchema`, alongside the ontology
+    // acyclicity probe's — 94 -> 95.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(95);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(218);
   });
 });
