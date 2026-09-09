@@ -44,13 +44,6 @@ export const MERGE_OPTION_DEFAULTS = {
   onComparisonCeiling: "error",
   provenance: true,
   persistProvenance: false,
-  identity: {
-    pairing: "off",
-    onAssertionConflict: "refuse",
-    onEdgeConflict: "repoint",
-    onUniquenessConflict: "refuse",
-    onProvenanceConflict: "keepBoth",
-  },
 } as const satisfies Readonly<{
   reconcileTypes: ReconcileTypesMode;
   onPropertyConflict: "flag";
@@ -59,13 +52,29 @@ export const MERGE_OPTION_DEFAULTS = {
   onComparisonCeiling: ComparisonCeilingPolicy;
   provenance: boolean;
   persistProvenance: boolean;
-  identity: Readonly<{
-    pairing: "off";
-    onAssertionConflict: "refuse";
-    onEdgeConflict: "repoint";
-    onUniquenessConflict: "refuse";
-    onProvenanceConflict: "keepBoth";
-  }>;
+}>;
+
+/**
+ * Frozen `identity` defaults — the one place `normalizeIdentityOptions`'s
+ * default spelling lives. Kept SEPARATE from {@link MERGE_OPTION_DEFAULTS}
+ * (rather than a member of it) because that constant is already publicly
+ * re-exported (`src/graph-merge/index.ts`): folding `identity` into it would
+ * move `etc/typegraph-graph-merge.api.md`, a public-surface change this PR
+ * must not make. PR-3 can fold this back into `MERGE_OPTION_DEFAULTS` in the
+ * same commit that exports `IdentityReconciliationOptions`.
+ */
+export const IDENTITY_OPTION_DEFAULTS = {
+  pairing: "off",
+  onAssertionConflict: "refuse",
+  onEdgeConflict: "repoint",
+  onUniquenessConflict: "refuse",
+  onProvenanceConflict: "keepBoth",
+} as const satisfies Readonly<{
+  pairing: "off";
+  onAssertionConflict: "refuse";
+  onEdgeConflict: "repoint";
+  onUniquenessConflict: "refuse";
+  onProvenanceConflict: "keepBoth";
 }>;
 
 /**
@@ -103,16 +112,16 @@ const identityOptionsScalarSchema = z
   .object({
     pairing: z
       .enum(["off", "candidate", "definitional"])
-      .default(MERGE_OPTION_DEFAULTS.identity.pairing),
+      .default(IDENTITY_OPTION_DEFAULTS.pairing),
     onEdgeConflict: z
       .enum(["repoint", "flag"])
-      .default(MERGE_OPTION_DEFAULTS.identity.onEdgeConflict),
+      .default(IDENTITY_OPTION_DEFAULTS.onEdgeConflict),
     onUniquenessConflict: z
       .enum(["refuse", "flag"])
-      .default(MERGE_OPTION_DEFAULTS.identity.onUniquenessConflict),
+      .default(IDENTITY_OPTION_DEFAULTS.onUniquenessConflict),
     onProvenanceConflict: z
       .enum(["keepBoth", "refuse"])
-      .default(MERGE_OPTION_DEFAULTS.identity.onProvenanceConflict),
+      .default(IDENTITY_OPTION_DEFAULTS.onProvenanceConflict),
   })
   .strict();
 
@@ -190,8 +199,9 @@ export type NormalizedMergeOptions<G extends GraphDef = GraphDef> = Readonly<{
   candidateDiagnostics?: CandidateDiagnosticsOptions;
   branchOrder?: readonly BranchId[];
   provenanceWeights?: ReadonlyMap<BranchId, number>;
-  /** Presence-preserving: absent unless the caller stated `identity`. */
-  identity?: IdentityReconciliationOptions;
+  // NOTE: `identity` is not a member here yet — see the matching note on
+  // `MergeOptions` (types.ts). `normalizeIdentityOptions` below is the
+  // presence-preserving normalizer PR-3 will wire in as this field.
 }>;
 
 /**
@@ -233,15 +243,23 @@ function validateIdentityAssertionConflictPolicy(
 }
 
 /**
- * Validates and fully resolves `identity`, PRESENCE-PRESERVING: `undefined`
- * in, `undefined` out — the compatibility hinge that keeps a review artifact
- * captured before this option existed revalidating `compatible`
+ * Validates and fully resolves an `identity` options bag, PRESENCE-PRESERVING:
+ * `undefined` in, `undefined` out — the compatibility hinge PR-3 needs to keep
+ * a review artifact captured before this option existed revalidating
+ * `compatible` once `normalizeMergeOptions` threads this in as a member
  * (`reviewOptionEvidence` encodes only what `normalizeMergeOptions` emits).
  * `{}` in still resolves every default and comes back fully populated: the
  * caller STATED they want identity reconciliation, even with every field at
  * its default.
+ *
+ * Deliberately NOT called from {@link normalizeMergeOptions} yet: `MergeOptions`
+ * is already publicly exported, so wiring this in changes
+ * `etc/typegraph-graph-merge.api.md` — a public-surface change this PR must
+ * not make (see the `MergeOptions`/`NormalizedMergeOptions` notes above).
+ * PR-3 calls this from `normalizeMergeOptions` once `identity` is a real
+ * `MergeOptions` member and `IdentityReconciliationOptions` ships as an export.
  */
-function validateIdentityOptions(
+export function normalizeIdentityOptions(
   identity: IdentityReconciliationOptions | undefined,
 ): IdentityReconciliationOptions | undefined {
   if (identity === undefined) return undefined;
@@ -250,7 +268,7 @@ function validateIdentityOptions(
   return {
     pairing: scalar.pairing,
     onAssertionConflict: validateIdentityAssertionConflictPolicy(
-      onAssertionConflict ?? MERGE_OPTION_DEFAULTS.identity.onAssertionConflict,
+      onAssertionConflict ?? IDENTITY_OPTION_DEFAULTS.onAssertionConflict,
     ),
     onEdgeConflict: scalar.onEdgeConflict,
     onUniquenessConflict: scalar.onUniquenessConflict,
@@ -377,8 +395,6 @@ export function normalizeMergeOptions<G extends GraphDef>(
       undefined
     : validateProvenanceWeights(options.provenanceWeights);
 
-  const identity = validateIdentityOptions(options.identity);
-
   // "provenanceWeighted" without weights would silently degrade to a
   // stable-branch-order (lastWriteWins) resolution and quietly commit a
   // different graph. Fail loudly instead so the misconfiguration is visible.
@@ -421,6 +437,5 @@ export function normalizeMergeOptions<G extends GraphDef>(
       {}
     : { branchOrder: options.branchOrder }),
     ...(provenanceWeights === undefined ? {} : { provenanceWeights }),
-    ...(identity === undefined ? {} : { identity }),
   };
 }

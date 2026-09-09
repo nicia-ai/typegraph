@@ -493,14 +493,15 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
    * validation refuses the merge rather than silently changing policy.
    */
   provenanceWeights?: ReadonlyMap<BranchId, number>;
-  /**
-   * Identity-driven candidate pairing and identity-assertion conflict
-   * arbitration. Omitted by default, which reproduces today's behavior
-   * byte-for-byte: no identity-driven pairing, and any identity-assertion
-   * conflict the classifier finds still fails the merge exactly as it always
-   * has. Stating this option on a graph declaring no `identity` is refused.
-   */
-  identity?: IdentityReconciliationOptions;
+  // NOTE: `identity` (identity-driven candidate pairing / assertion-conflict
+  // arbitration, `IdentityReconciliationOptions`) is deliberately NOT a
+  // member here yet. `MergeOptions` is already publicly exported
+  // (`src/graph-merge/index.ts`), so adding a field to it changes
+  // `etc/typegraph-graph-merge.api.md` — a public-surface change this PR
+  // must not make (no changeset; PR-3 owns the release). `IdentityReconciliationOptions`
+  // and its normalization already exist (`options.ts`'s `normalizeIdentityOptions`)
+  // for direct testing; wiring this field onto `MergeOptions` is PR-3's job,
+  // alongside exporting the type and refreshing the API report.
 }>;
 
 /**
