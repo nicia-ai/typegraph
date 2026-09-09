@@ -516,34 +516,36 @@ async function produceExportChunks<G extends GraphDef>(
   const nodeKinds = options.nodeKinds ?? getNodeKinds(store.graph);
   const edgeKinds = options.edgeKinds ?? getEdgeKinds(store.graph);
   const schemaVersion = await backend.getActiveSchema(graphId);
-  // Archival-only: the source graph's own retention watermark, so a reader of
-  // the raw payload knows the transitions section excludes anything the
-  // source had already pruned. Read from the same snapshot the rest of the
-  // export reads from, before the header is emitted, so a transactional
-  // export's header is consistent with everything that follows it. Omitted
-  // entirely when nothing has EVER been pruned (`prunedBeforeRevision ===
-  // 0`): `identityTransitionRetentionAtTarget`'s "nothing pruned" default
-  // stamps a fresh `prunedAt` on every read (it names no real prune event),
-  // which would otherwise make two archival exports of an unchanged graph
-  // compare unequal on that field alone.
+  const archivalIdentityEnabled =
+    store.graph.identity !== undefined && options.identityMode === "archival";
+  // The source graph's own retention watermark, so a reader of the raw
+  // payload knows the transitions section excludes anything the source had
+  // already pruned. Read from the same snapshot the rest of the export reads
+  // from, before the header is emitted, so a transactional export's header
+  // is consistent with everything that follows it. Omitted entirely when
+  // nothing has EVER been pruned (`prunedBeforeRevision === 0`):
+  // `identityTransitionRetentionAtTarget`'s "nothing pruned" default stamps a
+  // fresh `prunedAt` on every read (it names no real prune event), which
+  // would otherwise make two archival exports of an unchanged graph compare
+  // unequal on that field alone.
   const rawRetention =
-    store.graph.identity === undefined || options.identityMode !== "archival" ?
-      undefined
-    : await storeRuntime(store).identityTransitionRetentionAtTarget(backend);
+    archivalIdentityEnabled ?
+      await storeRuntime(store).identityTransitionRetentionAtTarget(backend)
+    : undefined;
   const retention =
     rawRetention === undefined || rawRetention.prunedBeforeRevision === 0 ?
       undefined
     : rawRetention;
-  // Archival-only, and read for the SAME reason as `retention` above: a
-  // streaming importer's header handler is the only place it can refuse an
-  // archival-transitions restore into a `history: false` target BEFORE any
-  // node or edge write — the "identity-transitions" chunk itself always
-  // arrives last. A cheap existence probe (never the full page) answers
-  // that from the same snapshot the header's other fields come from.
+  // Read for the SAME reason as `retention` above: a streaming importer's
+  // header handler is the only place it can refuse an archival-transitions
+  // restore into a `history: false` target BEFORE any node or edge write —
+  // the "identity-transitions" chunk itself always arrives last. A cheap
+  // existence probe (never the full page) answers that from the same
+  // snapshot the header's other fields come from.
   const hasTransitions =
-    store.graph.identity === undefined || options.identityMode !== "archival" ?
-      false
-    : await graphHasIdentityTransitions(store, backend);
+    archivalIdentityEnabled ?
+      await graphHasIdentityTransitions(store, backend)
+    : false;
 
   await emit({
     type: "header",

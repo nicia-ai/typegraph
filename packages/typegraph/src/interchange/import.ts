@@ -1419,10 +1419,11 @@ function graphDataForChunk(
   // this reconstructed document carries no transitions section at all, so the
   // nodes/edges/identity(assertions) chunk calls never redundantly re-write
   // the retention watermark. `header.identity.retention`, when the source
-  // carried one, is stripped on those same three chunk calls for the same
-  // reason: left in, every chunk would reconstruct a `retention`-bearing
-  // identity section and re-invoke the watermark write once per chunk
-  // instead of once for the whole stream.
+  // carried one, is likewise omitted on those same three chunk calls (it is
+  // only ever attached alongside `transitions` below) for the same reason:
+  // left in, every chunk would reconstruct a `retention`-bearing identity
+  // section and re-invoke the watermark write once per chunk instead of once
+  // for the whole stream.
   transitions?: readonly InterchangeIdentityTransition[],
 ): GraphData {
   const { identity, ...headerWithoutIdentity } = header;
@@ -1439,13 +1440,15 @@ function graphDataForChunk(
         identity: {
           profile: identity.profile,
           mode: identity.mode,
-          ...(identity.retention === undefined ?
-            {}
-          : { retention: identity.retention }),
           assertions: [...assertions],
           ...(transitions === undefined ?
-            { retention: undefined }
-          : { transitions: [...transitions] }),
+            {}
+          : {
+              transitions: [...transitions],
+              ...(identity.retention === undefined ?
+                {}
+              : { retention: identity.retention }),
+            }),
         },
       }),
   };
