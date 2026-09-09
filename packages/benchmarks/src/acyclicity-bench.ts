@@ -345,8 +345,23 @@ async function benchForest(
 // than assuming it (design note line 516-517, 999-1003).
 // ============================================================
 
-/** The system index the recursive term's `from_kind, from_id` join must use. */
-const EXPECTED_ACYCLICITY_INDEX = "typegraph_edges_from_idx";
+/**
+ * The system indexes the recursive term's `(graph_id, [kind,] from_kind,
+ * from_id)` seek may use. SQLite picks `typegraph_edges_from_idx`; PostgreSQL
+ * prefers `typegraph_edges_cardinality_idx`, which leads with the same three
+ * columns plus `kind` and is the tighter match for a single-kind relation.
+ * Either is the per-hop seek the probe's cost model assumes; what must NOT
+ * appear is a whole-partition scan (`typegraph_edges_kind_idx`, a heap scan,
+ * or SQLite's `MATERIALIZE candidates`).
+ */
+const EXPECTED_ACYCLICITY_INDEXES = [
+  "typegraph_edges_from_idx",
+  "typegraph_edges_cardinality_idx",
+] as const;
+
+function seekIndexNamed(planText: string): string | undefined {
+  return EXPECTED_ACYCLICITY_INDEXES.find((name) => planText.includes(name));
+}
 
 type CapturedStatement = Readonly<{ sql: string; params: readonly unknown[] }>;
 
@@ -428,7 +443,7 @@ function findAcyclicityProbeStatement(
  * realistic worst case for the recursive term), captures its exact SQL text
  * and bound parameters, and re-issues it as an `EXPLAIN` on the SAME
  * connection. Prints the plan and reports whether it names
- * {@link EXPECTED_ACYCLICITY_INDEX} — report-only, matching this lane's
+ * one of {@link EXPECTED_ACYCLICITY_INDEXES} — report-only, matching this lane's
  * stance elsewhere, but printed prominently: a silent heap scan here means
  * every other number in this file is priced against the wrong plan.
  */
@@ -471,11 +486,11 @@ async function explainAcyclicityProbe(
       const planText = plan
         .map((row) => Object.values(row).join(" "))
         .join("\n");
-      const usesExpectedIndex = planText.includes(EXPECTED_ACYCLICITY_INDEX);
+      const seekIndex = seekIndexNamed(planText);
       console.log(
-        `acyclicity:explain:sqlite:${String(size)}  ${usesExpectedIndex ? `USES ${EXPECTED_ACYCLICITY_INDEX}` : "DOES NOT NAME THE EXPECTED INDEX — see plan below"}`,
+        `acyclicity:explain:sqlite:${String(size)}  ${seekIndex === undefined ? "DOES NOT NAME A SEEK INDEX — see plan below" : `USES ${seekIndex}`}`,
       );
-      if (!usesExpectedIndex) console.log(planText);
+      if (seekIndex === undefined) console.log(planText);
     } finally {
       await close();
     }
@@ -509,16 +524,16 @@ async function explainAcyclicityProbe(
     const planText = (result.rows as readonly Record<string, unknown>[])
       .map((row) => Object.values(row).join(" "))
       .join("\n");
-    const usesExpectedIndex = planText.includes(EXPECTED_ACYCLICITY_INDEX);
+    const seekIndex = seekIndexNamed(planText);
     const isIndexOnlyScan = /Index Only Scan/i.test(planText);
     console.log(
       `acyclicity:explain:postgres:${String(size)}  ${
-        usesExpectedIndex ?
-          `USES ${EXPECTED_ACYCLICITY_INDEX}${isIndexOnlyScan ? " (index-only scan)" : " (NOT an index-only scan — see plan below)"}`
-        : "DOES NOT NAME THE EXPECTED INDEX — see plan below"
+        seekIndex === undefined ?
+          "DOES NOT NAME A SEEK INDEX — see plan below"
+        : `USES ${seekIndex}${isIndexOnlyScan ? " (index-only scan)" : " (NOT an index-only scan — see plan below)"}`
       }`,
     );
-    if (!usesExpectedIndex || !isIndexOnlyScan) console.log(planText);
+    if (seekIndex === undefined || !isIndexOnlyScan) console.log(planText);
   } finally {
     await pool.end();
   }
