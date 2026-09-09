@@ -462,6 +462,47 @@ export function registerCompositionAttachmentIntegrationTests(
       );
     });
 
+    it("reparent inside a transaction counts as ONE node write intent", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const anthology = await store.nodes.CaAnthology.create({});
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      // MUTATION CHECK: drop `reparent` from `NODE_WRITE_NAMES`
+      // (src/store/collection-surface.ts) and the sealed transaction
+      // collection stops counting the move at all — `writes.nodes` comes back
+      // `{}` and `total` 0, while the move itself still lands.
+      const { receipt } = await store.transactionWithReceipt(async (tx) => {
+        await tx.nodes.CaChapter.reparent(chapter.id, {
+          kind: "CaAnthology",
+          id: anthology.id,
+          via: "caIncludedIn",
+        });
+      });
+
+      // ONE intent for the caller's one call: the retire and the attach are
+      // this operation's own row work, not two collection-surface writes.
+      expect(receipt.writes.nodes).toEqual({ CaChapter: 1 });
+      expect(receipt.writes.edges).toEqual({});
+      expect(receipt.writes.total).toBe(1);
+      expect(receipt.cascadedParts).toEqual([]);
+
+      const moved = await store.edges.caIncludedIn.find({});
+      expect(moved).toHaveLength(1);
+      expect(requireDefined(moved[0]).toId).toBe(anthology.id);
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(0);
+    });
+
     // ========================================================
     // R6 — `partOf` on get-or-create is a POSTCONDITION
     // ========================================================
