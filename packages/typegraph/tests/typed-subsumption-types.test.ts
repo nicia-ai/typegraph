@@ -416,6 +416,38 @@ describe("R2 — typed relations and conservative widening", () => {
   });
   const iriRegistry = buildKindRegistry(iriGraph);
 
+  it("widens because an IRI-routed equivalence really does expand at runtime", () => {
+    // The RUNTIME premise behind the type widening above: a second kind
+    // mapped to the same external term joins the first kind's subclass
+    // closure, so a query on `IriMedia` can genuinely return rows of a kind
+    // its declared type never named. Without this, the widening would be
+    // pessimism rather than soundness.
+    const CoRegistered = defineNode("IriCoRegistered", {
+      schema: z.object({ title: z.string() }),
+    });
+    const sharedIri = "https://schema.org/CreativeWork";
+    const sharedRegistry = buildKindRegistry(
+      defineGraph({
+        id: "r2_iri_shared_term",
+        nodes: {
+          IriMedia: { type: IriMedia },
+          IriCoRegistered: { type: CoRegistered },
+        },
+        edges: {},
+        ontology: [
+          equivalentTo(IriMedia, sharedIri),
+          equivalentTo(CoRegistered, sharedIri),
+        ],
+      }),
+    );
+    expect(sharedRegistry.expandSubClasses("IriMedia")).toContain(
+      "IriCoRegistered",
+    );
+    expect(sharedRegistry.expandSubClasses("IriMedia")).not.toContain(
+      sharedIri,
+    );
+  });
+
   it("widens the alias of a kind whose only equivalence is IRI-routed", () => {
     const query = createQueryBuilder<typeof iriGraph>(iriGraph.id, iriRegistry)
       .from("IriMedia", "m")

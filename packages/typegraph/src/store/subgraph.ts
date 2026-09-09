@@ -430,9 +430,9 @@ export type SubgraphEdgeResult<
  * compile time. Widening to every declared edge kind is the conservative
  * reading: every key the traversal can produce is in the result type, and no
  * key outside the graph's own edges ever appears. A `composition` that is
- * absent, `false`, or an unresolved `boolean` variable leaves the existing
- * `edges`-list typing exactly as it was — `true extends C` is the test, so a
- * value that MIGHT be `true` widens too.
+ * absent or `false` leaves the existing `edges`-list typing exactly as it
+ * was. `true extends C` is the test, not `C extends true`, so an unresolved
+ * `boolean` — a flag that MIGHT be `true` at runtime — widens as well.
  */
 export type SubgraphResultEdgeKinds<
   G extends GraphDef,
