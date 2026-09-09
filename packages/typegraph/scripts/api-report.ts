@@ -613,8 +613,11 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // union (never re-exported from most entrypoints, only pulled in
   // transitively through `MetaEdgeProperties`/`SerializedMetaEdge`) dropped
   // exactly one forgotten export apiece from every entrypoint below that
-  // saw its count change — every value here is measured lower than before,
-  // never raised.
+  // saw its count change under THIS ONE batch — Roadmap F only ever
+  // lowered a count, never raised one. That is not a standing guarantee
+  // for the ledger as a whole: later batches below (Item E.2 among them)
+  // document counts this ledger RAISES, each with its own gate on the
+  // exact delta and the exact new names responsible.
   //
   // Item E.2: `CompositionExistence` (the `existence: "optional" | "required"`
   // union) is a new public type, re-exported directly only from `.` and
