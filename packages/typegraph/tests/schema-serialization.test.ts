@@ -589,9 +589,11 @@ describe("computeSchemaDiff", () => {
       serializeSchema(newGraph, 2),
     );
 
-    // Adding subClassOf relation adds both the meta-edge and the relation
+    // Adding a subClassOf relation is one relation-level ontology change.
+    // `SerializedOntology.metaEdges` is derived state (see its docblock)
+    // and is not an independent classification input.
     const addedItems = diff.ontology.filter((o) => o.type === "added");
-    expect(addedItems.length).toBeGreaterThanOrEqual(1);
-    expect(addedItems.some((o) => o.entity === "relation")).toBe(true);
+    expect(addedItems).toHaveLength(1);
+    expect(addedItems[0]).toMatchObject({ entity: "relation" });
   });
 });

@@ -100,9 +100,7 @@ function relationChangeOf(
   type: "added" | "removed",
 ) {
   return requireDefined(
-    changes.find(
-      (change) => change.entity === "relation" && change.type === type,
-    ),
+    changes.find((change) => change.type === type),
     `expected a ${type} relation change`,
   );
 }
@@ -473,9 +471,7 @@ describe("classifyOntologyChanges", () => {
       const changes = classifyOntologyChanges(before, after);
       const added = changes.find(
         (change) =>
-          change.entity === "relation" &&
-          change.type === "added" &&
-          change.name.startsWith("disjointWith"),
+          change.type === "added" && change.name.startsWith("disjointWith"),
       );
       const probe = probeOfKind(
         requireDefined(added, "expected the added disjointWith relation")
