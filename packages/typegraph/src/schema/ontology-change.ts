@@ -103,6 +103,7 @@ import { expandEdgeEndpointAllowance } from "../registry/edge-endpoint-allowance
 import { type KindRegistry } from "../registry/kind-registry";
 import { compareStrings } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
+import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
 import {
   buildRegistryFromSerializedSchema,
@@ -232,6 +233,9 @@ function relationKey(relation: SerializedOntologyRelation): string {
  * naming `via` (and `partSide`, when present) so a composition relation
  * re-pointed at a different realizing edge reads as a distinct change
  * instead of two identical-looking "removed"/"added" entries (E-a-8).
+ * Also names `existence` when declared, so a rendered diff never shows a
+ * bare `partOf(...)`/`hasPart(...)` pair with no hint of its existence
+ * constraint.
  */
 function relationDescription(relation: SerializedOntologyRelation): string {
   const base = `${relation.metaEdge}(${relation.from}, ${relation.to})`;
@@ -240,7 +244,11 @@ function relationDescription(relation: SerializedOntologyRelation): string {
     relation.partSide === undefined ?
       ""
     : ` (partSide: "${relation.partSide}")`;
-  return `${base}${viaClause}${partSideClause}`;
+  const existenceClause =
+    relation.existence === undefined ?
+      ""
+    : ` (existence: "${relation.existence}")`;
+  return `${base}${viaClause}${partSideClause}${existenceClause}`;
 }
 
 /**
@@ -251,13 +259,19 @@ function relationDescription(relation: SerializedOntologyRelation): string {
  * edge) must diff as remove + add rather than disappearing as a no-op, so
  * both `via` and `partSide` are folded into the key alongside the three
  * original fields, through the same injective tuple encoding the claim keys
- * use for exactly this reason (`src/utils/tuple-key.ts`). `existence` is
- * folded in too: flipping an already-declared pair's `existence` from
- * `"optional"` (or unset) to `"required"` tightens the pair against
- * existing data exactly like a brand-new required pair does, so it must
- * diff as remove + add rather than disappearing as a no-op that skips
- * `classifyKnownRelationSeverity`'s `added` arm entirely — see the comment
- * there.
+ * use for exactly this reason (`src/utils/tuple-key.ts`).
+ *
+ * `existence` is deliberately NOT part of this key. It identifies the
+ * SAME declared pair whichever way it reads, so a pair whose `existence`
+ * only flips (an in-place edit, not a re-declaration) is looked up as one
+ * relation present on both sides and classified as `modified` by
+ * `classifyExistenceChange` below — never folded into this identity key,
+ * which would make it disappear into a `removed` + `added` pair instead.
+ * `partOf`/`hasPart`'s `removed` arm is unconditionally `breaking`
+ * (dropping the pair entirely), so an existence-only edit routed through
+ * that arm would always classify as breaking regardless of direction,
+ * refusing even a pure loosening and refusing a tightening before
+ * `prepareSchemaTighteningPreflight` ever ran.
  */
 function relationMapKey(relation: SerializedOntologyRelation): string {
   return encodeTupleKey([
@@ -266,7 +280,6 @@ function relationMapKey(relation: SerializedOntologyRelation): string {
     relation.to,
     relation.via ?? "",
     relation.partSide ?? "",
-    relation.existence ?? "",
   ]);
 }
 
@@ -581,14 +594,15 @@ function classifyKnownRelationSeverity(
       if (direction !== "added") {
         return { severity: "breaking", probeKinds: [] };
       }
-      // Item E.2: `existence` is folded into `relationMapKey`, so flipping
-      // an already-declared pair to `"required"` diffs as remove + add
-      // rather than vanishing — it lands HERE, on the `added` arm, same as
-      // a brand-new pair. Under-probed by `compositionSingleWhole` alone:
-      // the added pair's data must ALSO be checked for a live part with no
-      // live whole, which `compositionRequiredWhole` does. Removing
-      // `existence: "required"` (or removing the pair) is a LOOSENING — the
-      // `removed` arm above stays unprobed.
+      // Item E.2: this arm only ever sees a BRAND-NEW pair — flipping an
+      // already-declared pair's `existence` is classified separately by
+      // `classifyExistenceChange` (relation identity, `via`/`partSide`
+      // included, excludes `existence`; see `relationMapKey`'s docblock),
+      // so it never reaches here as a synthetic remove + add. A brand-new
+      // pair is under-probed by `compositionSingleWhole` alone when it is
+      // ALSO declared `required`: the pair's data must additionally be
+      // checked for a live part with no live whole, which
+      // `compositionRequiredWhole` does.
       return {
         severity: "warning",
         probeKinds:
@@ -706,6 +720,75 @@ function classifyRelation(
 }
 
 /**
+ * Classifies an in-place `existence` flip on an already-declared `partOf`/
+ * `hasPart` pair (same identity — `relationMapKey` excludes `existence`, so
+ * this is the ONLY place that edit is classified; see its docblock). Mirrors
+ * ruling E.2's tightening/loosening split for the whole-pair `added` case
+ * above, but keyed off the existence delta directly rather than off
+ * presence/absence of the pair itself:
+ *
+ * - optional (or unset) → required: TIGHTENING. A required part with no
+ *   live whole can already exist in the data (nothing constrained it
+ *   before), so this needs the same audit a brand-new required pair does —
+ *   `compositionSingleWhole` and `compositionRequiredWhole`.
+ * - required → optional (or unset): LOOSENING. Every state the tightened
+ *   constraint forbade is still admitted; nothing newly forbidden. Safe,
+ *   no probe.
+ *
+ * `after` (not `before`) is used for the description and probes: the probe
+ * plan audits the graph as it will be, and the realizing edge kind
+ * (`via`) cannot itself change between these two entries (a `via` change
+ * makes `relationMapKey` disagree, so it would classify as remove + add
+ * instead of reaching this function).
+ */
+function classifyExistenceChange(
+  before: SerializedOntologyRelation,
+  after: SerializedOntologyRelation,
+  context: RelationClassificationContext,
+): OntologyChange {
+  const name = relationKey(after);
+  const beforeExistence = before.existence ?? "optional";
+  const afterExistence = after.existence ?? "optional";
+
+  if (
+    context.removedKindNames.has(after.from) ||
+    context.removedKindNames.has(after.to)
+  ) {
+    return {
+      type: "modified",
+      entity: "relation",
+      name,
+      severity: "safe",
+      details: `Relation ${relationDescription(after)} had its existence changed alongside a removed kind`,
+    };
+  }
+
+  if (afterExistence === "optional") {
+    // required → optional: loosening.
+    return {
+      type: "modified",
+      entity: "relation",
+      name,
+      severity: "safe",
+      details: `Relation ${relationDescription(after)} loosened existence from "${beforeExistence}" to "${afterExistence}"`,
+    };
+  }
+
+  // optional (or unset) → required: tightening.
+  return {
+    type: "modified",
+    entity: "relation",
+    name,
+    severity: "warning",
+    details: `Relation ${relationDescription(after)} tightened existence from "${beforeExistence}" to "${afterExistence}"`,
+    probes: [
+      buildProbe("compositionSingleWhole", context, after),
+      buildProbe("compositionRequiredWhole", context, after),
+    ],
+  };
+}
+
+/**
  * Classifies every ontology change between two schema snapshots, with the
  * data probes a commit of a tightening change owes.
  *
@@ -755,8 +838,28 @@ export function classifyOntologyChanges(
   const addedRelations = [...afterRelations.entries()]
     .filter(([key]) => !beforeRelations.has(key))
     .map(([, relation]) => relation);
+  // Same identity on both sides (`relationMapKey` excludes `existence`) but
+  // the `existence` value itself differs: an in-place edit, classified by
+  // `classifyExistenceChange` rather than falling out of the remove/add
+  // sets above.
+  const modifiedExistenceRelations = [...afterRelations.entries()]
+    .filter(([key]) => beforeRelations.has(key))
+    .map(
+      ([key, afterRelation]) =>
+        [requireDefined(beforeRelations.get(key)), afterRelation] as const,
+    )
+    .filter(([beforeRelation, afterRelation]) => {
+      return (
+        (beforeRelation.existence ?? "optional") !==
+        (afterRelation.existence ?? "optional")
+      );
+    });
 
-  if (removedRelations.length === 0 && addedRelations.length === 0) {
+  if (
+    removedRelations.length === 0 &&
+    addedRelations.length === 0 &&
+    modifiedExistenceRelations.length === 0
+  ) {
     return changes;
   }
 
@@ -800,6 +903,11 @@ export function classifyOntologyChanges(
   }
   for (const relation of addedRelations) {
     changes.push(classifyRelation("added", relation, context));
+  }
+  for (const [beforeRelation, afterRelation] of modifiedExistenceRelations) {
+    changes.push(
+      classifyExistenceChange(beforeRelation, afterRelation, context),
+    );
   }
 
   return changes;

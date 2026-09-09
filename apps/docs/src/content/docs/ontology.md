@@ -389,6 +389,13 @@ const parentSection = defineEdge("parentSection");
 partOf(Section, Section, { via: parentSection, partSide: "from" });
 ```
 
+**Changing this on a populated graph**: declaring or dropping a `partOf`/
+`hasPart` pair itself auto-migrates unconditionally either way — the schema
+change does not walk existing rows. Once composition's one-whole-per-part
+constraint is enforced, adding a `partOf` to an already-populated graph can
+surface parts that already have more than one live whole; removing one only
+ever loosens a constraint, so it stays safe regardless.
+
 #### `existence`: a part that cannot exist without a whole
 
 `existence: "required"` on a `partOf`/`hasPart` pair says a part of that kind
@@ -431,12 +438,17 @@ retroactive repair: `store.verifyConstraintFences()` reports a live required
 part with no live whole (data written before the declaration, or by trusted
 import — see below) but does not fix it.
 
-**Changing this on a populated graph**: the schema change itself auto-migrates
-unconditionally either way — declaring or dropping `partOf`/`hasPart` does not
-walk existing rows. Once composition's one-whole-per-part constraint is
-enforced, adding a `partOf` to an already-populated graph can surface parts
-that already have more than one live whole; removing one only ever loosens a
-constraint, so it stays safe regardless.
+**Changing `existence` on an already-declared pair**: flipping `existence` in
+place — the pair itself (`via`, `partSide`) stays the same, only the
+`"optional"`/`"required"` value changes — is classified as one `modified`
+change, never as removing and re-adding the pair. Tightening
+(`"optional"` → `"required"`) is a `warning`-severity change: it runs the
+SAME data check a brand-new required pair does (a live part with no live
+whole refuses the commit), reached directly through `ensureSchema`/
+`createAdapterStoreWithSchema`'s ordinary auto-migrate path — no explicit
+`migrateSchema()` call is needed. Loosening (`"required"` → `"optional"`) is
+always `safe`: every state the tightened constraint forbade is still
+admitted, so it auto-migrates unconditionally regardless of data.
 
 #### Choosing a containment tier
 
