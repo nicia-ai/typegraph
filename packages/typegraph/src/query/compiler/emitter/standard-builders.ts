@@ -1223,7 +1223,8 @@ export function buildStandardEmbeddingsCte(
     const slotDescriptor = vectorSlots?.get(vectorSlotKey(kind, fieldPath));
     // Use the predicate's explicit metric if given, else this kind's DECLARED
     // metric (the one its ANN index was built for). Resolving per kind keeps an
-    // subclass-expansion union correct when subkinds declare different metrics.
+    // subclass-expanded union correct when subkinds declare different
+    // metrics.
     const branchMetric = metric ?? slotDescriptor?.metric ?? "cosine";
 
     // Approximate opt-in: retrieve this kind's candidates via the
