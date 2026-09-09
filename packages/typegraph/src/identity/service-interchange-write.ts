@@ -550,62 +550,71 @@ export async function importIdentityTransitionsIntoTarget(
   transitions: readonly IdentityTransitionTransfer[],
   carriedWatermark: number | undefined,
 ): Promise<Readonly<{ created: number; watermark: number | undefined }>> {
-  if (transitions.length === 0) {
-    if (carriedWatermark === undefined || carriedWatermark === 0) {
-      return { created: 0, watermark: undefined };
+  // Raw identity statements run through the capture-approved handle
+  // `withRecordedIdentityMutationTarget` resolves — under `history: true` the
+  // target this function was HANDED refuses `executeStatement` outright (raw
+  // SQL bypasses recorded-time capture), exactly as every other identity
+  // relation writer already goes through this seam. Neither `touch` nor
+  // `noteTransition` is used: a restore inserts historical rows verbatim, it
+  // does not touch live entities or note a NEW transition.
+  return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+    if (transitions.length === 0) {
+      if (carriedWatermark === undefined || carriedWatermark === 0) {
+        return { created: 0, watermark: undefined };
+      }
+      await writeIdentityTransitionRetentionWatermark(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        carriedWatermark,
+        nowIso(),
+      );
+      return { created: 0, watermark: carriedWatermark };
     }
+    let previousRevision = Number.NEGATIVE_INFINITY;
+    for (const row of transitions) {
+      if (row.recordedRevision < previousRevision) {
+        throw transitionShapeError(
+          row.transitionId,
+          `Archival identity transitions must be ordered by non-decreasing recorded revision; ${row.transitionId} carries ${String(row.recordedRevision)} after ${String(previousRevision)}.`,
+          "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
+        );
+      }
+      previousRevision = row.recordedRevision;
+    }
+    const values = transitions.map((row) =>
+      encodeIdentityTransitionRow(
+        {
+          graphId: ctx.graphId,
+          cause: row.cause,
+          classRef: row.class,
+          priorClassRef: row.priorClass,
+          assertionIds: row.assertionIds,
+          decision: row.decision,
+          validAt: row.validAt,
+        },
+        row.recordedRevision,
+        row.recordedAt,
+        row.transitionId,
+      ),
+    );
+    await insertIdentityTransitionValues(rawTarget, ctx.schema, values);
+    const highestRestoredRevision = Math.max(
+      ...transitions.map((row) => row.recordedRevision),
+    );
+    const watermark = Math.max(
+      highestRestoredRevision + 1,
+      carriedWatermark ?? 0,
+    );
     await writeIdentityTransitionRetentionWatermark(
-      target,
+      rawTarget,
       ctx.schema,
       ctx.graphId,
-      carriedWatermark,
+      watermark,
       nowIso(),
     );
-    return { created: 0, watermark: carriedWatermark };
-  }
-  let previousRevision = Number.NEGATIVE_INFINITY;
-  for (const row of transitions) {
-    if (row.recordedRevision < previousRevision) {
-      throw transitionShapeError(
-        row.transitionId,
-        `Archival identity transitions must be ordered by non-decreasing recorded revision; ${row.transitionId} carries ${String(row.recordedRevision)} after ${String(previousRevision)}.`,
-        "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
-      );
-    }
-    previousRevision = row.recordedRevision;
-  }
-  const values = transitions.map((row) =>
-    encodeIdentityTransitionRow(
-      {
-        graphId: ctx.graphId,
-        cause: row.cause,
-        classRef: row.class,
-        priorClassRef: row.priorClass,
-        assertionIds: row.assertionIds,
-        decision: row.decision,
-        validAt: row.validAt,
-      },
-      row.recordedRevision,
-      row.recordedAt,
-      row.transitionId,
-    ),
-  );
-  await insertIdentityTransitionValues(target, ctx.schema, values);
-  const highestRestoredRevision = Math.max(
-    ...transitions.map((row) => row.recordedRevision),
-  );
-  const watermark = Math.max(
-    highestRestoredRevision + 1,
-    carriedWatermark ?? 0,
-  );
-  await writeIdentityTransitionRetentionWatermark(
-    target,
-    ctx.schema,
-    ctx.graphId,
-    watermark,
-    nowIso(),
-  );
-  return { created: transitions.length, watermark };
+    return { created: transitions.length, watermark };
+  });
 }
 
 export async function applyIdentityChangesForContext<G extends GraphDef>(

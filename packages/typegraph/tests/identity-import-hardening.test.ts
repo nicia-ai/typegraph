@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   type CompiledRowsSql,
   type CompiledStatementSql,
+  createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -393,6 +394,79 @@ describe("archival identity import window bounds", () => {
       includeDeleted: true,
     });
     expect(restored.identity).toEqual(archive.identity);
+  });
+
+  // Load-bearing (L10): the archival round trip carries the transitions
+  // section verbatim and the restore watermark reports the
+  // explanations-without-snapshots seam honestly (design §7.3).
+  it("archival round trip carries transitions and the watermark (L10)", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+
+    const first = await source.identity.assertSame(alice, bob);
+    await source.identity.retractAssertion(first.assertion.id);
+    await source.identity.assertSame(alice, bob);
+
+    const sourceTransitions = await source.identity.transitionsOf(alice);
+    expect(sourceTransitions.length).toBeGreaterThanOrEqual(3);
+    expect(sourceTransitions.map((transition) => transition.cause)).toEqual(
+      expect.arrayContaining(["assert", "retract"]),
+    );
+
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    expect(archive.identity?.transitions?.length).toBe(
+      sourceTransitions.length,
+    );
+    // Nothing was ever pruned at the source, so no watermark is carried.
+    expect(archive.identity?.retention).toBeUndefined();
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const result = await importGraph(target, archive, { onConflict: "skip" });
+    expect(result.errors).toEqual([]);
+    expect(result.success).toBe(true);
+
+    // `transitionsOf` answers FULLY from a restored archive (design §7.3):
+    // every restored transition is visible by walking from either endpoint's
+    // current class canonical. The target's own set is a SUPERSET of the
+    // restored ids — importing the still-open assertion is itself a genuine
+    // merge on the target, and that generates its own new "assert" note on
+    // top of the transplanted explanatory history, exactly as any other
+    // identity-affecting write would.
+    const targetTransitions = await target.identity.transitionsOf(alice);
+    expect(targetTransitions.length).toBeGreaterThanOrEqual(
+      sourceTransitions.length,
+    );
+    const targetTransitionIds = new Set(
+      targetTransitions.map((transition) => transition.transitionId),
+    );
+    for (const sourceTransition of sourceTransitions) {
+      expect(targetTransitionIds.has(sourceTransition.transitionId)).toBe(true);
+    }
+
+    // `replay`, by contrast, reports the seam honestly rather than silently
+    // claiming a complete history: the restore set the watermark to the
+    // highest restored revision + 1, which is above every boundary an
+    // unbounded replay call's requested range starts from (revision 0).
+    const targetReplay = await target.identity.replay(alice);
+    expect(targetReplay.truncatedBefore).toBeDefined();
   });
 });
 

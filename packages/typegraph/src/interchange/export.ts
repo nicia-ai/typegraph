@@ -495,11 +495,20 @@ async function produceExportChunks<G extends GraphDef>(
   // the raw payload knows the transitions section excludes anything the
   // source had already pruned. Read from the same snapshot the rest of the
   // export reads from, before the header is emitted, so a transactional
-  // export's header is consistent with everything that follows it.
-  const retention =
+  // export's header is consistent with everything that follows it. Omitted
+  // entirely when nothing has EVER been pruned (`prunedBeforeRevision ===
+  // 0`): `identityTransitionRetentionAtTarget`'s "nothing pruned" default
+  // stamps a fresh `prunedAt` on every read (it names no real prune event),
+  // which would otherwise make two archival exports of an unchanged graph
+  // compare unequal on that field alone.
+  const rawRetention =
     store.graph.identity === undefined || options.identityMode !== "archival" ?
       undefined
     : await storeRuntime(store).identityTransitionRetentionAtTarget(backend);
+  const retention =
+    rawRetention === undefined || rawRetention.prunedBeforeRevision === 0 ?
+      undefined
+    : rawRetention;
 
   await emit({
     type: "header",

@@ -682,6 +682,10 @@ export function registerIdentityIntegrationTests(
         sameAssertions: 2,
         differentAssertions: 0,
         retractions: 1,
+        // `context.getStore()` opens without `history: true`, so no
+        // transition notes are ever buffered — this is the "history off"
+        // case the receipts load-bearing test also pins.
+        transitions: 0,
         total: 3,
       });
       expect(outcome.receipt.writes.total).toBe(3);
