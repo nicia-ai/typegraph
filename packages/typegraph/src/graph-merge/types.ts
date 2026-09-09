@@ -20,6 +20,7 @@ import type {
   MatchEvidence,
   MatchSource,
 } from "./evidence";
+import type { IdentityAssertionConflictPolicy } from "./identity-three-way";
 import type {
   EdgeId,
   GetNodeType,
@@ -337,6 +338,59 @@ export type CandidateDiagnosticsOptions = Readonly<{
 }>;
 
 /**
+ * How the merge folds identity assertions (`store.identity.assertSame` /
+ * `assertDifferent`) into candidate pairing, and how it arbitrates the
+ * identity-assertion conflicts a three-way classification against the staged
+ * base slice cannot resolve by rule alone.
+ *
+ * Every field defaults to today's behavior: `pairing: "off"` recalls no
+ * candidates from identity assertions at all, and `onAssertionConflict:
+ * "refuse"` fails the merge on the same two shapes it always has (branches
+ * asserting opposing relations for one pair, or a retract/reassert race) — a
+ * merge that never sets `identity` behaves byte-for-byte as it does today.
+ */
+export type IdentityReconciliationOptions = Readonly<{
+  /**
+   * `"off"` (default): identity assertions recall no candidates.
+   * `"candidate"`: each `same` assertion emits a scored candidate pair,
+   * subject to the kind's threshold — strong recall, not proof.
+   * `"definitional"`: each `same` assertion forces a fused candidate edge,
+   * merging its endpoints regardless of similarity score.
+   */
+  pairing?: "off" | "candidate" | "definitional";
+  /**
+   * How to arbitrate a `same`/`different` opposing-relations collision or a
+   * retract/reassert race the classifier cannot resolve by rule alone.
+   * `"refuse"` (default) fails the merge, byte-identical to today.
+   * `"assertWins"` / `"retractWins"` resolve a retract/reassert race
+   * specifically (refused as an invalid option against any OTHER conflict
+   * shape, which has no assert/retract axis to decide). `"flag"` keeps base
+   * truth and records an {@link IdentityUnresolvedConflict}. A function
+   * receives the fully-populated conflict and returns the decision itself.
+   */
+  onAssertionConflict?: IdentityAssertionConflictPolicy;
+  /**
+   * How an identity-paired cluster's repointed edge collides with another.
+   * `"repoint"` (default) applies the repoint; `"flag"` keeps the edge and
+   * records a typed conflict.
+   */
+  onEdgeConflict?: "repoint" | "flag";
+  /**
+   * How a resolved write set that still violates a unique constraint after
+   * an identity pairing is dropped is handled. `"refuse"` (default) fails
+   * the merge with the existing constraint-conflict error; `"flag"` drops
+   * the pairing (never the constraint) and records a typed conflict.
+   */
+  onUniquenessConflict?: "refuse" | "flag";
+  /**
+   * How contradictory source attribution across identity-paired members is
+   * handled. `"keepBoth"` (default) keeps every contribution; `"refuse"`
+   * fails the merge.
+   */
+  onProvenanceConflict?: "keepBoth" | "refuse";
+}>;
+
+/**
  * Ontology type-reconciliation mode. `"off"` is a no-op (default); `"ontology"`
  * collapses compatible types to the most-specific via the public subClassOf
  * closure (T2a / T10).
@@ -439,6 +493,14 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
    * validation refuses the merge rather than silently changing policy.
    */
   provenanceWeights?: ReadonlyMap<BranchId, number>;
+  /**
+   * Identity-driven candidate pairing and identity-assertion conflict
+   * arbitration. Omitted by default, which reproduces today's behavior
+   * byte-for-byte: no identity-driven pairing, and any identity-assertion
+   * conflict the classifier finds still fails the merge exactly as it always
+   * has. Stating this option on a graph declaring no `identity` is refused.
+   */
+  identity?: IdentityReconciliationOptions;
 }>;
 
 /**

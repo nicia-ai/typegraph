@@ -15,6 +15,7 @@
 import { z } from "zod";
 
 import { createDataKeyedBag } from "../utils/object";
+import type { IdentityAssertionConflictPolicy } from "./identity-three-way";
 import type { GraphDef } from "./typegraph-internal";
 import type {
   BranchId,
@@ -22,6 +23,7 @@ import type {
   ComparisonCeilingPolicy,
   DeleteModifyPolicy,
   Embedder,
+  IdentityReconciliationOptions,
   MergeOptions,
   PropertyConflictPolicy,
   ReconcileTypesMode,
@@ -42,6 +44,13 @@ export const MERGE_OPTION_DEFAULTS = {
   onComparisonCeiling: "error",
   provenance: true,
   persistProvenance: false,
+  identity: {
+    pairing: "off",
+    onAssertionConflict: "refuse",
+    onEdgeConflict: "repoint",
+    onUniquenessConflict: "refuse",
+    onProvenanceConflict: "keepBoth",
+  },
 } as const satisfies Readonly<{
   reconcileTypes: ReconcileTypesMode;
   onPropertyConflict: "flag";
@@ -50,6 +59,13 @@ export const MERGE_OPTION_DEFAULTS = {
   onComparisonCeiling: ComparisonCeilingPolicy;
   provenance: boolean;
   persistProvenance: boolean;
+  identity: Readonly<{
+    pairing: "off";
+    onAssertionConflict: "refuse";
+    onEdgeConflict: "repoint";
+    onUniquenessConflict: "refuse";
+    onProvenanceConflict: "keepBoth";
+  }>;
 }>;
 
 /**
@@ -64,6 +80,41 @@ const propertyConflictPolicySchema = z.enum([
   "lastWriteWins",
   "provenanceWeighted",
 ]);
+
+/**
+ * zod schema for the STRING arm of `identity.onAssertionConflict` (the
+ * function arm is not validatable by zod, exactly the `onPropertyConflict`
+ * precedent above).
+ */
+const identityAssertionConflictPolicySchema = z.enum([
+  "refuse",
+  "assertWins",
+  "retractWins",
+  "flag",
+]);
+
+/**
+ * zod schema for `identity`'s scalar surface, EXCLUDING `onAssertionConflict`
+ * (validated separately, like `onPropertyConflict`, since it admits a
+ * function arm). `.strict()` so a mistyped sub-option is refused rather than
+ * silently ignored.
+ */
+const identityOptionsScalarSchema = z
+  .object({
+    pairing: z
+      .enum(["off", "candidate", "definitional"])
+      .default(MERGE_OPTION_DEFAULTS.identity.pairing),
+    onEdgeConflict: z
+      .enum(["repoint", "flag"])
+      .default(MERGE_OPTION_DEFAULTS.identity.onEdgeConflict),
+    onUniquenessConflict: z
+      .enum(["refuse", "flag"])
+      .default(MERGE_OPTION_DEFAULTS.identity.onUniquenessConflict),
+    onProvenanceConflict: z
+      .enum(["keepBoth", "refuse"])
+      .default(MERGE_OPTION_DEFAULTS.identity.onProvenanceConflict),
+  })
+  .strict();
 
 /** zod schema for a single resolve config's scalar surface (the threshold). */
 const resolveConfigScalarSchema = z.object({
@@ -139,6 +190,8 @@ export type NormalizedMergeOptions<G extends GraphDef = GraphDef> = Readonly<{
   candidateDiagnostics?: CandidateDiagnosticsOptions;
   branchOrder?: readonly BranchId[];
   provenanceWeights?: ReadonlyMap<BranchId, number>;
+  /** Presence-preserving: absent unless the caller stated `identity`. */
+  identity?: IdentityReconciliationOptions;
 }>;
 
 /**
@@ -159,6 +212,50 @@ function validatePropertyConflictPolicy<G extends GraphDef>(
     );
   }
   return policy;
+}
+
+/**
+ * Validates the STRING arm of `identity.onAssertionConflict` (the function
+ * arm is not validatable by zod).
+ */
+function validateIdentityAssertionConflictPolicy(
+  policy: IdentityAssertionConflictPolicy,
+): IdentityAssertionConflictPolicy {
+  if (
+    typeof policy === "string" &&
+    !identityAssertionConflictPolicySchema.safeParse(policy).success
+  ) {
+    throw new Error(
+      `Invalid identity.onAssertionConflict "${policy}": expected "refuse", "assertWins", "retractWins", "flag", or a function.`,
+    );
+  }
+  return policy;
+}
+
+/**
+ * Validates and fully resolves `identity`, PRESENCE-PRESERVING: `undefined`
+ * in, `undefined` out — the compatibility hinge that keeps a review artifact
+ * captured before this option existed revalidating `compatible`
+ * (`reviewOptionEvidence` encodes only what `normalizeMergeOptions` emits).
+ * `{}` in still resolves every default and comes back fully populated: the
+ * caller STATED they want identity reconciliation, even with every field at
+ * its default.
+ */
+function validateIdentityOptions(
+  identity: IdentityReconciliationOptions | undefined,
+): IdentityReconciliationOptions | undefined {
+  if (identity === undefined) return undefined;
+  const { onAssertionConflict, ...scalarInput } = identity;
+  const scalar = identityOptionsScalarSchema.parse(scalarInput);
+  return {
+    pairing: scalar.pairing,
+    onAssertionConflict: validateIdentityAssertionConflictPolicy(
+      onAssertionConflict ?? MERGE_OPTION_DEFAULTS.identity.onAssertionConflict,
+    ),
+    onEdgeConflict: scalar.onEdgeConflict,
+    onUniquenessConflict: scalar.onUniquenessConflict,
+    onProvenanceConflict: scalar.onProvenanceConflict,
+  };
 }
 
 /**
@@ -280,6 +377,8 @@ export function normalizeMergeOptions<G extends GraphDef>(
       undefined
     : validateProvenanceWeights(options.provenanceWeights);
 
+  const identity = validateIdentityOptions(options.identity);
+
   // "provenanceWeighted" without weights would silently degrade to a
   // stable-branch-order (lastWriteWins) resolution and quietly commit a
   // different graph. Fail loudly instead so the misconfiguration is visible.
@@ -322,5 +421,6 @@ export function normalizeMergeOptions<G extends GraphDef>(
       {}
     : { branchOrder: options.branchOrder }),
     ...(provenanceWeights === undefined ? {} : { provenanceWeights }),
+    ...(identity === undefined ? {} : { identity }),
   };
 }
