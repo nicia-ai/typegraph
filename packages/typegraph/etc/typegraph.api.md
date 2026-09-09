@@ -217,7 +217,6 @@ export type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
-    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public
@@ -2422,7 +2421,36 @@ export type EndpointPairErrorDetails = Readonly<{
 }>;
 
 // @public (undocumented)
+const ENGINE_RECORDED_READ_SOURCE: unique symbol;
+
+// @public (undocumented)
 const ENGINE_REVISION_BRAND: unique symbol;
+
+// @public
+type EngineRecordedInstantParts = Readonly<{
+    kind: "engine";
+    revision: string;
+    recordedAt: string;
+}>;
+
+// @public
+type EngineRecordedReadSource = Readonly<{
+    kind: "engine-native";
+    schema: SqlSchema;
+    [ENGINE_RECORDED_READ_SOURCE]: true;
+}> & RecordedReadSource;
+
+// @public
+type EngineRecordedRevision = Readonly<{
+    revision: string;
+    recordedAt: string;
+}>;
+
+// @public
+type EngineRecordedTimeMembers = Readonly<{
+    source: (this: void, table: RecordedSourceTable, revision: EngineRecordedRevision) => SqlFragment;
+    revisionNow: (this: void, session: RecordedTimeSession) => Promise<EngineRecordedRevision>;
+}>;
 
 // @public
 type EngineRevision = string & Readonly<{
@@ -2701,10 +2729,10 @@ const EXTERNAL_REF_TABLE_KEY: "_externalRefTable";
 
 // @public (undocumented)
 export type ExternalRecordedReadSource = Readonly<{
-    source: "external";
+    kind: "external";
     schema: SqlSchema;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
-}>;
+}> & RecordedReadSource;
 
 // @public
 export function externalRef<T extends string>(table: T): ExternalRefSchema<T>;
@@ -3222,6 +3250,7 @@ export type GraphBackend = Readonly<{
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
     catalog?: BackendCatalogProbes | undefined;
     lineage?: LineageMembers | undefined;
+    recordedTime?: EngineRecordedTimeMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -3537,7 +3566,7 @@ export function havingLt(aggregate: AggregateExpr, value: number): AggregateComp
 export function havingLte(aggregate: AggregateExpr, value: number): AggregateComparisonPredicate;
 
 // @public
-const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "lineage", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
+const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "lineage", "recordedTime", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
 
 // @public (undocumented)
 export type HistoryStore<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
@@ -5814,16 +5843,23 @@ export type RecordedInstant = string & {
 };
 
 // @public
+type RecordedInstantParts = TypeGraphRecordedInstantParts | EngineRecordedInstantParts;
+
+// @public
 export function recordedInstantRevision(instant: RecordedInstant): number;
 
 // @public
 export function recordedInstantWallTime(instant: RecordedInstant): string;
 
 // @public (undocumented)
-type RecordedReadBinding = RecordedReadSource;
+type RecordedReadBinding = ExternalRecordedReadSource | TypeGraphRecordedReadSource | EngineRecordedReadSource;
 
-// @public (undocumented)
-type RecordedReadSource = ExternalRecordedReadSource | TypeGraphRecordedReadSource;
+// @public
+export type RecordedReadSource = Readonly<{
+    source: (table: RecordedSourceTable, revision: RecordedInstantParts) => SqlFragment;
+    predicate: (prefix: SqlFragment, revision: RecordedInstantParts) => SqlFragment | undefined;
+    carriesInterval: boolean;
+}>;
 
 // @public (undocumented)
 export type RecordedReadStore<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, RecordedReadStore<G>> & Readonly<{
@@ -5862,6 +5898,9 @@ export type RecordedScanPage<T> = Readonly<{
     nextCursor: string | undefined;
     hasNextPage: boolean;
 }>;
+
+// @public
+export type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
 
 // @public
 export type RecordedStoreView<G extends GraphDef> = RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
@@ -5906,6 +5945,15 @@ type RecordedTableNames = Readonly<{
     recordedEdges: string;
     recordedNodes: string;
 }>;
+
+// @public
+type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
+
+// @public
+type RecordedTimeOwnership = "typegraph-relations" | "engine-native";
+
+// @public
+type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 type RecordIndexMaterializationParams = Readonly<{
@@ -6792,6 +6840,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     revisionTrackingEnabled: boolean;
     revisionSchema: SqlSchema;
     recordedReadBound: boolean;
+    recordedTimeOwnership: RecordedTimeOwnership;
     workingCopyOptions: WorkingCopyOptions;
     nodes: GraphNodeCollections<G>;
     edges: GraphEdgeCollections<G>;
@@ -6944,6 +6993,7 @@ export interface StoreRef<in out T> {
 // @internal
 type StoreRuntime<G extends GraphDef> = Readonly<{
     backend: GraphBackend;
+    captureEnabled?: boolean;
     uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
     queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
@@ -7496,7 +7546,7 @@ type TemporalOptions = Readonly<{
 const TRANSACTION_RUNTIME: unique symbol;
 
 // @public
-export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & RecordedTimeBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 export class TransactionClosedError extends TypeGraphError {
@@ -7675,12 +7725,19 @@ export type TypeGraphErrorOptions = Readonly<{
     cause?: unknown;
 }>;
 
+// @public
+type TypeGraphRecordedInstantParts = Readonly<{
+    kind: "typegraph";
+    revision: number;
+    recordedAt: string;
+}>;
+
 // @public (undocumented)
 type TypeGraphRecordedReadSource = Readonly<{
-    source: "typegraph-capture";
+    kind: "typegraph-capture";
     schema: SqlSchema;
     [TYPEGRAPH_RECORDED_READ_SOURCE]: true;
-}>;
+}> & RecordedReadSource;
 
 // @public
 export type UnboundLiveStoreOptions = LiveStoreOptions & Readonly<{

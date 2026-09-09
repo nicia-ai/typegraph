@@ -466,38 +466,70 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // TEXT diff adds a new top-level type (`LineageSession` itself) rather than
 // only touching `LineageMembers`'s two member signatures and the `lineage`
 // registry entry's `accesses` field.
+//
+// Recorded read source seam batch: `ExternalRecordedReadSource` and the
+// built-in capture binding's type both gained `source`/`predicate` members
+// (an intersection with the newly-public `RecordedReadSource`), whose
+// signatures reference `RecordedInstantParts` — a shape `core/temporal.ts`
+// already exported by name but no entrypoint had rendered before. `.`
+// directly exports `RecordedReadSource` and `RecordedSourceTable` now
+// (dropping the old unexported `RecordedReadSource` union from its own
+// forgotten set) while picking up `RecordedInstantParts` as a forgotten
+// export, netting zero (394 → 394, a different symbol set behind the same
+// count, hence a new SHA). The six entrypoints that mirror `.`'s surface
+// without directly exporting `RecordedReadSource`/`RecordedSourceTable`
+// (`./graph-merge`, `./interchange`, `./postgres/pglite`, `./profiler`,
+// `./provenance`, `./sqlite/local`) each gain both types as forgotten
+// exports, +2 apiece.
+//
+// Engine-native recorded time batch: `RecordedInstantParts` (already
+// forgotten export debt everywhere it rendered) became a discriminated union
+// of two new shapes, `TypeGraphRecordedInstantParts` and
+// `EngineRecordedInstantParts`, and the recorded read binding union
+// (`RecordedReadBinding`) gained a third member, `EngineRecordedReadSource` —
+// both reachable wherever `RecordedInstantParts`/`RecordedReadBinding`
+// already rendered. `StoreCore` (reachable from `.` via `Store`) also gained
+// `recordedTimeOwnership: RecordedTimeOwnership`, a fourth new forgotten
+// export at the same site. The seven entrypoints that already rendered
+// `RecordedInstantParts` (`.`, `./graph-merge`, `./interchange`, `./postgres/
+// pglite`, `./profiler`, `./provenance`, `./sqlite/local`) each move by
+// exactly +4. Gate: every moved entrypoint's debt increased by exactly 4, no
+// other entrypoint moved, and no bundled backend's own `.api.md` TEXT gains a
+// new top-level type beyond the two already-public seam types
+// (`EngineRecordedTimeMembers`/`EngineRecordedRevision`, added in the prior
+// commit) referencing `RecordedInstantParts`'s new shape indirectly.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 394,
-    sha256: "332b798faee651caa6d3544413c56f17d3da886db870a327e0bd015e2be57bd1",
+    count: 402,
+    sha256: "9a8bb93ef5faa50db4d7afdb9eaeff371125c99df44408886f9a2e7c1d02085a",
   },
   "./adapters/drizzle/engine": {
-    count: 326,
-    sha256: "cfa0fdf41c514575ef58ef0d2ba39846f472e5d41cdbed1bf6f81b2cf9ae89a2",
+    count: 331,
+    sha256: "da8304e4098dd2432ddd76161f81b9040d473e726cedd101b5f8b2ae76d26af9",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 252,
-    sha256: "941791eacd1aa20f98eeec0e4fd93f6c9b2ca2054259e00cbd1858184fa7cdbc",
+    count: 257,
+    sha256: "27f87a205d76e7373828a6727e1325b8a8ff8ea3137284a5cbaf795f6a9172ad",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 256,
-    sha256: "fd18070ffddb2b704cdf59dcab02a75adb9c56c6fa29a0938663da996546feb8",
+    count: 261,
+    sha256: "065875845610833fe425cb7dc48207fd762182c1a7bdd55529c884a27d80f8eb",
   },
   "./adapters/drizzle/sqlite": {
-    count: 253,
-    sha256: "e809383e93d65ad16de82824a7c33dadf38f24e8f689583eec3ee59ec3216684",
+    count: 258,
+    sha256: "0e23e4f6f1312675be5669a9e3f8215c5b8b8fd5214ea76203e3cc5ef723f212",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 256,
-    sha256: "33ec8f1f41e9ec0843462e066b1383fef6d615dade0b750860a88a0388fda4b0",
+    count: 261,
+    sha256: "c563ebdaa5cea1405885bdd20e676660738e404b89e522af157f8e617576a931",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 256,
-    sha256: "33ec8f1f41e9ec0843462e066b1383fef6d615dade0b750860a88a0388fda4b0",
+    count: 261,
+    sha256: "c563ebdaa5cea1405885bdd20e676660738e404b89e522af157f8e617576a931",
   },
   "./backend": {
     count: 16,
@@ -515,36 +547,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 732,
-    sha256: "a8def9b66461f7543a91120f3278b9fb3ccb90284c31901cc0f2ce7a8fe7dc21",
+    count: 742,
+    sha256: "8a92ed390b5d23fef63c7d602e1c6f9267eb3dcf793c014e279f36878d5a0464",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 715,
-    sha256: "32e93d18f9dc117d8c3333ee147d01e88df18851cb9832adfda4b801a295aa84",
+    count: 725,
+    sha256: "5f423a61795baaa16e1b65de5e77f5241b44e8288dc227f66cfa0ea796f4d386",
   },
   "./postgres/pglite": {
-    count: 712,
-    sha256: "620f5cd75513be9dd8c97a6b097afdce1ea87a99068432bf3f5102af7214a797",
+    count: 722,
+    sha256: "361a6b28b5d4e6766ec2d50aa01af5cdb36f4ab0a984e55527821ff56721003d",
   },
   "./profiler": {
-    count: 717,
-    sha256: "6fbd5405bcf49f618171f47994391c48b8b6cb5f8aed9413d0a79188773509f2",
+    count: 727,
+    sha256: "ba4d0d10bccf568b061ab2fe7fef0dddffdb792e565f5fc86dc0f79dd46ccbb4",
   },
   "./provenance": {
-    count: 723,
-    sha256: "45292db1f519001a8be95686625ffcf36f35580718dc321affaf0cb8f77d4c7b",
+    count: 733,
+    sha256: "2157102548e6ddbb364f3188be91c9af51e9fae1ab115636026f5d59df04c941",
   },
   "./schema": {
-    count: 277,
-    sha256: "b88f3306930490a80ecded62269ecc5b336855706f4e0551325986a3fe630fea",
+    count: 282,
+    sha256: "912798b14b4548dc5f66ce6ff9db71dd7561b7d0f1303fd165aa9f58b37390de",
   },
   "./sqlite/local": {
-    count: 712,
-    sha256: "620f5cd75513be9dd8c97a6b097afdce1ea87a99068432bf3f5102af7214a797",
+    count: 722,
+    sha256: "361a6b28b5d4e6766ec2d50aa01af5cdb36f4ab0a984e55527821ff56721003d",
   },
 };
 

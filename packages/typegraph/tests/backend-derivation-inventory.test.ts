@@ -181,6 +181,12 @@ const INVENTORY: readonly InventoryEntry[] = [
       "The capture backend itself: write members forward through the recorded-write path, every other member through the projection.",
   },
   {
+    file: "store/recorded-capture/write-touch.ts",
+    line: "return deriveBackend(target, {",
+    reason:
+      "The engine-native mutation witness: the same write-member overlay recorded-time capture installs, wrapping a transaction target so every write member is observed at the point it changed a row (or did not), reported through a boolean sink instead of capture's after-image one.",
+  },
+  {
     file: "store/recorded-read-service.ts",
     line: "const projectedBackend = projectGraphBackend(backend);",
     reason:

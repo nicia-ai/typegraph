@@ -97,6 +97,7 @@ import {
   recordedRevisionOriginsVerdict,
   resolveLineage,
   storeBackend,
+  storeCaptureEnabled,
   storeRuntime,
 } from "./typegraph-internal";
 import { computeSchemaHash, serializeSchema } from "./typegraph-internal";
@@ -326,8 +327,8 @@ export async function computeBaseVersion<G extends GraphDef>(
   }
   // Tracking is off, so `resolveLineage` can only ever answer with the
   // BACKEND's own `lineage` (the recorded-relations lineage requires
-  // `historyEnabled`, which implies tracking — see the module doc's anchor
-  // precedence). A store with no lineage at all falls through to the
+  // `storeCaptureEnabled`, which implies tracking — see the module doc's
+  // anchor precedence). A store with no lineage at all falls through to the
   // compatibility content fingerprint below.
   const lineage = resolveLineage(store);
   if (lineage !== undefined) {
@@ -667,7 +668,13 @@ export async function lineageDeltaSinceAnchor<G extends GraphDef>(
 ): Promise<LineageDelta | undefined> {
   const revisionAnchor = revisionAnchorOf(base);
   if (revisionAnchor !== undefined) {
-    if (!baseStore.historyEnabled) return undefined;
+    // `recordedRelationsLineage` below reads TypeGraph's own recorded
+    // relations directly, so this gate is `storeCaptureEnabled`, not the
+    // public `historyEnabled` getter — a revision anchor is a TypeGraph-
+    // owned token to begin with, but an engine-native store's `history:
+    // true` must still fall back to the full diff here rather than reading
+    // relations the engine never populates.
+    if (!storeCaptureEnabled(baseStore)) return undefined;
     const originMatch = await revisionOriginMatch(
       storeBackend(baseStore),
       baseStore.revisionSchema,

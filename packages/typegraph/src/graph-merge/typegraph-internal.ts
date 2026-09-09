@@ -88,6 +88,7 @@ export {
 } from "../store/recorded-capture";
 export {
   storeBackend,
+  storeCaptureEnabled,
   storeQueryBackend,
   storeRuntime,
   transactionBackend,

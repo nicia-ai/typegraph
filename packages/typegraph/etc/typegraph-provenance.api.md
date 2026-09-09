@@ -118,7 +118,6 @@ type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
-    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public
@@ -1526,7 +1525,36 @@ type EncodeTilde<S extends string> = S extends `${infer Head}~${infer Tail}` ? `
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public (undocumented)
+const ENGINE_RECORDED_READ_SOURCE: unique symbol;
+
+// @public (undocumented)
 const ENGINE_REVISION_BRAND: unique symbol;
+
+// @public
+type EngineRecordedInstantParts = Readonly<{
+    kind: "engine";
+    revision: string;
+    recordedAt: string;
+}>;
+
+// @public
+type EngineRecordedReadSource = Readonly<{
+    kind: "engine-native";
+    schema: SqlSchema;
+    [ENGINE_RECORDED_READ_SOURCE]: true;
+}> & RecordedReadSource;
+
+// @public
+type EngineRecordedRevision = Readonly<{
+    revision: string;
+    recordedAt: string;
+}>;
+
+// @public
+type EngineRecordedTimeMembers = Readonly<{
+    source: (this: void, table: RecordedSourceTable, revision: EngineRecordedRevision) => SqlFragment;
+    revisionNow: (this: void, session: RecordedTimeSession) => Promise<EngineRecordedRevision>;
+}>;
 
 // @public
 type EngineRevision = string & Readonly<{
@@ -1777,10 +1805,10 @@ const EXTERNAL_RECORDED_READ_SOURCE: unique symbol;
 
 // @public (undocumented)
 type ExternalRecordedReadSource = Readonly<{
-    source: "external";
+    kind: "external";
     schema: SqlSchema;
     [EXTERNAL_RECORDED_READ_SOURCE]: true;
-}>;
+}> & RecordedReadSource;
 
 // @public (undocumented)
 type ExtractAllowedPairs<From, To> = To extends readonly (infer ToNode extends NodeType)[] ? {
@@ -2225,6 +2253,7 @@ type GraphBackend = Readonly<{
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
     catalog?: BackendCatalogProbes | undefined;
     lineage?: LineageMembers | undefined;
+    recordedTime?: EngineRecordedTimeMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -4077,11 +4106,18 @@ type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
 
-// @public (undocumented)
-type RecordedReadBinding = RecordedReadSource;
+// @public
+type RecordedInstantParts = TypeGraphRecordedInstantParts | EngineRecordedInstantParts;
 
 // @public (undocumented)
-type RecordedReadSource = ExternalRecordedReadSource | TypeGraphRecordedReadSource;
+type RecordedReadBinding = ExternalRecordedReadSource | TypeGraphRecordedReadSource | EngineRecordedReadSource;
+
+// @public
+type RecordedReadSource = Readonly<{
+    source: (table: RecordedSourceTable, revision: RecordedInstantParts) => SqlFragment;
+    predicate: (prefix: SqlFragment, revision: RecordedInstantParts) => SqlFragment | undefined;
+    carriesInterval: boolean;
+}>;
 
 // @public
 type RecordedRelationDdl = Readonly<{
@@ -4102,6 +4138,9 @@ type RecordedScanPage<T> = Readonly<{
     nextCursor: string | undefined;
     hasNextPage: boolean;
 }>;
+
+// @public
+type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
 
 // @public
 type RecordedStoreView<G extends GraphDef> = RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
@@ -4146,6 +4185,15 @@ type RecordedTableNames = Readonly<{
     recordedEdges: string;
     recordedNodes: string;
 }>;
+
+// @public
+type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
+
+// @public
+type RecordedTimeOwnership = "typegraph-relations" | "engine-native";
+
+// @public
+type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 type RecordIndexMaterializationParams = Readonly<{
@@ -4783,6 +4831,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     revisionTrackingEnabled: boolean;
     revisionSchema: SqlSchema;
     recordedReadBound: boolean;
+    recordedTimeOwnership: RecordedTimeOwnership;
     workingCopyOptions: WorkingCopyOptions;
     nodes: GraphNodeCollections<G>;
     edges: GraphEdgeCollections<G>;
@@ -4902,6 +4951,7 @@ interface StoreRef<in out T> {
 // @internal
 type StoreRuntime<G extends GraphDef> = Readonly<{
     backend: GraphBackend;
+    captureEnabled?: boolean;
     uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
     queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
@@ -5415,7 +5465,7 @@ type TemporalOptions = Readonly<{
 const TRANSACTION_RUNTIME: unique symbol;
 
 // @public
-type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & RecordedTimeBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 type TransactionCollections<G extends GraphDef> = Readonly<{
@@ -5528,12 +5578,19 @@ type TypedStoreViewEdgeCollection<R extends EdgeRegistration> = StoreViewEdgeCol
 // @public (undocumented)
 const TYPEGRAPH_RECORDED_READ_SOURCE: unique symbol;
 
+// @public
+type TypeGraphRecordedInstantParts = Readonly<{
+    kind: "typegraph";
+    revision: number;
+    recordedAt: string;
+}>;
+
 // @public (undocumented)
 type TypeGraphRecordedReadSource = Readonly<{
-    source: "typegraph-capture";
+    kind: "typegraph-capture";
     schema: SqlSchema;
     [TYPEGRAPH_RECORDED_READ_SOURCE]: true;
-}>;
+}> & RecordedReadSource;
 
 // @public
 type UnbrandParam<T> = T extends NodeId<NodeType> ? string : T extends EdgeId<AnyEdgeType> ? string : T extends readonly NodeId<NodeType>[] ? readonly string[] : T extends readonly EdgeId<AnyEdgeType>[] ? readonly string[] : T extends readonly (infer Item extends Record<string, unknown>)[] ? readonly UnbrandRecord<Item>[] : T;

@@ -292,6 +292,7 @@ export type {
 
 import { type BackendCatalogProbes } from "./capabilities/catalog";
 import { type LineageMembers } from "./capabilities/lineage";
+import { type EngineRecordedTimeMembers } from "./capabilities/recorded-time";
 
 export type {
   BackendCatalogProbes,
@@ -308,6 +309,12 @@ export type {
   LineageMembers,
   LineageSession,
 } from "./capabilities/lineage";
+export type {
+  EngineRecordedRevision,
+  EngineRecordedTimeMembers,
+  RecordedSourceTable,
+  RecordedTimeSession,
+} from "./capabilities/recorded-time";
 
 /**
  * Backend capabilities that vary by dialect.
@@ -477,24 +484,6 @@ export type BackendCapabilities = Readonly<{
    * not honor.
    */
   writeFence?: WriteFenceDeclaration | undefined;
-  /**
-   * Who allocates recorded-time revisions. `"typegraph-relations"` (the
-   * default, and every first-party backend) means TypeGraph owns a clock row
-   * and performs the read/advance/write that `lockRecordedClock` fences —
-   * which is undegradable, so an `unfenced` engine is refused at
-   * construction. `"engine-native"` means the engine supplies the recorded
-   * axis itself (an engine that supplies the recorded axis natively via
-   * pinned-handle `AS OF`).
-   *
-   * TODAY THE ENGINE-NATIVE READ/WRITE PATH DOES NOT EXIST YET (follow-up
-   * F8, owned by WS9). The capture path allocates the TypeGraph clock
-   * unconditionally, so declaring `"engine-native"` and enabling
-   * clock-allocating history/revision tracking is refused at construction by
-   * its own typed error naming the interim state
-   * (`refuseEngineNativeRecordedTimeNotYetImplemented`,
-   * `src/backend/capabilities/recorded-time-ownership.ts`).
-   */
-  recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 export type BackendExecutionCapabilities = BackendCapabilities["execution"];
@@ -3006,6 +2995,22 @@ export type GraphBackend = Readonly<{
    */
   lineage?: LineageMembers | undefined;
 
+  /**
+   * The engine's own recorded (system-time) read source and revision clock.
+   * Present only when a backend's engine declares it
+   * (`EngineProvisioning.recordedTime`) — absent by default on a custom
+   * backend that supplies none, and absent on both bundled Drizzle profiles,
+   * which always allocate TypeGraph's own recorded clock and relations
+   * instead. Declaring this member is what makes a backend engine-native for
+   * recorded time — see `resolveRecordedTimeOwnership` in
+   * `backend/capabilities/recorded-time-ownership.ts`, the one reader of
+   * that distinction. A backend that supplies `recordedTime` must also
+   * supply `lineage`: engine-native history keeps no recorded relations of
+   * its own to derive a change delta from, so `createSqlBackend` refuses a
+   * profile that declares one without the other.
+   */
+  recordedTime?: EngineRecordedTimeMembers | undefined;
+
   // === Contribution Materialization (#135 — durable strategy-owned
   // storage marker, sibling of the index status table) ===
 
@@ -3670,6 +3675,9 @@ export type CatalogBackend = Pick<GraphBackend, "catalog">;
 /** The optional engine-lineage surface. See {@link LineageMembers}. */
 export type LineageBackend = Pick<GraphBackend, "lineage">;
 
+/** The optional engine-native recorded-time surface. See {@link EngineRecordedTimeMembers}. */
+export type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
+
 export type ContributionMaterializationBackend = Pick<
   GraphBackend,
   | "ensureContributionMaterializationsTable"
@@ -3768,6 +3776,7 @@ export type TransactionBackend = Readonly<
     IndexMaterializationBackend &
     CatalogBackend &
     LineageBackend &
+    RecordedTimeBackend &
     ContributionMaterializationBackend &
     RemovalMaterializationBackend &
     GraphLifecycleBackend &

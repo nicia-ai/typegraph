@@ -183,15 +183,20 @@ import { asCompiledRowsSql } from "../../query/sql-intent";
 import {
   type STORE_RUNTIME,
   storeBackend,
+  storeCaptureEnabled,
   type StoreRuntime,
 } from "../runtime-port";
 import { readRecordedClock, readRevisionOrigin } from "./clock";
 
 /**
  * The minimal store surface {@link recordedRelationsLineage} and
- * {@link resolveLineage} need: the graph this lineage answers for, whether
- * this store captures history, the schema naming the physical recorded
- * relations, and the runtime port reaching the store's own backend.
+ * {@link resolveLineage} need: the graph this lineage answers for, the
+ * schema naming the physical recorded relations, and the runtime port
+ * reaching the store's own backend and its `storeCaptureEnabled` flag —
+ * whether this store captures history through TypeGraph's own recorded
+ * relations, not merely whether `history: true` was requested (an
+ * engine-native store answers that too, without ever populating them; see
+ * `storeCaptureEnabled`'s own doc comment).
  *
  * A structural type rather than the `Store` class itself: `store/store.ts`
  * constructs the store's runtime port using exports from this same
@@ -201,7 +206,6 @@ import { readRecordedClock, readRevisionOrigin } from "./clock";
  */
 export type RecordedLineageStore<G extends GraphDef = GraphDef> = Readonly<{
   graphId: string;
-  historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;
   /**
@@ -439,7 +443,7 @@ async function changedEntityKeys(
 export function recordedRelationsLineage<G extends GraphDef>(
   store: RecordedLineageStore<G>,
 ): LineageMembers {
-  if (!store.historyEnabled) {
+  if (!storeCaptureEnabled(store)) {
     throw new ConfigurationError(
       "recordedRelationsLineage requires a store constructed with `history: true` — a non-capturing store never populates the recorded relations this lineage reads, so every changesSince would silently report an empty delta instead of the truth.",
       { code: "LINEAGE_REQUIRES_HISTORY" },
@@ -579,6 +583,6 @@ export function resolveLineage<G extends GraphDef>(
 ): LineageMembers | undefined {
   const backend = storeBackend(store);
   if (backend.lineage !== undefined) return backend.lineage;
-  if (store.historyEnabled) return recordedRelationsLineage(store);
+  if (storeCaptureEnabled(store)) return recordedRelationsLineage(store);
   return undefined;
 }

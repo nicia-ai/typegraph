@@ -48,7 +48,6 @@ type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
-    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public
@@ -3667,6 +3666,18 @@ type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 const ENGINE_REVISION_BRAND: unique symbol;
 
 // @public
+type EngineRecordedRevision = Readonly<{
+    revision: string;
+    recordedAt: string;
+}>;
+
+// @public
+type EngineRecordedTimeMembers = Readonly<{
+    source: (this: void, table: RecordedSourceTable, revision: EngineRecordedRevision) => SqlFragment;
+    revisionNow: (this: void, session: RecordedTimeSession) => Promise<EngineRecordedRevision>;
+}>;
+
+// @public
 type EngineRevision = string & Readonly<{
     [ENGINE_REVISION_BRAND]: "EngineRevision";
 }>;
@@ -4098,6 +4109,7 @@ type GraphBackend = Readonly<{
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
     catalog?: BackendCatalogProbes | undefined;
     lineage?: LineageMembers | undefined;
+    recordedTime?: EngineRecordedTimeMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -4758,11 +4770,20 @@ type RecordedRelationDdl = Readonly<{
 }>;
 
 // @public
+type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
+
+// @public
 type RecordedTableNames = Readonly<{
     recordedClock: string;
     recordedEdges: string;
     recordedNodes: string;
 }>;
+
+// @public
+type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
+
+// @public
+type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 type RecordIndexMaterializationParams = Readonly<{
@@ -5039,7 +5060,7 @@ type TableState = Readonly<{
 type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
 
 // @public
-type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & RecordedTimeBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 type TransactionOptions = Readonly<{

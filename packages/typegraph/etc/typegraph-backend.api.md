@@ -496,7 +496,6 @@ export type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
-    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public
@@ -2048,6 +2047,18 @@ export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 const ENGINE_REVISION_BRAND: unique symbol;
 
 // @public
+export type EngineRecordedRevision = Readonly<{
+    revision: string;
+    recordedAt: string;
+}>;
+
+// @public
+export type EngineRecordedTimeMembers = Readonly<{
+    source: (this: void, table: RecordedSourceTable, revision: EngineRecordedRevision) => SqlFragment;
+    revisionNow: (this: void, session: RecordedTimeSession) => Promise<EngineRecordedRevision>;
+}>;
+
+// @public
 export type EngineRevision = string & Readonly<{
     [ENGINE_REVISION_BRAND]: "EngineRevision";
 }>;
@@ -2580,6 +2591,7 @@ export type GraphBackend = Readonly<{
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
     catalog?: BackendCatalogProbes | undefined;
     lineage?: LineageMembers | undefined;
+    recordedTime?: EngineRecordedTimeMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -3365,11 +3377,20 @@ export function recordedRevisionOriginsMembers(port: Readonly<Partial<Pick<Graph
 export function recordedRevisionOriginsVerdict(backend: GraphBackend): BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>;
 
 // @public
+export type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
+
+// @public
 export type RecordedTableNames = Readonly<{
     recordedClock: string;
     recordedEdges: string;
     recordedNodes: string;
 }>;
+
+// @public
+export type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
+
+// @public
+export type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 export type RecordIndexMaterializationParams = Readonly<{
@@ -3954,7 +3975,7 @@ export type TombstonedNodeRow = NodeRow & Readonly<{
 }>;
 
 // @public
-export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & RecordedTimeBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 export type TransactionOptions = Readonly<{
@@ -4180,6 +4201,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "reasoned";
         readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. Every OTHER consumer — `assertTargetUnchanged`'s commit-time engine-anchor check among them — reaches `lineage` through `resolveLineage`/`requireLineage` rather than a raw `.lineage` read of its own, so none of them add to this count.";
         readonly accesses: 2;
+    };
+    readonly recordedTime: {
+        readonly kind: "reasoned";
+        readonly reason: "The engine's own recorded (system-time) read source and revision clock. Present only when a backend's engine declares it, and consulted only through resolveRecordedTimeOwnership/requireRecordedTime, both of which live in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). createSqlBackend's co-requirement check against `lineage` and both dialects' transaction-scoped threading all read `.recordedTime` off `EngineProvisioning`, not off a `GraphBackend`/`TransactionBackend`-typed receiver, so none of them add to this count either.";
+        readonly accesses: 0;
     };
     readonly claimIndexMaterialization: {
         readonly kind: "deferred";

@@ -821,6 +821,7 @@ async function fetchSubgraphNodes(
     recordedAsOf: ctx.recordedAsOf,
     tableAlias: "n",
     currentTimestamp: currentReadInstant(),
+    recordedReadBinding: ctx.recordedReadBinding,
   });
   const columns: SqlFragment[] = [
     sql`n.kind`,
@@ -857,6 +858,7 @@ async function fetchSubgraphEdges(
     recordedAsOf: ctx.recordedAsOf,
     tableAlias: "e",
     currentTimestamp: currentReadInstant(),
+    recordedReadBinding: ctx.recordedReadBinding,
   });
   const columns: SqlFragment[] = [
     sql`e.id`,

@@ -26,8 +26,8 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 15 of the 97 optional
- * `GraphBackend` members are bundled here; the other 82 are classified in
+ * This is the PILOT of a larger sweep (WS5b): 15 of the 98 optional
+ * `GraphBackend` members are bundled here; the other 83 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
  */
@@ -46,7 +46,7 @@ export type OptionalKeys<T> = {
 }[keyof T];
 
 /**
- * Every optional `GraphBackend` member — 97 of them, verified equal to the
+ * Every optional `GraphBackend` member — 98 of them, verified equal to the
  * names parsed from `etc/typegraph-backend.api.md` (§Baselines). Derived,
  * never hand-written: a member added or removed from `GraphBackend` changes
  * this type automatically, and the totality proof below fails loudly if the
@@ -776,7 +776,7 @@ export const CAPABILITY_BUNDLES = [
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 82, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 83, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -838,8 +838,15 @@ export type UnbundledOptionalMember =
  * parameter made that comparison unnecessary — `assertTargetUnchanged` now
  * reaches `lineage` through `requireLineage(txBackend, …)`, a call the
  * live scanner does not see (it reads `.lineage` inside
- * `backend/capabilities/`, outside the scanned scope) — back to 93,
- * 15 + 82 = 97 members total.
+ * `backend/capabilities/`, outside the scanned scope) — back to 93. The
+ * engine-native recorded-time capability then added `recordedTime`, a
+ * reasoned member with zero measured accesses: its own absence refusal
+ * (`requireRecordedTime`) lives in the excluded `backend/capabilities/`
+ * directory, and every other current read
+ * (`profile.provisioning.recordedTime` in `create-sql-backend.ts` and both
+ * dialects' transaction-scoped threading) is off `EngineProvisioning`, a
+ * type the receiver test's arm (b) does not recognize by name — still 93,
+ * 15 + 83 = 98 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   adoptBaseSchema: {
@@ -1057,6 +1064,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     reason:
       "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. Every OTHER consumer — `assertTargetUnchanged`'s commit-time engine-anchor check among them — reaches `lineage` through `resolveLineage`/`requireLineage` rather than a raw `.lineage` read of its own, so none of them add to this count.",
     accesses: 2,
+  },
+  recordedTime: {
+    kind: "reasoned",
+    reason:
+      "The engine's own recorded (system-time) read source and revision clock. Present only when a backend's engine declares it, and consulted only through resolveRecordedTimeOwnership/requireRecordedTime, both of which live in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). createSqlBackend's co-requirement check against `lineage` and both dialects' transaction-scoped threading all read `.recordedTime` off `EngineProvisioning`, not off a `GraphBackend`/`TransactionBackend`-typed receiver, so none of them add to this count either.",
+    accesses: 0,
   },
   claimIndexMaterialization: {
     kind: "deferred",
@@ -1425,7 +1438,7 @@ export const WS5B_SEED_BUNDLES = {
 // infers `MCore` correctly but, for a gated bundle with no `extras` field
 // (`CLAIMS`), leaves `MExtra` with NO inference candidate — and TypeScript's
 // fallback for an unmatched `infer` is the type parameter's CONSTRAINT
-// (`OptionalGraphBackendMember`, the full 97), not `never`, silently widening
+// (`OptionalGraphBackendMember`, the full 98), not `never`, silently widening
 // `MCore | MExtra` to every optional member. The structural form below has no
 // such unmatched parameter: `extras` is read only when the field is actually
 // present, so a bundle without one contributes no `ExtrasMembersOf` members
@@ -1469,7 +1482,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 97 optional members.
+// (i) Totality: the three-way partition covers exactly the 98 optional members.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,

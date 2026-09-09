@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("15 pilot + 82 unbundled = 97, with no member counted twice", () => {
+  it("15 pilot + 83 unbundled = 98, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(15);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(82);
+    expect(unbundledNames.length).toBe(83);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(97);
+    expect(bundledSet.size + unbundledNames.length).toBe(98);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("32 reasoned entries sum to 95 accesses; 50 deferred entries sum to 217", () => {
+  it("33 reasoned entries sum to 93 accesses; 50 deferred entries sum to 217", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(32);
+    expect(reasoned.length).toBe(33);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -147,6 +147,11 @@ describe("capability bundle totality (T9)", () => {
     // unnecessary: `assertTargetUnchanged` now reaches `lineage` through
     // `requireLineage(txBackend, …)`, which reads `.lineage` inside
     // `backend/capabilities/`, outside the scanner's scope — back to 93.
+    // The engine-native recorded-time capability then added `recordedTime`,
+    // a reasoned member with zero measured accesses for the same reason as
+    // `catalog`: every current read is either inside `backend/capabilities/`
+    // or off `EngineProvisioning`, never off a `GraphBackend`/
+    // `TransactionBackend`-typed receiver — still 93.
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(93);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });

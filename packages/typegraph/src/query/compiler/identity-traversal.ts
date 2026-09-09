@@ -1,8 +1,10 @@
+import { isEngineNativeRecordedReadBinding } from "../../backend/capabilities/recorded-time-ownership";
 import { optionalRecordedInstantParts } from "../../core/temporal";
 import {
   historicalIdentityPeerClassQuery,
   type HistoricalIdentitySqlCoordinate,
   IDENTITY_PEER_CLASS_COLUMNS,
+  refuseEngineNativeRecordedIdentityRead,
 } from "../../identity/historical-sql";
 import { type QueryAst } from "../ast";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -42,16 +44,23 @@ const CURRENT_MEMBER_NODE_ALIAS = "identity_peer_node";
 function historicalCoordinate(
   input: Readonly<{
     ast: QueryAst;
+    ctx: PredicateCompilerContext;
     temporalFilterPass: TemporalFilterPass;
   }>,
 ): HistoricalIdentitySqlCoordinate | undefined {
-  const { ast, temporalFilterPass } = input;
+  const { ast, ctx, temporalFilterPass } = input;
   const recorded = optionalRecordedInstantParts(
     ast.recordedAsOf,
     "recordedAsOf",
   );
   if (recorded === undefined && ast.temporalMode.mode === "current") {
     return undefined;
+  }
+  if (
+    recorded !== undefined &&
+    isEngineNativeRecordedReadBinding(ctx.recordedReadBinding)
+  ) {
+    refuseEngineNativeRecordedIdentityRead("historical identity expansion");
   }
   return {
     validMode: ast.temporalMode.mode,
@@ -91,7 +100,7 @@ export function compileIdentityClassCte(
     (traversal) => traversal.includeIdentityMembers === true,
   );
   if (!expandsIdentity) return undefined;
-  const coordinate = historicalCoordinate({ ast, temporalFilterPass });
+  const coordinate = historicalCoordinate({ ast, ctx, temporalFilterPass });
   if (coordinate === undefined) return undefined;
 
   const recursiveTraversal = requireRecursiveTraversalVerdict(
@@ -267,7 +276,7 @@ export function planIdentityFrontierExpansion(
 ): IdentityFrontierExpansion {
   const { ast, ctx, graphId, previousId, previousKind, temporalFilterPass } =
     input;
-  const coordinate = historicalCoordinate({ ast, temporalFilterPass });
+  const coordinate = historicalCoordinate({ ast, ctx, temporalFilterPass });
   if (coordinate !== undefined) {
     return planHistoricalIdentityFrontierExpansion({
       previousId,

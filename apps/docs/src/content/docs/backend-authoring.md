@@ -409,6 +409,74 @@ per-revision evidence a bare engine revision has no equivalent gap for); an
 engine profile's own suite should run against the conformance describe only
 and skip the other.
 
+## Supplying `recordedTime`
+
+`EngineProvisioning.recordedTime` declares an engine that tracks recorded
+(system) time itself, rather than through TypeGraph's own capture relations
+and clock — a backend that declares it must also declare `lineage`
+(engine-native history keeps no recorded relations for TypeGraph to derive a
+change delta from; `createSqlBackend` refuses `recordedTime` without a
+co-declared `lineage` with `ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE`).
+`EngineRecordedTimeMembers` has two members, `source` and `revisionNow`, both
+`this: void`.
+
+`source(table, revision)` names the table expression `table` (`"nodes"` |
+`"edges"` | `"identityAssertions"`) reads its recorded rows from, AS OF
+`revision` — the engine's own temporal-table syntax, with the interval
+already folded in (a system-time `AS OF` clause, or equivalent). It replaces
+what a TypeGraph-relation-backed source spells as two members: the recorded
+relation itself (`recordedNodesTable`/`recordedEdgesTable`) and a separate
+`recorded_from <= r AND r < recorded_to` interval predicate. Because
+`source`'s own expression already scopes every row to exactly one revision,
+there is nothing left for a predicate to narrow — every recorded read this
+member backs compiles with no interval clause at all. `revision` is an
+opaque `{ revision, recordedAt }` pair minted by your own `revisionNow`
+below; never parse `revision.revision` as a number; embed it in the AS OF
+expression as an opaque token. `table` is never called with
+`"identityAssertions"` today — a recorded identity read (`Store.
+identityAtCoordinate` at a past instant, and the query compiler's historical
+identity traversal) is refused outright under engine-native ownership before
+any read compiles, so your implementation must still accept the shared
+union without that arm ever running.
+
+`revisionNow(session)` is called on two different kinds of session, and must
+answer differently for each:
+
+- **On a root backend** (`store.recordedNow()`, `store.revisionNow()`): the
+  engine's current COMMITTED revision.
+- **On an open `transaction()` handle** (both places `TransactionReceipt.recorded`
+  is stamped, called before that transaction's own COMMIT): the revision at
+  which THIS transaction's writes will become visible once it commits — the
+  engine's pending/next revision for that session, not the last one committed
+  before it opened. TypeGraph stamps this still-uncommitted value straight
+  into the receipt it hands back to the caller once the transaction succeeds.
+
+An engine that can only name its last-COMMITTED revision, never its own
+pending one from inside an open transaction, cannot implement `recordedTime`:
+stamping the last-committed value into a receipt would describe the state
+*before* the write the receipt is reporting on, and there is no correct
+point after COMMIT to read the right value from without reopening the race
+`recordedTime` exists to close.
+
+Declaring `recordedTime` changes what `history: true` means on your profile.
+TypeGraph's own recorded relations, clock, and write-fence-gated clock
+allocation are never engaged; `revisionTracking: true` is refused whether or
+not `history: true` is also requested
+(`ENGINE_NATIVE_REVISION_TRACKING_UNSUPPORTED` — there is no
+TypeGraph clock for it to advance, and the engine's own revision is only
+ever available under `history: true`); a `recordedRead` external binding is
+refused (`ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED` — there is no TypeGraph
+recorded relation for one to populate); and `migrateLegacyRecordedTime`
+refuses outright (`ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` — it
+rewrites TypeGraph's own recorded relations, which your backend does not
+have). `RecordedInstant` anchors from a `recordedTime`-declaring store use
+the `e1:<opaque engine revision>:<ISO instant>` form rather than TypeGraph's
+`r1:<16-digit revision>:<ISO instant>` form; `asOfRecorded` refuses an
+anchor minted under the other ownership form with
+`RECORDED_INSTANT_OWNERSHIP_MISMATCH`. See [Engine-native recorded
+time](/queries/temporal#engine-native-recorded-time) for the full reader
+contract.
+
 ## Refusals you may meet
 
 | Code | When |
@@ -419,6 +487,13 @@ and skip the other.
 | `CALLER_SERIALIZED_REFUSES_ADOPTION` | `adoptTransaction` was called on a backend whose resolved write-fence plan is `caller-serialized` — an externally owned transaction's lifetime cannot be held by the backend's in-process write-unit queue. |
 | `CATALOG_UNAVAILABLE` | A store path that needs the backend's catalog probes (index materialization, the recorded-time schema check, the recorded-time migration's column read) finds `catalog` absent — a profile whose `provisioning.catalog` is unset builds a backend with no `catalog` member at all. |
 | `LINEAGE_UNAVAILABLE` | A caller reached `requireLineage` and found `lineage` absent on the backend it asked. Every OUT-OF-TRANSACTION graph-merge caller consults `lineage` through `resolveLineage`, which already falls back to the recorded-relations lineage or to a full comparison rather than hitting this refusal. `assertTargetUnchanged`'s in-transaction re-validation reads the transaction handle's `lineage` ONLY — no fallback to the root — so this fires whenever a `lineage` that anchored the plan (found on the root at plan time) is not ALSO threaded onto the transaction handle that commits it; see "Supplying `lineage`" above for how to thread it correctly. |
+| `ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE` | The profile declares `recordedTime` without also declaring `lineage` — engine-native history keeps no recorded relations of its own for TypeGraph to derive a graph-merge change delta from, so the engine's own `lineage` is the only source for one. Raised at `createSqlBackend` construction, naming both members. |
+| `RECORDED_TIME_UNAVAILABLE` | A caller reached `requireRecordedTime` and found `recordedTime` absent on the backend it asked. Store construction under `history: true` and the shared `recordedNow()`/`revisionNow()`/receipt-stamping read are the only callers today, both reached only once `recordedTimeOwnership` has already resolved to `"engine-native"`, so this is defense-in-depth rather than a reachable misconfiguration on a bundled backend. |
+| `ENGINE_NATIVE_REVISION_TRACKING_UNSUPPORTED` | A store was constructed with `revisionTracking: true` against a backend that declares `recordedTime`, whether or not `history: true` was also requested — engine-native has no TypeGraph clock for `revisionTracking` to advance on its own. |
+| `ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED` | A store was constructed with an external `recordedRead` binding against a backend that declares `recordedTime` — there is no TypeGraph recorded relation for one to populate; engine-native's own recorded reads are sourced from `recordedTime.source` instead. |
+| `ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED` | `Store.identityAtCoordinate` at a past recorded instant, or the query compiler's historical identity traversal, was reached under engine-native recorded time — identity history reads TypeGraph's own recorded relations directly, which an engine-native backend does not populate. |
+| `ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` | `migrateLegacyRecordedTime` was called against a backend that declares `recordedTime` — the migration rewrites TypeGraph's own recorded relations, which an engine-native backend does not have. |
+| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `asOfRecorded(instant)` was called with an instant minted under the OTHER recorded-time ownership form — an `r1:` instant against an engine-native store, or an `e1:` instant against a TypeGraph-owned one. |
 | `ENGINE_PROFILE_OVERRIDE_UNSUPPORTED` | `deriveEngineProfile`'s `overrides` names a key outside the derivable set, or one of the three adapter-backed sub-fields with a changed value (see [the carve-out](#the-adapter-backed-carve-out)). |
 | `ENGINE_ASSEMBLY_UNRECOGNIZED` | The profile's `assembly` is not a value `assembleEngine` produced — a profile built by hand rather than obtained from a bundled builder (optionally adapted with `deriveEngineProfile`). |
 

@@ -18,6 +18,7 @@
  * Built on the public `Store` surface (plus one internal sealed-query
  * seam), so it composes the same reads `branch()` / `merge()` consume.
  */
+import { assertRecordedInstantOwnershipMatch } from "../backend/capabilities/recorded-time-ownership";
 import {
   type AllNodeTypes,
   type EdgeKinds,
@@ -1171,6 +1172,15 @@ class RecordedStoreViewImplementation<
         { code: "RECORDED_STORE_VIEW_MISSING_COORDINATE" },
       );
     }
+    // Both `store.asOfRecorded(...)` and `store.asOf(...).asOfRecorded(...)`
+    // construct a RecordedStoreView here, so this is the one place every
+    // asOfRecorded anchor is checked against this store's own recorded-time
+    // ownership before any read compiles.
+    assertRecordedInstantOwnershipMatch(
+      store.recordedTimeOwnership,
+      coordinate.recorded.asOf,
+      "asOfRecorded",
+    );
 
     // `search` is intentionally absent from the typed recorded surface (a TS
     // caller gets a compile error). It is installed here as a runtime-only
