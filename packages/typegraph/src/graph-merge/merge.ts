@@ -550,18 +550,18 @@ async function captureSeparationFactsForPairing<G extends GraphDef>(
 
 /**
  * The always-on separation VETO at the candidate-edge application point: a
- * class-lifted `different` between two candidate endpoints refuses the match at
- * PLAN time, naming both entities and the assertion that separated them,
- * instead of surviving into the commit and aborting on the separation
- * relation's ordered-pair CHECK.
+ * SCORED match between two entities the ledger holds apart is recall the
+ * ledger forbids, so the proposal is dropped, the merge continues, and the
+ * drop is reported as a typed `separation` conflict.
  *
- * The two edge kinds get different treatment because they mean different
- * things. A SCORED edge is recall: similarity proposed a match the ledger
- * forbids, so the proposal is dropped, the merge continues, and the drop is
- * reported as a typed `separation` conflict. A FORCED edge is a DEFINITION — a
- * shared unique value, a rediscovered base row, or a `same` assertion under
- * `pairing: "definitional"` — so it is a direct contradiction between two
- * definitional claims and the plan fails.
+ * A FORCED edge is left alone here on purpose. It is a DEFINITION — a shared
+ * unique value, a rediscovered base row, or a `same` assertion under
+ * `pairing: "definitional"` — and refusing it at this point would fail merges
+ * the plan never had a problem with: the component base guard routinely severs
+ * a forced base pairing, so the two separated entities never land in one
+ * cluster and nothing is ever fused. The definitional refusal therefore runs
+ * on the edges that SURVIVE the base and diameter guards
+ * ({@link assertSurvivingEdgesNotSeparated}), where a contradiction is real.
  */
 function applyIdentitySeparationVeto(
   candidateEdges: readonly CandidateEdge[],
@@ -573,37 +573,57 @@ function applyIdentitySeparationVeto(
   const edges: CandidateEdge[] = [];
   const conflicts: IdentityUnresolvedConflict[] = [];
   for (const edge of candidateEdges) {
-    if (!isSeparatedPair(facts, edge.a, edge.b)) {
+    if (
+      edge.evidence.decision === "definitional" ||
+      !isSeparatedPair(facts, edge.a, edge.b)
+    ) {
       edges.push(edge);
       continue;
     }
-    const assertionIds = separatingAssertionIds(facts, edge.a, edge.b);
     const [source] = edge.evidence.sources;
-    if (edge.evidence.decision === "definitional") {
-      throw new IdentityMergeConflictError(
-        `Identity separation refuses a definitional match between ${kindOf(edge.a)}:${idOf(edge.a)} and ${kindOf(edge.b)}:${idOf(edge.b)}: the identity ledger holds their classes apart.`,
-        {
-          code: MERGE_ERROR_CODES.identitySeparationConflict,
-          details: {
-            a: entityRef(edge.a),
-            b: entityRef(edge.b),
-            assertionIds,
-            sources: edge.evidence.sources,
-          },
-          suggestion:
-            "Retract the `different` assertion separating these entities, or stop proposing them as one match, then re-plan the merge.",
-        },
-      );
-    }
     conflicts.push({
       kind: "separation",
       a: entityRef(edge.a),
       b: entityRef(edge.b),
-      assertionIds,
+      assertionIds: separatingAssertionIds(facts, edge.a, edge.b),
       ...(source === undefined ? {} : { source }),
     });
   }
   return { edges, conflicts };
+}
+
+/**
+ * The separation veto's refusal of a DEFINITIONAL claim, applied to the edges
+ * that survived the base and diameter guards — the only edges that can still
+ * fuse anything. A definitional edge spanning two classes the ledger holds
+ * apart is a direct contradiction between two definitional claims, so the plan
+ * fails here rather than in the commit on the separation relation's
+ * ordered-pair CHECK, naming both entities, the assertion that separated them
+ * and the sources that proposed the match.
+ */
+function assertSurvivingEdgesNotSeparated(
+  survivingEdges: readonly CandidateEdge[],
+  facts: IdentitySeparationFacts,
+): void {
+  if (facts.separatedClassPairs.size === 0) return;
+  for (const edge of survivingEdges) {
+    if (edge.evidence.decision !== "definitional") continue;
+    if (!isSeparatedPair(facts, edge.a, edge.b)) continue;
+    throw new IdentityMergeConflictError(
+      `Identity separation refuses a definitional match between ${kindOf(edge.a)}:${idOf(edge.a)} and ${kindOf(edge.b)}:${idOf(edge.b)}: the identity ledger holds their classes apart.`,
+      {
+        code: MERGE_ERROR_CODES.identitySeparationConflict,
+        details: {
+          a: entityRef(edge.a),
+          b: entityRef(edge.b),
+          assertionIds: separatingAssertionIds(facts, edge.a, edge.b),
+          sources: edge.evidence.sources,
+        },
+        suggestion:
+          "Retract the `different` assertion separating these entities, or stop proposing them as one match, then re-plan the merge.",
+      },
+    );
+  }
 }
 
 /**
@@ -643,6 +663,12 @@ const EMPTY_ASSERTIONS: readonly IdentityTransferAssertion[] = [];
 
 /** No blocked buckets — the identity source pairs off the kind's staged nodes. */
 const EMPTY_BLOCKS: ReadonlyMap<string, readonly Node<NodeType>[]> = new Map();
+
+/** What a kind with no identity pairing in scope contributes. */
+const NO_IDENTITY_CANDIDATES: Readonly<{
+  pairs: readonly CandidatePair[];
+  forcedEdges: readonly CandidateEdge[];
+}> = { pairs: [], forcedEdges: [] };
 
 /** The identity pairing input for a merge that asked for no pairing at all. */
 const NO_IDENTITY_PAIRING: IdentityPairingPartition = {
@@ -731,6 +757,38 @@ function partitionIdentityPairingAssertions(
   };
 }
 
+/**
+ * The ONE call site of {@link identitySource}. Both kinds of merge scope reach
+ * the identity pairing decision through here — the kind with an
+ * `options.resolve` entry, whose scored pairs still go through
+ * `scoreCandidates`, and the kind without one, which can only take a
+ * definitional (forced) pairing. `identitySource` is deliberately NOT a member
+ * of the driven source array: a second wiring of the same per-kind decision is
+ * exactly the copy that drifts.
+ */
+async function generateIdentityPairing(
+  kind: string,
+  nodes: readonly Node<NodeType>[],
+  pairing: "candidate" | "definitional" | undefined,
+  assertions: readonly IdentityTransferAssertion[],
+): Promise<
+  Readonly<{
+    pairs: readonly CandidatePair[];
+    forcedEdges: readonly CandidateEdge[];
+  }>
+> {
+  if (pairing === undefined || assertions.length === 0) {
+    return NO_IDENTITY_CANDIDATES;
+  }
+  const produced = await identitySource.generate({
+    kind,
+    blocks: EMPTY_BLOCKS,
+    nodes,
+    identity: { pairing, assertions },
+  });
+  return { pairs: produced.pairs, forcedEdges: produced.forcedEdges };
+}
+
 async function generateAllCandidates<G extends GraphDef>(
   target: Store<G>,
   staging: StagingSet,
@@ -772,12 +830,10 @@ async function generateAllCandidates<G extends GraphDef>(
     identityPairing === undefined ? NO_IDENTITY_PAIRING : (
       partitionIdentityPairingAssertions(staging)
     );
-  const sources = [
-    ...(useBaseSources ?
+  const sources =
+    useBaseSources ?
       [...CANDIDATE_SOURCES, baseUniqueSource, baseKeySource]
-    : CANDIDATE_SOURCES),
-    ...(identityPairing === undefined ? [] : [identitySource]),
-  ];
+    : CANDIDATE_SOURCES;
   // Base sources resolve staged nodes against the COMMITTED graph — the merge
   // TARGET, where prior runs' canonicals live — NOT the (possibly older) diff
   // reference. They coincide under the public snapshot path (target defaults to
@@ -836,15 +892,12 @@ async function generateAllCandidates<G extends GraphDef>(
               ),
             );
           }
-          const forced = await identitySource.generate({
+          const forced = await generateIdentityPairing(
             kind,
-            blocks: EMPTY_BLOCKS,
             nodes,
-            identity: {
-              pairing: identityPairing,
-              assertions: identityAssertions,
-            },
-          });
+            identityPairing,
+            identityAssertions,
+          );
           return ok({
             edges: forced.forcedEdges,
             warnings: [],
@@ -870,14 +923,6 @@ async function generateAllCandidates<G extends GraphDef>(
             {}
           : { blockIndex: resolveConfig.blockIndex }),
           ...(keylessConfig === undefined ? {} : { keyless: keylessConfig }),
-          ...(identityPairing === undefined ?
-            {}
-          : {
-              identity: {
-                pairing: identityPairing,
-                assertions: identityAssertions,
-              },
-            }),
         };
 
         const pairs: CandidatePair[] = [];
@@ -889,6 +934,16 @@ async function generateAllCandidates<G extends GraphDef>(
           forcedEdges.push(...produced.forcedEdges);
           kindBaseMembers.push(...produced.baseMembers);
         }
+        // A `"candidate"` pairing is a SCORED proposal: its pairs join the
+        // other sources' and `scoreCandidates` below still thresholds them.
+        const identityPaired = await generateIdentityPairing(
+          kind,
+          nodes,
+          identityPairing,
+          identityAssertions,
+        );
+        pairs.push(...identityPaired.pairs);
+        forcedEdges.push(...identityPaired.forcedEdges);
 
         // Base sources pull committed nodes into staged↔base pairs whose texts
         // were not in the staged-only precompute; embed them now so vector/hybrid
@@ -1432,18 +1487,21 @@ function buildInternalMergePlan<G extends GraphDef>(
         options.clusterMaxDiameter,
       );
   const clusters = diameterGuard.clusters;
-  // (4c) the second application point of the always-on separation veto: a
-  // TRANSITIVE fusion no single candidate edge exposed. Runs on the FINAL
-  // clusters — after the base and diameter guards have split what they split —
-  // so a cluster the guards already severed is never refused for a pair it no
-  // longer contains.
-  for (const cluster of clusters) {
-    assertClusterNotSeparated(cluster.members, separationFacts);
-  }
   const baseSurvivingEdges = new Set(guard.survivingEdges);
   const survivingEdges = diameterGuard.survivingEdges.filter((edge) =>
     baseSurvivingEdges.has(edge),
   );
+  // (4c) the second application point of the always-on separation veto, on the
+  // FINAL clusters and the edges that reached them — after the base and
+  // diameter guards have split what they split, so a pairing the guards
+  // already severed is never refused for a fusion it can no longer cause. The
+  // edge-level refusal runs first because it is the more specific diagnosis:
+  // a surviving DEFINITIONAL claim contradicting the ledger, named with the
+  // sources that proposed it, rather than the cluster it happens to sit in.
+  assertSurvivingEdgesNotSeparated(survivingEdges, separationFacts);
+  for (const cluster of clusters) {
+    assertClusterNotSeparated(cluster.members, separationFacts);
+  }
   const excludedByEndpoints = new Map<string, "diameter" | "baseAmbiguity">();
   for (const excluded of [
     ...guard.excludedEdges,

@@ -10,19 +10,26 @@
  * assertions that separated them.
  *
  * The facts are captured ONCE, before planning, from the merge target's own
- * identity context, and consumed by two application points that both read this
- * single fact set:
+ * identity context, and consumed by three application points that all read
+ * this single fact set:
  *
- *   1. the candidate-edge veto, which drops a scored edge and refuses a forced
- *      one; and
- *   2. the post-cluster assertion, which catches a TRANSITIVE fusion — `a`–`b`
+ *   1. the candidate-edge veto, which DROPS a scored edge (recall the ledger
+ *      forbids) and reports it as a typed `separation` conflict;
+ *   2. the surviving-edge refusal, which fails the plan on a DEFINITIONAL edge
+ *      that outlived the base and diameter guards; and
+ *   3. the post-cluster assertion, which catches a TRANSITIVE fusion — `a`–`b`
  *      and `b`–`c` each clearing the threshold while `a` and `c` are held
  *      apart, so no single candidate edge is separated yet the cluster fuses
  *      all three.
  *
- * Capturing once is what lets the second point stay synchronous inside plan
- * construction, and what makes it structurally impossible for the two points
- * to disagree.
+ * Points 2 and 3 run AFTER the guards on purpose. A forced base pairing whose
+ * component the base guard severs never fuses anything, so refusing it up
+ * front would fail a merge that is harmless; only an edge (or a cluster) that
+ * survives the guards can actually collapse two separated classes.
+ *
+ * Capturing once is what lets the later points stay synchronous inside plan
+ * construction, and what makes it structurally impossible for them to
+ * disagree.
  *
  * ONE OWNER. The class-lifted `different` decision is `bulkIsSeparated`
  * (`src/identity/separation.ts`) — this module resolves each participant to its

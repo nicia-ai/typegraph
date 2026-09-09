@@ -152,16 +152,20 @@ describe.each(backendMatrix())(
     }
 
     /**
-     * T3 — a FORCED candidate edge whose endpoints the ledger holds apart is
-     * refused at PLAN time.
+     * T3 — a DEFINITIONAL pairing that SURVIVES the base and diameter guards
+     * is refused at PLAN time.
      *
-     * The target holds `alpha` and `beta` and separates them. A branch created
-     * its own `beta` carrying `alpha`'s unique email, so the shared unique
-     * value is a DEFINITIONAL claim that `beta` and `alpha` are one entity —
-     * against a ledger that says they are not.
+     * Both branches recreate `alpha` and `beta`, which the TARGET already holds
+     * apart, and one of them asserts they are the same entity. The two staged
+     * assertions collide, and a policy that resolves the collision in favour
+     * of `same` still cannot fuse them: resolving the collision changes what
+     * the merge ASSERTS, not what the target currently HOLDS. Under
+     * `pairing: "definitional"` the surviving assertion forces a fused edge
+     * between two staged nodes — no base member is involved, so no guard
+     * severs it and the cluster really would collapse two separated classes.
      */
-    it("refuses a forced candidate edge whose endpoints are class-lifted different", async () => {
-      const forkPoint = await makeStore();
+    it("refuses a definitional pairing that survives the guards", async () => {
+      const forkPoint = await makeSimilarityStore();
       const target = unwrap(
         await branch(forkPoint, () => makeBackend(), { id: TARGET_CLONE }),
       ).store;
@@ -182,8 +186,16 @@ describe.each(backendMatrix())(
         await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
       );
       await source.store.nodes.Person.create(
-        { name: "Beta", email: "alpha@example.test" },
+        { name: "Alpha", email: "alpha@example.test" },
+        { id: "alpha" },
+      );
+      await source.store.nodes.Person.create(
+        { name: "Beta", email: "beta@example.test" },
         { id: "beta" },
+      );
+      await source.store.identity.assertSame(
+        { kind: "Person", id: "alpha" },
+        { kind: "Person", id: "beta" },
       );
 
       const before = await livePersonIds(target);
@@ -193,15 +205,25 @@ describe.each(backendMatrix())(
         branches: [source],
         options: {
           branchOrder: [BRANCH_A],
-          resolve: { Person: FORCED_ONLY_RESOLVE },
+          identity: {
+            pairing: "definitional",
+            onAssertionConflict: (conflict) => {
+              const same = conflict.asserted.find(
+                (staged) => staged.assertion.relation === "same",
+              );
+              return same === undefined ?
+                  { kind: "unresolved" }
+                : { kind: "assert", assertionId: same.assertion.id };
+            },
+          },
         },
       });
 
       if (isOk(result)) throw new Error("expected a separation refusal");
       expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
-      // The load-bearing half: the code AND the phase. Without the
-      // candidate-edge veto the merge reaches the commit and dies on the
-      // separation relation's CHECK under a different code.
+      // The load-bearing half: the code AND the phase. Without the veto the
+      // merge reaches the commit and dies on the separation relation's CHECK
+      // under a different code.
       expect(result.error.code).toBe(
         "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT",
       );
@@ -213,8 +235,69 @@ describe.each(backendMatrix())(
       // The refusal names the assertion that separated them, not just that
       // something did.
       expect(result.error.details["assertionIds"]).toHaveLength(1);
+      // The EDGE-level diagnosis, not the cluster-level one: a surviving
+      // definitional claim is refused naming the source that proposed it.
+      expect(result.error.details["sources"]).toEqual([
+        expect.objectContaining({ kind: "identity" }),
+      ]);
+      expect(result.error.details["cluster"]).toBeUndefined();
       // The target is byte-unchanged: a plan-time refusal writes nothing.
       expect(await livePersonIds(target)).toEqual(before);
+    });
+
+    /**
+     * The counterpart, and the reason the definitional refusal runs AFTER the
+     * guards: a forced BASE pairing between two committed entities is severed
+     * by the component base guard, so it never fuses anything. Refusing it up
+     * front would fail a merge that is harmless — this fixture merges cleanly
+     * and leaves both entities, and their separation, intact.
+     */
+    it("does not refuse a forced base pairing the base guard already severed", async () => {
+      const forkPoint = await makeStore();
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: TARGET_CLONE }),
+      ).store;
+      await target.nodes.Person.create(
+        { name: "Alpha", email: "alpha@example.test" },
+        { id: "alpha" },
+      );
+      await target.nodes.Person.create(
+        { name: "Beta", email: "beta@example.test" },
+        { id: "beta" },
+      );
+      await target.identity.assertDifferent(
+        { kind: "Person", id: "alpha" },
+        { kind: "Person", id: "beta" },
+      );
+
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      // Shares `alpha`'s unique email, so a base source forces the pairing.
+      await source.store.nodes.Person.create(
+        { name: "Beta", email: "alpha@example.test" },
+        { id: "beta" },
+      );
+
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [source],
+        options: {
+          branchOrder: [BRANCH_A],
+          resolve: { Person: FORCED_ONLY_RESOLVE },
+        },
+      });
+
+      if (isErr(result)) throw result.error;
+      expect(result.data.resolutions).toEqual([]);
+      expect(await livePersonIds(target)).toEqual(["alpha", "beta"]);
+      expect(
+        await target.identity.areDifferent(
+          { kind: "Person", id: "alpha" },
+          { kind: "Person", id: "beta" },
+        ),
+      ).toBe(true);
     });
 
     /**
@@ -327,6 +410,61 @@ describe.each(backendMatrix())(
     });
 
     /**
+     * `pairing: "candidate"` is RECALL, not proof: the assertion proposes the
+     * pair and the kind's own threshold still decides. The pair must therefore
+     * travel the ordinary scored pipeline — blocking puts the two nodes in
+     * different buckets, so no other source proposes them and the identity
+     * source is the only recall path under test.
+     */
+    it("candidate pairing proposes a SCORED pair the kind's threshold still decides", async () => {
+      async function mergeWith(
+        identity: { pairing: "candidate" } | undefined,
+        threshold: number,
+      ): Promise<readonly string[]> {
+        const store = await makeStore();
+        const source = unwrap(
+          await branch(store, () => makeBackend(), { id: BRANCH_A }),
+        );
+        await source.store.nodes.Person.create(
+          { name: "Ada", email: "a2@example.test" },
+          { id: "a2" },
+        );
+        await source.store.nodes.Person.create(
+          { name: "Ada", email: "b2@example.test" },
+          { id: "b2" },
+        );
+        await source.store.identity.assertSame(
+          { kind: "Person", id: "a2" },
+          { kind: "Person", id: "b2" },
+        );
+        const result = await merge(store, [source], {
+          branchOrder: [BRANCH_A],
+          resolve: {
+            Person: {
+              // One bucket per node: no other source can propose the pair.
+              block: (node) => node.id as string,
+              threshold,
+              similarity: { kind: "custom", score: () => 0.6 },
+            },
+          },
+          ...(identity === undefined ? {} : { identity }),
+        });
+        if (isErr(result)) throw result.error;
+        return livePersonIds(store);
+      }
+
+      // Scored 0.6: above a 0.5 threshold the identity-recalled pair merges.
+      expect(await mergeWith({ pairing: "candidate" }, 0.5)).toEqual(["a2"]);
+      // Same recall, same score, higher bar — the threshold still decides.
+      expect(await mergeWith({ pairing: "candidate" }, 0.9)).toEqual([
+        "a2",
+        "b2",
+      ]);
+      // Without the pairing option nothing proposes the pair at all.
+      expect(await mergeWith(undefined, 0.5)).toEqual(["a2", "b2"]);
+    });
+
+    /**
      * A cross-kind `same` assertion cannot be expressed as a per-kind pairing
      * edge — `orderEndpoints` keys on `(kind, id)` and a source scope is built
      * per kind. It is reported as a typed conflict rather than skipped, so a
@@ -372,11 +510,12 @@ describe.each(backendMatrix())(
 
     /**
      * The veto is on even with `pairing` absent, because a `different`
-     * assertion is an integrity fact and not a recall heuristic. Same fixture
-     * as the transitive case, no `identity` option stated at all.
+     * assertion is an integrity fact and not a recall heuristic. A SCORED
+     * match is recall, so the ledger's veto drops the proposal, reports it,
+     * and the merge continues — the plan is still applicable.
      */
-    it("vetoes without any identity option stated", async () => {
-      const forkPoint = await makeStore();
+    it("drops and reports a scored match the ledger holds apart, with no identity option stated", async () => {
+      const forkPoint = await makeSimilarityStore();
       const target = unwrap(
         await branch(forkPoint, () => makeBackend(), { id: TARGET_CLONE }),
       ).store;
@@ -396,8 +535,8 @@ describe.each(backendMatrix())(
         await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
       );
       await source.store.nodes.Person.create(
-        { name: "beta", email: "alpha@example.test" },
-        { id: "beta" },
+        { name: "delta", email: "delta@example.test" },
+        { id: "delta" },
       );
 
       const result = await mergeIncremental({
@@ -406,13 +545,46 @@ describe.each(backendMatrix())(
         branches: [source],
         options: {
           branchOrder: [BRANCH_A],
-          resolve: { Person: FORCED_ONLY_RESOLVE },
+          resolve: {
+            Person: {
+              ...ONE_BUCKET,
+              threshold: 0.5,
+              similarity: {
+                kind: "custom",
+                // Only the separated pair scores: nothing else may fuse, so
+                // the drop is observable on its own.
+                score: (left, right) => {
+                  const ids = [
+                    left.id as string,
+                    right.id as string,
+                  ].toSorted();
+                  return ids[0] === "alpha" && ids[1] === "beta" ? 1 : 0;
+                },
+              },
+            },
+          },
         },
       });
-      if (isOk(result)) throw new Error("expected a separation refusal");
-      expect(result.error.code).toBe(
-        "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT",
+
+      if (isErr(result)) throw result.error;
+      const separations = result.data.identityConflicts.filter(
+        (conflict) => conflict.kind === "separation",
       );
+      expect(separations).toHaveLength(1);
+      expect(separations[0]).toMatchObject({
+        kind: "separation",
+        a: { kind: "Person", id: "alpha" },
+        b: { kind: "Person", id: "beta" },
+      });
+      expect(separations[0]?.assertionIds).toHaveLength(1);
+      // Reported, not fatal: the merge lands and the separation stands.
+      expect(await livePersonIds(target)).toEqual(["alpha", "beta", "delta"]);
+      expect(
+        await target.identity.areDifferent(
+          { kind: "Person", id: "alpha" },
+          { kind: "Person", id: "beta" },
+        ),
+      ).toBe(true);
     });
   },
 );
