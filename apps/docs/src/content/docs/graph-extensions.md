@@ -304,6 +304,29 @@ Adding allowed pairs broadens an extension edge. Removing a pair tightens it,
 even if the overall source and target kind sets stay the same. Tightening
 currently requires the **entire edge kind** to be empty, not just the removed pair.
 
+A runtime-authored edge may declare `acyclic: true`, exactly like a
+compile-time one — its live relation becomes a DAG, enforced under the same
+per-graph write fence:
+
+```ts
+const proposal = defineGraphExtension({
+  edges: {
+    dependsOn: {
+      from: ["Task"],
+      to: ["Task"],
+      properties: {},
+      acyclic: true,
+    },
+  },
+});
+```
+
+It may **not** declare `cardinality` or `targetCardinality` — those stay
+compile-time-only, so a runtime-authored edge is always `many` on that axis.
+This is a deliberate asymmetry: `acyclic` needs no ownership slot and no
+sidecar to maintain, while cardinality's claim relation is not (yet) part of
+the runtime-authored surface.
+
 ### Ontology
 
 Pass `ontology: [{ metaEdge, from, to }, ...]` to declare ontology

@@ -50,11 +50,19 @@ export {
   createSqlSchema,
   type ResolvedSqlTableNames,
 } from "../query/compiler/schema";
+export { getDialect } from "../query/dialect";
 export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 export { type KindRegistry } from "../registry/kind-registry";
 export { sortedReplacer } from "../schema/canonical";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
+export {
+  acyclicEdgeRelations,
+  type EdgeAcyclicityViolation,
+  edgeKindIsInAcyclicRelation,
+  type ProposedRelationEdge,
+  readProposedEdgeAcyclicityViolations,
+} from "../store/acyclicity";
 export { type UniqueIntrospection } from "../store/introspect";
 export { planCompositionCascade } from "../store/operations/composition-cascade";
 export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";

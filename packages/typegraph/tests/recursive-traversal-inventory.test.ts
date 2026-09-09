@@ -156,7 +156,8 @@ type InventoryEntry = Readonly<{
 /**
  * The seven `WITH RECURSIVE` emission sites, measured on this branch (§2 of
  * the batch spec, reproduced from `grep -rn "WITH RECURSIVE" src
- * --include=*.ts`).
+ * --include=*.ts`) — site G (item D.2's acyclicity probe) added after that
+ * batch.
  */
 const EMISSION_SITES: readonly InventoryEntry[] = [
   {
@@ -211,6 +212,13 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
     site: "F",
     reason:
       "loadIdentityWindowLedger reconstructs the identity component ledger across a mutation's window.",
+  },
+  {
+    file: "store/recursive-cte.ts",
+    line: "return sql`WITH RECURSIVE ${body}`;",
+    site: "G",
+    reason:
+      "buildEdgeAcyclicityProbe (item D.2) runs the exhaustive, set-semantics reachability walk an `acyclic: true` edge kind's write path, audit, and merge plan-time preview all probe; `body` is assembled beforehand by buildProbeBodyDirect (write path / audit: `ancestry` joins `typegraph_edges` directly, an index seek) or buildProbeBodyPlanned (the merge preview's `\"planned\"` seed form only: `ancestry` hops through a compound `candidates` CTE, the ONE seed form that still pays SQLite's full-relation materialization).",
   },
 ];
 
@@ -587,7 +595,8 @@ describe("recursion inventory ratchet", () => {
     // holding the phrase with a comment-blind scan and compared that count
     // to 6. On this tree `grep -rl "WITH RECURSIVE" src --include=*.ts | wc
     // -l` is 8 for exactly 7 real emission sites (EMISSION_SITES.length),
-    // because two files hold the phrase only in a doc comment. This
+    // because two files hold the phrase only in a doc comment (site G lives
+    // in `store/recursive-cte.ts`, already one of the eight). This
     // fixture reproduces the shape in miniature: at least four comment
     // lines a raw, line-oriented scan cannot distinguish from code, and
     // zero real sites once the parser strips comments out.

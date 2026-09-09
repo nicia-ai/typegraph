@@ -80,6 +80,17 @@ const Article = defineNode("Article", {
   }),
 });
 
+/**
+ * Task node for the edge-acyclicity suite. Kept separate from `Person` /
+ * `Company` so `dependsOn` / `blockedBy` are self-edges with no unrelated
+ * endpoint-validation surface to reason about.
+ */
+const Task = defineNode("Task", {
+  schema: z.object({
+    name: z.string(),
+  }),
+});
+
 const worksAt = defineEdge("worksAt", {
   schema: z.object({
     role: z.string(),
@@ -93,6 +104,20 @@ const knows = defineEdge("knows", {
     // Nullable so weighted-traversal tests can pin the JSON-null case.
     weight: z.number().nullable().optional(),
   }),
+});
+
+/** Item D.2's primary fixture: `cardinality: "many"` with `acyclic: true`. */
+const dependsOn = defineEdge("dependsOn", {
+  schema: z.object({}),
+});
+
+/**
+ * A second, independent acyclic relation over the same node kind — pins
+ * D.2's per-kind scope: `a --dependsOn--> b` and `b --blockedBy--> a` are
+ * both accepted because neither relation alone has a cycle.
+ */
+const blockedBy = defineEdge("blockedBy", {
+  schema: z.object({}),
 });
 
 /**
@@ -143,6 +168,7 @@ export const integrationTestGraph = defineGraph({
     Company: { type: Company },
     Document: { type: Document },
     Article: { type: Article },
+    Task: { type: Task },
   },
   indexes: [
     productCategoryIndex,
@@ -164,6 +190,19 @@ export const integrationTestGraph = defineGraph({
       from: [Person],
       to: [Person],
       cardinality: "many",
+    },
+    dependsOn: {
+      type: dependsOn,
+      from: [Task],
+      to: [Task],
+      cardinality: "many",
+      acyclic: true,
+    },
+    blockedBy: {
+      type: blockedBy,
+      from: [Task],
+      to: [Task],
+      acyclic: true,
     },
   },
   identity: { sameIdAcrossKinds: "fold" },

@@ -22,6 +22,7 @@ export const PGLITE_TEST_FILES = [
   "tests/constraint-write-fence.test.ts",
   "tests/contribution-rebuild-lock.test.ts",
   "tests/durable-edge-match-identity.test.ts",
+  "tests/edge-acyclicity.test.ts",
   "tests/edge-convergence-command.test.ts",
   "tests/edge-match-identity-ddl.test.ts",
   "tests/engine-catalog-probes.test.ts",

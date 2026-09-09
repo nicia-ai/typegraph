@@ -772,6 +772,88 @@ export class CardinalityError extends TypeGraphError {
 }
 
 /**
+ * Details for EdgeAcyclicityError.
+ */
+export type EdgeAcyclicityErrorDetails = Readonly<{
+  relation: string;
+  edgeKind: string;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+  /** True when `from` and `to` are the same node: a cycle of length one. */
+  selfLoop: boolean;
+}>;
+
+/**
+ * Thrown when a write would give a declared `acyclic: true` edge relation a
+ * cycle. Carries no witness path — reconstructing one requires path
+ * tracking, which the set-semantics reachability check gives up in exchange
+ * for terminating with no depth bound (see `src/store/acyclicity.ts`).
+ */
+export class EdgeAcyclicityError extends TypeGraphError {
+  declare readonly details: EdgeAcyclicityErrorDetails;
+
+  constructor(
+    details: EdgeAcyclicityErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      details.selfLoop ?
+        `Acyclicity violation: "${details.edgeKind}" edge ${details.edgeId} is a self-loop (${details.fromKind}/${details.fromId} -> ${details.toKind}/${details.toId}), a cycle of length one.`
+      : `Acyclicity violation: "${details.edgeKind}" edge ${details.edgeId} would close a cycle in the "${details.relation}" relation (${details.toKind}/${details.toId} already reaches ${details.fromKind}/${details.fromId}).`,
+      "EDGE_ACYCLICITY_ERROR",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Inspect store.verifyConstraintFences() for every offending edge in this relation, or run a .recursive() traversal from the endpoints to see the path a human should resolve.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "EdgeAcyclicityError";
+  }
+}
+
+/**
+ * Details for EdgeAcyclicityIndeterminateError.
+ */
+export type EdgeAcyclicityIndeterminateErrorDetails = Readonly<{
+  relation: string;
+  operation: string;
+  graphId: string;
+}>;
+
+/**
+ * Thrown when the engine cut an acyclicity reachability search short
+ * (statement timeout, resource exhaustion) before it could prove or refute a
+ * cycle. An incomplete search is never reported as "no cycle" — see
+ * `isStatementCutShortError` in `src/utils/sql-errors.ts`.
+ */
+export class EdgeAcyclicityIndeterminateError extends TypeGraphError {
+  declare readonly details: EdgeAcyclicityIndeterminateErrorDetails;
+
+  constructor(
+    details: EdgeAcyclicityIndeterminateErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Acyclicity check for "${details.relation}" could not complete: the engine cut the reachability search short during "${details.operation}".`,
+      "EDGE_ACYCLICITY_INDETERMINATE",
+      {
+        details,
+        category: "system",
+        suggestion:
+          "Raise the statement budget for this operation, or drop `acyclic: true` from the edge and enforce acyclicity in application code.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "EdgeAcyclicityIndeterminateError";
+  }
+}
+
+/**
  * Details for DisjointError.
  */
 export type DisjointErrorDetails = Readonly<{
@@ -1859,6 +1941,7 @@ export class UnsupportedBackendCapabilityError extends TypeGraphError {
 
 /** Stable reasons an intentionally trusted initial import can be rejected. */
 export type TrustedImportErrorReason =
+  | "acyclicity_unsupported"
   | "backend_unsupported"
   | "cardinality_unsupported"
   | "database_not_empty"

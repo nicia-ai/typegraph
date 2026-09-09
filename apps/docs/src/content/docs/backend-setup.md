@@ -2082,6 +2082,7 @@ class needed the fence, because the way forward differs per class:
 
 | `details.constraint` | The write that needs the fence | Way forward without a transactional backend |
 | --- | --- | --- |
+| `edgeAcyclicity` | Creating, bulk-creating, or resurrecting an edge whose kind declares `acyclic: true` | Drop `acyclic: true` from the edge and detect cycles in application code |
 | `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`, or whose `targetCardinality` is `one` or `oneActive` | Declare `cardinality: "many"` and `targetCardinality: "many"` (or omit both) and enforce the limit in application code |
 | `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` using an undeclared dynamic `matchOn` key | Declare the edge registration's durable `matchIdentity`, or use `create` with a caller-chosen id |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom | Drop the axiom and keep ids distinct across those kinds yourself |
@@ -2093,7 +2094,14 @@ node kind of the graph owes a claim ahead of its row — that is, declares **any
 unique constraint or has a disjoint partner — or any edge kind's `cardinality`
 or `targetCardinality` is non-`many`.
 The import writes both creates and updates, so the widest of those placements is
-what decides it.
+what decides it. A graph declaring an `acyclic: true` edge kind refuses the
+same way even when no other constraint applies: acyclicity has no claim row
+to substitute for the per-graph lock import otherwise takes none of, so the
+whole import is refused with `details.constraint: "edgeAcyclicity"` before
+the first chunk. On a transactional backend, import instead takes the
+per-graph lock for the duration of each chunk it processes — a real change
+to import's concurrency posture for such a graph, so every other writer of
+that graph blocks for the chunk's duration.
 
 This affects **Cloudflare D1**, **`drizzle-orm/neon-http`**, and any SQLite
 backend built with `transactionMode: "none"`. Durable Objects are unaffected —
@@ -2229,6 +2237,7 @@ TypeGraph choosing separate query semantics per backend:
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |
+| Edge acyclicity probe (`acyclic: true`)                 | ✓ index-only scan of `typegraph_edges_from_idx`   | ✓ index-only scan of `typegraph_edges_from_idx` | Both engines enforce the check identically — the same recursive-reachability builder, `UNION` set semantics, and no depth bound. Both refuse without transactions (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, `edgeAcyclicity`) and both raise `RECURSIVE_TRAVERSAL_UNSUPPORTED` if `recursiveTraversal` is declared unsupported. No new system index is required |
 | Write fence (`capabilities.writeFence`)           | ✓ `engine-serialized` (single writer slot)        | ✓ `lock` (advisory + table locks)          | Identical guarantee, different mechanism. A custom backend that declares no `writeFence` resolves `unfenced` and is refused at construction for Operational Identity or TypeGraph-owned recorded-clock allocation |
 | Recorded-time ownership (`capabilities.recordedTimeOwnership`) | `"typegraph-relations"` (default)          | `"typegraph-relations"` (default)          | Both bundled backends own the clock today. `"engine-native"` is refused at construction as an interim measure whenever it is combined with `history`/`revisionTracking`, on either dialect |
 | Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |

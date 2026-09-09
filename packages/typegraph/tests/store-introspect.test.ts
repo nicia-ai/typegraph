@@ -103,6 +103,29 @@ describe("Store.introspect", () => {
     expect(edge?.origin).toBe("runtime");
     expect(edge?.from).toEqual(["Tag"]);
     expect(edge?.to).toEqual(["Person"]);
+    expect(edge?.acyclic).toBe(false);
+  });
+
+  it("includes a graph-extension edge's acyclic: true declaration", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Task: { properties: { name: { type: "string" } } } },
+        edges: {
+          dependsOn: {
+            from: ["Task"],
+            to: ["Task"],
+            properties: {},
+            acyclic: true,
+          },
+        },
+      }),
+    );
+
+    const result = evolved.introspect();
+    const edge = result.edges.find((entry) => entry.name === "dependsOn");
+    expect(edge?.acyclic).toBe(true);
   });
 
   it("includes runtime ontology with origin: runtime", async () => {

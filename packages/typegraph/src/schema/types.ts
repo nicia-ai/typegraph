@@ -521,6 +521,13 @@ export type SerializedEdgeDef = Readonly<{
     name: string;
     fields: readonly string[];
   }>;
+  /**
+   * Present, and `true`, only when the edge kind declares `acyclic: true`.
+   * Absent (never `false`) so a graph with no acyclic edge kind serializes
+   * byte-identically to a pre-D.2 document and `computeSchemaHash` does not
+   * move for it — see `serializeEdgeDef`.
+   */
+  acyclic?: boolean;
   description: string | undefined;
   annotations?: KindAnnotations;
 }>;
@@ -623,6 +630,7 @@ export const serializedSchemaZod = z
               })
               .loose()
               .optional(),
+            acyclic: z.boolean().optional(),
             description: z.string().optional(),
             annotations: annotationsZod.optional(),
           })

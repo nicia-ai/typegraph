@@ -2122,6 +2122,7 @@ export type ExtensionEdgeDef = Readonly<{
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -3232,6 +3233,9 @@ export function normalizeGraphCommandIsolation(value: unknown): GraphCommandIsol
 export type NullCheckOp = "isNull" | "isNotNull";
 
 // @public
+export function observesPostFenceCommits(isolation: GraphCommandIsolation): boolean;
+
+// @public
 export type OperationNames<D extends CapabilityBundleDefinition> = D["operations"][number]["operation"];
 
 // @public
@@ -3625,6 +3629,7 @@ export type SerializedEdgeDef = Readonly<{
         name: string;
         fields: readonly string[];
     }>;
+    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;
@@ -4053,7 +4058,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly tableNames: {
         readonly kind: "reasoned";
         readonly reason: "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.";
-        readonly accesses: 24;
+        readonly accesses: 27;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";

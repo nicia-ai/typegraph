@@ -52,6 +52,7 @@ import {
   registerCrossBackendConsistencyTests,
   registerCurrentIdentityTraversalTests,
   registerDurableEdgeMatchIdentityIntegrationTests,
+  registerEdgeAcyclicityIntegrationTests,
   registerEdgeCardinalityTighteningIntegrationTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeClaimSelfHealIntegrationTests,
@@ -352,6 +353,7 @@ export function createIntegrationTestSuite<
     registerCurrentIdentityTraversalTests(context);
     registerIdentitySeparationIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
+    registerEdgeAcyclicityIntegrationTests(context);
     registerEdgeClaimSelfHealIntegrationTests(context);
     registerEdgeTargetCardinalityIntegrationTests(context);
     registerEdgeTargetCardinalityTemporalIntegrationTests(context);

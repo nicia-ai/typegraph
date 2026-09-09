@@ -415,6 +415,18 @@ export type EdgeRegistration<
   targetCardinality?: TargetCardinality;
   endpointExistence?: EndpointExistence;
   matchIdentity?: EdgeMatchIdentity<E>;
+  /**
+   * When true, the live relation formed by this edge kind is a DAG: no write
+   * may create a path from an edge's `to` endpoint back to its `from`
+   * endpoint, and a self-loop is a cycle of length one. Enforced under the
+   * per-graph write fence; refused on a backend that cannot hold one.
+   *
+   * Orthogonal to `cardinality`, `matchIdentity`, `endpointExistence` and
+   * `onDelete` — `cardinality: "many", acyclic: true` (a dependency graph)
+   * is the common case and still takes the fence even though its
+   * cardinality does not.
+   */
+  acyclic?: boolean;
 }>;
 
 /**

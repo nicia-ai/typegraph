@@ -902,7 +902,7 @@ export type ConstraintFenceViolation = Readonly<{
     edgeKind: string;
     allowedPairs: readonly (readonly [string, string])[];
     edges: readonly MisassignedEdgeEndpointRow[];
-}>;
+}> | EdgeAcyclicityViolation;
 
 // @public
 type ConstraintFenceViolationRows = Readonly<{
@@ -1799,6 +1799,50 @@ export type EdgeAccessor<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends t
 }> & EdgePropsAccessor<E>;
 
 // @public
+export class EdgeAcyclicityError extends TypeGraphError {
+    constructor(details: EdgeAcyclicityErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: EdgeAcyclicityErrorDetails;
+}
+
+// @public
+export type EdgeAcyclicityErrorDetails = Readonly<{
+    relation: string;
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    selfLoop: boolean;
+}>;
+
+// @public
+export class EdgeAcyclicityIndeterminateError extends TypeGraphError {
+    constructor(details: EdgeAcyclicityIndeterminateErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: EdgeAcyclicityIndeterminateErrorDetails;
+}
+
+// @public
+export type EdgeAcyclicityIndeterminateErrorDetails = Readonly<{
+    relation: string;
+    operation: string;
+    graphId: string;
+}>;
+
+// @public
+type EdgeAcyclicityViolation = Readonly<{
+    family: "edgeAcyclicity";
+    relation: string;
+    edgeIds: readonly string[];
+}>;
+
+// @public
 type EdgeAlias<E extends AnyEdgeType = EdgeType, Optional extends boolean = false> = Readonly<{
     type: E;
     alias: string;
@@ -2154,6 +2198,7 @@ export type EdgeIntrospection = Readonly<{
     cardinality: Cardinality;
     targetCardinality: TargetCardinality;
     endpointExistence: EndpointExistence;
+    acyclic: boolean;
     properties: JsonSchema;
     annotations: KindAnnotations | undefined;
     deprecated: boolean;
@@ -2225,6 +2270,7 @@ export type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes exte
     targetCardinality?: TargetCardinality;
     endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -2563,6 +2609,7 @@ type ExtensionEdgeDef = Readonly<{
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -5352,7 +5399,7 @@ export function offsetFragment<G extends GraphDef>(n: number): FlexibleQueryFrag
 // @public
 type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "relation";
+    entity: "relation" | "edgeRegistration";
     name: string;
     severity: ChangeSeverity;
     details: string;
@@ -5369,6 +5416,9 @@ export type OntologyDataProbe = Readonly<{
 }> | Readonly<{
     kind: "edgeEndpointAssignability";
     allowances: readonly EdgeEndpointAllowance[];
+}> | Readonly<{
+    kind: "edgeAcyclicity";
+    edgeKinds: readonly string[];
 }>;
 
 // @public (undocumented)
@@ -6614,6 +6664,7 @@ type SerializedEdgeDef = Readonly<{
         name: string;
         fields: readonly string[];
     }>;
+    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;
@@ -7823,7 +7874,7 @@ export class TrustedImportError extends TypeGraphError {
 }
 
 // @public
-export type TrustedImportErrorReason = "backend_unsupported" | "cardinality_unsupported" | "database_not_empty" | "fulltext_unsupported" | "history_unsupported" | "identity_unsupported" | "invalid_stream" | "revision_tracking_unsupported" | "uniqueness_unsupported" | "vector_unsupported";
+export type TrustedImportErrorReason = "acyclicity_unsupported" | "backend_unsupported" | "cardinality_unsupported" | "database_not_empty" | "fulltext_unsupported" | "history_unsupported" | "identity_unsupported" | "invalid_stream" | "revision_tracking_unsupported" | "uniqueness_unsupported" | "vector_unsupported";
 
 // @public
 export type TrustedImportOptions = Readonly<{

@@ -97,6 +97,7 @@ type CompiledEdge = Readonly<{
     | Readonly<Record<string, readonly (NodeType | string)[]>>;
   cardinality?: Cardinality;
   targetCardinality?: TargetCardinality;
+  acyclic?: boolean;
 }>;
 
 // ============================================================
@@ -264,6 +265,7 @@ function compileEdge(
       to,
       cardinality: document.cardinality,
       targetCardinality: document.targetCardinality,
+      acyclic: document.acyclic,
     }),
   );
 }

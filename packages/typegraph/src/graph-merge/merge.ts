@@ -88,6 +88,7 @@ import {
   repointEdges,
 } from "./edge-repoint";
 import {
+  AcyclicityMergeConflictError,
   BaseVersionMismatchError,
   describeCause,
   InvalidMergeOptionsError,
@@ -186,6 +187,7 @@ import type { ReconcileClusterInput } from "./type-reconcile";
 import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
 import type {
   Edge,
+  EdgeAcyclicityViolation,
   EdgeId,
   GraphBackend,
   GraphDef,
@@ -196,6 +198,7 @@ import type {
   NodeDeletePolicy,
   NodeId,
   NodeType,
+  ProposedRelationEdge,
   Store,
   TransactionBackend,
   TransactionDeleteNodeWithPolicy,
@@ -204,12 +207,17 @@ import type {
   ValidityEndMutation,
 } from "./typegraph-internal";
 import {
+  acyclicEdgeRelations,
   advanceRevisionClock,
+  createSqlSchema,
+  edgeKindIsInAcyclicRelation,
   forceRecordedGraphRevision,
   forceWriteTransactionRevision,
+  getDialect,
   type GraphWriteLock,
   lockRecordedGraphWrite,
   planCompositionCascade,
+  readProposedEdgeAcyclicityViolations,
   readRecordedClock,
   readRevisionOrigin,
   runRetriedUnit,
@@ -2917,6 +2925,130 @@ async function resolvedMergeArtifact<G extends GraphDef>(
   return constructMergePlanArtifact(input);
 }
 
+/**
+ * The resolved plan's edge writes, projected to the shape the shared
+ * acyclicity predicate reads: FINAL `(kind, id)` endpoints — through
+ * {@link finalEdgeEndpoint}, exactly as the commit itself resolves them
+ * (`applyInternalMergePlan`, `applyWireMergeWrites`) — so the plan-time
+ * preview and the eventual write can never disagree about what the plan
+ * actually writes. An edge whose kind is in no acyclic relation is dropped;
+ * {@link readProposedEdgeAcyclicityViolations} would drop it too, but
+ * filtering here keeps the mapped list free of edges no relation cares
+ * about.
+ */
+function resolvedPlanAcyclicityCandidates<G extends GraphDef>(
+  graph: GraphDef,
+  plan: MergePlan<G>,
+): readonly ProposedRelationEdge[] {
+  const proposed: ProposedRelationEdge[] = [];
+  for (const edge of plan.mergedEdges) {
+    if (!edgeKindIsInAcyclicRelation(graph, edge.kind)) continue;
+    const from = finalEdgeEndpoint(plan, edge.fromKind, edge.fromId);
+    const to = finalEdgeEndpoint(plan, edge.toKind, edge.toId);
+    proposed.push({
+      edgeId: edge.id,
+      edgeKind: edge.kind,
+      fromKind: from.kind,
+      fromId: from.id,
+      toKind: to.kind,
+      toId: to.id,
+    });
+  }
+  return proposed;
+}
+
+/**
+ * Builds the typed plan-time conflict (ruling D-4) from the first violated
+ * relation. D.2 itself only ever declares standalone singleton relations, so
+ * more than one violated relation in a single plan is an item-E-composition
+ * edge case rather than the common shape; naming every OTHER violated
+ * relation in `details.additionalRelations` keeps that case debuggable
+ * without complicating the primary message.
+ */
+function acyclicityMergeConflict(
+  violations: readonly EdgeAcyclicityViolation[],
+  proposedById: ReadonlyMap<string, ProposedRelationEdge>,
+): AcyclicityMergeConflictError {
+  const [firstViolation, ...remaining] = violations;
+  if (firstViolation === undefined) {
+    throw new MergeError(
+      "acyclicityMergeConflict called with no violations — this is a defect in the caller, not a real conflict.",
+    );
+  }
+  const edges = firstViolation.edgeIds.map((edgeId) =>
+    requireDefined(proposedById.get(edgeId)),
+  );
+  const describedEdges = edges
+    .map(
+      (edge) =>
+        `${edge.edgeKind} ${edge.fromKind}:${edge.fromId} -> ${edge.toKind}:${edge.toId}`,
+    )
+    .join(", ");
+  return new AcyclicityMergeConflictError(
+    `The merge plan would close a cycle in acyclic relation "${firstViolation.relation}": ${describedEdges}.`,
+    {
+      details: {
+        relation: firstViolation.relation,
+        edges,
+        ...(remaining.length === 0 ?
+          {}
+        : {
+            additionalRelations: remaining.map((violation) => ({
+              relation: violation.relation,
+              edgeIds: violation.edgeIds,
+            })),
+          }),
+      },
+    },
+  );
+}
+
+/**
+ * D-4 (plan time): does the resolved plan's projected edge writes — layered
+ * onto the target's CURRENT live edges — close a cycle in a declared-acyclic
+ * relation. Runs for every commit mode (`merge()`'s direct commit and
+ * `planMerge()`'s reviewable artifact both flow through `resolveMerge`,
+ * before either branches to its own `complete` callback), so a reviewer of
+ * either surface sees the SAME typed conflict instead of only discovering
+ * the cycle when the write is attempted.
+ *
+ * Read-only and lock-free (`readProposedEdgeAcyclicityViolations`): this is
+ * a PREVIEW, not the write gate. It runs before any per-graph write lock
+ * exists (planning does no write) and is inherently racy against a
+ * concurrent writer of the same relation, which is fine — the actual commit
+ * re-verifies under the per-graph write lock regardless (the existing
+ * insert-then-probe write-path fence, unchanged by this check), and stays
+ * the sole authority. This function only turns an otherwise-silent future
+ * refusal into an up-front, reviewable conflict.
+ */
+async function assertResolvedPlanEdgesAcyclic<G extends GraphDef>(
+  target: Store<G>,
+  plan: MergePlan<G>,
+): Promise<void> {
+  if (acyclicEdgeRelations(target.graph).length === 0) return;
+  const proposed = resolvedPlanAcyclicityCandidates(target.graph, plan);
+  if (proposed.length === 0) return;
+
+  const backend = storeBackend(target);
+  const violations = await readProposedEdgeAcyclicityViolations(
+    {
+      graphId: target.graphId,
+      schema: createSqlSchema(backend.tableNames),
+      dialect: getDialect(backend.dialect),
+      target: backend,
+      operation: "mergePlanAcyclicity",
+    },
+    target.graph,
+    proposed,
+  );
+  if (violations.length === 0) return;
+
+  const proposedById = new Map(
+    proposed.map((edge) => [edge.edgeId, edge] as const),
+  );
+  throw acyclicityMergeConflict(violations, proposedById);
+}
+
 async function resolveMerge<G extends GraphDef, Output>(
   store: Store<G>,
   target: Store<G>,
@@ -3174,6 +3306,13 @@ async function resolveMerge<G extends GraphDef, Output>(
         ),
       );
     }
+
+    // D-4, plan time: does the resolved plan's edge writes — after
+    // canonicalization and repointing — close a cycle in a declared-acyclic
+    // relation. Runs for BOTH commit modes, exactly like the one-id-one-truth
+    // check above: a typed conflict here, before either callback runs, is
+    // what lets a `planMerge()` review see the cycle without ever writing.
+    await assertResolvedPlanEdgesAcyclic(target, plan);
 
     let identityGuard: IdentityPeerProbe | undefined;
     if (identityProbeIds !== undefined && incremental !== undefined) {

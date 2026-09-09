@@ -354,7 +354,23 @@ does not promise that apply will succeed: new rows may introduce constraint
 conflicts, and any write between revalidation and apply causes
 `StaleMergePlanError`. A failed application commits no partial candidate node,
 edge, or identity writes. Revalidate again after a stale refusal; require reapproval if
-the result changes.
+the result changes. This includes an `acyclic: true` edge kind: canonicalization
+and repointing can close a cycle out of edges that were individually fine in
+every branch. Every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`,
+`planMergeIncremental()`, `mergeIncremental()`) checks the resolved plan's
+projected edge writes for such a cycle at PLAN time, before anything is
+written — including a cycle formed entirely from edges the plan itself
+proposes, with nothing live on the target yet. A violation surfaces as the
+typed `AcyclicityMergeConflictError` (`code: "GRAPH_MERGE_ACYCLICITY_CONFLICT"`),
+naming the relation and every offending edge in `details`, so a `planMerge()`
+review sees it before deciding whether to apply. Only a cycle that arises from
+a write racing the plan-time check (which holds no per-graph lock, since
+planning does no write) escapes it, and is still caught by the unchanged
+apply-time write path: apply refuses with `MergeConstraintConflictError`
+wrapping the underlying `EdgeAcyclicityError` — the same generic
+declared-constraint translation cardinality, disjointness, and uniqueness
+conflicts already take, because apply writes every edge through the store's
+own collection API, which already enforces it.
 
 `policy.id` identifies your policy implementation; `policy.context` explicitly
 records every opaque dependency that can change its decision. Include callback
@@ -1605,6 +1621,7 @@ subclass you can branch on:
 | `BranchError`                | `branch()` or `ingestionBranch()` could not materialize a working copy.                                                                                                                                                                                                        |
 | `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge).                                  |
+| `AcyclicityMergeConflictError` | Code `GRAPH_MERGE_ACYCLICITY_CONFLICT`. Thrown at plan time by every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`, `planMergeIncremental()`, `mergeIncremental()`) when the resolved plan's edge writes — after canonicalization and repointing — would close a cycle in a declared `acyclic: true` relation. Its `details` name the relation and every offending edge. |
 | `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. The resolved plan would violate a deterministic store constraint, such as source- or target-side edge cardinality or node uniqueness. Its category is `constraint`, its `cause` is the original typed store error (a `CardinalityError` with `details.direction` for a cardinality conflict), and its details expose the original constraint fields. No graph or provenance writes commit. |
 | `InvalidMergeOptionsError`   | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`.                         |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |

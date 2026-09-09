@@ -38,8 +38,13 @@ export {
   captureCandidateWriteSetTarget,
   planCandidateWriteSet,
 } from "./candidate-write-set";
-export type { MergeConstraintConflictErrorDetails } from "./errors";
+export type {
+  AcyclicityMergeConflictDetails,
+  AcyclicityMergeConflictEdge,
+  MergeConstraintConflictErrorDetails,
+} from "./errors";
 export {
+  AcyclicityMergeConflictError,
   BaseVersionMismatchError,
   BranchError,
   CandidateSourceError,

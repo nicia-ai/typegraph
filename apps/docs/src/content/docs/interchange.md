@@ -436,6 +436,13 @@ The contract is deliberately narrow:
   claim rows those constraints depend on. Use `importGraphStream` for a graph
   with constrained edge kinds; it maintains claims the same way the store's
   normal write path does.
+- A target graph declaring any `acyclic: true` edge kind is rejected with
+  `details.reason === "acyclicity_unsupported"`: trusted import validates
+  nothing by contract and holds one transaction for the whole stream, so
+  there is no per-row point to probe the relation at, and no bounded
+  end-of-stream check that would not be a second, unbounded implementation
+  of the same predicate `importGraphStream` already enforces per row. Use
+  `importGraphStream` for a graph with an acyclic edge kind.
 - A composition relation (`partOf` / `hasPart`) always declares its realizing
   edge's cardinality, so a graph with any composition pair is already
   rejected by the `cardinality_unsupported` case above — trusted import
@@ -540,6 +547,27 @@ row is reported as the same per-row error rather than aborting the import.
 
 Nodes were never affected: their probe is `getNode(graphId, kind, id)`, which is
 kind-scoped, so a cross-kind id collision simply reads as absent.
+
+#### An edge that would close a cycle
+
+An edge kind declaring `acyclic: true` is checked per row, sequentially:
+each row's acyclicity probe runs inside the same savepoint-guarded attempt
+as its insert, so a row that would close a cycle rolls back to the
+savepoint and is reported as that row's per-row error while the rest of
+the import commits — the same per-row recovery every other declared
+constraint gets. Rows of an acyclic kind never join the batched slice
+insert other rows in the same chunk use: the in-batch cardinality/endpoint
+overlay intercepts simple counts and existence checks, not a recursive
+reachability query, so it cannot see an in-batch cycle. This is the one
+place import trades throughput for correctness on purpose — acyclic kinds
+import one row at a time.
+
+`importGraph` / `importGraphStream` additionally takes the per-graph write
+lock for the duration of each chunk whenever the target graph declares any
+`acyclic: true` edge kind, and refuses the whole import up front — before
+the first chunk, with `details.constraint: "edgeAcyclicity"` — on a backend
+with no transactions. See [Backend Setup](/backend-setup) for the full
+fence-reason table.
 
 #### An update target that changed under the import
 

@@ -90,6 +90,7 @@ import {
   ConfigurationError,
   DatabaseOperationError,
   DisjointError,
+  EdgeAcyclicityError,
   EdgeMatchIdentityConflictError,
   IdentityContradictionError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
@@ -103,7 +104,14 @@ import {
   IDENTITY_IMPORT_PROGRESS,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
+import { type SqlSchema } from "../query/compiler/schema";
+import { getDialect } from "../query/dialect";
+import { type DialectAdapter } from "../query/dialect/types";
 import { type KindRegistry } from "../registry/kind-registry";
+import {
+  assertEdgeRelationsAcyclic,
+  edgeKindIsInAcyclicRelation,
+} from "../store/acyclicity";
 import {
   edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
@@ -118,6 +126,7 @@ import {
   checkDisjointnessConstraint,
   checkEdgeCardinalityConstraints,
   graphOwesClaims,
+  graphOwesLockOnlyFence,
 } from "../store/constraints";
 import { classifyDurableEdgeBatchOutcomes } from "../store/durable-edge-batch";
 import {
@@ -146,6 +155,7 @@ import {
   type WriteTransactionMode,
 } from "../store/operations/write-transaction";
 import { runRecordedTransactionSavepoint } from "../store/recorded-capture";
+import { type GraphWriteLock } from "../store/recorded-capture/clock";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import {
@@ -312,6 +322,18 @@ type ImportWriteFrame = Readonly<{
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   /** Threaded `statementExecution` verdict — resolved once, from `backend`. */
   statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
+  /**
+   * The write-transaction's lock evidence — real coordination only when
+   * `graphOwesLockOnlyFence` made this chunk take the per-graph lock (an
+   * acyclic edge kind is declared). Threaded here so `processEdgeSlice` can
+   * run the combined post-flush acyclicity probe under the same evidence a
+   * managed store write would use.
+   */
+  lock: GraphWriteLock;
+  /** The code-level graph, for `acyclicRelationForEdgeKind`. */
+  graph: GraphDef;
+  schema: SqlSchema;
+  dialect: DialectAdapter;
 }>;
 
 /**
@@ -348,6 +370,9 @@ function createImportAttemptState(): ImportAttemptState {
  */
 export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
   graphId: string;
+  graph: G;
+  schema: SqlSchema;
+  dialect: DialectAdapter;
   registry: KindRegistry;
   data: GraphData;
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>;
@@ -379,6 +404,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   target: WriteTarget,
   overlaidSession: OverlaidSessionMint<"mixed">,
   transactionMode: WriteTransactionMode,
+  lock: GraphWriteLock,
 ): Promise<ImportAttemptState> {
   const { result, errors, importedNodeIds } = createImportAttemptState();
   let nextEdgeSavepointId = 0;
@@ -392,6 +418,10 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     batchPointRead: inputs.batchPointRead,
     uniqueSidecarBatch: inputs.uniqueSidecarBatch,
     statementExecution: inputs.statementExecution,
+    lock,
+    graph: inputs.graph,
+    schema: inputs.schema,
+    dialect: inputs.dialect,
   };
   await processNodes(
     frame,
@@ -476,6 +506,20 @@ async function importGraphData<G extends GraphDef>(
     );
   if (claimRefusal !== undefined) throw claimRefusal;
 
+  // The lock-only question is separate from the claim question above and can
+  // answer differently: acyclicity (`lockOnly`) has no claim row to
+  // substitute for the per-graph lock import otherwise takes none of, so a
+  // graph with an acyclic edge kind and no claim-backed constraint at all
+  // would sail past the check above and reach a transactionless backend
+  // unfenced. Answered per graph, before the first chunk, same as the claim
+  // question — see `graphOwesLockOnlyFence`.
+  const owedLockOnlyReason = graphOwesLockOnlyFence(graph);
+  const lockOnlyRefusal =
+    owedLockOnlyReason === undefined ? undefined : (
+      constraintFenceRefusal({ graphId }, backend, owedLockOnlyReason)
+    );
+  if (lockOnlyRefusal !== undefined) throw lockOnlyRefusal;
+
   // Build lookup maps for schema validation
   const nodeSchemas = buildNodeSchemaMap(graph);
   const edgeSchemas = buildEdgeSchemaMap(graph);
@@ -492,6 +536,9 @@ async function importGraphData<G extends GraphDef>(
   // schema maps, verdicts, and request pieces reach whichever attempt(s) run.
   const attemptInputs: ImportAttemptInputs<G> = {
     graphId,
+    graph,
+    schema: store.revisionSchema,
+    dialect: getDialect(backend.dialect),
     registry,
     data,
     nodeSchemas,
@@ -531,15 +578,22 @@ async function importGraphData<G extends GraphDef>(
     },
     // An import writes node rows AND edge rows in one frame, so it declares the
     // mixed family explicitly instead of receiving either narrower session.
-    mixedWritePlan(undefined, true),
+    // The constraint probe is the lock-only reason ONLY (never the claim
+    // reason above): a claim-backed axis is fenced by its reservation row,
+    // never by this lock, so passing it here would take a lock this import
+    // has never needed and does not document taking. `undefined` when the
+    // graph declares no acyclic edge kind, matching every prior release's
+    // behavior byte-for-byte.
+    mixedWritePlan(owedLockOnlyReason, true),
     backend,
-    (session, target, overlaidSession, _lock, transactionMode) =>
+    (session, target, overlaidSession, lock, transactionMode) =>
       runImportWritePlanAttempt(
         attemptInputs,
         session,
         target,
         overlaidSession,
         transactionMode,
+        lock,
       ),
   );
 
@@ -1761,12 +1815,14 @@ function isDeclaredConstraintRefusal(
   | UniquenessError
   | DisjointError
   | CardinalityError
-  | EdgeMatchIdentityConflictError {
+  | EdgeMatchIdentityConflictError
+  | EdgeAcyclicityError {
   return (
     error instanceof UniquenessError ||
     error instanceof DisjointError ||
     error instanceof CardinalityError ||
-    error instanceof EdgeMatchIdentityConflictError
+    error instanceof EdgeMatchIdentityConflictError ||
+    error instanceof EdgeAcyclicityError
   );
 }
 
@@ -2975,6 +3031,19 @@ async function processEdgeSlice(
     const { candidate, params, declarations } = prepared;
     const { edge } = candidate;
 
+    // Acyclic-kind rows never join the batched flush below (§10.1): the
+    // in-batch overlay `cardinalityValidationBackend` intercepts
+    // `countEdgesFrom` / `edgeExistsBetween`, not a recursive `execute`
+    // statement, so it cannot account for an in-batch cycle. Each instead
+    // joins the same sequential write-as-you-go fallback in-slice duplicate
+    // ids already use (`deferred`, processed via `processEdge` below),
+    // where the row lands inside the transaction before the next row's
+    // probe runs and the database itself carries the in-batch state.
+    if (edgeKindIsInAcyclicRelation(frame.graph, edge.kind)) {
+      deferred.push(edge);
+      continue;
+    }
+
     // The cardinality probe, per row and against the pending-aware overlay, so
     // two edges declaring the same axis from/to one node IN ONE SLICE refuse
     // the second row instead of both passing and colliding at the batch claim
@@ -3340,9 +3409,42 @@ async function processEdge(
     return { status: "error", error: cardinalityResult.error };
   }
 
+  // Acyclicity is checked AFTER the row lands, inside the same
+  // savepoint-guarded attempt as the insert: import writes each row as it
+  // goes, so this row's own probe already sees the previous rows in this
+  // same transaction, and a cycle rolls back to the savepoint and reports as
+  // this row's per-row error rather than aborting the whole chunk.
   const { result: createResult } = await catchEdgeCreateRefusalWithSavepoint(
     frame,
-    () => frame.session.createEdge(importEdgeInsertWork(params, declarations)),
+    async () => {
+      const row = await frame.session.createEdge(
+        importEdgeInsertWork(params, declarations),
+      );
+      if (edgeKindIsInAcyclicRelation(frame.graph, edge.kind)) {
+        await assertEdgeRelationsAcyclic(
+          {
+            graphId,
+            graph: frame.graph,
+            schema: frame.schema,
+            dialect: frame.dialect,
+            target: frame.target,
+            lock: frame.lock,
+            operation: "importGraph",
+          },
+          [
+            {
+              edgeId: params.id,
+              edgeKind: params.kind,
+              fromKind: params.fromKind,
+              fromId: params.fromId,
+              toKind: params.toKind,
+              toId: params.toId,
+            },
+          ],
+        );
+      }
+      return row;
+    },
   );
   if (!createResult.ok) {
     return { status: "error", error: createResult.error };

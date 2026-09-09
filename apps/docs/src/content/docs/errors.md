@@ -380,6 +380,34 @@ environment, and stale-plan failures retain their existing system errors.
 Constraint failure is atomic: neither graph writes nor merge provenance records
 survive.
 
+### `AcyclicityMergeConflictError`
+
+Detected at merge **plan time**, alongside `IdentityMergeConflictError`, when
+the resolved plan's edge writes — after canonicalization and repointing,
+layered onto the target's current live edges — would close a cycle in a
+declared-`acyclic: true` relation. This includes a cycle formed entirely from
+edges the plan itself proposes, with nothing live on the target yet.
+
+```typescript
+import {
+  AcyclicityMergeConflictError,
+  isErr,
+  merge,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, branches);
+if (isErr(result) && result.error instanceof AcyclicityMergeConflictError) {
+  console.log(result.error.code); // "GRAPH_MERGE_ACYCLICITY_CONFLICT"
+  console.log(result.error.details.relation); // the declared-acyclic relation
+  console.log(result.error.details.edges); // every offending edge on the cycle
+}
+```
+
+A cycle that only arises from a write racing the plan-time check (which holds
+no per-graph lock, since planning does no write) is not caught here — the
+unchanged apply-time write path still refuses it as
+`MergeConstraintConflictError` wrapping `EdgeAcyclicityError`.
+
 ### `MergeCompositionOrphanError`
 
 Thrown from inside `applyMergePlan`'s transaction when applying the plan would
@@ -539,6 +567,50 @@ try {
 `"source"` for a `cardinality` violation, `"target"` for a
 `targetCardinality` one. `fromKind` / `fromId` / `toKind` / `toId` always
 name both endpoints, regardless of direction.
+
+### `EdgeAcyclicityError`
+
+Thrown when a write would give a declared `acyclic: true` edge relation a
+cycle.
+
+```typescript
+// If dependsOn declares acyclic: true:
+await store.edges.dependsOn.create(taskA, taskB, {});
+
+try {
+  await store.edges.dependsOn.create(taskB, taskA, {});
+} catch (error) {
+  if (error instanceof EdgeAcyclicityError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { relation: "dependsOn", edgeKind: "dependsOn", edgeId: "<new-edge-id>",
+    //   fromKind: "Task", fromId: "<taskB-id>", toKind: "Task", toId: "<taskA-id>",
+    //   selfLoop: false }
+  }
+}
+```
+
+Carries no witness path — reconstructing one requires path tracking, which
+the underlying set-semantics reachability check gives up in exchange for
+terminating without a depth bound. Run `store.verifyConstraintFences()` to
+list every edge already on a cycle in the relation, or a `.recursive()`
+traversal from the endpoints for a human to inspect.
+
+### `EdgeAcyclicityIndeterminateError`
+
+Thrown when the engine cuts an acyclicity search short — a statement
+timeout, a resource limit — before it can prove or refute a cycle. An
+incomplete search is never reported as "no cycle".
+
+```typescript
+console.log(error.details);
+// { relation: "dependsOn", operation: "edges.create", graphId: "..." }
+```
+
+The suggestion names the two ways out: raise the statement budget for the
+operation, or drop `acyclic: true` from the edge and enforce it in
+application code. Retrying is not suggested — a relation too large for the
+budget will not shrink.
 
 ### `UniquenessError`
 
@@ -784,6 +856,7 @@ cannot fence constrained writes" is unusable advice while "your
 
 | `details.constraint` | The write it describes |
 | --- | --- |
+| `edgeAcyclicity` | Creating, bulk-creating, or resurrecting an edge whose kind declares `acyclic: true`. No claim row backs this axis — a cycle spans a whole reachable subgraph, not a tuple — so it is fenced by the per-graph lock alone. |
 | `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` (`one`, `unique`, `oneActive`) or `targetCardinality` (`one`, `oneActive`) constrains it, on either endpoint. |
 | `edgeMatchKeyConvergence` | Endpoint convergence that requires the portable transaction-scoped path: an undeclared dynamic `matchOn`, constrained cardinality, update or temporal options, derived/custom backends, or schema-aware resurrection of a tombstoned winner. A schema-declared durable `matchIdentity` removes this fence from eligible live single-item and bulk create/found paths. |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
@@ -1559,11 +1632,14 @@ try {
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
+| `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
+| `EDGE_ACYCLICITY_ERROR` | `EdgeAcyclicityError` | constraint | A write would give a declared-acyclic edge relation a cycle |
+| `EDGE_ACYCLICITY_INDETERMINATE` | `EdgeAcyclicityIndeterminateError` | system | The engine cut an acyclicity search short before it could prove or refute a cycle |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |

@@ -17,6 +17,10 @@ import {
 } from "../query/compiler/temporal";
 import { type DialectAdapter } from "../query/dialect/types";
 import { sql, type SqlFragment } from "../query/sql-fragment";
+import {
+  type AcyclicRelationMember,
+  type ProposedRelationEdge,
+} from "./acyclicity";
 import { type TraversalDirection } from "./algorithms/types";
 
 type ReachableCteCore = Readonly<{
@@ -355,4 +359,467 @@ function buildDirectedGroupsBranch(
   }
 
   return sql`${selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON ${joinCondition} ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+}
+
+// ============================================================
+// Edge-acyclicity probe (item D.2)
+// ============================================================
+
+/**
+ * The row source `buildEdgeAcyclicityProbe`'s `seed` CTE reads from, and —
+ * critically — whether `ancestry` may hop THROUGH those rows on top of the
+ * relation's live edges:
+ *
+ * - `"proposed"` — edges the calling write path has already made visible to
+ *   the probing transaction (an insert earlier in the SAME transaction), OR
+ *   a single row. A single row never needs a seed-hop: the question this
+ *   probe answers is "does `to` already reach `from`", and a row cannot help
+ *   answer that about ITSELF by being hopped through as an intermediate
+ *   step. **Contract:** a caller passing more than one `"proposed"` row
+ *   thereby asserts those rows are already inserted in the probing
+ *   transaction — every real write path satisfies this (bulkCreate and
+ *   import probe AFTER their insert; single create and resurrection propose
+ *   exactly one row). `ancestry` joins `typegraph_edges` DIRECTLY for this
+ *   form, no compound `candidates` CTE in between: a compound CTE whose
+ *   outer query is a join cannot be flattened by SQLite's query flattener
+ *   (rule 17d), which forces `MATERIALIZE candidates` — the entire relation
+ *   copied into an ephemeral table on EVERY probe, turning every acyclic
+ *   insert into an O(|relation|) operation instead of an index seek.
+ * - `"planned"` — edges NOT YET written anywhere that the walk must hop
+ *   through to see a cycle closed entirely by rows sharing no live edge.
+ *   Used by exactly one caller: the graph-merge plan-time preview
+ *   (`readProposedEdgeAcyclicityViolations` / `assertResolvedPlanEdgesAcyclic`
+ *   in `src/graph-merge/merge.ts`), which asks "would this resolved plan's
+ *   edges close a cycle" before any of them exist and so has nothing live to
+ *   probe against. `ancestry` hops through a compound `candidates` CTE (live
+ *   edges `UNION ALL` the `seed` rows) for this form — see
+ *   {@link buildPlannedAcyclicityCandidates}'s docblock for why that pays
+ *   SQLite's full-relation materialization, and why that cost is acceptable
+ *   once per merge plan (never per write).
+ * - `"relation"` — every live edge of the relation (the audit and
+ *   schema-tightening forms). `ancestry` joins `typegraph_edges` directly,
+ *   same as `"proposed"`.
+ */
+export type AcyclicityProbeSeed =
+  | Readonly<{ kind: "proposed"; edges: readonly ProposedRelationEdge[] }>
+  | Readonly<{ kind: "planned"; edges: readonly ProposedRelationEdge[] }>
+  | Readonly<{ kind: "relation" }>;
+
+function kindKeys(members: readonly AcyclicRelationMember[]): {
+  forward: readonly string[];
+  reversed: readonly string[];
+  all: readonly string[];
+} {
+  const forward = members
+    .filter((member) => !member.reversed)
+    .map((member) => member.edgeKind);
+  const reversed = members
+    .filter((member) => member.reversed)
+    .map((member) => member.edgeKind);
+  return { forward, reversed, all: [...forward, ...reversed] };
+}
+
+function reversedForEdgeKind(
+  members: readonly AcyclicRelationMember[],
+  edgeKind: string,
+): boolean {
+  return members.some(
+    (member) => member.edgeKind === edgeKind && member.reversed,
+  );
+}
+
+/** {@link orientedEndpointColumns}'s return shape: the row's "part" (`match`) and "whole" (`next`) endpoint columns. */
+type OrientedEndpointColumns = Readonly<{
+  matchKind: SqlFragment;
+  matchId: SqlFragment;
+  nextKind: SqlFragment;
+  nextId: SqlFragment;
+}>;
+
+/**
+ * The ONE owner of "which stored endpoint (`from` or `to`) is the relation's
+ * part (`match`) and which is the whole (`next`), for a table-aliased edges
+ * row." Every member forward — the only shape D.2 itself ever produces — is
+ * a plain column pair with no `CASE`, byte-identical to a hand-written
+ * `SELECT` (the benchmark's index-only-scan assumption, §7.6, depends on
+ * this). A relation with a reversed member (item E) instead needs a `CASE`
+ * on the row's own `kind` to pick the pair per row.
+ *
+ * `buildAcyclicitySeed`'s `"relation"` form, `buildLiveEdgeCandidates`, and
+ * `buildAcyclicityAncestryStepDirect`'s next-node projection all call this
+ * instead of re-spelling the `CASE` — see AGENTS.md "one predicate, one
+ * owner". `buildAcyclicityAncestryStepDirect`'s JOIN predicate is the one
+ * caller that CANNOT use `matchKind`/`matchId` here: a `CASE`-wrapped
+ * equality is not sargable, and that predicate must stay an OR of two
+ * plain-column arms for SQLite's OR-optimization / PostgreSQL's `BitmapOr`
+ * to seek both `typegraph_edges_from_idx` and `typegraph_edges_to_idx` (see
+ * that function's own docblock). `proposedSeedRow` answers the identical
+ * question at the single-edge, JS-value level via {@link reversedForEdgeKind}
+ * rather than a `SqlFragment` — both trace back to `member.reversed` on
+ * `members` with no independent re-derivation of the decision.
+ */
+function orientedEndpointColumns(
+  members: readonly AcyclicRelationMember[],
+  alias: string,
+): OrientedEndpointColumns {
+  const { forward, all } = kindKeys(members);
+  const fromKind = sql.raw(`${alias}.from_kind`);
+  const fromId = sql.raw(`${alias}.from_id`);
+  const toKind = sql.raw(`${alias}.to_kind`);
+  const toId = sql.raw(`${alias}.to_id`);
+
+  if (forward.length === all.length) {
+    return {
+      matchKind: fromKind,
+      matchId: fromId,
+      nextKind: toKind,
+      nextId: toId,
+    };
+  }
+
+  const isForwardRow = compileKindFilter(sql.raw(`${alias}.kind`), forward);
+  return {
+    matchKind: sql`CASE WHEN ${isForwardRow} THEN ${fromKind} ELSE ${toKind} END`,
+    matchId: sql`CASE WHEN ${isForwardRow} THEN ${fromId} ELSE ${toId} END`,
+    nextKind: sql`CASE WHEN ${isForwardRow} THEN ${toKind} ELSE ${fromKind} END`,
+    nextId: sql`CASE WHEN ${isForwardRow} THEN ${toId} ELSE ${fromId} END`,
+  };
+}
+
+/** One literal `seed` row for the `"proposed"` form, oriented part->whole. */
+function proposedSeedRow(
+  edge: ProposedRelationEdge,
+  members: readonly AcyclicRelationMember[],
+): SqlFragment {
+  const reversed = reversedForEdgeKind(members, edge.edgeKind);
+  const fromKind = reversed ? edge.toKind : edge.fromKind;
+  const fromId = reversed ? edge.toId : edge.fromId;
+  const toKind = reversed ? edge.fromKind : edge.toKind;
+  const toId = reversed ? edge.fromId : edge.toId;
+  return sql`(CAST(${edge.edgeId} AS TEXT), CAST(${fromKind} AS TEXT), CAST(${fromId} AS TEXT), CAST(${toKind} AS TEXT), CAST(${toId} AS TEXT))`;
+}
+
+/**
+ * The `seed` CTE body, oriented endpoints throughout: a `VALUES` row list
+ * for the two row-list forms (`"proposed"` and `"planned"` — identical
+ * shape, since both name rows the caller supplies rather than reading the
+ * table), or the relation's own live edges for the `"relation"` (audit)
+ * form.
+ */
+function buildAcyclicitySeed(
+  seed: AcyclicityProbeSeed,
+  members: readonly AcyclicRelationMember[],
+  graphId: string,
+  schema: SqlSchema,
+): SqlFragment {
+  if (seed.kind !== "relation") {
+    // A `VALUES` row list, never `SELECT ... UNION ALL SELECT ...`: a batch
+    // create can propose thousands of origins in one probe, and SQLite caps
+    // a compound SELECT at `SQLITE_LIMIT_COMPOUND_SELECT` (500 terms by
+    // default) — a limit `VALUES` is not subject to.
+    const rows = seed.edges.map((edge) => proposedSeedRow(edge, members));
+    return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES ${sql.join(rows, sql`, `)})`;
+  }
+  const { all } = kindKeys(members);
+  const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);
+  const { matchKind, matchId, nextKind, nextId } = orientedEndpointColumns(
+    members,
+    "e",
+  );
+  return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (SELECT e.id, ${matchKind}, ${matchId}, ${nextKind}, ${nextId} FROM ${schema.edgesTable} e WHERE e.graph_id = ${graphId} AND ${edgeKindFilter} AND e.deleted_at IS NULL)`;
+}
+
+/**
+ * The relation's live edges, reoriented so every row reads part->whole
+ * regardless of which member direction produced it: `(from_kind, from_id,
+ * to_kind, to_id)`. Used only to build the `"planned"` seed form's compound
+ * `candidates` source — see {@link buildPlannedAcyclicityCandidates}. The
+ * `"proposed"` and `"relation"` forms join `typegraph_edges` directly
+ * instead (see {@link buildAcyclicityAncestryStepDirect}) and never call
+ * this function.
+ */
+function buildLiveEdgeCandidates(
+  members: readonly AcyclicRelationMember[],
+  graphId: string,
+  schema: SqlSchema,
+): SqlFragment {
+  const { all } = kindKeys(members);
+  const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);
+  const commonWhere = [
+    sql`e.graph_id = ${graphId}`,
+    edgeKindFilter,
+    sql`e.deleted_at IS NULL`,
+  ];
+
+  // `orientedEndpointColumns` returns plain columns (no CASE, no OR) when
+  // every member is forward — the common case, and the only one D.2 itself
+  // ever produces — so this stays byte-identical to what the benchmark's
+  // index-only scan assumption (§7.6) requires. A relation composed of both
+  // part->whole and whole->part realizing edges (item E) instead gets a
+  // CASE picking which pair of columns is the "part" and which is the
+  // "whole" per row; each member still seeks its OWN natural endpoint
+  // column.
+  const { matchKind, matchId, nextKind, nextId } = orientedEndpointColumns(
+    members,
+    "e",
+  );
+  return sql`SELECT ${matchKind}, ${matchId}, ${nextKind}, ${nextId} FROM ${schema.edgesTable} e WHERE ${sql.join(commonWhere, sql` AND `)}`;
+}
+
+/**
+ * The `"planned"` seed form's `candidates` source: the relation's live
+ * edges, `UNION ALL` the writer's own not-yet-written rows via `seed`.
+ *
+ * A cycle formed ENTIRELY from rows in one planned set (three branch edges
+ * a->b, b->c, c->a with nothing live) has no live edge to walk, so
+ * `ancestry` must also be able to reach through `seed` directly. That
+ * cannot be a second `UNION`-ed recursive term next to the live-edge hop:
+ * both PostgreSQL and SQLite refuse a recursive term that references the
+ * recursive relation (`ancestry`) more than once (verified empirically —
+ * PostgreSQL: `recursive reference to query "ancestry" must not appear more
+ * than once`), so the two hops cannot be two arms of a `UNION` each
+ * self-joining `ancestry`. They must instead be two arms of the table
+ * `ancestry` joins against ONCE — the same device `buildBidirectionalBranch`
+ * uses for two traversal directions in one recursive term. This also lets a
+ * single path interleave live and planned edges (an existing edge, then a
+ * planned one, then another existing edge), which two separate recursive
+ * terms could not express without an explicit second round of interleaving.
+ *
+ * `UNION ALL`, not `UNION`: `candidates` is a source `ancestry` joins
+ * against, not itself part of the `(origin_key, node_kind, node_id)`
+ * accumulator that needs deduplicating — a duplicate candidate row costs an
+ * extra join, never a wrong answer.
+ *
+ * This is a compound CTE whose outer query (`ancestry`'s recursive term) is
+ * a join — SQLite's query flattener cannot flatten that (rule 17d), so this
+ * form materializes the ENTIRE relation into an ephemeral table on every
+ * call. Acceptable ONLY because this seed form runs once per merge plan,
+ * never per write — see {@link AcyclicityProbeSeed}'s docblock. The
+ * `"proposed"` and `"relation"` forms never pay this cost: their `ancestry`
+ * step joins `typegraph_edges` directly (see
+ * {@link buildAcyclicityAncestryStepDirect}) and calls neither this function
+ * nor {@link buildLiveEdgeCandidates}.
+ */
+function buildPlannedAcyclicityCandidates(
+  members: readonly AcyclicRelationMember[],
+  graphId: string,
+  schema: SqlSchema,
+): SqlFragment {
+  const liveEdges = buildLiveEdgeCandidates(members, graphId, schema);
+  return sql`${liveEdges} UNION ALL SELECT from_kind, from_id, to_kind, to_id FROM seed`;
+}
+
+/**
+ * The `ancestry` recursive term for the `"planned"` seed form: one hop
+ * through the compound `candidates` CTE, the ONLY reference to the
+ * recursive relation this term may make (see
+ * {@link buildPlannedAcyclicityCandidates}'s docblock for why the live-edge
+ * and seed hops are folded into one join rather than two recursive terms).
+ */
+function buildAcyclicityAncestryStepViaCandidates(
+  forceWorktableOuterJoinOrder: boolean,
+): SqlFragment {
+  const joinPredicate = sql`c.from_kind = a.node_kind AND c.from_id = a.node_id`;
+  if (forceWorktableOuterJoinOrder) {
+    return sql`SELECT a.origin_key, c.to_kind, c.to_id FROM ancestry a CROSS JOIN candidates c WHERE ${joinPredicate}`;
+  }
+  return sql`SELECT a.origin_key, c.to_kind, c.to_id FROM ancestry a JOIN candidates c ON ${joinPredicate}`;
+}
+
+/**
+ * The `ancestry` recursive term for the `"proposed"` and `"relation"` seed
+ * forms: one hop DIRECTLY against `typegraph_edges`, with no `candidates`
+ * CTE in between. This is what keeps every real write's probe an index
+ * seek — see {@link AcyclicityProbeSeed}'s docblock for the flattener
+ * defect this restores the pre-D-4 shape to avoid.
+ *
+ * The common case (no `reversed` member — the only shape D.2 itself ever
+ * produces) is a plain equality join on `from_kind`/`from_id`, seekable by
+ * `typegraph_edges_from_idx`. `forceWorktableOuterJoinOrder` moves the join
+ * field predicate into the `WHERE` clause behind a `CROSS JOIN`, mirroring
+ * `buildDirectionalBranch` above — every other predicate (`graph_id`, the
+ * edge-kind filter, `deleted_at`) always lives in `WHERE` regardless.
+ *
+ * A relation with a `reversed` member (item E's mixed orientation — D.2
+ * itself never produces one, but the type and this code path are exercised
+ * by the mixed-orientation fixture) is still ONE join, never a compound: an
+ * OR of two index-seekable arms, one per orientation —
+ * `(e.kind IN (forward) AND e.from_kind = a.node_kind AND e.from_id =
+ * a.node_id) OR (e.kind IN (reversed) AND e.to_kind = a.node_kind AND
+ * e.to_id = a.node_id)` — with the "next node" projected by a `CASE` on
+ * which arm matched. This is what lets SQLite's OR-optimization and
+ * PostgreSQL's `BitmapOr` seek both `typegraph_edges_from_idx` and
+ * `typegraph_edges_to_idx` in the same step, mirroring
+ * `buildBidirectionalBranch`'s two-direction device above.
+ */
+function buildAcyclicityAncestryStepDirect(
+  members: readonly AcyclicRelationMember[],
+  graphId: string,
+  schema: SqlSchema,
+  forceWorktableOuterJoinOrder: boolean,
+): SqlFragment {
+  const { forward, reversed, all } = kindKeys(members);
+  const commonWhere = [sql`e.graph_id = ${graphId}`, sql`e.deleted_at IS NULL`];
+  // The "next node" projection is shared via `orientedEndpointColumns`. The
+  // JOIN predicate below is NOT: see that function's docblock for why a
+  // CASE-wrapped equality can't stand in for the OR-of-arms shape here.
+  const { nextKind, nextId } = orientedEndpointColumns(members, "e");
+
+  if (reversed.length === 0) {
+    const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);
+    const joinPredicate = sql`e.from_kind = a.node_kind AND e.from_id = a.node_id`;
+    const whereClauses = [...commonWhere, edgeKindFilter];
+    if (forceWorktableOuterJoinOrder) {
+      return sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...whereClauses, joinPredicate], sql` AND `)}`;
+    }
+    return sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(whereClauses, sql` AND `)}`;
+  }
+
+  // A `CASE`-wrapped equality (`CASE WHEN ... END = a.node_kind`) is not
+  // sargable, so the JOIN predicate stays a hand-written OR of two
+  // plain-column, index-seekable arms rather than routing through
+  // `orientedEndpointColumns`'s `matchKind`/`matchId` — that's what lets
+  // SQLite's OR-optimization and PostgreSQL's `BitmapOr` seek both
+  // `typegraph_edges_from_idx` and `typegraph_edges_to_idx` in one step (see
+  // this function's own docblock above).
+  const forwardFilter = compileKindFilter(sql.raw("e.kind"), forward);
+  const reversedFilter = compileKindFilter(sql.raw("e.kind"), reversed);
+  const forwardArm = sql`(${forwardFilter} AND e.from_kind = a.node_kind AND e.from_id = a.node_id)`;
+  const reversedArm = sql`(${reversedFilter} AND e.to_kind = a.node_kind AND e.to_id = a.node_id)`;
+  const joinPredicate = sql`(${forwardArm} OR ${reversedArm})`;
+
+  if (forceWorktableOuterJoinOrder) {
+    return sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...commonWhere, joinPredicate], sql` AND `)}`;
+  }
+  return sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(commonWhere, sql` AND `)}`;
+}
+
+/** Everything {@link buildProbeBodyPlanned} and {@link buildProbeBodyDirect} need beyond their own seed form. */
+type AcyclicityProbeBodyOptions = Readonly<{
+  members: readonly AcyclicRelationMember[];
+  graphId: string;
+  schema: SqlSchema;
+  forceWorktableOuterJoinOrder: boolean;
+  seedCte: SqlFragment;
+  anchor: SqlFragment;
+  closingSelect: SqlFragment;
+}>;
+
+/** The `"planned"` form's probe body: `seed`, a compound `candidates`, `ancestry` hopping through it. */
+function buildProbeBodyPlanned(
+  options: AcyclicityProbeBodyOptions,
+): SqlFragment {
+  const candidatesCte = buildPlannedAcyclicityCandidates(
+    options.members,
+    options.graphId,
+    options.schema,
+  );
+  const ancestryStep = buildAcyclicityAncestryStepViaCandidates(
+    options.forceWorktableOuterJoinOrder,
+  );
+  const ancestry = sql`ancestry(origin_key, node_kind, node_id) AS (${options.anchor} UNION ${ancestryStep})`;
+  return sql`${options.seedCte}, candidates(from_kind, from_id, to_kind, to_id) AS (${candidatesCte}), ${ancestry} ${options.closingSelect}`;
+}
+
+/** The `"proposed"`/`"relation"` forms' probe body: `seed`, `ancestry` joining `typegraph_edges` directly. */
+function buildProbeBodyDirect(
+  options: AcyclicityProbeBodyOptions,
+): SqlFragment {
+  const ancestryStep = buildAcyclicityAncestryStepDirect(
+    options.members,
+    options.graphId,
+    options.schema,
+    options.forceWorktableOuterJoinOrder,
+  );
+  const ancestry = sql`ancestry(origin_key, node_kind, node_id) AS (${options.anchor} UNION ${ancestryStep})`;
+  return sql`${options.seedCte}, ${ancestry} ${options.closingSelect}`;
+}
+
+/**
+ * Builds the exhaustive, set-semantics reachability probe item D.2's
+ * acyclicity check runs: "does `from` lie in the reflexive-transitive
+ * closure of `to`" over one acyclic relation's live edges.
+ *
+ * Deliberately a sibling export in this file rather than a new emitter: the
+ * three seed forms are the ONLY difference between the write-path probe,
+ * the audit reader, and the merge plan-time preview, so all three are built
+ * by this one function and cannot answer the question differently.
+ *
+ * `UNION`, never `UNION ALL`, on the `ancestry` term: set semantics on
+ * `(origin_key, node_kind, node_id)` is what makes an unbounded recursion
+ * terminate on a finite graph with no path tracking and no depth bound —
+ * `MAX_EXPLICIT_RECURSIVE_DEPTH` does not apply to this probe.
+ *
+ * Exactly ONE literal `WITH RECURSIVE` occurs in this function (the
+ * `WITH RECURSIVE ${body}` return below) regardless of which seed form
+ * runs: `body` is assembled by {@link buildPlannedAcyclicityCandidates} /
+ * {@link buildAcyclicityAncestryStepDirect} beforehand, both of which are
+ * plain fragments with no `WITH RECURSIVE` of their own, so
+ * `tests/recursive-traversal-inventory.test.ts`'s emission-site inventory
+ * still counts exactly one site here.
+ *
+ * For the `"planned"` seed form, `ancestry` hops through TWO sources folded
+ * into one `candidates` CTE — the relation's live edges AND the writer's
+ * not-yet-written rows (D-4) — so a cycle closed entirely by rows in that
+ * set is found even though none of them exist yet. See
+ * {@link buildPlannedAcyclicityCandidates}'s docblock for why this is one
+ * joined source rather than a second recursive term, and why it is the only
+ * form that pays for it. The `"proposed"` and `"relation"` forms join
+ * `typegraph_edges` directly instead — see
+ * {@link buildAcyclicityAncestryStepDirect}.
+ *
+ * Every literal seed column is `CAST(... AS TEXT)`: PostgreSQL cannot infer
+ * the type of a bare bound parameter in a `SELECT` list with no surrounding
+ * column context.
+ */
+export function buildEdgeAcyclicityProbe(
+  options: Readonly<{
+    graphId: string;
+    members: readonly AcyclicRelationMember[];
+    seed: AcyclicityProbeSeed;
+    dialect: DialectAdapter;
+    schema: SqlSchema;
+    recursiveTraversal: RecursiveTraversalVerdict;
+    operation: string;
+  }>,
+): SqlFragment {
+  assertRecursiveTraversal(options.recursiveTraversal, options.operation);
+
+  const seedCte = buildAcyclicitySeed(
+    options.seed,
+    options.members,
+    options.graphId,
+    options.schema,
+  );
+  const forceWorktableOuterJoinOrder =
+    options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
+  const anchor = sql`SELECT s.origin_key, s.to_kind, s.to_id FROM seed s`;
+
+  const closingSelect = sql`SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id`;
+  // A single-edge row-list seed (`"proposed"` OR `"planned"` — a single row
+  // has only one possible `origin_key`) stops at the first witness: both
+  // engines pipeline a recursive CTE, so a `LIMIT 1` short-circuits the walk
+  // instead of running to fixpoint. Several origins must return every
+  // offending one so a refusal can name the edge, so no LIMIT is added
+  // there. `"relation"` has no `edges` to count and always runs unlimited.
+  const limited =
+    options.seed.kind !== "relation" && options.seed.edges.length === 1 ?
+      sql`${closingSelect} LIMIT 1`
+    : closingSelect;
+
+  const bodyOptions: AcyclicityProbeBodyOptions = {
+    members: options.members,
+    graphId: options.graphId,
+    schema: options.schema,
+    forceWorktableOuterJoinOrder,
+    seedCte,
+    anchor,
+    closingSelect: limited,
+  };
+  const body =
+    options.seed.kind === "planned" ?
+      buildProbeBodyPlanned(bodyOptions)
+    : buildProbeBodyDirect(bodyOptions);
+
+  return sql`WITH RECURSIVE ${body}`;
 }

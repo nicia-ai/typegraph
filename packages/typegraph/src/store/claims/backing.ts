@@ -32,6 +32,7 @@ import { type GraphBackend } from "../../backend/types";
  * that map's own keys and would be trivially true.
  */
 export const CONSTRAINT_FENCE_REASONS = [
+  "edgeAcyclicity",
   "edgeCardinality",
   "edgeMatchKeyConvergence",
   "nodeDisjointness",
@@ -72,9 +73,12 @@ type ConstraintFenceBacking = "uniques" | "edgeClaims" | "lockOnly";
  * declaration actually spans and the one the edges primary key `(graph_id, id)`
  * cannot fence. The classes still marked `lockOnly` are fenced by the per-graph
  * write lock alone, which is why they are also the classes a non-transactional
- * backend refuses.
+ * backend refuses. `edgeAcyclicity` is `lockOnly` because the axis a cycle
+ * spans is a whole reachable subgraph, not a tuple — there is no key that
+ * could refuse a second claimant.
  */
 export const CONSTRAINT_FENCE_BACKING = {
+  edgeAcyclicity: "lockOnly",
   edgeCardinality: "edgeClaims",
   edgeMatchKeyConvergence: "lockOnly",
   nodeDisjointness: "uniques",

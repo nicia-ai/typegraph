@@ -93,6 +93,13 @@ export type EdgeIntrospection = Readonly<{
   cardinality: Cardinality;
   targetCardinality: TargetCardinality;
   endpointExistence: EndpointExistence;
+  /**
+   * Whether this edge kind's live relation is enforced as a DAG. Required
+   * (never optional): introspection reports the RESOLVED value, not the
+   * declaration's sparse form — see `SerializedEdgeDef.acyclic`'s docblock
+   * for why the declaration itself is emit-when-true only.
+   */
+  acyclic: boolean;
   properties: JsonSchema;
   annotations: KindAnnotations | undefined;
   deprecated: boolean;
@@ -163,6 +170,7 @@ export function introspectSchema<G extends GraphDef>(
       cardinality: reg.cardinality ?? "many",
       targetCardinality: reg.targetCardinality ?? "many",
       endpointExistence: reg.endpointExistence ?? "notDeleted",
+      acyclic: reg.acyclic ?? false,
       properties: serializeSchemaProperties(edgeType.schema),
       annotations: edgeType.annotations,
       deprecated: deprecated.has(name),

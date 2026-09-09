@@ -514,6 +514,8 @@ export {
 
 /** What a caller must change to make each refused constraint class writable. */
 const CONSTRAINT_FENCE_ADVICE = {
+  edgeAcyclicity:
+    "drop `acyclic: true` from the edge and detect cycles in application code",
   edgeCardinality:
     'declare the edge `cardinality: "many"` and enforce the limit in application code',
   edgeMatchKeyConvergence:
