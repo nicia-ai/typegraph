@@ -687,28 +687,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 748,
-    sha256: "5254cd3a314fd6d88b20791cf2dbb8c4d82ff5b3b796503b67bdc41cd8233eb5",
+    count: 751,
+    sha256: "8730044e7a059541aed796a599e6c6a5c298f37d4a207ec70120c3debb66cae7",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 733,
-    sha256: "ff4ae7c2e607565e6619e104900072d4c8e5cb08ce3a1088724c1a4be07b9c49",
+    count: 736,
+    sha256: "3f69434dbf424609139beb0c5b60b7dd986654907d7297878b142b6fb84bbd5e",
   },
   "./postgres/pglite": {
-    count: 730,
-    sha256: "8910191f6fce05ca905e7a984c616bd7ce46dc9646a50f58785816618a36adcc",
+    count: 733,
+    sha256: "78fb46193f0808bad988b030121a9dbbac755388b3b8b86430d43231cf043e9d",
   },
   "./profiler": {
-    count: 735,
-    sha256: "c060979abe65e40be9f63ebb6a23c4a53abe4c976e60717eef3adb39d5aefe2f",
+    count: 738,
+    sha256: "1ebfe3d3375aa0fb825520e84168d5a143450f2ee2df6c685f79d0a9a971c09e",
   },
   "./provenance": {
-    count: 741,
-    sha256: "886d33930d90fc3827e69656f3b6a190f66ffc211b0404dbd54236e9b5811542",
+    count: 744,
+    sha256: "15509713f4fe4a6c54155939de968c070e38f12d8353b65f3ad8a89d12d52a02",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -724,8 +724,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "d151d64d59d863a37d75027fe51e40ae149a0f2fe122f5ff6751dcc9971a35c8",
   },
   "./sqlite/local": {
-    count: 730,
-    sha256: "8910191f6fce05ca905e7a984c616bd7ce46dc9646a50f58785816618a36adcc",
+    count: 733,
+    sha256: "78fb46193f0808bad988b030121a9dbbac755388b3b8b86430d43231cf043e9d",
   },
 };
 

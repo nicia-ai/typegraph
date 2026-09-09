@@ -3420,13 +3420,9 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
         validFrom?: string | null;
         onImmutableLowerBound?: "preserve" | "refuse";
     }> & ValidityEndMutation) => Promise<Node<N>>;
-    bulkCreate: (items: readonly Readonly<{
+    bulkCreate: (items: readonly (Readonly<{
         props: z.input<N["schema"]>;
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-        partOf?: CompositionWholeRef;
-    }>[]) => Promise<Node<N>[]>;
+    }> & NodeCreateOptions)[]) => Promise<Node<N>[]>;
     bulkUpsertById: (items: readonly (Readonly<{
         id: string;
         props: z.input<N["schema"]>;
