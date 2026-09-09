@@ -39,6 +39,7 @@ export {
 } from "../errors";
 export {
   bulkIsSeparated,
+  hasLiveDifferentAssertions,
   IDENTITY_STORAGE_MISSING_CODE,
 } from "../identity/separation";
 export type { IdentityTransferAssertion } from "../identity/service";

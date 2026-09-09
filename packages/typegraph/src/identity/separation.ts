@@ -668,7 +668,7 @@ async function hasSeparationRows(
  * a database whose closure is corrupt, which `validateIdentity()` reports and
  * which the CHECK still refuses at the next fusing write.
  */
-async function hasLiveDifferentAssertions(
+export async function hasLiveDifferentAssertions(
   target: IdentityTarget,
   schema: SqlSchema,
   graphId: string,

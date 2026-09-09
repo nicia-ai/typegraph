@@ -42,6 +42,7 @@ import type { GraphDef, PlainNodeRef, Store } from "./typegraph-internal";
 import {
   bulkIsSeparated,
   currentClassKey,
+  hasLiveDifferentAssertions,
   identityReferenceKeyOf,
   loadCurrentStructuralClasses,
   loadSpanningDifferentAssertion,
@@ -145,6 +146,32 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   const participants = [...new Set(groups.flat())];
   if (participants.length === 0) return NO_IDENTITY_SEPARATION_FACTS;
   const ctx = storeRuntime(target).identityContext();
+  // A graph holding no `different` assertion can separate nothing, so the whole
+  // capture — the class resolution AND the within-component pair enumeration,
+  // which is quadratic in component size — is skipped for one indexed
+  // existence probe. That is the STEADY state of every graph that uses only
+  // `assertSame`, and the state where the veto's cost would otherwise be pure
+  // waste. The predicate is the identity module's own
+  // (`hasLiveDifferentAssertions`), never a second spelling of "is anything
+  // separated here": it is the same fact `bulkIsSeparated` consults to decide
+  // that an EMPTY separation relation is correct rather than unfilled.
+  //
+  // Consequence, deliberately: a legacy store whose separation relation was
+  // never provisioned no longer refuses a stated `identity.pairing` when it
+  // holds no `different` assertion either. Refusing there was a false alarm —
+  // there is nothing for the veto to read, and the identity module already
+  // treats "no live `different` assertion" as proof that an empty relation is
+  // correct. A store that does hold one still reaches the refusal below.
+  if (
+    !(await hasLiveDifferentAssertions(
+      ctx.backend,
+      ctx.schema,
+      ctx.graphId,
+      ctx.registry,
+    ))
+  ) {
+    return NO_IDENTITY_SEPARATION_FACTS;
+  }
   const classes = await loadCurrentStructuralClasses(
     ctx.backend,
     ctx.schema,
