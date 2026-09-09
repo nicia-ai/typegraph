@@ -15,17 +15,35 @@
  * - "differentFrom dropped": the classifier's verdict on a store opened
  *   after the code simply deletes a `differentFrom(A, B)` declaration is
  *   safe — it auto-migrates on open.
+ *
+ * The three `describe` blocks above exercise `computeSchemaDiff` and
+ * `deserializeSchema` directly — the classification math in isolation. The
+ * final block drives the same two migrations end to end through
+ * `ensureSchema` against a real backend, the way a booting `Store` actually
+ * encounters a pre-removal document: committed schema rows, not diff
+ * literals, and the "migrated" status the schema manager actually returns.
  */
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import {
+  defineGraph,
+  defineNode,
+  equivalentTo,
+  type GraphBackend,
+} from "../src";
 import { deserializeSchema } from "../src/schema/deserializer";
+import { ensureSchema } from "../src/schema/manager";
 import { computeSchemaDiff } from "../src/schema/migration";
+import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import {
   type SerializedNodeDef,
   type SerializedOntology,
   type SerializedSchema,
   serializedSchemaZod,
 } from "../src/schema/types";
+import { createStoreWithSchema } from "../src/store/store";
+import { createTestBackend } from "./test-utils";
 
 // ============================================================
 // Fixtures
@@ -186,5 +204,94 @@ describe("roadmap F: dropping a differentFrom(A, B) declaration auto-migrates", 
       entity: "relation",
       severity: "safe",
     });
+  });
+});
+
+describe("roadmap F: ensureSchema auto-migrates a persisted pre-removal document", () => {
+  const A = defineNode("A", { schema: z.object({}) });
+  const B = defineNode("B", { schema: z.object({}) });
+
+  const baseGraph = defineGraph({
+    id: "meta-edge-removal-ensure-schema",
+    nodes: { A: { type: A }, B: { type: B } },
+    edges: {},
+  });
+
+  // Simulates "an earlier process, running pre-removal code, persisted this
+  // document": initializes the backend normally (so the A/B tables exist),
+  // then commits a v2 schema row whose `ontology` is hand-edited to the
+  // pre-removal shape — a shape today's `serializeSchema` can no longer
+  // produce, which is exactly the point of the fixture.
+  async function persistLegacyOntologyDocument(
+    backend: GraphBackend,
+    legacyOntology: SerializedOntology,
+  ): Promise<void> {
+    const [, initial] = await createStoreWithSchema(baseGraph, backend);
+    expect(initial.status).toBe("initialized");
+
+    const legacySchema: SerializedSchema = {
+      ...serializeSchema(baseGraph, 2),
+      ontology: legacyOntology,
+    };
+    const legacyHash = await computeSchemaHash(legacySchema);
+    await backend.commitSchemaVersion({
+      graphId: baseGraph.id,
+      expected: { kind: "active", version: 1 },
+      version: 2,
+      schemaHash: legacyHash,
+      schemaDoc: legacySchema,
+    });
+  }
+
+  it("migrates a persisted sameAs(A, B) relation to equivalentTo(A, B) on open", async () => {
+    const backend = createTestBackend();
+    await persistLegacyOntologyDocument(backend, {
+      metaEdges: {
+        sameAs: {
+          name: "sameAs",
+          description: "Deprecated type-level equivalence alias",
+        },
+      },
+      relations: [{ metaEdge: "sameAs", from: "A", to: "B" }],
+      closures: EMPTY_CLOSURES,
+    });
+
+    const migratedGraph = defineGraph({
+      id: baseGraph.id,
+      nodes: { A: { type: A }, B: { type: B } },
+      edges: {},
+      ontology: [equivalentTo(A, B)],
+    });
+
+    // MUTATION CHECK: restoring the dropped meta-edge-CATALOG diff arm in
+    // `classifyOntologyChanges` (`src/schema/ontology-change.ts`) flips this
+    // to `status: "breaking"` (and, with `throwOnBreaking` defaulted true,
+    // a thrown `MigrationError`) — `sameAs` leaves the catalog in this exact
+    // migration. Restored after the check.
+    const result = await ensureSchema(backend, migratedGraph);
+    expect(result.status).toBe("migrated");
+  });
+
+  it("migrates a persisted differentFrom(A, B) relation by dropping it on open", async () => {
+    const backend = createTestBackend();
+    await persistLegacyOntologyDocument(backend, {
+      metaEdges: {
+        differentFrom: {
+          name: "differentFrom",
+          description: "Deprecated decorative type-level non-identity relation",
+        },
+      },
+      relations: [{ metaEdge: "differentFrom", from: "A", to: "B" }],
+      closures: EMPTY_CLOSURES,
+    });
+
+    const migratedGraph = defineGraph({
+      id: baseGraph.id,
+      nodes: { A: { type: A }, B: { type: B } },
+      edges: {},
+    });
+
+    const result = await ensureSchema(backend, migratedGraph);
+    expect(result.status).toBe("migrated");
   });
 });
