@@ -88,10 +88,7 @@ export type HybridSearchHit<N = Node> = Readonly<{
  * not a search scope) — see `src/query/builder/alias-expansion.ts`, the one
  * owner of the axis vocabulary.
  */
-export type SearchExpansionAxis = Extract<
-  AliasExpansionAxis,
-  "exact" | "subclasses"
->;
+type SearchExpansionAxis = Extract<AliasExpansionAxis, "exact" | "subclasses">;
 
 /**
  * Scope options shared by every facade search leg.
