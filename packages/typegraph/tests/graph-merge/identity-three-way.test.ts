@@ -19,7 +19,10 @@ import {
   RETRACT_OVERRULED_DROP_REASON,
 } from "../../src/graph-merge/identity-three-way";
 import { merge } from "../../src/graph-merge/merge";
-import { planIdentityChanges } from "../../src/graph-merge/merge-identity";
+import {
+  planIdentityChanges,
+  RETRACTION_TARGET_MISMATCH_DROP_REASON,
+} from "../../src/graph-merge/merge-identity";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import type { StagingSet } from "../../src/graph-merge/staging";
 import type { IdentityTransferAssertion } from "../../src/graph-merge/typegraph-internal";
@@ -290,6 +293,134 @@ describe("T9 — 'flag' plans applicably; 'refuse' does not, for the same fixtur
     // this pair either way — base identity truth is untouched.
     expect(planned.assertions).toEqual([]);
     expect(planned.retractions).toEqual([]);
+  });
+});
+
+/**
+ * A resolving policy is a DECISION, and the reconciliation it produces is the
+ * only place that decision is recorded (`rule: "policy"`, plus the arm's own
+ * name) — `IdentityDecisionProvenance.policy` is built from nothing else.
+ * The survivor a policy keeps must also come from the ONE survivor rule, never
+ * from staging order.
+ */
+describe("policy resolutions are recorded, and pick through the survivor rule", () => {
+  const inherited: IdentityTransferAssertion = { ...SAME_PAIR, id: "a-1" };
+  /** Staged FIRST but the LATER validFrom, so index order and the rule disagree. */
+  const lateFirst: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "a-2",
+    validFrom: "2024-03-01T00:00:00.000Z",
+  };
+  const earlyLast: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "a-3",
+    validFrom: "2024-02-01T00:00:00.000Z",
+  };
+  const twoWayRace = (): StagingSet =>
+    stagingWithIdentityChanges(
+      [
+        { branchId: BRANCH_B, assertion: lateFirst },
+        { branchId: asBranchId("branch-c"), assertion: earlyLast },
+      ],
+      [{ branchId: BRANCH_A, assertion: inherited }],
+    );
+
+  it("'assertWins' keeps the survivor rule's winner, not the first staged", () => {
+    const planned = planIdentityChanges(twoWayRace(), new Map(), "assertWins");
+    expect(planned.assertions.map((entry) => entry.id)).toEqual(["a-3"]);
+    expect(planned.reconciliations).toEqual([
+      {
+        semanticKey: planned.reconciliations[0]?.semanticKey,
+        a: { kind: "Person", id: "first" },
+        b: { kind: "Person", id: "second" },
+        relation: "same",
+        survivorAssertionId: "a-3",
+        supersededAssertionIds: ["a-1", "a-2"],
+        rule: "policy",
+        policy: "assertWins",
+        branches: ["branch-a", "branch-b", "branch-c"],
+      },
+    ]);
+  });
+
+  it("'retractWins' records the ended base row as what governs the pair", () => {
+    const planned = planIdentityChanges(twoWayRace(), new Map(), "retractWins");
+    expect(planned.assertions).toEqual([]);
+    expect(planned.reconciliations).toHaveLength(1);
+    expect(planned.reconciliations[0]).toMatchObject({
+      survivorAssertionId: "a-1",
+      supersededAssertionIds: ["a-2", "a-3"],
+      rule: "policy",
+      policy: "retractWins",
+    });
+  });
+
+  it("a function policy records itself as `callback`, never its source", () => {
+    const planned = planIdentityChanges(twoWayRace(), new Map(), () => ({
+      kind: "retract" as const,
+    }));
+    expect(planned.reconciliations[0]).toMatchObject({
+      rule: "policy",
+      policy: "callback",
+    });
+  });
+
+  it("'flag' records no reconciliation — nothing was decided", () => {
+    const planned = planIdentityChanges(twoWayRace(), new Map(), "flag");
+    expect(planned.reconciliations).toEqual([]);
+    expect(planned.unresolved).toHaveLength(1);
+  });
+});
+
+/**
+ * The base slice is a "state" read (open rows only) while a staged retraction
+ * is derived from an ARCHIVAL read, so a branch retracting a row the target
+ * has already ended stages a retraction with no base group to classify
+ * against. It must still reach the plan — or be dropped with a typed reason —
+ * never vanish.
+ */
+describe("a staged retraction whose base row is already ended", () => {
+  const alreadyEnded: IdentityTransferAssertion = { ...SAME_PAIR, id: "a-1" };
+  const orphanStaging = (): StagingSet =>
+    stagingWithIdentityChanges(
+      [],
+      [{ branchId: BRANCH_A, assertion: alreadyEnded }],
+      // The target's CURRENT truth holds nothing for this pair: the row the
+      // branch retracts was ended before the merge.
+      [],
+    );
+
+  it("is planned, not silently dropped", () => {
+    const planned = planIdentityChanges(orphanStaging(), new Map());
+    expect(planned.retractions.map((entry) => entry.id)).toEqual(["a-1"]);
+    expect(planned.dropped).toEqual([]);
+    expect(planned.assertions).toEqual([]);
+  });
+
+  it("is dropped with a typed reason when the target's OPEN row is a different truth", () => {
+    const planned = planIdentityChanges(
+      orphanStaging(),
+      new Map([
+        [
+          "a-1",
+          {
+            id: "a-1",
+            relation: "same" as const,
+            a: { kind: "Person", id: "first" },
+            b: { kind: "Person", id: "third" },
+            validFrom: SAME_PAIR.validFrom,
+          },
+        ],
+      ]),
+    );
+    expect(planned.retractions).toEqual([]);
+    expect(planned.dropped).toEqual([
+      {
+        kind: "identity",
+        id: "a-1",
+        reason: RETRACTION_TARGET_MISMATCH_DROP_REASON,
+      },
+    ]);
   });
 });
 

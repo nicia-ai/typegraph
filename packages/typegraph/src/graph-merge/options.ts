@@ -15,6 +15,7 @@
 import { z } from "zod";
 
 import { createDataKeyedBag } from "../utils/object";
+import { InvalidMergeOptionsError } from "./errors";
 import type { IdentityAssertionConflictPolicy } from "./identity-three-way";
 import type { GraphDef } from "./typegraph-internal";
 import type {
@@ -47,8 +48,6 @@ export const MERGE_OPTION_DEFAULTS = {
   identity: {
     pairing: "off",
     onAssertionConflict: "refuse",
-    onEdgeConflict: "repoint",
-    onUniquenessConflict: "refuse",
     onProvenanceConflict: "keepBoth",
   },
 } as const satisfies Readonly<{
@@ -62,8 +61,6 @@ export const MERGE_OPTION_DEFAULTS = {
   identity: Readonly<{
     pairing: "off";
     onAssertionConflict: "refuse";
-    onEdgeConflict: "repoint";
-    onUniquenessConflict: "refuse";
     onProvenanceConflict: "keepBoth";
   }>;
 }>;
@@ -104,12 +101,6 @@ const identityOptionsScalarSchema = z
     pairing: z
       .enum(["off", "candidate", "definitional"])
       .default(MERGE_OPTION_DEFAULTS.identity.pairing),
-    onEdgeConflict: z
-      .enum(["repoint", "flag"])
-      .default(MERGE_OPTION_DEFAULTS.identity.onEdgeConflict),
-    onUniquenessConflict: z
-      .enum(["refuse", "flag"])
-      .default(MERGE_OPTION_DEFAULTS.identity.onUniquenessConflict),
     onProvenanceConflict: z
       .enum(["keepBoth", "refuse"])
       .default(MERGE_OPTION_DEFAULTS.identity.onProvenanceConflict),
@@ -225,8 +216,9 @@ function validateIdentityAssertionConflictPolicy(
     typeof policy === "string" &&
     !identityAssertionConflictPolicySchema.safeParse(policy).success
   ) {
-    throw new Error(
+    throw new InvalidMergeOptionsError(
       `Invalid identity.onAssertionConflict "${policy}": expected "refuse", "assertWins", "retractWins", "flag", or a function.`,
+      { details: { option: "identity.onAssertionConflict", policy } },
     );
   }
   return policy;
@@ -247,29 +239,11 @@ function validateIdentityOptions(
   if (identity === undefined) return undefined;
   const { onAssertionConflict, ...scalarInput } = identity;
   const scalar = identityOptionsScalarSchema.parse(scalarInput);
-  // Accepted or refused, never ignored. Both `"flag"` arms mean "drop the
-  // identity PAIRING and keep the data", which needs a plan rebuild with the
-  // offending identity candidate edges removed — machinery this release does
-  // not have. Refusing the value is the honest contract: a caller who states it
-  // learns the merge cannot honor it, instead of receiving a plan that silently
-  // applied the default.
-  if (scalar.onEdgeConflict === "flag") {
-    throw new Error(
-      'identity.onEdgeConflict: "flag" is not implemented: dropping an identity pairing whose repoint collides requires rebuilding the plan without that pairing. Use "repoint" (the default), which applies the repoint and reports the property disagreement through onPropertyConflict.',
-    );
-  }
-  if (scalar.onUniquenessConflict === "flag") {
-    throw new Error(
-      'identity.onUniquenessConflict: "flag" is not implemented: dropping an identity pairing whose fusion violates a unique constraint requires rebuilding the plan without that pairing. Use "refuse" (the default), which surfaces the violation through the existing constraint-conflict error.',
-    );
-  }
   return {
     pairing: scalar.pairing,
     onAssertionConflict: validateIdentityAssertionConflictPolicy(
       onAssertionConflict ?? MERGE_OPTION_DEFAULTS.identity.onAssertionConflict,
     ),
-    onEdgeConflict: scalar.onEdgeConflict,
-    onUniquenessConflict: scalar.onUniquenessConflict,
     onProvenanceConflict: scalar.onProvenanceConflict,
   };
 }

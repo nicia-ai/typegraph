@@ -17,6 +17,8 @@ import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
 import {
   captureCandidateWriteSetTarget,
+  isOk,
+  merge,
   planCandidateWriteSetReview,
   revalidateCandidateWriteSetReview,
   unwrap,
@@ -113,19 +115,38 @@ describe("§3.3 refusal matrix — identity option validation", () => {
     ).toThrow();
   });
 
-  // Applied or refused, never ignored: both `"flag"` arms mean "drop the
-  // identity pairing", which needs a plan rebuild this release does not do.
-  // Accepting them and silently applying the default would be the API lying.
-  it("refuses onEdgeConflict: flag, naming what is missing", () => {
+  // The two deferred knobs (`onEdgeConflict`, `onUniquenessConflict`) are not
+  // part of the option at all this release: an option whose only accepted
+  // value is its default is dead surface. `.strict()` refuses them exactly as
+  // it refuses a typo, so a caller who states one is told rather than served a
+  // plan that ignored it.
+  it("refuses the deferred onEdgeConflict knob", () => {
     expect(() =>
-      normalizeMergeOptions({ identity: { onEdgeConflict: "flag" } }),
-    ).toThrow(/onEdgeConflict/);
+      // @ts-expect-error deferred: not part of this release's option
+      normalizeMergeOptions({ identity: { onEdgeConflict: "repoint" } }),
+    ).toThrow();
   });
 
-  it("refuses onUniquenessConflict: flag, naming what is missing", () => {
+  it("refuses the deferred onUniquenessConflict knob", () => {
     expect(() =>
-      normalizeMergeOptions({ identity: { onUniquenessConflict: "flag" } }),
-    ).toThrow(/onUniquenessConflict/);
+      // @ts-expect-error deferred: not part of this release's option
+      normalizeMergeOptions({ identity: { onUniquenessConflict: "refuse" } }),
+    ).toThrow();
+  });
+
+  it("a refused identity option carries details.option through tryNormalize", async () => {
+    const { backend } = createLocalSqliteBackend();
+    disposers.push(() => backend.close());
+    const [store] = await createStoreWithSchema(reviewGraph, backend, {
+      history: true,
+    });
+    const result = await merge(store, [], {
+      // @ts-expect-error deliberately invalid enum value
+      identity: { onAssertionConflict: "yolo" },
+    });
+    if (isOk(result)) throw new Error("expected an invalid-options refusal");
+    expect(result.error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
+    expect(result.error.details["option"]).toBe("identity.onAssertionConflict");
   });
 
   it("accepts every arm it does honor", () => {
@@ -133,16 +154,12 @@ describe("§3.3 refusal matrix — identity option validation", () => {
       identity: {
         pairing: "definitional",
         onAssertionConflict: "flag",
-        onEdgeConflict: "repoint",
-        onUniquenessConflict: "refuse",
         onProvenanceConflict: "refuse",
       },
     });
     expect(normalized.identity).toEqual({
       pairing: "definitional",
       onAssertionConflict: "flag",
-      onEdgeConflict: "repoint",
-      onUniquenessConflict: "refuse",
       onProvenanceConflict: "refuse",
     });
   });

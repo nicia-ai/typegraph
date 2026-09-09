@@ -84,6 +84,72 @@ function compareIdentitySurvivors(
   return byValidity === 0 ? compareCodePoints(left.id, right.id) : byValidity;
 }
 
+/** Why one identity assertion beat the one it displaced. */
+type IdentitySurvivorRule = IdentityReconciliation["rule"];
+
+/**
+ * THE survivor decision for two identity assertions describing one semantic
+ * pair, and the only place the committed-id override, the comparator and the
+ * rule label are spelled. Every path that must choose between two colliding
+ * assertions — the staged classifier, the post-remap re-dedupe, and a
+ * resolving policy's `assertWins` arm — reduces through this one function, so
+ * no caller can spell a survivor rule of its own and drift from the rest.
+ *
+ * An id the target ALREADY holds with the exact staged truth always wins: the
+ * applier is idempotent per semantic pair, so a freshly minted branch id could
+ * never displace the target's committed row, and choosing it would report an
+ * id as applied that is never written while listing the target's own row as
+ * dropped.
+ */
+function pickIdentitySurvivor<
+  T extends Readonly<{ assertion: IdentityTransferAssertion }>,
+>(
+  candidate: T,
+  incumbent: T,
+  committedIds: ReadonlySet<string>,
+): Readonly<{ winner: T; loser: T; rule: IdentitySurvivorRule }> {
+  const candidateCommitted = committedIds.has(candidate.assertion.id);
+  const incumbentCommitted = committedIds.has(incumbent.assertion.id);
+  if (candidateCommitted !== incumbentCommitted) {
+    const [winner, loser] =
+      candidateCommitted ?
+        ([candidate, incumbent] as const)
+      : ([incumbent, candidate] as const);
+    return { winner, loser, rule: "committed-id" };
+  }
+  const rule: IdentitySurvivorRule =
+    (
+      compareCodePoints(
+        candidate.assertion.validFrom,
+        incumbent.assertion.validFrom,
+      ) === 0
+    ) ?
+      "code-point-id"
+    : "earliest-valid-from";
+  const [winner, loser] =
+    compareIdentitySurvivors(candidate.assertion, incumbent.assertion) < 0 ?
+      ([candidate, incumbent] as const)
+    : ([incumbent, candidate] as const);
+  return { winner, loser, rule };
+}
+
+/**
+ * Whether the loser is the very row that won: the same id carrying the same
+ * complete truth. Two branches staging the IDENTICAL row collapse silently —
+ * reporting one as dropped while it is the row applied would make the report
+ * self-contradictory.
+ */
+function isIdenticalIdentityRow(
+  left: IdentityTransferAssertion,
+  right: IdentityTransferAssertion,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.validFrom === right.validFrom &&
+    (left.validTo ?? undefined) === (right.validTo ?? undefined)
+  );
+}
+
 /**
  * Reason recorded when two branches asserted the SAME semantic pair and the
  * survivor rule kept only one of the two assertion ids.
@@ -203,47 +269,21 @@ function reduceIdentitySurvivor(
   survivor: StagedIdentityAssertion;
   superseded: readonly DroppedItem[];
   /** Why the final survivor beat the last candidate it displaced. */
-  rule: IdentityReconciliation["rule"];
+  rule: IdentitySurvivorRule;
 }> {
   const [first, ...rest] = candidates;
   let survivor = requireDefined(first);
-  let rule: IdentityReconciliation["rule"] = "code-point-id";
+  let rule: IdentitySurvivorRule = "code-point-id";
   const superseded: DroppedItem[] = [];
   for (const candidate of rest) {
-    const candidateCommitted = committedIds.has(candidate.assertion.id);
-    const survivorCommitted = committedIds.has(survivor.assertion.id);
-    if (candidateCommitted === survivorCommitted) {
-      rule =
-        (
-          compareCodePoints(
-            candidate.assertion.validFrom,
-            survivor.assertion.validFrom,
-          ) === 0
-        ) ?
-          "code-point-id"
-        : "earliest-valid-from";
-    } else {
-      rule = "committed-id";
-    }
-    const [winner, loser] =
-      candidateCommitted === survivorCommitted ?
-        compareIdentitySurvivors(candidate.assertion, survivor.assertion) < 0 ?
-          [candidate, survivor]
-        : [survivor, candidate]
-      : candidateCommitted ? [candidate, survivor]
-      : [survivor, candidate];
-    survivor = winner;
-    if (
-      loser.assertion.id === winner.assertion.id &&
-      loser.assertion.validFrom === winner.assertion.validFrom &&
-      (loser.assertion.validTo ?? undefined) ===
-        (winner.assertion.validTo ?? undefined)
-    ) {
+    const picked = pickIdentitySurvivor(candidate, survivor, committedIds);
+    survivor = picked.winner;
+    rule = picked.rule;
+    if (isIdenticalIdentityRow(picked.loser.assertion, picked.winner.assertion))
       continue;
-    }
     superseded.push(
       droppedIdentityAssertion(
-        loser.assertion,
+        picked.loser.assertion,
         DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
       ),
     );
@@ -299,6 +339,48 @@ function buildReconciliation(
 }
 
 /**
+ * The label a resolved conflict records for the arm that decided it. A
+ * function policy is recorded as `"callback"` — its source is never part of
+ * the plan artifact, exactly as `reviewOptionEvidence` encodes it.
+ */
+function identityPolicyLabel(policy: IdentityAssertionConflictPolicy): string {
+  return typeof policy === "function" ? "callback" : policy;
+}
+
+/**
+ * The {@link IdentityReconciliation} a RESOLVING POLICY produced for one
+ * conflict — the only path that sets `rule: "policy"`, and therefore the only
+ * source of `IdentityDecisionProvenance.policy`. A merge whose conflicts were
+ * all resolved by rule (or refused) records no policy string it did not
+ * exercise.
+ */
+function policyReconciliation(
+  conflict: IdentityAssertionConflict,
+  policy: IdentityAssertionConflictPolicy,
+  survivorAssertionId: string | undefined,
+  supersededAssertionIds: readonly string[],
+): IdentityReconciliation {
+  return {
+    semanticKey: conflict.semanticKey,
+    a: conflict.a,
+    b: conflict.b,
+    relation: conflict.relation,
+    ...(survivorAssertionId === undefined ? {} : { survivorAssertionId }),
+    supersededAssertionIds: [...supersededAssertionIds].toSorted(
+      compareStrings,
+    ),
+    rule: "policy",
+    policy: identityPolicyLabel(policy),
+    branches: [
+      ...new Set([
+        ...conflict.asserted.map((staged) => staged.branchId),
+        ...conflict.retracted.map((staged) => staged.branchId),
+      ]),
+    ].toSorted(compareStrings),
+  };
+}
+
+/**
  * Reduces raw (unstaged) identity assertions across POTENTIALLY MANY semantic
  * pairs to one survivor per pair, via {@link identityDedupeKey} /
  * {@link compareIdentitySurvivors} — the same rule
@@ -327,23 +409,15 @@ export function dedupeIdentityAssertionsRaw(
       survivorBySemantic.set(key, assertion);
       continue;
     }
-    const assertionCommitted = committedIds.has(assertion.id);
-    const previousCommitted = committedIds.has(previous.id);
-    const [survivor, loser] =
-      assertionCommitted === previousCommitted ?
-        compareIdentitySurvivors(assertion, previous) < 0 ?
-          ([assertion, previous] as const)
-        : ([previous, assertion] as const)
-      : assertionCommitted ? ([assertion, previous] as const)
-      : ([previous, assertion] as const);
+    const picked = pickIdentitySurvivor(
+      { assertion },
+      { assertion: previous },
+      committedIds,
+    );
+    const survivor = picked.winner.assertion;
+    const loser = picked.loser.assertion;
     survivorBySemantic.set(key, survivor);
-    if (
-      loser.id === survivor.id &&
-      loser.validFrom === survivor.validFrom &&
-      (loser.validTo ?? undefined) === (survivor.validTo ?? undefined)
-    ) {
-      continue;
-    }
+    if (isIdenticalIdentityRow(loser, survivor)) continue;
     dropped.push(
       droppedIdentityAssertion(loser, DUPLICATE_IDENTITY_ASSERTION_DROP_REASON),
     );
@@ -547,6 +621,7 @@ export type IdentityThreeWayResult = Readonly<{
 function resolveConflict(
   conflict: IdentityAssertionConflict,
   policy: IdentityAssertionConflictPolicy,
+  committedIds: ReadonlySet<string>,
   refuse: () => never,
 ): IdentityAssertionDecision {
   if (policy === "refuse") refuse();
@@ -565,9 +640,15 @@ function resolveConflict(
       );
     }
     if (policy === "assertWins") {
-      const winner = conflict.asserted[0];
-      if (winner === undefined) return { kind: "retract" };
-      return { kind: "assert", assertionId: winner.assertion.id };
+      if (conflict.asserted.length === 0) return { kind: "retract" };
+      // Through the ONE survivor rule, never staging order: a race whose
+      // reassertions arrived under two ids must pick the same winner every
+      // other path would.
+      const { survivor } = reduceIdentitySurvivor(
+        conflict.asserted,
+        committedIds,
+      );
+      return { kind: "assert", assertionId: survivor.assertion.id };
     }
     return { kind: "retract" };
   }
@@ -750,7 +831,7 @@ export function planIdentityThreeWay(
       asserted: [...group.same, ...group.different],
       retracted: [],
     };
-    const decision = resolveConflict(conflict, policy, () =>
+    const decision = resolveConflict(conflict, policy, committedIds, () =>
       refuseOpposing(
         requireDefined(anchorSame),
         requireDefined(anchorDifferent),
@@ -781,6 +862,17 @@ export function planIdentityThreeWay(
           ),
         );
       }
+      // Nothing survives an opposing-relations conflict resolved by retraction
+      // — no reassertion is kept and no base row was staged for ending — so
+      // the reconciliation names the superseded ids alone.
+      reconciliations.push(
+        policyReconciliation(
+          conflict,
+          policy,
+          undefined,
+          conflict.asserted.map((staged) => staged.assertion.id),
+        ),
+      );
       continue;
     }
     const winner = requireDefined(
@@ -798,6 +890,16 @@ export function planIdentityThreeWay(
         ),
       );
     }
+    reconciliations.push(
+      policyReconciliation(
+        conflict,
+        policy,
+        winner.assertion.id,
+        conflict.asserted
+          .filter((staged) => staged.assertion.id !== winner.assertion.id)
+          .map((staged) => staged.assertion.id),
+      ),
+    );
   }
 
   const races = detectRetractReassertRaces(staging);
@@ -832,7 +934,12 @@ export function planIdentityThreeWay(
         },
       );
     };
-    const decision = resolveConflict(conflict, policy, refuseRace);
+    const decision = resolveConflict(
+      conflict,
+      policy,
+      committedIds,
+      refuseRace,
+    );
     if (decision.kind === "unresolved") {
       unresolved.push({
         kind: "assertion",
@@ -865,6 +972,16 @@ export function planIdentityThreeWay(
           ),
         );
       }
+      // The ended base row is the last id that spoke for the pair, so it is
+      // what governs after the merge.
+      reconciliations.push(
+        policyReconciliation(
+          conflict,
+          policy,
+          retraction.assertion.id,
+          race.asserted.map((staged) => staged.assertion.id),
+        ),
+      );
       continue;
     }
     const winner = requireDefined(
@@ -894,6 +1011,14 @@ export function planIdentityThreeWay(
       ...requireDefined(race.retracted[0]).assertion,
       validTo: winner.assertion.validFrom,
     });
+    reconciliations.push(
+      policyReconciliation(conflict, policy, winner.assertion.id, [
+        ...race.asserted
+          .filter((staged) => staged.assertion.id !== winner.assertion.id)
+          .map((staged) => staged.assertion.id),
+        ...race.retracted.map((staged) => staged.assertion.id),
+      ]),
+    );
   }
 
   const baseByDedupe = new Map<string, IdentityTransferAssertion[]>();
@@ -916,14 +1041,27 @@ export function planIdentityThreeWay(
     assertedByDedupe.set(key, group);
   }
   const retractedByDedupe = new Map<string, StagedRetraction[]>();
+  // Retractions with NO base group to classify against. The base slice is the
+  // target's CURRENT truth (`readCurrentIdentityAssertions("state")`, open rows
+  // only) while a retraction is derived from an archival read, so a branch that
+  // retracts a row the target has ALREADY ended stages a retraction whose base
+  // row is absent here. That is still a stated retraction: it is planned, and
+  // `planIdentityChanges`' stored-truth filter is the one owner that decides
+  // whether it applies or is dropped with `identity:retraction-target-mismatch`.
+  // Dropping it here would make it vanish from the plan with no reported reason.
+  const orphanRetractions: StagedRetraction[] = [];
   for (const staged of staging.retractedIdentityAssertions) {
     if (handledRaceKeys.has(identitySemanticKey(staged.assertion))) continue;
     const key = baseIdToDedupeKey.get(staged.assertion.id);
-    if (key === undefined) continue; // orphan: `planIdentityChanges` re-validates by id.
+    if (key === undefined) {
+      orphanRetractions.push(staged);
+      continue;
+    }
     const group = retractedByDedupe.get(key) ?? [];
     group.push(staged);
     retractedByDedupe.set(key, group);
   }
+  for (const staged of orphanRetractions) retractions.push(staged.assertion);
 
   const groupKeys = new Set<string>([
     ...baseByDedupe.keys(),

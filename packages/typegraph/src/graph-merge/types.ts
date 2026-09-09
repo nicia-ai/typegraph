@@ -370,27 +370,6 @@ export type IdentityReconciliationOptions = Readonly<{
    */
   onAssertionConflict?: IdentityAssertionConflictPolicy;
   /**
-   * How an identity-paired cluster's repointed edge collides with another.
-   * `"repoint"` (default) applies the repoint, reporting any property
-   * disagreement through {@link MergeOptions.onPropertyConflict}.
-   *
-   * `"flag"` — drop the pairing, keep both edges — is REFUSED with an
-   * invalid-option error rather than silently applying the default: dropping a
-   * pairing requires rebuilding the plan without the offending identity
-   * candidate edge, which this release does not do.
-   */
-  onEdgeConflict?: "repoint" | "flag";
-  /**
-   * How a resolved write set that violates a unique constraint because an
-   * identity pairing fused two members is handled. `"refuse"` (default)
-   * surfaces the violation through the existing constraint-conflict error.
-   *
-   * `"flag"` — drop the pairing, never the constraint — is REFUSED with an
-   * invalid-option error rather than silently applying the default, for the
-   * same reason as {@link IdentityReconciliationOptions.onEdgeConflict}.
-   */
-  onUniquenessConflict?: "refuse" | "flag";
-  /**
    * How contradictory source attribution across the members of a cluster an
    * identity assertion FUSED is handled. `"keepBoth"` (default) keeps every
    * contribution, exactly as the merge always has; `"refuse"` fails the plan
@@ -611,14 +590,17 @@ export type DroppedItem =
  *   while a DIFFERENT branch re-asserted it under a new id without retracting.
  * - `"opposing-relations"` — branches asserted BOTH `same` and `different` for
  *   one endpoint pair with overlapping validity windows.
- * - `"id-reuse"` — one assertion id was staged for two different identity
- *   truths. Never policy-resolvable: an id names one truth by construction, so
- *   there is no arbitration to offer — see {@link IdentityAssertionDecision}.
  * - `"cross-kind-pairing"` — a `same` assertion spans two different merge
  *   KINDS, so no per-kind candidate scope can express it as a pairing edge.
+ * - `"out-of-scope-pairing"` — a `same` assertion names at least one endpoint
+ *   that is not a staged new node of its kind (a committed target row, or a
+ *   node no branch staged), so no per-kind candidate scope contains it.
  */
 export type IdentityAssertionConflictReason =
-  "retract-reassert" | "opposing-relations" | "id-reuse" | "cross-kind-pairing";
+  | "retract-reassert"
+  | "opposing-relations"
+  | "cross-kind-pairing"
+  | "out-of-scope-pairing";
 
 /**
  * An identity-adjacent disagreement the merge could not resolve into a single
@@ -653,12 +635,6 @@ export type IdentityUnresolvedConflict =
       source?: MatchSource | undefined;
     }>
   | Readonly<{
-      kind: "uniqueness";
-      constraintName: string;
-      members: readonly EntityRef[];
-      assertionIds: readonly string[];
-    }>
-  | Readonly<{
       kind: "provenance";
       canonical: EntityRef;
       contributions: readonly ProvenanceRecord[];
@@ -677,9 +653,29 @@ export type IdentityReconciliation = Readonly<{
   a: EntityRef;
   b: EntityRef;
   relation: IdentityRelation;
-  survivorAssertionId: string;
+  /**
+   * The assertion id that governs the pair after the merge: the surviving
+   * assertion for a duplicate survivor pick or an assert-shaped policy
+   * resolution, and the ENDED base row's own id when a policy resolved the
+   * conflict by retracting. Absent only when the resolution kept nothing at
+   * all — a callback that retracts an opposing-relations conflict, where no
+   * assertion and no base row is left to name.
+   */
+  survivorAssertionId?: string | undefined;
   supersededAssertionIds: readonly string[];
+  /**
+   * WHICH rule chose the survivor. `"policy"` means the caller's
+   * `onAssertionConflict` arbitrated a conflict no rule could resolve, and
+   * {@link IdentityReconciliation.policy} names the arm it used.
+   */
   rule: "earliest-valid-from" | "code-point-id" | "committed-id" | "policy";
+  /**
+   * The `onAssertionConflict` arm that decided, present exactly when `rule` is
+   * `"policy"`: the policy string, or `"callback"` for a function policy
+   * (whose source is never recorded). This is what
+   * `IdentityDecisionProvenance.policy` is built from, so a merge that
+   * arbitrated nothing by policy records no policy string.
+   */
   policy?: string | undefined;
   branches: readonly BranchId[];
 }>;

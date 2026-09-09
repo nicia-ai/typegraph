@@ -2126,13 +2126,6 @@ function identityUnresolvedConflictSortKey(
     case "separation": {
       return { semanticKey: conflict.kind, a: conflict.a, b: conflict.b };
     }
-    case "uniqueness": {
-      return {
-        semanticKey: `${conflict.kind}|${conflict.constraintName}`,
-        a: conflict.members[0] ?? UNKEYED_ENTITY_REF,
-        b: conflict.members[1] ?? UNKEYED_ENTITY_REF,
-      };
-    }
     case "provenance": {
       return {
         semanticKey: conflict.kind,
@@ -3051,8 +3044,15 @@ function tryNormalize<G extends GraphDef>(
   try {
     return ok(normalizeMergeOptions(optionsInput));
   } catch (error) {
+    // A refusal the normalizer already spelled as a typed invalid-option error
+    // travels unchanged: re-wrapping it would bury the `details.option` the
+    // caller needs to know WHICH option was refused (§3.3). Anything else —
+    // a zod parse failure, a bare validation throw — becomes the generic
+    // invalid-options refusal with the original attached as its cause.
     return err(
-      new InvalidMergeOptionsError("Invalid merge options.", { cause: error }),
+      error instanceof InvalidMergeOptionsError ? error : (
+        new InvalidMergeOptionsError("Invalid merge options.", { cause: error })
+      ),
     );
   }
 }

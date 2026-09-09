@@ -141,6 +141,69 @@ describe.each(backendMatrix())(
     });
 
     /**
+     * The policy arm that DECIDED reaches the transition log. A function
+     * policy is the only arm that can arbitrate an opposing-relations
+     * conflict (the string arms have no assert/retract axis to decide there),
+     * so it is what makes `decision.policy` observable end to end.
+     */
+    it("records the policy arm that arbitrated an identity conflict", async () => {
+      const target = await baseWithTwoPeople();
+      const sameBranch = unwrap(
+        await branch(target, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await sameBranch.store.identity.assertSame(
+        { kind: "Person", id: "ada" },
+        { kind: "Person", id: "ada2" },
+      );
+      const differentBranch = unwrap(
+        await branch(target, () => makeBackend(), { id: BRANCH_B }),
+      );
+      await differentBranch.store.identity.assertDifferent(
+        { kind: "Person", id: "ada" },
+        { kind: "Person", id: "ada2" },
+      );
+
+      const result = await merge(target, [sameBranch, differentBranch], {
+        branchOrder: [BRANCH_A, BRANCH_B],
+        identity: {
+          onAssertionConflict: (conflict) => {
+            const same = conflict.asserted.find(
+              (staged) => staged.assertion.relation === "same",
+            );
+            return same === undefined ?
+                { kind: "unresolved" }
+              : { kind: "assert", assertionId: same.assertion.id };
+          },
+        },
+      });
+      if (isErr(result)) throw result.error;
+      expect(result.data.identityReconciliations).toHaveLength(1);
+      expect(result.data.identityReconciliations[0]).toMatchObject({
+        rule: "policy",
+        policy: "callback",
+      });
+      expect(
+        await target.identity.areSame(
+          { kind: "Person", id: "ada" },
+          { kind: "Person", id: "ada2" },
+        ),
+      ).toBe(true);
+
+      const ctx = storeRuntime(target).identityContext();
+      const transitions = await identityTransitionsOf(ctx, {
+        kind: "Person",
+        id: "ada",
+      });
+      const decided = transitions.filter(
+        (transition) => transition.decision?.policy !== undefined,
+      );
+      expect(decided.length).toBeGreaterThan(0);
+      for (const transition of decided) {
+        expect(transition.decision?.policy).toBe("assertion:callback");
+      }
+    });
+
+    /**
      * T9's end-to-end twin — `"flag"` produces an APPLICABLE plan, `"refuse"`
      * does not, from ONE fixture: two branches assert opposing relations for
      * the same pair, which no rule can arbitrate.

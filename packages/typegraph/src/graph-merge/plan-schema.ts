@@ -586,7 +586,7 @@ const identityReconciliationSchema = z
     a: mergePlanEntityRefSchema,
     b: mergePlanEntityRefSchema,
     relation: z.enum(["same", "different"]),
-    survivorAssertionId: nonEmptyStringSchema,
+    survivorAssertionId: nonEmptyStringSchema.optional(),
     supersededAssertionIds: z.array(nonEmptyStringSchema),
     rule: z.enum([
       "earliest-valid-from",
@@ -622,8 +622,8 @@ const identityUnresolvedConflictSchema = z.discriminatedUnion("kind", [
       reason: z.enum([
         "retract-reassert",
         "opposing-relations",
-        "id-reuse",
         "cross-kind-pairing",
+        "out-of-scope-pairing",
       ]),
       semanticKey: nonEmptyStringSchema,
       a: mergePlanEntityRefSchema,
@@ -640,14 +640,6 @@ const identityUnresolvedConflictSchema = z.discriminatedUnion("kind", [
       b: mergePlanEntityRefSchema,
       assertionIds: z.array(nonEmptyStringSchema),
       source: matchSourceSchema.optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("uniqueness"),
-      constraintName: nonEmptyStringSchema,
-      members: z.array(mergePlanEntityRefSchema),
-      assertionIds: z.array(nonEmptyStringSchema),
     })
     .strict(),
   z

@@ -24,7 +24,6 @@ export const MERGE_ERROR_CODES = {
   constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT",
   identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT",
   identitySeparationConflict: "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT",
-  identityUniquenessConflict: "GRAPH_MERGE_IDENTITY_UNIQUENESS_CONFLICT",
   identityProvenanceConflict: "GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT",
   acyclicityConflict: "GRAPH_MERGE_ACYCLICITY_CONFLICT",
   baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH",
@@ -270,11 +269,10 @@ export class MergeCompositionOrphanError extends MergeError {
 
 /**
  * The identity dimension of a merge refusal: opposing or retract/reassert
- * truth, a class-lifted `different` that vetoes a match, a uniqueness
- * collision an identity pairing induced, or contradictory provenance across
- * paired members.
+ * truth, a class-lifted `different` that vetoes a match, or contradictory
+ * provenance across paired members.
  *
- * ONE class, four codes. Each of those is a distinct machine-readable
+ * ONE class, three codes. Each of those is a distinct machine-readable
  * `MERGE_ERROR_CODES` entry so a caller can branch precisely, but they share
  * this class — and therefore `category: "conflict"` — so every consumer that
  * already handles an identity merge conflict keeps handling all of them, and
@@ -294,11 +292,10 @@ export class IdentityMergeConflictError extends MergeError {
   }
 }
 
-/** The four codes {@link IdentityMergeConflictError} can carry. */
+/** The three codes {@link IdentityMergeConflictError} can carry. */
 export type IdentityMergeConflictCode =
   | typeof MERGE_ERROR_CODES.identityConflict
   | typeof MERGE_ERROR_CODES.identitySeparationConflict
-  | typeof MERGE_ERROR_CODES.identityUniquenessConflict
   | typeof MERGE_ERROR_CODES.identityProvenanceConflict;
 
 /** One offending edge named in an {@link AcyclicityMergeConflictError}. */
