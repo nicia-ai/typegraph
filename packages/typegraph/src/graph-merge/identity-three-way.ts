@@ -43,7 +43,7 @@ import type {
  * Two assertions sharing this key describe the same claim about the same
  * pair, whatever window each one carries.
  */
-export function identitySemanticKey(
+function identitySemanticKey(
   assertion: IdentityTransferAssertion,
 ): string {
   return identityAssertionSemanticKey(
@@ -76,7 +76,7 @@ export function identityDedupeKey(
  * (an id the target already holds with the exact staged truth always wins
  * regardless of this order) apply it before falling back to this comparator.
  */
-export function compareIdentitySurvivors(
+function compareIdentitySurvivors(
   left: IdentityTransferAssertion,
   right: IdentityTransferAssertion,
 ): number {
