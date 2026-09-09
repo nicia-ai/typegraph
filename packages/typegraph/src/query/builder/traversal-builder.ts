@@ -717,6 +717,78 @@ export class TraversalBuilder<
   }
 
   /**
+   * Finalizes the traversal against an explicit, already-resolved set of
+   * target node kinds, rather than one compile-time-known kind (`to`) or one
+   * runtime-resolved kind (`toDynamic`).
+   *
+   * `parts()`/`wholes()` (`QueryBuilder`) are today's one caller: the
+   * composition part/whole closure under a kind can itself span several node
+   * kinds with different schemas, computed from the registry rather than
+   * named by the query author. The alias is dynamic, like `toDynamic`, for
+   * the same reason — a heterogeneous closure has no single schema to type
+   * the accessor against.
+   *
+   * `alias` is a bare `A`, not `UniqueAlias<A, Aliases>`: `parts()`/`wholes()`
+   * build the `TraversalBuilder` this runs on over the generic `AliasMap`
+   * upper bound rather than the calling query's actual alias map (the
+   * composition closure has already been reduced to a flat kind array by
+   * then, so there is no specific `Aliases` left to check against), and
+   * `keyof AliasMap` is `string` — every `A` would fail the collision check
+   * vacuously. The real duplicate-alias guard already ran, against the real
+   * `Aliases`, on `QueryBuilder.parts`/`.wholes`'s own public signature.
+   *
+   * Validates like `toDynamic`, not merely `to`'s compile-time endpoint
+   * check: an empty `kinds` array refuses rather than silently compiling to
+   * a filter no row can match, each kind must be registered
+   * (`KindNotFoundError` otherwise), and each runs `#assertValidEndpoint`.
+   * `parts()`/`wholes()`'s own registry-derived `targetKindList` pays
+   * nothing for this — it is already registered and endpoint-valid by
+   * construction — but `toKindSet` is a public finalizer like its siblings,
+   * so it cannot skip the checks they apply (Ed-r2-2).
+   */
+  toKindSet<A extends string>(
+    kinds: readonly string[],
+    alias: A,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  > {
+    validateSqlIdentifier(alias);
+
+    if (kinds.length === 0) {
+      throw new ConfigurationError(
+        `toKindSet(alias: "${alias}") requires at least one kind; an empty kind set would compile to a filter no row can match instead of refusing the invalid traversal.`,
+        { code: "EMPTY_KIND_SET", alias },
+      );
+    }
+    for (const kind of kinds) {
+      if (!this.#config.registry.hasNodeType(kind)) {
+        throw new KindNotFoundError(kind, "node", {
+          graphId: this.#config.graphId,
+        });
+      }
+      this.#assertValidEndpoint(kind);
+    }
+
+    const baseState = this.#stateWithTraversal(alias, kinds);
+    const newState: QueryBuilderState = {
+      ...baseState,
+      dynamicNodeAliases: new Set([...baseState.dynamicNodeAliases, alias]),
+    };
+
+    return new QueryBuilderClass(this.#config, newState) as QueryBuilder<
+      G,
+      Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
+      EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+      RecAliases & BuildRecursiveAliases<DC, PC, A>,
+      CoordinateState
+    >;
+  }
+
+  /**
    * Builds the next `QueryBuilderState` after appending a traversal
    * targeting `alias` with `kinds`. Shared by `to` and `toDynamic`.
    */

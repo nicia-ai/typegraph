@@ -2472,6 +2472,7 @@ store.subgraph<EK, NK>(
 | `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to both nodes and edges along the traversal — same semantics as `store.query()` and collection reads |
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 | `project` | `{ nodes?, edges? }` | *(none)* | Per-kind field projection — see [Projection](#subgraph-projection) below |
+| `composition` | `boolean` | `false` | Close the root over its declared composition parts — see [Composition export](#composition-export) below |
 
 **Result:**
 
@@ -2554,6 +2555,37 @@ const neighborhood = await store.subgraph(skill.id, {
   maxDepth: 3,
 });
 ```
+
+#### Composition export
+
+`composition: true` closes the root over its declared `partOf`/`hasPart`
+parts — the whole-plus-parts export unit — in addition to whatever `edges`
+already lists. It walks every composition edge kind transitively under the
+root's kind (see [Composition](/ontology#composition) in the ontology
+guide), regardless of orientation, so a mix of `part -> whole` and `whole ->
+part` (`has_*`) edges in the same chain is exported in one call:
+
+```typescript
+const sg = await store.subgraph(episode.id, {
+  edges: [],
+  composition: true,
+});
+
+// sg.nodes includes the Episode and every Segment transitively part of it,
+// reached through whichever composition edge kind realizes each level —
+// no need to name segmentOf/episodeOf/... by hand.
+```
+
+This is set-level, not per-root-kind-required: a root whose kind declares
+no composition parts contributes nothing extra and the read still runs
+normally. A graph that declares no composition relation at all cannot
+honor the option meaningfully and throws `ConfigurationError`
+(`COMPOSITION_NO_PARTS_DECLARED`) rather than silently running as if
+`composition` were absent.
+
+Composition edges added this way are not necessarily members of the
+compile-time `edges` list, so list them there too if you want typed access
+to their rows in `adjacency` / `reverseAdjacency`.
 
 #### Subgraph Projection
 

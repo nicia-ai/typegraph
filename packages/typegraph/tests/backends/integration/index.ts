@@ -13,6 +13,7 @@ export { registerClaimCompensationIntegrationTests } from "./claim-compensation"
 export { registerClaimLookupPreferenceIntegrationTests } from "./claim-lookup-preference";
 export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identity";
 export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
+export { registerCompositionNavigationIntegrationTests } from "./composition-navigation";
 export { registerConstraintFenceErrorIntegrationTests } from "./constraint-fence-errors";
 export { registerConstraintFenceTransactionHealthTests } from "./constraint-fence-transaction-health";
 export { registerConstraintFenceVerificationIntegrationTests } from "./constraint-fence-verification";

@@ -19,12 +19,10 @@ import { type DialectAdapter } from "../query/dialect/types";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { type TraversalDirection } from "./algorithms/types";
 
-type BuildReachableCteOptions = Readonly<{
+type ReachableCteCore = Readonly<{
   graphId: string;
   sourceId: string;
-  edgeKinds: readonly string[];
   maxHops: number;
-  direction: TraversalDirection;
   cyclePolicy: RecursiveCyclePolicy;
   includePath: boolean;
   /**
@@ -51,14 +49,38 @@ type BuildReachableCteOptions = Readonly<{
   operation: string;
 }>;
 
-export function buildReachableCte(
-  options: BuildReachableCteOptions,
-): SqlFragment {
+type BuildReachableCteOptions = ReachableCteCore &
+  Readonly<{
+    edgeKinds: readonly string[];
+    direction: TraversalDirection;
+  }>;
+
+type PreparedReachableCte = Readonly<{
+  baseCase: SqlFragment;
+  recursiveColumns: readonly SqlFragment[];
+  recursiveWhere: readonly SqlFragment[];
+  forceWorktableOuterJoinOrder: boolean;
+  schema: SqlSchema;
+}>;
+
+/**
+ * Everything a reachable-CTE's base case and recursive WHERE clauses need
+ * that does not depend on direction: temporal filters, the recorded-schema
+ * swap, path/cycle tracking, and the edge-kind filter (evaluated against
+ * whatever superset of kinds the caller's shape requires). Shared by
+ * {@link buildReachableCte} (one uniform direction) and
+ * {@link buildDirectedReachableCte} (two edge-kind-scoped directions), so
+ * the temporal/path/cycle machinery cannot drift between them.
+ */
+function prepareReachableCte(
+  options: ReachableCteCore,
+  edgeKindsForFilter: readonly string[],
+): PreparedReachableCte {
   assertRecursiveTraversal(options.recursiveTraversal, options.operation);
   const trackPath = options.cyclePolicy === "prevent" || options.includePath;
   const edgeKindFilter = compileKindFilter(
     sql.raw("e.kind"),
-    options.edgeKinds,
+    edgeKindsForFilter,
   );
   const currentTimestamp = currentReadInstant();
   const nodeTemporalFilter = compileTemporalFilter({
@@ -122,18 +144,77 @@ export function buildReachableCte(
   ];
   if (cycleCheck !== undefined) recursiveWhere.push(cycleCheck);
 
-  const forceWorktableOuterJoinOrder =
-    options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
+  return {
+    baseCase,
+    recursiveColumns,
+    recursiveWhere,
+    forceWorktableOuterJoinOrder:
+      options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
+    schema,
+  };
+}
+
+export function buildReachableCte(
+  options: BuildReachableCteOptions,
+): SqlFragment {
+  const prepared = prepareReachableCte(options, options.edgeKinds);
 
   const recursiveCase = compileRecursiveBranch({
-    recursiveColumns,
-    whereClauses: recursiveWhere,
+    recursiveColumns: prepared.recursiveColumns,
+    whereClauses: prepared.recursiveWhere,
     direction: options.direction,
-    forceWorktableOuterJoinOrder,
-    schema,
+    forceWorktableOuterJoinOrder: prepared.forceWorktableOuterJoinOrder,
+    schema: prepared.schema,
   });
 
-  return sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`;
+  return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;
+}
+
+type BuildDirectedReachableCteOptions = ReachableCteCore &
+  Readonly<{
+    /** Edge kinds walked in the "out" direction (`e.from_id = r.id`). */
+    outEdgeKinds: readonly string[];
+    /** Edge kinds walked in the "in" direction (`e.to_id = r.id`). */
+    inEdgeKinds: readonly string[];
+  }>;
+
+/**
+ * A reachable CTE whose recursive term walks two edge-kind groups in two
+ * different, fixed directions — every hop tries both groups against the
+ * current frontier row, unioned within the SAME recursive term via an OR on
+ * the join condition, never as two separate recursive terms (PostgreSQL
+ * refuses more than one self-reference in a recursive CTE, even split
+ * across `UNION ALL` branches).
+ *
+ * This is what lets a composition closure cross a relation that mixes
+ * `part -> whole` and `whole -> part` (`has_*`) realizing edges across
+ * levels of the same tree, without walking `direction: "both"` — which
+ * would also climb from a mid-tree root to its ancestors and re-descend
+ * into siblings (Ed-01). A uniform `edgeKinds`+`direction` traversal
+ * ({@link buildReachableCte}) cannot express "these kinds forward, those
+ * kinds reversed" in one term; this function is the composition-specific
+ * generalization of `buildReachableCte`'s `"both"` case, scoped to two
+ * caller-chosen edge-kind groups instead of one edge-kind set walked both
+ * ways.
+ */
+export function buildDirectedReachableCte(
+  options: BuildDirectedReachableCteOptions,
+): SqlFragment {
+  const prepared = prepareReachableCte(options, [
+    ...options.outEdgeKinds,
+    ...options.inEdgeKinds,
+  ]);
+
+  const recursiveCase = buildDirectedGroupsBranch({
+    recursiveColumns: prepared.recursiveColumns,
+    whereClauses: prepared.recursiveWhere,
+    outEdgeKinds: options.outEdgeKinds,
+    inEdgeKinds: options.inEdgeKinds,
+    forceWorktableOuterJoinOrder: prepared.forceWorktableOuterJoinOrder,
+    schema: prepared.schema,
+  });
+
+  return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;
 }
 
 type CompileRecursiveBranchOptions = Readonly<{
@@ -232,4 +313,46 @@ function buildBidirectionalBranch(
   }
 
   return sql`${options.selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON (e.from_id = r.id OR e.to_id = r.id) ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+}
+
+type DirectedGroupsBranchOptions = Readonly<{
+  recursiveColumns: readonly SqlFragment[];
+  whereClauses: readonly SqlFragment[];
+  outEdgeKinds: readonly string[];
+  inEdgeKinds: readonly string[];
+  forceWorktableOuterJoinOrder: boolean;
+  schema: SqlSchema;
+}>;
+
+/**
+ * The directed-groups counterpart of {@link buildBidirectionalBranch}: an
+ * edge row matches this frontier row either by starting from it (`e.from_id
+ * = r.id`), restricted to `outEdgeKinds`, or by ending at it (`e.to_id =
+ * r.id`), restricted to `inEdgeKinds` — never both regardless of kind, which
+ * is what `buildBidirectionalBranch` does instead. An edge kind present in
+ * neither group can never match (`compileKindFilter([])` compiles to
+ * `1 = 0`), so a caller may pass one empty group for a uniform-orientation
+ * relation and get exactly the single-direction shape.
+ */
+function buildDirectedGroupsBranch(
+  options: DirectedGroupsBranchOptions,
+): SqlFragment {
+  const selectClause = sql`SELECT ${sql.join([...options.recursiveColumns], sql`, `)}`;
+  const outKindFilter = compileKindFilter(
+    sql.raw("e.kind"),
+    options.outEdgeKinds,
+  );
+  const inKindFilter = compileKindFilter(
+    sql.raw("e.kind"),
+    options.inEdgeKinds,
+  );
+  const joinCondition = sql`((e.from_id = r.id AND (${outKindFilter})) OR (e.to_id = r.id AND (${inKindFilter})))`;
+  const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.from_id = r.id AND (${outKindFilter}) AND n.id = e.to_id AND n.kind = e.to_kind) OR (e.to_id = r.id AND (${inKindFilter}) AND n.id = e.from_id AND n.kind = e.from_kind))`;
+
+  if (options.forceWorktableOuterJoinOrder) {
+    const allWhere = [...options.whereClauses, joinCondition];
+    return sql`${selectClause} FROM reachable r CROSS JOIN ${options.schema.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
+  }
+
+  return sql`${selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON ${joinCondition} ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
 }
