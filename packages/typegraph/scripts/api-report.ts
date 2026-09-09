@@ -609,6 +609,13 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // exported deliberately from `src/graph-merge/index.ts` rather than left as
 // debt, which retires more forgotten exports than the port adds.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
+  // Roadmap F (meta-edge removal): removing the public `InferenceType`
+  // union (never re-exported from most entrypoints, only pulled in
+  // transitively through `MetaEdgeProperties`/`SerializedMetaEdge`) dropped
+  // exactly one forgotten export apiece from every entrypoint below that
+  // saw its count change — every value here is measured lower than before,
+  // never raised.
+  //
   // Item E.2: `CompositionExistence` (the `existence: "optional" | "required"`
   // union) is a new public type, re-exported directly only from `.` and
   // `./ontology` (alongside its existing sibling `CompositionPartSide`).

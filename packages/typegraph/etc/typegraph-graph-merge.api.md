@@ -6671,6 +6671,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>[]) => Promise<void>;
+    detachDeletedImportedIdentityNode: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, reference: Readonly<{
+        kind: string;
+        id: string;
+    }>) => Promise<void>;
     importIdentityAssertionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";
