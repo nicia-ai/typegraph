@@ -235,7 +235,7 @@ import {
   isAutocommitSingleStatementWrite,
 } from "./autocommit-single-statement";
 import {
-  cascadedPartReferences as cascadedPartReferences,
+  cascadedPartReferences,
   type CompositionCascadePlan,
   planCompositionCascade,
 } from "./composition-cascade";

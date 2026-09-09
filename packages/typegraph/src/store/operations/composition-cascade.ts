@@ -377,9 +377,17 @@ export async function planCompositionCascade(
         : { kind: row.from_kind, id: row.from_id };
       // By `row.kind`, not "the first declared pair between these two
       // kinds": two realizing edges may hold the same (part, whole) pair
-      // (E-a-2), and their populations are per-edge-kind declarations, so a
-      // first-match lookup could admit this row under the OTHER edge's
-      // population predicate.
+      // (E-a-2), and the pair this row is judged under must be the one the
+      // row itself realizes. NOT a population fix — population cannot differ
+      // between two pairs applicable to one concrete part kind
+      // (`ONTOLOGY_COMPOSITION_POPULATION_MIXED` refuses that ontology) — so
+      // the verdict below is the same either way today. It is the INVARIANT
+      // below that the by-`via` lookup keeps honest: the "no declared pair"
+      // throw is reachable only from a row no declared pair admits, which
+      // `ONTOLOGY_COMPOSITION_VIA_MIXED` already rules out at registry-build
+      // time (every endpoint pair a composition edge kind admits must itself
+      // be a declared pair) — which is exactly what makes it a
+      // should-be-impossible invariant rather than a user-facing refusal.
       const pair = ctx.registry.compositionPairVia(
         part.kind,
         wholeOfRow.kind,
@@ -387,7 +395,7 @@ export async function planCompositionCascade(
       );
       if (pair === undefined) {
         throw new CompilerInvariantError(
-          `planCompositionCascade read composition edge "${row.kind}" between "${part.kind}" and "${wholeOfRow.kind}", but the registry declares no composition pair for that combination.`,
+          `planCompositionCascade read composition edge "${row.kind}" between "${part.kind}" and "${wholeOfRow.kind}", but the registry declares no composition pair between them realized by that edge kind.`,
           {
             edgeKind: row.kind,
             partKind: part.kind,
