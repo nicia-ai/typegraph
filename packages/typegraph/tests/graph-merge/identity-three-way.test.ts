@@ -297,6 +297,37 @@ describe("T9 — 'flag' plans applicably; 'refuse' does not, for the same fixtur
 });
 
 /**
+ * ORDER IS BEHAVIOR: a staging set that trips more than one check must report
+ * the error it always has. The classifier's cross-cutting refusals run first,
+ * then the structural one-id-one-truth checks — moving either past the other
+ * changes which error a caller sees for the same input.
+ */
+describe("validation order across the classifier and the structural checks", () => {
+  it("reports the opposing-relations refusal, not the id collision it also carries", () => {
+    const opposing: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      relation: "different",
+      id: "d-1",
+    };
+    const staging = stagingWithIdentityChanges([
+      { branchId: BRANCH_A, assertion: { ...SAME_PAIR, id: "dup" } },
+      {
+        branchId: BRANCH_B,
+        assertion: {
+          ...SAME_PAIR,
+          id: "dup",
+          validFrom: "2024-05-01T00:00:00.000Z",
+        },
+      },
+      { branchId: BRANCH_B, assertion: opposing },
+    ]);
+    expect(() => planIdentityChanges(staging, new Map())).toThrow(
+      "Branches asserted opposing identity relations for one endpoint pair.",
+    );
+  });
+});
+
+/**
  * A resolving policy is a DECISION, and the reconciliation it produces is the
  * only place that decision is recorded (`rule: "policy"`, plus the arm's own
  * name) — `IdentityDecisionProvenance.policy` is built from nothing else.

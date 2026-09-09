@@ -217,18 +217,6 @@ export function planIdentityChanges(
   reconciliations: readonly IdentityReconciliation[];
   unresolved: readonly IdentityUnresolvedConflict[];
 }> {
-  // One id, one truth — over the RAW staged assertions, BEFORE the semantic
-  // survivor dedupe: two branches staging one id for the same pair with
-  // different validFrom values collapse into one survivor under the semantic
-  // key (which excludes validity), so a later check would never see the
-  // collision — while the report would list the id as both applied and
-  // dropped.
-  assertOneIdOneTruth(
-    staging.newIdentityAssertions.map((staged) => staged.assertion),
-    NO_STORED_ASSERTIONS,
-  );
-  assertRetractedIdsHaveOneTruth(staging);
-
   // Staged ids the target ALREADY holds with the exact staged truth. The
   // classifier's survivor rule must prefer these: the applier is idempotent
   // per semantic pair, so a freshly minted branch id can never displace the
@@ -251,6 +239,26 @@ export function planIdentityChanges(
     onAssertionConflict,
     committedIds,
   );
+
+  // One id, one truth — over the RAW staged assertions, never the classifier's
+  // survivors: two branches staging one id for the same pair with different
+  // validFrom values collapse into one survivor under the semantic key (which
+  // excludes validity), so a check reading the survivors would never see the
+  // collision — while the report would list the id as both applied and
+  // dropped.
+  //
+  // ORDER IS BEHAVIOR. A staging set that trips more than one check must
+  // report the same error it always has, so the two structural checks run
+  // where they always did relative to the classifier's own refusals:
+  // opposing-relations, then the retract/reassert race (both inside
+  // `planIdentityThreeWay`), then one-id-one-truth, then the retraction's
+  // two-truths check. The classifier throws nothing after those two arms, so
+  // running these afterwards over the raw slices is exactly that order.
+  assertOneIdOneTruth(
+    staging.newIdentityAssertions.map((staged) => staged.assertion),
+    NO_STORED_ASSERTIONS,
+  );
+  assertRetractedIdsHaveOneTruth(staging);
 
   const retractionById = new Map<string, IdentityTransferAssertion>();
   for (const retraction of classified.retractions) {
