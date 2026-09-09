@@ -32,7 +32,10 @@ import {
   NODE_SYSTEM_COLUMN_NAMES,
 } from "../indexes/types";
 import { type JsonPointer } from "../query/json-pointer";
-import { type CompositionPartSide } from "../registry/composition-relation";
+import {
+  type CompositionExistence,
+  type CompositionPartSide,
+} from "../registry/composition-relation";
 
 // ============================================================
 // Enum Zod Schemas
@@ -332,6 +335,7 @@ const runtimeEdgeDocumentZod = z
   .loose();
 
 const compositionPartSideZod = z.enum(["from", "to"]);
+const compositionExistenceZod = z.enum(["optional", "required"]);
 
 const runtimeOntologyRelationZod = z
   .object({
@@ -340,6 +344,7 @@ const runtimeOntologyRelationZod = z
     to: z.string(),
     via: z.string().optional(),
     partSide: compositionPartSideZod.optional(),
+    existence: compositionExistenceZod.optional(),
   })
   .loose();
 
@@ -455,6 +460,8 @@ export type SerializedOntologyRelation = Readonly<{
   via?: string;
   /** R5's orientation. Meaningful only alongside `via`. */
   partSide?: CompositionPartSide;
+  /** Item E.2: whether the part must have a live whole. Meaningful only alongside `via`. */
+  existence?: CompositionExistence;
 }>;
 
 // ============================================================
@@ -700,6 +707,7 @@ export const serializedSchemaZod = z
               to: z.string(),
               via: z.string().optional(),
               partSide: compositionPartSideZod.optional(),
+              existence: compositionExistenceZod.optional(),
             })
             .loose(),
         ),

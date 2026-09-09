@@ -1631,6 +1631,7 @@ describe("composition relation round-trip (E-a-9)", () => {
               viaEdgeKind: edgeKindName,
               partSide: "from",
               population,
+              existence: "optional",
             },
           ]);
         },
@@ -1681,6 +1682,7 @@ describe("composition relation round-trip (E-a-9)", () => {
               viaEdgeKind: edgeKindName,
               partSide,
               population,
+              existence: "optional",
             },
           ]);
         },

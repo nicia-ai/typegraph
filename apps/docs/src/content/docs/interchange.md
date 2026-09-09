@@ -447,10 +447,13 @@ The contract is deliberately narrow:
   `details.reason === "composition_unsupported"`: trusted import writes no
   composition claim row and does not check the composition acyclicity
   relation, so a graph loaded this way can carry a part with two live wholes
-  or a part/whole cycle. Use `importGraphStream` for a graph with a
-  composition pair; `store.verifyConstraintFences()` reports either problem
-  after the fact if trusted import is used anyway on data prepared outside
-  TypeGraph.
+  or a part/whole cycle. This refusal covers `existence: "required"` pairs
+  too — trusted import cannot honor that guarantee any more than the
+  one-whole claim, so there is no separate reason code for it. Use
+  `importGraphStream` for a graph with a composition pair;
+  `store.verifyConstraintFences()` reports either problem (plus a required
+  part with no whole) after the fact if trusted import is used anyway on
+  data prepared outside TypeGraph.
 - Operational Identity-enabled target stores are rejected with
   `details.reason === "identity_unsupported"`; identity-bearing input is
   rejected with `details.reason === "invalid_stream"`. The trusted session
@@ -547,6 +550,31 @@ row is reported as the same per-row error rather than aborting the import.
 
 Nodes were never affected: their probe is `getNode(graphId, kind, id)`, which is
 kind-scoped, so a cross-kind id collision simply reads as absent.
+
+#### A required composition part with no whole
+
+Import writes every node row before any edge row, so whether a required-existence
+part (`existence: "required"`, see [Ontology](/ontology#existence-a-part-that-cannot-exist-without-a-whole))
+has its composition edge cannot be decided per row at insert time — only once
+the whole payload's edge set is known. A part created by this import is
+accepted when its composition edge arrives later in the SAME import (any
+batch), or when it is already attached on the target from before this import;
+otherwise it is reported as a per-row error on the node (`error` matches
+`/requires a whole/`) and its row is removed in the same transaction before
+the import commits — no orphan node row survives, and the rest of the import
+is unaffected.
+
+```typescript
+const result = await importGraph(store, data, { onConflict: "error" });
+const orphaned = result.errors.filter(
+  (entry) => entry.entityType === "node" && /requires a whole/u.test(entry.error),
+);
+```
+
+Only nodes THIS import creates are tracked this way: a required-existence node
+already live on the target that this import merely updates or leaves alone is
+never re-checked, even if it happens to have no whole (a pre-existing gap
+`store.verifyConstraintFences()` — not import — reports).
 
 #### An edge that would close a cycle
 

@@ -222,6 +222,7 @@ import {
   canFuseSchemaFenceInFirstWrite,
   isAutocommitSingleStatementWrite,
 } from "./autocommit-single-statement";
+import { assertCompositionExistencePreserved } from "./composition-create";
 import { createEdgeBatchValidationBackend } from "./edge-batch-validation";
 import {
   assertEdgeIdentityMatches,
@@ -342,7 +343,7 @@ type EdgeCreatePrepared = Readonly<{
  * the verdict it follows from; the session issues it, because a claim write
  * is a backend member only the seam may spell.
  */
-function edgeInsertWork<G extends GraphDef>(
+export function edgeInsertWork<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   prepared: EdgeCreatePrepared,
 ): EdgeInsertWork {
@@ -398,7 +399,7 @@ function buildInsertEdgeParams(
   return insertParams;
 }
 
-async function validateAndPrepareEdgeCreate<G extends GraphDef>(
+export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
   id: string,
@@ -603,7 +604,7 @@ function assertEndpointRowLive(
  * caller's `onError` hook observes it, and this runs before that transaction
  * opens.
  */
-function edgeCardinalityDeclarations<G extends GraphDef>(
+export function edgeCardinalityDeclarations<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   kind: string,
 ): EdgeCardinalityDeclarations {
@@ -2371,6 +2372,26 @@ async function performEdgeUpdate<G extends GraphDef>(
     claims: reentryClaims,
   };
 
+  // Item E.2. The refusal fires only for the write that ENDS a currently
+  // OPEN window — `existing.valid_to === undefined` — not for one that
+  // merely restates or tightens an end the row already carries: the moment
+  // of detachment already passed the first time the window closed, so
+  // re-touching an already-ended edge is not what orphans a live part.
+  if (work.validTo !== undefined && existing.valid_to === undefined) {
+    await assertCompositionExistencePreserved(
+      {
+        graphId: ctx.graphId,
+        registry: ctx.registry,
+        lock: requireDefined(
+          lock,
+          "a composition-existence-checked edge window-end reached performEdgeUpdate with no write lock",
+        ),
+      },
+      existing,
+      target,
+    );
+  }
+
   const row = await withUnmatchedEdgeUpdateRefusal(
     ctx.graphId,
     target,
@@ -3062,17 +3083,27 @@ export async function executeEdgeDelete<G extends GraphDef>(
   return runHookedWritePlan(
     ctx,
     opContext,
-    // A soft delete decides nothing a concurrent write could invalidate.
+    // A soft delete decides nothing a concurrent write could invalidate —
+    // except item E.2's composition-existence check, which is a READ, not a
+    // key a write plan fences: `assertCompositionExistencePreserved`'s own
+    // fast path (not a composition edge, or an optional-existence pair)
+    // costs nothing for the ordinary case.
     edgeWritePlan(undefined),
     backend,
-    async (session) => {
-      // No in-transaction re-read: the statement carries the expected kind and
-      // `deleted_at IS NULL`, so it is its own recheck. A concurrent writer that
-      // tombstones this edge, or hard-deletes it and recreates the id under
-      // another kind, leaves the DELETE matching zero rows — the same no-op the
-      // re-read produced, one round trip cheaper and without the window between
-      // a lock-free `getEdge` and a `(graph_id, id)`-keyed write that PostgreSQL
-      // READ COMMITTED left open.
+    async (session, target, _overlaidSession, lock) => {
+      // `gate`'s kind/from/to are immutable for the row's lifetime, so
+      // reusing it here (rather than re-reading) is safe even though the
+      // DELETE itself carries no in-transaction re-read: a concurrent writer
+      // that tombstones this edge, or hard-deletes it and recreates the id
+      // under another kind, leaves the DELETE matching zero rows — the same
+      // no-op the re-read produced, one round trip cheaper and without the
+      // window between a lock-free `getEdge` and a `(graph_id, id)`-keyed
+      // write that PostgreSQL READ COMMITTED left open.
+      await assertCompositionExistencePreserved(
+        { graphId: ctx.graphId, registry: ctx.registry, lock },
+        gate,
+        target,
+      );
       await session.retireEdge({ id, kind: expectedKind });
     },
   );
@@ -3116,7 +3147,7 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
     ctx,
     edgeWritePlan(undefined),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const rowsById = await getEdgeRowsByIds(
         target,
         ctx.batchPointRead,
@@ -3137,6 +3168,12 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
         if (current.deleted_at) continue;
         if (scheduledIds.has(id)) continue;
         scheduledIds.add(id);
+        // Item E.2, per member — see `executeEdgeDelete`'s identical check.
+        await assertCompositionExistencePreserved(
+          { graphId: ctx.graphId, registry: ctx.registry, lock },
+          current,
+          target,
+        );
         retirements.push({ id, kind: expectedKind });
       }
       // Resolution and execution share the same transaction target. The batch
@@ -3231,7 +3268,13 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
     opContext,
     edgeWritePlan(undefined),
     backend,
-    async (session) => {
+    async (session, target, _overlaidSession, lock) => {
+      // Item E.2 — see executeEdgeDelete's identical check.
+      await assertCompositionExistencePreserved(
+        { graphId: ctx.graphId, registry: ctx.registry, lock },
+        gate,
+        target,
+      );
       // No in-transaction re-read: see executeEdgeDelete. The DELETE carries the
       // expected kind, so an id concurrently re-pointed at another kind's edge
       // matches zero rows instead of destroying that other edge.

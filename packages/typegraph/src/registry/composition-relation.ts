@@ -31,6 +31,16 @@ import { type KindRegistry } from "./kind-registry";
 /** Which endpoint of the realizing edge carries the PART. R5's orientation. */
 export type CompositionPartSide = "from" | "to";
 
+/**
+ * Item E.2: whether a composition part can exist with no whole.
+ * `"required"` — the part cannot exist without a live whole, enforced at
+ * create (a bare create is refused; `partOf` must name a legal whole) and at
+ * detach (ending, soft-deleting, or hard-deleting the composition edge is
+ * refused while the part is live). Default `"optional"` — every declaration
+ * written before E.2 keeps its semantics.
+ */
+export type CompositionExistence = "optional" | "required";
+
 /** One declared composition pair and the edge that realizes it. */
 export type CompositionPair = Readonly<{
   partKind: string;
@@ -44,6 +54,13 @@ export type CompositionPair = Readonly<{
    * single value is the temporal population every composition claim reads.
    */
   population: "one" | "oneActive";
+  /**
+   * Item E.2. Total, not optional: the registry resolves the default
+   * (`"optional"`) once here so no consumer re-spells `?? "optional"`. See
+   * {@link KindRegistry.compositionExistence}, the one reader every E.2
+   * decision goes through.
+   */
+  existence: CompositionExistence;
 }>;
 
 /** THE composition relation of one graph. Everything else is derived. */
@@ -69,7 +86,8 @@ export type CompositionIssueCode =
   | "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID"
   | "ONTOLOGY_COMPOSITION_CARDINALITY"
   | "ONTOLOGY_COMPOSITION_VIA_MIXED"
-  | "ONTOLOGY_COMPOSITION_POPULATION_MIXED";
+  | "ONTOLOGY_COMPOSITION_POPULATION_MIXED"
+  | "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED";
 
 export type CompositionIssue = Readonly<{
   code: CompositionIssueCode;
@@ -279,11 +297,23 @@ export function compositionRelationFields(
   source: Readonly<{
     via?: string | undefined;
     partSide?: CompositionPartSide | undefined;
+    existence?: CompositionExistence | undefined;
   }>,
-): Readonly<{ via?: string; partSide?: CompositionPartSide }> {
+): Readonly<{
+  via?: string;
+  partSide?: CompositionPartSide;
+  existence?: CompositionExistence;
+}> {
   return {
     ...(source.via === undefined ? {} : { via: source.via }),
     ...(source.partSide === undefined ? {} : { partSide: source.partSide }),
+    // Stronger than `via`/`partSide`: an explicit `existence: "optional"` is
+    // ALSO omitted, because it is the default — emitting it would change the
+    // hash of a graph whose author merely spelled the default out (E.2's
+    // D.1/D.2-precedent serializer rule).
+    ...(source.existence === undefined || source.existence === "optional" ?
+      {}
+    : { existence: source.existence }),
   };
 }
 
@@ -463,6 +493,7 @@ export function buildCompositionRelation(
       viaEdgeKind,
       partSide,
       population,
+      existence: relation.existence ?? "optional",
     });
   }
 
@@ -525,6 +556,36 @@ export function buildCompositionRelation(
           `Node kind "${kind}" is a composition part under edges declaring different populations ` +
           `(${[...populations].toSorted((left, right) => compareStrings(left, right)).join(", ")}); ` +
           `every composition edge that can hold "${kind}" as a part must declare the same cardinality.`,
+        relation: {
+          metaEdge: META_EDGE_PART_OF,
+          from: representative.partKind,
+          to: representative.wholeKind,
+          via: representative.viaEdgeKind,
+          partSide: representative.partSide,
+        },
+      });
+    }
+  }
+
+  // Item E.2's mixed-existence refusal: R4 gives a part one whole across
+  // every declared composition relation, so "must this part have one" is a
+  // property of the part kind, not of a pair — the same argument
+  // `ONTOLOGY_COMPOSITION_POPULATION_MIXED` already makes for population.
+  // This is what makes `KindRegistry.compositionExistence` total.
+  for (const kind of candidateKinds) {
+    const applicable = pairs.filter(
+      (pair) =>
+        kind === pair.partKind || registry.isAssignableTo(kind, pair.partKind),
+    );
+    const existenceValues = new Set(applicable.map((pair) => pair.existence));
+    if (existenceValues.size > 1) {
+      const representative = requireDefined(applicable[0]);
+      issues.push({
+        code: "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED",
+        message:
+          `Node kind "${kind}" is a composition part under edges declaring different \`existence\` ` +
+          `(${[...existenceValues].toSorted((left, right) => compareStrings(left, right)).join(", ")}); ` +
+          `every composition edge that can hold "${kind}" as a part must declare the same existence.`,
         relation: {
           metaEdge: META_EDGE_PART_OF,
           from: representative.partKind,

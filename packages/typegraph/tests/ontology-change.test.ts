@@ -95,6 +95,22 @@ function relation(
   return { metaEdge, from, to, ...(via === undefined ? {} : { via }) };
 }
 
+function compositionRelation(
+  metaEdge: "partOf" | "hasPart",
+  from: string,
+  to: string,
+  via: string,
+  existence?: "optional" | "required",
+): SerializedOntologyRelation {
+  return {
+    metaEdge,
+    from,
+    to,
+    via,
+    ...(existence === undefined ? {} : { existence }),
+  };
+}
+
 function relationChangeOf(
   changes: ReturnType<typeof classifyOntologyChanges>,
   type: "added" | "removed",
@@ -604,6 +620,69 @@ describe("classifyOntologyChanges", () => {
       const after = snapshot({}, {}, incoherentRelations);
 
       expect(() => classifyOntologyChanges(before, after)).not.toThrow();
+    });
+  });
+
+  describe("an in-place `existence` flip on an already-declared partOf/hasPart pair (item E.2)", () => {
+    it('classifies optional -> required as ONE "modified" warning entry carrying both composition probes, never remove+add', () => {
+      const before = snapshot({}, EDGES_FOR_COMPOSITION, [
+        compositionRelation("partOf", "X", "Y", "edgeA"),
+      ]);
+      const after = snapshot({}, EDGES_FOR_COMPOSITION, [
+        compositionRelation("partOf", "X", "Y", "edgeA", "required"),
+      ]);
+
+      const changes = classifyOntologyChanges(before, after);
+
+      // The bug this guards: folding `existence` into the identity key made
+      // this diff as remove (breaking) + add (warning), which both defeats
+      // the rule that a pure loosening must be safe and makes `ensureSchema`
+      // refuse a tightening as "breaking-change" before the tightening
+      // preflight ever runs.
+      expect(changes).toHaveLength(1);
+      const change = requireDefined(changes[0], "expected one change");
+      expect(change.type).toBe("modified");
+      expect(change.severity).toBe("warning");
+      expect(change.details).toContain('existence: "required"');
+      expect((change.probes ?? []).map((probe) => probe.kind)).toEqual([
+        "compositionSingleWhole",
+        "compositionRequiredWhole",
+      ]);
+    });
+    // MUTATION CHECK: restore `relation.existence ?? ""` as a fifth element
+    // of the tuple `relationMapKey` (src/schema/ontology-change.ts) encodes.
+    // `changes` then has length 2 (one "removed", one "added") and the
+    // "removed" half's severity is "breaking" instead of this test's single
+    // "modified"/"warning" entry.
+
+    it('classifies required -> optional as ONE "modified" safe entry with no probe (loosening is safe)', () => {
+      const before = snapshot({}, EDGES_FOR_COMPOSITION, [
+        compositionRelation("partOf", "X", "Y", "edgeA", "required"),
+      ]);
+      const after = snapshot({}, EDGES_FOR_COMPOSITION, [
+        compositionRelation("partOf", "X", "Y", "edgeA"),
+      ]);
+
+      const changes = classifyOntologyChanges(before, after);
+
+      expect(changes).toHaveLength(1);
+      const change = requireDefined(changes[0], "expected one change");
+      expect(change.type).toBe("modified");
+      expect(change.severity).toBe("safe");
+      expect(change.probes).toBeUndefined();
+    });
+    // MUTATION CHECK: same restore as above. `changes` then has length 2,
+    // and the "removed" half (dropping the old `required` declaration)
+    // classifies as "breaking" instead of this test's single "safe" entry.
+
+    it("classifies no change at all when existence is unchanged", () => {
+      const relations = [
+        compositionRelation("partOf", "X", "Y", "edgeA", "required"),
+      ];
+      const before = snapshot({}, EDGES_FOR_COMPOSITION, relations);
+      const after = snapshot({}, EDGES_FOR_COMPOSITION, relations);
+
+      expect(classifyOntologyChanges(before, after)).toEqual([]);
     });
   });
 });

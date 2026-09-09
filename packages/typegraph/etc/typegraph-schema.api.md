@@ -202,12 +202,16 @@ type CompositionClaimScope = Readonly<{
 }>;
 
 // @public
+type CompositionExistence = "optional" | "required";
+
+// @public
 type CompositionPair = Readonly<{
     partKind: string;
     wholeKind: string;
     viaEdgeKind: string;
     partSide: CompositionPartSide;
     population: "one" | "oneActive";
+    existence: CompositionExistence;
 }>;
 
 // @public
@@ -842,6 +846,7 @@ type ExtensionOntologyRelation = Readonly<{
     to: string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public
@@ -1676,6 +1681,7 @@ class KindRegistry {
     compositionEdgeKinds(): readonly string[];
     compositionEdgeKindsOver(partKind: string): readonly string[];
     compositionEdgeKindsUnder(wholeKind: string): readonly string[];
+    compositionExistence(concretePartKind: string): CompositionExistence;
     compositionPartKindsUnder(wholeKind: string): readonly string[];
     compositionPartSide(edgeKind: string): CompositionPartSide | undefined;
     compositionPopulation(concretePartKind: string): "one" | "oneActive" | undefined;
@@ -1999,6 +2005,9 @@ export type OntologyDataProbe = Readonly<{
 }> | Readonly<{
     kind: "compositionSingleWhole";
     edgeKinds: readonly string[];
+}> | Readonly<{
+    kind: "compositionRequiredWhole";
+    edgeKinds: readonly string[];
 }>;
 
 // @public
@@ -2008,6 +2017,7 @@ type OntologyRelation = Readonly<{
     to: NodeType | AnyEdgeType | string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public
@@ -2348,6 +2358,7 @@ export type SerializedOntologyRelation = Readonly<{
     to: string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public

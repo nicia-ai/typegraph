@@ -642,6 +642,9 @@ type CompositionClaimScope = Readonly<{
 }>;
 
 // @public
+type CompositionExistence = "optional" | "required";
+
+// @public
 type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
     from?: keyof Aliases & string;
     maxHops?: number;
@@ -663,6 +666,7 @@ type CompositionPair = Readonly<{
     viaEdgeKind: string;
     partSide: CompositionPartSide;
     population: "one" | "oneActive";
+    existence: CompositionExistence;
 }>;
 
 // @public
@@ -673,6 +677,12 @@ type CompositionRelation = Readonly<{
     pairs: readonly CompositionPair[];
     edgeKinds: ReadonlySet<string>;
     partSideByEdgeKind: ReadonlyMap<string, CompositionPartSide>;
+}>;
+
+// @public
+type CompositionWholeRef = Readonly<{
+    kind: string;
+    id: string;
 }>;
 
 // @public
@@ -694,6 +704,13 @@ type ConstraintFenceViolation = Readonly<{
     family: "composition";
     target: ClaimTarget;
     edgeIds: readonly string[];
+}> | Readonly<{
+    family: "compositionExistence";
+    partKind: string;
+    parts: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[];
 }> | Readonly<{
     family: "edgeEndpointAssignability";
     edgeKind: string;
@@ -1817,6 +1834,7 @@ type ExtensionOntologyRelation = Readonly<{
     to: string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public
@@ -3077,6 +3095,7 @@ class KindRegistry {
     compositionEdgeKinds(): readonly string[];
     compositionEdgeKindsOver(partKind: string): readonly string[];
     compositionEdgeKindsUnder(wholeKind: string): readonly string[];
+    compositionExistence(concretePartKind: string): CompositionExistence;
     compositionPartKindsUnder(wholeKind: string): readonly string[];
     compositionPartSide(edgeKind: string): CompositionPartSide | undefined;
     compositionPopulation(concretePartKind: string): "one" | "oneActive" | undefined;
@@ -3385,11 +3404,7 @@ type NodeChange = Readonly<{
 
 // @public
 type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
-    create: (props: z.input<N["schema"]>, options?: Readonly<{
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-    }>) => Promise<Node<N>>;
+    create: (props: z.input<N["schema"]>, options?: NodeCreateOptions) => Promise<Node<N>>;
     getById: (id: NodeId<N>, options?: QueryOptions) => Promise<Node<N> | undefined>;
     getByIds: (ids: readonly NodeId<N>[], options?: QueryOptions) => Promise<readonly (Node<N> | undefined)[]>;
     update: (id: NodeId<N>, props: Partial<z.input<N["schema"]>>, options?: ValidityEndMutation) => Promise<Node<N>>;
@@ -3419,11 +3434,7 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
         offset?: number;
     }>, temporal?: QueryOptions) => Promise<Node<N>[]>;
     count: (temporal?: QueryOptions) => Promise<number>;
-    createFromRecord: (data: Record<string, unknown>, options?: Readonly<{
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-    }>) => Promise<Node<N>>;
+    createFromRecord: (data: Record<string, unknown>, options?: NodeCreateOptions) => Promise<Node<N>>;
     upsertById: (id: string, props: z.input<N["schema"]>, options?: Readonly<{
         validFrom?: string | null;
         onImmutableLowerBound?: "preserve" | "refuse";
@@ -3432,12 +3443,9 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
         validFrom?: string | null;
         onImmutableLowerBound?: "preserve" | "refuse";
     }> & ValidityEndMutation) => Promise<Node<N>>;
-    bulkCreate: (items: readonly Readonly<{
+    bulkCreate: (items: readonly (Readonly<{
         props: z.input<N["schema"]>;
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-    }>[]) => Promise<Node<N>[]>;
+    }> & NodeCreateOptions)[]) => Promise<Node<N>[]>;
     bulkUpsertById: (items: readonly (Readonly<{
         id: string;
         props: z.input<N["schema"]>;
@@ -3496,6 +3504,14 @@ type NodeCreateCommandResult = Readonly<{
 }>;
 
 // @public
+type NodeCreateOptions = Readonly<{
+    id?: string;
+    validFrom?: string | null;
+    validTo?: string;
+    partOf?: CompositionWholeRef;
+}>;
+
+// @public
 type NodeCurrentReads<N extends NodeType, CN extends string = string> = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
 
 // @public
@@ -3514,6 +3530,7 @@ type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbs
 // @public
 type NodeGetOrCreateByConstraintOptions = Readonly<{
     ifExists?: IfExistsMode;
+    partOf?: CompositionWholeRef;
 }>;
 
 // @public
@@ -3731,6 +3748,9 @@ type OntologyDataProbe = Readonly<{
 }> | Readonly<{
     kind: "compositionSingleWhole";
     edgeKinds: readonly string[];
+}> | Readonly<{
+    kind: "compositionRequiredWhole";
+    edgeKinds: readonly string[];
 }>;
 
 // @public (undocumented)
@@ -3740,6 +3760,7 @@ type OntologyIntrospection = Readonly<{
     to: string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
     origin: "compile-time" | "runtime";
 }>;
 
@@ -3750,6 +3771,7 @@ type OntologyRelation = Readonly<{
     to: NodeType | AnyEdgeType | string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public
@@ -4734,6 +4756,7 @@ type SerializedOntologyRelation = Readonly<{
     to: string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public
@@ -5207,6 +5230,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>[]) => Promise<void>;
+    detachDeletedImportedIdentityNode: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, reference: Readonly<{
+        kind: string;
+        id: string;
+    }>) => Promise<void>;
     importIdentityAssertionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";

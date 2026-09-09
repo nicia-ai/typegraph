@@ -20,6 +20,7 @@ import { type SchemaCommitPreflightBackend } from "../backend/types";
 import { MigrationError } from "../errors";
 import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
+import { type KindRegistry } from "../registry/kind-registry";
 import {
   compositionAcyclicRelation,
   readEdgeAcyclicityViolations,
@@ -31,6 +32,11 @@ import {
   type ConstraintFenceViolation,
   uniquenessAxisGroupFor,
 } from "../store/claims/verify";
+import {
+  readCompositionUnattachedParts,
+  requiredCompositionPartKinds,
+} from "../store/operations/composition-create";
+import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
@@ -124,6 +130,9 @@ type GroupedProbes = Readonly<{
     Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
   composition?:
     Extract<OntologyDataProbe, { kind: "compositionSingleWhole" }> | undefined;
+  compositionExistence?:
+    | Extract<OntologyDataProbe, { kind: "compositionRequiredWhole" }>
+    | undefined;
 }>;
 
 function groupProbesByKind(
@@ -140,6 +149,9 @@ function groupProbesByKind(
     Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
   let composition:
     Extract<OntologyDataProbe, { kind: "compositionSingleWhole" }> | undefined;
+  let compositionExistence:
+    | Extract<OntologyDataProbe, { kind: "compositionRequiredWhole" }>
+    | undefined;
   for (const probe of probes) {
     switch (probe.kind) {
       case "nodeDisjointness": {
@@ -162,9 +174,20 @@ function groupProbesByKind(
         composition = probe;
         break;
       }
+      case "compositionRequiredWhole": {
+        compositionExistence = probe;
+        break;
+      }
     }
   }
-  return { disjointness, uniqueness, endpoints, acyclicity, composition };
+  return {
+    disjointness,
+    uniqueness,
+    endpoints,
+    acyclicity,
+    composition,
+    compositionExistence,
+  };
 }
 
 /** The first couple of violations, rendered for a refusal message. */
@@ -175,6 +198,52 @@ function previewViolations(
     .slice(0, 2)
     .map((violation) => JSON.stringify(violation))
     .join("; ");
+}
+
+/**
+ * Item E.2. Resolves the delta's `via` edge kinds to their REQUIRED-existence
+ * part kinds against the PROPOSED registry — reusing
+ * {@link requiredCompositionPartKinds} (`../store/operations/composition-create`)
+ * rather than re-spelling "which part kinds does a required existence pair
+ * name" a second time, so this probe can never admit an `existence:
+ * "optional"` pair's part kind (which can never violate `compositionExistence`)
+ * or miss a subclass of a declared required part kind — reads
+ * {@link readCompositionUnattachedParts} for the
+ * result, dedupes, one owner of "which part kinds does this probe's
+ * edge-kind list name", shared by nothing else because this preflight is
+ * its only caller.
+ */
+async function readCompositionUnattachedPartsForEdgeKinds(
+  proposedRegistry: KindRegistry,
+  target: SchemaCommitPreflightBackend,
+  graphId: string,
+  edgeKinds: readonly string[],
+): Promise<readonly ConstraintFenceViolation[]> {
+  const requiredPartKinds = new Set(
+    requiredCompositionPartKinds(proposedRegistry),
+  );
+  const partKinds = new Set<string>();
+  for (const pair of proposedRegistry.compositionRelation().pairs) {
+    if (!edgeKinds.includes(pair.viaEdgeKind)) continue;
+    for (const concreteKind of proposedRegistry.expandSubClasses(
+      pair.partKind,
+    )) {
+      if (requiredPartKinds.has(concreteKind)) partKinds.add(concreteKind);
+    }
+  }
+  if (partKinds.size === 0) return [];
+  const unattached = await readCompositionUnattachedParts(
+    proposedRegistry,
+    target,
+    graphId,
+    [...partKinds],
+  );
+  const byPartKind = groupBy(unattached, (part) => part.kind);
+  return [...byPartKind.entries()].map(([partKind, parts]) => ({
+    family: "compositionExistence" as const,
+    partKind,
+    parts,
+  }));
 }
 
 function buildOntologyTighteningViolatedError(
@@ -388,10 +457,29 @@ export function prepareSchemaTighteningPreflight(
           [compositionRelation],
         );
 
+    // Item E.2's third composition check: for every required-existence part
+    // kind this commit's added pair(s) name, does a LIVE part already have
+    // no live whole? Delta-scoped to WHICH part kinds are checked (only
+    // those a `compositionRequiredWhole` probe names); the check itself
+    // still reads the PROPOSED registry's full composition relation for
+    // each — an already-attached part via a pre-existing edge kind under
+    // the same part kind is found, not missed, matching
+    // `readCompositionUnattachedParts`'s own docblock.
+    const compositionExistenceViolations =
+      grouped.compositionExistence === undefined ?
+        []
+      : await readCompositionUnattachedPartsForEdgeKinds(
+          proposedRegistry,
+          target,
+          params.graphId,
+          grouped.compositionExistence.edgeKinds,
+        );
+
     const violations = [
       ...claimBackedViolations,
       ...acyclicityViolations,
       ...compositionAcyclicityViolations,
+      ...compositionExistenceViolations,
     ];
     if (violations.length === 0) return;
 

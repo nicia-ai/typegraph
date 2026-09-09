@@ -244,6 +244,116 @@ describe("generated edge batch store consumer", () => {
     ).toBeUndefined();
   });
 
+  it("declines a composition edge kind realizing a required-existence part (item E.2)", () => {
+    // `assertCompositionExistencePreserved` reads the part row under the
+    // held write lock — a decision this read-free fused command cannot
+    // express, so a required-existence composition edge kind must take the
+    // portable delete path. Built directly against a marked-eligible root:
+    // the store's ordinary edge-delete paths never reach this resolver for
+    // ANY composition edge kind in the first place (`compositionAcyclicRelation`
+    // already excludes it), so only a direct call proves this guard adds
+    // anything beyond that exclusion.
+    const AedPart = defineNode("AedPart", { schema: z.object({}) });
+    const AedWhole = defineNode("AedWhole", { schema: z.object({}) });
+    const aedPartOf = defineEdge("aedPartOf", { schema: z.object({}) });
+    const requiredGraph = defineGraph({
+      id: "atomic-generated-edge-batch-composition-required-delete",
+      nodes: { AedPart: { type: AedPart }, AedWhole: { type: AedWhole } },
+      edges: {
+        aedPartOf: {
+          type: aedPartOf,
+          from: [AedPart],
+          to: [AedWhole],
+          cardinality: "one",
+        },
+      },
+      ontology: [
+        partOf(AedPart, AedWhole, { via: aedPartOf, existence: "required" }),
+      ],
+    });
+
+    const backend = {
+      capabilities: {
+        execution: { interactiveTransactions: false, atomicBatch: "root" },
+      },
+    } as GraphBackend;
+    markBundledRootAutocommitEligible(backend);
+    markBundledRootAtomicMutationPrograms(backend, {
+      deleteEdges: (deleteInput) =>
+        Promise.resolve({
+          affectedCount: deleteInput.ids.length,
+          schemaFenceMatched: true,
+        }),
+    });
+
+    expect(
+      resolveAtomicEdgeDeleteBatchExecutor({
+        backend,
+        graph: requiredGraph,
+        registry: buildKindRegistry(requiredGraph),
+        expectedKind: "aedPartOf",
+        ids: ["edge-1"],
+        schemaVersion: 1,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeUndefined();
+  });
+  // MUTATION CHECK: delete the
+  // `compositionEdgeHasRequiredExistencePart(...)` guard in
+  // `resolveAtomicEdgeDeleteBatchExecutor`
+  // (src/store/operations/atomic-mutation-program.ts). This assertion then
+  // fails.
+
+  it("accepts a composition edge kind whose part is optional-existence (item E.2)", () => {
+    const AedOptPart = defineNode("AedOptPart", { schema: z.object({}) });
+    const AedOptWhole = defineNode("AedOptWhole", { schema: z.object({}) });
+    const aedOptPartOf = defineEdge("aedOptPartOf", { schema: z.object({}) });
+    const optionalGraph = defineGraph({
+      id: "atomic-generated-edge-batch-composition-optional-delete",
+      nodes: {
+        AedOptPart: { type: AedOptPart },
+        AedOptWhole: { type: AedOptWhole },
+      },
+      edges: {
+        aedOptPartOf: {
+          type: aedOptPartOf,
+          from: [AedOptPart],
+          to: [AedOptWhole],
+          cardinality: "one",
+        },
+      },
+      ontology: [partOf(AedOptPart, AedOptWhole, { via: aedOptPartOf })],
+    });
+
+    const backend = {
+      capabilities: {
+        execution: { interactiveTransactions: false, atomicBatch: "root" },
+      },
+    } as GraphBackend;
+    markBundledRootAutocommitEligible(backend);
+    markBundledRootAtomicMutationPrograms(backend, {
+      deleteEdges: (deleteInput) =>
+        Promise.resolve({
+          affectedCount: deleteInput.ids.length,
+          schemaFenceMatched: true,
+        }),
+    });
+
+    expect(
+      resolveAtomicEdgeDeleteBatchExecutor({
+        backend,
+        graph: optionalGraph,
+        registry: buildKindRegistry(optionalGraph),
+        expectedKind: "aedOptPartOf",
+        ids: ["edge-1"],
+        schemaVersion: 1,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeDefined();
+  });
+
   it("selects the atomic executor only for the exact marked root", async () => {
     const backend = {
       capabilities: {

@@ -1,5 +1,9 @@
 import { type AnyEdgeType, type NodeType } from "../core/types";
-import { type CompositionPartSide } from "../registry/composition-relation";
+import {
+  type CompositionExistence,
+  type CompositionPartSide,
+  compositionRelationFields,
+} from "../registry/composition-relation";
 import {
   META_EDGE_BROADER,
   META_EDGE_DIFFERENT_FROM,
@@ -287,6 +291,12 @@ export type CompositionOptions = Readonly<{
   via: AnyEdgeType;
   /** R5: required only when the edge admits both orientations (e.g. same-kind containment). */
   partSide?: CompositionPartSide;
+  /**
+   * Item E.2. `"required"`: the part cannot exist without a live whole.
+   * Default `"optional"` — every declaration written before E.2 keeps its
+   * semantics.
+   */
+  existence?: CompositionExistence;
 }>;
 
 /**
@@ -305,7 +315,10 @@ export function partOf(
     from: part,
     to: whole,
     via: options.via.kind,
-    ...(options.partSide === undefined ? {} : { partSide: options.partSide }),
+    ...compositionRelationFields({
+      partSide: options.partSide,
+      existence: options.existence,
+    }),
   };
 }
 
@@ -331,7 +344,10 @@ export function hasPart(
     from: whole,
     to: part,
     via: options.via.kind,
-    ...(options.partSide === undefined ? {} : { partSide: options.partSide }),
+    ...compositionRelationFields({
+      partSide: options.partSide,
+      existence: options.existence,
+    }),
   };
 }
 

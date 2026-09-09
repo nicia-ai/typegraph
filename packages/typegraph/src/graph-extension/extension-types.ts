@@ -22,7 +22,10 @@ import {
   type TargetCardinality,
 } from "../core/types";
 import { type MetaEdgeName } from "../ontology/constants";
-import { type CompositionPartSide } from "../registry/composition-relation";
+import {
+  type CompositionExistence,
+  type CompositionPartSide,
+} from "../registry/composition-relation";
 
 // ============================================================
 // Property Types
@@ -371,6 +374,8 @@ export type ExtensionOntologyRelation = Readonly<{
   via?: string;
   /** R5's orientation. Meaningful only alongside `via`. */
   partSide?: CompositionPartSide;
+  /** Item E.2: whether the part must have a live whole. Meaningful only alongside `via`. */
+  existence?: CompositionExistence;
 }>;
 
 // ============================================================

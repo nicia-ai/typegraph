@@ -41,6 +41,7 @@ import {
 } from "../graph-extension/ontology-keys";
 import { getTypeName } from "../ontology/types";
 import {
+  type CompositionExistence,
   type CompositionPartSide,
   compositionRelationFields,
 } from "../registry/composition-relation";
@@ -113,6 +114,8 @@ export type OntologyIntrospection = Readonly<{
   via?: string;
   /** R5's orientation. Meaningful only alongside `via`. */
   partSide?: CompositionPartSide;
+  /** Item E.2: whether the part must have a live whole. Meaningful only alongside `via`. */
+  existence?: CompositionExistence;
   origin: "compile-time" | "runtime";
 }>;
 

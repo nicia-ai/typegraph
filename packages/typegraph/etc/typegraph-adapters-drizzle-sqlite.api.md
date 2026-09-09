@@ -196,6 +196,9 @@ type CompositionClaimScope = Readonly<{
 }>;
 
 // @public
+type CompositionExistence = "optional" | "required";
+
+// @public
 type CompositionPartSide = "from" | "to";
 
 // @public
@@ -4631,6 +4634,7 @@ type ExtensionOntologyRelation = Readonly<{
     to: string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public
@@ -6808,6 +6812,7 @@ type SerializedOntologyRelation = Readonly<{
     to: string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public

@@ -613,78 +613,102 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // union (never re-exported from most entrypoints, only pulled in
   // transitively through `MetaEdgeProperties`/`SerializedMetaEdge`) dropped
   // exactly one forgotten export apiece from every entrypoint below that
-  // saw its count change — every value here is measured lower than before,
-  // never raised.
+  // saw its count change under THIS ONE batch — Roadmap F only ever
+  // lowered a count, never raised one. That is not a standing guarantee
+  // for the ledger as a whole: later batches below (Item E.2 among them)
+  // document counts this ledger RAISES, each with its own gate on the
+  // exact delta and the exact new names responsible.
+  //
+  // Item E.2: `CompositionExistence` (the `existence: "optional" | "required"`
+  // union) is a new public type, re-exported directly only from `.` and
+  // `./ontology` (alongside its existing sibling `CompositionPartSide`).
+  // Every OTHER entrypoint below reaches it only transitively — through a
+  // public signature that names `CompositionOptions`/`OntologyRelation`/
+  // `CompositionPair`-derived shapes it never itself exports — so it
+  // registers as a NEW forgotten export everywhere those signatures are
+  // reachable (+1 apiece). A few entrypoints (`./backend`,
+  // `./adapters/drizzle/*`, `./adapters/drizzle/postgres/pglite`,
+  // `./adapters/drizzle/sqlite/local`, `./adapters/drizzle/sqlite/libsql`,
+  // `./adapters/drizzle/engine`) also newly forgotten-export
+  // `CompositionPartSide` for the first time at +1 each (it was already
+  // reachable at every OTHER entrypoint below before this lane), because
+  // the new `ConstraintFenceViolation.compositionExistence` member and the
+  // `ReadConstraintFenceViolationsParams`-adjacent surface it rides in on
+  // make the composition-relation types reachable from those backend
+  // entrypoints for the first time.
+  // `CompositionWholeRef` and `NodeCreateOptions` are exported directly from
+  // `.` (see `src/index.ts`), so neither registers as forgotten here — the
+  // debt is back to its pre-E.2 baseline for this entrypoint specifically.
   ".": {
     count: 410,
     sha256: "bb66b071623f7b108adbc99c1d640e6d3aa47f29f1645a38480cca0c24f2f06f",
   },
   "./adapters/drizzle/engine": {
-    count: 326,
-    sha256: "713d8e135d59c5933ed814045dcda4e9907cb6e7ed9b4acda8dacce8f95d9bb1",
+    count: 327,
+    sha256: "7a5a67c6d20c0088e8c8da016acf611805a90c4ce3df47f1934b20cabf1173a2",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 253,
-    sha256: "d515ebae2dcda48588803c3769ba7f896f337d2c2518922d70b03d1cbbe935fa",
+    count: 254,
+    sha256: "eed0e84b48cc5910f091832e3e5e6c4031006a1fedc497814ddae036b6b006a7",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 257,
-    sha256: "46c770d303c7c1336bcbf364db770f84770bae433c321481fdaec642d2c496ac",
+    count: 258,
+    sha256: "e581c1e654750b8ecc5ab985cdc9a0bf4f174652ad49f26ab286204a0ae61ae1",
   },
   "./adapters/drizzle/sqlite": {
-    count: 254,
-    sha256: "d6a0de98af563ed4eb20b703ea075d8b37266c061d719e603e69191040733a6b",
+    count: 255,
+    sha256: "14c5634ea4d61739ccbf0247418e24d528788902293a0ae0064c5356175806b3",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 257,
-    sha256: "4eafeb451f6155468f7efc1cea2f897f2c7616535f3b600e1d477912ddb1fe88",
+    count: 258,
+    sha256: "53c25a59b9a29346cb43cbc52e4b0056ac1fa8a1e6c78487d0a28c843f098e51",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 257,
-    sha256: "4eafeb451f6155468f7efc1cea2f897f2c7616535f3b600e1d477912ddb1fe88",
+    count: 258,
+    sha256: "53c25a59b9a29346cb43cbc52e4b0056ac1fa8a1e6c78487d0a28c843f098e51",
   },
   "./backend": {
-    count: 21,
-    sha256: "fbf0fba6e529961f739f68a602e7896b97108515fc4f0cdcab68c91a7f58f84d",
+    count: 22,
+    sha256: "7e3362491e07c2eb5729cb621a7994eebb2f19b6585859d9bb1abbe7f854af1b",
   },
   "./core": {
-    count: 72,
-    sha256: "c75302b1dabb728a21f9843d89d14432a97df8f07a9c513ce3832dcd8ccfded0",
+    count: 73,
+    sha256: "558fb671c7c7fc1053c0bc22a807110516596cd49364a1804abcce8d2878d621",
   },
   "./graph-extension": {
-    count: 19,
-    sha256: "7a8ee88d1a81a5cf165abb6f34e45072b14b180e200bf9bf8b9ff83015647375",
+    count: 20,
+    sha256: "f88c3ebb710441aa204483f98147921b40dd8ba978c7b87b803c561c82137638",
   },
   // MergePlanReadContext derives its read-only surface from the runtime method
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 748,
-    sha256: "5254cd3a314fd6d88b20791cf2dbb8c4d82ff5b3b796503b67bdc41cd8233eb5",
+    count: 751,
+    sha256: "8730044e7a059541aed796a599e6c6a5c298f37d4a207ec70120c3debb66cae7",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 733,
-    sha256: "ff4ae7c2e607565e6619e104900072d4c8e5cb08ce3a1088724c1a4be07b9c49",
+    count: 736,
+    sha256: "3f69434dbf424609139beb0c5b60b7dd986654907d7297878b142b6fb84bbd5e",
   },
   "./postgres/pglite": {
-    count: 730,
-    sha256: "8910191f6fce05ca905e7a984c616bd7ce46dc9646a50f58785816618a36adcc",
+    count: 733,
+    sha256: "78fb46193f0808bad988b030121a9dbbac755388b3b8b86430d43231cf043e9d",
   },
   "./profiler": {
-    count: 735,
-    sha256: "c060979abe65e40be9f63ebb6a23c4a53abe4c976e60717eef3adb39d5aefe2f",
+    count: 738,
+    sha256: "1ebfe3d3375aa0fb825520e84168d5a143450f2ee2df6c685f79d0a9a971c09e",
   },
   "./provenance": {
-    count: 741,
-    sha256: "886d33930d90fc3827e69656f3b6a190f66ffc211b0404dbd54236e9b5811542",
+    count: 744,
+    sha256: "15509713f4fe4a6c54155939de968c070e38f12d8353b65f3ad8a89d12d52a02",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -696,12 +720,12 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // signature does. +1, only on `./schema` — the sole entrypoint that
   // names `ensureSchema`.
   "./schema": {
-    count: 282,
-    sha256: "92a8fa1ad38d8093a5b4fe1d53afdfefc7fe374cbc2e8e4b263e6b04bba58a30",
+    count: 283,
+    sha256: "d151d64d59d863a37d75027fe51e40ae149a0f2fe122f5ff6751dcc9971a35c8",
   },
   "./sqlite/local": {
-    count: 730,
-    sha256: "8910191f6fce05ca905e7a984c616bd7ce46dc9646a50f58785816618a36adcc",
+    count: 733,
+    sha256: "78fb46193f0808bad988b030121a9dbbac755388b3b8b86430d43231cf043e9d",
   },
 };
 

@@ -27,6 +27,7 @@ export function graphExtensionOntologyKey(
     entry.to,
     entry.via ?? "",
     entry.partSide ?? "",
+    entry.existence ?? "",
   ]);
 }
 
@@ -37,6 +38,7 @@ export function compileTimeOntologyKey(relation: OntologyRelation): string {
     getTypeName(relation.to),
     relation.via ?? "",
     relation.partSide ?? "",
+    relation.existence ?? "",
   ]);
 }
 

@@ -17,6 +17,7 @@ export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identi
 export { registerClearIntegrationTests } from "./clear";
 export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
 export { registerCollectionAggregateIntegrationTests } from "./collection-aggregates";
+export { registerCompositionExistenceIntegrationTests } from "./composition-existence";
 export { registerCompositionFenceIntegrationTests } from "./composition-fence";
 export { registerCompositionNavigationIntegrationTests } from "./composition-navigation";
 export { registerCompositionTighteningIntegrationTests } from "./composition-tightening";

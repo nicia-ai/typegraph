@@ -172,6 +172,7 @@ describe.each(backendMatrix())(
           part: { kind: "Part", id: "p2" },
           whole: { kind: "Whole", id: "w1" },
           viaEdgeKind: "holds",
+          cause: "deleted",
         },
       ]);
 
@@ -444,6 +445,7 @@ describe.each(backendMatrix())(
           part: { kind: "Leaf", id: "l1" },
           whole: { kind: "Part", id: "p1" },
           viaEdgeKind: "holdsLeaf",
+          cause: "deleted",
         },
       ]);
 

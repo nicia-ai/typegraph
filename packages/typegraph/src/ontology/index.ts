@@ -51,3 +51,5 @@ export {
 
 // R5's orientation, for `CompositionOptions.partSide`.
 export type { CompositionPartSide } from "../registry/composition-relation";
+// Item E.2, for `CompositionOptions.existence`.
+export type { CompositionExistence } from "../registry/composition-relation";

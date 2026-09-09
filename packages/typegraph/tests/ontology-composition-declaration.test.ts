@@ -450,6 +450,63 @@ describe("composition registration checks (buildKindRegistry)", () => {
       "ONTOLOGY_COMPOSITION_POPULATION_MIXED",
     );
   });
+
+  it("ONTOLOGY_COMPOSITION_EXISTENCE_MIXED: one part kind declaring different existence across pairs (item E.2)", () => {
+    const SharedPart = defineNode("SharedPart", { schema: emptySchema });
+    const WholeOne = defineNode("WholeOne", { schema: emptySchema });
+    const WholeTwo = defineNode("WholeTwo", { schema: emptySchema });
+    const edgeOne = defineEdge("edgeOne", { schema: emptySchema });
+    const edgeTwo = defineEdge("edgeTwo", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "composition-existence-mixed",
+      nodes: {
+        SharedPart: { type: SharedPart },
+        WholeOne: { type: WholeOne },
+        WholeTwo: { type: WholeTwo },
+      },
+      edges: {
+        edgeOne: {
+          type: edgeOne,
+          from: [SharedPart],
+          to: [WholeOne],
+          cardinality: "one",
+        },
+        edgeTwo: {
+          type: edgeTwo,
+          from: [SharedPart],
+          to: [WholeTwo],
+          cardinality: "one",
+        },
+      },
+      ontology: [
+        partOf(SharedPart, WholeOne, { via: edgeOne, existence: "required" }),
+        partOf(SharedPart, WholeTwo, { via: edgeTwo }),
+      ],
+    });
+    expectCompositionCode(
+      () => buildKindRegistry(graph),
+      "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED",
+    );
+  });
+  // MUTATION CHECK: remove the mixed-existence loop in
+  // `buildCompositionRelation` (src/registry/composition-relation.ts). This
+  // graph then builds cleanly and `registry.compositionExistence("SharedPart")`
+  // answers whichever pair happens to be iterated last, silently — the
+  // exact ambiguity `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED` exists to refuse.
+
+  it("existence on a non-composition meta-edge is refused (ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN)", () => {
+    const issues = validateOntologyRelations([
+      {
+        metaEdge: "subClassOf",
+        from: "A",
+        to: "B",
+        existence: "required",
+      },
+    ]);
+    expect(issues.map((issue) => issue.code)).toContain(
+      "ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN",
+    );
+  });
 });
 
 // ============================================================
@@ -501,6 +558,7 @@ describe("a valid multi-relation composition declaration", () => {
         viaEdgeKind: "episodeOf",
         partSide: "from",
         population: "one",
+        existence: "optional",
       },
       {
         partKind: "Segment",
@@ -508,6 +566,7 @@ describe("a valid multi-relation composition declaration", () => {
         viaEdgeKind: "segmentOf",
         partSide: "from",
         population: "oneActive",
+        existence: "optional",
       },
     ]);
     expect(relation.edgeKinds).toEqual(new Set(["episodeOf", "segmentOf"]));
@@ -679,6 +738,7 @@ describe("the mirrored partOf + hasPart idiom (E-a-3)", () => {
         viaEdgeKind: "chapterOf",
         partSide: "from",
         population: "one",
+        existence: "optional",
       },
     ]);
   });
@@ -717,6 +777,7 @@ describe("two realizing edges over one (part, whole) pair (E-a-2)", () => {
         viaEdgeKind: "edgeA",
         partSide: "from",
         population: "one",
+        existence: "optional",
       },
       {
         partKind: "Part",
@@ -724,6 +785,7 @@ describe("two realizing edges over one (part, whole) pair (E-a-2)", () => {
         viaEdgeKind: "edgeB",
         partSide: "from",
         population: "one",
+        existence: "optional",
       },
     ]);
     expect(registry.compositionEdgeKindsOver("Part")).toEqual([
