@@ -2641,6 +2641,104 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
 }
 
 /**
+ * Item E.2. The composition edge's temporal window, inherited verbatim from
+ * the part's own INSERT params — the one place every create shape (single,
+ * both batch shapes) reads `validFrom`/`validTo` off `insertParams` into
+ * {@link attachCompositionCreateEdge}'s `temporal` parameter, so the three
+ * call sites cannot drift on which fields they forward.
+ */
+function compositionTemporalFromInsertParams(
+  insertParams: Pick<InsertNodeParams, "validFrom" | "validTo">,
+): Readonly<{ validFrom?: string | null; validTo?: string }> {
+  return {
+    ...(insertParams.validFrom === undefined ?
+      {}
+    : { validFrom: insertParams.validFrom }),
+    ...(insertParams.validTo === undefined ?
+      {}
+    : { validTo: insertParams.validTo }),
+  };
+}
+
+/**
+ * Item E.2. The two batch create paths' (`executeNodeCreateNoReturnBatch`,
+ * `executeNodeCreateBatch`) shared per-input composition resolution: computed
+ * from the ORIGINAL `inputs` (an item's `id` may be `undefined`, and must
+ * reach `draftNodeCreate`'s `idProvided` check unresolved — pre-filling it
+ * here would make every generated id look caller-supplied to the batch
+ * preparation that follows), synchronous and read-free so the two refusal
+ * arms throw before any row is touched. `undefined` entries (no composition
+ * work) are kept, so the result stays index-aligned with `inputs`.
+ */
+function resolveBatchCompositionWorks<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  inputs: readonly CreateNodeInput[],
+): readonly (CompositionCreateWork | undefined)[] {
+  return inputs.map((input) => resolveCompositionCreate(ctx.registry, input));
+}
+
+/**
+ * Item E.2. The constraint-fence probes a batch's composition edges owe,
+ * folded alongside the batch's own node probes by both create paths — one
+ * spelling of "filter to the resolved works, then fence each one's realizing
+ * edge kind" shared by `executeNodeCreateNoReturnBatch` and
+ * `executeNodeCreateBatch`.
+ */
+function compositionBatchConstraintProbes<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  compositionWorks: readonly (CompositionCreateWork | undefined)[],
+): readonly (ConstraintFenceReason | undefined)[] {
+  return compositionWorks
+    .filter((work): work is CompositionCreateWork => work !== undefined)
+    .map((work) =>
+      edgeWriteNeedsConstraintFence({
+        ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
+        composition: true,
+      }),
+    );
+}
+
+/**
+ * Item E.2. After every node row in a batch exists (inserted or
+ * resurrected), attaches each item's composition edge — one owner reached
+ * from every prepared row by its id, so a mixed batch of
+ * required/optional/no-`partOf` items each takes exactly the edge it owes.
+ * `preparedCreates` preserves `inputs`' order (see `prepareBatchCreates`), so
+ * zipping it against `compositionWorks` (index-aligned with the ORIGINAL
+ * `inputs`, from {@link resolveBatchCompositionWorks}) is the one place a
+ * resolved id and its composition work are joined. Shared by both batch
+ * create paths so neither re-spells the zip or the attach loop.
+ */
+async function attachBatchCompositionCreateEdges<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: WriteSession,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  preparedCreates: readonly NodeCreatePrepared[],
+  compositionWorks: readonly (CompositionCreateWork | undefined)[],
+): Promise<void> {
+  const compositionWorkByPreparedId = new Map(
+    preparedCreates
+      .map((prepared, index) => [prepared.id, compositionWorks[index]] as const)
+      .filter(
+        (entry): entry is [string, CompositionCreateWork] =>
+          entry[1] !== undefined,
+      ),
+  );
+  for (const prepared of preparedCreates) {
+    await attachCompositionCreateEdge(
+      ctx,
+      session,
+      target,
+      lock,
+      compositionWorkByPreparedId.get(prepared.id),
+      prepared.id,
+      compositionTemporalFromInsertParams(prepared.insertParams),
+    );
+  }
+}
+
+/**
  * Item E.2. Refuses `partOf` stated against an already-
  * existing node — a `getOrCreateByConstraint` call whose match resolved to
  * `"found"` or `"updated"` — naming the node's current whole when it has a
@@ -2838,14 +2936,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         lock,
         compositionWork,
         id,
-        {
-          ...(prepared.insertParams.validFrom === undefined ?
-            {}
-          : { validFrom: prepared.insertParams.validFrom }),
-          ...(prepared.insertParams.validTo === undefined ?
-            {}
-          : { validTo: prepared.insertParams.validTo }),
-        },
+        compositionTemporalFromInsertParams(prepared.insertParams),
       );
 
     const existing = prepared.tombstone;
@@ -3104,16 +3195,8 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 ): Promise<void> {
   if (inputs.length === 0) return;
 
-  // Item E.2. Synchronous, read-free, thrown before any row is touched for
-  // the two refusal arms — computed from the ORIGINAL inputs (an item's
-  // `id` may be `undefined`, and must reach `draftNodeCreate`'s `idProvided`
-  // check unresolved: pre-filling it here would make every generated id
-  // look caller-supplied to the batch preparation below). `undefined`
-  // entries (no composition work) are kept, so this stays index-aligned
-  // with `inputs` and, later, with `preparedCreates`.
-  const compositionWorks = inputs.map((input) =>
-    resolveCompositionCreate(ctx.registry, input),
-  );
+  // Item E.2 — see `resolveBatchCompositionWorks`'s docblock.
+  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs);
 
   const atomicExecutor = resolveAtomicNodeBatchExecutor({
     backend,
@@ -3174,14 +3257,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     mixedBatchWritePlan(
       [
         ...nodeBatchConstraintProbes(ctx, inputs, "create"),
-        ...compositionWorks
-          .filter((work): work is CompositionCreateWork => work !== undefined)
-          .map((work) =>
-            edgeWriteNeedsConstraintFence({
-              ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
-              composition: true,
-            }),
-          ),
+        ...compositionBatchConstraintProbes(ctx, compositionWorks),
       ],
       nodeBatchCreateRequiresIdentityLock(ctx, inputs),
     ),
@@ -3189,21 +3265,6 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     async (session, target, _overlaidSession, lock) => {
       const identity = ctx.identity;
       const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
-      // Item E.2. `preparedCreates` preserves `inputs`' order (see
-      // `prepareBatchCreates`), so this zip is index-aligned with
-      // `compositionWorks` above — the one place a resolved id and its
-      // composition work are joined.
-      const compositionWorkByPreparedId = new Map(
-        preparedCreates
-          .map(
-            (prepared, index) =>
-              [prepared.id, compositionWorks[index]] as const,
-          )
-          .filter(
-            (entry): entry is [string, CompositionCreateWork] =>
-              entry[1] !== undefined,
-          ),
-      );
 
       const partition = partitionCreates(preparedCreates);
       // ## Resurrections follow the whole insert unit
@@ -3239,29 +3300,15 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
           "restore",
         );
       }
-      // Item E.2. After every node row in the batch exists (inserted or
-      // resurrected), attach each item's composition edge — one owner
-      // (`attachCompositionCreateEdge`) reached from every prepared row by
-      // its id, so a mixed batch of required/optional/no-`partOf` items each
-      // takes exactly the edge it owes.
-      for (const prepared of preparedCreates) {
-        await attachCompositionCreateEdge(
-          ctx,
-          session,
-          target,
-          lock,
-          compositionWorkByPreparedId.get(prepared.id),
-          prepared.id,
-          {
-            ...(prepared.insertParams.validFrom === undefined ?
-              {}
-            : { validFrom: prepared.insertParams.validFrom }),
-            ...(prepared.insertParams.validTo === undefined ?
-              {}
-            : { validTo: prepared.insertParams.validTo }),
-          },
-        );
-      }
+      // Item E.2 — see `attachBatchCompositionCreateEdges`'s docblock.
+      await attachBatchCompositionCreateEdges(
+        ctx,
+        session,
+        target,
+        lock,
+        preparedCreates,
+        compositionWorks,
+      );
     },
     { didWrite: writeResultAlwaysChanges },
   );
@@ -3285,9 +3332,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   if (inputs.length === 0) return [];
 
   // Item E.2 — see `executeNodeCreateNoReturnBatch`'s identical preamble.
-  const compositionWorks = inputs.map((input) =>
-    resolveCompositionCreate(ctx.registry, input),
-  );
+  const compositionWorks = resolveBatchCompositionWorks(ctx, inputs);
 
   const atomicExecutor = resolveAtomicNodeBatchExecutor({
     backend,
@@ -3353,14 +3398,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
     mixedBatchWritePlan(
       [
         ...nodeBatchConstraintProbes(ctx, inputs, "create"),
-        ...compositionWorks
-          .filter((work): work is CompositionCreateWork => work !== undefined)
-          .map((work) =>
-            edgeWriteNeedsConstraintFence({
-              ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
-              composition: true,
-            }),
-          ),
+        ...compositionBatchConstraintProbes(ctx, compositionWorks),
       ],
       nodeRequiresIdentityLock(ctx),
     ),
@@ -3372,18 +3410,6 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         inputs,
         target,
         options,
-      );
-      // Item E.2 — see `executeNodeCreateNoReturnBatch`'s identical zip.
-      const compositionWorkByPreparedId = new Map(
-        preparedCreates
-          .map(
-            (prepared, index) =>
-              [prepared.id, compositionWorks[index]] as const,
-          )
-          .filter(
-            (entry): entry is [string, CompositionCreateWork] =>
-              entry[1] !== undefined,
-          ),
       );
 
       const partition = partitionCreates(preparedCreates);
@@ -3424,25 +3450,15 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
           "restore",
         );
       }
-      // Item E.2 — see `executeNodeCreateNoReturnBatch`'s identical step.
-      for (const prepared of preparedCreates) {
-        await attachCompositionCreateEdge(
-          ctx,
-          session,
-          target,
-          lock,
-          compositionWorkByPreparedId.get(prepared.id),
-          prepared.id,
-          {
-            ...(prepared.insertParams.validFrom === undefined ?
-              {}
-            : { validFrom: prepared.insertParams.validFrom }),
-            ...(prepared.insertParams.validTo === undefined ?
-              {}
-            : { validTo: prepared.insertParams.validTo }),
-          },
-        );
-      }
+      // Item E.2 — see `attachBatchCompositionCreateEdges`'s docblock.
+      await attachBatchCompositionCreateEdges(
+        ctx,
+        session,
+        target,
+        lock,
+        preparedCreates,
+        compositionWorks,
+      );
 
       return rows.map((row) => rowToNode(row));
     },

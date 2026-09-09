@@ -1138,14 +1138,8 @@ export type NodeCollection<
    * `undefined`. A future `validTo` is unaffected.
    */
   bulkCreate: (
-    items: readonly Readonly<{
-      props: z.input<N["schema"]>;
-      id?: string;
-      validFrom?: string | null;
-      validTo?: string;
-      /** Item E.2: the whole THIS item's composition edge attaches to. */
-      partOf?: CompositionWholeRef;
-    }>[],
+    items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
+      NodeCreateOptions)[],
   ) => Promise<Node<N>[]>;
 
   /**
