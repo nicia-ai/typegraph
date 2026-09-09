@@ -142,6 +142,32 @@ type DynamicEdgeTypeFor<T> =
   T extends RuntimeEdgeKind ? RuntimeEdgeTypeFor<T> : DynamicEdgeType;
 
 /**
+ * The `QueryBuilder` shape `parts()`/`wholes()` return: one alias definition
+ * consumed by both methods' public signatures and their internal casts, so
+ * the same generic expansion is never re-spelled four times over.
+ */
+type CompositionNavigationResult<
+  G extends GraphDef,
+  Aliases extends AliasMap,
+  EdgeAliases extends EdgeAliasMap,
+  RecursiveAliases extends RecursiveAliasMap,
+  CoordinateState extends QueryCoordinateState,
+  NA extends string,
+  O,
+> = QueryBuilder<
+  G,
+  Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
+  EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
+  RecursiveAliases &
+    BuildRecursiveAliases<
+      O extends { depth: infer D extends string } ? D : false,
+      O extends { path: infer P extends string } ? P : false,
+      NA
+    >,
+  CoordinateState
+>;
+
+/**
  * Builds projected fields for a node alias (including all metadata columns).
  */
 function buildNodeFields(alias: string): ProjectedField[] {
@@ -769,33 +795,27 @@ export class QueryBuilder<
   >(
     nodeAlias: UniqueAlias<NA, Aliases>,
     options?: O,
-  ): QueryBuilder<
+  ): CompositionNavigationResult<
     G,
-    Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
-    EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
-    RecursiveAliases &
-      BuildRecursiveAliases<
-        O extends { depth: infer D extends string } ? D : false,
-        O extends { path: infer P extends string } ? P : false,
-        NA
-      >,
-    CoordinateState
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState,
+    NA,
+    O
   > {
     return this.#navigateComposition(
       "parts",
       nodeAlias,
       options,
-    ) as unknown as QueryBuilder<
+    ) as unknown as CompositionNavigationResult<
       G,
-      Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
-      EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
-      RecursiveAliases &
-        BuildRecursiveAliases<
-          O extends { depth: infer D extends string } ? D : false,
-          O extends { path: infer P extends string } ? P : false,
-          NA
-        >,
-      CoordinateState
+      Aliases,
+      EdgeAliases,
+      RecursiveAliases,
+      CoordinateState,
+      NA,
+      O
     >;
   }
 
@@ -819,33 +839,27 @@ export class QueryBuilder<
   >(
     nodeAlias: UniqueAlias<NA, Aliases>,
     options?: O,
-  ): QueryBuilder<
+  ): CompositionNavigationResult<
     G,
-    Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
-    EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
-    RecursiveAliases &
-      BuildRecursiveAliases<
-        O extends { depth: infer D extends string } ? D : false,
-        O extends { path: infer P extends string } ? P : false,
-        NA
-      >,
-    CoordinateState
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState,
+    NA,
+    O
   > {
     return this.#navigateComposition(
       "wholes",
       nodeAlias,
       options,
-    ) as unknown as QueryBuilder<
+    ) as unknown as CompositionNavigationResult<
       G,
-      Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
-      EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
-      RecursiveAliases &
-        BuildRecursiveAliases<
-          O extends { depth: infer D extends string } ? D : false,
-          O extends { path: infer P extends string } ? P : false,
-          NA
-        >,
-      CoordinateState
+      Aliases,
+      EdgeAliases,
+      RecursiveAliases,
+      CoordinateState,
+      NA,
+      O
     >;
   }
 
