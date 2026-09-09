@@ -599,8 +599,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // saw its count change — every value here is measured lower than before,
   // never raised.
   ".": {
-    count: 408,
-    sha256: "2f80a89109da50299543425b58c61d498aefe91bfbab0da80ab522f1e64b89e1",
+    count: 410,
+    sha256: "bb66b071623f7b108adbc99c1d640e6d3aa47f29f1645a38480cca0c24f2f06f",
   },
   "./adapters/drizzle/engine": {
     count: 325,
@@ -646,28 +646,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 745,
-    sha256: "0ca0b6863662da14226ec34524ffe2406ab4a9fdf46a9152e7c1eb5d8fd30061",
+    count: 748,
+    sha256: "c187929ddca1a50181743f0596e48cb227734229b7072a6bb7b6f24cefd2ad8d",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 728,
-    sha256: "395ca9333fe33d476b6d0e040de88dfb205b59049ce0d11fd1fe4dff08b9318d",
+    count: 731,
+    sha256: "0b30f3e7aa6c67f472c314186b575333a0112c5eed5006e74f51911693a2742e",
   },
   "./postgres/pglite": {
-    count: 725,
-    sha256: "6c825a5a56aa8cbfafd7313bb1d4f7152302a88104bf7a23fc0d693508cf8012",
+    count: 728,
+    sha256: "7725262707583bee58057f22f2ac57a2782847cdbc6338bece386bc7d6da3078",
   },
   "./profiler": {
-    count: 730,
-    sha256: "f096335f794849f66be2114e2693e35f88d47672a6bb22a75d43db7654e8b9c5",
+    count: 733,
+    sha256: "bb063f317d9cdebe410899ba3dd9bac2bac52ff7fd591763589536eda7812830",
   },
   "./provenance": {
-    count: 736,
-    sha256: "d1ff0b2058450b2ebc23a581387978fc3fbcf92b621890c282af94201c580c09",
+    count: 739,
+    sha256: "dc7a03b329be5d96eda158c8096ca1ce67da74ce95a84e478c3fe463e495eb2e",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -683,8 +683,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "b2605158261e8e8a5d0ca0aaf9bffc9b64a081187f39e0ace5d0e4f577353ade",
   },
   "./sqlite/local": {
-    count: 725,
-    sha256: "6c825a5a56aa8cbfafd7313bb1d4f7152302a88104bf7a23fc0d693508cf8012",
+    count: 728,
+    sha256: "7725262707583bee58057f22f2ac57a2782847cdbc6338bece386bc7d6da3078",
   },
 };
 
