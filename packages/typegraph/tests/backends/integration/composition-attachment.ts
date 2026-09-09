@@ -158,7 +158,7 @@ export function registerCompositionAttachmentIntegrationTests(
 ): void {
   describe("Composition attachment (via / props / reparent / get-or-create)", () => {
     // ========================================================
-    // R4 — the attachment names its realizing edge
+    // The attachment names its realizing edge: `via` and `props`
     // ========================================================
 
     it("refuses an ambiguous partOf with COMPOSITION_VIA_AMBIGUOUS and writes no row", async () => {
@@ -264,7 +264,7 @@ export function registerCompositionAttachmentIntegrationTests(
     });
 
     // ========================================================
-    // R5 — reparent
+    // Moving a part: `reparent`
     // ========================================================
 
     it('reparent moves a `population: "one"` part, keeping its id and descendants', async () => {
@@ -504,7 +504,7 @@ export function registerCompositionAttachmentIntegrationTests(
     });
 
     // ========================================================
-    // R6 — `partOf` on get-or-create is a POSTCONDITION
+    // `partOf` on get-or-create is a POSTCONDITION
     // ========================================================
 
     it("getOrCreateByConstraint with partOf is idempotent when the whole already matches", async () => {
