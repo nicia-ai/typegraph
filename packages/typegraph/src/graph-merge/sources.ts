@@ -1,5 +1,6 @@
 import { createDataKeyedBag } from "../utils/object";
 import { requireDefined } from "../utils/presence";
+import { encodeTupleKey } from "../utils/tuple-key";
 /**
  * Candidate SOURCES (design §4 / §6.1) — the RECALL layer of candidate generation.
  *
@@ -926,14 +927,14 @@ export const identitySource: CandidateSource = {
     >();
     const ordered = [...identity.assertions].sort((left, right) =>
       compareStrings(
-        JSON.stringify([
+        encodeTupleKey([
           left.a.kind,
           left.a.id,
           left.b.kind,
           left.b.id,
           left.id,
         ]),
-        JSON.stringify([
+        encodeTupleKey([
           right.a.kind,
           right.a.id,
           right.b.kind,

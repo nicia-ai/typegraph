@@ -496,6 +496,43 @@ export function assertNoOpposingIdentityRelationsRaw(
 }
 
 /**
+ * The `"asserted"` outcome for a pair with at least one surviving assertion:
+ * reduces to one survivor (skipping the reduction machinery entirely when
+ * there is nothing to reduce) and attaches whatever reconciliation the
+ * survivor pick earns. The one place `classifyIdentityPair`'s three
+ * asserted-outcome arms (base absent, retracted-empty, convergent) reduce
+ * through, so they cannot drift on how a survivor is picked or reported.
+ */
+function assertedOutcome(
+  semanticKey: string,
+  asserted: readonly StagedIdentityAssertion[],
+  committedIds: ReadonlySet<string>,
+  policy: IdentityAssertionConflictPolicy,
+): IdentityPairOutcome {
+  const { survivor, superseded, rule } =
+    asserted.length === 1 ?
+      {
+        survivor: requireDefined(asserted[0]),
+        superseded: [] as readonly DroppedItem[],
+        rule: "code-point-id" as const,
+      }
+    : reduceIdentitySurvivor(asserted, committedIds);
+  return {
+    kind: "asserted",
+    survivor: survivor.assertion,
+    superseded,
+    reconciliation: buildReconciliation(
+      semanticKey,
+      asserted,
+      survivor,
+      superseded,
+      rule,
+      policy,
+    ),
+  };
+}
+
+/**
  * Classifies one identity pair — one semantic key, one validity window —
  * against the staged base slice. `base` is the target's CURRENT truth for
  * this pair at staging time (empty when the pair has none); `asserted` /
@@ -528,30 +565,7 @@ export function classifyIdentityPair(
 ): IdentityPairOutcome {
   if (base.length === 0) {
     if (asserted.length === 0) return { kind: "unchanged" };
-    if (asserted.length === 1) {
-      return {
-        kind: "asserted",
-        survivor: requireDefined(asserted[0]).assertion,
-        superseded: [],
-      };
-    }
-    const { survivor, superseded, rule } = reduceIdentitySurvivor(
-      asserted,
-      committedIds,
-    );
-    return {
-      kind: "asserted",
-      survivor: survivor.assertion,
-      superseded,
-      reconciliation: buildReconciliation(
-        semanticKey,
-        asserted,
-        survivor,
-        superseded,
-        rule,
-        policy,
-      ),
-    };
+    return assertedOutcome(semanticKey, asserted, committedIds, policy);
   }
 
   if (retracted.length === 0) {
@@ -561,27 +575,7 @@ export function classifyIdentityPair(
     // is not detected as a race at plan time — see `planIdentityThreeWay`'s
     // race detector, which only fires when a retraction is staged. Preserved
     // verbatim so the default policy stays byte-identical.
-    const { survivor, superseded, rule } =
-      asserted.length === 1 ?
-        {
-          survivor: requireDefined(asserted[0]),
-          superseded: [],
-          rule: "code-point-id" as const,
-        }
-      : reduceIdentitySurvivor(asserted, committedIds);
-    return {
-      kind: "asserted",
-      survivor: survivor.assertion,
-      superseded,
-      reconciliation: buildReconciliation(
-        semanticKey,
-        asserted,
-        survivor,
-        superseded,
-        rule,
-        policy,
-      ),
-    };
+    return assertedOutcome(semanticKey, asserted, committedIds, policy);
   }
 
   if (asserted.length === 0) {
@@ -596,27 +590,7 @@ export function classifyIdentityPair(
   // pair. `planIdentityThreeWay` itself attaches the base row's ending (at
   // the retraction's own honest instant — nothing here is a policy question)
   // once it sees this outcome alongside a non-empty `retracted` group.
-  const { survivor, superseded, rule } =
-    asserted.length === 1 ?
-      {
-        survivor: requireDefined(asserted[0]),
-        superseded: [],
-        rule: "code-point-id" as const,
-      }
-    : reduceIdentitySurvivor(asserted, committedIds);
-  return {
-    kind: "asserted",
-    survivor: survivor.assertion,
-    superseded,
-    reconciliation: buildReconciliation(
-      semanticKey,
-      asserted,
-      survivor,
-      superseded,
-      rule,
-      policy,
-    ),
-  };
+  return assertedOutcome(semanticKey, asserted, committedIds, policy);
 }
 
 /**
