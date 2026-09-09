@@ -156,6 +156,15 @@ export type Node<N extends NodeType = NodeType> = Readonly<{
   Readonly<z.infer<N["schema"]>>;
 
 /**
+ * Item E.2. The whole a required (or, as a convenience, an optional) part is
+ * created under, or detached at the moment its composition edge would end.
+ * Runtime-checked against the declared composition pairs — see
+ * `resolveCompositionCreate` (`src/store/operations/composition-create.ts`),
+ * the one owner of what this option is applied or refused against.
+ */
+export type CompositionWholeRef = Readonly<{ kind: string; id: string }>;
+
+/**
  * Input for creating a node.
  */
 export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
@@ -165,6 +174,30 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
   /** Omit to use the creation default; null explicitly requests no lower bound. */
   validFrom?: string | null;
   validTo?: string;
+  /** Item E.2: the whole this create attaches its composition edge to. */
+  partOf?: CompositionWholeRef;
+}>;
+
+/**
+ * Options for {@link NodeCollection.create}. Extracted (rather than left as
+ * `create`'s inline options object) so `partOf`'s docblock is written once
+ * for every entry point that accepts it.
+ */
+export type NodeCreateOptions = Readonly<{
+  id?: string;
+  /** Omit to use the creation default; null explicitly requests no lower bound. */
+  validFrom?: string | null;
+  validTo?: string;
+  /**
+   * Item E.2. The whole a required part is created under, atomically with
+   * the node, in one write plan: a lost composition claim or a dead/missing
+   * whole aborts the node create too. Accepted on an optional-existence kind
+   * as a convenience (the same one write); never required for one. Runtime-
+   * checked against the graph's declared composition pairs —
+   * `ConfigurationError` (`COMPOSITION_WHOLE_NOT_DECLARED`) when no pair
+   * exists from this kind to `partOf.kind`.
+   */
+  partOf?: CompositionWholeRef;
 }>;
 
 /**
@@ -718,6 +751,15 @@ export type NodeGetOrCreateByConstraintResult<N extends NodeType> = Readonly<{
 export type NodeGetOrCreateByConstraintOptions = Readonly<{
   /** Existing record behavior. Default: "return" */
   ifExists?: IfExistsMode;
+  /**
+   * Item E.2. The whole applied on the `"created"` and `"resurrected"`
+   * branches — resurrection restores the whole alone, matching a plain
+   * create. Refused with `CompositionExistenceError` on `"found"` /
+   * `"updated"` (the node already has a whole, or has none and this call did
+   * not create it): never silently dropped. Shared by
+   * `bulkGetOrCreateByConstraint`, applying to every item in the batch.
+   */
+  partOf?: CompositionWholeRef;
 }>;
 
 /**
@@ -898,11 +940,7 @@ export type NodeCollection<
    */
   create: (
     props: z.input<N["schema"]>,
-    options?: Readonly<{
-      id?: string;
-      validFrom?: string | null;
-      validTo?: string;
-    }>,
+    options?: NodeCreateOptions,
   ) => Promise<Node<N>>;
 
   /** Get a node by ID */
@@ -1019,11 +1057,7 @@ export type NodeCollection<
    */
   createFromRecord: (
     data: Record<string, unknown>,
-    options?: Readonly<{
-      id?: string;
-      validFrom?: string | null;
-      validTo?: string;
-    }>,
+    options?: NodeCreateOptions,
   ) => Promise<Node<N>>;
 
   /**
@@ -1109,6 +1143,8 @@ export type NodeCollection<
       id?: string;
       validFrom?: string | null;
       validTo?: string;
+      /** Item E.2: the whole THIS item's composition edge attaches to. */
+      partOf?: CompositionWholeRef;
     }>[],
   ) => Promise<Node<N>[]>;
 

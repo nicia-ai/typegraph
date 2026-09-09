@@ -44,6 +44,7 @@ import {
 } from "../resolved-mutation-set";
 import { type NodeRow } from "../row-mappers";
 import {
+  type CompositionWholeRef,
   type CreateNodeInput,
   type GetOrCreateAction,
   type Node,
@@ -326,6 +327,7 @@ function buildCreateInput(
     id?: string;
     validFrom?: string | null;
     validTo?: string;
+    partOf?: CompositionWholeRef;
   }>,
 ): CreateNodeInput {
   const input: {
@@ -334,10 +336,12 @@ function buildCreateInput(
     props: Record<string, unknown>;
     validFrom?: string | null;
     validTo?: string;
+    partOf?: CompositionWholeRef;
   } = { kind, props };
   if (options?.id !== undefined) input.id = options.id;
   if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.partOf !== undefined) input.partOf = options.partOf;
   return input;
 }
 
@@ -396,6 +400,7 @@ function mapBulkNodeInputs(
     id?: string;
     validFrom?: string | null;
     validTo?: string;
+    partOf?: CompositionWholeRef;
   }>[],
 ): CreateNodeInput[] {
   return items.map((item) => buildCreateInput(kind, item.props, item));
@@ -445,6 +450,7 @@ export function createNodeCollection<
         id?: string;
         validFrom?: string | null;
         validTo?: string;
+        partOf?: CompositionWholeRef;
       }>,
     ): Promise<Node<N>> {
       return this.createFromRecord(props, options);
@@ -456,6 +462,7 @@ export function createNodeCollection<
         id?: string;
         validFrom?: string | null;
         validTo?: string;
+        partOf?: CompositionWholeRef;
       }>,
     ): Promise<Node<N>> {
       const result = await executeNodeCreate(
@@ -839,6 +846,7 @@ export function createNodeCollection<
         id?: string;
         validFrom?: string | null;
         validTo?: string;
+        partOf?: CompositionWholeRef;
       }>[],
     ): Promise<Node<N>[]> {
       const batchInputs = mapBulkNodeInputs(kind, items);

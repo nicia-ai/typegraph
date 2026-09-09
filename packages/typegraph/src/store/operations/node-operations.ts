@@ -104,6 +104,7 @@ import {
 } from "../../core/types";
 import {
   CompilerInvariantError,
+  CompositionExistenceError,
   ConfigurationError,
   DatabaseOperationError,
   KindNotFoundError,
@@ -174,6 +175,7 @@ import {
   checkDisjointnessConstraint,
   type ConstraintContext,
   type ConstraintFenceReason,
+  edgeWriteNeedsConstraintFence,
   nodeDeleteNeedsConstraintFence,
   nodeWriteNeedsConstraintFence,
 } from "../constraints";
@@ -234,6 +236,17 @@ import {
   planCompositionCascade,
 } from "./composition-cascade";
 import {
+  buildCompositionCreateEdgeInput,
+  type CompositionCreateWork,
+  findLiveCompositionWhole,
+  resolveCompositionCreate,
+} from "./composition-create";
+import {
+  edgeCardinalityDeclarations,
+  edgeInsertWork,
+  validateAndPrepareEdgeCreate,
+} from "./edge-operations";
+import {
   type NodeDeleteMode,
   type NodeDeletePolicy,
   nodeDeletePolicyRequiresPortablePath,
@@ -251,11 +264,12 @@ import {
   writeResultAlwaysChanges,
 } from "./write-executor";
 import { type NodeUpdateFences } from "./write-fences";
-import { nodeBatchWritePlan, nodeWritePlan } from "./write-plan";
+import { mixedWritePlan, nodeWritePlan } from "./write-plan";
 import {
   type NodeCreateWork,
   type NodeWriteSession,
   unfencedTarget,
+  type WriteSession,
   type WriteTarget,
 } from "./write-session";
 import {
@@ -415,9 +429,11 @@ function nodeFencesConstraintProbe<G extends GraphDef>(
 /**
  * The per-item constraint probes a batch write plan folds.
  *
- * "A batch fences when ANY item does" is owned by {@link nodeBatchWritePlan};
- * this only supplies the per-item classifications it folds, so the rule has one
- * spelling instead of one here and one in the plan builder.
+ * "A batch fences when ANY item does" is `nodeBatchWritePlan`'s rule
+ * (`write-plan.ts`); this only supplies the per-item classifications it (or,
+ * for a composition batch's `mixedWritePlan`, the equivalent manual
+ * `.find((probe) => probe !== undefined)` fold at the call site) folds, so
+ * the rule has one spelling instead of one here and one in the plan builder.
  */
 function nodeBatchConstraintProbes<G extends GraphDef>(
   ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
@@ -2552,6 +2568,74 @@ async function batchCheckUniqueAcrossKinds(
 // Node Create Operations
 // ============================================================
 
+/**
+ * Item E.2. Inserts one create's composition edge, in the SAME transaction
+ * the node row lands in, through the ordinary edge-create validation/prepare
+ * pipeline (`validateAndPrepareEdgeCreate`/`edgeInsertWork`,
+ * `edge-operations.ts`) — the identical work a caller's own
+ * `store.edges.<kind>.create(...)` would run, just issued against this
+ * frame's `target`/`session` instead of opening a second write. A failed
+ * edge (a lost `COMPOSITION_WHOLE_OCCUPIED` claim, a dead or missing whole
+ * endpoint, a cardinality or acyclicity refusal) throws and aborts the node
+ * create too — `edgeInsertClaims` (`composition-claims.ts`) remains the
+ * sole owner of the claim; this adds none. A no-op when `work` is
+ * `undefined` (the ordinary, no-`partOf` create), so every call site can
+ * call it unconditionally.
+ */
+async function attachCompositionCreateEdge<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: WriteSession,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  work: CompositionCreateWork | undefined,
+  partId: string,
+  temporal: Readonly<{ validFrom?: string | null; validTo?: string }> = {},
+): Promise<void> {
+  if (work === undefined) return;
+  const edgeInput = buildCompositionCreateEdgeInput(work, partId, temporal);
+  const preparedEdge = await validateAndPrepareEdgeCreate(
+    ctx,
+    edgeInput,
+    generateId(),
+    target,
+    {
+      validateEndpoints: true,
+      validateCardinality: true,
+      validateAcyclicity: true,
+      lock,
+    },
+  );
+  await session.createEdgeNoReturn(edgeInsertWork(ctx, preparedEdge));
+}
+
+/**
+ * Item E.2 (ruling E2-1). Refuses `partOf` stated against an already-
+ * existing node — a `getOrCreateByConstraint` call whose match resolved to
+ * `"found"` or `"updated"` — naming the node's current whole when it has a
+ * live one. Shared by the single-item and bulk entries so neither re-spells
+ * the "read the current whole" step.
+ */
+async function refuseExistingPartOf<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  concreteKind: string,
+  concreteId: string,
+): Promise<never> {
+  const currentWhole = await findLiveCompositionWhole(
+    ctx.registry,
+    backend,
+    ctx.graphId,
+    concreteKind,
+    concreteId,
+  );
+  throw new CompositionExistenceError({
+    partKind: concreteKind,
+    partId: concreteId,
+    situation: "existing",
+    ...(currentWhole === undefined ? {} : { currentWhole }),
+  });
+}
+
 async function executeNodeCreateInternal<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
@@ -2560,6 +2644,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
 ): Promise<Node | undefined> {
   const kind = input.kind;
   const id = input.id ?? generateId();
+  // Item E.2. Synchronous and read-free — throws BEFORE any row is touched
+  // for the two refusal arms (required-existence with no `partOf`; a
+  // `partOf` naming an undeclared pair), which is what makes cases where no
+  // node row survives provable rather than merely likely.
+  const compositionWork = resolveCompositionCreate(ctx.registry, input);
   const opContext = ctx.createOperationContext("create", "node", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
   const autocommitBackend =
@@ -2586,20 +2675,40 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const schemaFenceInFirstWrite =
     candidate !== undefined &&
     canFuseSchemaFenceInFirstWrite({ kind: "node", candidate });
+  // Item E.2: a composition create writes a second row (the edge) that must
+  // land in the SAME transaction as the node — never a candidate for a
+  // single-statement autocommit write, which has no transaction to share.
   const autocommitSingleStatement =
+    compositionWork === undefined &&
     autocommitBackend !== undefined &&
     candidate !== undefined &&
     isAutocommitSingleStatementWrite({ kind: "node", candidate });
-  const plan = nodeWritePlan(
-    nodeFencesConstraintProbe(ctx, kind, "create"),
+  // Item E.2: `mixedWritePlan` unconditionally — `entity` only widens the
+  // STATIC session type `rowWork` receives (`createWriteSession` always
+  // mints the full node+edge session; see `write-executor.ts`'s
+  // `planFrame`), so this has no runtime effect on the ordinary,
+  // no-`partOf` create. When this create owes a composition edge, the
+  // constraint probe folds the node's own with the edge's — `edgeComposition
+  // : true` makes `edgeWriteNeedsConstraintFence` answer `"edgeComposition"`
+  // unconditionally, so a backend that cannot hold the fence refuses the
+  // WHOLE create, naming the composition declaration, rather than writing a
+  // node it cannot attach.
+  const plan = mixedWritePlan(
+    nodeFencesConstraintProbe(ctx, kind, "create") ??
+      (compositionWork === undefined ? undefined : (
+        edgeWriteNeedsConstraintFence({
+          ...edgeCardinalityDeclarations(ctx, compositionWork.pair.viaEdgeKind),
+          composition: true,
+        })
+      )),
     nodeCreateRequiresIdentityLock(ctx, input),
   );
 
   const rowWork = async (
-    session: NodeWriteSession,
+    session: WriteSession,
     target: WriteTarget,
-    _overlaidSession: OverlaidSessionMint<"node">,
-    _lock: GraphWriteLock,
+    _overlaidSession: OverlaidSessionMint<"mixed">,
+    lock: GraphWriteLock,
     transactionMode: WriteTransactionMode,
   ): Promise<Node | undefined> => {
     // The outer backend's mark chooses the optimistic plan, but a custom
@@ -2608,7 +2717,16 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     // receiver carry the schema fence; otherwise a wrapper that dropped the
     // ordinary diagnostic fence could silently write a verified store.
     const targetBackend = unfencedTarget(target);
+    // Item E.2: a composition create declines EVERY fused single-statement
+    // shape (schema-fence fusion, projection fusion) — none has a slot for
+    // the second row this write also owes, and a fused command is an
+    // optimization attempt, not evidence its dimensions ran (the same
+    // principle §5.4 applies to the BATCH fused programs, generalized here
+    // to this function's own single-create fusions). It still takes the
+    // ordinary portable schema-version lock below when the kind is
+    // schema-fenced.
     const fuseSchemaFenceInFirstWrite =
+      compositionWork === undefined &&
       schemaFenceInFirstWrite &&
       isSchemaFencedInsertEligible(targetBackend) &&
       !hasLeasedSchemaFence(ctx, targetBackend);
@@ -2664,7 +2782,10 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       claimPlan,
     );
     const projectionFusionEligible =
-      shouldReturnRow && !prepared.idProvided && projections.length > 0;
+      compositionWork === undefined &&
+      shouldReturnRow &&
+      !prepared.idProvided &&
+      projections.length > 0;
     const fuseProjections =
       projectionFusionEligible &&
       supportsNodeInsertProjections(target, projections);
@@ -2672,6 +2793,22 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       fuseSchemaFenceInFirstWrite &&
       projectionFusionEligible &&
       supportsNodeInsertProjections(target, projections);
+
+    const attachCompositionEdge = (): Promise<void> =>
+      attachCompositionCreateEdge(
+        ctx,
+        session,
+        target,
+        lock,
+        compositionWork,
+        id,
+        {
+          ...(input.validFrom === undefined ?
+            {}
+          : { validFrom: input.validFrom }),
+          ...(input.validTo === undefined ? {} : { validTo: input.validTo }),
+        },
+      );
 
     const existing = prepared.tombstone;
     if (existing !== undefined) {
@@ -2688,6 +2825,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           "restore",
         );
       }
+      await attachCompositionEdge();
       return shouldReturnRow ? rowToNode(resurrected) : undefined;
     }
 
@@ -2773,6 +2911,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
             "fold",
           );
         }
+        await attachCompositionEdge();
         return shouldReturnRow ? rowToNode(inserted) : undefined;
       }
 
@@ -2823,6 +2962,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           "restore",
         );
       }
+      await attachCompositionEdge();
       return shouldReturnRow ? rowToNode(resurrected) : undefined;
     }
 
@@ -2856,6 +2996,8 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     if (identity !== undefined) {
       await identity.foldCreated(target, foldReferences([prepared]), "fold");
     }
+
+    await attachCompositionEdge();
 
     if (row === undefined) return;
     return rowToNode(row);
@@ -2924,6 +3066,17 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 ): Promise<void> {
   if (inputs.length === 0) return;
 
+  // Item E.2. Synchronous, read-free, thrown before any row is touched for
+  // the two refusal arms — computed from the ORIGINAL inputs (an item's
+  // `id` may be `undefined`, and must reach `draftNodeCreate`'s `idProvided`
+  // check unresolved: pre-filling it here would make every generated id
+  // look caller-supplied to the batch preparation below). `undefined`
+  // entries (no composition work) are kept, so this stays index-aligned
+  // with `inputs` and, later, with `preparedCreates`.
+  const compositionWorks = inputs.map((input) =>
+    resolveCompositionCreate(ctx.registry, input),
+  );
+
   const atomicExecutor = resolveAtomicNodeBatchExecutor({
     backend,
     graph: ctx.graph,
@@ -2980,14 +3133,40 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 
   await runWritePlan(
     nodeWritePlanContext(ctx),
-    nodeBatchWritePlan(
-      nodeBatchConstraintProbes(ctx, inputs, "create"),
+    mixedWritePlan(
+      nodeBatchConstraintProbes(ctx, inputs, "create").find(
+        (probe) => probe !== undefined,
+      ) ??
+        compositionWorks
+          .filter((work): work is CompositionCreateWork => work !== undefined)
+          .map((work) =>
+            edgeWriteNeedsConstraintFence({
+              ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
+              composition: true,
+            }),
+          )
+          .find((probe) => probe !== undefined),
       nodeBatchCreateRequiresIdentityLock(ctx, inputs),
     ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const identity = ctx.identity;
       const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
+      // Item E.2. `preparedCreates` preserves `inputs`' order (see
+      // `prepareBatchCreates`), so this zip is index-aligned with
+      // `compositionWorks` above — the one place a resolved id and its
+      // composition work are joined.
+      const compositionWorkByPreparedId = new Map(
+        preparedCreates
+          .map(
+            (prepared, index) =>
+              [prepared.id, compositionWorks[index]] as const,
+          )
+          .filter(
+            (entry): entry is [string, CompositionCreateWork] =>
+              entry[1] !== undefined,
+          ),
+      );
 
       const partition = partitionCreates(preparedCreates);
       // ## Resurrections follow the whole insert unit
@@ -3023,6 +3202,29 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
           "restore",
         );
       }
+      // Item E.2. After every node row in the batch exists (inserted or
+      // resurrected), attach each item's composition edge — one owner
+      // (`attachCompositionCreateEdge`) reached from every prepared row by
+      // its id, so a mixed batch of required/optional/no-`partOf` items each
+      // takes exactly the edge it owes.
+      for (const prepared of preparedCreates) {
+        await attachCompositionCreateEdge(
+          ctx,
+          session,
+          target,
+          lock,
+          compositionWorkByPreparedId.get(prepared.id),
+          prepared.id,
+          {
+            ...(prepared.insertParams.validFrom === undefined ?
+              {}
+            : { validFrom: prepared.insertParams.validFrom }),
+            ...(prepared.insertParams.validTo === undefined ?
+              {}
+            : { validTo: prepared.insertParams.validTo }),
+          },
+        );
+      }
     },
     { didWrite: writeResultAlwaysChanges },
   );
@@ -3044,6 +3246,11 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   options?: NodeCreateInternalOptions,
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
+
+  // Item E.2 — see `executeNodeCreateNoReturnBatch`'s identical preamble.
+  const compositionWorks = inputs.map((input) =>
+    resolveCompositionCreate(ctx.registry, input),
+  );
 
   const atomicExecutor = resolveAtomicNodeBatchExecutor({
     backend,
@@ -3106,18 +3313,41 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 
   return runWritePlan(
     nodeWritePlanContext(ctx),
-    nodeBatchWritePlan(
-      nodeBatchConstraintProbes(ctx, inputs, "create"),
+    mixedWritePlan(
+      nodeBatchConstraintProbes(ctx, inputs, "create").find(
+        (probe) => probe !== undefined,
+      ) ??
+        compositionWorks
+          .filter((work): work is CompositionCreateWork => work !== undefined)
+          .map((work) =>
+            edgeWriteNeedsConstraintFence({
+              ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
+              composition: true,
+            }),
+          )
+          .find((probe) => probe !== undefined),
       nodeRequiresIdentityLock(ctx),
     ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const identity = ctx.identity;
       const preparedCreates = await prepareBatchCreates(
         ctx,
         inputs,
         target,
         options,
+      );
+      // Item E.2 — see `executeNodeCreateNoReturnBatch`'s identical zip.
+      const compositionWorkByPreparedId = new Map(
+        preparedCreates
+          .map(
+            (prepared, index) =>
+              [prepared.id, compositionWorks[index]] as const,
+          )
+          .filter(
+            (entry): entry is [string, CompositionCreateWork] =>
+              entry[1] !== undefined,
+          ),
       );
 
       const partition = partitionCreates(preparedCreates);
@@ -3156,6 +3386,25 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
           target,
           foldReferences(partition.resurrections),
           "restore",
+        );
+      }
+      // Item E.2 — see `executeNodeCreateNoReturnBatch`'s identical step.
+      for (const prepared of preparedCreates) {
+        await attachCompositionCreateEdge(
+          ctx,
+          session,
+          target,
+          lock,
+          compositionWorkByPreparedId.get(prepared.id),
+          prepared.id,
+          {
+            ...(prepared.insertParams.validFrom === undefined ?
+              {}
+            : { validFrom: prepared.insertParams.validFrom }),
+            ...(prepared.insertParams.validTo === undefined ?
+              {}
+            : { validTo: prepared.insertParams.validTo }),
+          },
         );
       }
 
@@ -3588,15 +3837,37 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
   backend: GraphBackend | TransactionBackend,
-  options?: Readonly<{ clearDeleted?: boolean }>,
+  options?: Readonly<{
+    clearDeleted?: boolean;
+    /**
+     * Item E.2. Present only from `executeNodeGetOrCreateByConstraint`'s
+     * resurrection leg: `partOf` restores the whole alone (Q2), in the SAME
+     * transaction as the resurrecting write, so a lost composition claim or
+     * a dead/missing whole aborts the resurrection too.
+     */
+    compositionWork?: CompositionCreateWork;
+  }>,
 ): Promise<Node> {
   if (input.clearValidTo === true) {
     assertClearValidToSupported(backend, "node");
   }
+  const compositionWork = options?.compositionWork;
   return runWritePlan(
     nodeWritePlanContext(ctx),
-    nodeWritePlan(
-      nodeFencesConstraintProbe(ctx, input.kind, "update"),
+    // `mixedWritePlan` unconditionally — see `executeNodeCreateInternal`'s
+    // identical note: `entity` only widens the STATIC session type, with no
+    // runtime effect on a call that carries no `compositionWork`.
+    mixedWritePlan(
+      nodeFencesConstraintProbe(ctx, input.kind, "update") ??
+        (compositionWork === undefined ? undefined : (
+          edgeWriteNeedsConstraintFence({
+            ...edgeCardinalityDeclarations(
+              ctx,
+              compositionWork.pair.viaEdgeKind,
+            ),
+            composition: true,
+          })
+        )),
       // Conditional for the same reason as {@link executeNodeUpdate}: a
       // resurrecting upsert folds, and stating a validity end reads the
       // identity's other members, so both take the lock.
@@ -3605,7 +3876,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
       : false,
     ),
     backend,
-    async (session, target) => {
+    async (session, target, _overlaidSession, lock) => {
       const validTo = validateOptionalCanonicalIsoDate(
         input.validTo,
         "validTo",
@@ -3632,6 +3903,14 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           "restore",
         );
       }
+      await attachCompositionCreateEdge(
+        ctx,
+        session,
+        target,
+        lock,
+        compositionWork,
+        input.id,
+      );
       return node;
     },
     { didWrite: writeResultAlwaysChanges },
@@ -4335,6 +4614,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
   options?: NodeGetOrCreateByConstraintOptions,
 ): Promise<Readonly<{ node: Node; action: GetOrCreateAction }>> {
   const ifExists = options?.ifExists ?? "return";
+  const partOf = options?.partOf;
 
   const registration = getNodeRegistration(ctx.graph, kind);
   const nodeKind = registration.type;
@@ -4348,7 +4628,11 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
   if (!checkWherePredicate(constraint, validatedProps)) {
     const node = await executeNodeCreate(
       ctx,
-      { kind, props: validatedProps },
+      {
+        kind,
+        props: validatedProps,
+        ...(partOf === undefined ? {} : { partOf }),
+      },
       backend,
       { propsPreValidated: true },
     );
@@ -4387,7 +4671,11 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     if (existingUniqueRow === undefined) {
       const node = await executeNodeCreate(
         ctx,
-        { kind, props: validatedProps },
+        {
+          kind,
+          props: validatedProps,
+          ...(partOf === undefined ? {} : { partOf }),
+        },
         backend,
         { propsPreValidated: true },
       );
@@ -4405,7 +4693,11 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     if (existingRow === undefined) {
       const node = await executeNodeCreate(
         ctx,
-        { kind, props: validatedProps },
+        {
+          kind,
+          props: validatedProps,
+          ...(partOf === undefined ? {} : { partOf }),
+        },
         backend,
         { propsPreValidated: true },
       );
@@ -4416,6 +4708,20 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
 
     if (isSoftDeleted || ifExists === "update") {
       const concreteKind = existingUniqueRow.concrete_kind;
+      if (!isSoftDeleted && partOf !== undefined) {
+        await refuseExistingPartOf(ctx, backend, concreteKind, existingRow.id);
+      }
+      // Resurrection restores the whole alone (Q2): resolved against the
+      // TOMBSTONE's own kind/id, never against `kind` as requested (a
+      // subclass scope can resurrect under a sibling/parent kind).
+      const compositionWork =
+        isSoftDeleted ?
+          resolveCompositionCreate(ctx.registry, {
+            kind: concreteKind,
+            id: existingRow.id,
+            ...(partOf === undefined ? {} : { partOf }),
+          })
+        : undefined;
       const node = await executeNodeUpsertUpdate(
         ctx,
         {
@@ -4424,9 +4730,21 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
           props: validatedProps,
         },
         backend,
-        { clearDeleted: isSoftDeleted },
+        {
+          clearDeleted: isSoftDeleted,
+          ...(compositionWork === undefined ? {} : { compositionWork }),
+        },
       );
       return { node, action: isSoftDeleted ? "resurrected" : "updated" };
+    }
+
+    if (partOf !== undefined) {
+      await refuseExistingPartOf(
+        ctx,
+        backend,
+        existingUniqueRow.concrete_kind,
+        existingRow.id,
+      );
     }
 
     return { node: rowToNode(existingRow), action: "found" };
@@ -5033,6 +5351,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
   if (items.length === 0) return [];
 
   const ifExists = options?.ifExists ?? "return";
+  const partOf = options?.partOf;
   const registration = getNodeRegistration(ctx.graph, kind);
   const nodeKind = registration.type;
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
@@ -5090,7 +5409,14 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
     for (const [index, { validatedProps, key }] of validated.entries()) {
       if (key === undefined) {
-        toCreate.push({ index, input: { kind, props: validatedProps } });
+        toCreate.push({
+          index,
+          input: {
+            kind,
+            props: validatedProps,
+            ...(partOf === undefined ? {} : { partOf }),
+          },
+        });
         continue;
       }
 
@@ -5104,7 +5430,14 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
       const existing = existingByKey.get(key);
       if (existing === undefined) {
-        toCreate.push({ index, input: { kind, props: validatedProps } });
+        toCreate.push({
+          index,
+          input: {
+            kind,
+            props: validatedProps,
+            ...(partOf === undefined ? {} : { partOf }),
+          },
+        });
       } else {
         toFetch.push({
           index,
@@ -5147,7 +5480,11 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       if (existingRow === undefined) {
         const node = await executeNodeCreate(
           ctx,
-          { kind, props: validatedProps },
+          {
+            kind,
+            props: validatedProps,
+            ...(partOf === undefined ? {} : { partOf }),
+          },
           backend,
           { propsPreValidated: true },
         );
@@ -5165,6 +5502,24 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       const isSoftDeleted = existingRow.deleted_at !== undefined;
 
       if (isSoftDeleted || ifExists === "update") {
+        if (!isSoftDeleted && partOf !== undefined) {
+          await refuseExistingPartOf(
+            ctx,
+            backend,
+            concreteKind,
+            existingRow.id,
+          );
+        }
+        // Resurrection restores the whole alone (Q2) — see the single-item
+        // path's identical reasoning.
+        const compositionWork =
+          isSoftDeleted ?
+            resolveCompositionCreate(ctx.registry, {
+              kind: concreteKind,
+              id: existingRow.id,
+              ...(partOf === undefined ? {} : { partOf }),
+            })
+          : undefined;
         const node = await executeNodeUpsertUpdate(
           ctx,
           {
@@ -5173,13 +5528,24 @@ export async function executeNodeBulkGetOrCreateByConstraint<
             props: validatedProps,
           },
           backend,
-          { clearDeleted: isSoftDeleted },
+          {
+            clearDeleted: isSoftDeleted,
+            ...(compositionWork === undefined ? {} : { compositionWork }),
+          },
         );
         results[index] = {
           node,
           action: isSoftDeleted ? "resurrected" : "updated",
         };
       } else {
+        if (partOf !== undefined) {
+          await refuseExistingPartOf(
+            ctx,
+            backend,
+            concreteKind,
+            existingRow.id,
+          );
+        }
         results[index] = { node: rowToNode(existingRow), action: "found" };
       }
     }
@@ -5187,6 +5553,14 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     // Step 6: Resolve within-batch duplicates by copying the first occurrence's result
     for (const { index, sourceIndex } of duplicateOf) {
       const sourceResult = requireDefined(results[sourceIndex]);
+      if (partOf !== undefined) {
+        await refuseExistingPartOf(
+          ctx,
+          backend,
+          sourceResult.node.kind,
+          sourceResult.node.id,
+        );
+      }
       results[index] = { node: sourceResult.node, action: "found" };
     }
 

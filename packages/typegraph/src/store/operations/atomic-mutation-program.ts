@@ -34,6 +34,7 @@ import { edgeWriteNeedsConstraintFence } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
 import type { CreateEdgeInput, CreateNodeInput } from "../types";
+import { compositionEdgeHasRequiredExistencePart } from "./composition-create";
 import { diagnoseFusedSchemaFenceNoRow } from "./write-transaction";
 
 type CommonAtomicMutationEligibility = Readonly<{
@@ -100,6 +101,20 @@ export function resolveAtomicNodeBatchExecutor(
   input: AtomicNodeBatchEligibilityInput,
 ): BackendAtomicNodeBatchExecutor | undefined {
   if (input.inputs.length === 0 || input.identityEnabled) return;
+  // Item E.2: a fused node-batch program writes node rows only — it has no
+  // shape for the composition edge a required-existence kind or a stated
+  // `partOf` also owes. Declined by declaration, before any row is read: a
+  // fused command is an optimization attempt, not evidence that its
+  // dimensions ran.
+  if (
+    input.inputs.some(
+      (item) =>
+        item.partOf !== undefined ||
+        input.registry.compositionExistence(item.kind) === "required",
+    )
+  ) {
+    return;
+  }
   const profile = resolveAtomicMutationProfile(input);
   if (profile?.createNodes === undefined) return;
   const claimSupport = profile.createNodes.claimSupport;
@@ -162,6 +177,12 @@ export function resolveAtomicNodeReplacementBatchProgram(
   if (!hasOwnKey(input.graph.nodes, input.kind)) return;
   const registration = input.graph.nodes[input.kind];
   if (registration === undefined) return;
+  // Item E.2: a replacement that lands on no existing row CREATES the node,
+  // and this fused program has no `partOf` parameter and no composition-edge
+  // shape — a required-existence kind must take the portable path so
+  // `resolveCompositionCreate` gets to refuse the bare create rather than
+  // this program silently writing an orphan.
+  if (input.registry.compositionExistence(input.kind) === "required") return;
   const executor = resolveAtomicMutationProfile(input)?.replaceNodes;
   if (executor === undefined) return;
   const releasedClaimFamilies = new Set(executor.releasedClaimFamilies);
@@ -345,6 +366,17 @@ export function resolveAtomicEdgeDeleteBatchExecutor(
 ): AtomicEdgeDeleteBatchExecutor | undefined {
   if (input.ids.length === 0) return;
   if (!hasOwnKey(input.graph.edges, input.expectedKind)) return;
+  // Item E.2: `assertCompositionExistencePreserved` reads the part row under
+  // the held write lock — a decision this read-free fused command cannot
+  // express. A composition edge kind realizing a required-existence part
+  // must take the portable path for its delete, exactly as its create-side
+  // counterpart (`resolveAtomicNodeBatchExecutor`) declines the fused
+  // program for a required-existence node create.
+  if (
+    compositionEdgeHasRequiredExistencePart(input.registry, input.expectedKind)
+  ) {
+    return;
+  }
   return resolveAtomicMutationProfile(input)?.deleteEdges;
 }
 
@@ -539,6 +571,18 @@ export function resolveAtomicNodeResolvedMutationSetExecutor(
   if (
     input.creates.some(
       (item) => item.kind !== input.kind || item.id === undefined,
+    )
+  ) {
+    return;
+  }
+  // Item E.2: same reasoning as the other two node-create fused resolvers —
+  // no shape here for the composition edge a `partOf` or a required-existence
+  // kind also owes.
+  if (
+    input.creates.some(
+      (item) =>
+        item.partOf !== undefined ||
+        input.registry.compositionExistence(item.kind) === "required",
     )
   ) {
     return;
