@@ -290,15 +290,22 @@ before the affected nodes can be deleted.
   live required part with no live whole) and ships no repair step.
   `store.verifyConstraintFences()` reports the same finding on an already-live
   graph but does not fix it.
-- **Graph merge does not audit `existence: "required"`.** Merge's own
-  composition-orphan check (`compositionOrphansAmong`, reported at plan time
-  and re-verified at apply) finds a live part left behind when the merge
-  DELETES its whole node — it does not detect a required part whose
-  composition EDGE is dropped or collapsed by canonicalization while both
-  endpoints survive. A merge can therefore commit a live required part with no
-  whole at all without a `MergeCompositionOrphan` finding; the gap is only
-  caught after the fact by `store.verifyConstraintFences()`'s
-  `compositionExistence` family run separately against the merged store.
+- **Graph merge's `existence: "required"` audit has one residual gap: a
+  composition edge silently DROPPED by canonicalization, with no explicit
+  write for anything to intercept.** Merge's composition-orphan check
+  (`compositionOrphansAmong` — a delete orphans a part the plan does not also
+  delete — plus its sibling `unattachedRequiredPartOrphansAmong`, reported at
+  plan time and re-verified at apply) catches a required part that this merge
+  writes, or whose composition edge this merge explicitly deletes or ends,
+  and resolves to no live whole at all. It does NOT catch a composition edge
+  removed from the write set entirely because canonicalization repointed it
+  onto a finally-deleted endpoint (`ENDPOINT_DELETED_DROP_REASON`,
+  `src/graph-merge/edge-repoint.ts`): that drop issues no delete or update
+  call for any per-write guard (`MergeCompositionOrphan` included) to see,
+  and `DroppedEdge` carries no endpoint data to recover the orphaned part
+  from after the fact. The gap is caught after the fact by
+  `store.verifyConstraintFences()`'s `compositionExistence` family run
+  separately against the merged store.
 
 ## Connection Management
 

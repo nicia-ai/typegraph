@@ -12,9 +12,10 @@ Validating import tracks every required-existence part it creates and, once the 
 
 `store.verifyConstraintFences()` gains a `compositionExistence` family, reporting any LIVE required-existence part with no live whole; a schema commit newly declaring `existence: "required"` on an already-populated pair runs the same check as a tightening preflight and refuses a dirty graph rather than silently admitting orphans.
 
-Graph merge does not yet audit `existence: "required"`: merge's own composition-orphan check catches a live part left behind when the merge deletes its whole node, but not a required part whose composition edge is dropped or collapsed by canonicalization while both endpoints survive. Run `store.verifyConstraintFences()` against a merged store to catch that case until merge gains its own check — see [Limitations](/limitations#composition-existence-existence-required).
+Graph merge's composition-orphan check gains a second arm for `existence: "required"`: alongside the existing check (a live part left behind when the merge deletes its whole node), it now also catches a required part this merge writes — or whose composition edge this merge explicitly deletes or ends — that resolves to no live whole at all, reported at plan time (`MergePlanCompositionOrphan.cause: "unattached"`) and refused at apply with the same `MergeCompositionOrphanError`. One residual gap remains: a composition edge silently dropped by canonicalization's own endpoint-deleted repointing, which issues no write for this (or any) per-write guard to see — run `store.verifyConstraintFences()` against a merged store to catch that case; see [Limitations](/limitations#composition-existence-existence-required).
 
 ### Breaking
 
 - `CompositionPair` (internal to the registry; not part of the public entrypoint) gains a required `existence` field — anything constructing one directly, such as a test fixture, must add it.
 - `ConstraintFenceViolation`'s union gains the `compositionExistence` member; an exhaustive `switch (violation.family)` outside the library needs a new arm.
+- `MergePlanCompositionOrphan` gains a required `cause: "deleted" | "unattached"` field and its `whole` becomes optional (absent for `cause: "unattached"`, which has no whole to name); a consumer constructing or exhaustively matching this shape needs updating.

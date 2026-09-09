@@ -743,20 +743,31 @@ edits compose instead of clobbering each other.
 
 ### Composition orphans
 
-A branch that deletes a composition whole (see [Composition](/ontology#composition))
-can conflict with a part attached to it on the target *after* the branch point,
-or independently of it — the branch's diff carries no deletion for that part,
-so applying the plan as trusted would leave it pointing at a whole that no
-longer exists.
+Two independent ways a merge can leave a required or optional composition
+part with no whole, both surfaced through the same
+`MergePlanReview.compositionOrphans` finding and the same
+`MergeCompositionOrphanError`:
 
-`planMerge` and `planMergeIncremental` scan for this against the target's
+- **`cause: "deleted"`** — a branch deletes a composition whole (see
+  [Composition](/ontology#composition)) while a part attached to it on the
+  target *after* the branch point, or independently of it, survives — the
+  branch's diff carries no deletion for that part, so applying the plan as
+  trusted would leave it pointing at a whole that no longer exists.
+- **`cause: "unattached"`** — a required-existence part (`existence:
+  "required"`, see [Composition existence](/ontology#existence-a-part-that-cannot-exist-without-a-whole))
+  this merge writes, or whose composition edge this merge explicitly deletes
+  or ends, resolves to no live whole at all after canonicalization. There is
+  no whole to name for this cause, so `whole` is absent.
+
+`planMerge` and `planMergeIncremental` scan for both against the target's
 current state and report every finding in `MergePlanReview.compositionOrphans`:
 
 ```typescript
 type MergePlanCompositionOrphan = {
   part: { kind: string; id: string };
-  whole: { kind: string; id: string };
+  whole?: { kind: string; id: string }; // absent for cause: "unattached"
   viaEdgeKind: string; // the realizing composition edge
+  cause: "deleted" | "unattached";
 };
 ```
 
@@ -765,7 +776,11 @@ on before approving the plan. `applyMergePlan` re-verifies the same finding
 inside the apply transaction, under the per-graph write lock, and refuses with
 `MergeCompositionOrphanError` (see [Errors](/errors#mergecompositionorphanerror))
 if it still recurs there — so a plan-time report that comes back empty is not
-a guarantee against a concurrent attach racing the eventual apply.
+a guarantee against a concurrent attach racing the eventual apply. The
+`"unattached"` cause has its own residual blind spot: a composition edge
+silently dropped by canonicalization's endpoint-deleted repointing issues no
+write for any per-write guard to see — see
+[Limitations](/limitations#composition-existence-existence-required).
 
 ## Edges follow their entities
 

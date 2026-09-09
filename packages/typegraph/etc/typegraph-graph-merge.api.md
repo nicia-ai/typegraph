@@ -4181,8 +4181,9 @@ export class MergePlanCapabilityError extends MergeError {
 // @public
 export type MergePlanCompositionOrphan = Readonly<{
     part: MergePlanEntityRef;
-    whole: MergePlanEntityRef;
+    whole?: MergePlanEntityRef;
     viaEdgeKind: string;
+    cause: "deleted" | "unattached";
 }>;
 
 // @public (undocumented)

@@ -428,7 +428,8 @@ const applied = await applyMergePlan(store, plan);
 if (isErr(applied) && applied.error instanceof MergeCompositionOrphanError) {
   console.log(applied.error.code); // "MERGE_COMPOSITION_ORPHAN"
   console.log(applied.error.details.part); // { kind, id }
-  console.log(applied.error.details.whole); // { kind, id }
+  console.log(applied.error.details.cause); // "deleted" | "unattached"
+  console.log(applied.error.details.whole); // { kind, id } — absent for cause: "unattached"
   console.log(applied.error.details.viaEdgeKind);
 }
 ```
@@ -438,8 +439,10 @@ in `MergePlanReview.compositionOrphans` — a dry-run report computed against
 the target's state at plan time. This error is the authoritative,
 apply-time re-verification of that same check, run under the per-graph write
 lock so it cannot miss an orphan the plan-time report's unlocked read raced
-past. Recompute the merge plan against the target's current state, or delete
-the orphaned part in the branch before merging.
+past. `cause: "deleted"` names the whole a branch deletes while a part
+survives; `cause: "unattached"` (item E.2 composition existence) has no whole
+to name — recompute the merge plan against the target's current state, or
+delete/attach the orphaned part in the branch before merging.
 
 ### Merge plan and evidence errors
 

@@ -14,6 +14,7 @@ export {
 } from "../backend/transaction-resource";
 export type {
   GraphBackend,
+  GraphReadBackend,
   NodeRow,
   TransactionBackend,
   TransactionOptions,
@@ -80,6 +81,7 @@ export {
 } from "../store/acyclicity";
 export { type UniqueIntrospection } from "../store/introspect";
 export { planCompositionCascade } from "../store/operations/composition-cascade";
+export { findLiveCompositionWhole } from "../store/operations/composition-create";
 export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
