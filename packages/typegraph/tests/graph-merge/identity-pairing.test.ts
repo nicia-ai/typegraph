@@ -20,7 +20,7 @@
  * server Postgres when `POSTGRES_URL` is set) — the pairing decision is shared
  * code, the separation probe is not, so both must agree.
  */
-import type { GraphBackend, Store } from "@nicia-ai/typegraph";
+import type { CompiledRowsSql, GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
   defineGraph,
@@ -29,6 +29,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { deriveBackend } from "../../src/backend/derive-backend";
 import { branch } from "../../src/graph-merge/branch";
 import { IdentityMergeConflictError } from "../../src/graph-merge/errors";
 import { merge, mergeIncremental } from "../../src/graph-merge/merge";
@@ -91,6 +92,7 @@ const FORCED_ONLY_RESOLVE = {
 } as const;
 
 const BRANCH_A = asBranchId("branch-a");
+const BRANCH_B = asBranchId("branch-b");
 const TARGET_CLONE = asBranchId("target-clone");
 
 /** Every staged Person lands in one bucket, so `exactKey` proposes all pairs. */
@@ -465,13 +467,15 @@ describe.each(backendMatrix())(
     });
 
     /**
-     * `onProvenanceConflict: "refuse"` — for a caller whose source attribution
-     * is a correctness invariant rather than a record. Only a cluster an
-     * identity assertion FUSED is judged: two members contributed under
-     * different source ids disagree, and the plan fails naming the canonical
-     * entity and the contributions.
+     * `onProvenanceConflict: "refuse"` judges CONTRIBUTING BRANCHES, not the
+     * fork-local id each member happened to carry (`ProvenanceRecord.sourceId`
+     * — see its docblock). A single branch that creates both halves of a pair
+     * and asserts `same` over its own rows disagrees with nothing: it is one
+     * source's own claim, and refusing it would make the option refuse EVERY
+     * definitional fusion, since two distinct members always carry two
+     * distinct `sourceId`s regardless of provenance.
      */
-    it("refuses an identity-paired entity whose members disagree on provenance", async () => {
+    it("keeps a single-branch identity-paired fusion under onProvenanceConflict: refuse", async () => {
       const store = await makeStore();
       const source = unwrap(
         await branch(store, () => makeBackend(), { id: BRANCH_A }),
@@ -493,6 +497,47 @@ describe.each(backendMatrix())(
         branchOrder: [BRANCH_A],
         identity: { pairing: "definitional", onProvenanceConflict: "refuse" },
       });
+      if (isErr(result)) throw result.error;
+      expect(await livePersonIds(store)).toEqual(["a3"]);
+    });
+
+    /**
+     * The genuine case `onProvenanceConflict: "refuse"` exists for: TWO
+     * branches independently author the paired rows (branch A creates `a3`
+     * on its own; branch B recreates `a3` AND authors `b3`, then asserts
+     * `same(a3, b3)` entirely within its own view). The fused canonical then
+     * really does carry contributions from two different sources, and the
+     * plan fails naming the canonical entity and the contributions.
+     */
+    it("refuses an identity-paired entity whose members disagree on provenance", async () => {
+      const store = await makeStore();
+      const branchA = unwrap(
+        await branch(store, () => makeBackend(), { id: BRANCH_A }),
+      );
+      const branchB = unwrap(
+        await branch(store, () => makeBackend(), { id: BRANCH_B }),
+      );
+      await branchA.store.nodes.Person.create(
+        { name: "Ada", email: "a3@example.test" },
+        { id: "a3" },
+      );
+      await branchB.store.nodes.Person.create(
+        { name: "Ada", email: "a3@example.test" },
+        { id: "a3" },
+      );
+      await branchB.store.nodes.Person.create(
+        { name: "Ada", email: "b3@example.test" },
+        { id: "b3" },
+      );
+      await branchB.store.identity.assertSame(
+        { kind: "Person", id: "a3" },
+        { kind: "Person", id: "b3" },
+      );
+
+      const result = await merge(store, [branchA, branchB], {
+        branchOrder: [BRANCH_A, BRANCH_B],
+        identity: { pairing: "definitional", onProvenanceConflict: "refuse" },
+      });
       if (isOk(result)) throw new Error("expected a provenance refusal");
       expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
       expect(result.error.code).toBe(
@@ -508,23 +553,30 @@ describe.each(backendMatrix())(
       // The DEFAULT keeps every contribution and merges the same fixture, so
       // the refusal is the policy's doing and not the pairing's.
       const keeping = await makeStore();
-      const keepingSource = unwrap(
+      const keepingA = unwrap(
         await branch(keeping, () => makeBackend(), { id: BRANCH_A }),
       );
-      await keepingSource.store.nodes.Person.create(
+      const keepingB = unwrap(
+        await branch(keeping, () => makeBackend(), { id: BRANCH_B }),
+      );
+      await keepingA.store.nodes.Person.create(
         { name: "Ada", email: "a3@example.test" },
         { id: "a3" },
       );
-      await keepingSource.store.nodes.Person.create(
+      await keepingB.store.nodes.Person.create(
+        { name: "Ada", email: "a3@example.test" },
+        { id: "a3" },
+      );
+      await keepingB.store.nodes.Person.create(
         { name: "Ada", email: "b3@example.test" },
         { id: "b3" },
       );
-      await keepingSource.store.identity.assertSame(
+      await keepingB.store.identity.assertSame(
         { kind: "Person", id: "a3" },
         { kind: "Person", id: "b3" },
       );
-      const kept = await merge(keeping, [keepingSource], {
-        branchOrder: [BRANCH_A],
+      const kept = await merge(keeping, [keepingA, keepingB], {
+        branchOrder: [BRANCH_A, BRANCH_B],
         identity: { pairing: "definitional" },
       });
       if (isErr(kept)) throw kept.error;
@@ -624,6 +676,47 @@ describe.each(backendMatrix())(
     });
 
     /**
+     * R1 — the round-1 fix above over-corrected: it reported EVERY inherited
+     * `same` assertion in the target's ledger as `out-of-scope-pairing`, not
+     * only the ones a branch actually staged. A `same` assertion between two
+     * rows already committed before any branch forked, which no branch in
+     * this merge restages or otherwise touches, is not a conflict any branch
+     * caused — it is simply the target's existing truth, out of scope for
+     * this merge's candidate pairing, but not a defect to report.
+     */
+    it("does not report an inherited same assertion no branch touched", async () => {
+      const store = await makeStore();
+      await store.nodes.Person.create(
+        { name: "Ada", email: "one@example.test" },
+        { id: "one" },
+      );
+      await store.nodes.Person.create(
+        { name: "Ada", email: "two@example.test" },
+        { id: "two" },
+      );
+      await store.identity.assertSame(
+        { kind: "Person", id: "one" },
+        { kind: "Person", id: "two" },
+      );
+
+      const source = unwrap(
+        await branch(store, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.Person.create(
+        { name: "Carl", email: "carl@example.test" },
+        { id: "carl" },
+      );
+
+      const result = await merge(store, [source], {
+        branchOrder: [BRANCH_A],
+        identity: { pairing: "definitional" },
+      });
+      if (isErr(result)) throw result.error;
+      expect(result.data.identityConflicts).toEqual([]);
+      expect(await livePersonIds(store)).toEqual(["carl", "one", "two"]);
+    });
+
+    /**
      * The veto is on even with `pairing` absent, because a `different`
      * assertion is an integrity fact and not a recall heuristic. A SCORED
      * match is recall, so the ledger's veto drops the proposal, reports it,
@@ -660,6 +753,7 @@ describe.each(backendMatrix())(
         branches: [source],
         options: {
           branchOrder: [BRANCH_A],
+          candidateDiagnostics: { limit: 50 },
           resolve: {
             Person: {
               ...ONE_BUCKET,
@@ -700,6 +794,104 @@ describe.each(backendMatrix())(
           { kind: "Person", id: "beta" },
         ),
       ).toBe(true);
+      // R2: the diagnostic surface must say what actually happened to the
+      // vetoed pair — "excluded" for "separation" — never "retained", which
+      // would flatly contradict the `identityConflicts` entry above for the
+      // identical pair.
+      const alphaBetaDiagnostic =
+        result.data.candidateDiagnostics?.entries.find(
+          (diagnostic) =>
+            diagnostic.evidence.decision === "scored" &&
+            [diagnostic.evidence.a.id, diagnostic.evidence.b.id]
+              .toSorted()
+              .join(",") === "alpha,beta",
+        );
+      expect(alphaBetaDiagnostic).toBeDefined();
+      expect(alphaBetaDiagnostic?.scoreDecision).toBe("accepted");
+      expect(alphaBetaDiagnostic?.clusterDisposition).toEqual({
+        kind: "excluded",
+        reason: "separation",
+      });
+    });
+
+    /**
+     * R9 — `captureIdentitySeparationFacts` asked `hasLiveDifferentAssertions`
+     * directly on every merge, bypassing `separation.ts`'s own
+     * `separationReadinessProven` memo for the identical per-(registry,
+     * graphId) fact an earlier `assertSame`/`assertDifferent` on this Store
+     * handle already settled. `store.identity.assertSame` below runs
+     * `isSeparated` (a real pair, so it always probes) and proves readiness
+     * as a side effect; the merge that follows must not pay for the same
+     * fact again.
+     */
+    it("skips the live-different round trip a merge no longer needs once an earlier assertSame already proved it", async () => {
+      let liveDifferentProbes = 0;
+      function countLiveDifferentProbe<T>(
+        base: Readonly<{
+          execute: (query: CompiledRowsSql) => Promise<readonly T[]>;
+        }>,
+      ) {
+        return (query: CompiledRowsSql): Promise<readonly T[]> => {
+          const text = query.chunks
+            .map((chunk) => (chunk.kind === "text" ? chunk.value : ""))
+            .join("");
+          if (text.includes("live_different")) liveDifferentProbes += 1;
+          return base.execute(query);
+        };
+      }
+      const rawBackend = await makeBackend();
+      const backend = deriveBackend(rawBackend, {
+        execute: countLiveDifferentProbe(rawBackend),
+        // Reads inside `assertSame`'s own transaction run against the
+        // TRANSACTION target, not the root backend's `execute` — wrap that
+        // target too, the same way the create-round-trips harness does.
+        transaction: (fn, options) =>
+          rawBackend.transaction(
+            (tx) =>
+              fn(
+                deriveBackend(tx, {
+                  execute: countLiveDifferentProbe(tx),
+                }),
+              ),
+            options,
+          ),
+      });
+      const [store] = await createStoreWithSchema(pairingGraph, backend, {
+        history: true,
+      });
+      await store.nodes.Person.create(
+        { name: "Alice", email: "alice@example.test" },
+        { id: "alice" },
+      );
+      await store.nodes.Person.create(
+        { name: "Bob", email: "bob@example.test" },
+        { id: "bob" },
+      );
+      // A real pair probes the ledger and — finding zero separation rows —
+      // proves readiness for (store's registry, store's graphId).
+      await store.identity.assertSame(
+        { kind: "Person", id: "alice" },
+        { kind: "Person", id: "bob" },
+      );
+      const probesAfterAssertSame = liveDifferentProbes;
+      expect(probesAfterAssertSame).toBeGreaterThan(0);
+
+      const source = unwrap(
+        await branch(store, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.Person.create(
+        { name: "Carl", email: "carl@example.test" },
+        { id: "carl" },
+      );
+      const result = await merge(store, [source], {
+        branchOrder: [BRANCH_A],
+        identity: { pairing: "definitional" },
+      });
+      if (isErr(result)) throw result.error;
+
+      // The merge's own separation capture must not re-pay the round trip
+      // readiness was already proven for.
+      expect(liveDifferentProbes).toBe(probesAfterAssertSame);
     });
   },
 );

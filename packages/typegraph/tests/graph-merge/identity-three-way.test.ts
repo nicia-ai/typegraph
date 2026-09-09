@@ -31,6 +31,7 @@ import { createTestBackend } from "../test-utils";
 
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
+const BRANCH_C = asBranchId("branch-c");
 
 /** A branch-tagged assertion, as `stageBranches` produces. */
 type StagedAssertion = Readonly<{
@@ -328,6 +329,62 @@ describe("validation order across the classifier and the structural checks", () 
 });
 
 /**
+ * `IdentityAssertionConflict.base` is documented callback input ("Base truth
+ * for the pair") — the exact thing a retract/reassert race or an
+ * opposing-relations conflict has, and the one piece of context a resolving
+ * callback needs to tell "the branches diverged from a real base row" from
+ * "the branches invented a claim from nothing". Covers both construction
+ * sites in `planIdentityThreeWay`.
+ */
+describe("IdentityAssertionConflict.base carries the base row a conflict raced against", () => {
+  it("populates base for a retract/reassert race", () => {
+    const inherited: IdentityTransferAssertion = { ...SAME_PAIR, id: "a-1" };
+    const reasserted: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      id: "a-2",
+      validFrom: "2024-02-01T00:00:00.000Z",
+    };
+    const staging = stagingWithIdentityChanges(
+      [{ branchId: BRANCH_B, assertion: reasserted }],
+      [{ branchId: BRANCH_A, assertion: inherited }],
+    );
+    const seenBase: (readonly IdentityTransferAssertion[])[] = [];
+    planIdentityChanges(staging, new Map(), (conflict) => {
+      seenBase.push(conflict.base);
+      return { kind: "unresolved" };
+    });
+    expect(seenBase).toEqual([[inherited]]);
+  });
+
+  it("populates base for an opposing-relations conflict", () => {
+    const baseAssertion: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      id: "base-1",
+    };
+    const sameStaged: IdentityTransferAssertion = { ...SAME_PAIR, id: "s-1" };
+    const differentStaged: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      relation: "different",
+      id: "d-1",
+    };
+    const staging = stagingWithIdentityChanges(
+      [
+        { branchId: BRANCH_A, assertion: sameStaged },
+        { branchId: BRANCH_B, assertion: differentStaged },
+      ],
+      [],
+      [baseAssertion],
+    );
+    const seenBase: (readonly IdentityTransferAssertion[])[] = [];
+    planIdentityChanges(staging, new Map(), (conflict) => {
+      seenBase.push(conflict.base);
+      return { kind: "unresolved" };
+    });
+    expect(seenBase).toEqual([[baseAssertion]]);
+  });
+});
+
+/**
  * A resolving policy is a DECISION, and the reconciliation it produces is the
  * only place that decision is recorded (`rule: "policy"`, plus the arm's own
  * name) — `IdentityDecisionProvenance.policy` is built from nothing else.
@@ -451,6 +508,116 @@ describe("a staged retraction whose base row is already ended", () => {
         id: "a-1",
         reason: RETRACTION_TARGET_MISMATCH_DROP_REASON,
       },
+    ]);
+  });
+});
+
+/**
+ * Two branches ending the SAME base identity assertion at DIFFERENT
+ * valid-time instants (`state-diff.ts`'s `classifyRetractions` stages each
+ * fork's own ended row) reduce to one retraction under the DEFAULT policy —
+ * no conflict, no callback involved. The rule is the EARLIEST staged
+ * `validTo` wins, order-independent — not "the last one staged", which is
+ * what the pre-reduction code did. Undeclared behavior change (R6): pinned
+ * here so a regression to staging order fails loudly instead of silently
+ * changing which valid-time instant a merge commits.
+ */
+describe("ending a doubly-retracted base row picks the EARLIEST end, not the last staged", () => {
+  const basePair: IdentityTransferAssertion = { ...SAME_PAIR, id: "base-1" };
+  const earlyEnd: IdentityTransferAssertion = {
+    ...basePair,
+    validTo: "2024-03-01T00:00:00.000Z",
+  };
+  const lateEnd: IdentityTransferAssertion = {
+    ...basePair,
+    validTo: "2024-09-01T00:00:00.000Z",
+  };
+  const earlyRetraction = {
+    branchId: BRANCH_A,
+    assertion: earlyEnd,
+    cause: { kind: "explicit" } as const,
+  };
+  const lateRetraction = {
+    branchId: BRANCH_B,
+    assertion: lateEnd,
+    cause: { kind: "explicit" } as const,
+  };
+
+  it("picks the earlier end whichever order the retractions are staged in", () => {
+    const forward = classifyIdentityPair(
+      "base-1",
+      [basePair],
+      [],
+      [earlyRetraction, lateRetraction],
+      "refuse",
+      new Set(),
+    );
+    const backward = classifyIdentityPair(
+      "base-1",
+      [basePair],
+      [],
+      [lateRetraction, earlyRetraction],
+      "refuse",
+      new Set(),
+    );
+    expect(forward).toEqual({ kind: "retracted", retraction: earlyEnd });
+    expect(backward).toEqual({ kind: "retracted", retraction: earlyEnd });
+  });
+
+  it("agrees end to end through planIdentityChanges", () => {
+    const staging = stagingWithIdentityChanges(
+      [],
+      [lateRetraction, earlyRetraction],
+      [basePair],
+    );
+    const planned = planIdentityChanges(staging, new Map());
+    expect(planned.retractions).toEqual([earlyEnd]);
+  });
+});
+
+/**
+ * `assertWins` builds the OVERRULED ending row (the base row a race's
+ * retracted side raced with) from `race.retracted[0]` — raw staging order —
+ * while `retractWins`/the plain-retraction path (above) reduces through
+ * {@link reduceIdentityRetraction}. Two spellings of "which staged retraction
+ * speaks for this pair" inside one function (R7): pinned so `assertWins`
+ * picks the SAME base row the other arms would for an identical race, not
+ * whichever happened to be staged first.
+ */
+describe("'assertWins' builds the overruled ending from the survivor rule, not race.retracted[0]", () => {
+  const earlyEnd: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "base-early",
+    validFrom: "2023-01-01T00:00:00.000Z",
+    validTo: "2024-03-01T00:00:00.000Z",
+  };
+  const lateEnd: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "base-late",
+    validFrom: "2023-06-01T00:00:00.000Z",
+    validTo: "2024-09-01T00:00:00.000Z",
+  };
+  const winner: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "reassert-1",
+    validFrom: "2024-10-01T00:00:00.000Z",
+  };
+
+  it("picks the earliest-ending base row regardless of which retraction was staged first", () => {
+    const staging = stagingWithIdentityChanges(
+      [{ branchId: BRANCH_C, assertion: winner }],
+      [
+        // Staged with the LATER end first — a bug that reads race.retracted[0]
+        // would build the ending from `lateEnd`, not `earlyEnd`.
+        { branchId: BRANCH_B, assertion: lateEnd },
+        { branchId: BRANCH_A, assertion: earlyEnd },
+      ],
+      [],
+    );
+    const planned = planIdentityChanges(staging, new Map(), "assertWins");
+    expect(planned.assertions.map((entry) => entry.id)).toEqual(["reassert-1"]);
+    expect(planned.retractions).toEqual([
+      { ...earlyEnd, validTo: winner.validFrom },
     ]);
   });
 });

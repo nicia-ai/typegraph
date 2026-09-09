@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
+import { OPPOSING_RELATIONS_OVERRULED_DROP_REASON } from "../../src/graph-merge/identity-three-way";
 import { applyMergePlan, merge, planMerge } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
@@ -219,10 +220,11 @@ describe.each(backendMatrix())(
       const differentBranch = unwrap(
         await branch(target, () => makeBackend(), { id: BRANCH_B }),
       );
-      await differentBranch.store.identity.assertDifferent(
-        { kind: "Person", id: "ada" },
-        { kind: "Person", id: "ada2" },
-      );
+      const { assertion: differentAssertion } =
+        await differentBranch.store.identity.assertDifferent(
+          { kind: "Person", id: "ada" },
+          { kind: "Person", id: "ada2" },
+        );
 
       const result = await merge(target, [sameBranch, differentBranch], {
         branchOrder: [BRANCH_A, BRANCH_B],
@@ -249,6 +251,16 @@ describe.each(backendMatrix())(
           { kind: "Person", id: "ada2" },
         ),
       ).toBe(true);
+      // The losing `different` assertion is dropped under a reason that names
+      // the shape it actually was (R8): opposing relations, never a
+      // retract/reassert race — nothing here was reasserted.
+      expect(result.data.dropped).toEqual([
+        {
+          kind: "identity",
+          id: differentAssertion.id,
+          reason: OPPOSING_RELATIONS_OVERRULED_DROP_REASON,
+        },
+      ]);
 
       const ctx = storeRuntime(target).identityContext();
       const transitions = await identityTransitionsOf(ctx, {
