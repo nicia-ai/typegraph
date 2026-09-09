@@ -293,7 +293,7 @@ fold, a delete or restore, a validity-window end, a kind drop, a schema
 transition, or a reconciliation decision made by a governed graph merge:
 
 ```typescript
-const transitions = await store.identity.transitionsOf(alice);
+const { transitions } = await store.identity.transitionsOf(alice);
 for (const transition of transitions) {
   console.log(transition.cause, transition.recorded, transition.assertionIds);
 }
@@ -328,12 +328,37 @@ for (const step of steps) {
 }
 ```
 
-`options.fromRecorded` / `toRecorded` bound the range by recorded instant;
-`options.limit` (default 200, maximum 2000) caps the number of boundaries a
-single call returns, throwing `IDENTITY_REPLAY_LIMIT_EXCEEDED` with a
-`resumeFromRecorded` cursor when there are more. Both `replay` and
-`transitionsOf` throw `IDENTITY_REPLAY_REQUIRES_HISTORY` on a store opened
-without `history: true` — there is nothing for them to annotate.
+`options.fromRecorded` / `toRecorded` bound the range by recorded instant.
+Bounding the ANSWER never bounds the LINEAGE SEARCH: discovery always walks
+the whole log, because the note that names an earlier class canonical
+routinely sits above the requested window (the walk starts at the node's
+current canonical and hops backwards). A window that returned nothing would
+otherwise be indistinguishable from a lineage that genuinely had no
+transitions in it.
+
+`options.limit` (default 200, maximum 2000) caps the number of BOUNDARIES one
+page returns. Both `replay` and `transitionsOf` page rather than refuse: a
+capped result carries `nextFrom`, the recorded instant of the first boundary
+it stopped short of, and passing that back as `fromRecorded` reads the next
+page. They page on identical boundaries, so a `replay` page and a
+`transitionsOf` page taken with the same options always cover the same
+revisions.
+
+```typescript
+let cursor: RecordedInstant | undefined;
+do {
+  const page = await store.identity.transitionsOf(alice, {
+    limit: 50,
+    ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+  });
+  render(page.transitions);
+  cursor = page.nextFrom;
+} while (cursor !== undefined);
+```
+
+Both `replay` and `transitionsOf` throw `IDENTITY_REPLAY_REQUIRES_HISTORY` on
+a store opened without `history: true` — there is nothing for them to
+annotate.
 
 `replay` and `transitionsOf` live on `store.identity` and `tx.identity`
 only, never on a coordinate-pinned read lens (`store.asOf(t).identity`,

@@ -46,7 +46,7 @@ import {
   type IdentityNodeRefInput,
 } from "./types";
 
-/** Default and maximum boundary counts a single `replay` call returns. */
+/** Default and maximum boundary counts a single `replay` PAGE returns. */
 export const IDENTITY_REPLAY_DEFAULT_LIMIT = 200;
 export const IDENTITY_REPLAY_MAX_LIMIT = 2000;
 
@@ -67,10 +67,31 @@ export type IdentityReplayStep<G extends GraphDef> = Readonly<{
   after: readonly IdentityNodeReference<G>[];
 }>;
 
+/**
+ * The continuation cursor a paged transition read hands back: the recorded
+ * instant of the first BOUNDARY the page did not include, or `undefined` when
+ * the page reached the end of the lineage. Pass it back as `fromRecorded` to
+ * read the next page — `fromRecorded` is inclusive, so the boundary this
+ * names opens the next page exactly once.
+ */
+type PagedTransitions = Readonly<{
+  rows: readonly IdentityTransitionRow[];
+  nextFrom?: RecordedInstant | undefined;
+}>;
+
 export type IdentityReplay<G extends GraphDef> = Readonly<{
   steps: readonly IdentityReplayStep<G>[];
   /** Set when the retention watermark cut history above the requested start. */
   truncatedBefore?: RecordedInstant | undefined;
+  /** Set when `limit` capped this page; pass it as `fromRecorded` for the next one. */
+  nextFrom?: RecordedInstant | undefined;
+}>;
+
+/** One page of {@link identityTransitionsOf}'s answer. */
+export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
+  transitions: readonly IdentityTransition<G>[];
+  /** Set when `limit` capped this page; pass it as `fromRecorded` for the next one. */
+  nextFrom?: RecordedInstant | undefined;
 }>;
 
 export type IdentityReplayOptions = Readonly<{
@@ -135,11 +156,10 @@ async function currentClassCanonicalSeed<G extends GraphDef>(
 
 /**
  * Generous internal ceiling for the seed-lineage walk's OWN reads (never the
- * caller's `limit`, which is enforced once, on the fully-converged result
- * below): a round that truncated its read before the seed set converged
- * could hide the very rows that would have grown that set, silently
- * returning an incomplete lineage instead of the caller's requested
- * `IDENTITY_REPLAY_LIMIT_EXCEEDED` refusal.
+ * caller's `limit`, which caps the PAGE assembled from the fully-converged
+ * result below): a round that truncated its read before the seed set
+ * converged could hide the very rows that would have grown that set,
+ * silently returning an incomplete lineage instead of a typed refusal.
  */
 const IDENTITY_REPLAY_WALK_READ_CEILING = 100_000;
 
@@ -149,12 +169,25 @@ const IDENTITY_REPLAY_WALK_READ_CEILING = 100_000;
  * known set of class keys (forward AND reverse — a note's `class` or
  * `priorClass`), adding any newly discovered keys, until a round adds
  * nothing new.
+ *
+ * DISCOVERY IS UNBOUNDED BY THE CALLER'S WINDOW, deliberately: the seed set
+ * has to reach every class name the node ever carried before any window can
+ * be applied to the result. A class key enters the set only by appearing on
+ * some note, and the note that names it can sit anywhere on the recorded
+ * axis — typically ABOVE the requested window, since the walk starts from
+ * the node's CURRENT canonical and works backwards through `priorClass`
+ * hops. Scoping the read by the caller's `fromRecorded`/`toRecorded` cut
+ * exactly those hops and silently returned an empty lineage for a window
+ * whose transitions were sitting in the log: B and C merge at revision 1, A
+ * joins and becomes canonical at revision 2, and a walk bounded at revision
+ * 1 never sees the revision-2 note that would have taught it B's name.
+ * `readIdentityTransitions` therefore takes no revision bounds at all
+ * (transition-log.ts) — the window is applied once, by
+ * {@link windowedRows}, to the converged result.
  */
 async function walkClassLineage<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   seed: PlainNodeRef,
-  fromRevision: number | undefined,
-  toRevision: number | undefined,
 ): Promise<readonly IdentityTransitionRow[]> {
   const seeds = new Map<string, PlainNodeRef>([[refKey(seed), seed]]);
   for (;;) {
@@ -165,8 +198,6 @@ async function walkClassLineage<G extends GraphDef>(
       ctx.graphId,
       {
         classRefs: scopeReferences,
-        fromRevision,
-        toRevision,
         limit: IDENTITY_REPLAY_WALK_READ_CEILING,
       },
     );
@@ -184,7 +215,7 @@ async function walkClassLineage<G extends GraphDef>(
         },
         {
           suggestion:
-            "Narrow fromRecorded/toRecorded to shrink the scanned range, or prune older transitions with pruneIdentityTransitions.",
+            "Prune older transitions with pruneIdentityTransitions. Narrowing fromRecorded/toRecorded does not help: lineage discovery reads the whole log on purpose, so that a window can never hide the notes that name a class.",
         },
       );
     }
@@ -287,41 +318,49 @@ function distinctBoundaries(
   );
 }
 
-function identityReplayLimitExceededError(
+/** Applies the caller's recorded window to the fully-discovered lineage — the ONE place `fromRecorded`/`toRecorded` narrow anything, since discovery itself must stay unbounded (see {@link walkClassLineage}). */
+function windowedRows(
   rows: readonly IdentityTransitionRow[],
-  boundaries: readonly number[],
+  fromRevision: number | undefined,
+  toRevision: number | undefined,
+): readonly IdentityTransitionRow[] {
+  return rows.filter(
+    (row) =>
+      (fromRevision === undefined || row.recorded_revision >= fromRevision) &&
+      (toRevision === undefined || row.recorded_revision <= toRevision),
+  );
+}
+
+/**
+ * Cuts the windowed lineage into one page of at most `limit` BOUNDARIES
+ * (distinct recorded revisions), not `limit` rows — §3.2 step 3 counts
+ * boundaries, and every note sharing a boundary shares one replay step, so a
+ * row-counted page could split a single step's rows across two pages.
+ *
+ * `nextFrom` names the first boundary this page did NOT include, so a caller
+ * pages by re-issuing the identical call with `fromRecorded: nextFrom`
+ * (`fromRecorded` is inclusive). One owner for both `transitionsOf` and
+ * `replay`: they page identically, or a caller pairing an explanation from
+ * one with a membership step from the other would see the two disagree about
+ * where the page ended.
+ */
+function pageBoundaries(
+  rows: readonly IdentityTransitionRow[],
   limit: number,
-): IdentityReplayError {
+): PagedTransitions {
+  const boundaries = distinctBoundaries(rows);
+  if (boundaries.length <= limit) return { rows };
   const cutoffRevision = requireDefined(boundaries[limit]);
   const cutoffRow = requireDefined(
     rows.find((row) => row.recorded_revision === cutoffRevision),
   );
-  return new IdentityReplayError(
-    `Identity replay found more transition boundaries than the requested limit (${String(limit)}).`,
-    {
-      code: "IDENTITY_REPLAY_LIMIT_EXCEEDED",
-      limit,
-      resumeFromRecorded: createRecordedInstant(
-        cutoffRow.recorded_revision,
-        cutoffRow.recorded_at,
-      ),
-    },
-    {
-      suggestion:
-        "Pass a larger limit, or page by re-calling with fromRecorded set to details.resumeFromRecorded.",
-    },
-  );
-}
-
-/** Throws `IDENTITY_REPLAY_LIMIT_EXCEEDED` when the walk found more DISTINCT boundaries (recorded revisions) than `limit` allows — §3.2 step 3 compares boundary count, not raw row count. */
-function assertBoundaryLimit(
-  rows: readonly IdentityTransitionRow[],
-  limit: number,
-): void {
-  const boundaries = distinctBoundaries(rows);
-  if (boundaries.length > limit) {
-    throw identityReplayLimitExceededError(rows, boundaries, limit);
-  }
+  return {
+    rows: rows.filter((row) => row.recorded_revision < cutoffRevision),
+    nextFrom: createRecordedInstant(
+      cutoffRow.recorded_revision,
+      cutoffRow.recorded_at,
+    ),
+  };
 }
 
 function identityReplayHistoryTruncatedError(
@@ -348,18 +387,23 @@ type WalkedTransitions = Readonly<{
   seed: PlainNodeRef;
   fromRevision: number | undefined;
   toRevision: number | undefined;
-  limit: number;
   rows: readonly IdentityTransitionRow[];
+  nextFrom?: RecordedInstant | undefined;
 }>;
 
 /**
  * The shared setup both `identityTransitionsOf` and `identityReplay` need
  * before they diverge: enforce `history: true`, resolve the requested limit
- * and revision bounds, seed and run the lineage walk (§3.2 step 2), and
- * enforce the boundary-count limit (§3.2 step 3) on the result. `seed` is the
- * caller's ORIGINAL reference (not the resolved class canonical), for
- * `identityReplay`'s `reconstructAt` calls — see that function's docblock for
- * why the two must not be conflated.
+ * and revision bounds, seed and run the lineage walk (§3.2 step 2), narrow
+ * the converged result to the requested window, and cut it into one page of
+ * at most `limit` boundaries (§3.2 step 3). `seed` is the caller's ORIGINAL
+ * reference (not the resolved class canonical), for `identityReplay`'s
+ * `reconstructAt` calls — see that function's docblock for why the two must
+ * not be conflated.
+ *
+ * The three stages are ordered and cannot be reshuffled: discovery must run
+ * unbounded, the window applies to what discovery found, and the page is cut
+ * from what the window kept.
  */
 async function walkedTransitionsFor<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
@@ -378,22 +422,35 @@ async function walkedTransitionsFor<G extends GraphDef>(
     options?.toRecorded === undefined ?
       undefined
     : requireTypeGraphRecordedRevision(options.toRecorded, "toRecorded");
-  const rows = await walkClassLineage(ctx, walkSeed, fromRevision, toRevision);
-  assertBoundaryLimit(rows, limit);
-  return { seed, fromRevision, toRevision, limit, rows };
+  const discovered = await walkClassLineage(ctx, walkSeed);
+  const page = pageBoundaries(
+    windowedRows(discovered, fromRevision, toRevision),
+    limit,
+  );
+  return {
+    seed,
+    fromRevision,
+    toRevision,
+    rows: page.rows,
+    ...(page.nextFrom === undefined ? {} : { nextFrom: page.nextFrom }),
+  };
 }
 
 /**
  * Every transition touching `ref`'s class lineage, ascending by recorded
- * revision. `store.identity.transitionsOf` is a thin wrapper over this.
+ * revision, in pages of at most `limit` boundaries.
+ * `store.identity.transitionsOf` is a thin wrapper over this.
  */
 export async function identityTransitionsOf<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
-): Promise<readonly IdentityTransition<G>[]> {
-  const { rows } = await walkedTransitionsFor(ctx, ref, options);
-  return rows.map((row) => publicTransition<G>(row));
+): Promise<IdentityTransitionHistory<G>> {
+  const { rows, nextFrom } = await walkedTransitionsFor(ctx, ref, options);
+  return {
+    transitions: rows.map((row) => publicTransition<G>(row)),
+    ...(nextFrom === undefined ? {} : { nextFrom }),
+  };
 }
 
 /**
@@ -404,17 +461,21 @@ export async function identityTransitionsOf<G extends GraphDef>(
  * `IdentityTransitionCause`), so no membership-changing revision can fall
  * between two consecutive boundaries undetected. `store.identity.replay` is
  * a thin wrapper over this.
+ *
+ * Paged by boundary exactly as `transitionsOf` is: `nextFrom` names the first
+ * boundary this page stopped short of. Because the page is cut BEFORE
+ * restored rows are excluded, `steps` can be shorter than `limit` boundaries
+ * on a page whose lineage mixes restored and native rows — the page boundary
+ * stays identical between the two methods, which is what lets a caller pair
+ * a `transitionsOf` explanation with a `replay` step page for page.
  */
 export async function identityReplay<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   ref: IdentityNodeRefInput<G>,
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
-  const { seed, fromRevision, toRevision, rows } = await walkedTransitionsFor(
-    ctx,
-    ref,
-    options,
-  );
+  const { seed, fromRevision, toRevision, rows, nextFrom } =
+    await walkedTransitionsFor(ctx, ref, options);
 
   const retention = await readTransitionRetentionDetails(
     ctx.backend,
@@ -475,5 +536,6 @@ export async function identityReplay<G extends GraphDef>(
   return {
     steps,
     ...(truncatedBefore === undefined ? {} : { truncatedBefore }),
+    ...(nextFrom === undefined ? {} : { nextFrom }),
   };
 }

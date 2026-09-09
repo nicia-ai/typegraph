@@ -329,16 +329,19 @@ cannot answer a request. Its code names the reason:
   section targets a history-off store: without `history: true` those rows
   could never be read back through `transitionsOf` / `replay` either, so the
   import refuses rather than writing them write-only.
-- `IDENTITY_REPLAY_LIMIT_EXCEEDED` — the lineage walk found more boundaries
-  than the requested `limit` (default 200, maximum 2000). `details
-  .resumeFromRecorded` names a cursor; pass it as `fromRecorded` to page.
 - `IDENTITY_REPLAY_HISTORY_TRUNCATED` — the requested range lies entirely
   below the graph's retention watermark (see
   [`pruneIdentityTransitions`](/identity/#retention)); `details.prunedBefore`
   names the watermark.
 - `IDENTITY_REPLAY_WALK_INCOMPLETE` — an internal safety ceiling on the
-  lineage walk's own reads was hit; narrow `fromRecorded`/`toRecorded` or
-  prune older history.
+  lineage walk's own reads was hit; prune older history with
+  `pruneIdentityTransitions`. Narrowing `fromRecorded`/`toRecorded` does not
+  help: lineage discovery reads the whole log deliberately, so that a
+  requested window can never hide the notes that name a class.
+
+A range with more boundaries than the requested `limit` is not an error —
+`replay` and `transitionsOf` page, returning a `nextFrom` cursor on the
+result (see [Replay and identity history](/identity/#replay-and-identity-history)).
 
 ```typescript
 import { IdentityReplayError } from "@nicia-ai/typegraph";
@@ -1801,7 +1804,6 @@ try {
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store opened without `history: true` |
-| `IDENTITY_REPLAY_LIMIT_EXCEEDED` | `IdentityReplayError` | constraint | The lineage walk found more boundaries than the requested `limit` |
 | `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
 | `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | The lineage walk's internal read ceiling was hit before the seed set converged |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |

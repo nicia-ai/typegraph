@@ -118,5 +118,49 @@ export function registerIdentityReplayIntegrationTests(
         liveMembers.map((ref) => ref.id).toSorted(),
       );
     });
+
+    // Discovery-vs-window and boundary paging on EVERY backend: both moved
+    // out of the reader's SQL (which no longer takes revision bounds at all)
+    // and into `replay.ts`, so the shared suite is where the two dialects are
+    // pinned to the same answer rather than each certifying its own.
+    it("discovers lineage outside the requested window, and pages by boundary through nextFrom", async () => {
+      const store = await provisionIdentityReplayStore(context);
+      const a = { kind: "Person" as const, id: "page-a" };
+      const b = { kind: "Person" as const, id: "page-b" };
+      const c = { kind: "Person" as const, id: "page-c" };
+      await store.nodes.Person.create({}, { id: a.id });
+      await store.nodes.Person.create({}, { id: b.id });
+      await store.nodes.Person.create({}, { id: c.id });
+
+      await store.identity.assertSame(b, c);
+      const throughFirstMerge = requireDefined(await store.recordedNow());
+      await store.identity.assertSame(a, b);
+
+      // `a` is the class canonical now, and no note at or below the first
+      // merge names it — only an unbounded walk can reach that boundary.
+      const windowed = await store.identity.transitionsOf(b, {
+        toRecorded: throughFirstMerge,
+      });
+      expect(windowed.transitions.length).toBeGreaterThan(0);
+
+      const whole = await store.identity.transitionsOf(a);
+      expect(whole.nextFrom).toBeUndefined();
+      const boundaries = new Set(
+        whole.transitions.map((transition) => transition.recorded),
+      );
+      expect(boundaries.size).toBeGreaterThan(1);
+
+      const firstPage = await store.identity.transitionsOf(a, { limit: 1 });
+      expect(firstPage.nextFrom).toBeDefined();
+      const secondPage = await store.identity.transitionsOf(a, {
+        limit: 1,
+        fromRecorded: requireDefined(firstPage.nextFrom),
+      });
+      expect(
+        secondPage.transitions.map((transition) => transition.transitionId),
+      ).not.toEqual(
+        firstPage.transitions.map((transition) => transition.transitionId),
+      );
+    });
   });
 }

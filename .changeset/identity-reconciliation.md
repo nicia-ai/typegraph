@@ -9,7 +9,12 @@ retractions, same-id folds, deletes and restores, validity-window ends, kind
 drops, schema transitions and reconciliation decisions — each carrying the
 assertion ids involved, both temporal coordinates, and, for a decision made by
 a merge, the policy arm, branch, branch ancestry and plan and review digests
-that produced it. `store.identity.replay(ref)` pairs each transition with the
+that produced it. `transitionsOf` and `replay` both page: `limit` caps the number of boundaries
+one page returns and a capped page hands back a `nextFrom` cursor to pass as
+the next call's `fromRecorded`. Bounding the answer with
+`fromRecorded`/`toRecorded` never bounds the lineage search — discovery walks
+the whole log, because the note naming an earlier class canonical routinely
+sits above the requested window. `store.identity.replay(ref)` pairs each transition with the
 class membership before and after it, reconstructed through the same
 historical reader `asOf` and `asOfRecorded` reads already use, so replay can
 never disagree with a live read. `pruneIdentityTransitions(store, { beforeRecorded })`
@@ -55,6 +60,17 @@ transaction's flush wrote, an annotation of the assertion/retraction writes
 `total` already counts rather than a fourth kind of write.
 
 ### Breaking changes
+
+- `store.identity.transitionsOf` returns `{ transitions, nextFrom? }` rather
+  than a bare array, so a capped page can carry its continuation cursor.
+  Destructure the result (`const { transitions } = await
+  store.identity.transitionsOf(ref)`).
+- `IDENTITY_REPLAY_LIMIT_EXCEEDED` is gone from `IdentityReplayErrorDetails`
+  and the error catalog. A lineage with more boundaries than `limit` now
+  pages: `replay` and `transitionsOf` return a `nextFrom` recorded instant
+  naming the first boundary the page stopped short of. Code that caught the
+  refusal and resumed from `details.resumeFromRecorded` reads `nextFrom` off
+  the successful result instead.
 
 - The identity transition log adds two relations, `typegraph_identity_transitions`
   and `typegraph_identity_transition_retention`, which `ensureSchema` creates on

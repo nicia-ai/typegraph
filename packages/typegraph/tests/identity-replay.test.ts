@@ -153,10 +153,120 @@ describe("identity replay", () => {
     await store.identity.assertSame(a, b);
 
     const ctx = storeRuntime(store).identityContext();
-    const transitions = await identityTransitionsOf(ctx, a);
+    const { transitions } = await identityTransitionsOf(ctx, a);
     const replay = await identityReplay(ctx, a);
     expect(replay.steps.map((step) => step.transition.transitionId)).toEqual(
       transitions.map((transition) => transition.transitionId),
+    );
+  });
+
+  // Load-bearing (R3): lineage DISCOVERY must ignore the caller's window.
+  // The seed set can only learn a class name from a note that mentions it,
+  // and the note that teaches it routinely sits ABOVE the window — the walk
+  // starts at the CURRENT canonical and hops backwards through `priorClass`.
+  // Mutation check: give `readIdentityTransitions` back its `fromRevision` /
+  // `toRevision` filters and pass the caller's bounds into
+  // `walkClassLineage` (its pre-R3 shape) — the walk from `a` then reads
+  // nothing at or below the first merge's revision, both `windowed` and
+  // `windowedReplay` come back empty, and the first two expectations here
+  // fail. `pnpm exec vitest run tests/identity-replay.test.ts --maxWorkers=2`.
+  it("R3: a windowed read discovers lineage the window itself cannot see", async () => {
+    const store = await buildAbcStore();
+    const a = { kind: "Person" as const, id: "a" };
+    const b = { kind: "Person" as const, id: "b" };
+    const c = { kind: "Person" as const, id: "c" };
+
+    // B and C merge FIRST. Every note at this boundary names the {b, c}
+    // class — `a` appears nowhere at or below it.
+    await store.identity.assertSame(b, c);
+    const throughFirstMerge = await store.recordedNow();
+    if (throughFirstMerge === undefined) {
+      throw new Error("expected a recorded instant");
+    }
+    // A joins and takes over as canonical (code-point-smallest member), so
+    // the walk from `b` now seeds on `a`.
+    await store.identity.assertSame(a, b);
+
+    const ctx = storeRuntime(store).identityContext();
+    const firstMergeRevision = recordedInstantRevision(throughFirstMerge);
+
+    const { transitions: windowed } = await identityTransitionsOf(ctx, b, {
+      toRecorded: throughFirstMerge,
+    });
+    expect(windowed.length).toBeGreaterThan(0);
+    const windowedReplay = await identityReplay(ctx, b, {
+      toRecorded: throughFirstMerge,
+    });
+    expect(windowedReplay.steps.length).toBeGreaterThan(0);
+
+    // The window still narrows the ANSWER — discovery being unbounded must
+    // not leak the later boundary back into the result.
+    for (const transition of windowed) {
+      expect(recordedInstantRevision(transition.recorded)).toBeLessThanOrEqual(
+        firstMergeRevision,
+      );
+    }
+    const { transitions: unbounded } = await identityTransitionsOf(ctx, b);
+    expect(unbounded.length).toBeGreaterThan(windowed.length);
+  });
+
+  // Load-bearing (R7): the boundary limit pages, it never refuses. Mutation
+  // check: make `pageBoundaries` (replay.ts) throw when
+  // `boundaries.length > limit` instead of cutting the page — every
+  // `limit: 1` call below rejects and the whole test fails.
+  it("R7: limit caps a page and hands back nextFrom, and the pages reassemble the whole lineage", async () => {
+    const store = await buildAbcStore();
+    const a = { kind: "Person" as const, id: "a" };
+    const b = { kind: "Person" as const, id: "b" };
+    const c = { kind: "Person" as const, id: "c" };
+    const same1 = await store.identity.assertSame(a, b);
+    await store.identity.assertSame(b, c);
+    await store.identity.retractAssertion(same1.assertion.id);
+    await store.identity.assertSame(a, b);
+
+    const ctx = storeRuntime(store).identityContext();
+    const { transitions: whole, nextFrom: wholeNextFrom } =
+      await identityTransitionsOf(ctx, a);
+    expect(wholeNextFrom).toBeUndefined();
+    const wholeBoundaries = new Set(
+      whole.map((transition) => transition.recorded),
+    );
+    expect(wholeBoundaries.size).toBeGreaterThan(2);
+
+    const paged: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page <= wholeBoundaries.size; page += 1) {
+      const result = await identityTransitionsOf(ctx, a, {
+        limit: 1,
+        ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+      });
+      // Exactly one boundary per page, and the boundary the cursor named.
+      expect(
+        new Set(result.transitions.map((transition) => transition.recorded))
+          .size,
+      ).toBe(1);
+      paged.push(
+        ...result.transitions.map((transition) => transition.transitionId),
+      );
+      cursor = result.nextFrom;
+      if (cursor === undefined) break;
+    }
+    expect(cursor).toBeUndefined();
+    expect(paged).toEqual(whole.map((transition) => transition.transitionId));
+
+    // `replay` pages on the identical boundaries — the two must agree about
+    // where a page ended, or an audit view pairing them would drift.
+    const firstReplayPage = await identityReplay(ctx, a, { limit: 1 });
+    const firstTransitionPage = await identityTransitionsOf(ctx, a, {
+      limit: 1,
+    });
+    expect(firstReplayPage.nextFrom).toBe(firstTransitionPage.nextFrom);
+    expect(
+      firstReplayPage.steps.map((step) => step.transition.transitionId),
+    ).toEqual(
+      firstTransitionPage.transitions.map(
+        (transition) => transition.transitionId,
+      ),
     );
   });
 
@@ -284,13 +394,14 @@ describe("identity replay — public facade surface", () => {
     const b = { kind: "Person" as const, id: "b" };
     await store.identity.assertSame(a, b);
 
-    const storeTransitions = await store.identity.transitionsOf(a);
+    const { transitions: storeTransitions } =
+      await store.identity.transitionsOf(a);
     expect(storeTransitions.length).toBeGreaterThan(0);
     const storeReplay = await store.identity.replay(a);
     expect(storeReplay.steps.length).toBe(storeTransitions.length);
 
     await store.transaction(async (tx) => {
-      const txTransitions = await tx.identity.transitionsOf(a);
+      const { transitions: txTransitions } = await tx.identity.transitionsOf(a);
       expect(txTransitions).toEqual(storeTransitions);
       const txReplay = await tx.identity.replay(a);
       expect(txReplay).toEqual(storeReplay);

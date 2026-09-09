@@ -486,8 +486,6 @@ export function toTransitionTransfer(
 
 export type IdentityTransitionReadScope = Readonly<{
   classRefs: readonly PlainNodeRef[];
-  fromRevision?: number | undefined;
-  toRevision?: number | undefined;
   limit: number;
 }>;
 
@@ -505,6 +503,14 @@ export type IdentityTransitionReadScope = Readonly<{
  * one boundary shares the same `before`/`after` step in replay — but a
  * future reader that does must not assume this ordering reflects buffering
  * order.
+ *
+ * TAKES NO RECORDED-REVISION BOUNDS, on purpose. Its one caller is replay's
+ * fixed-point lineage walk, whose seed set has to reach every class name the
+ * node ever carried — and the note that teaches the walk a name routinely
+ * sits ABOVE the window the caller asked about, because the walk starts at
+ * the node's CURRENT canonical and hops backwards through `priorClass`. A
+ * bounded read cut exactly those hops. The caller's `fromRecorded` /
+ * `toRecorded` are applied once, to the converged lineage, by `replay.ts`.
  *
  * `scope.classRefs` is chunked through the shared bind-budget helper (each
  * reference costs four bind parameters: kind+id in the forward match, kind+id
@@ -560,22 +566,12 @@ export async function readIdentityTransitions(
     ),
     sql` OR `,
   );
-  const fromFilter =
-    scope.fromRevision === undefined ?
-      sql``
-    : sql`AND recorded_revision >= ${scope.fromRevision}`;
-  const toFilter =
-    scope.toRevision === undefined ?
-      sql``
-    : sql`AND recorded_revision <= ${scope.toRevision}`;
   const rows = await target.execute<RawIdentityTransitionRow>(
     asCompiledRowsSql(sql`
       SELECT ${IDENTITY_TRANSITION_COLUMNS}
       FROM ${schema.identityTransitionsTable}
       WHERE graph_id = ${graphId}
         AND (${classMatches} OR ${priorMatches})
-        ${fromFilter}
-        ${toFilter}
       ORDER BY recorded_revision ASC, transition_id ASC
       LIMIT ${scope.limit}
     `),
