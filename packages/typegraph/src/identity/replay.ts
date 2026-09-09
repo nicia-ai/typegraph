@@ -59,6 +59,25 @@ export type IdentityTransition<G extends GraphDef> = Readonly<{
   priorClass?: IdentityNodeReference<G> | undefined;
   assertionIds: readonly IdentityAssertionId[];
   decision?: IdentityDecisionProvenance | undefined;
+  /**
+   * Present when an ARCHIVAL RESTORE inserted this row into the graph being
+   * read, rather than this graph's own history capture recording it — the
+   * public face of the internal marker `isRestoredTransitionRow` reads. An
+   * audit surface uses it to tell an imported explanation from a locally
+   * replayable event: `replay` deliberately excludes every restored
+   * transition from `steps` (a restored row's `recorded` revision was minted
+   * by the SOURCE graph's clock and interleaves arbitrarily with this
+   * graph's, so no before/after could be reconstructed for it honestly),
+   * while `transitionsOf` returns it like any other.
+   *
+   * `at` is the destination graph's WALL CLOCK at restore time, not a
+   * {@link RecordedInstant}: a restore records history, it does not relive
+   * it, so it never advances this graph's recorded revision counter and
+   * there is no revision on this graph's own axis to pair the timestamp
+   * with. The coarser retention watermark (`truncatedBefore`) is the only
+   * revision-shaped signal a restore leaves behind.
+   */
+  restored?: Readonly<{ at: string }> | undefined;
 }>;
 
 export type IdentityReplayStep<G extends GraphDef> = Readonly<{
@@ -115,6 +134,9 @@ function publicTransition<G extends GraphDef>(
       ),
     assertionIds: row.assertion_ids as readonly IdentityAssertionId[],
     decision: row.decision,
+    ...(row.restored_at === undefined ?
+      {}
+    : { restored: { at: row.restored_at } }),
   };
 }
 

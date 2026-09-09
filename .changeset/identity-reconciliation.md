@@ -9,7 +9,10 @@ retractions, same-id folds, deletes and restores, validity-window ends, kind
 drops, schema transitions and reconciliation decisions — each carrying the
 assertion ids involved, both temporal coordinates, and, for a decision made by
 a merge, the policy arm, branch, branch ancestry and plan and review digests
-that produced it. `transitionsOf` and `replay` both page: `limit` caps the number of boundaries
+that produced it. A transition an archival restore brought in carries
+`restored.at`, the destination's wall clock at restore time, so an audit view
+can tell an imported explanation from a locally replayable event.
+`transitionsOf` and `replay` both page: `limit` caps the number of boundaries
 one page returns and a capped page hands back a `nextFrom` cursor to pass as
 the next call's `fromRecorded`. Bounding the answer with
 `fromRecorded`/`toRecorded` never bounds the lineage search — discovery walks

@@ -299,6 +299,14 @@ for (const transition of transitions) {
 }
 ```
 
+A transition that an archival restore brought into this graph — rather than
+this graph's own history capture recording it — carries `restored`, whose
+`at` is the destination's wall clock at restore time. That is the marker
+`replay` itself uses to leave the row out of `steps`, made public so an audit
+view can label an imported explanation instead of inferring it from a
+revision comparison (see [Archival transitions and the retention
+watermark](#archival-transitions-and-the-retention-watermark)).
+
 | Cause | Fires when |
 | --- | --- |
 | `assert` | An explicit `same` assertion (or a merge's own union) fused two classes |
@@ -381,6 +389,11 @@ await store.transaction(async (tx) => {
 });
 await store.identity.transitionsOf(alice); // now includes it, post-commit
 ```
+
+Restored transitions are never `steps`, but they are always
+`transitions` — see [Archival transitions and the retention
+watermark](#archival-transitions-and-the-retention-watermark) for the marker
+that tells them apart.
 
 ### Retention
 
@@ -574,9 +587,15 @@ so nothing was silently dropped, but it also could not throw. Open the
 restore target with `history: true` if it needs to accept archival exports
 from a history-enabled source.
 
-Every restored row is also marked as such internally, regardless of what the
-source graph thought of it: a restore always inserts rows this graph did not
-record itself. `replay` uses that marker — never a comparison against
+Every restored row is also marked as such, regardless of what the source
+graph thought of it: a restore always inserts rows this graph did not record
+itself. The marker is public — `transitionsOf` returns it as
+`transition.restored.at`, the destination's wall clock at restore time — so
+an audit view can label an imported explanation. It is a wall clock and not a
+`RecordedInstant` because a restore records history without reliving it: it
+never advances the destination's own recorded revision counter, so there is
+no revision on this graph's axis to pair the timestamp with. `replay` uses
+that same marker — never a comparison against
 `recordedRevision` — to decide whether a row may be paired with a
 reconstructed before/after snapshot, because a restored row's revision is
 minted by the *source* graph's own clock and interleaves arbitrarily with

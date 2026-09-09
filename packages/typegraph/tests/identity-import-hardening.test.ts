@@ -463,7 +463,28 @@ describe("archival identity import window bounds", () => {
     );
     for (const sourceTransition of sourceTransitions) {
       expect(targetTransitionIds.has(sourceTransition.transitionId)).toBe(true);
+      // Load-bearing (R-S4): the restore marker is PUBLIC on the transition,
+      // so an audit surface can tell an imported explanation (excluded from
+      // `replay`'s steps) from a locally replayable event without inferring
+      // it from a revision comparison — the inference the marker exists to
+      // replace. Mutation check: drop the `restored` spread from
+      // `publicTransition` (src/identity/replay.ts) and this expectation
+      // fails on the first restored id.
+      const restoredHere = targetTransitions.find(
+        (transition) =>
+          transition.transitionId === sourceTransition.transitionId,
+      );
+      expect(restoredHere?.restored?.at).toEqual(expect.any(String));
+      // ...and the SOURCE's own copy of the identical row is not marked:
+      // the marker names where the row was inserted, never what it explains.
+      expect(sourceTransition.restored).toBeUndefined();
     }
+    // The target's own post-restore note (the import's genuine merge) is
+    // native, so `restored` distinguishes rather than blanketing everything.
+    const nativeTargetTransitions = targetTransitions.filter(
+      (transition) => transition.restored === undefined,
+    );
+    expect(nativeTargetTransitions.length).toBeGreaterThan(0);
 
     // `replay`, by contrast, reports the seam honestly rather than silently
     // claiming a complete history: the restore set the watermark to the
