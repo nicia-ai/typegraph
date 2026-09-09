@@ -4,9 +4,16 @@
  * three separate inline arbitrations in `merge-identity.ts` —
  * `dedupeIdentityAssertions`, `assertNoOpposingIdentityRelations`, and
  * `assertNoRetractReassertRace`. Every arm keeps today's behavior verbatim
- * under the default `"refuse"` policy; a caller-supplied resolving policy
- * (`"assertWins"` / `"retractWins"` / `"flag"` / a function) turns a subset of
- * those refusals into a recorded resolution instead of a thrown error.
+ * under the default `"refuse"` policy, WITH ONE DECLARED EXCEPTION: when two
+ * branches end the same base identity assertion at different valid-time
+ * instants, {@link reduceIdentityRetraction} now picks the EARLIEST staged
+ * `validTo` — deterministic and order-independent — where the inline code it
+ * replaced let whichever retraction was staged LAST win, a branch-order
+ * dependency no caller could rely on. See "ending a doubly-retracted base row
+ * picks the EARLIEST end" in `identity-three-way.test.ts`. A caller-supplied
+ * resolving policy (`"assertWins"` / `"retractWins"` / `"flag"` / a function)
+ * turns a subset of the classifier's refusals into a recorded resolution
+ * instead of a thrown error.
  *
  * Extracted out of `merge-identity.ts` so both the plan-time dedupe and the
  * post-remap re-dedupe it runs after endpoint canonicalization call the SAME
@@ -162,6 +169,16 @@ export const DUPLICATE_IDENTITY_ASSERTION_DROP_REASON =
  * branch's re-assertion of a pair another branch retracted.
  */
 export const REASSERT_OVERRULED_DROP_REASON = "identity:reassert-overruled";
+
+/**
+ * Reason recorded when a resolving policy overruled one side of an
+ * `"opposing-relations"` conflict (branches asserted BOTH `same` and
+ * `different` for one pair with overlapping windows) — a distinct shape from
+ * `REASSERT_OVERRULED_DROP_REASON`'s retract/reassert race, since nothing here
+ * was reasserted: the policy chose one relation over the other.
+ */
+export const OPPOSING_RELATIONS_OVERRULED_DROP_REASON =
+  "identity:opposing-relations-overruled";
 
 /**
  * Reason recorded when an `"assertWins"`/function resolution overruled a
@@ -783,7 +800,9 @@ function detectRetractReassertRaces(staging: StagingSet): ReadonlyMap<
  * and `assertNoRetractReassertRace` into arms of ONE classifier, keyed by the
  * `IdentityAssertionConflictPolicy` a caller may supply. Under the default
  * `"refuse"` policy every arm reproduces today's behavior byte-for-byte —
- * same thrown errors, same drop reasons, same survivor rule.
+ * same thrown errors, same drop reasons, same survivor rule — EXCEPT the
+ * doubly-retracted-base-row ending, which now picks the earliest staged end
+ * rather than the last one staged (module docblock above).
  */
 export function planIdentityThreeWay(
   staging: StagingSet,
@@ -795,6 +814,20 @@ export function planIdentityThreeWay(
   const dropped: DroppedItem[] = [];
   const reconciliations: IdentityReconciliation[] = [];
   const unresolved: IdentityUnresolvedConflict[] = [];
+
+  // Base truth for every semantic pair, so a conflict can hand a resolving
+  // policy the ROW ONE BRANCH RACED AGAINST — a race by definition has a base
+  // row, and `IdentityAssertionConflict.base` is public callback input
+  // documented as exactly that. Built once here (rather than left to the
+  // later `baseByDedupe` grouping, which splits a bounded assertion further
+  // by window and would under-populate a conflict that spans several windows).
+  const baseBySemanticKey = new Map<string, IdentityTransferAssertion[]>();
+  for (const assertion of staging.baseIdentityAssertions) {
+    const key = identitySemanticKey(assertion);
+    const group = baseBySemanticKey.get(key) ?? [];
+    group.push(assertion);
+    baseBySemanticKey.set(key, group);
+  }
 
   const refuseOpposing = (
     same: StagedIdentityAssertion,
@@ -827,7 +860,10 @@ export function planIdentityThreeWay(
       a: group.a,
       b: group.b,
       relation: "same",
-      base: [],
+      base: [
+        ...(baseBySemanticKey.get(group.sameKey) ?? []),
+        ...(baseBySemanticKey.get(group.differentKey) ?? []),
+      ],
       asserted: [...group.same, ...group.different],
       retracted: [],
     };
@@ -858,7 +894,7 @@ export function planIdentityThreeWay(
         dropped.push(
           droppedIdentityAssertion(
             staged.assertion,
-            REASSERT_OVERRULED_DROP_REASON,
+            OPPOSING_RELATIONS_OVERRULED_DROP_REASON,
           ),
         );
       }
@@ -886,7 +922,7 @@ export function planIdentityThreeWay(
       dropped.push(
         droppedIdentityAssertion(
           staged.assertion,
-          REASSERT_OVERRULED_DROP_REASON,
+          OPPOSING_RELATIONS_OVERRULED_DROP_REASON,
         ),
       );
     }
@@ -915,7 +951,7 @@ export function planIdentityThreeWay(
       a: entityRefOf(anchorAssertion.a),
       b: entityRefOf(anchorAssertion.b),
       relation: anchorAssertion.relation,
-      base: [],
+      base: baseBySemanticKey.get(semanticKey) ?? [],
       asserted: race.asserted,
       retracted: race.retracted,
     };
@@ -1007,8 +1043,13 @@ export function planIdentityThreeWay(
         ),
       );
     }
+    // The same survivor rule the `retract` decision above uses for its base
+    // row, not raw staging order (R7): a race whose base row two branches
+    // retracted must pick the SAME base row here, under `assertWins`, that
+    // `retractWins`/the plain-retraction path would pick for the identical
+    // fixture — only the ending instant differs (the winner's own start).
     retractions.push({
-      ...requireDefined(race.retracted[0]).assertion,
+      ...reduceIdentityRetraction(race.retracted).assertion,
       validTo: winner.assertion.validFrom,
     });
     reconciliations.push(
