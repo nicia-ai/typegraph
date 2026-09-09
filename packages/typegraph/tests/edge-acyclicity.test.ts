@@ -201,11 +201,13 @@ describe("buildEdgeAcyclicityProbe: compiled-SQL pin", () => {
     const rendered = renderSqlite(fragment).sql;
 
     // The `ancestry` accumulator itself is UNION, never UNION ALL — that is
-    // what makes an unbounded recursion terminate with no depth bound.
-    // `UNION ALL` legitimately appears in the preceding `candidates` CTE
-    // (D-4's seed hop, see recursive-cte.ts), which is a source `ancestry`
-    // joins against and not part of the `(origin_key, node_kind, node_id)`
-    // accumulator that needs deduplicating.
+    // what makes an unbounded recursion terminate with no depth bound. This
+    // pin's seed is `"proposed"`, so `ancestry` joins `typegraph_edges`
+    // directly (see `buildAcyclicityAncestryStepDirect`) — there is no
+    // compound `candidates` CTE here at all, so `UNION ALL` never appears
+    // anywhere in this rendered SQL (that shape is exclusive to the
+    // `"planned"` seed form's `buildPlannedAcyclicityCandidates`).
+    expect(rendered).not.toContain("candidates(");
     const ancestryTerm = rendered.slice(
       rendered.indexOf("ancestry(origin_key"),
     );

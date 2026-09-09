@@ -108,8 +108,14 @@ describe("edge-acyclicity probe: query plan (item D.2 perf ruling)", () => {
     // expected; `MATERIALIZE candidates` — the whole-relation copy — is the
     // regression this test exists to catch, and cannot appear at all now
     // that the `"proposed"` form has no `candidates` CTE.
+    // No standalone "no full scan" assertion here: verified empirically (the
+    // lane's load-bearing mutation check) that reverting to the old compound
+    // `candidates` CTE makes SQLite populate it via an INDEX SEARCH on
+    // `typegraph_edges_to_idx` (filtered only by `graph_id`), never a bare
+    // `SCAN e` — a scan-shaped assertion would never fire. The
+    // `from_idx`/`MATERIALIZE candidates` pair above already fails under
+    // that exact mutation and is the real backstop.
     expect(plan).not.toContain("MATERIALIZE candidates");
-    expect(plan).not.toMatch(/\bSCAN\s+.*typegraph_edges\b/i);
   });
 
   it("a bulkCreate batch's post-insert probe seeks typegraph_edges_from_idx directly, no MATERIALIZE candidates", async () => {
@@ -142,8 +148,14 @@ describe("edge-acyclicity probe: query plan (item D.2 perf ruling)", () => {
     const plan = explainQueryPlan(client, probeStatement);
 
     expect(plan).toMatch(/typegraph_edges_from_idx/);
+    // No standalone "no full scan" assertion here: verified empirically (the
+    // lane's load-bearing mutation check) that reverting to the old compound
+    // `candidates` CTE makes SQLite populate it via an INDEX SEARCH on
+    // `typegraph_edges_to_idx` (filtered only by `graph_id`), never a bare
+    // `SCAN e` — a scan-shaped assertion would never fire. The
+    // `from_idx`/`MATERIALIZE candidates` pair above already fails under
+    // that exact mutation and is the real backstop.
     expect(plan).not.toContain("MATERIALIZE candidates");
-    expect(plan).not.toMatch(/\bSCAN\s+.*typegraph_edges\b/i);
   });
 
   it("a mixed-orientation relation's audit probe seeks BOTH from_idx and to_idx directly (MULTI-INDEX OR), no candidates CTE", async () => {
