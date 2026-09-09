@@ -377,7 +377,12 @@ export class QueryBuilder<
    * narrowed). `"exact"` restores the exact-kind reading; `"narrower"`
    * expands through `broader`/`narrower` instead (C.3, untyped alias — no
    * schema relationship is claimed). Omitting the option, passing `{}`, or
-   * passing an explicit `undefined` all take the store default.
+   * passing an explicit `undefined` all take the store default — which is
+   * why the default overload's parameter spells `expansion?: undefined`
+   * rather than a bare optional (`exactOptionalPropertyTypes` rejects a
+   * stated `undefined` against a bare optional) and why it cannot spell the
+   * whole `AliasExpansionAxis` union (it would then also capture the
+   * `"exact"` and `"narrower"` calls the overloads below type).
    *
    * @param kind - The node kind to start from
    * @param alias - A unique alias for this node (compile-time error if duplicate)
@@ -470,7 +475,8 @@ export class QueryBuilder<
    * `from()` — this always widens to {@link PolymorphicNodeType} whenever the
    * axis is not `"exact"`, rather than computing `SubsumptionAffected`.
    * `expansion: "narrower"` types the alias as an untyped {@link NodeAlias},
-   * the same way `from()` does.
+   * the same way `from()` does. Omitting the option, passing `{}`, and
+   * passing an explicit `undefined` all take the store default.
    */
   fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
@@ -487,7 +493,7 @@ export class QueryBuilder<
   fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: { expansion?: "subclasses" },
+    options?: { expansion?: "subclasses" | undefined },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>>>,

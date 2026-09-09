@@ -491,6 +491,12 @@ export class TraversalBuilder<
    * - "out" direction: kind must be in the edge's "to" array
    * - "in" direction: kind must be in the edge's "from" array
    *
+   * The alias's expansion axis is the same one option `from()` states,
+   * resolved through the same owner (`./alias-expansion.ts`): `expansion`,
+   * taking the store default when the option is omitted, `{}`, or an
+   * explicit `undefined`. A `"narrower"` expansion additionally admits each
+   * expanded kind as an endpoint of this edge.
+   *
    * @param kind - The target node kind
    * @param alias - A unique alias for this node (compile-time error if duplicate)
    */
@@ -584,6 +590,11 @@ export class TraversalBuilder<
   /**
    * Runtime-kind sibling of `to`; accepts a kind name or Store-issued token.
    * Throws `KindNotFoundError` if the kind is not registered.
+   *
+   * Like `fromDynamic`, the runtime kind may not appear in `G["ontology"]`,
+   * so any axis other than `"exact"` widens to {@link PolymorphicNodeType}.
+   * Omitting the option, passing `{}`, and passing an explicit `undefined`
+   * all take the store default.
    */
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
@@ -600,7 +611,7 @@ export class TraversalBuilder<
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: { expansion?: "subclasses" },
+    options?: { expansion?: "subclasses" | undefined },
   ): QueryBuilder<
     G,
     Aliases &

@@ -15,6 +15,7 @@ import { z } from "zod";
 import {
   broader,
   createQueryBuilder,
+  defineEdge,
   defineGraph,
   defineNode,
   equivalentTo,
@@ -157,6 +158,7 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
   const PodcastKind = defineNode("PodcastAliasTest", {
     schema: z.object({ title: z.string(), rssUrl: z.string() }),
   });
+  const cites = defineEdge("citesAliasTest", { schema: z.object({}) });
 
   const affectedGraph = defineGraph({
     id: "alias_typing_affected",
@@ -293,6 +295,93 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
     >[number];
     expectTypeOf<EmptyRow["kind"]>().toEqualTypeOf<string>();
     expectTypeOf<UndefinedRow["kind"]>().toEqualTypeOf<string>();
+  });
+
+  it("forwards an unstated option identically on every expansion entry point", () => {
+    // R-S1, load-bearing at COMPILE time: each call below fails to typecheck
+    // if its entry point's default overload stops admitting the shape the
+    // caller passes. `exactOptionalPropertyTypes` makes the three shapes
+    // genuinely distinct — a bare `expansion?: "subclasses"` rejects the
+    // stated `undefined`, which is what `fromDynamic`/`toDynamic` used to do
+    // while `from`/`to` accepted it.
+    const edgeGraph = defineGraph({
+      id: "rs1_forwarding",
+      nodes: {
+        MediaAliasTest: { type: MediaKind },
+        PodcastAliasTest: { type: PodcastKind },
+      },
+      edges: {
+        citesAliasTest: {
+          type: cites,
+          from: [MediaKind],
+          to: [MediaKind, PodcastKind],
+        },
+      },
+      ontology: [subClassOf(PodcastKind, MediaKind)],
+    });
+    const edgeRegistry = buildKindRegistry(edgeGraph);
+    const builder = () =>
+      createQueryBuilder<typeof edgeGraph>(edgeGraph.id, edgeRegistry);
+    const unstated: { expansion?: undefined } = {};
+
+    const fromCalls = [
+      builder().from("MediaAliasTest", "m"),
+      builder().from("MediaAliasTest", "m", {}),
+      builder().from("MediaAliasTest", "m", undefined),
+      builder().from("MediaAliasTest", "m", { expansion: undefined }),
+      builder().from("MediaAliasTest", "m", unstated),
+    ];
+    const fromDynamicCalls = [
+      builder().fromDynamic("MediaAliasTest", "m"),
+      builder().fromDynamic("MediaAliasTest", "m", {}),
+      builder().fromDynamic("MediaAliasTest", "m", undefined),
+      builder().fromDynamic("MediaAliasTest", "m", { expansion: undefined }),
+      builder().fromDynamic("MediaAliasTest", "m", unstated),
+    ];
+    const traversal = () =>
+      builder()
+        .from("MediaAliasTest", "m", { expansion: "exact" })
+        .traverse("citesAliasTest", "e");
+    const toCalls = [
+      traversal().to("MediaAliasTest", "t"),
+      traversal().to("MediaAliasTest", "t", {}),
+      traversal().to("MediaAliasTest", "t", undefined),
+      traversal().to("MediaAliasTest", "t", { expansion: undefined }),
+      traversal().to("MediaAliasTest", "t", unstated),
+    ];
+    const toDynamicCalls = [
+      traversal().toDynamic("MediaAliasTest", "t"),
+      traversal().toDynamic("MediaAliasTest", "t", {}),
+      traversal().toDynamic("MediaAliasTest", "t", undefined),
+      traversal().toDynamic("MediaAliasTest", "t", { expansion: undefined }),
+      traversal().toDynamic("MediaAliasTest", "t", unstated),
+    ];
+
+    // Every shape resolves to the SAME builder type per entry point, so the
+    // aliases projected off one of them stand for all five: `from` widens to
+    // the polymorphic kind under the store default, and a `"narrower"`-free
+    // `toDynamic` does too.
+    const fromQuery = builder()
+      .from("MediaAliasTest", "m", {})
+      .select((ctx) => ctx.m);
+    expect(fromQuery).toBeDefined();
+    type FromRow = Awaited<ReturnType<typeof fromQuery.execute>>[number];
+    expectTypeOf<FromRow["kind"]>().toEqualTypeOf<string>();
+    const toQuery = traversal()
+      .to("MediaAliasTest", "t", { expansion: undefined })
+      .select((ctx) => ctx.t);
+    expect(toQuery).toBeDefined();
+    type ToRow = Awaited<ReturnType<typeof toQuery.execute>>[number];
+    expectTypeOf<ToRow["kind"]>().toEqualTypeOf<string>();
+
+    for (const call of [
+      ...fromCalls,
+      ...fromDynamicCalls,
+      ...toCalls,
+      ...toDynamicCalls,
+    ]) {
+      expect(call).toBeDefined();
+    }
   });
 
   it("refuses an expansion axis outside the option's domain", () => {
