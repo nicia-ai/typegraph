@@ -202,6 +202,7 @@ import { type NodeRow, rowToNode } from "../row-mappers";
 import {
   type BulkOperationHookContext,
   compareAndSetAbsent,
+  type CompositionWholeRef,
   type CreateNodeInput,
   type GetOrCreateAction,
   type Node,
@@ -2678,6 +2679,25 @@ function resolveBatchCompositionWorks<G extends GraphDef>(
 }
 
 /**
+ * Item E.2. The constraint-fence probe one composition create owes for the
+ * edge it is about to attach — `edgeComposition: true` makes
+ * `edgeWriteNeedsConstraintFence` answer `"edgeComposition"` unconditionally,
+ * so a backend that cannot hold the fence refuses the whole create rather
+ * than writing a node it cannot attach. The single spelling of that probe,
+ * reused by the single-create path, both batch create paths, and the
+ * composition-restoring leg of `executeNodeUpsertUpdate`.
+ */
+function compositionEdgeConstraintFence<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  work: CompositionCreateWork,
+): ConstraintFenceReason | undefined {
+  return edgeWriteNeedsConstraintFence({
+    ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
+    composition: true,
+  });
+}
+
+/**
  * Item E.2. The constraint-fence probes a batch's composition edges owe,
  * folded alongside the batch's own node probes by both create paths — one
  * spelling of "filter to the resolved works, then fence each one's realizing
@@ -2690,12 +2710,7 @@ function compositionBatchConstraintProbes<G extends GraphDef>(
 ): readonly (ConstraintFenceReason | undefined)[] {
   return compositionWorks
     .filter((work): work is CompositionCreateWork => work !== undefined)
-    .map((work) =>
-      edgeWriteNeedsConstraintFence({
-        ...edgeCardinalityDeclarations(ctx, work.pair.viaEdgeKind),
-        composition: true,
-      }),
-    );
+    .map((work) => compositionEdgeConstraintFence(ctx, work));
 }
 
 /**
@@ -2766,6 +2781,20 @@ async function refuseExistingPartOf<G extends GraphDef>(
   });
 }
 
+/**
+ * Item E.2. `getOrCreateByConstraint`'s (single-item and bulk) six create
+ * fallbacks each forward the caller's `partOf` onto the underlying
+ * `executeNodeCreate` input — one spelling of that optional-field forward
+ * instead of six copies of the same conditional spread.
+ */
+function createInputWithPartOf(
+  kind: string,
+  props: Record<string, unknown>,
+  partOf: CompositionWholeRef | undefined,
+): CreateNodeInput {
+  return { kind, props, ...(partOf === undefined ? {} : { partOf }) };
+}
+
 async function executeNodeCreateInternal<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
@@ -2826,10 +2855,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const plan = mixedWritePlan(
     nodeFencesConstraintProbe(ctx, kind, "create") ??
       (compositionWork === undefined ? undefined : (
-        edgeWriteNeedsConstraintFence({
-          ...edgeCardinalityDeclarations(ctx, compositionWork.pair.viaEdgeKind),
-          composition: true,
-        })
+        compositionEdgeConstraintFence(ctx, compositionWork)
       )),
     nodeCreateRequiresIdentityLock(ctx, input),
   );
@@ -3912,13 +3938,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
     mixedWritePlan(
       nodeFencesConstraintProbe(ctx, input.kind, "update") ??
         (compositionWork === undefined ? undefined : (
-          edgeWriteNeedsConstraintFence({
-            ...edgeCardinalityDeclarations(
-              ctx,
-              compositionWork.pair.viaEdgeKind,
-            ),
-            composition: true,
-          })
+          compositionEdgeConstraintFence(ctx, compositionWork)
         )),
       // Conditional for the same reason as {@link executeNodeUpdate}: a
       // resurrecting upsert folds, and stating a validity end reads the
@@ -4680,11 +4700,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
   if (!checkWherePredicate(constraint, validatedProps)) {
     const node = await executeNodeCreate(
       ctx,
-      {
-        kind,
-        props: validatedProps,
-        ...(partOf === undefined ? {} : { partOf }),
-      },
+      createInputWithPartOf(kind, validatedProps, partOf),
       backend,
       { propsPreValidated: true },
     );
@@ -4723,11 +4739,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     if (existingUniqueRow === undefined) {
       const node = await executeNodeCreate(
         ctx,
-        {
-          kind,
-          props: validatedProps,
-          ...(partOf === undefined ? {} : { partOf }),
-        },
+        createInputWithPartOf(kind, validatedProps, partOf),
         backend,
         { propsPreValidated: true },
       );
@@ -4745,11 +4757,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     if (existingRow === undefined) {
       const node = await executeNodeCreate(
         ctx,
-        {
-          kind,
-          props: validatedProps,
-          ...(partOf === undefined ? {} : { partOf }),
-        },
+        createInputWithPartOf(kind, validatedProps, partOf),
         backend,
         { propsPreValidated: true },
       );
@@ -5463,11 +5471,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       if (key === undefined) {
         toCreate.push({
           index,
-          input: {
-            kind,
-            props: validatedProps,
-            ...(partOf === undefined ? {} : { partOf }),
-          },
+          input: createInputWithPartOf(kind, validatedProps, partOf),
         });
         continue;
       }
@@ -5484,11 +5488,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       if (existing === undefined) {
         toCreate.push({
           index,
-          input: {
-            kind,
-            props: validatedProps,
-            ...(partOf === undefined ? {} : { partOf }),
-          },
+          input: createInputWithPartOf(kind, validatedProps, partOf),
         });
       } else {
         toFetch.push({
@@ -5532,11 +5532,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       if (existingRow === undefined) {
         const node = await executeNodeCreate(
           ctx,
-          {
-            kind,
-            props: validatedProps,
-            ...(partOf === undefined ? {} : { partOf }),
-          },
+          createInputWithPartOf(kind, validatedProps, partOf),
           backend,
           { propsPreValidated: true },
         );

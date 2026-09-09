@@ -36,6 +36,7 @@ import {
   readCompositionUnattachedParts,
   requiredCompositionPartKinds,
 } from "../store/operations/composition-create";
+import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
@@ -237,12 +238,7 @@ async function readCompositionUnattachedPartsForEdgeKinds(
     graphId,
     [...partKinds],
   );
-  const byPartKind = new Map<string, { kind: string; id: string }[]>();
-  for (const part of unattached) {
-    const group = byPartKind.get(part.kind) ?? [];
-    group.push(part);
-    byPartKind.set(part.kind, group);
-  }
+  const byPartKind = groupBy(unattached, (part) => part.kind);
   return [...byPartKind.entries()].map(([partKind, parts]) => ({
     family: "compositionExistence" as const,
     partKind,

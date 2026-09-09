@@ -37,6 +37,23 @@ import type { CreateEdgeInput, CreateNodeInput } from "../types";
 import { compositionEdgeHasRequiredExistencePart } from "./composition-create";
 import { diagnoseFusedSchemaFenceNoRow } from "./write-transaction";
 
+/**
+ * Item E.2: whether `item` owes a composition edge a fused node-create
+ * program has no shape for — a stated `partOf`, or a required-existence
+ * kind (which owes one even with no `partOf` stated; `resolveCompositionCreate`
+ * is what refuses that bare create). The one predicate both node-create
+ * fused-eligibility checks below share, so neither re-spells it.
+ */
+function nodeCreateOwesCompositionEdge(
+  registry: KindRegistry,
+  item: CreateNodeInput,
+): boolean {
+  return (
+    item.partOf !== undefined ||
+    registry.compositionExistence(item.kind) === "required"
+  );
+}
+
 type CommonAtomicMutationEligibility = Readonly<{
   backend: GraphBackend | TransactionBackend;
   graph: GraphDef;
@@ -107,10 +124,8 @@ export function resolveAtomicNodeBatchExecutor(
   // fused command is an optimization attempt, not evidence that its
   // dimensions ran.
   if (
-    input.inputs.some(
-      (item) =>
-        item.partOf !== undefined ||
-        input.registry.compositionExistence(item.kind) === "required",
+    input.inputs.some((item) =>
+      nodeCreateOwesCompositionEdge(input.registry, item),
     )
   ) {
     return;
@@ -579,10 +594,8 @@ export function resolveAtomicNodeResolvedMutationSetExecutor(
   // no shape here for the composition edge a `partOf` or a required-existence
   // kind also owes.
   if (
-    input.creates.some(
-      (item) =>
-        item.partOf !== undefined ||
-        input.registry.compositionExistence(item.kind) === "required",
+    input.creates.some((item) =>
+      nodeCreateOwesCompositionEdge(input.registry, item),
     )
   ) {
     return;
