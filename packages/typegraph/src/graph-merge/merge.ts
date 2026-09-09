@@ -138,8 +138,8 @@ import { normalizeMergeOptions } from "./options";
 import type {
   MergePlanAnchors,
   MergePlanArtifact,
-  MergePlanArtifactV1,
-  MergePlanArtifactV1Input,
+  MergePlanArtifactV2,
+  MergePlanArtifactV2Input,
   MergePlanCompositionOrphan,
   MergePlanEdgeUpsert,
   MergePlanEntityRef,
@@ -2713,7 +2713,7 @@ async function compositionOrphansAmong(
 ): Promise<readonly MergePlanCompositionOrphan[]> {
   const orphansByPart = new Map<MergeKey, MergePlanCompositionOrphan>();
   for (const whole of wholes) {
-    if (ctx.registry.compositionEdgeKindsUnder(whole.kind).length === 0) {
+    if (!ctx.registry.isCompositionWhole(whole.kind)) {
       continue;
     }
     const cascadePlan = await planCompositionCascade(
@@ -2794,10 +2794,7 @@ async function assertNoCompositionOrphans<G extends GraphDef>(
 ): Promise<void> {
   const registry = target.registry;
   if (
-    !deletions.some(
-      (deletion) =>
-        registry.compositionEdgeKindsUnder(deletion.kind).length > 0,
-    )
+    !deletions.some((deletion) => registry.isCompositionWhole(deletion.kind))
   ) {
     return;
   }
@@ -2820,7 +2817,7 @@ async function resolvedMergeArtifact<G extends GraphDef>(
   mode: "snapshot" | "incremental",
   targetFence: MergePlanTargetFence,
   anchors: MergePlanAnchors,
-): Promise<MergePlanArtifactV1> {
+): Promise<MergePlanArtifactV2> {
   const { plan, options } = resolved;
   const compositionOrphans = await planTimeCompositionOrphans(target, plan);
   const nodeUpserts = resolvedNodeUpserts(plan);
@@ -2840,7 +2837,7 @@ async function resolvedMergeArtifact<G extends GraphDef>(
       ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
     };
   });
-  const input: MergePlanArtifactV1Input = {
+  const input: MergePlanArtifactV2Input = {
     formatVersion: MERGE_PLAN_FORMAT_VERSION,
     mode,
     target: targetFence,
@@ -3562,7 +3559,7 @@ async function preflightWireMergeWrites<G extends GraphDef>(
   target: Store<G>,
   nodesApi: TxNodes,
   edgesApi: TxEdges,
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifactV2,
 ): Promise<void> {
   const graphNodes = target.graph.nodes as Record<string, unknown>;
   const graphEdges = target.graph.edges as Record<
@@ -3842,7 +3839,7 @@ async function preflightWireMergeWrites<G extends GraphDef>(
 async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
   target: Store<G>,
   txBackend: TransactionBackend,
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifactV2,
   requireFreshSnapshot: boolean,
 ): Promise<void> {
   await lockMergeTargetWrite(txBackend, {
@@ -3911,7 +3908,7 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
 }
 
 function identityConsistencySeeds(
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifactV2,
   profile: "fold" | "ignore" | undefined,
 ): readonly MergePlanEntityRef[] {
   const deleted = new Set(
@@ -3944,7 +3941,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
   nodesApi: TxNodes,
   edgesApi: TxEdges,
   txBackend: TransactionBackend,
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifactV2,
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
 ): Promise<MergedCounts> {
   const committedNodes = await applyNodeRows(
@@ -4020,7 +4017,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
 }
 
 function reportFromArtifact<G extends GraphDef>(
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifactV2,
   merged: MergedCounts,
   warnings: readonly string[],
   provenancePersisted?: MergeReport<G>["provenancePersisted"],

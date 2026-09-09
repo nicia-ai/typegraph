@@ -5,7 +5,7 @@ import {
   computeMergePlanDigest,
   finalizeMergePlanArtifact,
 } from "../../src/graph-merge/plan-canonical";
-import type { MergePlanArtifactV1Input } from "../../src/graph-merge/plan-schema";
+import type { MergePlanArtifactV2Input } from "../../src/graph-merge/plan-schema";
 import { MERGE_PLAN_FORMAT_VERSION } from "../../src/graph-merge/plan-schema";
 import {
   constructMergePlanArtifact,
@@ -15,7 +15,7 @@ import {
 } from "../../src/graph-merge/plan-wire";
 import { requireDefined } from "../../src/utils/presence";
 
-function planInput(): MergePlanArtifactV1Input {
+function planInput(): MergePlanArtifactV2Input {
   return {
     formatVersion: MERGE_PLAN_FORMAT_VERSION,
     mode: "snapshot",
@@ -71,7 +71,7 @@ function planInput(): MergePlanArtifactV1Input {
   };
 }
 
-function resolutionPlanInput(): MergePlanArtifactV1Input {
+function resolutionPlanInput(): MergePlanArtifactV2Input {
   const input = planInput();
   const evidence = {
     a: { kind: "Patient", id: "a" },
@@ -105,7 +105,7 @@ function resolutionPlanInput(): MergePlanArtifactV1Input {
   };
 }
 
-describe("merge plan V1 wire format", () => {
+describe("merge plan wire format", () => {
   it("round-trips through JSON with explicit property removals intact", async () => {
     const artifact = await constructMergePlanArtifact(planInput());
     const roundTripped: unknown = JSON.parse(JSON.stringify(artifact));
@@ -122,7 +122,7 @@ describe("merge plan V1 wire format", () => {
 
   it("canonicalizes nested object keys before hashing", async () => {
     const left = planInput();
-    const right: MergePlanArtifactV1Input = {
+    const right: MergePlanArtifactV2Input = {
       ...left,
       writes: {
         ...left.writes,
@@ -165,7 +165,7 @@ describe("merge plan V1 wire format", () => {
     });
   });
 
-  it("distinguishes unsupported versions from malformed V1 artifacts", async () => {
+  it("distinguishes unsupported versions from malformed artifacts", async () => {
     // A stale but genuinely PRE-COMPOSITION artifact: `formatVersion: 1`
     // (this library's PREVIOUS format, before `review.compositionOrphans`
     // was added — see the version-bump comment on

@@ -27,7 +27,7 @@ import {
   planMergeIncremental,
 } from "../../src/graph-merge/merge";
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
-import type { MergePlanArtifactV1 } from "../../src/graph-merge/plan-schema";
+import type { MergePlanArtifactV2 } from "../../src/graph-merge/plan-schema";
 import { MERGE_PLAN_FORMAT_VERSION } from "../../src/graph-merge/plan-schema";
 import { constructMergePlanArtifact } from "../../src/graph-merge/plan-wire";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
@@ -119,9 +119,9 @@ describe("public merge plan lifecycle", () => {
   }
 
   async function rehashTarget(
-    artifact: MergePlanArtifactV1,
-    target: MergePlanArtifactV1["target"],
-  ): Promise<MergePlanArtifactV1> {
+    artifact: MergePlanArtifactV2,
+    target: MergePlanArtifactV2["target"],
+  ): Promise<MergePlanArtifactV2> {
     const { digest: _digest, ...input } = artifact;
     return constructMergePlanArtifact({ ...input, target });
   }

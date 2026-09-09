@@ -1,4 +1,4 @@
-import type { MergePlanEntityRef } from "./plan-schema";
+import type { MergePlanCompositionOrphan } from "./plan-schema";
 import type { TypeGraphErrorOptions } from "./typegraph-internal";
 import { TransactionConflictError, TypeGraphError } from "./typegraph-internal";
 
@@ -226,13 +226,6 @@ export function translateMergeCommitError(error: unknown): unknown {
   return new MergeConstraintConflictError(error);
 }
 
-/** Which part, whole, and realizing edge kind a composition orphan conflict names. */
-export type MergeCompositionOrphanErrorDetails = Readonly<{
-  part: MergePlanEntityRef;
-  whole: MergePlanEntityRef;
-  viaEdgeKind: string;
-}>;
-
 /**
  * Raised at APPLY when a live composition part of a whole the plan deletes is
  * not itself among the plan's node deletions: the target gained that part
@@ -246,13 +239,20 @@ export type MergeCompositionOrphanErrorDetails = Readonly<{
  * report. This error is the authoritative one: it is thrown from inside the
  * apply transaction, under the per-graph write lock, so it cannot miss an
  * orphan the plan-time report's unlocked read raced past.
+ *
+ * `details` is typed as {@link MergePlanCompositionOrphan} — the SAME shape
+ * `assertNoCompositionOrphans` (`merge.ts`) passes straight into this
+ * constructor — rather than a second, structurally-identical type. Two names
+ * for one finding is exactly the kind of drift a future field (say, the
+ * realizing edge id) could silently introduce between the dry-run report and
+ * the apply-time refusal.
  */
 export class MergeCompositionOrphanError extends MergeError {
   protected static override readonly errorCategory = "constraint";
   override readonly code = MERGE_ERROR_CODES.compositionOrphan;
-  declare readonly details: MergeCompositionOrphanErrorDetails;
+  declare readonly details: MergePlanCompositionOrphan;
 
-  constructor(details: MergeCompositionOrphanErrorDetails) {
+  constructor(details: MergePlanCompositionOrphan) {
     super(
       `Applying this merge plan would delete whole "${details.whole.kind}:${details.whole.id}" ` +
         `while its part "${details.part.kind}:${details.part.id}" (via "${details.viaEdgeKind}") ` +

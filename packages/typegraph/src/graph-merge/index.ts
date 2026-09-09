@@ -38,10 +38,7 @@ export {
   captureCandidateWriteSetTarget,
   planCandidateWriteSet,
 } from "./candidate-write-set";
-export type {
-  MergeCompositionOrphanErrorDetails,
-  MergeConstraintConflictErrorDetails,
-} from "./errors";
+export type { MergeConstraintConflictErrorDetails } from "./errors";
 export {
   BaseVersionMismatchError,
   BranchError,
@@ -88,8 +85,8 @@ export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
   MergePlanAnchors,
   MergePlanArtifact,
-  MergePlanArtifactV1,
-  MergePlanArtifactV1Input,
+  MergePlanArtifactV2,
+  MergePlanArtifactV2Input,
   MergePlanBranchAnchor,
   MergePlanCandidateDiagnostic,
   MergePlanCanonicalMapping,
