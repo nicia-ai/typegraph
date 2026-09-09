@@ -3026,7 +3026,7 @@ export type IdentityAssertionConflict = Readonly<{
 export type IdentityAssertionConflictPolicy = "refuse" | "assertWins" | "retractWins" | "flag" | ((conflict: IdentityAssertionConflict) => IdentityAssertionDecision);
 
 // @public
-export type IdentityAssertionConflictReason = "retract-reassert" | "opposing-relations" | "id-reuse" | "cross-kind-pairing";
+export type IdentityAssertionConflictReason = "retract-reassert" | "opposing-relations" | "cross-kind-pairing" | "out-of-scope-pairing";
 
 // @public
 export type IdentityAssertionDecision = Readonly<{
@@ -3082,7 +3082,7 @@ type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
 }>;
 
 // @public
-export type IdentityMergeConflictCode = typeof MERGE_ERROR_CODES.identityConflict | typeof MERGE_ERROR_CODES.identitySeparationConflict | typeof MERGE_ERROR_CODES.identityUniquenessConflict | typeof MERGE_ERROR_CODES.identityProvenanceConflict;
+export type IdentityMergeConflictCode = typeof MERGE_ERROR_CODES.identityConflict | typeof MERGE_ERROR_CODES.identitySeparationConflict | typeof MERGE_ERROR_CODES.identityProvenanceConflict;
 
 // @public
 export class IdentityMergeConflictError extends MergeError {
@@ -3132,7 +3132,7 @@ export type IdentityReconciliation = Readonly<{
     a: EntityRef;
     b: EntityRef;
     relation: IdentityRelation;
-    survivorAssertionId: string;
+    survivorAssertionId?: string | undefined;
     supersededAssertionIds: readonly string[];
     rule: "earliest-valid-from" | "code-point-id" | "committed-id" | "policy";
     policy?: string | undefined;
@@ -3143,8 +3143,6 @@ export type IdentityReconciliation = Readonly<{
 export type IdentityReconciliationOptions = Readonly<{
     pairing?: "off" | "candidate" | "definitional";
     onAssertionConflict?: IdentityAssertionConflictPolicy;
-    onEdgeConflict?: "repoint" | "flag";
-    onUniquenessConflict?: "refuse" | "flag";
     onProvenanceConflict?: "keepBoth" | "refuse";
 }>;
 
@@ -3210,11 +3208,6 @@ export type IdentityUnresolvedConflict = Readonly<{
     b: EntityRef;
     assertionIds: readonly string[];
     source?: MatchSource | undefined;
-}> | Readonly<{
-    kind: "uniqueness";
-    constraintName: string;
-    members: readonly EntityRef[];
-    assertionIds: readonly string[];
 }> | Readonly<{
     kind: "provenance";
     canonical: EntityRef;
@@ -3938,7 +3931,6 @@ export const MERGE_ERROR_CODES: {
     readonly constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
     readonly identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT";
     readonly identitySeparationConflict: "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT";
-    readonly identityUniquenessConflict: "GRAPH_MERGE_IDENTITY_UNIQUENESS_CONFLICT";
     readonly identityProvenanceConflict: "GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT";
     readonly acyclicityConflict: "GRAPH_MERGE_ACYCLICITY_CONFLICT";
     readonly baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH";
@@ -3970,8 +3962,6 @@ export const MERGE_OPTION_DEFAULTS: {
     readonly identity: {
         readonly pairing: "off";
         readonly onAssertionConflict: "refuse";
-        readonly onEdgeConflict: "repoint";
-        readonly onUniquenessConflict: "refuse";
         readonly onProvenanceConflict: "keepBoth";
     };
 };

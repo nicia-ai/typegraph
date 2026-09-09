@@ -3821,7 +3821,7 @@ export type IdentityContradictionErrorDetails = Readonly<{
 }>;
 
 // @public
-type IdentityDecisionProvenance = Readonly<{
+export type IdentityDecisionProvenance = Readonly<{
     policy?: string | undefined;
     branchId?: string | undefined;
     branchAncestry?: readonly string[] | undefined;
