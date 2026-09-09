@@ -31,6 +31,7 @@ import {
   requireRecordedTime,
 } from "../backend/capabilities/recorded-time";
 import {
+  isEngineNativeRecordedReadBinding,
   type RecordedTimeOwnership,
   resolveRecordedTimeOwnership,
 } from "../backend/capabilities/recorded-time-ownership";
@@ -1227,7 +1228,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         false
       : this.#captureEnabled || requestedRevisionTracking;
     if (this.#revisionTrackingEnabled) {
-      // Keyed on the resource `lockRecordedClock` fences (ruling F3): the
+      // Keyed on the resource `lockRecordedClock` fences: the
       // TypeGraph-owned clock row, which `history` and `revisionTracking`
       // both reach here — unreachable under engine-native, whose
       // `#revisionTrackingEnabled` is forced false above.
@@ -1522,7 +1523,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const recordedAsOf = coordinate.recorded?.asOf;
     if (
       recordedAsOf !== undefined &&
-      this.#recordedTimeOwnership === "engine-native"
+      isEngineNativeRecordedReadBinding(this.#recordedReadBinding)
     ) {
       refuseEngineNativeRecordedIdentityRead("identityAtCoordinate");
     }
@@ -2760,13 +2761,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Reads this backend's engine-native recorded-time revision on `session`
-   * and mints the `e1:` {@link RecordedInstant} for it — the ONE place that
-   * calls `recordedTime.revisionNow`, consulted by {@link recordedNow} and
-   * {@link revisionNow} (both on the root backend) and by the two
-   * transaction-commit sites that stamp `TransactionReceipt.recorded` (on
-   * the committing session), so "what instant does this transaction get"
-   * has one owner beside `flush()`'s own TypeGraph-capture answer.
+   * Reads `session`'s own recorded-time revision and mints the `e1:`
+   * {@link RecordedInstant} for it — the ONE place that calls
+   * `recordedTime.revisionNow`, consulted by {@link recordedNow} and
+   * {@link revisionNow} (both on the root backend, so they read the current
+   * COMMITTED revision) and by the two transaction-commit sites that stamp
+   * `TransactionReceipt.recorded` (on the still-open committing transaction
+   * handle, so they read that transaction's PENDING revision — see
+   * `EngineRecordedTimeMembers.revisionNow`'s own doc comment for why that
+   * is the correct value to stamp into a receipt). One owner for "what
+   * instant does this transaction get," beside `flush()`'s own
+   * TypeGraph-capture answer.
    */
   async #engineRecordedInstant(
     session: RecordedTimeSession,
@@ -3598,8 +3603,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           );
           // The engine-native counterpart to capture's flush observer: read
           // inside the transaction (before its outer COMMIT), on the SAME
-          // committing session `txBackend` is, exactly once — never once per
-          // graph, since an engine-native store answers for exactly one. Only
+          // committing session `txBackend` is, so `recordedTime.revisionNow`
+          // answers with the PENDING revision this transaction's writes will
+          // land at once it commits, not the last one already committed
+          // before it opened. Exactly once — never once per graph, since an
+          // engine-native store answers for exactly one. Only
           // when a receipt was requested AND that receipt actually recorded a
           // write — `TransactionReceipt.recorded` is undefined for a
           // read-only or no-op transaction under either ownership form
@@ -3912,9 +3920,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // Flush allocates the recorded commit instant for this transaction's graph
     // under TypeGraph-owned capture; under engine-native it is
     // `recordedTime.revisionNow` read on this SAME adopted session, still
-    // inside the caller's transaction — the engine-native counterpart to
-    // `flush()`, called once for this store's one graph, and only when the
-    // receipt actually recorded a write (`hasWrites()`; TypeGraph-owned
+    // inside the caller's transaction — so it answers with the PENDING
+    // revision this transaction's writes will land at once it commits, not
+    // the last one already committed before it opened. The engine-native
+    // counterpart to `flush()`, called once for this store's one graph, and
+    // only when the receipt actually recorded a write (`hasWrites()`; TypeGraph-owned
     // capture answers the same "nothing to stamp" case implicitly, by simply
     // never flushing a row for a graph with no captured writes). Either way
     // `transactionOutcome` reads this store's instant out of the returned map

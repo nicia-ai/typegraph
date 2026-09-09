@@ -1,3 +1,4 @@
+import { isEngineNativeRecordedReadBinding } from "../../backend/capabilities/recorded-time-ownership";
 import { optionalRecordedInstantParts } from "../../core/temporal";
 import {
   historicalIdentityPeerClassQuery,
@@ -57,7 +58,7 @@ function historicalCoordinate(
   }
   if (
     recorded !== undefined &&
-    ctx.recordedReadBinding?.kind === "engine-native"
+    isEngineNativeRecordedReadBinding(ctx.recordedReadBinding)
   ) {
     refuseEngineNativeRecordedIdentityRead("historical identity expansion");
   }

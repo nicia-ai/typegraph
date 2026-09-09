@@ -51,7 +51,7 @@
  * a future `cas-serialized` arm is OQ3's named seam behind the exhaustive
  * `WriteFencePlan` union switch, not pre-built here.
  *
- * **WS9 (engine-native recorded time).** A backend earns `"engine-native"`
+ * **Engine-native recorded time.** A backend earns `"engine-native"`
  * ownership by declaring `recordedTime` (`EngineRecordedTimeMembers`,
  * `./recorded-time.ts`) — there is no separate flag to set alongside it, and
  * `resolveRecordedTimeOwnership` is the one place that reads the member to

@@ -53,14 +53,34 @@ export type EngineRecordedRevision = Readonly<{
  * `predicate` that always returns `undefined`: the engine's `source` already
  * scopes every row to exactly one revision.
  *
- * `revisionNow` reads the engine's current committed revision on `session`
- * — the connection the CALLER's decision is bound to, not one this member
- * opens for itself, exactly as {@link LineageMembers}'s two members require
+ * `revisionNow` reads `session`'s own recorded-time revision — the
+ * connection the CALLER's decision is bound to, not one this member opens
+ * for itself, exactly as {@link LineageMembers}'s two members require
  * (`./lineage.ts`'s own doc comment states the full rationale: a commit-time
  * caller that already holds an open transaction passes that handle so the
- * read observes the transaction's own snapshot). It is called at most once
- * per transaction — the position TypeGraph's own `flush()` occupies for a
- * capture-owned store — never once per graph.
+ * read observes the transaction's own snapshot). What "own revision" means
+ * depends on which session it is called with — the two call sites TypeGraph
+ * makes never confuse them:
+ *
+ * - **On a root backend** (`store.recordedNow()`, `store.revisionNow()`):
+ *   the engine's current COMMITTED revision.
+ * - **On an open `transaction()` handle** (both `TransactionReceipt.recorded`
+ *   sites, called before that transaction's own COMMIT): the revision at
+ *   which THIS transaction's writes will become visible once it commits —
+ *   the engine's pending/next revision for that session, not the last one
+ *   committed before it opened. TypeGraph stamps this uncommitted value
+ *   straight into the receipt it returns to the caller after the
+ *   transaction succeeds, trusting it to describe exactly the state that
+ *   commit produced.
+ *
+ * An engine that cannot name its own pending revision from inside an open
+ * transaction — only its last-committed one — cannot supply `recordedTime`:
+ * `TransactionReceipt.recorded` would then either lag one commit behind the
+ * write it is supposed to describe, or require a second round trip after
+ * COMMIT that reopens the race `recordedTime` exists to close.
+ *
+ * It is called at most once per transaction — the position TypeGraph's own
+ * `flush()` occupies for a capture-owned store — never once per graph.
  */
 export type EngineRecordedTimeMembers = Readonly<{
   /**
@@ -82,7 +102,12 @@ export type EngineRecordedTimeMembers = Readonly<{
     table: RecordedSourceTable,
     revision: EngineRecordedRevision,
   ) => SqlFragment;
-  /** The engine's current committed recorded-time revision, read on `session`. */
+  /**
+   * `session`'s own recorded-time revision: the current committed one on a
+   * root backend, or the pending revision an open transaction's writes will
+   * land at once it commits. See this type's own doc comment for the full
+   * contract.
+   */
   revisionNow: (
     this: void,
     session: RecordedTimeSession,

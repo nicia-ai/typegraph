@@ -11,6 +11,7 @@ import {
   type RecordedInstant,
 } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
+import { type RecordedReadBinding } from "../../query/compiler/schema";
 import { type GraphBackend } from "../types";
 
 /** Who allocates recorded-time revisions for a backend. See {@link resolveRecordedTimeOwnership}. */
@@ -29,6 +30,31 @@ export function resolveRecordedTimeOwnership(
   return backend.recordedTime === undefined ?
       "typegraph-relations"
     : "engine-native";
+}
+
+/**
+ * THE one check for "is this recorded read reached under engine-native
+ * ownership," for the callers that hold a read binding rather than a
+ * backend: the query compiler's historical identity traversal
+ * (`query/compiler/identity-traversal.ts`) only ever sees
+ * `ctx.recordedReadBinding`, never the store or its backend.
+ *
+ * A binding's `kind` is `"engine-native"` exactly when
+ * {@link resolveRecordedTimeOwnership} answered `"engine-native"` for the
+ * backend it was built from: `Store`'s constructor builds the engine-native
+ * binding kind (`createEngineRecordedReadBinding`) only after that
+ * derivation already held, and every other construction path leaves
+ * `#recordedReadBinding` as the TypeGraph or external kind. `Store.
+ * identityAtCoordinate` — the other entry point a recorded identity read can
+ * reach — therefore calls this same function over its own bound binding
+ * rather than re-deriving the ownership from `#recordedTimeOwnership`, so
+ * the two entry points cannot drift into disagreeing about which reads this
+ * refuses.
+ */
+export function isEngineNativeRecordedReadBinding(
+  binding: RecordedReadBinding | undefined,
+): boolean {
+  return binding?.kind === "engine-native";
 }
 
 /**

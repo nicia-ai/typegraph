@@ -35,6 +35,7 @@ import {
   type EngineRecordedRevision,
   type EngineRecordedTimeMembers,
 } from "../src/backend/capabilities/recorded-time";
+import { isEngineNativeRecordedReadBinding } from "../src/backend/capabilities/recorded-time-ownership";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createSqlBackend } from "../src/backend/drizzle/engine";
 import { buildSqliteEngineProfile } from "../src/backend/drizzle/sqlite";
@@ -158,7 +159,8 @@ describe("engine-native recorded time: construction", () => {
     // history on its own and none of TypeGraph's recorded relations are
     // ever populated.
     expect(storeCaptureEnabled(store)).toBe(false);
-    // The engine-anchor path (3B) applies, not the revision-anchor path.
+    // The backend's own engine anchor applies for graph-merge base tokens,
+    // not the TypeGraph revision-anchor path.
     expect(store.revisionTrackingEnabled).toBe(false);
   });
 
@@ -285,6 +287,70 @@ describe("engine-native recorded time: transaction receipts", () => {
     expect(recordedNodeCount.count).toBe(0);
   });
 
+  /**
+   * `revisionNow`'s contract (`EngineRecordedTimeMembers`'s own doc comment)
+   * is session-dependent: on the still-open committing transaction handle it
+   * must answer with the PENDING revision that transaction's writes will
+   * land at once it commits, never the last one already committed before it
+   * opened. This scripted engine answers differently for the two sessions it
+   * can be called with, so the receipt can only carry the pending marker if
+   * store.ts actually calls `revisionNow` on the transaction handle rather
+   * than, say, the root backend after commit. MUTATION-PROOF: passing
+   * `this.#backend` (the root) instead of `txBackend` to
+   * `#engineRecordedInstant` in store.ts's `run()` closure makes this test
+   * fail — `outcome.receipt.recorded` would carry `COMMITTED_REVISION`
+   * instead of `PENDING_REVISION`.
+   */
+  it("carries the transaction's own pending revision, not the last committed one, in the receipt", async () => {
+    const sqlite = new RealDatabase(":memory:");
+    cleanups.push(() => {
+      sqlite.close();
+    });
+    const profile = buildSqliteEngineProfile(drizzleSqlite(sqlite), {
+      executionProfile: { isSync: true },
+    });
+    const lineage = scriptedLineage();
+    const COMMITTED_REVISION: EngineRecordedRevision = {
+      revision: "engine-committed-r1",
+      recordedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const PENDING_REVISION: EngineRecordedRevision = {
+      revision: "engine-pending-r2",
+      recordedAt: "2026-01-01T00:00:01.000Z",
+    };
+    let observedTxBackend: TransactionBackend | undefined;
+    const recordedTime: EngineRecordedTimeMembers = {
+      source: (table) => sql.raw(`__engine_native_${table}__`),
+      revisionNow: (session) =>
+        Promise.resolve(
+          session === observedTxBackend ? PENDING_REVISION : COMMITTED_REVISION,
+        ),
+    };
+    attachEngineNativeRecordedTime(profile.provisioning, recordedTime, lineage);
+    const rootBackend = createSqlBackend(profile);
+    const observingBackend = deriveBackend(rootBackend, {
+      transaction: (fn, options) =>
+        rootBackend.transaction((tx) => {
+          observedTxBackend = tx;
+          return fn(tx);
+        }, options),
+    });
+
+    const [store] = await createStoreWithSchema(graph, observingBackend, {
+      history: true,
+    });
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      await tx.nodes.Widget.create({ label: "hello" });
+    });
+
+    expect(outcome.receipt.recorded).toBe(
+      createEngineRecordedInstant(
+        PENDING_REVISION.revision,
+        PENDING_REVISION.recordedAt,
+      ),
+    );
+  });
+
   it("does not call revisionNow when no receipt was requested", async () => {
     const observedSessions: TransactionBackend[] = [];
     const { backend } = createEngineNativeBackend(observedSessions);
@@ -330,9 +396,9 @@ describe("engine-native recorded time: transaction receipts", () => {
 
 describe("engine-native recorded time: revisionNow", () => {
   /**
-   * `revisionNow()` is decision E-c's OTHER consumer of
-   * `#engineRecordedInstant`, alongside `recordedNow()` and the two
-   * transaction-commit sites — gating it on `#revisionTrackingEnabled`
+   * `revisionNow()` is another consumer of `#engineRecordedInstant`,
+   * alongside `recordedNow()` and the two transaction-commit sites — gating
+   * it on `#revisionTrackingEnabled`
    * alone (forced false under engine-native, since the engine anchor
    * applies instead) left it answering `undefined` even under `history:
    * true`. MUTATION-PROOF: removing the `#engineNativeHistory` branch here
@@ -360,8 +426,8 @@ describe("engine-native recorded time: revisionNow", () => {
 
   /**
    * Declared deviation: `revisionTrackingEnabled` stays false under
-   * engine-native ownership (the engine anchor applies instead of the
-   * revision-anchor path — decision E-d), and public merge planning's
+   * engine-native ownership (the backend's own engine anchor applies
+   * instead of the TypeGraph revision-anchor path), and public merge planning's
    * capability gate (`assertPublicPlanCapability`, `graph-merge/merge.ts`)
    * checks exactly that flag, not `revisionNow()`'s availability. Fixing
    * `revisionNow()` above does not lift this refusal — extending public
@@ -580,6 +646,42 @@ describe("engine-native recorded time: historical identity refusal", () => {
     identity: { sameIdAcrossKinds: "fold" },
   });
 
+  /**
+   * Pins the single predicate the two refusal sites below now share
+   * (`isEngineNativeRecordedReadBinding`,
+   * `backend/capabilities/recorded-time-ownership.ts`) instead of each
+   * re-spelling the "is this engine-native" decision independently — the
+   * query compiler's historical identity traversal used to test
+   * `ctx.recordedReadBinding?.kind === "engine-native"` inline, and
+   * `Store.identityAtCoordinate` used to test `this.#recordedTimeOwnership
+   * === "engine-native"` inline. MUTATION-PROOF: changing this function's
+   * body to `return false;` makes this test fail, along with BOTH refusal
+   * tests below (`view.identity` builds a facade instead of throwing, and
+   * `compileQuery` no longer throws) — one shared owner, not three copies
+   * that happen to agree.
+   */
+  it("isEngineNativeRecordedReadBinding answers true only for the engine-native binding kind", () => {
+    const schema = createSqlSchema();
+    expect(isEngineNativeRecordedReadBinding(undefined)).toBe(false);
+    expect(
+      isEngineNativeRecordedReadBinding(createRecordedReadBinding(schema)),
+    ).toBe(false);
+    expect(
+      isEngineNativeRecordedReadBinding(recordedRelation({ schema })),
+    ).toBe(false);
+    expect(
+      isEngineNativeRecordedReadBinding(
+        createEngineRecordedReadBinding(
+          {
+            source: (table) => sql.raw(`__engine_native_${table}__`),
+            revisionNow: () => Promise.resolve(ENGINE_REVISION),
+          },
+          schema,
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it("refuses a recorded coordinate that expands identity members under an engine-native binding", () => {
     const schema = createSqlSchema();
     const binding = createEngineRecordedReadBinding(
@@ -629,10 +731,11 @@ describe("engine-native recorded time: historical identity refusal", () => {
    * query-compiler entry point above: `store.asOfRecorded(anchor).identity`
    * is the public path a caller actually reaches this through.
    * MUTATION-PROOF: deleting the `recordedAsOf !== undefined &&
-   * this.#recordedTimeOwnership === "engine-native"` guard block in
-   * `identityAtCoordinate` makes this test fail (`.identity` builds the
-   * facade instead of throwing) while every other case in this file still
-   * passes, since none of them reads `identity` on an engine-native store.
+   * isEngineNativeRecordedReadBinding(this.#recordedReadBinding)` guard
+   * block in `identityAtCoordinate` makes this test fail (`.identity`
+   * builds the facade instead of throwing) while every other case in this
+   * file still passes, since none of them reads `identity` on an
+   * engine-native store.
    */
   it("refuses identityAtCoordinate itself for a recorded coordinate on an engine-native store", async () => {
     const { backend } = createEngineNativeBackend([]);

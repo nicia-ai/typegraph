@@ -409,6 +409,33 @@ per-revision evidence a bare engine revision has no equivalent gap for); an
 engine profile's own suite should run against the conformance describe only
 and skip the other.
 
+## Supplying `recordedTime`
+
+`EngineProvisioning.recordedTime` declares an engine that tracks recorded
+(system) time itself, rather than through TypeGraph's own capture relations
+and clock — a backend that declares it must also declare `lineage`
+(engine-native history keeps no recorded relations for TypeGraph to derive a
+change delta from).
+
+`revisionNow(session)` is called on two different kinds of session, and must
+answer differently for each:
+
+- **On a root backend** (`store.recordedNow()`, `store.revisionNow()`): the
+  engine's current COMMITTED revision.
+- **On an open `transaction()` handle** (both places `TransactionReceipt.recorded`
+  is stamped, called before that transaction's own COMMIT): the revision at
+  which THIS transaction's writes will become visible once it commits — the
+  engine's pending/next revision for that session, not the last one committed
+  before it opened. TypeGraph stamps this still-uncommitted value straight
+  into the receipt it hands back to the caller once the transaction succeeds.
+
+An engine that can only name its last-COMMITTED revision, never its own
+pending one from inside an open transaction, cannot implement `recordedTime`:
+stamping the last-committed value into a receipt would describe the state
+*before* the write the receipt is reporting on, and there is no correct
+point after COMMIT to read the right value from without reopening the race
+`recordedTime` exists to close.
+
 ## Refusals you may meet
 
 | Code | When |
