@@ -27,7 +27,7 @@ import {
   reportFromArtifact,
   validateMergePlanForTarget,
 } from "./merge";
-import type { MergePlanArtifact, MergePlanArtifactV1 } from "./plan-schema";
+import type { MergePlanArtifact, MergePlanArtifactV2 } from "./plan-schema";
 import type { Result } from "./result";
 import { err, ok } from "./result";
 import type { GraphDef, Store } from "./typegraph-internal";
@@ -72,7 +72,7 @@ export async function applyDurableMergePlan<
     );
   }
 
-  let artifact: MergePlanArtifactV1;
+  let artifact: MergePlanArtifactV2;
   const descriptorOrigin = durableOriginOfDescriptor(descriptor);
   try {
     artifact = await validateMergePlanForTarget(target, plan);

@@ -224,6 +224,39 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 // MAX_RECURSIVE_DEPTH = 10
 ```
 
+## Composition Cascade
+
+Deleting a [composition](/ontology#composition) whole cascades leaf-first
+through its live parts closure, each part going through its own node-delete
+pipeline in the same transaction. Two behaviors are easy to assume and are
+not what happens:
+
+- **Resurrecting a soft-deleted whole restores the whole alone.** Ownership
+  of its parts ended when the cascade ran; the parts stay deleted. There is
+  no opt-in to cascade a resurrection back onto them.
+- **Ending a whole's validity window is not a cascade.** Closing an
+  `oneActive` composition edge's currency (for example, a provenance
+  retraction) leaves the part node itself untouched — it is not deleted, and
+  a later reattach of the SAME part to a different whole is a reparent, not
+  a resurrection.
+- **The cascade emits one operation-hook event, for the whole.** Each
+  cascaded part delete runs through its own node-delete pipeline but is not
+  itself a caller-issued operation, so `onOperationEnd` fires exactly once —
+  for the whole's delete, not once per part. A consumer using operation hooks
+  for cache invalidation or audit must account for a composition whole's
+  parts independently (for example, by re-deriving the closure from
+  `registry.compositionRelation()`).
+
+The closure walk is bounded by its **visited set**, not a fixed depth: a kind
+may declare a reflexive composition pair (a `Section` that is `partOf`
+another `Section`, for example), so a kind-level depth bound cannot cap
+instance depth. Nothing yet refuses the corresponding INSTANCE-level cycle at
+write time, so two or more nodes can end up mutually `partOf` each other;
+deleting any node in such a cycle throws `CompositionCycleError` (see
+[Errors](/errors#compositioncycleerror)) rather than looping. Break the cycle
+by hand (delete or reassign one of the composition edges that closes it)
+before the affected nodes can be deleted.
+
 ## Connection Management
 
 Managed Store factories own their local SQLite or PGlite connection, and their

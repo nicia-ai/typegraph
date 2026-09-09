@@ -1247,7 +1247,10 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     bundle: "heterogeneousEndpointSetRead",
     // Import prefetches existing endpoint pairs through the same bulk-read
     // capability rather than issuing one probe per incoming edge.
-    ceiling: 5,
+    // `store/operations/composition-cascade.ts`'s `planCompositionCascade`
+    // reads one round's whole-side composition edges the same way
+    // `findConnectedEdgesForNodeBatch` (`node-operations.ts`) already does.
+    ceiling: 6,
   },
   fulltextSearch: {
     kind: "deferred",

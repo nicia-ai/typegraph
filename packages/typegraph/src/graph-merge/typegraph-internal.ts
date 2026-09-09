@@ -76,6 +76,7 @@ export {
   serializeSchema,
 } from "../schema/serializer";
 export { type UniqueIntrospection } from "../store/introspect";
+export { planCompositionCascade } from "../store/operations/composition-cascade";
 export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
@@ -88,6 +89,11 @@ export {
   recordedRelationsLineage,
   resolveLineage,
 } from "../store/recorded-capture";
+export {
+  type GraphWriteLock,
+  lockRecordedGraphWrite,
+  uncapturedGraphWriteLock,
+} from "../store/recorded-capture/clock";
 export {
   storeBackend,
   storeCaptureEnabled,

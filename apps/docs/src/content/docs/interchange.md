@@ -421,11 +421,11 @@ The contract is deliberately narrow:
 - The TypeGraph node and edge tables must be globally empty. A different graph
   in the same database also makes the database non-empty.
 - The caller guarantees property shapes, endpoint existence, edge endpoint
-  types, cardinality, duplicate-free IDs, and duplicate-free durable edge match
-  identities. Only stream ordering and known kind names are checked. Trusted
-  import still derives each declared edge identity and stores it with the row,
-  so a collision reaches the database arbiter and rolls back the complete
-  trusted-import transaction.
+  types, cardinality, composition, duplicate-free IDs, and duplicate-free
+  durable edge match identities. Only stream ordering and known kind names are
+  checked. Trusted import still derives each declared edge identity and stores
+  it with the row, so a collision reaches the database arbiter and rolls back
+  the complete trusted-import transaction.
 - Recorded-time history, revision tracking, node uniqueness constraints,
   `searchable()` fields, and `embedding()` fields are rejected in this first
   version because their sidecar writes would otherwise be skipped.
@@ -436,6 +436,14 @@ The contract is deliberately narrow:
   claim rows those constraints depend on. Use `importGraphStream` for a graph
   with constrained edge kinds; it maintains claims the same way the store's
   normal write path does.
+- A composition relation (`partOf` / `hasPart`) always declares its realizing
+  edge's cardinality, so a graph with any composition pair is already
+  rejected by the `cardinality_unsupported` case above — trusted import
+  writes no claim rows, so a hypothetical composition graph loaded this way
+  could otherwise carry a part with two wholes with nothing to refuse it.
+  Today that hole is closed by construction, for the same reason cardinality
+  itself is refused; the general rule is documented here rather than left
+  implicit.
 - Operational Identity-enabled target stores are rejected with
   `details.reason === "identity_unsupported"`; identity-bearing input is
   rejected with `details.reason === "invalid_stream"`. The trusted session

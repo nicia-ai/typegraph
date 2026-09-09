@@ -327,6 +327,31 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   if (!hasOwnKey(input.graph.nodes, input.kind)) return;
   const registration = input.graph.nodes[input.kind];
   if (registration === undefined) return;
+  // A composition whole's delete cascades to its parts through the portable
+  // pipeline (`planCompositionCascade`, `node-operations.ts`) — a decision
+  // that reads rows and recurses, which the fused command's single read-free
+  // SQL shape cannot express. Statically ineligible by declaration, before
+  // any row is read: "does this kind declare parts?" is a property of the
+  // registry, not of this particular delete.
+  //
+  // A kind that is itself a composition PART (`registry.isCompositionPart`)
+  // is equally ineligible, for a second, independent reason: composition edges
+  // never count against `restrict`, on either end
+  // (composition-contract-design.md's binding ruling), and only the portable
+  // path's `enforceNodeDeleteBehavior` (`node-write-pipeline.ts`) knows how
+  // to exclude them from its restrict count — the fused command's read-free
+  // refusal diagnosis has no such filter and would misreport a composition
+  // edge as a live restrict obstacle. This is the second, declared owner
+  // `nodeDeletePolicyRequiresPortablePath`'s doc cross-references: that
+  // predicate owns the two `NodeDeletePolicy`-shaped dimensions
+  // (`enforceDeleteBehavior`, `consumedEdgeIds`); this guard owns the
+  // registry-shaped one (static composition participation).
+  if (
+    input.registry.isCompositionWhole(input.kind) ||
+    input.registry.isCompositionPart(input.kind)
+  ) {
+    return;
+  }
   const executor = resolveAtomicMutationProfile(input)?.deleteNodes;
   if (executor === undefined) return;
   const releasedClaimFamilies = new Set(executor.releasedClaimFamilies);

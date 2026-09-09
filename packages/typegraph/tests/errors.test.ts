@@ -5,6 +5,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type {
   CardinalityErrorDetails,
+  CompositionCycleErrorDetails,
   ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
   DisjointErrorDetails,
@@ -31,6 +32,7 @@ import type {
 import {
   CardinalityError,
   CompilerInvariantError,
+  CompositionCycleError,
   ConfigurationError,
   ContributionUnavailableError,
   DatabaseOperationError,
@@ -341,6 +343,45 @@ describe("RestrictedDeleteError", () => {
     expectTypeOf(error.details).toEqualTypeOf<RestrictedDeleteErrorDetails>();
     expectTypeOf(error.details.edgeCount).toBeNumber();
     expectTypeOf(error.details.edgeKinds).toEqualTypeOf<readonly string[]>();
+  });
+});
+
+describe("CompositionCycleError", () => {
+  it("formats message with whole and revisited node", () => {
+    const error = new CompositionCycleError({
+      wholeKind: "Section",
+      wholeId: "section-1",
+      revisitedKind: "Section",
+      revisitedId: "section-3",
+    });
+    expect(error.message).toContain("Section/section-1");
+    expect(error.message).toContain("Section/section-3");
+    expect(error.code).toBe("COMPOSITION_CYCLE_DETECTED");
+    expect(error.name).toBe("CompositionCycleError");
+    expect(error.category).toBe("constraint");
+  });
+
+  it("stores cycle context", () => {
+    const details = {
+      wholeKind: "Section",
+      wholeId: "section-1",
+      revisitedKind: "Section",
+      revisitedId: "section-3",
+    };
+    const error = new CompositionCycleError(details);
+    expect(error.details).toEqual(details);
+  });
+
+  it("exposes details typed as CompositionCycleErrorDetails, no cast needed", () => {
+    const error = new CompositionCycleError({
+      wholeKind: "Section",
+      wholeId: "section-1",
+      revisitedKind: "Section",
+      revisitedId: "section-3",
+    });
+    expectTypeOf(error.details).toEqualTypeOf<CompositionCycleErrorDetails>();
+    expectTypeOf(error.details.wholeKind).toBeString();
+    expectTypeOf(error.details.revisitedId).toBeString();
   });
 });
 

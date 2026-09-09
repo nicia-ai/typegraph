@@ -68,7 +68,7 @@ import {
   describeCause,
   DurableEvidenceUndeliveredError,
 } from "./errors";
-import type { MergePlanArtifactV1 } from "./plan-schema";
+import type { MergePlanArtifactV2 } from "./plan-schema";
 import type { Result } from "./result";
 import { err, ok } from "./result";
 import { diffAgainstBase } from "./state-diff";
@@ -332,7 +332,7 @@ export type DurableWorkingCopyStrategy<
           branch: GraphBranch<G>;
           descriptor: TStoreDescriptor;
           expectedOrigin: DurableBranchOrigin;
-          plan: MergePlanArtifactV1;
+          plan: MergePlanArtifactV2;
         }>,
       ) => Promise<NativeDurableMergeResult>)
     | undefined;

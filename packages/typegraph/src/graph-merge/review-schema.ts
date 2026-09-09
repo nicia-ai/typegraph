@@ -9,7 +9,7 @@ import type {
   MergePlanDigest,
   MergePlanEntityRef,
 } from "./plan-schema";
-import { mergePlanArtifactV1Schema } from "./plan-schema";
+import { mergePlanArtifactV2Schema } from "./plan-schema";
 import type { JsonValue } from "./typegraph-internal";
 
 export const MERGE_REVIEW_FORMAT_VERSION = 1 as const;
@@ -37,7 +37,7 @@ export type MergeReviewBaseline = Readonly<{
 
 /**
  * Immutable review evidence, distinct from its single-use execution plan.
- * V1 supports candidate write sets only. Authenticate stored artifacts separately.
+ * V2 supports candidate write sets only. Authenticate stored artifacts separately.
  */
 export type MergeReviewArtifact = Readonly<{
   formatVersion: typeof MERGE_REVIEW_FORMAT_VERSION;
@@ -91,7 +91,7 @@ export const mergeReviewArtifactSchema = z
     writeSet: CandidateWriteSetSchema,
     policy: mergeReviewPolicySchema,
     options: z.json(),
-    plan: mergePlanArtifactV1Schema,
+    plan: mergePlanArtifactV2Schema,
     baseline: z
       .object({
         rows: z.array(

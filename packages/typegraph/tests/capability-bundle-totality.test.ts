@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("34 reasoned entries sum to 102 accesses; 50 deferred entries sum to 229", () => {
+  it("34 reasoned entries sum to 102 accesses; 50 deferred entries sum to 230", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -163,6 +163,8 @@ describe("capability bundle totality (T9)", () => {
     // endpoint-set prefetch: 218 -> 223.
     // The resolved-node batch update adds one optional member with a ceiling
     // of six live access sites: 223 -> 229.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(229);
+    // The composition cascade adds one heterogeneous endpoint-set consumer:
+    // 229 -> 230.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(230);
   });
 });
