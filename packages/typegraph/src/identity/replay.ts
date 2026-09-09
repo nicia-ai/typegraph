@@ -8,10 +8,10 @@
  * itself supplies boundaries and explanations ONLY; it is never consulted for
  * membership.
  */
+import { requireTypeGraphRecordedRevision } from "../backend/capabilities/recorded-time-ownership";
 import { type GraphDef } from "../core/define-graph";
 import {
   createRecordedInstant,
-  parseRecordedInstant,
   type RecordedInstant,
   recordedInstantWallTime,
   resolveReadCoordinate,
@@ -373,11 +373,11 @@ async function walkedTransitionsFor<G extends GraphDef>(
   const fromRevision =
     options?.fromRecorded === undefined ?
       undefined
-    : parseRecordedInstant(options.fromRecorded, "fromRecorded").revision;
+    : requireTypeGraphRecordedRevision(options.fromRecorded, "fromRecorded");
   const toRevision =
     options?.toRecorded === undefined ?
       undefined
-    : parseRecordedInstant(options.toRecorded, "toRecorded").revision;
+    : requireTypeGraphRecordedRevision(options.toRecorded, "toRecorded");
   const rows = await walkClassLineage(ctx, walkSeed, fromRevision, toRevision);
   assertBoundaryLimit(rows, limit);
   return { seed, fromRevision, toRevision, limit, rows };

@@ -21,7 +21,10 @@ import {
   MAX_EXPLICIT_RECURSIVE_DEPTH,
   MAX_RECURSIVE_DEPTH,
 } from "../src/query/compiler/recursive";
-import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
+import {
+  createRecordedReadBinding,
+  DEFAULT_SQL_SCHEMA,
+} from "../src/query/compiler/schema";
 import { postgresDialect, sqliteDialect } from "../src/query/dialect";
 import { sql } from "../src/query/sql-fragment";
 import { requireDefined } from "../src/utils/presence";
@@ -97,6 +100,11 @@ function createContext(
     recursiveTraversal: assumeRecursiveTraversalSupported(
       "recursive compiler unit test",
     ),
+    // A recorded-pinned AST reaches the temporal filter through the recorded
+    // read seam, which refuses a compile with no bound relation — the same
+    // binding a `{ history: true }` store installs. Harmless for the
+    // current-time cases: nothing reads it unless `recordedAsOf` is set.
+    recordedReadBinding: createRecordedReadBinding(DEFAULT_SQL_SCHEMA),
   };
 }
 

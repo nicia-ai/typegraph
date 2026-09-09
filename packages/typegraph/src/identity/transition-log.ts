@@ -14,8 +14,8 @@
  * coordinate c". This module is an explanation layer over that truth, never
  * a second copy of it.
  */
+import { requireTypeGraphRecordedRevision } from "../backend/capabilities/recorded-time-ownership";
 import { type GraphDef } from "../core/define-graph";
-import { parseRecordedInstant } from "../core/temporal";
 import { ConfigurationError, IdentityReplayError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
@@ -812,14 +812,17 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
   if (!ctx.historyEnabled) {
     throw identityReplayRequiresHistoryError(ctx.graphId);
   }
-  const target = parseRecordedInstant(options.beforeRecorded, "beforeRecorded");
+  const targetRevision = requireTypeGraphRecordedRevision(
+    options.beforeRecorded,
+    "beforeRecorded",
+  );
   return runIdentityMutation(ctx, async (rawTarget) => {
     const existingWatermark = await readTransitionRetention(
       rawTarget,
       ctx.schema,
       ctx.graphId,
     );
-    const resolvedWatermark = Math.max(existingWatermark, target.revision);
+    const resolvedWatermark = Math.max(existingWatermark, targetRevision);
     if (resolvedWatermark === existingWatermark) {
       return { pruned: 0, prunedBeforeRevision: existingWatermark };
     }
