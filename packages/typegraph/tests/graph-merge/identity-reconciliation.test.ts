@@ -141,6 +141,67 @@ describe.each(backendMatrix())(
     });
 
     /**
+     * The two apply paths must record the SAME ancestry for the same logical
+     * merge: `merge()` has no plan artifact to read anchors from, so it
+     * derives the order itself, and a second spelling of that order would make
+     * replay provenance incomparable across the paths whenever the caller's
+     * branch order is not already code-point sorted.
+     */
+    it("records one branch ancestry whether the merge is direct or applied from a plan", async () => {
+      async function ancestryOf(
+        apply: "direct" | "plan",
+      ): Promise<readonly string[] | undefined> {
+        const target = await baseWithTwoPeople();
+        // Deliberately NOT in code-point order.
+        const later = unwrap(
+          await branch(target, () => makeBackend(), { id: BRANCH_B }),
+        );
+        await later.store.identity.assertSame(
+          { kind: "Person", id: "ada" },
+          { kind: "Person", id: "ada2" },
+        );
+        const earlier = unwrap(
+          await branch(target, () => makeBackend(), { id: BRANCH_A }),
+        );
+        await earlier.store.nodes.Person.create(
+          { name: "Grace" },
+          { id: "grace" },
+        );
+
+        if (apply === "direct") {
+          const merged = await merge(target, [later, earlier], {
+            branchOrder: [BRANCH_B, BRANCH_A],
+          });
+          if (isErr(merged)) throw merged.error;
+        } else {
+          const artifact = unwrap(
+            await planMerge(target, [later, earlier], {
+              branchOrder: [BRANCH_B, BRANCH_A],
+            }),
+          );
+          const applied = await applyMergePlan(target, artifact);
+          if (isErr(applied)) throw applied.error;
+        }
+
+        const ctx = storeRuntime(target).identityContext();
+        const transitions = await identityTransitionsOf(ctx, {
+          kind: "Person",
+          id: "ada",
+        });
+        const reconciled = transitions.filter(
+          (transition) => transition.cause === "reconcile",
+        );
+        expect(reconciled.length).toBeGreaterThan(0);
+        return reconciled[0]?.decision?.branchAncestry;
+      }
+
+      const direct = await ancestryOf("direct");
+      const planned = await ancestryOf("plan");
+      expect(direct).toEqual(planned);
+      expect(direct).toEqual(["identity_reconciliation", BRANCH_A, BRANCH_B]);
+    });
+
+    /**
      * The policy arm that DECIDED reaches the transition log. A function
      * policy is the only arm that can arbitrate an opposing-relations
      * conflict (the string arms have no assert/retract axis to decide there),

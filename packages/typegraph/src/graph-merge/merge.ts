@@ -743,12 +743,13 @@ function partitionIdentityPairingAssertions(
     // one entity; pairing on it would fuse exactly what the merge is ending.
     if (assertion.relation !== "same" || retracted.has(assertion.id)) continue;
     const unpairable: IdentityAssertionConflictReason | undefined =
-      assertion.a.kind === assertion.b.kind ? (
-        !stagedNewKeys.has(mergeKeyOf(assertion.a)) ||
-        !stagedNewKeys.has(mergeKeyOf(assertion.b))
-      ) ?
-        "out-of-scope-pairing"
-      : undefined
+      assertion.a.kind === assertion.b.kind ?
+        (
+          !stagedNewKeys.has(mergeKeyOf(assertion.a)) ||
+          !stagedNewKeys.has(mergeKeyOf(assertion.b))
+        ) ?
+          "out-of-scope-pairing"
+        : undefined
       : "cross-kind-pairing";
     if (unpairable !== undefined) {
       crossKind.push({
@@ -807,6 +808,19 @@ async function generateIdentityPairing(
     identity: { pairing, assertions },
   });
   return { pairs: produced.pairs, forcedEdges: produced.forcedEdges };
+}
+
+/**
+ * The ONE order merged branches are recorded in: code-point by branch id.
+ * A plan artifact's `MergePlanAnchors.branches` and the identity decision's
+ * `branchAncestry` both read it here, so the same logical merge run through
+ * `merge()` and through `planMerge` + `applyMergePlan` records comparable
+ * replay provenance instead of two orderings that only happen to agree.
+ */
+function branchesInAnchorOrder<G extends GraphDef>(
+  branches: readonly GraphBranch<G>[],
+): readonly GraphBranch<G>[] {
+  return [...branches].sort((left, right) => compareStrings(left.id, right.id));
 }
 
 async function generateAllCandidates<G extends GraphDef>(
@@ -4077,9 +4091,7 @@ async function resolveMerge<G extends GraphDef, Output>(
         options,
         branchAncestry: branchAncestryOf(
           store.graphId,
-          [...branches]
-            .map((branch) => branch.id as string)
-            .toSorted((left, right) => compareStrings(left, right)),
+          branchesInAnchorOrder(branches).map((branch) => branch.id as string),
         ),
         ...(expectedBaseVersion === undefined ? {} : { expectedBaseVersion }),
         ...(incrementalGuard === undefined ? {} : { incrementalGuard }),
@@ -4227,12 +4239,10 @@ export async function planMerge<G extends GraphDef>(
   const anchors: MergePlanAnchors = {
     kind: "snapshot",
     base: { graphId: store.graphId, baseVersion: precondition.data },
-    branches: [...branches]
-      .sort((left, right) => compareStrings(left.id, right.id))
-      .map((branch) => ({
-        branchId: branch.id,
-        baseVersion: branch.base,
-      })),
+    branches: branchesInAnchorOrder(branches).map((branch) => ({
+      branchId: branch.id,
+      baseVersion: branch.base,
+    })),
   };
   return resolveMerge(
     store,
@@ -4312,12 +4322,10 @@ export async function planMergeIncremental<G extends GraphDef>(
         hash: forkActiveSchema?.schema_hash ?? forkSchema,
       },
     },
-    branches: [...branches]
-      .sort((left, right) => compareStrings(left.id, right.id))
-      .map((branch) => ({
-        branchId: branch.id,
-        baseVersion: branch.base,
-      })),
+    branches: branchesInAnchorOrder(branches).map((branch) => ({
+      branchId: branch.id,
+      baseVersion: branch.base,
+    })),
   };
   return resolveMerge(
     forkPoint,
