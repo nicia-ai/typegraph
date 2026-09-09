@@ -2495,6 +2495,7 @@ export const GraphDataHeaderSchema: z.ZodObject<{
             prunedBeforeRevision: z.ZodNumber;
             prunedAt: z.ZodISODateTime;
         }, z.core.$strip>>;
+        hasTransitions: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 
@@ -2709,6 +2710,7 @@ export const GraphInterchangeChunkSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 prunedBeforeRevision: z.ZodNumber;
                 prunedAt: z.ZodISODateTime;
             }, z.core.$strip>>;
+            hasTransitions: z.ZodOptional<z.ZodBoolean>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
 }, z.core.$strip>, z.ZodObject<{
