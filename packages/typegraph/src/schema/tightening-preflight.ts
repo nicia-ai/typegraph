@@ -21,14 +21,17 @@ import { MigrationError } from "../errors";
 import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import {
+  compositionAcyclicRelation,
   readEdgeAcyclicityViolations,
   standaloneAcyclicRelation,
 } from "../store/acyclicity";
+import { compositionEdgeCardinalityDeclarations } from "../store/claims/composition-claims";
 import {
   auditConstraintFences,
   type ConstraintFenceViolation,
   uniquenessAxisGroupFor,
 } from "../store/claims/verify";
+import { requireDefined } from "../utils/presence";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
   type EdgeCardinalityDeclaration,
@@ -119,6 +122,8 @@ type GroupedProbes = Readonly<{
     | undefined;
   acyclicity?:
     Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
+  composition?:
+    Extract<OntologyDataProbe, { kind: "compositionSingleWhole" }> | undefined;
 }>;
 
 function groupProbesByKind(
@@ -133,6 +138,8 @@ function groupProbesByKind(
     | undefined;
   let acyclicity:
     Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
+  let composition:
+    Extract<OntologyDataProbe, { kind: "compositionSingleWhole" }> | undefined;
   for (const probe of probes) {
     switch (probe.kind) {
       case "nodeDisjointness": {
@@ -151,9 +158,13 @@ function groupProbesByKind(
         acyclicity = probe;
         break;
       }
+      case "compositionSingleWhole": {
+        composition = probe;
+        break;
+      }
     }
   }
-  return { disjointness, uniqueness, endpoints, acyclicity };
+  return { disjointness, uniqueness, endpoints, acyclicity, composition };
 }
 
 /** The first couple of violations, rendered for a refusal message. */
@@ -285,6 +296,21 @@ export function prepareSchemaTighteningPreflight(
     uniquenessAxisGroupFor(group.constraintName, group.coveredKinds),
   );
 
+  // Item E's composition declarations, delta-scoped to exactly the
+  // `partOf`/`hasPart` pairs THIS commit adds (`grouped.composition.edgeKinds`)
+  // — a pre-existing, already-tightened pair's data is never re-walked by an
+  // unrelated commit, the same discipline `edgeCardinalities`/
+  // `disjointKindPairs` above already honor.
+  const compositionEdgeCardinalities =
+    grouped.composition === undefined ?
+      []
+    : compositionEdgeCardinalityDeclarations(proposedRegistry).filter(
+        (declaration) =>
+          requireDefined(grouped.composition).edgeKinds.includes(
+            declaration.edgeKind,
+          ),
+      );
+
   const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
     const claimBackedViolations = await auditConstraintFences(target, {
       declarations: {
@@ -297,7 +323,10 @@ export function prepareSchemaTighteningPreflight(
         uniqueConstraintNames: [
           ...new Set(uniquenessGroups.map((group) => group.constraintName)),
         ],
-        edgeCardinalities: newlyConstrainedAxes,
+        edgeCardinalities: [
+          ...newlyConstrainedAxes,
+          ...compositionEdgeCardinalities,
+        ],
         edgeEndpointAllowances: grouped.endpoints?.allowances ?? [],
       },
       uniquenessGroups,
@@ -317,6 +346,7 @@ export function prepareSchemaTighteningPreflight(
       : await readEdgeAcyclicityViolations(
           {
             graphId: params.graphId,
+            registry: proposedRegistry,
             schema: createSqlSchema(target.tableNames),
             dialect: getDialect(target.dialect),
             target,
@@ -327,7 +357,38 @@ export function prepareSchemaTighteningPreflight(
           ),
         );
 
-    const violations = [...claimBackedViolations, ...acyclicityViolations];
+    // Item E's D-10 acyclicity check, over the FULL proposed composition
+    // relation rather than delta-scoped: unlike the single-whole audit
+    // above, a cross-kind cycle (D-10's whole point) can span a
+    // pre-existing pair and the one this commit adds, so checking only the
+    // new edge kind would miss exactly the cycle this check exists to
+    // catch. Triggered by the delta (`grouped.composition` is only set when
+    // this commit adds a pair) but checked against everything, matching
+    // `acyclicEdgeRelations`'s own population rule (every live edge of the
+    // relation counts, not just the ones a particular write touched).
+    const compositionAcyclicityViolations =
+      grouped.composition === undefined ?
+        []
+      : await readEdgeAcyclicityViolations(
+          {
+            graphId: params.graphId,
+            registry: proposedRegistry,
+            schema: createSqlSchema(target.tableNames),
+            dialect: getDialect(target.dialect),
+            target,
+            operation: "schema-commit:composition-tightening",
+          },
+          [compositionAcyclicRelation(proposedRegistry)].filter(
+            (relation): relation is NonNullable<typeof relation> =>
+              relation !== undefined,
+          ),
+        );
+
+    const violations = [
+      ...claimBackedViolations,
+      ...acyclicityViolations,
+      ...compositionAcyclicityViolations,
+    ];
     if (violations.length === 0) return;
 
     const cardinalityViolations = violations.filter(

@@ -39,6 +39,7 @@ import { diagnoseFusedSchemaFenceNoRow } from "./write-transaction";
 type CommonAtomicMutationEligibility = Readonly<{
   backend: GraphBackend | TransactionBackend;
   graph: GraphDef;
+  registry: KindRegistry;
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
@@ -246,7 +247,12 @@ export function resolveAtomicEdgeConvergenceExecutor(
   if (
     edgeWriteNeedsConstraintFence({
       ...registration,
-      acyclic: edgeKindIsInAcyclicRelation(input.graph, input.kind),
+      acyclic: edgeKindIsInAcyclicRelation(
+        input.graph,
+        input.registry,
+        input.kind,
+      ),
+      composition: input.registry.isCompositionEdge(input.kind),
     }) !== undefined
   ) {
     return;
@@ -286,7 +292,17 @@ export function resolveAtomicEdgeBatchExecutor(
         // rows cannot express. Any acyclic kind in the batch sends the WHOLE
         // batch through the portable path, which probes the combined insert
         // once, after it lands.
-        !edgeKindIsInAcyclicRelation(input.graph, item.kind),
+        !edgeKindIsInAcyclicRelation(input.graph, input.registry, item.kind) &&
+        // A composition edge kind owes a SECOND claim (the reserved
+        // relation-wide axis, `compositionClaim`) beyond whatever ordinary
+        // axis its own registration declares — a fact the two-axis check
+        // below cannot see, because it counts only
+        // `edgeCardinalityAxisReferences`. Rather than teach that check a
+        // claim source it does not otherwise know about, any composition
+        // kind sends the whole batch through the portable path, exactly as
+        // an acyclic kind does — `assertMatchingFusedEdgeClaim`
+        // (`operation-backend-core.ts`) is the belt behind this gate.
+        !input.registry.isCompositionEdge(item.kind),
     )
   ) {
     return;
@@ -437,18 +453,23 @@ function supportsAtomicResolvedNodeKindProjections(
 }
 
 function isAtomicResolvedEdgeKindEligible(
-  input: Readonly<{ graph: GraphDef; kind: string }>,
+  input: Readonly<{ graph: GraphDef; registry: KindRegistry; kind: string }>,
 ): boolean {
   if (!hasOwnKey(input.graph.edges, input.kind)) return false;
   const registration = input.graph.edges[input.kind];
   return (
     registration !== undefined &&
-    // No native program applies a constrained cardinality axis or
-    // acyclicity; such a create must re-enter the portable path, which
+    // No native program applies a constrained cardinality axis, acyclicity,
+    // or composition; such a create must re-enter the portable path, which
     // probes and refuses.
     edgeWriteNeedsConstraintFence({
       ...registration,
-      acyclic: edgeKindIsInAcyclicRelation(input.graph, input.kind),
+      acyclic: edgeKindIsInAcyclicRelation(
+        input.graph,
+        input.registry,
+        input.kind,
+      ),
+      composition: input.registry.isCompositionEdge(input.kind),
     }) === undefined &&
     registration.matchIdentity === undefined
   );

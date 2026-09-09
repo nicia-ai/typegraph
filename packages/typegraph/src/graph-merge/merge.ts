@@ -2938,11 +2938,12 @@ async function resolvedMergeArtifact<G extends GraphDef>(
  */
 function resolvedPlanAcyclicityCandidates<G extends GraphDef>(
   graph: GraphDef,
+  registry: KindRegistry,
   plan: MergePlan<G>,
 ): readonly ProposedRelationEdge[] {
   const proposed: ProposedRelationEdge[] = [];
   for (const edge of plan.mergedEdges) {
-    if (!edgeKindIsInAcyclicRelation(graph, edge.kind)) continue;
+    if (!edgeKindIsInAcyclicRelation(graph, registry, edge.kind)) continue;
     const from = finalEdgeEndpoint(plan, edge.fromKind, edge.fromId);
     const to = finalEdgeEndpoint(plan, edge.toKind, edge.toId);
     proposed.push({
@@ -3025,14 +3026,19 @@ async function assertResolvedPlanEdgesAcyclic<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
 ): Promise<void> {
-  if (acyclicEdgeRelations(target.graph).length === 0) return;
-  const proposed = resolvedPlanAcyclicityCandidates(target.graph, plan);
+  if (acyclicEdgeRelations(target.graph, target.registry).length === 0) return;
+  const proposed = resolvedPlanAcyclicityCandidates(
+    target.graph,
+    target.registry,
+    plan,
+  );
   if (proposed.length === 0) return;
 
   const backend = storeBackend(target);
   const violations = await readProposedEdgeAcyclicityViolations(
     {
       graphId: target.graphId,
+      registry: target.registry,
       schema: createSqlSchema(backend.tableNames),
       dialect: getDialect(backend.dialect),
       target: backend,

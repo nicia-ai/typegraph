@@ -22,12 +22,17 @@ import {
   type InsertEdgeParams,
 } from "../../backend/types";
 import { type Cardinality, type TargetCardinality } from "../../core/types";
-import { CardinalityError, ConfigurationError } from "../../errors";
+import {
+  CardinalityError,
+  CompositionError,
+  ConfigurationError,
+} from "../../errors";
 import { isMissingTableError } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import {
   type ClaimTarget,
   compareClaimTargets,
+  COMPOSITION_RELATION_NAME,
   edgeCardinalityAxis,
 } from "./axis";
 import { claimSupport } from "./backing";
@@ -156,15 +161,29 @@ function edgeCardinalityAxisRefFromName(
   };
 }
 
-/** Every axis an edge kind's claims can sit on, for housekeeping reaps. */
+/**
+ * Every axis an edge kind's claims can sit on, for housekeeping reaps.
+ *
+ * Always includes the reserved composition axis alongside the kind's own
+ * five ordinary axes: composition's axis is relation-wide rather than
+ * per-edge-kind (§R4), so the caller cannot name it from `edgeKind` alone the
+ * way it names the other five. Sweeping it on every edge-kind removal is
+ * over-broad rather than unsafe — the composition claim's fence is a live
+ * ENTITY-relation check (`competingLiveEdgePredicate`), never the claim row's
+ * mere existence, so a swept row for a still-live composition edge of a
+ * different kind is simply re-acquired on that edge's next write.
+ */
 export function edgeCardinalityAxesForKind(
   edgeKind: string,
 ): readonly string[] {
-  return (
-    Object.keys(EDGE_CARDINALITY_SPECS) as readonly EdgeCardinalityAxisName[]
-  ).map((axisName) =>
-    edgeCardinalityAxis(edgeCardinalityAxisRefFromName(axisName), edgeKind),
-  );
+  return [
+    ...(
+      Object.keys(EDGE_CARDINALITY_SPECS) as readonly EdgeCardinalityAxisName[]
+    ).map((axisName) =>
+      edgeCardinalityAxis(edgeCardinalityAxisRefFromName(axisName), edgeKind),
+    ),
+    COMPOSITION_RELATION_NAME,
+  ];
 }
 
 /**
@@ -183,6 +202,16 @@ export function edgeCardinalityAxesForKind(
  * claim's axis never mentions the opposite endpoint's kind, so an edge kind's
  * source and target populations cannot collide even when a node id repeats
  * under different kinds.
+ *
+ * **Composition (`params.scope`)**: the axis is the one reserved,
+ * relation-wide string instead of `<cardinality>:<edgeKind>` — R4 is a single
+ * invariant over every declared `partOf`/`hasPart` pair, so two different
+ * realizing edge kinds must collide on one row. The key is unaffected: it is
+ * still whichever endpoint {@link edgeCardinalitySpec}'s `keyShape` names,
+ * which for a composition claim is always the PART endpoint (R5: `direction:
+ * "source"` when the part is `from`, `"target"` when it is `to`), so a
+ * `from`-side pair and a `to`-side pair attaching the same part still compute
+ * the same key.
  */
 export function edgeCardinalityClaimTarget(
   params: ClaimEdgeCardinalityParams,
@@ -191,7 +220,10 @@ export function edgeCardinalityClaimTarget(
   return {
     relation: "edgeClaims",
     graphId: params.graphId,
-    axis: edgeCardinalityAxis(params, params.edgeKind),
+    axis:
+      params.scope === undefined ?
+        edgeCardinalityAxis(params, params.edgeKind)
+      : COMPOSITION_RELATION_NAME,
     key:
       spec.keyShape === "from" ?
         encodeTupleKey([params.fromKind, params.fromId])
@@ -394,6 +426,53 @@ export function edgeCardinalityClaimRefusal(
 }
 
 /**
+ * Builds the public composition refusal for a lost composition claim.
+ *
+ * Physically beside {@link edgeCardinalityClaimRefusal} rather than in
+ * `composition-claims.ts` (its documented home, and where it is re-exported
+ * from): both read the same {@link edgeCardinalitySpec} table to name the
+ * PART side, and `composition-claims.ts` already imports from this module —
+ * a back-import here would be a value-level cycle, the exact shape
+ * `axis.ts`'s docblock records avoiding for its own type-only back-edge onto
+ * this module.
+ */
+export function compositionClaimRefusal(
+  params: ClaimEdgeCardinalityParams,
+): CompositionError {
+  const spec = edgeCardinalitySpec(params);
+  const part =
+    spec.keyShape === "from" ?
+      { kind: params.fromKind, id: params.fromId }
+    : { kind: params.toKind, id: params.toId };
+  const whole =
+    spec.keyShape === "from" ?
+      { kind: params.toKind, id: params.toId }
+    : { kind: params.fromKind, id: params.fromId };
+  return new CompositionError({
+    partKind: part.kind,
+    partId: part.id,
+    wholeKind: whole.kind,
+    wholeId: whole.id,
+    edgeKind: params.edgeKind,
+  });
+}
+
+/**
+ * THE claim refusal for a lost claim, of either shape. Every claim-issuing
+ * call site raises through here rather than choosing between
+ * {@link edgeCardinalityClaimRefusal} and {@link compositionClaimRefusal}
+ * itself, so a caller cannot forget the composition arm the way a second
+ * inline `claim.scope !== undefined` spelling could.
+ */
+export function claimRefusalFor(
+  params: ClaimEdgeCardinalityParams,
+): CardinalityError | CompositionError {
+  return params.scope === undefined ?
+      edgeCardinalityClaimRefusal(params)
+    : compositionClaimRefusal(params);
+}
+
+/**
  * Converts the engine's "relation does not exist" into a typed precondition
  * error naming the relation and the way to create it.
  *
@@ -411,7 +490,10 @@ export function edgeClaimRelationMissing(
     "Enforcing a declared edge cardinality needs the edge claim relation " +
       "(typegraph_edge_claims), and this database does not have it. " +
       "Databases initialized before this relation existed were never sent " +
-      "its CREATE TABLE, because the bootstrap DDL runs only on first boot.",
+      "its CREATE TABLE, because the bootstrap DDL runs only on first boot. " +
+      "A composition edge (`partOf`/`hasPart`) rides the same relation: a " +
+      "deployment initialized before it existed must be migrated under " +
+      "owner credentials before declaring `partOf`.",
     { code: "EDGE_CLAIM_RELATION_MISSING", graphId },
     {
       cause,
@@ -494,7 +576,7 @@ async function claimEdgeCardinality(
       mode.claim(claim),
     );
     if (outcome.status === "refused") {
-      throw edgeCardinalityClaimRefusal(claim);
+      throw claimRefusalFor(claim);
     }
     return;
   }
@@ -503,7 +585,7 @@ async function claimEdgeCardinality(
   const outcome = await withEdgeClaimRelationPrecondition(claim.graphId, () =>
     support.claims.claimEdgeCardinality(claim),
   );
-  if (outcome.status === "refused") throw edgeCardinalityClaimRefusal(claim);
+  if (outcome.status === "refused") throw claimRefusalFor(claim);
 }
 
 /**
@@ -555,7 +637,7 @@ export async function claimEdgeCardinalityBatch(
   for (const [index, outcome] of outcomes.entries()) {
     const entry = ordered[index];
     if (entry !== undefined && outcome.status === "refused") {
-      throw edgeCardinalityClaimRefusal(entry.claim);
+      throw claimRefusalFor(entry.claim);
     }
   }
 }

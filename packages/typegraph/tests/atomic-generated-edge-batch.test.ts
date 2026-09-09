@@ -28,6 +28,7 @@ import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
+import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import type { Store } from "../src/store";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
@@ -195,6 +196,7 @@ describe("generated edge batch store consumer", () => {
     });
     const common = {
       graph,
+      registry: buildKindRegistry(graph),
       expectedKind: "worksAt",
       ids: ["edge-1"],
       schemaVersion: 1,
@@ -267,6 +269,7 @@ describe("generated edge batch store consumer", () => {
       resolveAtomicEdgeBatchExecutor({
         backend,
         graph,
+        registry: buildKindRegistry(graph),
         inputs: [input],
         schemaVersion: 1,
         historyEnabled: false,
@@ -277,6 +280,7 @@ describe("generated edge batch store consumer", () => {
       resolveAtomicEdgeBatchExecutor({
         backend: deriveBackend(backend, {}),
         graph,
+        registry: buildKindRegistry(graph),
         inputs: [input],
         schemaVersion: 1,
         historyEnabled: false,
@@ -294,6 +298,7 @@ describe("generated edge batch store consumer", () => {
           resolveAtomicEdgeBatchExecutor({
             backend: transactionBackend,
             graph,
+            registry: buildKindRegistry(graph),
             inputs: [input],
             schemaVersion: 1,
             historyEnabled: false,
@@ -335,6 +340,7 @@ describe("generated edge batch store consumer", () => {
         resolveAtomicEdgeBatchExecutor({
           backend,
           graph: constrainedGraph,
+          registry: buildKindRegistry(constrainedGraph),
           inputs: [
             {
               kind: "worksAt",

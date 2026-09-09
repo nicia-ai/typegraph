@@ -80,11 +80,16 @@ export type ConstraintContext = Readonly<{
  * reachability probe before inserting; nothing in the schema repeats either
  * test.
  *
- * Cardinality is reported first when both apply, so every refusal payload
- * that existed before `acyclic` shipped stays byte-identical — the fence
- * itself is the same per-graph lock regardless of which reason names it, so
- * the choice affects only what a refusal on an unfenceable backend calls the
- * constraint.
+ * Composition is reported first of all: a composition edge kind ALWAYS
+ * declares a constrained whole-side cardinality (§2.5 of the design note), so
+ * it always also qualifies as `"edgeCardinality"` — reporting the narrower
+ * reason first is what lets a backend that cannot hold the fence give advice
+ * that names the `partOf`/`hasPart` declaration rather than a generic
+ * cardinality one. Cardinality is reported next when both it and acyclicity
+ * apply, so every refusal payload that existed before `acyclic` shipped stays
+ * byte-identical — the fence itself is the same per-graph lock regardless of
+ * which reason names it, so the choice affects only what a refusal on an
+ * unfenceable backend calls the constraint.
  *
  * The one owner of this classification: it folds through
  * {@link edgeCardinalityAxisReferences}, the same fold `checkEdgeCardinalityConstraints`
@@ -95,8 +100,12 @@ export type ConstraintContext = Readonly<{
  * the per-graph lock import skips (see {@link graphOwesLockOnlyFence}).
  */
 export function edgeWriteNeedsConstraintFence(
-  declarations: EdgeCardinalityDeclarations & Readonly<{ acyclic?: boolean }>,
+  declarations: EdgeCardinalityDeclarations &
+    Readonly<{ acyclic?: boolean; composition?: boolean }>,
 ): ConstraintFenceReason | undefined {
+  if (declarations.composition === true) {
+    return "edgeComposition";
+  }
   if (edgeCardinalityAxisReferences(declarations).length > 0) {
     return "edgeCardinality";
   }
@@ -237,7 +246,9 @@ export function graphOwesClaims(
 
 /**
  * Whether `importGraph` must take the per-graph write lock per chunk: the
- * graph declares at least one `acyclic: true` edge kind.
+ * graph declares at least one `acyclic: true` edge kind, or any
+ * `partOf`/`hasPart` pair — item E's composition relation is D-10's oriented
+ * union over the SAME acyclicity check, with the same `lockOnly` backing.
  *
  * Import takes no per-graph lock by design (`graphOwesClaims`'s docblock) and
  * is fenced instead by the claim rows its constrained writes issue —
@@ -250,8 +261,9 @@ export function graphOwesClaims(
  */
 export function graphOwesLockOnlyFence(
   graph: GraphDef,
+  registry: KindRegistry,
 ): ConstraintFenceReason | undefined {
-  return acyclicEdgeRelations(graph).length === 0 ?
+  return acyclicEdgeRelations(graph, registry).length === 0 ?
       undefined
     : "edgeAcyclicity";
 }

@@ -65,6 +65,78 @@ function endpointTerms(
 }
 
 /**
+ * THE rows that can hold this claim: which edge kinds, and — for a
+ * composition claim — on which endpoint. The one owner of that decision, so
+ * {@link competingLiveEdgePredicate} and
+ * {@link recordedClaimHolderIsLivePredicate} cannot render two different
+ * answers to "does this row hold the axis this claim contends for".
+ *
+ * `scope === undefined` (the ordinary case, unchanged from before item E):
+ * `kind = params.edgeKind`, plus the endpoint terms {@link endpointTerms}
+ * renders off `keyShape`.
+ *
+ * `scope !== undefined` (a composition claim, R4): the claim's key is the
+ * PART's identity regardless of which orientation wrote it, so a holder is
+ * any row of ANY holder edge kind whose PART-side endpoint matches that
+ * identity — an OR over the two oriented arms `scope.holders` carries:
+ * `kind IN (fromSideKinds) AND from_kind/from_id = the part` for a
+ * `partSide: "from"` holder, `kind IN (toSideKinds) AND to_kind/to_id = the
+ * part` for a `partSide: "to"` one. This is what lets `chapterOf`
+ * (`Chapter -> Book`, part `from`) and `includedIn` (`Anthology -> Chapter`,
+ * part `to`) contend for the SAME Chapter's one whole even though they are
+ * different edge kinds in different orientations.
+ */
+function claimHolderTerms(
+  edgesName: string,
+  edges: Tables["edges"],
+  params: ClaimEdgeCardinalityParams,
+): SQL {
+  const spec = edgeCardinalitySpec(params);
+  if (params.scope === undefined) {
+    return sql`${qualified(edgesName, edges.kind)} = ${params.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, params)}`;
+  }
+  const partKind = spec.keyShape === "from" ? params.fromKind : params.toKind;
+  const partId = spec.keyShape === "from" ? params.fromId : params.toId;
+  const fromSideKinds = params.scope.holders
+    .filter((holder) => holder.partSide === "from")
+    .map((holder) => holder.edgeKind);
+  const toSideKinds = params.scope.holders
+    .filter((holder) => holder.partSide === "to")
+    .map((holder) => holder.edgeKind);
+  const arms: SQL[] = [];
+  if (fromSideKinds.length > 0) {
+    arms.push(sql`
+      (
+            ${qualified(edgesName, edges.kind)} IN (${sql.join(
+        fromSideKinds.map((kind) => sql`${kind}`),
+        sql`, `,
+      )})
+            AND ${qualified(edgesName, edges.fromKind)} = ${partKind}
+            AND ${qualified(edgesName, edges.fromId)} = ${partId}
+          )
+    `);
+  }
+  if (toSideKinds.length > 0) {
+    arms.push(sql`
+      (
+            ${qualified(edgesName, edges.kind)} IN (${sql.join(
+        toSideKinds.map((kind) => sql`${kind}`),
+        sql`, `,
+      )})
+            AND ${qualified(edgesName, edges.toKind)} = ${partKind}
+            AND ${qualified(edgesName, edges.toId)} = ${partId}
+          )
+    `);
+  }
+  // A composition claim always names its own edge kind on the matching side
+  // (`compositionClaim`, `src/store/claims/composition-claims.ts`), so
+  // `arms` is never empty in practice; the fallback keeps this total rather
+  // than emitting invalid SQL for a hand-built params object with no
+  // holders.
+  return arms.length === 0 ? sql`FALSE` : sql`(${sql.join(arms, sql` OR `)})`;
+}
+
+/**
  * The live entity predicate a claim guards, excluding the proposed holder.
  * Both the guarded lock and guarded takeover use this exact fragment so the
  * fast path cannot disagree about what constitutes a claimless incumbent.
@@ -85,7 +157,7 @@ function competingLiveEdgePredicate(
     ${qualified(edgesName, edges.graphId)} = ${params.graphId}
       AND ${qualified(edgesName, edges.id)} <> ${params.edgeId}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, params)}${activeTerm}
+      AND ${claimHolderTerms(edgesName, edges, params)}${activeTerm}
   `;
 }
 
@@ -146,7 +218,7 @@ function recordedClaimHolderIsLivePredicate(
     ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
       AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, params)}${activeTerm}
+      AND ${claimHolderTerms(edgesName, edges, params)}${activeTerm}
   `;
 }
 

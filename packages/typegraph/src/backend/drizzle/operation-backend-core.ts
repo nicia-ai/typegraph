@@ -279,10 +279,34 @@ export function atomicNodeReplacementSubmissionMaxEntries(
   );
 }
 
+/**
+ * The belt behind the composition-eligibility gates (`resolveAtomicEdgeBatchExecutor`
+ * et al., `src/store/operations/atomic-mutation-program.ts`): a fused command
+ * is an optimization attempt, not evidence that its dimensions ran, and a
+ * composition claim (item E, `scope.kind === "composition"`) must NEVER
+ * reach a fused write — the fused single-claim path (`createEdgeWithPlan`)
+ * carries exactly one claim by construction, and even the batch path's
+ * generic multi-claim support is a policy choice this assertion enforces
+ * rather than a capability this library exercises. A composition edge
+ * always owes at least two claims (its own declared axis, plus this one),
+ * so every gate that reaches this function should already have routed such
+ * an edge kind through the portable path; this throws if one ever does not.
+ */
 function assertMatchingFusedEdgeClaim(
   params: InsertEdgeParams,
   claim: ClaimEdgeCardinalityParams,
 ): void {
+  if (claim.scope?.kind === "composition") {
+    throw new CompilerInvariantError(
+      "A fused edge write can never apply a composition claim: a composition " +
+        "edge kind always owes at least two claims, which every static " +
+        "eligibility gate must route through the portable write path instead.",
+      {
+        edgeId: claim.edgeId,
+        edgeKind: claim.edgeKind,
+      },
+    );
+  }
   const matchesEdge =
     claim.graphId === params.graphId &&
     claim.edgeId === params.id &&
@@ -1106,11 +1130,9 @@ async function readMisassignedEdgeEndpointRows(
     );
     const rowsByEdgeId = new Map(rows.map((row) => [row.edge_id, row]));
     candidates =
-      candidates === undefined ?
-        rowsByEdgeId
-      : new Map(
-          [...candidates].filter(([edgeId]) => rowsByEdgeId.has(edgeId)),
-        );
+      candidates === undefined ? rowsByEdgeId : (
+        new Map([...candidates].filter(([edgeId]) => rowsByEdgeId.has(edgeId)))
+      );
     if (candidates.size === 0) break;
   }
   return [...(candidates?.values() ?? [])].map((row) => ({
@@ -5090,7 +5112,9 @@ export function createCommonOperationBackend(
       }
     },
 
-    async countEdgesAtEndpoint(params: CountEdgesAtEndpointParams): Promise<number> {
+    async countEdgesAtEndpoint(
+      params: CountEdgesAtEndpointParams,
+    ): Promise<number> {
       const query = operationStrategy.buildCountEdgesAtEndpoint(params);
       const row = await execution.execGet<{ count: string | number }>(query);
       return Number(row?.count ?? 0);
@@ -5370,23 +5394,45 @@ export function createCommonOperationBackend(
       }));
 
       // One statement per declared axis, because that is the granularity at
-      // which the population's key and liveness differ.
+      // which the population's key and liveness differ. Composition
+      // declarations (item E, `declaration.scope !== undefined`) are grouped
+      // and audited separately: R4's axis is relation-wide, so the peer test
+      // is the oriented two-arm union, not exact-kind equality — see
+      // `buildContendedCompositionEdgeRowAudit`.
       const edgeKindsByAxis = new Map<
         EdgeCardinalityAxisName,
         Readonly<{ ref: EdgeCardinalityAxisRef; edgeKinds: string[] }>
       >();
+      const compositionEdgeKindsByAxis = new Map<
+        EdgeCardinalityAxisName,
+        Readonly<{
+          ref: EdgeCardinalityAxisRef;
+          edgeKinds: string[];
+          holders: NonNullable<EdgeCardinalityDeclaration["scope"]>["holders"];
+        }>
+      >();
       for (const declaration of params.edgeCardinalities) {
         const axisName = edgeCardinalityAxisName(declaration);
-        const entry = edgeKindsByAxis.get(axisName) ?? {
-          // Narrowed to the axis ref alone: `declaration` also carries
-          // `edgeKind`, and keeping that field on `ref` would let a later
-          // `{...ref, edgeKind: row.edge_kind}` merge silently depend on
-          // spread ORDER to discard it instead of the type excluding it.
+        if (declaration.scope === undefined) {
+          const entry = edgeKindsByAxis.get(axisName) ?? {
+            // Narrowed to the axis ref alone: `declaration` also carries
+            // `edgeKind`, and keeping that field on `ref` would let a later
+            // `{...ref, edgeKind: row.edge_kind}` merge silently depend on
+            // spread ORDER to discard it instead of the type excluding it.
+            ref: axisRefFromDeclaration(declaration),
+            edgeKinds: [],
+          };
+          entry.edgeKinds.push(declaration.edgeKind);
+          edgeKindsByAxis.set(axisName, entry);
+          continue;
+        }
+        const entry = compositionEdgeKindsByAxis.get(axisName) ?? {
           ref: axisRefFromDeclaration(declaration),
           edgeKinds: [],
+          holders: declaration.scope.holders,
         };
         entry.edgeKinds.push(declaration.edgeKind);
-        edgeKindsByAxis.set(axisName, entry);
+        compositionEdgeKindsByAxis.set(axisName, entry);
       }
       const contendedEdgeRows: ContendedEdgeRow[] = [];
       for (const { ref, edgeKinds } of edgeKindsByAxis.values()) {
@@ -5401,6 +5447,45 @@ export function createCommonOperationBackend(
           operationStrategy.buildContendedEdgeRowAudit(
             params.graphId,
             ref,
+            edgeKinds,
+          ),
+        );
+        for (const row of rows) {
+          contendedEdgeRows.push({
+            ...ref,
+            edgeKind: row.edge_kind,
+            edgeId: row.edge_id,
+            fromKind: row.from_kind,
+            fromId: row.from_id,
+            toKind: row.to_kind,
+            toId: row.to_id,
+          });
+        }
+      }
+      for (const {
+        ref,
+        edgeKinds,
+        holders,
+      } of compositionEdgeKindsByAxis.values()) {
+        const rows = await execution.execAll<{
+          edge_id: string;
+          edge_kind: string;
+          from_kind: string;
+          from_id: string;
+          to_kind: string;
+          to_id: string;
+        }>(
+          operationStrategy.buildContendedCompositionEdgeRowAudit(
+            params.graphId,
+            ref,
+            {
+              fromSideKinds: holders
+                .filter((holder) => holder.partSide === "from")
+                .map((holder) => holder.edgeKind),
+              toSideKinds: holders
+                .filter((holder) => holder.partSide === "to")
+                .map((holder) => holder.edgeKind),
+            },
             edgeKinds,
           ),
         );
@@ -5437,9 +5522,8 @@ export function createCommonOperationBackend(
         // `withPinnedReadInstant` pins one instant across the operands of a
         // set operation (`src/query/compiler/temporal.ts`).
         const now = nowIso();
-        const pairChunkSize = misassignedEdgeEndpointPairChunkSize(
-          maxBindParameters,
-        );
+        const pairChunkSize =
+          misassignedEdgeEndpointPairChunkSize(maxBindParameters);
         for (const allowance of params.edgeEndpointAllowances) {
           for (const row of await readMisassignedEdgeEndpointRows(
             execution,

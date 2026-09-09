@@ -4027,6 +4027,25 @@ export type HardDeleteUniquesByConcreteKindParams = Readonly<{
  * TypeScript probe and the SQL builder read it. A caller that rendered the
  * axis and key itself would be a second spelling of that decision.
  */
+/**
+ * Present only on a composition claim: the reserved relation-wide axis
+ * (item E, `COMPOSITION_RELATION_NAME`), and the ORIENTED realizing edge
+ * kinds whose live rows can hold it — every edge kind the graph's
+ * `partOf`/`hasPart` declarations resolve to, tagged with which endpoint of
+ * that kind carries the part. Absent means the ordinary per-edge-kind
+ * cardinality claim.
+ *
+ * The two arms this carries (`partSide: "from"` vs `"to"`) are what let
+ * {@link file://./drizzle/operations/edge-claims.ts claimHolderTerms} render
+ * the "does a live edge already hold this part" predicate as a cross-kind,
+ * oriented OR — a plain `kind IN (...)` cannot express which endpoint of each
+ * kind is the part.
+ */
+export type CompositionClaimScope = Readonly<{
+  kind: "composition";
+  holders: readonly Readonly<{ edgeKind: string; partSide: "from" | "to" }>[];
+}>;
+
 export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef &
   Readonly<{
     graphId: string;
@@ -4037,6 +4056,7 @@ export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef &
     fromId: string;
     toKind: string;
     toId: string;
+    scope?: CompositionClaimScope;
   }>;
 
 /**
@@ -4061,6 +4081,14 @@ export type PurgeEdgeClaimsParams = Readonly<{
 export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef &
   Readonly<{
     edgeKind: string;
+    /**
+     * Present when this edge kind's declared axis is a composition axis —
+     * see {@link CompositionClaimScope}. The fence-audit reader groups and
+     * queries a composition declaration by its two oriented arms rather than
+     * by exact-kind equality, because R4's axis is relation-wide: two
+     * different realizing edge kinds contend for the SAME row.
+     */
+    scope?: CompositionClaimScope;
   }>;
 
 /**

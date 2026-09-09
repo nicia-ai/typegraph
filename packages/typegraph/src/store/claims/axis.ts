@@ -57,6 +57,20 @@ const DISJOINT_AXIS_PREFIX = `${AXIS_SEPARATOR}disjoint${AXIS_SEPARATOR}`;
 export const DISJOINT_CONSTRAINT_NAME = `${AXIS_SEPARATOR}disjointWith`;
 
 /**
+ * THE axis every composition claim is written at, and THE name of the
+ * composition acyclic relation ({@link file://../acyclicity.ts
+ * compositionAcyclicRelation}).
+ *
+ * ONE string for the whole graph, not one per edge kind and not one per
+ * population: R4's invariant is relation-wide, so two composition edges out
+ * of one part must collide on one row regardless of which `partOf`/`hasPart`
+ * pair or which realizing edge kind wrote it. Prefixed with the reserved
+ * separator so no kind name can spell it (enforced the same way
+ * {@link DISJOINT_CONSTRAINT_NAME} is, through {@link assertClaimAxisSafe}).
+ */
+export const COMPOSITION_RELATION_NAME = `${AXIS_SEPARATOR}composition`;
+
+/**
  * THE axis a disjointness claim is written at: the registry's own canonical
  * pair label, prefixed so it cannot collide with a kind.
  *

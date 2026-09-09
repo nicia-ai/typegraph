@@ -62,6 +62,10 @@ import {
   uniquenessClaimTarget,
 } from "./axis";
 import {
+  compositionClaim,
+  compositionEdgeCardinalityDeclarations,
+} from "./composition-claims";
+import {
   edgeCardinalityAxisReferences,
   edgeCardinalityClaimTarget,
 } from "./edge-claims";
@@ -87,6 +91,19 @@ export type ConstraintFenceViolation =
     }>
   | Readonly<{
       family: "edgeCardinality";
+      target: ClaimTarget;
+      edgeIds: readonly string[];
+    }>
+  | Readonly<{
+      /**
+       * Item E: two or more live edges — of any realizing kind, in either
+       * orientation — hold the SAME part's reserved composition axis. Its
+       * own family rather than folding into `edgeCardinality`, even though
+       * the row shape is identical, because the axis it names is R4's
+       * relation-wide one, not a per-edge-kind one, and a caller branching on
+       * `family` should not have to inspect `target.axis` to tell them apart.
+       */
+      family: "composition";
       target: ClaimTarget;
       edgeIds: readonly string[];
     }>
@@ -304,22 +321,45 @@ function disjointnessViolations(
 function edgeCardinalityViolations(
   rows: readonly ContendedEdgeRow[],
   graphId: string,
+  registry: KindRegistry,
 ): readonly ConstraintFenceViolation[] {
   const byAxis = new Map<
     string,
-    Readonly<{ target: ClaimTarget; edgeIds: string[] }>
+    Readonly<{
+      target: ClaimTarget;
+      family: "edgeCardinality" | "composition";
+      edgeIds: string[];
+    }>
   >();
   for (const row of rows) {
-    const target = edgeCardinalityClaimTarget({ ...row, graphId });
+    // A composition-realizing edge kind's row folds onto the RESERVED
+    // relation-wide axis rather than its own `(cardinality, edgeKind)` one —
+    // `compositionClaim` is the one owner of that decision (the same
+    // function every composition write calls), so this audit and the fence
+    // cannot compute two different targets for the same row.
+    const compositionClaimParams = compositionClaim(registry, {
+      graphId,
+      id: row.edgeId,
+      kind: row.edgeKind,
+      fromKind: row.fromKind,
+      fromId: row.fromId,
+      toKind: row.toKind,
+      toId: row.toId,
+    });
+    const target = edgeCardinalityClaimTarget(
+      compositionClaimParams ?? { ...row, graphId },
+    );
+    const family =
+      compositionClaimParams === undefined ? "edgeCardinality" : "composition";
     const identity = targetIdentity(target);
-    const entry = byAxis.get(identity) ?? { target, edgeIds: [] };
+    const entry = byAxis.get(identity) ?? { target, family, edgeIds: [] };
     entry.edgeIds.push(row.edgeId);
     byAxis.set(identity, entry);
   }
   return [...byAxis.values()]
     .filter((entry) => entry.edgeIds.length > 1)
     .map((entry) => ({
-      family: "edgeCardinality" as const,
+      family: entry.family,
       target: entry.target,
       edgeIds: entry.edgeIds.toSorted((left, right) =>
         compareStrings(left, right),
@@ -409,13 +449,16 @@ function fenceDeclarations(
       (registration.unique ?? []).map((constraint) => constraint.name),
     ),
   );
-  const edgeCardinalities = Object.entries(graph.edges).flatMap(
-    ([edgeKind, registration]): readonly EdgeCardinalityDeclaration[] =>
-      edgeCardinalityAxisReferences(registration).map((ref) => ({
-        ...ref,
-        edgeKind,
-      })),
-  );
+  const edgeCardinalities: readonly EdgeCardinalityDeclaration[] = [
+    ...Object.entries(graph.edges).flatMap(
+      ([edgeKind, registration]): readonly EdgeCardinalityDeclaration[] =>
+        edgeCardinalityAxisReferences(registration).map((ref) => ({
+          ...ref,
+          edgeKind,
+        })),
+    ),
+    ...compositionEdgeCardinalityDeclarations(registry),
+  ];
   const edgeEndpointKinds = buildGraphEdgeKindFacts(graph.edges);
   const edgeEndpointAllowances = [...edgeEndpointKinds.entries()]
     .map(([edgeKind, endpoints]) =>
@@ -515,6 +558,7 @@ export async function auditConstraintFences(
     ...edgeCardinalityViolations(
       rows.contendedEdgeRows,
       plan.declarations.graphId,
+      plan.registry,
     ),
     ...edgeEndpointViolations(
       rows.misassignedEdgeEndpointRows ?? [],
@@ -551,12 +595,16 @@ export async function verifyConstraintFences(
     registry: context.registry,
   });
 
-  const acyclicRelations = acyclicEdgeRelations(context.graph);
+  const acyclicRelations = acyclicEdgeRelations(
+    context.graph,
+    context.registry,
+  );
   if (acyclicRelations.length === 0) return claimBacked;
 
   const acyclicity = await readEdgeAcyclicityViolations(
     {
       graphId: context.graphId,
+      registry: context.registry,
       schema: createSqlSchema(context.backend.tableNames),
       dialect: getDialect(context.backend.dialect),
       target: context.backend,

@@ -1170,6 +1170,57 @@ export class CompositionCycleError extends TypeGraphError {
   }
 }
 
+/**
+ * Details for CompositionError.
+ *
+ * `incumbentWholeKind`/`incumbentWholeId` are omitted when the refusal is
+ * raised from the claim row alone (the common case: the claim statement
+ * reports only which edge holds the axis, not that edge's own endpoints) —
+ * present only where a caller already read the incumbent whole's identity.
+ */
+export type CompositionErrorDetails = Readonly<{
+  partKind: string;
+  partId: string;
+  wholeKind: string;
+  wholeId: string;
+  edgeKind: string;
+  incumbentWholeKind?: string;
+  incumbentWholeId?: string;
+}>;
+
+/**
+ * Thrown when a composition edge (`partOf`/`hasPart`) would give a part a
+ * second whole. R4: a part holds exactly one whole across every declared
+ * composition relation, enforced by one claim row per part
+ * (`typegraph_edge_claims`, the reserved composition axis).
+ */
+export class CompositionError extends TypeGraphError {
+  declare readonly details: CompositionErrorDetails;
+
+  constructor(details: CompositionErrorDetails, options?: { cause?: unknown }) {
+    super(
+      `Cannot attach ${details.partKind}/${details.partId} to ${details.wholeKind}/${details.wholeId} via "${details.edgeKind}": ` +
+        `it already has a whole${
+          (
+            details.incumbentWholeKind === undefined ||
+            details.incumbentWholeId === undefined
+          ) ?
+            ""
+          : ` (${details.incumbentWholeKind}/${details.incumbentWholeId})`
+        }, and composition allows exactly one.`,
+      "COMPOSITION_WHOLE_OCCUPIED",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Detach the part from its current whole before attaching it to a new one, or reparent it through an update instead of a second create.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "CompositionError";
+  }
+}
+
 // ============================================================
 // Concurrency Errors (category: "system")
 // ============================================================
@@ -1944,6 +1995,7 @@ export type TrustedImportErrorReason =
   | "acyclicity_unsupported"
   | "backend_unsupported"
   | "cardinality_unsupported"
+  | "composition_unsupported"
   | "database_not_empty"
   | "fulltext_unsupported"
   | "history_unsupported"

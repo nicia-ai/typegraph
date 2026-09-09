@@ -51,10 +51,19 @@
  * identity fold flip (`diffIdentity` in `./migration`) is the precedent for
  * classifying that `breaking` so it cannot auto-migrate.
  *
- * `broader`, `narrower`, `partOf`, `hasPart` and `relatedTo` never gate a
- * write and never change which rows a claim contends for, so they stay
- * `safe` in both directions — `partOf`/`hasPart` until composition
- * constraints exist to make them otherwise.
+ * `broader`, `narrower` and `relatedTo` never gate a write and never change
+ * which rows a claim contends for, so they stay `safe` in both directions.
+ *
+ * `partOf` / `hasPart` ADDED is item E's tightening: a newly declared
+ * composition pair can make an already-live part's second whole a violation
+ * of R4 (one whole per part, relation-wide) it never was before, so it is
+ * `warning`, probed by `compositionSingleWhole` — the single-whole audit AND
+ * D-10's acyclicity check over the PROPOSED composition relation, both run
+ * against the proposed registry in `prepareSchemaTighteningPreflight`.
+ * REMOVED is `breaking`: dropping a composition declaration is a
+ * read/write-semantics change (parts stop being deletable-with-their-whole,
+ * `parts()`/`wholes()` stop resolving), not a row-level fact a data check
+ * could falsify, so — like `inverseOf`/`implies` — it cannot auto-migrate.
  *
  * A relation whose `from` or `to` names a kind THIS COMMIT REMOVES is always
  * `safe` with no probe — see {@link classifyOntologyChanges}'s removed-kind
@@ -148,6 +157,19 @@ export type OntologyDataProbe =
        * Edge kinds whose `acyclic` flag turned on this commit (present on
        * both sides of the diff — a brand-new kind is vacuously safe, per
        * `edgeAcyclicityDelta`).
+       */
+      edgeKinds: readonly string[];
+    }>
+  | Readonly<{
+      kind: "compositionSingleWhole";
+      /**
+       * The realizing (`via`) edge kinds of the `partOf`/`hasPart` pairs
+       * ADDED this commit — delta-scoped like every other family here, so a
+       * commit that adds one new composition pair is checked against that
+       * pair alone, never against a pre-existing pair's already-tightened
+       * data. `prepareSchemaTighteningPreflight` derives the actual audit
+       * declarations and the acyclicity relation from the PROPOSED registry,
+       * restricted to these edge kinds.
        */
       edgeKinds: readonly string[];
     }>;
@@ -535,10 +557,14 @@ function classifyKnownRelationSeverity(
     case META_EDGE_IMPLIES: {
       return { severity: "breaking", probeKinds: [] };
     }
+    case META_EDGE_PART_OF:
+    case META_EDGE_HAS_PART: {
+      return direction === "added" ?
+          { severity: "warning", probeKinds: ["compositionSingleWhole"] }
+        : { severity: "breaking", probeKinds: [] };
+    }
     case META_EDGE_BROADER:
     case META_EDGE_NARROWER:
-    case META_EDGE_PART_OF:
-    case META_EDGE_HAS_PART:
     case META_EDGE_RELATED_TO:
     case META_EDGE_DIFFERENT_FROM: {
       return { severity: "safe", probeKinds: [] };
@@ -577,6 +603,7 @@ type RelationClassificationContext = Readonly<{
 function buildProbe(
   kind: ProbeKind,
   context: RelationClassificationContext,
+  relation: SerializedOntologyRelation,
 ): OntologyDataProbe {
   switch (kind) {
     case "nodeDisjointness": {
@@ -587,6 +614,16 @@ function buildProbe(
     }
     case "edgeEndpointAssignability": {
       return { kind, allowances: context.endpointAllowances };
+    }
+    case "compositionSingleWhole": {
+      // `relation.via` is always present here: `classifyKnownRelationSeverity`
+      // only attaches this probe kind to a `partOf`/`hasPart` relation, and
+      // R3 (schema load) already refuses one persisted without `via` before
+      // this classifier ever sees it.
+      return {
+        kind,
+        edgeKinds: relation.via === undefined ? [] : [relation.via],
+      };
     }
   }
 }
@@ -621,7 +658,7 @@ function classifyRelation(
     direction,
     relation.metaEdge,
   );
-  const probes = probeKinds.map((kind) => buildProbe(kind, context));
+  const probes = probeKinds.map((kind) => buildProbe(kind, context, relation));
 
   return {
     type: direction,
@@ -756,7 +793,8 @@ function groupKey(group: UniquenessComponentProbeGroup): string {
  * unconditionally.
  *
  * Deterministic order: `nodeDisjointness`, `nodeUniquenessComponent`, then
- * `edgeEndpointAssignability`, then `edgeAcyclicity`.
+ * `edgeEndpointAssignability`, then `edgeAcyclicity`, then
+ * `compositionSingleWhole`.
  */
 export function ontologyTighteningProbes(
   changes: readonly OntologyChange[],
@@ -765,6 +803,7 @@ export function ontologyTighteningProbes(
   const groups = new Map<string, UniquenessComponentProbeGroup>();
   const allowances = new Map<string, EdgeEndpointAllowance>();
   const acyclicEdgeKinds = new Set<string>();
+  const compositionEdgeKinds = new Set<string>();
 
   for (const change of changes) {
     for (const probe of change.probes ?? []) {
@@ -786,6 +825,11 @@ export function ontologyTighteningProbes(
         case "edgeAcyclicity": {
           for (const edgeKind of probe.edgeKinds)
             acyclicEdgeKinds.add(edgeKind);
+          break;
+        }
+        case "compositionSingleWhole": {
+          for (const edgeKind of probe.edgeKinds)
+            compositionEdgeKinds.add(edgeKind);
           break;
         }
       }
@@ -821,6 +865,12 @@ export function ontologyTighteningProbes(
     result.push({
       kind: "edgeAcyclicity",
       edgeKinds: [...acyclicEdgeKinds].toSorted(compareStrings),
+    });
+  }
+  if (compositionEdgeKinds.size > 0) {
+    result.push({
+      kind: "compositionSingleWhole",
+      edgeKinds: [...compositionEdgeKinds].toSorted(compareStrings),
     });
   }
   return result;
