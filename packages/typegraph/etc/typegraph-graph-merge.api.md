@@ -539,7 +539,7 @@ export type CandidateDiagnostic = Readonly<{
     reason?: "noComparableValues";
     clusterDisposition?: "retained" | Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity";
+        reason: "diameter" | "baseAmbiguity" | "separation";
     }>;
 }> | Readonly<{
     evidence: Extract<MatchEvidence, Readonly<{
@@ -548,7 +548,7 @@ export type CandidateDiagnostic = Readonly<{
     scoreDecision: "accepted";
     clusterDisposition: Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity";
+        reason: "diameter" | "baseAmbiguity" | "separation";
     }>;
 }>;
 
@@ -3208,10 +3208,6 @@ export type IdentityUnresolvedConflict = Readonly<{
     b: EntityRef;
     assertionIds: readonly string[];
     source?: MatchSource | undefined;
-}> | Readonly<{
-    kind: "provenance";
-    canonical: EntityRef;
-    contributions: readonly ProvenanceRecord[];
 }>;
 
 // @public
@@ -4144,7 +4140,7 @@ export type MergePlanCandidateDiagnostic = Readonly<{
     reason?: "noComparableValues" | undefined;
     clusterDisposition?: "retained" | Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity";
+        reason: "diameter" | "baseAmbiguity" | "separation";
     }> | undefined;
 }>;
 
