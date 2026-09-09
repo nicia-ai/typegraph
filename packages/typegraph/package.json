@@ -111,8 +111,8 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "dev": "tsup --watch",
-    "build": "tsup",
+    "dev": "node --max-old-space-size=8192 node_modules/tsup/dist/cli-default.js --watch",
+    "build": "node --max-old-space-size=8192 node_modules/tsup/dist/cli-default.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit --skipLibCheck",
     "test:types": "node --import tsx scripts/test-types.ts all",
