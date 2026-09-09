@@ -372,8 +372,9 @@ export function prepareSchemaTighteningPreflight(
     // this commit adds a pair) but checked against everything, matching
     // `acyclicEdgeRelations`'s own population rule (every live edge of the
     // relation counts, not just the ones a particular write touched).
+    const compositionRelation = compositionAcyclicRelation(proposedRegistry);
     const compositionAcyclicityViolations =
-      grouped.composition === undefined ?
+      grouped.composition === undefined || compositionRelation === undefined ?
         []
       : await readEdgeAcyclicityViolations(
           {
@@ -384,10 +385,7 @@ export function prepareSchemaTighteningPreflight(
             target,
             operation: "schema-commit:composition-tightening",
           },
-          [compositionAcyclicRelation(proposedRegistry)].filter(
-            (relation): relation is NonNullable<typeof relation> =>
-              relation !== undefined,
-          ),
+          [compositionRelation],
         );
 
     const violations = [

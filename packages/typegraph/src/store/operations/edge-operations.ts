@@ -150,6 +150,7 @@ import { compareClaimTargets } from "../claims/axis";
 import {
   compositionReentryClaim,
   edgeInsertClaims,
+  sortedByClaimTarget,
 } from "../claims/composition-claims";
 import {
   activeOnlyAxisReferences,
@@ -2286,13 +2287,11 @@ async function performEdgeUpdate<G extends GraphDef>(
       reentryAxisReferences,
       reentrySubject,
     );
-    reentryClaims = (
+    reentryClaims = sortedByClaimTarget(
       compositionEntry === undefined ?
         reentryOrdinaryClaims
-      : [...reentryOrdinaryClaims, compositionEntry])
-      .map((claim) => ({ claim, target: edgeCardinalityClaimTarget(claim) }))
-      .toSorted((left, right) => compareClaimTargets(left.target, right.target))
-      .map((entry) => entry.claim);
+      : [...reentryOrdinaryClaims, compositionEntry],
+    );
   }
   // The row's stored lower bound is the effective one on EVERY edge update,
   // in-place or resurrecting: an edge RETAINS `valid_from` unless the

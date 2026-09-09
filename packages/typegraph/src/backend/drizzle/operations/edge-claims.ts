@@ -154,14 +154,16 @@ export function claimHolderTerms(
     const bound = params as BoundClaimHolderIdentity;
     return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, bound)}`;
   }
+  // No `partIdentity` means the first overload matched: a real write-path
+  // composition claim, whose `fromKind`/`fromId`/`toKind`/`toId` are genuine
+  // bound values. Cast once here rather than at each field read below.
+  const bound = params as BoundClaimHolderIdentity;
   const partKind =
     partIdentity?.kind ??
-    // No `partIdentity` means the first overload matched: a real write-path
-    // composition claim, whose `fromKind`/`toKind` are genuine bound values.
-    sql`${spec.keyShape === "from" ? (params as BoundClaimHolderIdentity).fromKind : (params as BoundClaimHolderIdentity).toKind}`;
+    sql`${spec.keyShape === "from" ? bound.fromKind : bound.toKind}`;
   const partId =
     partIdentity?.id ??
-    sql`${spec.keyShape === "from" ? (params as BoundClaimHolderIdentity).fromId : (params as BoundClaimHolderIdentity).toId}`;
+    sql`${spec.keyShape === "from" ? bound.fromId : bound.toId}`;
   const fromSideKinds = params.scope.holders
     .filter((holder) => holder.partSide === "from")
     .map((holder) => holder.edgeKind);

@@ -103,8 +103,14 @@ function compositionClaim(
   };
 }
 
-/** Claim targets in {@link compareClaimTargets} order — the canonical claim order. */
-function sortedByClaimTarget(
+/**
+ * Claim targets in {@link compareClaimTargets} order — the canonical claim
+ * order. Exported so a caller that assembles its own claim set outside
+ * {@link edgeInsertClaims} (today, `performEdgeUpdate`'s reentry set in
+ * `src/store/operations/edge-operations.ts`) sorts it through the same
+ * function rather than re-spelling the map/sort/map fold inline.
+ */
+export function sortedByClaimTarget(
   claims: readonly ClaimEdgeCardinalityParams[],
 ): readonly ClaimEdgeCardinalityParams[] {
   return claims
