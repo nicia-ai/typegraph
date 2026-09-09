@@ -2084,6 +2084,7 @@ class needed the fence, because the way forward differs per class:
 | --- | --- | --- |
 | `edgeAcyclicity` | Creating, bulk-creating, or resurrecting an edge whose kind declares `acyclic: true` | Drop `acyclic: true` from the edge and detect cycles in application code |
 | `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`, or whose `targetCardinality` is `one` or `oneActive` | Declare `cardinality: "many"` and `targetCardinality: "many"` (or omit both) and enforce the limit in application code |
+| `edgeComposition` | Creating or resurrecting an edge that realizes a declared `partOf`/`hasPart` pair | Drop the `partOf`/`hasPart` declaration realized by this edge kind and enforce the single-whole rule in application code |
 | `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` using an undeclared dynamic `matchOn` key | Declare the edge registration's durable `matchIdentity`, or use `create` with a caller-chosen id |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom | Drop the axiom and keep ids distinct across those kinds yourself |
 | `nodeUniquenessClaim` | **Updating or resurrecting** a node whose kind declares any unique constraint, of any scope — a transition reserves the new key *before* the row write it gates, and only a transaction can undo the pair together | Drop the constraint, or run updates on a transactional backend. Plain **creates** under a `scope: "kind"` unique are unaffected: their claim follows the row |
@@ -2094,14 +2095,20 @@ node kind of the graph owes a claim ahead of its row — that is, declares **any
 unique constraint or has a disjoint partner — or any edge kind's `cardinality`
 or `targetCardinality` is non-`many`.
 The import writes both creates and updates, so the widest of those placements is
-what decides it. A graph declaring an `acyclic: true` edge kind refuses the
-same way even when no other constraint applies: acyclicity has no claim row
-to substitute for the per-graph lock import otherwise takes none of, so the
-whole import is refused with `details.constraint: "edgeAcyclicity"` before
-the first chunk. On a transactional backend, import instead takes the
-per-graph lock for the duration of each chunk it processes — a real change
-to import's concurrency posture for such a graph, so every other writer of
-that graph blocks for the chunk's duration.
+what decides it. A graph declaring an `acyclic: true` edge kind — or any
+`partOf`/`hasPart` pair, whose composition relation D-10 checks with the same
+exhaustive reachability probe — refuses the same way even when no other
+constraint applies: acyclicity has no claim row to substitute for the
+per-graph lock import otherwise takes none of, so the whole import is refused
+with `details.constraint: "edgeAcyclicity"` before the first chunk. (A
+composition edge kind is separately refused with `edgeComposition` first, by
+the ordinary claim-backed path above — the composition claim itself needs
+only an interactive transaction, not the lock-only fence; it is the
+*acyclicity* check over the composition relation that is lock-only.) On a
+transactional backend, import instead takes the per-graph lock for the
+duration of each chunk it processes — a real change to import's concurrency
+posture for such a graph, so every other writer of that graph blocks for the
+chunk's duration.
 
 This affects **Cloudflare D1**, **`drizzle-orm/neon-http`**, and any SQLite
 backend built with `transactionMode: "none"`. Durable Objects are unaffected —
@@ -2228,6 +2235,7 @@ TypeGraph choosing separate query semantics per backend:
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
 | TypeGraph Identity Profile                             | ✓ transactional drivers                           | ✓ transactional drivers                    | Enabled graphs fail fast on non-atomic drivers; identity-disabled graphs retain their ordinary path                      |
 | Constraint claim relations (`capabilities.constraintClaims`) | ✓                                           | ✓                                          | Identical relations and identical statements on both dialects. A third-party backend that omits them declares `constraintClaims` absent and keeps the per-graph lock as its only fence |
+| Composition claim (`partOf`/`hasPart`)                 | ✓                                                  | ✓                                           | One reserved axis in `typegraph_edge_claims`, identical on both dialects — no new relation or statement shape. Needs an interactive transaction the same way any other declared-cardinality write does (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, `edgeComposition`), and needs `typegraph_edge_claims` to already exist: a deployment initialized before it did raises `EDGE_CLAIM_RELATION_MISSING` on the first `partOf`/`hasPart` write and must be migrated under owner credentials first |
 | Durable edge match identity (`capabilities.durableEdgeMatchIdentity`) | ✓ bundled adapters | ✓ bundled adapters | Both dialects persist the same canonical key and use a unique database arbiter. A custom backend must satisfy the full capability contract above or leave the capability absent |
 | Managed node projection fusion                        | ✓ registered atomic bulk programs; singleton fallback | ✓ registered atomic bulk programs; singleton create fusion | Eligible node bulk creates and resolved updates group fulltext/vector transitions into the same atomic program as their row mutations on both dialects. PostgreSQL additionally fuses an eligible singleton generated-ID create into one SQL statement when every active strategy supplies an inserted-node builder |
 | Managed node claim fusion (`capabilities.atomicNodeInsertClaims`) | ✗ portable transactional fallback             | ✓ PostgreSQL/PGlite                        | SQLite keeps claim acquisition and insertion in the portable transaction. PostgreSQL transaction receivers fuse supported claim plans; a root non-transactional receiver is limited to exactly one generated-id, same-kind uniqueness claim with no other side effects |
