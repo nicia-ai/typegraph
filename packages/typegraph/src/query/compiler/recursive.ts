@@ -659,8 +659,13 @@ function compileRecursiveCte(
     // on every execution — measured to switch SQLite from a covering-index
     // seek to a full MATERIALIZE + automatic index build (Ed-04). The
     // recursive term only ever reads graph_id/kind (structural filters),
-    // the temporal columns, and the four tg_source_*/tg_target_* aliases
-    // derived below — UNLESS a predicate on this edge alias or the identity
+    // the temporal columns — including `recorded_from`/`recorded_to` on a
+    // recorded-pinned read, per `temporalFilterPass.recordedColumns`, whose
+    // one spelling of that decision is what a recorded-pinned mixed-
+    // orientation traversal's `e.recorded_from`/`e.recorded_to` reference
+    // (emitted by `edgeTemporalFilter` below) depends on projecting here
+    // (Ed-r2-1) — and the four tg_source_*/tg_target_* aliases derived
+    // below — UNLESS a predicate on this edge alias or the identity
     // frontier widening can reference an arbitrary column (e.g. `e.props`
     // via `whereEdge`), in which case only `e.*` is guaranteed to carry
     // whatever they need. Narrow only in the provably safe case; keep the
@@ -670,8 +675,22 @@ function compileRecursiveCte(
     const directedEdgeBaseColumns: SqlFragment =
       requiresFullEdgeProjection ?
         sql`e.*`
-      : sql`e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at`;
+      : sql.join(
+          [
+            sql`e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at`,
+            ...temporalFilterPass.recordedColumns.map(
+              (column) => sql`e.${sql.raw(column)}`,
+            ),
+          ],
+          sql`, `,
+        );
 
+    // Both arms also filter on `e.graph_id` — not only the recursive term
+    // downstream — so a multi-graph database normalizes only the current
+    // graph's edges of these kinds into this CTE rather than every graph's
+    // (Ed-r2-4). The result is unchanged either way (the recursive term
+    // already requires `graph_id = ${graphId}`); this only bounds what gets
+    // normalized before that filter runs.
     const directArm = sql`
       SELECT ${directedEdgeBaseColumns},
         e.${sql.raw(directJoinField)} AS tg_source_id,
@@ -679,7 +698,7 @@ function compileRecursiveCte(
         e.${sql.raw(directTargetField)} AS tg_target_id,
         e.${sql.raw(directTargetKindField)} AS tg_target_kind
       FROM ${ctx.schema.edgesTable} e
-      WHERE ${compileKindFilter(directEdgeKinds, "e.kind")}
+      WHERE e.graph_id = ${graphId} AND ${compileKindFilter(directEdgeKinds, "e.kind")}
     `;
     const inverseArm = sql`
       SELECT ${directedEdgeBaseColumns},
@@ -688,7 +707,7 @@ function compileRecursiveCte(
         e.${sql.raw(inverseTargetField)} AS tg_target_id,
         e.${sql.raw(inverseTargetKindField)} AS tg_target_kind
       FROM ${ctx.schema.edgesTable} e
-      WHERE ${compileKindFilter(inverseEdgeKinds, "e.kind")}${
+      WHERE e.graph_id = ${graphId} AND ${compileKindFilter(inverseEdgeKinds, "e.kind")}${
         duplicateGuard === undefined ? sql`` : sql` AND ${duplicateGuard}`
       }
     `;

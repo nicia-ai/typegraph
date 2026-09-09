@@ -264,6 +264,47 @@ export function registerCompositionNavigationIntegrationTests(
       );
     });
 
+    it("parts() unions mixed orientation under a recorded-pinned read", async () => {
+      const history = await context.createHistoryStore(
+        compositionNavigationGraph,
+      );
+      const book = await history.nodes.CnBook.create({ title: "The Book" });
+      const chapter = await history.nodes.CnChapter.create({
+        title: "Chapter 1",
+      });
+      await history.edges.cnBookHasChapter.create(book, chapter, {});
+      const paragraph = await history.nodes.CnParagraph.create({
+        title: "Paragraph 1",
+      });
+      await history.edges.cnParagraphOf.create(paragraph, chapter, {});
+      const pin = await history.recordedNow();
+      if (pin === undefined) throw new Error("recorded clock was not written");
+
+      // MUTATION CHECK (Ed-r2-1): the mixed-orientation shape above forces
+      // `parts()` to compile the `inverseEdgeKinds` union branch, whose
+      // `_directed_edges` CTE narrows its edge projection. Reverting that
+      // narrowing to omit `recorded_from`/`recorded_to` (dropping
+      // `temporalFilterPass.recordedColumns` from the column list in
+      // `recursive.ts`) makes this throw `no such column: e.recorded_from`
+      // on SQLite (an undefined-column error on PostgreSQL/PGlite) as soon
+      // as this recorded-pinned read executes, because the edge temporal
+      // filter references those columns on every recorded read regardless
+      // of projection width — verified and reverted.
+      const rows = await history
+        .asOfRecorded(pin)
+        .query()
+        .from("CnBook", "b")
+        .whereNode("b", (b) => b.id.eq(book.id))
+        .parts("x")
+        .select((ctx) => ctx.x)
+        .execute();
+
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((row) => row.kind))).toEqual(
+        new Set(["CnChapter", "CnParagraph"]),
+      );
+    });
+
     it("wholes() returns the ancestor chain from a Segment", async () => {
       const store = await context.createStore(compositionNavigationGraph);
       const { segment1 } = await seedCompositionFixtures(store);

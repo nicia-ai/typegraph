@@ -5,6 +5,7 @@ import {
   currentReadInstantFor,
   extractTemporalOptions,
   type ReadInstantMode,
+  RECORDED_TEMPORAL_COLUMNS,
 } from "../temporal";
 
 export type TemporalFilterPass = Readonly<{
@@ -17,6 +18,19 @@ export type TemporalFilterPass = Readonly<{
    * of resampling the clock, which would break the single-snapshot invariant.
    */
   currentInstant: SqlFragment;
+  /**
+   * Column names, beyond the always-present `valid_from`/`valid_to`/
+   * `deleted_at`, that {@link forAlias}'s filter will reference for this AST
+   * — `recorded_from`/`recorded_to` when the read is recorded-pinned,
+   * otherwise empty. A caller that narrows an edge/node projection to avoid
+   * a wildcard select (rather than emitting `alias.*`) must include these so
+   * its column list stays correct if the recorded pin is ever added to or
+   * removed from this AST; deriving that answer here, instead of a second
+   * `ast.recordedAsOf !== undefined` check at the narrowing site, is what
+   * keeps the two decisions from drifting apart (see recursive.ts's
+   * `<edgeAlias>_directed_edges` CTE).
+   */
+  recordedColumns: readonly string[];
 }>;
 
 /**
@@ -33,6 +47,8 @@ export function createTemporalFilterPass(
   readInstant: ReadInstantMode = "literal",
 ): TemporalFilterPass {
   const currentTimestamp = currentReadInstantFor(readInstant);
+  const recordedColumns: readonly string[] =
+    ast.recordedAsOf === undefined ? [] : RECORDED_TEMPORAL_COLUMNS;
   return {
     forAlias(tableAlias?: string): SqlFragment {
       return compileTemporalFilter({
@@ -41,5 +57,6 @@ export function createTemporalFilterPass(
       });
     },
     currentInstant: currentTimestamp,
+    recordedColumns,
   };
 }
