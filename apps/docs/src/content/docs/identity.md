@@ -344,13 +344,13 @@ current canonical and hops backwards). A window that returned nothing would
 otherwise be indistinguishable from a lineage that genuinely had no
 transitions in it.
 
-`options.limit` (default 200, maximum 2000) caps the number of BOUNDARIES one
-page returns. Both `replay` and `transitionsOf` page rather than refuse: a
-capped result carries `nextFrom`, the recorded instant of the first boundary
-it stopped short of, and passing that back as `fromRecorded` reads the next
-page. They page on identical boundaries, so a `replay` page and a
-`transitionsOf` page taken with the same options always cover the same
-revisions.
+`options.limit` (default 200, an integer from 1 to 2000 — anything else is a
+`ValidationError`) caps the number of BOUNDARIES one page returns. Both
+`replay` and `transitionsOf` page rather than refuse: a capped result carries
+`nextFrom`, the recorded instant of the first boundary it stopped short of,
+and passing that back as `fromRecorded` reads the next page. They page on
+identical boundaries, so a `replay` page and a `transitionsOf` page taken
+with the same options always cover the same revisions.
 
 ```typescript
 let cursor: RecordedInstant | undefined;

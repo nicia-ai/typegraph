@@ -11,7 +11,13 @@ assertion ids involved, both temporal coordinates, and, for a decision made by
 a merge, the policy arm, branch, branch ancestry and plan and review digests
 that produced it. A transition an archival restore brought in carries
 `restored.at`, the destination's wall clock at restore time, so an audit view
-can tell an imported explanation from a locally replayable event.
+can tell an imported explanation from a locally replayable event. That marker
+is a wall clock rather than a `RecordedInstant` on purpose: a restore records
+history, it does not relive it, so it never advances the destination's
+recorded-revision counter and there is no revision on the destination's own
+axis to pair the timestamp with — the retention watermark
+(`truncatedBefore`) remains the only revision-shaped signal a restore
+leaves behind.
 `transitionsOf` and `replay` both page: `limit` caps the number of boundaries
 one page returns and a capped page hands back a `nextFrom` cursor to pass as
 the next call's `fromRecorded`. Bounding the answer with
@@ -74,6 +80,13 @@ transaction's flush wrote, an annotation of the assertion/retraction writes
   naming the first boundary the page stopped short of. Code that caught the
   refusal and resumed from `details.resumeFromRecorded` reads `nextFrom` off
   the successful result instead.
+- Lineage discovery no longer honors `fromRecorded`/`toRecorded`: the walk
+  reads the whole transition log and the window is applied to the converged
+  result, so a window can never hide the notes that name an earlier class
+  canonical. Two consequences: a narrow-window audit read now scans the full
+  lineage on every call, and `IDENTITY_REPLAY_WALK_INCOMPLETE`'s only remedy
+  is `pruneIdentityTransitions` — narrowing the window no longer lowers the
+  walk's read volume, and the error's suggestion says so.
 
 - The identity transition log adds two relations, `typegraph_identity_transitions`
   and `typegraph_identity_transition_retention`, which `ensureSchema` creates on

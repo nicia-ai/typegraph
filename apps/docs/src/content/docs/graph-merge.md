@@ -712,15 +712,24 @@ both endpoints are *staged new nodes of the kind being planned*, drawn from
 the same staging slices the three-way classifier reads. An assertion naming a
 node already committed on the target, a node of another kind, or a node no
 branch staged proposes nothing at all — recall proposes over the nodes in
-scope, silently and by design. So this is a **branch-reconciliation** knob:
-it decides which rows two branches contributed collapse into one entity as
-they land. It is not an API for consolidating two entities that already live
-in the target graph; there is no `store.identity.consolidate(a, b)` today,
-and asserting `same` between two committed nodes records identity truth (a
-class, honored by every identity-aware read) without ever rewriting them into
-a single row. A future direct consolidation API would build on this same
-reviewed merge machinery — the plan artifact, the review digest, the
-separation veto — rather than introducing a second, unaudited path.
+scope. What it does instead depends on where the assertion came from: a
+branch-staged assertion whose endpoints are out of scope is reported on
+[`MergeReport.identityConflicts`](#identity-conflicts) with reason
+`out-of-scope-pairing`, and *every* cross-kind `same` is reported with
+`cross-kind-pairing` regardless of provenance. Both are reported, never
+fatal — the merge proceeds and fuses nothing for that pair, whatever
+`onAssertionConflict` says. Only an **inherited** assertion no branch
+restaged — the target's own existing ledger between two committed rows — is
+silent, because it is not a conflict any branch caused. So this is a
+**branch-reconciliation** knob: it decides which rows two branches
+contributed collapse into one entity as they land. It is not an API for
+consolidating two entities that already live in the target graph; there is no
+`store.identity.consolidate(a, b)` today, and asserting `same` between two
+committed nodes records identity truth (a class, honored by every
+identity-aware read) without ever rewriting them into a single row. A future
+direct consolidation API would build on this same reviewed merge machinery —
+the plan artifact, the review digest, the separation veto — rather than
+introducing a second, unaudited path.
 
 **`pairing: "definitional"` is consolidation, said once and loudly.** It
 merges nodes that were created under different ids purely because a `same`

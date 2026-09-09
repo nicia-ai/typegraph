@@ -132,9 +132,13 @@ export function registerIdentityReplayIntegrationTests(
       await store.nodes.Person.create({}, { id: b.id });
       await store.nodes.Person.create({}, { id: c.id });
 
-      await store.identity.assertSame(b, c);
+      const firstMerge = await store.identity.assertSame(b, c);
       const throughFirstMerge = requireDefined(await store.recordedNow());
       await store.identity.assertSame(a, b);
+      // Four boundaries, not two: a page size of 1 has to be cut three times
+      // for reassembly to be able to catch a cursor that skips one.
+      await store.identity.retractAssertion(firstMerge.assertion.id);
+      await store.identity.assertSame(b, c);
 
       // `a` is the class canonical now, and no note at or below the first
       // merge names it — only an unbounded walk can reach that boundary.
@@ -148,18 +152,33 @@ export function registerIdentityReplayIntegrationTests(
       const boundaries = new Set(
         whole.transitions.map((transition) => transition.recorded),
       );
-      expect(boundaries.size).toBeGreaterThan(1);
+      expect(boundaries.size).toBeGreaterThan(2);
 
-      const firstPage = await store.identity.transitionsOf(a, { limit: 1 });
-      expect(firstPage.nextFrom).toBeDefined();
-      const secondPage = await store.identity.transitionsOf(a, {
-        limit: 1,
-        fromRecorded: requireDefined(firstPage.nextFrom),
-      });
-      expect(
-        secondPage.transitions.map((transition) => transition.transitionId),
-      ).not.toEqual(
-        firstPage.transitions.map((transition) => transition.transitionId),
+      // Reassembly, not merely "the second page differs from the first": a
+      // cursor that skipped a boundary, or a page that came back empty,
+      // satisfies "differs" and fails here. This is also the one place a
+      // dialect-decoded `recorded_at` (PostgreSQL hands back a timestamptz,
+      // SQLite a text column) round-trips back in through `fromRecorded`.
+      const paged: string[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page <= boundaries.size; page += 1) {
+        const result = await store.identity.transitionsOf(a, {
+          limit: 1,
+          ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+        });
+        expect(
+          new Set(result.transitions.map((transition) => transition.recorded))
+            .size,
+        ).toBe(1);
+        paged.push(
+          ...result.transitions.map((transition) => transition.transitionId),
+        );
+        cursor = result.nextFrom;
+        if (cursor === undefined) break;
+      }
+      expect(cursor).toBeUndefined();
+      expect(paged).toEqual(
+        whole.transitions.map((transition) => transition.transitionId),
       );
     });
   });

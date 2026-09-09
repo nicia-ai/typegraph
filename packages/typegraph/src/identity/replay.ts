@@ -307,21 +307,33 @@ async function reconstructAt<G extends GraphDef>(
   return found.visible.map((ref) => publicNodeRef<G>(ref));
 }
 
+function invalidReplayLimitError(
+  requirement: string,
+  resolved: number,
+): ValidationError {
+  return new ValidationError(`replay limit must be ${requirement}.`, {
+    issues: [{ path: "limit", message: `Got ${String(resolved)}.` }],
+  });
+}
+
+/**
+ * A page size must be a whole number of at least one. The lower bound is not
+ * decoration: {@link pageBoundaries} cuts the page at `boundaries[limit]`, so
+ * `limit: 0` would hand back an empty page whose `nextFrom` names the very
+ * first boundary — re-issuing with that cursor returns the identical empty
+ * page forever, and the documented `while (cursor !== undefined)` paging loop
+ * never terminates. A fractional limit indexes past a boundary that is not
+ * there and escapes as a bare `TypeError` from `requireDefined`.
+ */
 function resolveLimit(limit: number | undefined): number {
   const resolved = limit ?? IDENTITY_REPLAY_DEFAULT_LIMIT;
-  if (resolved > IDENTITY_REPLAY_MAX_LIMIT) {
-    throw new ValidationError(
-      `replay limit must be at most ${String(IDENTITY_REPLAY_MAX_LIMIT)}.`,
-      {
-        issues: [
-          {
-            path: "limit",
-            message: `Got ${String(resolved)}.`,
-          },
-        ],
-      },
+  if (!Number.isInteger(resolved) || resolved < 1)
+    throw invalidReplayLimitError("an integer of at least 1", resolved);
+  if (resolved > IDENTITY_REPLAY_MAX_LIMIT)
+    throw invalidReplayLimitError(
+      `at most ${String(IDENTITY_REPLAY_MAX_LIMIT)}`,
+      resolved,
     );
-  }
   return resolved;
 }
 

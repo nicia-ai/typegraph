@@ -829,12 +829,13 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "f88c3ebb710441aa204483f98147921b40dd8ba978c7b87b803c561c82137638",
   },
   // Paged identity history: `IdentityFacade.transitionsOf` now returns the
-  // named `IdentityTransitionHistory` instead of a bare array. `.` (and
-  // `./identity`) export the type directly, so their debt is unchanged; the
-  // six entrypoints below reach it only transitively through `Store`'s
-  // identity facade and each gains exactly that one name (+1 apiece). Gate:
-  // no entrypoint's debt decreased, no seventh entrypoint moved, and the
-  // single added symbol at each of the six is `IdentityTransitionHistory`.
+  // named `IdentityTransitionHistory` instead of a bare array. The root
+  // entrypoint `.` already exports the type directly, so its debt is
+  // unchanged; the six entrypoints below reach it only transitively through
+  // `Store`'s identity facade and each gains exactly that one name
+  // (+1 apiece). Gate: no entrypoint's debt decreased, no seventh entrypoint
+  // moved, and the single added symbol at each of the six is
+  // `IdentityTransitionHistory`.
   // Delta: `./graph-merge` 774→775, `./interchange` 759→760,
   // `./postgres/pglite` 756→757, `./profiler` 761→762, `./provenance`
   // 767→768, `./sqlite/local` 756→757.

@@ -20,7 +20,7 @@ import {
   createRecordedInstant,
   recordedInstantRevision,
 } from "../src/core/temporal";
-import { IdentityReplayError } from "../src/errors";
+import { IdentityReplayError, ValidationError } from "../src/errors";
 import {
   IDENTITY_REPLAY_MAX_LIMIT,
   identityReplay,
@@ -82,6 +82,41 @@ describe("identity replay", () => {
         },
       ),
     ).rejects.toThrow();
+  });
+
+  // Load-bearing: a page size below 1, or a fractional one, is a typed
+  // refusal — never a page. Mutation check: drop the
+  // `!Number.isInteger(resolved) || resolved < 1` guard from `resolveLimit`
+  // (replay.ts) and every case below fails — `limit: 0` resolves to an empty
+  // page whose `nextFrom` names the FIRST boundary, so the documented
+  // `while (cursor !== undefined)` loop re-reads that same empty page
+  // forever, and the fractional cases escape as a bare `TypeError` from
+  // `requireDefined` instead of a `ValidationError`.
+  it("rejects a limit below 1 or fractional, so a page always advances the cursor", async () => {
+    const store = await buildAbcStore();
+    const a = { kind: "Person" as const, id: "a" };
+    const b = { kind: "Person" as const, id: "b" };
+    await store.identity.assertSame(a, b);
+    const ctx = storeRuntime(store).identityContext();
+
+    for (const limit of [0, -1, 0.5, 1.5]) {
+      await expect(identityTransitionsOf(ctx, a, { limit })).rejects.toThrow(
+        ValidationError,
+      );
+      await expect(identityReplay(ctx, a, { limit })).rejects.toThrow(
+        ValidationError,
+      );
+    }
+    await expect(
+      identityTransitionsOf(ctx, a, { limit: 0 }),
+    ).rejects.toMatchObject({
+      details: { issues: [{ path: "limit", message: "Got 0." }] },
+    });
+
+    // The smallest ACCEPTED page still moves: one boundary, and a cursor
+    // pointing past it.
+    const page = await identityTransitionsOf(ctx, a, { limit: 1 });
+    expect(page.transitions.length).toBeGreaterThan(0);
   });
 
   it("replays merge / split / re-merge: every step's before/after matches an independent asOfRecorded read", async () => {
