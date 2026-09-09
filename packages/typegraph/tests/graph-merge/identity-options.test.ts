@@ -16,10 +16,13 @@ import { z } from "zod";
 import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
 import {
+  branch,
   captureCandidateWriteSetTarget,
   isOk,
   merge,
+  MERGE_PLAN_FORMAT_VERSION,
   planCandidateWriteSetReview,
+  planMerge,
   revalidateCandidateWriteSetReview,
   unwrap,
 } from "../../src/graph-merge";
@@ -28,7 +31,29 @@ import {
   normalizeMergeOptions,
 } from "../../src/graph-merge/options";
 import { reviewOptionEvidence } from "../../src/graph-merge/review-evidence";
-import type { IdentityReconciliationOptions } from "../../src/graph-merge/types";
+import {
+  asBranchId,
+  type IdentityReconciliationOptions,
+} from "../../src/graph-merge/types";
+
+/**
+ * The option evidence a caller who never heard of `identity` produced BEFORE
+ * this release — copied literally, not recomputed. A review artifact stored
+ * against this must keep revalidating `compatible`.
+ */
+const PRE_RELEASE_OPTION_EVIDENCE = [
+  "object",
+  [
+    ["onBasePropertyConflict", ["literal", "flag"]],
+    ["onComparisonCeiling", ["literal", "error"]],
+    ["onDeleteModifyConflict", ["literal", "flag"]],
+    ["onPropertyConflict", ["literal", "flag"]],
+    ["persistProvenance", ["literal", false]],
+    ["provenance", ["literal", true]],
+    ["reconcileTypes", ["literal", "off"]],
+    ["resolve", ["object", []]],
+  ],
+] as const;
 
 describe("T7 — presence-preserving normalization", () => {
   it("omits `identity` entirely when the caller never stated it", () => {
@@ -51,17 +76,12 @@ describe("T7 — presence-preserving normalization", () => {
     expect(jsonString.includes('"identity"')).toBe(false);
   });
 
-  it("mutation check: emitting the defaulted bag unconditionally breaks presence-preservation", () => {
-    // Simulates the regression this test guards against directly against the
-    // normalizer, without needing to re-run the whole suite under a patched
-    // build: an unconditional emission is exactly `{ ...normalizeMergeOptions({}), identity: MERGE_OPTION_DEFAULTS.identity }`.
-    const wronglyUnconditional = {
-      ...normalizeMergeOptions({}),
-      identity: MERGE_OPTION_DEFAULTS.identity,
-    };
-    expect("identity" in wronglyUnconditional).toBe(true);
-    // ...which is exactly what the real (correct) normalizer must NOT do.
-    expect("identity" in normalizeMergeOptions({})).toBe(false);
+  it("an identity-free bag encodes to the FROZEN pre-release evidence, field for field", () => {
+    // Not "the same as what the normalizer produces" — a literal copy of the
+    // evidence this release inherited. Anything the normalizer starts emitting
+    // for an identity-free caller fails here, which is what makes every stored
+    // review artifact's compatibility a guarantee rather than a coincidence.
+    expect(reviewOptionEvidence({})).toEqual(PRE_RELEASE_OPTION_EVIDENCE);
   });
 });
 
@@ -239,17 +259,57 @@ describe("T6 — the identity policy is inside the review digest", () => {
     expect(revalidated.status).toBe("compatible");
   });
 
-  it("T7 at the artifact layer: an identity-free review stays compatible against identity-free options", async () => {
+  it("T7 at the artifact layer: a review captured BEFORE this release still revalidates compatible", async () => {
     const planned = await reviewArgs(undefined);
     const review = unwrap(await planCandidateWriteSetReview(planned));
+    // The stored artifact is a PRE-RELEASE one: its option evidence is the
+    // frozen literal, not whatever today's normalizer happens to emit. Both
+    // sides being computed by the current code would make this test unable to
+    // fail — an unconditional `identity` emission would move both together.
+    const stored = {
+      ...JSON.parse(JSON.stringify(review)),
+      options: PRE_RELEASE_OPTION_EVIDENCE,
+    };
     const applying = await reviewArgs(undefined);
     const revalidated = unwrap(
       await revalidateCandidateWriteSetReview({
         ...applying,
         target: planned.target,
-        review: JSON.parse(JSON.stringify(review)),
+        review: stored,
       }),
     );
     expect(revalidated.status).toBe("compatible");
+  });
+
+  it("T7 — the identity review arms are additive: the plan format version stays 2", async () => {
+    const { backend } = createLocalSqliteBackend();
+    disposers.push(() => backend.close());
+    const [target] = await createStoreWithSchema(reviewGraph, backend, {
+      history: true,
+    });
+    await target.nodes.Item.create({ name: "Kept" }, { id: "kept" });
+    const source = unwrap(
+      await branch(target, async () => createLocalSqliteBackend().backend, {
+        id: asBranchId("branch-a"),
+      }),
+    );
+    await source.store.nodes.Item.create({ name: "Fresh" }, { id: "fresh" });
+    await source.store.identity.assertSame(
+      { kind: "Item", id: "kept" },
+      { kind: "Item", id: "fresh" },
+    );
+    disposers.push(() => source.close());
+
+    const artifact = unwrap(
+      await planMerge(target, [source], {
+        branchOrder: [asBranchId("branch-a")],
+        identity: { pairing: "definitional" },
+      }),
+    );
+    expect(MERGE_PLAN_FORMAT_VERSION).toBe(2);
+    expect(artifact.formatVersion).toBe(MERGE_PLAN_FORMAT_VERSION);
+    // Present only when non-empty, so an identity-free plan's review object is
+    // byte-identical to a pre-release one at the same format version.
+    expect(artifact.review.identityConflicts).toBeDefined();
   });
 });
