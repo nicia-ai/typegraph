@@ -1138,13 +1138,17 @@ export type CompositionCycleErrorDetails = Readonly<{
 /**
  * Thrown when a composition parts closure revisits a node already in the
  * walk — an INSTANCE-level cycle, not a library invariant violation.
- * Reflexive composition (a kind declaring `partOf`/`hasPart` against
- * itself) is permitted at the kind level, and nothing yet refuses the
- * corresponding cycle when the realizing edges are written, so two nodes
- * (or a longer ring) can end up mutually `partOf` each other. The cascade's
- * visited set catches this deterministically rather than looping or
- * silently truncating, but the affected nodes stay undeletable through the
- * ordinary delete path until the cycle is broken by hand.
+ *
+ * Reflexive composition (a kind declaring `partOf`/`hasPart` against itself)
+ * is permitted at the kind level, and the store refuses the corresponding
+ * INSTANCE cycle at write time: every realizing edge kind belongs to the
+ * oriented composition union, which is probed for acyclicity on each
+ * composition edge write. A ring therefore only reaches this walk through
+ * rows that bypassed that fence — written before the `partOf`/`hasPart`
+ * pair was declared, by trusted import, or by direct SQL. The cascade's
+ * visited set catches it deterministically rather than looping or silently
+ * truncating, but the affected nodes stay undeletable through the ordinary
+ * delete path until the cycle is broken by hand.
  */
 export class CompositionCycleError extends TypeGraphError {
   declare readonly details: CompositionCycleErrorDetails;
@@ -1208,7 +1212,7 @@ export class CompositionError extends TypeGraphError {
         details,
         category: "constraint",
         suggestion:
-          "Detach the part from its current whole before attaching it to a new one, or reparent it through an update instead of a second create.",
+          "Call `store.nodes.<PartKind>.reparent(partId, { kind, id, via? })` to move the part — it retires the incumbent attachment and creates the new one in one transaction. A second composition edge create can never succeed while the first one holds the part.",
         cause: options?.cause,
       },
     );
@@ -1224,11 +1228,15 @@ export class CompositionError extends TypeGraphError {
  * since deciding it is what keeps the row from ever being written.
  * `edgeKind`/`edgeId` are present only on `situation: "detach"`, where an
  * existing composition edge row is what the caller is trying to end,
- * soft-delete, or hard-delete. `currentWhole` is present only on
- * `situation: "existing"` (a `getOrCreateByConstraint` call whose `partOf`
- * resolved to `"found"`/`"updated"`), and only when the node has a whole to
- * name — a part with no whole at all still refuses (the option is stated,
- * not honored), just with no whole to report.
+ * soft-delete, or hard-delete.
+ *
+ * `currentWhole`/`currentVia` and `requestedWhole`/`requestedVia` are
+ * present only on `situation: "existing"` — a `getOrCreateByConstraint` call
+ * whose `partOf` postcondition the already-existing node CONTRADICTS. Both
+ * sides are named so a caller can see the move it would have to make: the
+ * whole (and realizing edge) the node holds now, and the one the call asked
+ * for. `currentVia` is absent when the contradiction is a differing whole
+ * rather than a differing realizing edge only.
  */
 export type CompositionExistenceErrorDetails = Readonly<{
   partKind: string;
@@ -1237,6 +1245,9 @@ export type CompositionExistenceErrorDetails = Readonly<{
   edgeKind?: string;
   edgeId?: string;
   currentWhole?: Readonly<{ kind: string; id: string }>;
+  currentVia?: string;
+  requestedWhole?: Readonly<{ kind: string; id: string }>;
+  requestedVia?: string;
 }>;
 
 /**
@@ -1272,12 +1283,23 @@ export class CompositionExistenceError extends TypeGraphError {
           }: this kind requires a whole (\`existence: "required"\`) and the part is still live.`;
         }
         case "existing": {
-          return (
-            `Cannot apply \`partOf\` to ${partLabel}: the node already exists` +
-            (details.currentWhole === undefined ?
-              " with no whole."
-            : ` with whole ${details.currentWhole.kind}/${details.currentWhole.id}.`)
-          );
+          const held =
+            details.currentWhole === undefined ?
+              "no whole"
+            : `whole ${details.currentWhole.kind}/${details.currentWhole.id}${
+                details.currentVia === undefined ?
+                  ""
+                : ` (via "${details.currentVia}")`
+              }`;
+          const asked =
+            details.requestedWhole === undefined ?
+              "the requested whole"
+            : `${details.requestedWhole.kind}/${details.requestedWhole.id}${
+                details.requestedVia === undefined ?
+                  ""
+                : ` (via "${details.requestedVia}")`
+              }`;
+          return `Cannot apply \`partOf\` to ${partLabel}: the node already exists with ${held}, not ${asked}.`;
         }
       }
     })();
@@ -1288,8 +1310,8 @@ export class CompositionExistenceError extends TypeGraphError {
         details.situation === "create" ?
           `Pass \`partOf: { kind, id }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`
         : details.situation === "detach" ?
-          `Soft-delete or hard-delete the part itself first (which frees its composition edge), or reparent it to a new whole before detaching the old one.`
-        : `Reparent through an explicit edge create/update instead of getOrCreateByConstraint's \`partOf\`, which only applies to a genuinely new (or resurrected) node.`,
+          `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { kind, id, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`
+        : `Call \`store.nodes.<Kind>.reparent(id, { kind, id, via? })\` to MOVE the part to the requested whole; getOrCreateByConstraint's \`partOf\` asserts an attachment, it never re-homes one.`,
       cause: options?.cause,
     });
     this.name = "CompositionExistenceError";

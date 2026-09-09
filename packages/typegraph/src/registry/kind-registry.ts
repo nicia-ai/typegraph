@@ -490,20 +490,47 @@ export class KindRegistry {
   }
 
   /**
-   * The declared composition pair between this part and whole kind, if any —
-   * either may be a subclass of the kind the pair was declared against. Two
-   * realizing edges may hold the same (part, whole) pair (E-a-2); when they
-   * do, this returns the code-point-first `viaEdgeKind` (the sort order
-   * `CompositionRelation.pairs` already carries), not "all of them".
+   * EVERY declared composition pair between this part and whole kind —
+   * either may be a subclass of the kind the pair was declared against —
+   * code-point ordered by realizing edge kind (the order
+   * `CompositionRelation.pairs` already carries).
+   *
+   * Deliberately plural. Two realizing edges may hold the same
+   * (part, whole) pair (E-a-2), and this reader used to answer with the
+   * code-point-FIRST one alone, which silently picked an attachment's
+   * realizing edge for the caller. The caller now names it (`partOf`'s
+   * `via`), and ambiguity is refused rather than resolved by sort order —
+   * see {@link compositionPairVia} for the by-`via` lookup and
+   * `resolveCompositionAttachment`
+   * (`src/store/operations/composition-create.ts`) for the one owner of that
+   * refusal.
    */
-  getCompositionEdge(
+  compositionPairsBetween(
     partKind: string,
     wholeKind: string,
-  ): CompositionPair | undefined {
-    return this.#composition.pairs.find(
+  ): readonly CompositionPair[] {
+    return this.#composition.pairs.filter(
       (pair) =>
         this.isAssignableTo(partKind, pair.partKind) &&
         this.isAssignableTo(wholeKind, pair.wholeKind),
+    );
+  }
+
+  /**
+   * The declared composition pair between this part and whole kind realized
+   * by exactly `viaEdgeKind`, or `undefined` when the three do not name a
+   * declared pair. The by-`via` projection of
+   * {@link compositionPairsBetween}, so a caller that already knows the
+   * realizing edge (an attachment naming `via`, a cascade row whose own
+   * `kind` IS the realizing edge) never has to re-filter the plural answer.
+   */
+  compositionPairVia(
+    partKind: string,
+    wholeKind: string,
+    viaEdgeKind: string,
+  ): CompositionPair | undefined {
+    return this.compositionPairsBetween(partKind, wholeKind).find(
+      (pair) => pair.viaEdgeKind === viaEdgeKind,
     );
   }
 

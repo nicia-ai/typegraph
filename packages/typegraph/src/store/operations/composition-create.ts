@@ -30,6 +30,8 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
+  type CompositionAttachment,
+  type CompositionNodeRef,
   type CompositionWholeRef,
   type CreateEdgeInput,
   type CreateNodeInput,
@@ -61,14 +63,106 @@ export type CompositionCreateWork = Readonly<{
   whole: CompositionWholeRef;
   /** The concrete part kind this create declared — `input.kind`, verbatim. */
   partKind: string;
+  /**
+   * The realizing edge's own properties, as the caller stated them
+   * (`partOf.props`) or `{}`. Carried verbatim: validation against the edge
+   * kind's schema is `validateAndPrepareEdgeCreate`'s, exactly as it is for a
+   * caller's own `store.edges.<via>.create(...)` — a second Zod parse here
+   * would be a second spelling of that decision.
+   */
+  props: Record<string, unknown>;
 }>;
+
+/**
+ * THE decision every attachment surface asks: given this part kind and the
+ * whole (and, optionally, the realizing edge) the caller named, WHICH
+ * declared composition pair does this attachment realize?
+ *
+ * The one owner of both `via` refusals — `create`, `bulkCreate`, both
+ * get-or-create entries, and `reparent` all reach it, so none of them can
+ * resolve an ambiguous attachment by sort order the way the removed
+ * `getCompositionEdge` did:
+ *
+ * - no declared pair at all between the two kinds — `ConfigurationError`
+ *   (`COMPOSITION_WHOLE_NOT_DECLARED`);
+ * - `via` named, but it realizes no declared pair between them —
+ *   `ConfigurationError` (`COMPOSITION_VIA_NOT_DECLARED`);
+ * - `via` omitted while more than one pair is declared between them —
+ *   `ConfigurationError` (`COMPOSITION_VIA_AMBIGUOUS`).
+ *
+ * Pure and synchronous — no I/O and no claim.
+ */
+export function resolveCompositionAttachment(
+  registry: KindRegistry,
+  partKind: string,
+  attachment: CompositionAttachment,
+): CompositionPair {
+  const declared = registry.compositionPairsBetween(partKind, attachment.kind);
+  if (declared.length === 0) {
+    throw new ConfigurationError(
+      `Node kind "${partKind}" declares no composition pair to whole kind "${attachment.kind}".`,
+      {
+        code: "COMPOSITION_WHOLE_NOT_DECLARED",
+        partKind,
+        wholeKind: attachment.kind,
+      },
+      {
+        suggestion:
+          `Declare \`partOf(${partKind}, ${attachment.kind}, { via: ... })\` (or the mirrored \`hasPart\`) in the ontology, ` +
+          `or pass \`partOf\` naming a whole kind this part is actually declared under.`,
+      },
+    );
+  }
+
+  const viaEdgeKinds = declared.map((pair) => pair.viaEdgeKind);
+  const via = attachment.via;
+  if (via !== undefined) {
+    const pair = declared.find((candidate) => candidate.viaEdgeKind === via);
+    if (pair === undefined) {
+      throw new ConfigurationError(
+        `Edge kind "${via}" realizes no declared composition pair between "${partKind}" and "${attachment.kind}".`,
+        {
+          code: "COMPOSITION_VIA_NOT_DECLARED",
+          partKind,
+          wholeKind: attachment.kind,
+          via,
+          declaredVia: viaEdgeKinds,
+        },
+        {
+          suggestion: `Pass \`via\` naming one of the declared realizing edges: ${viaEdgeKinds.join(", ")}.`,
+        },
+      );
+    }
+    return pair;
+  }
+
+  if (declared.length > 1) {
+    throw new ConfigurationError(
+      `Attaching "${partKind}" to "${attachment.kind}" is ambiguous: ${declared.length} declared composition pairs realize it.`,
+      {
+        code: "COMPOSITION_VIA_AMBIGUOUS",
+        partKind,
+        wholeKind: attachment.kind,
+        declaredVia: viaEdgeKinds,
+      },
+      {
+        suggestion: `Pass \`partOf: { kind, id, via }\` naming the realizing edge: ${viaEdgeKinds.join(", ")}.`,
+      },
+    );
+  }
+
+  return requireDefined(
+    declared[0],
+    "compositionPairsBetween returned a non-empty list with no first pair",
+  );
+}
 
 /**
  * THE decision every node-create path asks: given the declared existence of
  * this kind and the caller's stated `partOf`, what composition edge does
  * this create owe — and is the pair legal? Refuses; never returns a silent
  * "nothing to do" for a required kind with no `partOf`, and never silently
- * drops a `partOf` naming an undeclared pair.
+ * drops a `partOf` naming an undeclared or ambiguous pair.
  *
  * Pure and synchronous — no I/O, no claim, no endpoint-liveness read, and no
  * id needed: the composition CLAIM and the whole's liveness are both the
@@ -94,24 +188,12 @@ export function resolveCompositionCreate(
     return undefined;
   }
 
-  const pair = registry.getCompositionEdge(partKind, partOf.kind);
-  if (pair === undefined) {
-    throw new ConfigurationError(
-      `Node kind "${partKind}" declares no composition pair to whole kind "${partOf.kind}".`,
-      {
-        code: "COMPOSITION_WHOLE_NOT_DECLARED",
-        partKind,
-        wholeKind: partOf.kind,
-      },
-      {
-        suggestion:
-          `Declare \`partOf(${partKind}, ${partOf.kind}, { via: ... })\` (or the mirrored \`hasPart\`) in the ontology, ` +
-          `or pass \`partOf\` naming a whole kind this part is actually declared under.`,
-      },
-    );
-  }
-
-  return { pair, whole: partOf, partKind };
+  return {
+    pair: resolveCompositionAttachment(registry, partKind, partOf),
+    whole: { kind: partOf.kind, id: partOf.id },
+    partKind,
+    props: partOf.props ?? {},
+  };
 }
 
 /**
@@ -138,7 +220,7 @@ export function buildCompositionCreateEdgeInput(
     fromId,
     toKind,
     toId,
-    props: {},
+    props: work.props,
     ...(temporal.validFrom === undefined ?
       {}
     : { validFrom: temporal.validFrom }),
@@ -220,12 +302,22 @@ export function edgeCurrentlyAttachesPart(
  * `lock: GraphWriteLock` in the parameter is compile-time evidence that this
  * read cannot precede the per-graph write lock — the same device
  * `planCompositionCascade` uses.
+ *
+ * `reattachedPart` names the ONE part whose composition edge this same write
+ * frame retires only to attach it to a new whole immediately afterwards
+ * (`reparent`, `node-operations.ts`). That part is not being detached at
+ * all: the frame's final state has it attached, so the invariant this
+ * refusal protects is preserved end-to-end even though its intermediate
+ * state is not. Stated as the part itself rather than as a "skip the check"
+ * flag, so the exemption is bound to the resource that earned it — a
+ * frame's reparent of part A can never quietly license a detach of part B.
  */
 export async function assertCompositionExistencePreserved(
   ctx: Readonly<{
     graphId: string;
     registry: KindRegistry;
     lock: GraphWriteLock;
+    reattachedPart?: CompositionNodeRef;
   }>,
   edge: EdgeRow,
   backend: GraphReadBackend,
@@ -246,6 +338,11 @@ export async function assertCompositionExistencePreserved(
     : { kind: edge.to_kind, id: edge.to_id };
 
   if (ctx.registry.compositionExistence(part.kind) !== "required") return;
+
+  const reattached = ctx.reattachedPart;
+  if (reattached?.kind === part.kind && reattached.id === part.id) {
+    return;
+  }
 
   // A row that no longer currently attaches (an already-ended
   // `population: "oneActive"` window) has nothing left to detach: the
@@ -271,29 +368,35 @@ export async function assertCompositionExistencePreserved(
 }
 
 /**
- * The live whole a composition part currently holds, if any — read to name
- * it in `CompositionExistenceError`'s `situation: "existing"` message (the
- * ruling that `partOf` stated against an already-existing node found by
- * `getOrCreateByConstraint` is refused, naming the node's current whole).
- * `undefined` when `concreteKind` is not a composition part at all, or the
- * part currently has no live whole.
+ * The composition edge that currently attaches this part, together with the
+ * whole it attaches it to. `undefined` when `concreteKind` is not a
+ * composition part at all, or the part currently has no live whole.
+ *
+ * THE reader behind both "which whole does this part hold"
+ * ({@link findLiveCompositionWhole}) and "which edge row realizes that
+ * attachment right now" (`reparent`'s retire target,
+ * `node-operations.ts`) — one traversal, one orientation decision, one
+ * population predicate, so the mover and the reporter can never disagree
+ * about which edge is the incumbent.
  *
  * `excludeEdgeIds` (default none) skips a connected edge by id regardless of
- * its own liveness — item E.2's merge plan-time preview
+ * its own liveness — merge's plan-time preview
  * (`unattachedRequiredPartOrphansAmong`, `src/graph-merge/merge.ts`) uses it
  * to ask "does this part have a live whole AFTER this merge's own planned
  * edge deletions land", against a backend that still shows those edges as
  * live (nothing has been written yet at plan time), without a second,
  * plan-aware spelling of this predicate.
  */
-export async function findLiveCompositionWhole(
+export async function findLiveCompositionAttachment(
   registry: KindRegistry,
   backend: GraphReadBackend,
   graphId: string,
   concreteKind: string,
   concreteId: string,
   excludeEdgeIds?: ReadonlySet<string>,
-): Promise<CompositionWholeRef | undefined> {
+): Promise<
+  Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }> | undefined
+> {
   if (!registry.isCompositionPart(concreteKind)) return undefined;
   const connected = await backend.findEdgesConnectedTo({
     graphId,
@@ -310,11 +413,39 @@ export async function findLiveCompositionWhole(
       : edge.to_kind === concreteKind && edge.to_id === concreteId;
     if (!isPartHere) continue;
     if (!edgeCurrentlyAttachesPart(registry, concreteKind, edge)) continue;
-    return partSide === "from" ?
+    const whole =
+      partSide === "from" ?
         { kind: edge.to_kind, id: edge.to_id }
       : { kind: edge.from_kind, id: edge.from_id };
+    return { edge, whole };
   }
   return undefined;
+}
+
+/**
+ * The live whole a composition part currently holds, if any — read to name
+ * it in `CompositionExistenceError`'s `situation: "existing"` message, and
+ * to decide whether a `getOrCreateByConstraint` postcondition is already
+ * satisfied. The whole-only projection of
+ * {@link findLiveCompositionAttachment}.
+ */
+export async function findLiveCompositionWhole(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  concreteKind: string,
+  concreteId: string,
+  excludeEdgeIds?: ReadonlySet<string>,
+): Promise<CompositionWholeRef | undefined> {
+  const attachment = await findLiveCompositionAttachment(
+    registry,
+    backend,
+    graphId,
+    concreteKind,
+    concreteId,
+    excludeEdgeIds,
+  );
+  return attachment?.whole;
 }
 
 /**

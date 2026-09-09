@@ -713,6 +713,8 @@ export type {
   BulkOperationHookContext,
   CompareAndSetAbsent,
   CompareAndSetExpected,
+  CompositionAttachment,
+  CompositionNodeRef,
   CompositionWholeRef,
   ConstraintNames,
   CreateEdgeInput,

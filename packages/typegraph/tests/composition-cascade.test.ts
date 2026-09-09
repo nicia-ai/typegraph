@@ -44,6 +44,8 @@ import {
   planCompositionCascade,
 } from "../src/store/operations/composition-cascade";
 import { uncapturedGraphWriteLock } from "../src/store/recorded-capture/clock";
+import { type OperationHookContext } from "../src/store/types";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, matchingObject } from "./test-utils";
 
 const emptySchema = z.object({});
@@ -974,5 +976,108 @@ describe("composition cascade — attach ordering under the write lock", () => {
     await expect(
       store.nodes.Podcast.getById(podcast.id),
     ).resolves.toBeUndefined();
+  });
+});
+
+// ============================================================
+// The cascade's EXPOSURE: the delete's hook context and receipt
+// ============================================================
+
+describe("composition cascade — cascadedParts exposure", () => {
+  it("names the cascaded parts on the whole's onOperationEnd context, and nothing on onOperationStart", async () => {
+    const graph = buildPodcastGraph("cascade-hook-exposure");
+    const backend = createTestBackend();
+    await createStoreWithSchema(graph, backend);
+
+    const started: OperationHookContext[] = [];
+    const ended: OperationHookContext[] = [];
+    const store = createStore(graph, backend, {
+      hooks: {
+        onOperationStart: (ctx) => started.push(ctx),
+        onOperationEnd: (ctx) => ended.push(ctx),
+      },
+    });
+
+    const podcast = await store.nodes.Podcast.create({ title: "My Show" });
+    const episode = await store.nodes.Episode.create({ title: "Pilot" });
+    const segment = await store.nodes.Segment.create({});
+    await store.edges.episodeOf.create(episode, podcast, {});
+    await store.edges.segmentOf.create(segment, episode, {});
+
+    started.length = 0;
+    ended.length = 0;
+    await store.nodes.Podcast.delete(podcast.id);
+
+    // One event for the whole, exactly as before — the cascade adds no
+    // per-part operation.
+    expect(ended).toHaveLength(1);
+    const endContext = requireDefined(ended[0]);
+    expect(endContext.kind).toBe("Podcast");
+    // MUTATION: drop `operationFacts: nodeDeleteOperationFacts` from
+    // `executeNodeDelete`'s write-plan options
+    // (src/store/operations/node-operations.ts) and this becomes undefined.
+    expect(endContext.cascadedParts).toEqual([
+      { kind: "Segment", id: segment.id },
+      { kind: "Episode", id: episode.id },
+    ]);
+    // The START context cannot carry them: the cascade has not been planned.
+    expect(requireDefined(started[0]).cascadedParts).toBeUndefined();
+  });
+
+  it("reports an empty cascade for a whole with no live parts", async () => {
+    const graph = buildPodcastGraph("cascade-hook-exposure-empty");
+    const backend = createTestBackend();
+    await createStoreWithSchema(graph, backend);
+
+    const ended: OperationHookContext[] = [];
+    const store = createStore(graph, backend, {
+      hooks: { onOperationEnd: (ctx) => ended.push(ctx) },
+    });
+    const podcast = await store.nodes.Podcast.create({ title: "Lonely" });
+    ended.length = 0;
+
+    await store.nodes.Podcast.delete(podcast.id);
+    expect(requireDefined(ended[0]).cascadedParts).toEqual([]);
+  });
+
+  it("carries the same parts on the transaction receipt, and a hard delete reports them too", async () => {
+    const graph = buildPodcastGraph("cascade-receipt-exposure");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const podcast = await store.nodes.Podcast.create({ title: "My Show" });
+    const episode = await store.nodes.Episode.create({ title: "Pilot" });
+    const segment = await store.nodes.Segment.create({});
+    await store.edges.episodeOf.create(episode, podcast, {});
+    await store.edges.segmentOf.create(segment, episode, {});
+
+    // MUTATION: drop the `ctx.recordCascadedParts?.(outcome.cascadedParts)`
+    // call from `executeNodeDelete` and `cascadedParts` stays empty here
+    // while the delete still removes both parts.
+    const { receipt } = await store.transactionWithReceipt(async (tx) => {
+      await tx.nodes.Podcast.hardDelete(podcast.id);
+    });
+
+    expect(receipt.cascadedParts).toEqual([
+      { kind: "Segment", id: segment.id },
+      { kind: "Episode", id: episode.id },
+    ]);
+    // The cascade is NOT folded into the write counters: one caller-issued
+    // delete stays one write intent.
+    expect(receipt.writes.nodes).toEqual({ Podcast: 1 });
+    await expect(
+      store.nodes.Segment.getById(segment.id),
+    ).resolves.toBeUndefined();
+  });
+
+  it("leaves cascadedParts empty on a transaction that deletes no composition whole", async () => {
+    const graph = buildPodcastGraph("cascade-receipt-exposure-none");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const { receipt } = await store.transactionWithReceipt(async (tx) => {
+      await tx.nodes.Tag.create({});
+    });
+    expect(receipt.cascadedParts).toEqual([]);
   });
 });

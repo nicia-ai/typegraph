@@ -3733,7 +3733,7 @@ async function compositionOrphansAmong(
       // already resolved to admit this member in the first place — the
       // member's OWN immediate whole, not necessarily the cascade root
       // (`whole`, above) once the closure is more than one level deep.
-      // Re-deriving via `registry.getCompositionEdge(member.kind, whole.kind)`
+      // Re-deriving via `registry.compositionPairsBetween(member.kind, whole.kind)`
       // is wrong past depth 1 and is exactly the second spelling this plan
       // carries the resolved pair to avoid.
       orphansByPart.set(partKey, {
@@ -3999,8 +3999,7 @@ async function requiredExistenceOrphanCandidatesFromWrites(
  * The declared composition pair a diagnostic names for a required-existence
  * part with NO live whole at all — there is no attaching edge to resolve one
  * from, so this picks the FIRST declared pair for the concrete kind
- * (`CompositionRelation.pairs`' own code-point order), mirroring
- * `KindRegistry.getCompositionEdge`'s own first-match resolution.
+ * (`CompositionRelation.pairs`' own code-point order).
  * Presentational only: `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED` already
  * guarantees every pair a concrete part kind can match shares the same
  * `existence`, so which ONE is named here never changes whether this is

@@ -44,6 +44,7 @@ import {
   registerClaimLookupPreferenceIntegrationTests,
   registerClaimOwnerIdentityIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
+  registerCompositionAttachmentIntegrationTests,
   registerCompositionExistenceIntegrationTests,
   registerCompositionFenceIntegrationTests,
   registerCompositionNavigationIntegrationTests,
@@ -300,6 +301,7 @@ export function createIntegrationTestSuite<
     registerCapabilityPortBindingIntegrationTests(context);
     registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
+    registerCompositionAttachmentIntegrationTests(context);
     registerCompositionExistenceIntegrationTests(context);
     registerCompositionFenceIntegrationTests(context);
     registerCompositionNavigationIntegrationTests(context);

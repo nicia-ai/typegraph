@@ -1,0 +1,637 @@
+/**
+ * The composition ATTACHMENT surface, on every backend: how a part names the
+ * whole it belongs to (`partOf: { kind, id, via?, props? }`), how it MOVES
+ * between wholes (`nodes.<Kind>.reparent`), and what `getOrCreateByConstraint`
+ * guarantees about a node it resolved rather than created.
+ *
+ * Fixture shape — the (CaChapter, CaBook) pair is deliberately realized by
+ * TWO edge kinds, which is what makes `via` load-bearing rather than
+ * cosmetic:
+ *
+ *   CaChapter --(caChapterOf,      partOf, part->whole)-- CaBook
+ *   CaChapter --(caDraftChapterOf, partOf, part->whole)-- CaBook
+ *   CaChapter --(caIncludedIn,     partOf, part->whole)-- CaAnthology
+ *   CaPage    --(caPageOf,         partOf, part->whole)-- CaChapter
+ *   CaClip    --(caClipOf,         partOf, part->whole, oneActive)-- CaShow
+ *   CaTrack   --(caHasTrack,       hasPart, whole->part)-- CaAlbum
+ *   CaFolder  --(caParentFolder,   partOf, part->whole, reflexive)-- CaFolder
+ *
+ * Each case states, in a comment, the mutation/revert that must make it
+ * fail; the checks actually performed are recorded in the scratchpad
+ * `lane-RVA-load-bearing.md` note.
+ */
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import {
+  asNodeId,
+  CompositionExistenceError,
+  ConfigurationError,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  EdgeAcyclicityError,
+  hasPart,
+  NodeNotFoundError,
+  partOf,
+} from "../../../src";
+import { requireDefined } from "../../../src/utils/presence";
+import { matchingObject } from "../../test-utils";
+import { type IntegrationTestContext } from "./test-context";
+
+const CaBook = defineNode("CaBook", { schema: z.object({}) });
+const CaAnthology = defineNode("CaAnthology", { schema: z.object({}) });
+const CaChapter = defineNode("CaChapter", {
+  schema: z.object({ slug: z.string() }),
+});
+const CA_CHAPTER_SLUG_UNIQUE = {
+  name: "ca_chapter_slug",
+  fields: ["slug"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+const CaPage = defineNode("CaPage", { schema: z.object({}) });
+const CaShow = defineNode("CaShow", { schema: z.object({}) });
+const CaClip = defineNode("CaClip", { schema: z.object({}) });
+const CaAlbum = defineNode("CaAlbum", { schema: z.object({}) });
+const CaTrack = defineNode("CaTrack", { schema: z.object({}) });
+/** A reflexive composition pair — the acyclicity coverage below. */
+const CaFolder = defineNode("CaFolder", { schema: z.object({}) });
+/** Declares no composition pair at all — `reparent`'s not-a-part refusal. */
+const CaReader = defineNode("CaReader", { schema: z.object({}) });
+
+const caChapterOf = defineEdge("caChapterOf", {
+  schema: z.object({ order: z.number().int() }),
+});
+/** A SECOND realizing edge for the same (CaChapter, CaBook) pair — what makes `via` load-bearing. */
+const caDraftChapterOf = defineEdge("caDraftChapterOf", {
+  schema: z.object({}),
+});
+const caIncludedIn = defineEdge("caIncludedIn", { schema: z.object({}) });
+const caPageOf = defineEdge("caPageOf", { schema: z.object({}) });
+const caClipOf = defineEdge("caClipOf", { schema: z.object({}) });
+const caHasTrack = defineEdge("caHasTrack", { schema: z.object({}) });
+const caParentFolder = defineEdge("caParentFolder", { schema: z.object({}) });
+
+function buildGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: {
+      CaBook: { type: CaBook },
+      CaAnthology: { type: CaAnthology },
+      CaChapter: { type: CaChapter, unique: [CA_CHAPTER_SLUG_UNIQUE] },
+      CaPage: { type: CaPage },
+      CaShow: { type: CaShow },
+      CaClip: { type: CaClip },
+      CaAlbum: { type: CaAlbum },
+      CaTrack: { type: CaTrack },
+      CaFolder: { type: CaFolder },
+      CaReader: { type: CaReader },
+    },
+    edges: {
+      caChapterOf: {
+        type: caChapterOf,
+        from: [CaChapter],
+        to: [CaBook],
+        cardinality: "one",
+      },
+      caDraftChapterOf: {
+        type: caDraftChapterOf,
+        from: [CaChapter],
+        to: [CaBook],
+        cardinality: "one",
+      },
+      caIncludedIn: {
+        type: caIncludedIn,
+        from: [CaChapter],
+        to: [CaAnthology],
+        cardinality: "one",
+      },
+      caPageOf: {
+        type: caPageOf,
+        from: [CaPage],
+        to: [CaChapter],
+        cardinality: "one",
+      },
+      caClipOf: {
+        type: caClipOf,
+        from: [CaClip],
+        to: [CaShow],
+        cardinality: "oneActive",
+      },
+      caHasTrack: {
+        type: caHasTrack,
+        from: [CaAlbum],
+        to: [CaTrack],
+        targetCardinality: "one",
+      },
+      caParentFolder: {
+        type: caParentFolder,
+        from: [CaFolder],
+        to: [CaFolder],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      partOf(CaChapter, CaBook, { via: caChapterOf }),
+      partOf(CaChapter, CaBook, { via: caDraftChapterOf }),
+      partOf(CaChapter, CaAnthology, { via: caIncludedIn }),
+      partOf(CaPage, CaChapter, { via: caPageOf }),
+      partOf(CaClip, CaShow, { via: caClipOf, existence: "required" }),
+      hasPart(CaAlbum, CaTrack, { via: caHasTrack }),
+      partOf(CaFolder, CaFolder, {
+        via: caParentFolder,
+        partSide: "from",
+      }),
+    ],
+  });
+}
+
+let graphIdCounter = 0;
+function nextGraphId(): string {
+  graphIdCounter += 1;
+  return `composition_attachment_${graphIdCounter}`;
+}
+
+export function registerCompositionAttachmentIntegrationTests(
+  context: IntegrationTestContext,
+): void {
+  describe("Composition attachment (via / props / reparent / get-or-create)", () => {
+    // ========================================================
+    // R4 — the attachment names its realizing edge
+    // ========================================================
+
+    it("refuses an ambiguous partOf with COMPOSITION_VIA_AMBIGUOUS and writes no row", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+
+      // MUTATION CHECK: make `resolveCompositionAttachment`
+      // (src/store/operations/composition-create.ts) return `declared[0]`
+      // instead of refusing when `declared.length > 1` and no `via` is
+      // stated — the create then silently succeeds through whichever pair
+      // sorts first, and both assertions below fail.
+      await expect(
+        store.nodes.CaChapter.create(
+          { slug: "one" },
+          { partOf: { kind: "CaBook", id: book.id } },
+        ),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          code: "CONFIGURATION_ERROR",
+          details: matchingObject({ code: "COMPOSITION_VIA_AMBIGUOUS" }),
+        }),
+      );
+      expect(await store.nodes.CaChapter.count()).toBe(0);
+    });
+
+    it("refuses a `via` that realizes no declared pair between the two kinds", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+
+      // MUTATION CHECK: drop the `via`-named-but-unknown arm and fall
+      // through to `declared[0]` — the create then attaches through
+      // `caChapterOf` while the caller asked for `caIncludedIn`.
+      await expect(
+        store.nodes.CaChapter.create(
+          { slug: "one" },
+          { partOf: { kind: "CaBook", id: book.id, via: "caIncludedIn" } },
+        ),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          code: "CONFIGURATION_ERROR",
+          details: matchingObject({ code: "COMPOSITION_VIA_NOT_DECLARED" }),
+        }),
+      );
+      expect(await store.nodes.CaChapter.count()).toBe(0);
+    });
+
+    it("attaches through the named `via` and validates its props like edges.<via>.create", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+
+      // MUTATION CHECK: revert `buildCompositionCreateEdgeInput` to
+      // `props: {}` — the realizing edge is written with no `order` and the
+      // `order` assertion below fails (a required schema field would also
+      // make the create throw).
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 3 },
+          },
+        },
+      );
+
+      const edges = await store.edges.caChapterOf.find({});
+      expect(edges).toHaveLength(1);
+      expect(requireDefined(edges[0]).fromId).toBe(chapter.id);
+      expect(requireDefined(edges[0]).order).toBe(3);
+    });
+
+    it("validates the realizing edge's props against its own schema", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+
+      await expect(
+        store.nodes.CaChapter.create(
+          { slug: "one" },
+          {
+            partOf: {
+              kind: "CaBook",
+              id: book.id,
+              via: "caChapterOf",
+              props: { order: "third" },
+            },
+          },
+        ),
+      ).rejects.toThrow(expect.objectContaining({ code: "VALIDATION_ERROR" }));
+      expect(await store.nodes.CaChapter.count()).toBe(0);
+    });
+
+    it("omitting `via` is fine when exactly one pair is declared", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const album = await store.nodes.CaAlbum.create({});
+      const track = await store.nodes.CaTrack.create(
+        {},
+        { partOf: { kind: "CaAlbum", id: album.id } },
+      );
+      const edges = await store.edges.caHasTrack.find({});
+      expect(edges).toHaveLength(1);
+      expect(requireDefined(edges[0]).toId).toBe(track.id);
+    });
+
+    // ========================================================
+    // R5 — reparent
+    // ========================================================
+
+    it('reparent moves a `population: "one"` part, keeping its id and descendants', async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const anthology = await store.nodes.CaAnthology.create({});
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+      const page = await store.nodes.CaPage.create(
+        {},
+        { partOf: { kind: "CaChapter", id: chapter.id } },
+      );
+
+      // MUTATION CHECK: skip the retire (drop the `if (current !== undefined)`
+      // block in `executeNodeReparent`, src/store/operations/node-operations.ts)
+      // — the attach then loses the composition claim and this rejects with
+      // COMPOSITION_WHOLE_OCCUPIED instead of moving the chapter.
+      await store.nodes.CaChapter.reparent(chapter.id, {
+        kind: "CaAnthology",
+        id: anthology.id,
+        via: "caIncludedIn",
+      });
+
+      const moved = await store.edges.caIncludedIn.find({});
+      expect(moved).toHaveLength(1);
+      expect(requireDefined(moved[0]).fromId).toBe(chapter.id);
+      expect(requireDefined(moved[0]).toId).toBe(anthology.id);
+      // `population: "one"` retires by DELETE — an ended row would still
+      // read as an attachment under that population.
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(0);
+      // Same node, same descendants: nothing below the part was rewritten.
+      const reloaded = await store.nodes.CaChapter.getById(chapter.id);
+      expect(reloaded?.slug).toBe("one");
+      const pages = await store.edges.caPageOf.find({});
+      expect(pages).toHaveLength(1);
+      expect(requireDefined(pages[0]).fromId).toBe(page.id);
+      expect(requireDefined(pages[0]).toId).toBe(chapter.id);
+    });
+
+    it('reparent ends the window of a `population: "oneActive"` required part instead of deleting it', async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const showA = await store.nodes.CaShow.create({});
+      const showB = await store.nodes.CaShow.create({});
+      const clip = await store.nodes.CaClip.create(
+        {},
+        { partOf: { kind: "CaShow", id: showA.id } },
+      );
+
+      // MUTATION CHECK: remove the `reattachedPart` arm from
+      // `assertCompositionExistencePreserved`
+      // (src/store/operations/composition-create.ts) — the window end is
+      // then read as a detach of a live required part and this rejects with
+      // CompositionExistenceError (`situation: "detach"`).
+      await store.nodes.CaClip.reparent(clip.id, {
+        kind: "CaShow",
+        id: showB.id,
+      });
+
+      const all = await store.edges.caClipOf.find(
+        {},
+        {
+          temporalMode: "includeEnded",
+        },
+      );
+      expect(all).toHaveLength(2);
+      const ended = all.filter((edge) => edge.toId === showA.id);
+      const open = all.filter((edge) => edge.toId === showB.id);
+      expect(ended).toHaveLength(1);
+      expect(requireDefined(ended[0]).meta.validTo).toBeDefined();
+      expect(open).toHaveLength(1);
+      expect(requireDefined(open[0]).meta.validTo).toBeUndefined();
+    });
+
+    it("reparent to the whole the part already holds is an accepted no-op", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+      const beforeEdges = await store.edges.caChapterOf.find({});
+      const before = requireDefined(beforeEdges[0]);
+
+      await store.nodes.CaChapter.reparent(chapter.id, {
+        kind: "CaBook",
+        id: book.id,
+        via: "caChapterOf",
+      });
+
+      const after = await store.edges.caChapterOf.find({});
+      expect(after).toHaveLength(1);
+      // No write at all: the SAME row, not a retire-and-recreate.
+      expect(requireDefined(after[0]).id).toBe(before.id);
+      expect(requireDefined(after[0]).meta.updatedAt).toBe(
+        before.meta.updatedAt,
+      );
+    });
+
+    it("reparent refuses a kind that is not a composition part", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const reader = await store.nodes.CaReader.create({});
+      await expect(
+        store.nodes.CaReader.reparent(reader.id, {
+          kind: "CaBook",
+          id: "whatever",
+        }),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          code: "CONFIGURATION_ERROR",
+          details: matchingObject({ code: "COMPOSITION_NOT_A_PART" }),
+        }),
+      );
+    });
+
+    it("reparent refuses an undeclared target pair and a missing part", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+      const page = await store.nodes.CaPage.create(
+        {},
+        { partOf: { kind: "CaChapter", id: chapter.id } },
+      );
+
+      await expect(
+        store.nodes.CaPage.reparent(page.id, { kind: "CaBook", id: book.id }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+
+      await expect(
+        store.nodes.CaChapter.reparent(asNodeId("no-such-chapter"), {
+          kind: "CaBook",
+          id: book.id,
+          via: "caChapterOf",
+        }),
+      ).rejects.toBeInstanceOf(NodeNotFoundError);
+    });
+
+    it("reparent validates acyclicity over the composition union against the FINAL state", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.CaFolder.create({});
+      const child = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { kind: "CaFolder", id: root.id } },
+      );
+      const grandchild = await store.nodes.CaFolder.create(
+        {},
+        { partOf: { kind: "CaFolder", id: child.id } },
+      );
+
+      // MUTATION CHECK: pass `validateAcyclicity: false` in
+      // `attachCompositionCreateEdge` (src/store/operations/node-operations.ts)
+      // — the move then succeeds and leaves a three-node composition ring
+      // that no ordinary delete can unwind (`CompositionCycleError`).
+      await expect(
+        store.nodes.CaFolder.reparent(root.id, {
+          kind: "CaFolder",
+          id: grandchild.id,
+        }),
+      ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+
+      // The refused move left the graph exactly as it was: the retire and
+      // the attach are one transaction, so a failing attach rolls the
+      // retire back too. Without that, `root` would now be detached.
+      const links = await store.edges.caParentFolder.find({});
+      expect(links).toHaveLength(2);
+      expect(
+        new Set(links.map((edge) => `${edge.fromId}->${edge.toId}`)),
+      ).toEqual(
+        new Set([`${child.id}->${root.id}`, `${grandchild.id}->${child.id}`]),
+      );
+    });
+
+    // ========================================================
+    // R6 — `partOf` on get-or-create is a POSTCONDITION
+    // ========================================================
+
+    it("getOrCreateByConstraint with partOf is idempotent when the whole already matches", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const attachment = {
+        kind: "CaBook" as const,
+        id: book.id,
+        via: "caChapterOf",
+        props: { order: 1 },
+      };
+
+      const first = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "one" },
+        { partOf: attachment },
+      );
+      expect(first.action).toBe("created");
+
+      // MUTATION CHECK: restore the unconditional refusal (throw
+      // `CompositionExistenceError` whenever `partOf` is stated against a
+      // found/updated node, `applyExistingPartOfPostcondition` in
+      // src/store/operations/node-operations.ts) — this second call then
+      // rejects instead of returning `"found"`.
+      const second = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "one" },
+        { partOf: attachment },
+      );
+      expect(second.action).toBe("found");
+      expect(second.node.id).toBe(first.node.id);
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
+    });
+
+    it("getOrCreateByConstraint with partOf refuses a DIFFERENT live whole, naming both", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const anthology = await store.nodes.CaAnthology.create({});
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      const error = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "one" },
+        { partOf: { kind: "CaAnthology", id: anthology.id } },
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(CompositionExistenceError);
+      const details = (error as CompositionExistenceError).details;
+      expect(details.situation).toBe("existing");
+      expect(details.partId).toBe(chapter.id);
+      expect(details.currentWhole).toEqual({
+        kind: "CaBook",
+        id: book.id,
+      });
+      expect(details.requestedWhole).toEqual({
+        kind: "CaAnthology",
+        id: anthology.id,
+      });
+      // Refused, not moved.
+      expect(await store.edges.caIncludedIn.find({})).toHaveLength(0);
+    });
+
+    it("getOrCreateByConstraint with partOf refuses the same whole reached through a different `via`", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      // MUTATION CHECK: drop the `viaMatches` conjunct from
+      // `applyExistingPartOfPostcondition` — the call then reports success
+      // while the node hangs off `caChapterOf`, not the `caDraftChapterOf`
+      // the caller asked for.
+      const error = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caDraftChapterOf",
+          },
+        },
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(CompositionExistenceError);
+      const details = (error as CompositionExistenceError).details;
+      expect(details.currentVia).toBe("caChapterOf");
+      expect(details.requestedVia).toBe("caDraftChapterOf");
+      expect(await store.edges.caDraftChapterOf.find({})).toHaveLength(0);
+    });
+
+    it("getOrCreateByConstraint with partOf attaches a found node that has NO live whole", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      // An optional part created bare — legal, and exactly the state the
+      // postcondition has to repair rather than refuse.
+      const chapter = await store.nodes.CaChapter.create({ slug: "one" });
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(0);
+
+      // MUTATION CHECK: restore the unconditional refusal — this rejects
+      // with `CompositionExistenceError` and no edge is ever written.
+      const result = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 7 },
+          },
+        },
+      );
+
+      expect(result.action).toBe("found");
+      expect(result.node.id).toBe(chapter.id);
+      const edges = await store.edges.caChapterOf.find({});
+      expect(edges).toHaveLength(1);
+      expect(requireDefined(edges[0]).fromId).toBe(chapter.id);
+      expect(requireDefined(edges[0]).order).toBe(7);
+    });
+
+    it("bulkGetOrCreateByConstraint applies the same postcondition per item", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const attachment = {
+        kind: "CaBook" as const,
+        id: book.id,
+        via: "caChapterOf",
+        props: { order: 1 },
+      };
+
+      const first = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+        "ca_chapter_slug",
+        [{ props: { slug: "a" } }, { props: { slug: "b" } }],
+        { partOf: attachment },
+      );
+      expect(first.map((entry) => entry.action)).toEqual([
+        "created",
+        "created",
+      ]);
+
+      const second = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+        "ca_chapter_slug",
+        [{ props: { slug: "a" } }, { props: { slug: "b" } }],
+        { partOf: attachment },
+      );
+      expect(second.map((entry) => entry.action)).toEqual(["found", "found"]);
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(2);
+    });
+  });
+}

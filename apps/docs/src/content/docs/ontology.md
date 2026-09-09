@@ -391,10 +391,85 @@ partOf(Section, Section, { via: parentSection, partSide: "from" });
 
 **Changing this on a populated graph**: declaring or dropping a `partOf`/
 `hasPart` pair itself auto-migrates unconditionally either way — the schema
-change does not walk existing rows. Once composition's one-whole-per-part
-constraint is enforced, adding a `partOf` to an already-populated graph can
-surface parts that already have more than one live whole; removing one only
-ever loosens a constraint, so it stays safe regardless.
+change does not walk existing rows, so a graph that already holds parts with
+more than one live whole (written before the pair was declared, by trusted
+import, or by direct SQL) is not repaired by the declaration. Run
+`store.verifyConstraintFences()` (the `family: "composition"` entries) after
+adding a pair to a populated graph. Removing a pair only ever loosens a
+constraint, so it stays safe regardless.
+
+#### Attaching a part: `partOf: { kind, id, via?, props? }`
+
+Every write that can give a part a whole takes the same attachment value:
+`create`, `bulkCreate` (per item), `getOrCreateByConstraint` /
+`bulkGetOrCreateByConstraint`, and
+[`reparent`](#reparent-moving-a-part-to-a-new-whole).
+
+```typescript
+const chapter = await store.nodes.Chapter.create(
+  { title: "Openings" },
+  {
+    partOf: {
+      kind: "Book",
+      id: book.id,
+      via: "chapterOf",
+      props: { order: 1 },
+    },
+  },
+);
+```
+
+The node and its realizing composition edge are written in **one**
+transaction: a lost composition claim, a dead or missing whole, a cardinality
+refusal, or an acyclicity refusal aborts the node create too.
+
+- **`kind` / `id`** name the whole. A pair that is not declared between the
+  two kinds raises `ConfigurationError`
+  (`details.code: "COMPOSITION_WHOLE_NOT_DECLARED"`).
+- **`via`** names the realizing edge kind. It is required only when the part
+  kind declares **more than one** composition pair toward that whole kind:
+  omitting it there raises `ConfigurationError`
+  (`COMPOSITION_VIA_AMBIGUOUS`) rather than silently picking one, and naming
+  an edge kind that realizes no declared pair between them raises
+  `COMPOSITION_VIA_NOT_DECLARED`.
+- **`props`** are the realizing edge's own properties, validated against that
+  edge kind's schema exactly as `store.edges.<via>.create(...)` would
+  validate them. A realizing edge with required schema fields therefore needs
+  `props` here.
+
+#### `reparent`: moving a part to a new whole
+
+```typescript
+await store.nodes.Chapter.reparent(chapter.id, {
+  kind: "Anthology",
+  id: anthology.id,
+  via: "includedIn",
+});
+```
+
+Moving a part is a first-class operation because neither half is legal on its
+own: the new attachment refuses while the old edge still holds the part's
+one-whole claim, and — under `existence: "required"` — detaching the old edge
+refuses while the part is live. `reparent` performs both under one per-graph
+fence, in one transaction, and validates the **final** state: one whole,
+acyclicity over the composition union, and a required part never left
+detached. The part keeps its id, its properties, and every descendant beneath
+it.
+
+How the old attachment is retired follows its declared population, so the row
+keeps its meaning:
+
+| population | retire | why |
+| --- | --- | --- |
+| `"one"` | the composition edge is deleted | a `"one"` binding persists for the row's whole life, ended or not, so an ended row would still read as an attachment |
+| `"oneActive"` | the window is ended at the move instant | the previous membership stays readable as valid-time history |
+
+Reparenting to the whole the part already holds (through the same `via`, when
+one is stated) is accepted as a **no-op** — no write, no history — so a
+caller converging on a destination need not first ask where the part is. A
+kind that declares no `partOf`/`hasPart` pair at all raises
+`ConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
+part raises `NodeNotFoundError`.
 
 #### `existence`: a part that cannot exist without a whole
 
@@ -417,13 +492,21 @@ Three refusals follow from that one declaration:
 - **Detaching a live part is refused.** Ending, soft-deleting, or
   hard-deleting the composition edge of a LIVE required part throws the same
   error with `situation: "detach"`. A part that is already retired (soft- or
-  hard-deleted) is not orphaned by losing its edge, so that case is allowed —
-  deleting the part itself (which frees its edge) or reparenting it are the
-  ways out.
-- **`partOf` on `getOrCreateByConstraint` only applies to a genuinely new (or
-  resurrected) node.** Stating it against a call that resolves to `"found"`
-  or `"updated"` is refused, naming the node's current whole when it has one:
-  an accepted option is never silently dropped.
+  hard-deleted) is not orphaned by losing its edge, so that case is allowed.
+  The two ways out are deleting the part itself (which frees its edge) and
+  [`reparent`](#reparent-moving-a-part-to-a-new-whole), which retires the old
+  attachment and creates the new one in one transaction so the part is never
+  detached at all.
+- **`partOf` on `getOrCreateByConstraint` is a POSTCONDITION.** When the call
+  returns, the resolved node holds exactly the stated attachment. On
+  `"created"`/`"resurrected"` it is applied as a plain create's `partOf` is;
+  on `"found"`/`"updated"` it is checked — a node that already holds this
+  whole (and, when `via` is stated, this realizing edge) satisfies it and the
+  call is idempotent, a node with no live whole has the attachment written
+  now, and a node with a **different** live whole is refused with
+  `CompositionExistenceError` (`situation: "existing"`) naming both sides.
+  Moving a part is [`reparent`](#reparent-moving-a-part-to-a-new-whole)'s
+  decision, never a side effect of a lookup.
 
 `existence: "required"` is about detachment and bare creation, not about
 deleting the *whole* — deleting a whole still cascades to its required parts
@@ -455,18 +538,46 @@ admitted, so it auto-migrates unconditionally regardless of data.
 Not every "this belongs to that" relationship is composition. Before reaching
 for `partOf`/`hasPart`, place the relation in exactly one of three tiers:
 
-| tier | what you write | what the runtime guarantees today | planned for tier 1 |
-| --- | --- | --- | --- |
-| 1 — Composition | `partOf(Part, Whole, { via: edge })` | the realizing edge's whole-side cardinality is `"one"`/`"oneActive"`; every endpoint pair the edge admits is a declared composition pair in that orientation; `parts()`/`wholes()` navigation across heterogeneous, mixed-orientation edge kinds; `subgraph({ composition: true })` exports a root plus its parts closure | one whole per part enforced cross-relation at write time; acyclicity checked over the union of realizing edge kinds; deleting a whole deletes its parts leaf-first (cascade) |
-| 2 — Aggregation | `cardinality`, `targetCardinality`, `acyclic` on an edge registration | each rule enforced independently, with no ownership slot, no cascade, no cross-relation constraint | — |
-| 3 — Mereology | an ordinary edge kind + `.recursive()` | transitivity only, no integrity claim | — |
+| tier | what you write | what the runtime guarantees |
+| --- | --- | --- |
+| 1 — Composition | `partOf(Part, Whole, { via: edge })` | everything below |
+| 2 — Aggregation | `cardinality`, `targetCardinality`, `acyclic` on an edge registration | each rule enforced independently, with no ownership slot, no cascade, no cross-relation constraint |
+| 3 — Mereology | an ordinary edge kind + `.recursive()` | transitivity only, no integrity claim |
 
-The "planned for tier 1" column is not yet implemented: declaring `partOf`/
-`hasPart` today validates the relation's shape (`via`, `partSide`,
-cardinality, endpoint-pair completeness) but does not yet enforce one whole
-per part, does not yet check acyclicity over the composition union, and does
-not yet cascade a delete from whole to parts. Do not rely on any of the three
-until a release note says otherwise.
+Tier 1 is enforced, in full, at write time:
+
+- **Declaration shape.** The realizing edge's whole-side cardinality is
+  `"one"` or `"oneActive"`, and every endpoint pair the edge admits is a
+  declared composition pair in that orientation.
+- **One whole per part.** A part holds exactly one whole across **every**
+  declared composition relation and **both** orientations — two different
+  realizing edge kinds contend for one reserved claim row, so the second
+  attach refuses with `CompositionError`
+  ([`COMPOSITION_WHOLE_OCCUPIED`](/errors#compositionerror)). Move a part
+  with [`reparent`](#reparent-moving-a-part-to-a-new-whole), never by
+  attaching a second edge.
+- **Acyclicity over the composition union.** Every realizing edge kind forms
+  ONE oriented (part → whole) relation, probed on each composition edge
+  write, so a cycle spanning two different realizing edge kinds is caught
+  even though neither kind is `acyclic` alone
+  ([`EdgeAcyclicityError`](/errors#edgeacyclicityerror)).
+- **Leaf-first cascade.** Deleting a whole deletes its live parts closure
+  leaf-first, in the same transaction, each part through its own node-delete
+  pipeline. See
+  [Composition Cascade](/limitations#composition-cascade) for what the
+  cascade deliberately does *not* do.
+- **`existence: "required"`.** An opt-in per pair: a part of that kind can
+  never exist without a live whole (see below).
+- **Navigation and export.** `parts()`/`wholes()` cross heterogeneous,
+  mixed-orientation edge kinds, and `subgraph({ composition: true })` returns
+  the complete owned unit — a root plus its entire parts closure, at any
+  depth.
+
+The composition claim rides `typegraph_edge_claims`, the same relation edge
+cardinality claims use. A deployment initialized before that relation existed
+raises `ConfigurationError` (`EDGE_CLAIM_RELATION_MISSING`) on the first
+`partOf`/`hasPart` write and must be migrated under owner credentials — see
+[Backend Setup](/backend-setup).
 
 **The only tier with a cascade is the only tier with an ownership slot.** A
 part with two owners is not a part. Any relation whose users need shared
@@ -490,17 +601,6 @@ re-homes its children to the deleted folder's parent, or a document whose
 deletion retracts claims but leaves the referenced entity standing on
 remaining support, is aggregation — declaring either `partOf` would be wrong,
 not just imprecise.
-
-#### Upgrade prerequisite (forthcoming): the composition claim will need `typegraph_edge_claims`
-
-Not yet applicable in this release: declaring `partOf`/`hasPart` does not
-check for `typegraph_edge_claims` today. Once the one-whole-per-part
-guarantee above ships, it is expected to ride the same reserved relation edge
-cardinality claims already use, and a deployment initialized before that
-relation existed will need to provision it (under owner credentials — see
-[Backend Setup](/backend-setup)) before declaring the first `partOf`/
-`hasPart`. This section will be updated with the exact error code and
-provisioning step once that lane lands.
 
 ### Edge Relationships
 
@@ -885,6 +985,8 @@ type CompositionPartSide = "from" | "to";
 type CompositionOptions = {
   via: EdgeType;
   partSide?: CompositionPartSide;
+  /** Default `"optional"`. See `existence` above. */
+  existence?: "optional" | "required";
 };
 
 function partOf<Part extends NodeType, Whole extends NodeType>(
