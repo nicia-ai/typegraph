@@ -8,7 +8,9 @@
  * Key ontology relations:
  *   - subClassOf(Child, Parent) - Type inheritance
  *   - broader(Specific, General) - Concept hierarchy
- *   - equivalentTo(A, B) / sameAs(A, B) - Type equivalence
+ *   - equivalentTo(A, B) - Type equivalence (`sameAs` was a deprecated
+ *     alias, removed; a persisted document that still names it loads and
+ *     folds identically — see the "sameAs" describe block below)
  *   - disjointWith(A, B) - Types that cannot overlap
  *   - partOf(Part, Whole) / hasPart(Whole, Part) - Composition
  */
@@ -24,11 +26,26 @@ import {
   equivalentTo,
   hasPart,
   narrower,
+  type NodeType,
+  type OntologyRelation,
   partOf,
-  sameAs,
   subClassOf,
 } from "../src";
+import { core } from "../src/ontology/core-meta-edges";
 import { buildKindRegistry } from "../src/registry";
+
+/**
+ * `sameAs` has no public factory any more (roadmap F removed it): a document
+ * persisted before the removal that still names a `sameAs` relation must
+ * keep loading and folding exactly like `equivalentTo` — `core.sameAsMetaEdge`
+ * is the internal object `compileOntologyRelation`
+ * (`src/graph-extension/compiler.ts`) and `buildRegistryFromSerializedSchema`
+ * still resolve that name to, so building the relation directly from it here
+ * exercises the same registry fold a persisted `sameAs` document would.
+ */
+function sameAsRelation(kindA: NodeType, kindB: NodeType): OntologyRelation {
+  return { metaEdge: core.sameAsMetaEdge, from: kindA, to: kindB };
+}
 
 const emptySchema = z.object({});
 
@@ -188,8 +205,7 @@ describe("sameAs - Alias for equivalentTo", () => {
       Account: { type: Account },
     },
     edges: {},
-    // eslint-disable-next-line @typescript-eslint/no-deprecated -- pins the migration-period alias behavior
-    ontology: [sameAs(User, Account)],
+    ontology: [sameAsRelation(User, Account)],
   });
 
   const registry = buildKindRegistry(graph);
