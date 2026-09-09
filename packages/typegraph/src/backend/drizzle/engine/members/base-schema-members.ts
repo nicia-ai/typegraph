@@ -97,6 +97,18 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * retention watermark, the version-3 adoption step's other half.
    */
   identityTransitionRetentionTableDdl: string;
+  /**
+   * Ensures the identity-transitions table's `restored_at` column exists,
+   * the version-4 adoption step. A brand-new relation created by
+   * `generateDdl()` already carries the column (bootstrap is
+   * `"covered-by-generated-ddl"`); this ALTER-shaped migration is what an
+   * EXISTING version-3 relation, created before this column existed, still
+   * needs. Dialect-owned for the same reason `ensureEdgeMatchIdentityStorage`
+   * is: PostgreSQL's native `ADD COLUMN IF NOT EXISTS` needs no
+   * introspection, while SQLite re-reads `PRAGMA table_info` under a
+   * duplicate-column retry loop.
+   */
+  ensureIdentityTransitionsRestoredAtColumn: () => Promise<void>;
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -127,6 +139,7 @@ export function createBaseSchemaMembers(
     fencesTableDdl,
     identityTransitionsTableDdl,
     identityTransitionRetentionTableDdl,
+    ensureIdentityTransitionsRestoredAtColumn,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -161,6 +174,13 @@ export function createBaseSchemaMembers(
             await ensureTable(ddl);
           }
           await ensureTable(identityTransitionRetentionTableDdl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 4,
+        async adopt(): Promise<void> {
+          await ensureIdentityTransitionsRestoredAtColumn();
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },

@@ -421,6 +421,14 @@ export function createSqliteTables(
       assertionIds: text("assertion_ids").notNull(),
       decision: text("decision"),
       txId: text("tx_id"),
+      // NULL for a row this graph recorded itself through the live capture
+      // flush; set to the restore's own wall time for a row an archival
+      // restore inserted verbatim. `identityReplay` uses ONLY this marker —
+      // never a revision comparison — to decide whether a row may be paired
+      // with a reconstructed before/after snapshot, because a restored row's
+      // `recorded_revision` is the SOURCE graph's own number and interleaves
+      // arbitrarily with this graph's (see `isRestoredTransitionRow`).
+      restoredAt: text("restored_at"),
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.transitionId] }),

@@ -1789,9 +1789,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // A history-off graph has nowhere for `transitionsOf` / `replay` to ever
     // read these rows back from (both refuse with the same error below
     // `history: true`), so restoring them here would write data the store's
-    // own API can never surface again — and, worse, silently. Refuse at the
-    // one seam every archival-transitions restore passes through rather than
-    // let the rows and watermark land write-only.
+    // own API can never surface again — and, worse, silently. `importGraph`
+    // / `importGraphStream` (`interchange/import.ts`) already refuse this
+    // UPFRONT, before any node or edge write, whenever the document or
+    // stream header names a transitions section or a non-zero retention
+    // watermark — this is the BACKSTOP every archival-transitions restore
+    // still passes through, catching any caller that reaches this method
+    // directly.
     if (!this.#captureEnabled) {
       throw identityReplayRequiresHistoryError(this.graphId);
     }

@@ -106,6 +106,7 @@ import {
   IDENTITY_IMPORT_PROGRESS,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
+import { identityReplayRequiresHistoryError } from "../identity/transition-log";
 import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { type DialectAdapter } from "../query/dialect/types";
@@ -508,6 +509,11 @@ async function importGraphData<G extends GraphDef>(
   // see assertIdentityImportSupported / validateIdentitySection.
   assertIdentityImportSupported(store, data.identity !== undefined);
   validateIdentitySection(data.identity);
+  assertIdentityTransitionsRestoreSupported(
+    store,
+    (data.identity?.transitions?.length ?? 0) > 0,
+    data.identity?.retention,
+  );
 
   const graph = store.graph;
   const graphId = store.graphId;
@@ -767,6 +773,15 @@ export async function importGraphStream<G extends GraphDef>(
           assertIdentityImportSupported(
             store,
             chunk.header.identity !== undefined,
+          );
+          // Same guard as importGraph's upfront check, using the header's
+          // `hasTransitions` announcement in place of the array itself — the
+          // "identity-transitions" chunk always arrives last, after nodes,
+          // edges and identity assertions have already been written.
+          assertIdentityTransitionsRestoreSupported(
+            store,
+            chunk.header.identity?.hasTransitions === true,
+            chunk.header.identity?.retention,
           );
           header = chunk.header;
           break;
@@ -1054,6 +1069,52 @@ function assertIdentityImportSupported<G extends GraphDef>(
 }
 
 /**
+ * Whether an identity payload's ARCHIVAL fields ask the destination to
+ * restore transition-log rows: a non-empty `transitions` array (or, before
+ * that array has arrived, a streaming header's `hasTransitions`
+ * announcement) or a non-zero retention watermark. The one owner both
+ * {@link assertIdentityTransitionsRestoreSupported} call sites below
+ * consult, so an atomic `importGraph` and a streamed `importGraphStream`
+ * refuse the exact same documents.
+ */
+function identityArchivalRestoreRequested(
+  hasTransitions: boolean,
+  retention: Readonly<{ prunedBeforeRevision: number }> | undefined,
+): boolean {
+  return hasTransitions || (retention?.prunedBeforeRevision ?? 0) > 0;
+}
+
+/**
+ * Rejects an archival transitions/retention payload aimed at a history-off
+ * store BEFORE any entity write.
+ *
+ * `importIdentityTransitionsAtTarget` (`store.ts`) raises the same
+ * `IdentityReplayError` / `IDENTITY_REPLAY_REQUIRES_HISTORY` as a backstop,
+ * but only from the LAST import section — after nodes, edges and identity
+ * assertions have already committed durably on a non-transactional target,
+ * or after they have queued inside a transaction that a later error would
+ * still have to unwind. This guard runs first: from
+ * {@link importGraphData}'s upfront validation for the atomic path (which
+ * already has the full `transitions` array in hand), and from
+ * `importGraphStream`'s "header" chunk arm for the streaming path (which
+ * does not — by protocol the `identity-transitions` chunk is always last,
+ * so the header's `hasTransitions` announcement is the only pre-write
+ * signal available).
+ */
+function assertIdentityTransitionsRestoreSupported<G extends GraphDef>(
+  store: Store<G>,
+  hasTransitions: boolean,
+  retention: Readonly<{ prunedBeforeRevision: number }> | undefined,
+): void {
+  if (
+    identityArchivalRestoreRequested(hasTransitions, retention) &&
+    !store.historyEnabled
+  ) {
+    throw identityReplayRequiresHistoryError(store.graphId);
+  }
+}
+
+/**
  * Runtime-validates just the identity section of an otherwise pre-typed
  * `GraphData`. {@link importGraph} deliberately trusts the type for the
  * (potentially graph-sized) node and edge arrays to preserve its per-row
@@ -1262,7 +1323,8 @@ async function importIdentitySection<G extends GraphDef>(
 
 /**
  * Restores an archival payload's `transitions` section, if any — a verbatim
- * restore (§7.3): no closure repair, no renumbering, nothing reported back on
+ * restore (see "Archival transitions and the retention watermark" in the
+ * identity documentation): no closure repair, no renumbering, nothing reported back on
  * {@link ImportResult} (there is no live-conflict dimension to count, unlike
  * assertions). Never attempted for `state` mode, which carries current truth
  * only; a `state` payload naming transitions is a shape defect and throws
@@ -1368,11 +1430,18 @@ function graphDataForChunk(
     ...headerWithoutIdentity,
     nodes,
     edges,
+    // `identity.hasTransitions` is a streaming-header-only announcement (see
+    // `InterchangeIdentityHeaderSchema`) with no place on the reconstructed
+    // per-chunk document — deliberately dropped, not spread through.
     ...(identity === undefined ?
       {}
     : {
         identity: {
-          ...identity,
+          profile: identity.profile,
+          mode: identity.mode,
+          ...(identity.retention === undefined ?
+            {}
+          : { retention: identity.retention }),
           assertions: [...assertions],
           ...(transitions === undefined ?
             { retention: undefined }

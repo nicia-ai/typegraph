@@ -144,6 +144,11 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
       "Resolves the configured/default table name into the PostgreSQL backend's `SqlTableNames`, mirroring every other relation.",
   },
   {
+    file: "backend/sqlite/local.ts",
+    reason:
+      "ensureLocalSqliteIdentityTransitionsRestoredAtColumn resolves the relation's configured table name to run the base-schema version-4 adoption step (an ALTER-shaped column migration, mirroring drizzle/sqlite.ts's async ensureIdentityTransitionsRestoredAtColumn for this synchronous local-installation path) — DDL adoption wiring, never a membership read.",
+  },
+  {
     file: "backend/types.ts",
     reason:
       "IdentityTableNames names the relation as one of the six Operational Identity table-name fields a backend port speaks about — structural, not a read.",
@@ -176,7 +181,7 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
   {
     file: "identity/service-interchange-write.ts",
     reason:
-      "Imports the IdentityDecisionProvenance type to type a governed-apply's decision metadata before handing it to noteTransition, AND (PR-3) importIdentityTransitionsIntoTarget's archival restore, which calls transition-log.ts's own encodeIdentityTransitionRow / insertIdentityTransitionValues / writeIdentityTransitionRetentionWatermark to write rows verbatim — delegating to the relation's one owner, never a second inline write, and never a membership read.",
+      "Imports the IdentityDecisionProvenance type to type a governed-apply's decision metadata before handing it to noteTransition, and importIdentityTransitionsIntoTarget's archival restore, which calls transition-log.ts's own encodeIdentityTransitionRow / insertIdentityTransitionValues / writeIdentityTransitionRetentionWatermark / hasNativeIdentityTransitions to write and check rows verbatim — delegating to the relation's one owner, never a second inline write, and never a membership read.",
   },
   {
     file: "store/recorded-capture.ts",
@@ -186,12 +191,12 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
   {
     file: "store/runtime-port.ts",
     reason:
-      "Imports the IdentityDecisionProvenance type to declare the optional `decision` parameter graph-merge's identity apply threads through applyIdentityMergeAtTarget, AND (PR-3) IdentityTransitionCursor / IdentityTransitionTransfer to type the archival readIdentityTransitionPageAtTarget / importIdentityTransitionsAtTarget port members — every one a port signature, no relation access.",
+      "Imports the IdentityDecisionProvenance type to declare the optional `decision` parameter graph-merge's identity apply threads through applyIdentityMergeAtTarget, and IdentityTransitionCursor / IdentityTransitionTransfer to type the archival readIdentityTransitionPageAtTarget / importIdentityTransitionsAtTarget port members — every one a port signature, no relation access.",
   },
   {
     file: "store/store.ts",
     reason:
-      "Implements the identityContext-adjacent port methods against the IdentityDecisionProvenance-typed decision parameter, AND (PR-3) the three archival-transitions port methods (readIdentityTransitionPageAtTarget, identityTransitionRetentionAtTarget, importIdentityTransitionsAtTarget), which call transition-log.ts's own reader/writer functions — delegating, never re-implementing. `flushed.identityTransitions` in transactionOutcome is a COUNT off RecordedGraphFlushResult (how many notes this flush wrote), not a relation read — matched by this scanner's regex on the field name alone.",
+      "Implements the identityContext-adjacent port methods against the IdentityDecisionProvenance-typed decision parameter, and the three archival-transitions port methods (readIdentityTransitionPageAtTarget, identityTransitionRetentionAtTarget, importIdentityTransitionsAtTarget), which call transition-log.ts's own reader/writer functions — delegating, never re-implementing. `flushed.identityTransitions` in transactionOutcome is a COUNT off RecordedGraphFlushResult (how many notes this flush wrote), not a relation read — matched by this scanner's regex on the field name alone.",
   },
   {
     file: "identity/index.ts",
@@ -211,12 +216,17 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
   {
     file: "identity/service.ts",
     reason:
-      "PR-3: re-exports transition-log.ts's readIdentityTransitionPageForInterchange / readTransitionRetentionDetails / toTransitionTransfer functions and the IdentityTransitionCursor / IdentityTransitionTransfer types onto the internal identity-service barrel store.ts imports from — the archival interchange boundary's own read functions, delegating to the one owner, never a second reader.",
+      "Re-exports transition-log.ts's readIdentityTransitionPageForInterchange / readTransitionRetentionDetails / toTransitionTransfer functions and the IdentityTransitionCursor / IdentityTransitionTransfer types onto the internal identity-service barrel store.ts imports from — the archival interchange boundary's own read functions, delegating to the one owner, never a second reader.",
+  },
+  {
+    file: "interchange/import.ts",
+    reason:
+      "Imports identityReplayRequiresHistoryError to raise the exact typed refusal an archival transitions/retention restore into a history-off target gets, upfront (assertIdentityTransitionsRestoreSupported), matching store.ts's backstop of the same error — never a relation read.",
   },
   {
     file: "interchange/export.ts",
     reason:
-      "PR-3: archival export pages storeRuntime(store).readIdentityTransitionPageAtTarget and accumulates the resulting EXPLANATION rows into the exported identity.transitions array — an export of the log's own rows for interchange, not a membership derivation. Also imports the IdentityTransitionCursor / IdentityTransitionTransfer types only, to type the paging cursor and widen the wire shape's readonly arrays.",
+      "Archival export pages storeRuntime(store).readIdentityTransitionPageAtTarget (including a limit-1 existence probe for the streaming header's `hasTransitions` flag) and accumulates the resulting EXPLANATION rows into the exported identity.transitions array — an export of the log's own rows for interchange, not a membership derivation. Also imports the IdentityTransitionCursor / IdentityTransitionTransfer types only, to type the paging cursor and widen the wire shape's readonly arrays.",
   },
 ];
 

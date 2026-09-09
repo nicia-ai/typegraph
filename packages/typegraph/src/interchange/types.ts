@@ -187,11 +187,13 @@ const InterchangeIdentityTransitionDecisionSchema = z.object({
 });
 
 /**
- * One archived identity transition-log row (§7.3): an explanation of why a
- * class's membership changed, carried verbatim — `recordedRevision` and
+ * One archived identity transition-log row: an explanation of why a class's
+ * membership changed, carried verbatim — `recordedRevision` and
  * `recordedAt` are the SOURCE graph's own values, preserved rather than
- * renumbered, because a restore records history, it does not relive it.
- * Absent from `state`-mode interchange, which carries current truth only.
+ * renumbered, because a restore records history, it does not relive it. See
+ * "Archival transitions and the retention watermark" in the identity
+ * documentation. Absent from `state`-mode interchange, which carries current
+ * truth only.
  */
 export const InterchangeIdentityTransitionSchema = z.object({
   transitionId: z.string().min(1),
@@ -245,6 +247,18 @@ export type InterchangeIdentity = z.infer<typeof InterchangeIdentitySchema>;
 const InterchangeIdentityHeaderSchema = InterchangeIdentitySchema.omit({
   assertions: true,
   transitions: true,
+}).extend({
+  /**
+   * `archival` mode only: whether the `identity-transitions` chunk this
+   * stream will later emit carries at least one row. The header is the ONLY
+   * place a streaming import can learn this before that chunk arrives — by
+   * protocol it is always the LAST chunk, after nodes, edges and identity
+   * assertions have already been written — so `importGraphStream` reads it
+   * to refuse an archival-transitions restore into a `history: false` target
+   * up front, matching `importGraph`'s atomic upfront check (which reads the
+   * full `transitions` array directly, since it never streams).
+   */
+  hasTransitions: z.boolean().optional(),
 });
 
 // ============================================================

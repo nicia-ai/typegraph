@@ -40,6 +40,16 @@ export const BASE_SCHEMA_RELEASES = [
         "4e9c16c3761e83663f4a25da916c8e4ee171c792c215e1a7c704d4f674435e59",
     },
   },
+  {
+    version: 4,
+    id: "identity-transitions-restored-at",
+    orderedShapeDigests: {
+      postgres:
+        "c51f7f23d98915d9e29de43184cb94c3f1ad98bd74bf764123f732e9073f8fa4",
+      sqlite:
+        "f474cc2305f442c188686d9cf146c3eb2c37528edfc004d50373e9072870ea18",
+    },
+  },
 ] as const;
 
 function currentBaseSchemaVersion(): number {

@@ -34,6 +34,7 @@ import {
   identityReplayRequiresHistoryError,
   type IdentityTransitionCause,
   type IdentityTransitionRow,
+  isRestoredTransitionRow,
   readIdentityTransitions,
   readTransitionRetentionDetails,
   transitionClassRef,
@@ -433,31 +434,29 @@ export async function identityReplay<G extends GraphDef>(
     );
   }
 
-  const boundaries = distinctBoundaries(rows);
+  // Restored rows carry the SOURCE graph's own revision number, which
+  // interleaves arbitrarily with this graph's — a numeric watermark
+  // comparison cannot tell "a foreign row that happens to sit above the
+  // floor" from "this graph's own later history" apart (see
+  // `isRestoredTransitionRow`'s docblock, and the retention watermark's own
+  // "cannot vouch below N" contract, which is coarser and orthogonal). Steps
+  // are therefore built ONLY from this graph's own (never restored) rows;
+  // `transitionsOf` (no such filter) remains the complete answer for "what
+  // changed and why". Filtering the boundary set itself — not merely the
+  // rows matched at each boundary — also means the next NATIVE boundary
+  // computes its own fresh `before` here (`previousAfter` never chains
+  // through a boundary that held only restored rows).
+  const nativeRows = rows.filter((row) => !isRestoredTransitionRow(row));
+  const boundaries = distinctBoundaries(nativeRows);
 
   const steps: IdentityReplayStep<G>[] = [];
   let previousAfter: readonly IdentityNodeReference<G>[] | undefined;
   for (const boundary of boundaries) {
-    // A boundary below the retention watermark names a transition this
-    // graph cannot honestly explain from a snapshot: either it was pruned
-    // (and would not appear in `rows` at all), or it arrived through an
-    // archival restore, whose row carries the SOURCE graph's revision
-    // number, not this graph's own. Reconstructing "before"/"after" for it
-    // through THIS graph's historical reader would pair a foreign
-    // transition with a destination membership snapshot that has nothing to
-    // do with it — exactly the fabricated pair `truncatedBefore` exists to
-    // warn callers away from. `transitionsOf` (no watermark filtering) is
-    // still the complete answer for "what changed and why"; `replay` answers
-    // "and what did membership look like" only from the retained region
-    // forward. Skipping BEFORE any reconstruction also means the next
-    // retained boundary computes its own fresh `before` here (`previousAfter`
-    // stays unset) rather than chaining off a fabricated step.
-    if (watermark > 0 && boundary < watermark) continue;
     const before =
       previousAfter ?? (await reconstructAt(ctx, seed, boundary - 1));
     const after = await reconstructAt(ctx, seed, boundary);
     previousAfter = after;
-    for (const row of rows) {
+    for (const row of nativeRows) {
       if (row.recorded_revision !== boundary) continue;
       steps.push({
         transition: publicTransition<G>(row),

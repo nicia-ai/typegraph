@@ -47,6 +47,7 @@ import { type IdentityTarget, type PlainNodeRef } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
   encodeIdentityTransitionRow,
+  hasNativeIdentityTransitions,
   type IdentityDecisionProvenance,
   type IdentityTransitionTransfer,
   insertIdentityTransitionValues,
@@ -538,24 +539,33 @@ function transitionShapeError(
  * constraint — a known cause, a well-formed `{kind, id}` ref — is already
  * enforced by the interchange schema before a row reaches here).
  *
- * Sets the destination graph's retention watermark to the DESTINATION's own
- * current recorded revision + 1 — never to a number the payload carries.
- * `carriedWatermark` and every restored row's `recordedRevision` are minted
- * by the SOURCE graph's clock, which is a different counter than this
- * graph's: writing either straight into this graph's watermark would
- * misclassify this destination's own later, fully-retained transitions as
- * pruned the moment its own clock happens to reach a number below the
- * foreign one. Reading THIS graph's clock at restore time and adding one
- * gives an honest floor on this graph's own timeline — every earlier
- * revision on the destination's OWN axis (there are none yet the first time
- * a fresh graph restores) is truly unexplained here, and every later one the
- * destination goes on to record for real is, by the clock's own
- * monotonicity, always at or above this floor. `replay` then surfaces the
- * explanations-without-snapshots seam as `truncatedBefore` rather than
- * silently claiming a complete history. The watermark write goes through the
- * same monotonic `writeIdentityTransitionRetentionWatermark`
- * `pruneIdentityTransitionsForContext` uses, so importing into a graph that
- * already retains newer history can only raise the bound, never lower it.
+ * Every inserted row is marked `restored_at` (the restore's own wall time),
+ * regardless of what the wire payload carried — see
+ * `encodeIdentityTransitionRow`'s docblock. That marker, not a revision
+ * comparison, is what keeps `identityReplay` from ever pairing one of these
+ * rows with a fabricated before/after: a restored row's `recordedRevision`
+ * is minted by the SOURCE graph's own clock and interleaves arbitrarily with
+ * this graph's, so no floor on this graph's axis could separate "restored"
+ * from "native" by number alone.
+ *
+ * The retention watermark is a SEPARATE, coarser signal — "this graph cannot
+ * vouch for a complete history below revision N on its own axis" — and is
+ * only ever advanced here when {@link hasNativeIdentityTransitions} answers
+ * `false`, i.e. this graph has recorded no identity transitions of its own
+ * yet. Advancing it unconditionally (the original design here) would, for a
+ * graph that already has its own retained history, stamp a
+ * destination-clock-derived floor over transitions the restore never
+ * touched — misreporting `truncatedBefore`, and `IDENTITY_REPLAY_HISTORY_TRUNCATED`,
+ * for classes the restore had nothing to do with. A graph with no native
+ * rows yet has nothing of its own for that floor to misclassify, so setting
+ * it there stays sound: reading THIS graph's clock at restore time and
+ * adding one gives an honest floor on this graph's own timeline (there is no
+ * earlier revision on it yet), and every later one the destination goes on
+ * to record for real is, by the clock's own monotonicity, always at or
+ * above it. The watermark write goes through the same monotonic
+ * `writeIdentityTransitionRetentionWatermark` `pruneIdentityTransitionsForContext`
+ * uses, so a graph that later restores again can only raise its own floor,
+ * never lower it.
  */
 export async function importIdentityTransitionsIntoTarget(
   ctx: IdentityTransitionImportContext,
@@ -580,8 +590,18 @@ export async function importIdentityTransitionsIntoTarget(
       destinationClock === undefined ? 1 : (
         recordedInstantRevision(destinationClock) + 1
       );
+    const restoredAt = nowIso();
+    const hasOwnHistory = await hasNativeIdentityTransitions(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+    );
     if (transitions.length === 0) {
-      if (carriedWatermark === undefined || carriedWatermark === 0) {
+      if (
+        carriedWatermark === undefined ||
+        carriedWatermark === 0 ||
+        hasOwnHistory
+      ) {
         return { created: 0, watermark: undefined };
       }
       await writeIdentityTransitionRetentionWatermark(
@@ -589,7 +609,7 @@ export async function importIdentityTransitionsIntoTarget(
         ctx.schema,
         ctx.graphId,
         destinationFloor,
-        nowIso(),
+        restoredAt,
       );
       return { created: 0, watermark: destinationFloor };
     }
@@ -618,15 +638,19 @@ export async function importIdentityTransitionsIntoTarget(
         row.recordedRevision,
         row.recordedAt,
         row.transitionId,
+        restoredAt,
       ),
     );
     await insertIdentityTransitionValues(rawTarget, ctx.schema, values);
+    if (hasOwnHistory) {
+      return { created: transitions.length, watermark: undefined };
+    }
     await writeIdentityTransitionRetentionWatermark(
       rawTarget,
       ctx.schema,
       ctx.graphId,
       destinationFloor,
-      nowIso(),
+      restoredAt,
     );
     return { created: transitions.length, watermark: destinationFloor };
   });

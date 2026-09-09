@@ -106,11 +106,19 @@ export async function exportGraph<G extends GraphDef>(
     ...headerWithoutIdentity,
     nodes,
     edges,
+    // Rebuilt field-by-field rather than spread: the header's `identity`
+    // also carries `hasTransitions`, a streaming-only announcement with no
+    // place in the full envelope — the real `transitions` array right below
+    // already says everything it would.
     ...(identity === undefined ?
       {}
     : {
         identity: {
-          ...identity,
+          profile: identity.profile,
+          mode: identity.mode,
+          ...(identity.retention === undefined ?
+            {}
+          : { retention: identity.retention }),
           assertions: identityAssertions,
           ...(identity.mode === "archival" ?
             { transitions: identityTransitions }
@@ -481,6 +489,23 @@ function claimSnapshotExportLeaseOrRefuse(
   return lease.release;
 }
 
+/**
+ * Whether `store`'s archival transitions section will carry at least one
+ * row — a cheap existence probe (never the full page), read for the
+ * streaming header's `hasTransitions` announcement (see
+ * `produceExportChunks`'s call site).
+ */
+async function graphHasIdentityTransitions<G extends GraphDef>(
+  store: Store<G>,
+  backend: GraphBackend | TransactionBackend,
+): Promise<boolean> {
+  const probe = await storeRuntime(store).readIdentityTransitionPageAtTarget(
+    backend,
+    { limit: 1 },
+  );
+  return probe.transitions.length > 0;
+}
+
 async function produceExportChunks<G extends GraphDef>(
   store: Store<G>,
   backend: GraphBackend | TransactionBackend,
@@ -509,6 +534,16 @@ async function produceExportChunks<G extends GraphDef>(
     rawRetention === undefined || rawRetention.prunedBeforeRevision === 0 ?
       undefined
     : rawRetention;
+  // Archival-only, and read for the SAME reason as `retention` above: a
+  // streaming importer's header handler is the only place it can refuse an
+  // archival-transitions restore into a `history: false` target BEFORE any
+  // node or edge write — the "identity-transitions" chunk itself always
+  // arrives last. A cheap existence probe (never the full page) answers
+  // that from the same snapshot the header's other fields come from.
+  const hasTransitions =
+    store.graph.identity === undefined || options.identityMode !== "archival" ?
+      false
+    : await graphHasIdentityTransitions(store, backend);
 
   await emit({
     type: "header",
@@ -527,6 +562,7 @@ async function produceExportChunks<G extends GraphDef>(
             profile: "typegraph-identity-v1" as const,
             mode: options.identityMode,
             ...(retention === undefined ? {} : { retention }),
+            ...(hasTransitions ? { hasTransitions: true } : {}),
           },
         }),
     },

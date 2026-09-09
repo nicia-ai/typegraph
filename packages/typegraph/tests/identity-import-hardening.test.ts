@@ -577,7 +577,7 @@ describe("archival identity import window bounds", () => {
     });
   });
 
-  // Load-bearing (G3-01 fix): the restore watermark must be resolved on the
+  // Load-bearing: the restore watermark must be resolved on the
   // DESTINATION's own recorded-revision scale, never the source's — writing
   // a foreign, source-scale number would misclassify the destination's own
   // later, fully-retained transitions as pruned. Revert check: change
@@ -638,14 +638,15 @@ describe("archival identity import window bounds", () => {
     ).resolves.toBeDefined();
   });
 
-  // Load-bearing (G3-02 fix): a restored transition's row carries the
-  // SOURCE graph's own revision number, which `replay` must never pair with
-  // a membership snapshot reconstructed on the DESTINATION's historical
-  // reader — that pairs a foreign transition with a fabricated before/after
-  // that has nothing to do with it. Revert check: remove the `boundary <
-  // watermark` `continue` in `identityReplay` (replay.ts) and this test's
-  // `steps` assertion fails — the restored boundaries reappear as steps
-  // despite sitting below `truncatedBefore`.
+  // Load-bearing: a restored transition's row carries the SOURCE graph's own
+  // revision number, which `replay` must never pair with a membership
+  // snapshot reconstructed on the DESTINATION's historical reader — that
+  // pairs a foreign transition with a fabricated before/after that has
+  // nothing to do with it. Revert check: remove the
+  // `!isRestoredTransitionRow(row)` filter (both the `nativeRows` line and
+  // the row-match inside the boundary loop) in `identityReplay` (replay.ts)
+  // and this test's `steps` assertion fails — the restored transitions
+  // reappear as steps despite carrying `restored_at`.
   it("excludes restored pre-restore boundaries from replay steps", async () => {
     const [source] = await createAdapterStoreWithSchema(
       graph,
@@ -706,7 +707,144 @@ describe("archival identity import window bounds", () => {
     }
   });
 
-  // Load-bearing (G3-03 fix): re-importing the identical archival document —
+  // Load-bearing: restoring into a brand-new target — no filler writes
+  // inflating its own clock ahead of the archive's revisions, unlike the
+  // test above — is the ORDINARY restore shape, and must not fabricate
+  // replay steps either. A per-row `restored_at` marker (not a revision
+  // comparison against the destination's own low, fresh clock) is what
+  // makes this sound regardless of which side's numbers happen to be
+  // larger. Revert check: drop the `restoredAt` argument from the
+  // `encodeIdentityTransitionRow` call inside `importIdentityTransitionsIntoTarget`
+  // (service-interchange-write.ts) and this test's `steps` assertion fails —
+  // the restored `assert` reappears as a step claiming membership never
+  // changed, when the source's own history shows it did.
+  it("does not fabricate a replay step for a transition restored into a brand-new target", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    // Retract/reassert, exactly like the destination-scoping test above, so
+    // the source's own clock reaches a revision higher than 1 — the
+    // destination's floor the moment it is fresh. A single `assertSame`
+    // alone would not discriminate the bug: on a truly empty source AND
+    // target, both floors coincide at revision 1 by accident.
+    const first = await source.identity.assertSame(sourceAlice, sourceBob);
+    await source.identity.retractAssertion(first.assertion.id);
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const sourceTransitions = requireDefined(archive.identity?.transitions);
+    expect(sourceTransitions.length).toBeGreaterThan(0);
+
+    // A genuinely fresh target — no filler writes inflating its own clock
+    // ahead of the archive's revisions beforehand, unlike the test above.
+    // This is what an ordinary restore into a brand-new graph looks like.
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await importGraph(target, archive, { onConflict: "skip" });
+
+    const alice = { kind: "Person" as const, id: "alice" };
+    // `transitionsOf` still answers fully — the restore itself is complete.
+    // (Archival mode ALSO imports the current assertion as live truth, which
+    // notes one native transition of its own, so this is `>=`, not `==`.)
+    const targetTransitions = await target.identity.transitionsOf(alice);
+    expect(targetTransitions.length).toBeGreaterThanOrEqual(
+      sourceTransitions.length,
+    );
+
+    // None of the RESTORED transitions may surface as a replay step — doing
+    // so would pair a foreign transition with a before/after reconstructed
+    // from the destination's own, unrelated state (the fabrication this test
+    // guards against; e.g. a restored `assert` step falsely claiming
+    // membership did not change).
+    const replay = await target.identity.replay(alice);
+    const restoredTransitionIds = new Set(
+      sourceTransitions.map((transition) => transition.transitionId),
+    );
+    for (const step of replay.steps) {
+      expect(restoredTransitionIds.has(step.transition.transitionId)).toBe(
+        false,
+      );
+    }
+    expect(replay.truncatedBefore).toBeDefined();
+  });
+
+  // Load-bearing: an archival restore that brings in unrelated foreign
+  // history must never erase, exclude, or report as pruned this graph's OWN
+  // already-retained transitions — restoring is additive, not a retention
+  // policy statement about classes the restore never touched. Revert check:
+  // remove the `hasOwnHistory` guard around the watermark write in
+  // `importIdentityTransitionsIntoTarget` (service-interchange-write.ts) and
+  // this test's final two assertions fail — carol's own steps drop to zero
+  // and her already-recorded history is reported as truncated.
+  it("preserves the destination's own retained transitions when restoring an unrelated archive", async () => {
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const carol = await target.nodes.Person.create(
+      { name: "Carol" },
+      { id: "carol" },
+    );
+    const dave = await target.nodes.Person.create(
+      { name: "Dave" },
+      { id: "dave" },
+    );
+    const carolDave = await target.identity.assertSame(carol, dave);
+    await target.identity.retractAssertion(carolDave.assertion.id);
+    const carolReplayBefore = await target.identity.replay(carol);
+    expect(carolReplayBefore.steps.length).toBeGreaterThan(0);
+    expect(carolReplayBefore.truncatedBefore).toBeUndefined();
+
+    // An archive from a source that never mentions carol or dave.
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    await importGraph(target, archive, { onConflict: "skip" });
+
+    // Carol's own, fully-retained history survives the unrelated restore
+    // unchanged: same step count, and no false claim of truncation.
+    const carolReplayAfter = await target.identity.replay(carol);
+    expect(carolReplayAfter.steps.length).toBe(carolReplayBefore.steps.length);
+    await expect(
+      target.identity.replay(carol, {
+        toRecorded: requireDefined(carolReplayBefore.steps.at(-1)).transition
+          .recorded,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  // Load-bearing: re-importing the identical archival document —
   // `importGraph(..., { onConflict: "skip" })` re-run over the same
   // archive, exactly what a repeated backup restore does — must not crash
   // with a raw driver UNIQUE-constraint error on `transition_id`. Revert
@@ -785,6 +923,56 @@ describe("archival identity import window bounds", () => {
       name: "IdentityReplayError",
       details: matchingObject({ code: "IDENTITY_REPLAY_REQUIRES_HISTORY" }),
     });
+  });
+
+  // Load-bearing: the SAME refusal, on the streaming path, must fire at the
+  // header — before any node, edge, or identity-assertion chunk is applied —
+  // not from the last import section, after those chunks already committed.
+  // Revert check: delete the `assertIdentityTransitionsRestoreSupported`
+  // call from the "header" chunk arm of `importGraphStream`
+  // (interchange/import.ts) and this test's node-count assertion fails —
+  // the refusal still fires (store.ts's backstop still catches it), but only
+  // after Alice and Bob are already durably written.
+  it("refuses an archival-transitions restore via importGraphStream before writing any node", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+
+    const chunks: GraphInterchangeChunk[] = [];
+    for await (const chunk of exportGraphStream(source, {
+      identityMode: "archival",
+    })) {
+      chunks.push(chunk);
+    }
+    const header = requireDefined(
+      chunks.find((chunk) => chunk.type === "header"),
+    );
+    // The header carries the announcement the refusal reads — proving this
+    // test actually exercises the header-time signal, not a coincidence.
+    expect(header.header.identity?.hasTransitions).toBe(true);
+
+    const target = await createInitializedStore(graph, createTestBackend());
+    await expect(
+      importGraphStream(target, chunkStream(chunks), { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "IdentityReplayError",
+      details: matchingObject({ code: "IDENTITY_REPLAY_REQUIRES_HISTORY" }),
+    });
+
+    // Nothing from the stream was ever applied — the refusal fired before
+    // the "nodes" chunk, not after it.
+    await expect(target.nodes.Person.count()).resolves.toBe(0);
   });
 
   it("streams the identity-transitions chunk through exportGraphStream / importGraphStream", async () => {

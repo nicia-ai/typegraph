@@ -168,6 +168,43 @@ export function planSqliteEdgeMatchIdentityAdoption(
   ];
 }
 
+const IDENTITY_TRANSITIONS_RESTORED_AT_COLUMN = "restored_at";
+
+/**
+ * Idempotent PostgreSQL DDL for adopting an existing identity-transitions
+ * table's `restored_at` column (base-schema version 4). A single statement —
+ * unlike {@link generatePostgresEdgeMatchIdentityUpgradeDDL} above, which
+ * also adds a constraint and an index Postgres cannot spell
+ * `IF NOT EXISTS`, this is one nullable column, and Postgres's native
+ * `ADD COLUMN IF NOT EXISTS` already makes the statement idempotent with no
+ * `pg_attribute` introspection needed.
+ */
+export function generatePostgresIdentityTransitionsRestoredAtAdoptionDDL(
+  tableName: string,
+): string {
+  const table = quoteDdlIdentifier(tableName);
+  const column = quoteDdlIdentifier(IDENTITY_TRANSITIONS_RESTORED_AT_COLUMN);
+  return `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} TIMESTAMPTZ;`;
+}
+
+/**
+ * Plans the focused SQLite v4 adoption from one authoritative column
+ * inventory — the identity-transitions table's `restored_at` marker,
+ * mirroring {@link planSqliteEdgeMatchIdentityAdoption}'s convention that an
+ * empty inventory means the table does not exist yet (current generated DDL
+ * will create it, column included).
+ */
+export function planSqliteIdentityTransitionsRestoredAtAdoption(
+  tableName: string,
+  existingColumns: ReadonlySet<string>,
+): readonly string[] {
+  if (existingColumns.size === 0) return [];
+  if (existingColumns.has(IDENTITY_TRANSITIONS_RESTORED_AT_COLUMN)) return [];
+  return [
+    `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${quoteDdlIdentifier(IDENTITY_TRANSITIONS_RESTORED_AT_COLUMN)} TEXT;`,
+  ];
+}
+
 // ============================================================
 // SQLite DDL Generation
 // ============================================================

@@ -27,7 +27,10 @@ import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
-import { toCanonicalIdentityTimestamp } from "./row-codec";
+import {
+  optionalIdentityTimestamp,
+  toCanonicalIdentityTimestamp,
+} from "./row-codec";
 import { runIdentityMutation } from "./service-facade";
 import { refKey } from "./service-read";
 import { type IdentityServiceContext } from "./service-types";
@@ -122,6 +125,8 @@ export type IdentityTransitionRow = Readonly<{
   assertion_ids: readonly string[];
   decision: IdentityDecisionProvenance | undefined;
   tx_id: string | undefined;
+  /** Set when an archival restore inserted this row; `undefined` for a row this graph's own live capture flush recorded. See {@link isRestoredTransitionRow}. */
+  restored_at: string | undefined;
 }>;
 
 /** The class-change record `replaceAffectedClosure` / `mergeCurrentClasses` return to their caller. */
@@ -233,6 +238,7 @@ export const IDENTITY_TRANSITION_COLUMN_NAMES = [
   "assertion_ids",
   "decision",
   "tx_id",
+  "restored_at",
 ] as const;
 
 /** Column list shared by the INSERT and every read projection. */
@@ -257,12 +263,23 @@ function decodeOptionalRef(
   return { kind, id };
 }
 
-/** Builds one transition row's INSERT value tuple, in {@link IDENTITY_TRANSITION_COLUMNS} order. */
+/**
+ * Builds one transition row's INSERT value tuple, in
+ * {@link IDENTITY_TRANSITION_COLUMNS} order.
+ *
+ * `restoredAt` is `undefined` for every row the live capture flush writes
+ * (`flush.ts`'s ONE call site) — a note this graph is recording about
+ * itself. Archival restore (`importIdentityTransitionsIntoTarget`,
+ * `service-interchange-write.ts`) is the only caller that ever passes a
+ * value: every row it inserts is, by construction, foreign to this graph's
+ * own timeline, regardless of what the wire payload carried.
+ */
 export function encodeIdentityTransitionRow(
   note: IdentityTransitionNote,
   revision: number,
   recordedAt: string,
   transitionId: string,
+  restoredAt?: string,
 ): SqlFragment {
   return sql`
     (
@@ -286,7 +303,8 @@ export function encodeIdentityTransitionRow(
         },
         ${encodeJsonColumn(note.assertionIds)},
         ${note.decision === undefined ? sql.raw("NULL") : encodeJsonColumn(note.decision)},
-        ${sql.raw("NULL")}
+        ${sql.raw("NULL")},
+        ${restoredAt === undefined ? sql.raw("NULL") : sql`${restoredAt}`}
       )
   `;
 }
@@ -350,6 +368,7 @@ type RawIdentityTransitionRow = Readonly<{
   assertion_ids: unknown;
   decision: unknown;
   tx_id: unknown;
+  restored_at: unknown;
 }>;
 
 function toRevisionNumber(value: unknown): number {
@@ -408,7 +427,25 @@ function normalizeIdentityTransitionRow(
         undefined
       : (decodeJsonColumn(row.decision) as IdentityDecisionProvenance),
     tx_id: asOptionalRowString(row.tx_id, "tx_id"),
+    // `timestamp(..., { withTimezone: true })` on PostgreSQL, same as
+    // `recorded_at`/`valid_at` above — decoded through the identity module's
+    // one optional-timestamp owner rather than `asOptionalRowString`, which
+    // would throw on the `Date` node-postgres hands back.
+    restored_at: optionalIdentityTimestamp(row.restored_at),
   };
+}
+
+/**
+ * Whether `row` was written by an archival restore rather than this graph's
+ * own live capture flush. `identityReplay` uses this — never a comparison
+ * against `recorded_revision` — to decide whether a row may be paired with a
+ * membership snapshot reconstructed on THIS graph's historical reader: a
+ * restored row's revision is minted by the SOURCE graph's own clock, which
+ * interleaves arbitrarily with this graph's, so no numeric floor can
+ * separate "restored" from "native" the way this per-row marker does.
+ */
+export function isRestoredTransitionRow(row: IdentityTransitionRow): boolean {
+  return row.restored_at !== undefined;
 }
 
 /** `IdentityTransitionRow` decoded to its `classRef`, for the replay seed-lineage walk. */
@@ -625,6 +662,39 @@ export async function readIdentityTransitionPageForInterchange(
       }),
     done: rows.length < options.limit,
   };
+}
+
+type RawNativeTransitionExistsRow = Readonly<{ transition_id: unknown }>;
+
+/**
+ * Whether `graphId` already has at least one NATIVE (non-restored) identity
+ * transition row — one this graph itself recorded through the live capture
+ * flush, as opposed to one an archival restore inserted verbatim.
+ *
+ * Archival restore (`importIdentityTransitionsIntoTarget`,
+ * `service-interchange-write.ts`) consults this BEFORE deciding whether to
+ * advance the retention watermark: a graph that already has its own retained
+ * history has honest boundaries the restore never touched, and stamping a
+ * restore-derived floor over them would misreport `truncatedBefore` (or the
+ * `IDENTITY_REPLAY_HISTORY_TRUNCATED` refusal) for classes the restore had
+ * nothing to do with. A graph with no native rows yet — fresh, or one whose
+ * only transitions so far are themselves restored — has nothing of its own
+ * for a floor to misclassify, so the restore is free to set one.
+ */
+export async function hasNativeIdentityTransitions(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<boolean> {
+  const rows = await target.execute<RawNativeTransitionExistsRow>(
+    asCompiledRowsSql(sql`
+      SELECT transition_id
+      FROM ${schema.identityTransitionsTable}
+      WHERE graph_id = ${graphId} AND restored_at IS NULL
+      LIMIT 1
+    `),
+  );
+  return rows.length > 0;
 }
 
 /** Reads a graph's transition-retention watermark; `0` when nothing has been pruned. */
