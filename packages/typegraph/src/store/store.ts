@@ -3204,6 +3204,30 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * The engine-native counterpart to a capture flush's
+   * {@link RecordedFlushInstants}: one entry, for this store's one graph.
+   * The ONE owner of that shape on this path, called by both transaction
+   * sites that stamp `TransactionReceipt.recorded` under engine-native
+   * ownership, so neither can spell the map differently from the other.
+   * `identityTransitions` is a measured `0`: the identity transition log is
+   * written only by a TypeGraph capture session's flush, and engine-native
+   * ownership runs none.
+   */
+  async #engineRecordedFlushInstants(
+    session: RecordedTimeSession,
+  ): Promise<RecordedFlushInstants> {
+    return new Map([
+      [
+        this.graphId,
+        {
+          recordedAt: await this.#engineRecordedInstant(session),
+          identityTransitions: 0,
+        },
+      ],
+    ]);
+  }
+
+  /**
    * Returns the durable graph revision used by graph branching. It is undefined
    * until the first successful tracked write, which is itself a stable initial
    * anchor. Unlike {@link recordedNow}, this is also available on a live Store
@@ -4230,9 +4254,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // or an empty-body `transactionWithReceipt()` neither takes the
           // extra round trip nor stamps an instant nothing earned.
           if (mutationWitness?.mutated === true) {
-            recordedByGraph = new Map([
-              [this.graphId, await this.#engineRecordedInstant(txBackend)],
-            ]);
+            recordedByGraph =
+              await this.#engineRecordedFlushInstants(txBackend);
           }
           return output;
         };
