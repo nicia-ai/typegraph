@@ -198,25 +198,14 @@ export function buildContendedCompositionEdgeRowAudit(
       sql` AND ${qualified(PEER, edges.validTo)} IS NULL`
     : sql.empty();
 
-  // A stand-in `ClaimEdgeCardinalityParams`: `claimHolderTerms` only reads
-  // `edgeKind`/`fromKind`/`fromId`/`toKind`/`toId` on its ordinary
-  // (`scope === undefined`) branch, never on this composition one — the
-  // fields below are structurally required but unread here, since
-  // `partIdentity` supplies the part's identity instead.
+  // The composition overload of `claimHolderTerms` (R8): with `partIdentity`
+  // supplied, it needs nothing beyond the axis ref and `scope` — no
+  // fabricated `edgeKind`/`fromKind`/`fromId`/`toKind`/`toId` for a caller
+  // to invent or a reader to check is unread.
   const peerHolderTerms = claimHolderTerms(
     PEER,
     edges,
-    {
-      ...ref,
-      graphId,
-      edgeKind: "",
-      edgeId: "",
-      fromKind: "",
-      fromId: "",
-      toKind: "",
-      toId: "",
-      scope: { kind: "composition", holders },
-    },
+    { ...ref, scope: { kind: "composition", holders } },
     {
       kind: qualified(relation, outerPartKindColumn),
       id: qualified(relation, outerPartIdColumn),
