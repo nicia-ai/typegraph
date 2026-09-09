@@ -31,6 +31,7 @@ import {
   partOf,
   subClassOf,
 } from "../src";
+import { ALL_META_EDGE_NAMES } from "../src/ontology/constants";
 import { metaEdgesByName } from "../src/ontology/core-meta-edges";
 import { buildKindRegistry } from "../src/registry";
 
@@ -217,6 +218,23 @@ describe("sameAs - Alias for equivalentTo", () => {
   it("works the same as equivalentTo", () => {
     expect(registry.areEquivalent("User", "Account")).toBe(true);
   });
+});
+
+describe("metaEdgesByName - internal by-name lookup correspondence", () => {
+  // `metaEdgesByName` is a hand-written literal keyed by every
+  // `MetaEdgeName`; nothing else pins that key N maps to the meta-edge
+  // object actually NAMED N. `compileOntologyRelation`
+  // (`src/graph-extension/compiler.ts`) trusts this correspondence
+  // unconditionally when resolving a declarative graph extension's
+  // `metaEdge` string — a mis-mapped entry (e.g. `sameAs` pointing at
+  // `equivalentToMetaEdge`) would compile and persist under the wrong
+  // name with no other test catching it.
+  it.each(ALL_META_EDGE_NAMES)(
+    "metaEdgesByName[%s] carries that name",
+    (name) => {
+      expect(metaEdgesByName[name].name).toBe(name);
+    },
+  );
 });
 
 describe("disjointWith - Mutually Exclusive Types", () => {
