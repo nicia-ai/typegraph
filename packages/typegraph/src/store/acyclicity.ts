@@ -409,12 +409,18 @@ export async function readEdgeAcyclicityViolations(
  * ({@link assertEdgeRelationsAcyclic}) re-verifies under the per-graph write
  * lock at commit/apply time regardless, and remains the sole authority.
  *
- * Shares `runAcyclicityProbe` (and so `buildEdgeAcyclicityProbe`'s seed-hop
- * branch, D-4) with the write path and the audit reader, so a write-path
- * refusal, a live-graph audit, and a plan-time preview can never disagree
- * about what counts as a cycle. A self-loop among `proposed` is reported
- * directly, mirroring {@link assertEdgeRelationsAcyclic}'s immediate refusal,
- * without a round trip.
+ * Shares `runAcyclicityProbe` (and so `buildEdgeAcyclicityProbe`) with the
+ * write path and the audit reader, so a write-path refusal, a live-graph
+ * audit, and a plan-time preview can never disagree about what counts as a
+ * cycle. This is the ONE caller that probes rows not yet written anywhere,
+ * so it is the ONE caller that passes the `"planned"` seed form (D-4): the
+ * write path's own probe passes `"proposed"` (rows already inserted, or a
+ * single row) precisely because it never needs to hop through a row that
+ * isn't live yet — see `AcyclicityProbeSeed`'s docblock in
+ * `src/store/recursive-cte.ts` for the full contract. A self-loop among
+ * `proposed` is reported directly, mirroring
+ * {@link assertEdgeRelationsAcyclic}'s immediate refusal, without a round
+ * trip.
  */
 export async function readProposedEdgeAcyclicityViolations(
   ctx: AcyclicityAuditContext,
@@ -455,7 +461,7 @@ export async function readProposedEdgeAcyclicityViolations(
       grouped === undefined ?
         []
       : await runAcyclicityProbe(ctx, grouped.relation, {
-          kind: "proposed",
+          kind: "planned",
           edges: grouped.edges,
         });
     const edgeIds = [...new Set([...selfLoopIds, ...probedIds])].toSorted(
