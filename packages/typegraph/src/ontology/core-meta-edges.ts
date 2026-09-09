@@ -433,14 +433,25 @@ export const core = {
 /**
  * Every built-in meta-edge by name, including `sameAs`/`differentFrom` —
  * which have no public factory and are absent from the public `core`
- * export above. This record exists solely for
- * `compileOntologyRelation` (`src/graph-extension/compiler.ts`), the one
- * reader that still resolves an `ALL_META_EDGE_NAMES` member to its
- * `MetaEdge` object rather than through a factory, so a declarative graph
- * extension naming `sameAs`/`differentFrom` compiles to the same
- * `OntologyRelation` shape a persisted document's relation folds into
- * (`collectOntologyRelations`, `src/registry/kind-registry.ts`, switches on
- * the name either way).
+ * export above. This record is kept, per roadmap F ruling F-2, for exactly
+ * as long as PERSISTED-DOCUMENT interpretation needs it: a `schema_doc`
+ * committed before this removal can carry a `sameAs`/`differentFrom`
+ * relation by name (`SerializedOntology.relations`,
+ * `src/schema/types.ts`), and `collectOntologyRelations`
+ * (`src/registry/kind-registry.ts`) must still fold that name into the same
+ * `KindRegistry` state the pre-removal code produced when the document
+ * loads.
+ *
+ * `compileOntologyRelation` (`src/graph-extension/compiler.ts`) is the one
+ * reader that resolves an `ALL_META_EDGE_NAMES` member to its `MetaEdge`
+ * object this way, by name, rather than through a factory. That path
+ * compiles a DECLARATIVE graph extension, not only a persisted document —
+ * and `ALL_META_EDGE_NAMES` stays closed, not narrowed, so a new extension
+ * naming `sameAs`/`differentFrom` still compiles today. That is by design:
+ * the closed name set is what graph extensions validate against
+ * (`src/graph-extension/validation.ts`), and narrowing it to exclude these
+ * two names — rather than merely declining to ship a public factory or
+ * relation-declaration sugar for them — was never part of this removal.
  *
  * Not re-exported from `../ontology` or the package root — reach it only by
  * importing `./core-meta-edges` directly from inside this package.
