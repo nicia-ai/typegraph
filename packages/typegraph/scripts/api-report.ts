@@ -603,32 +603,32 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "bb66b071623f7b108adbc99c1d640e6d3aa47f29f1645a38480cca0c24f2f06f",
   },
   "./adapters/drizzle/engine": {
-    count: 325,
-    sha256: "a8f21cfed5d82117d7f11e9faf59ac33ce75e4864db856054efa35bead7779cf",
+    count: 326,
+    sha256: "713d8e135d59c5933ed814045dcda4e9907cb6e7ed9b4acda8dacce8f95d9bb1",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 252,
-    sha256: "ffd4766ce085bb10ace2b3ddc91d425ed057eec3bd2ee2d604931a217f1169a2",
+    count: 253,
+    sha256: "d515ebae2dcda48588803c3769ba7f896f337d2c2518922d70b03d1cbbe935fa",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 256,
-    sha256: "3539bf5348d1164893324fb0dc3004f2aafc55eab038087e7d64c17acff52bd4",
+    count: 257,
+    sha256: "46c770d303c7c1336bcbf364db770f84770bae433c321481fdaec642d2c496ac",
   },
   "./adapters/drizzle/sqlite": {
-    count: 253,
-    sha256: "d90d6c4ac973788c26aa871574081677322431a1887d4e70a49c9fae6d9fbe2e",
+    count: 254,
+    sha256: "d6a0de98af563ed4eb20b703ea075d8b37266c061d719e603e69191040733a6b",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 256,
-    sha256: "66f9ed384c586a34ed561e89654df0bb12d96a641166b0f8eee0e0549542b5f4",
+    count: 257,
+    sha256: "4eafeb451f6155468f7efc1cea2f897f2c7616535f3b600e1d477912ddb1fe88",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 256,
-    sha256: "66f9ed384c586a34ed561e89654df0bb12d96a641166b0f8eee0e0549542b5f4",
+    count: 257,
+    sha256: "4eafeb451f6155468f7efc1cea2f897f2c7616535f3b600e1d477912ddb1fe88",
   },
   "./backend": {
     count: 21,
@@ -646,28 +646,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 748,
-    sha256: "c187929ddca1a50181743f0596e48cb227734229b7072a6bb7b6f24cefd2ad8d",
+    count: 749,
+    sha256: "c304435d0da14a9633d332d1e8ceef75fa192b6d7dfeb67a6d9e10b9f1c3f5a6",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 731,
-    sha256: "0b30f3e7aa6c67f472c314186b575333a0112c5eed5006e74f51911693a2742e",
+    count: 732,
+    sha256: "d02b7aca8c5e6617add2fd9f4490a2c4b586740cdfca7c12645205e9521647e3",
   },
   "./postgres/pglite": {
-    count: 728,
-    sha256: "7725262707583bee58057f22f2ac57a2782847cdbc6338bece386bc7d6da3078",
+    count: 729,
+    sha256: "c0e2b712d191e1805a523599dc1e8c401df66db27b04908fc94a28098afae4b7",
   },
   "./profiler": {
-    count: 733,
-    sha256: "bb063f317d9cdebe410899ba3dd9bac2bac52ff7fd591763589536eda7812830",
+    count: 734,
+    sha256: "b37ca8d07e93fc38e1d6d086edc0c0f84df7d1b73612268ee9d5c37f898f92e5",
   },
   "./provenance": {
-    count: 739,
-    sha256: "dc7a03b329be5d96eda158c8096ca1ce67da74ce95a84e478c3fe463e495eb2e",
+    count: 740,
+    sha256: "bbdc084313ebd205f871f93737ffe0866045c412092ad72432d1cbd77f5b2acf",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -679,12 +679,12 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // signature does. +1, only on `./schema` — the sole entrypoint that
   // names `ensureSchema`.
   "./schema": {
-    count: 281,
-    sha256: "b2605158261e8e8a5d0ca0aaf9bffc9b64a081187f39e0ace5d0e4f577353ade",
+    count: 282,
+    sha256: "92a8fa1ad38d8093a5b4fe1d53afdfefc7fe374cbc2e8e4b263e6b04bba58a30",
   },
   "./sqlite/local": {
-    count: 728,
-    sha256: "7725262707583bee58057f22f2ac57a2782847cdbc6338bece386bc7d6da3078",
+    count: 729,
+    sha256: "c0e2b712d191e1805a523599dc1e8c401df66db27b04908fc94a28098afae4b7",
   },
 };
 

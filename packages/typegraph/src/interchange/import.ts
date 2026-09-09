@@ -87,6 +87,7 @@ import {
 } from "../core/types";
 import {
   CardinalityError,
+  CompositionError,
   ConfigurationError,
   DatabaseOperationError,
   DisjointError,
@@ -112,9 +113,9 @@ import {
   assertEdgeRelationsAcyclic,
   edgeKindIsInAcyclicRelation,
 } from "../store/acyclicity";
+import { edgeInsertClaims } from "../store/claims/composition-claims";
 import {
   edgeCardinalityAxisReferences,
-  edgeCardinalityClaims,
   type EdgeCardinalityDeclarations,
 } from "../store/claims/edge-claims";
 import {
@@ -513,7 +514,7 @@ async function importGraphData<G extends GraphDef>(
   // would sail past the check above and reach a transactionless backend
   // unfenced. Answered per graph, before the first chunk, same as the claim
   // question — see `graphOwesLockOnlyFence`.
-  const owedLockOnlyReason = graphOwesLockOnlyFence(graph);
+  const owedLockOnlyReason = graphOwesLockOnlyFence(graph, registry);
   const lockOnlyRefusal =
     owedLockOnlyReason === undefined ? undefined : (
       constraintFenceRefusal({ graphId }, backend, owedLockOnlyReason)
@@ -1815,12 +1816,14 @@ function isDeclaredConstraintRefusal(
   | UniquenessError
   | DisjointError
   | CardinalityError
+  | CompositionError
   | EdgeMatchIdentityConflictError
   | EdgeAcyclicityError {
   return (
     error instanceof UniquenessError ||
     error instanceof DisjointError ||
     error instanceof CardinalityError ||
+    error instanceof CompositionError ||
     error instanceof EdgeMatchIdentityConflictError ||
     error instanceof EdgeAcyclicityError
   );
@@ -3039,7 +3042,7 @@ async function processEdgeSlice(
     // ids already use (`deferred`, processed via `processEdge` below),
     // where the row lands inside the transaction before the next row's
     // probe runs and the database itself carries the in-batch state.
-    if (edgeKindIsInAcyclicRelation(frame.graph, edge.kind)) {
+    if (edgeKindIsInAcyclicRelation(frame.graph, registry, edge.kind)) {
       deferred.push(edge);
       continue;
     }
@@ -3105,7 +3108,7 @@ async function processEdgeSlice(
     // changed under a bulk load and is why the per-row probe above exists for
     // everything that is not concurrent.
     const acceptedWork = accepted.map((prepared) =>
-      importEdgeInsertWork(prepared.params, prepared.declarations),
+      importEdgeInsertWork(registry, prepared.params, prepared.declarations),
     );
     const retryAcceptedIndividually = async (): Promise<void> => {
       for (const prepared of accepted) {
@@ -3113,7 +3116,11 @@ async function processEdgeSlice(
           frame,
           () =>
             frame.session.createEdge(
-              importEdgeInsertWork(prepared.params, prepared.declarations),
+              importEdgeInsertWork(
+                registry,
+                prepared.params,
+                prepared.declarations,
+              ),
             ),
         );
         if (rowResult.ok) {
@@ -3418,13 +3425,14 @@ async function processEdge(
     frame,
     async () => {
       const row = await frame.session.createEdge(
-        importEdgeInsertWork(params, declarations),
+        importEdgeInsertWork(registry, params, declarations),
       );
-      if (edgeKindIsInAcyclicRelation(frame.graph, edge.kind)) {
+      if (edgeKindIsInAcyclicRelation(frame.graph, registry, edge.kind)) {
         await assertEdgeRelationsAcyclic(
           {
             graphId,
             graph: frame.graph,
+            registry,
             schema: frame.schema,
             dialect: frame.dialect,
             target: frame.target,
@@ -3463,15 +3471,13 @@ async function processEdge(
  * session, which is the only handle in this module that reaches a write member.
  */
 function importEdgeInsertWork(
+  registry: KindRegistry,
   params: InsertEdgeParams,
   declarations: EdgeCardinalityDeclarations,
 ): EdgeInsertWork {
   return {
     params,
-    claims: edgeCardinalityClaims(
-      edgeCardinalityAxisReferences(declarations),
-      params,
-    ),
+    claims: edgeInsertClaims(registry, declarations, params),
   };
 }
 

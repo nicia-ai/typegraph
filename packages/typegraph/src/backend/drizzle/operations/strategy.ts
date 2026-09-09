@@ -24,6 +24,7 @@ import type {
   CheckUniqueParams,
   ClaimEdgeCardinalityParams,
   CompareAndSetNodeParams,
+  CompositionClaimScope,
   ContributionMaterializationIdentity,
   CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
@@ -83,6 +84,7 @@ import {
   buildFindNodesByKind,
 } from "./collections";
 import {
+  buildContendedCompositionEdgeRowAudit,
   buildContendedEdgeRowAudit,
   buildContendedUniqueRowAudit,
   buildDisjointOverlapAudit,
@@ -575,6 +577,20 @@ export type CommonOperationStrategy = Readonly<{
     ref: EdgeCardinalityAxisRef,
     edgeKinds: readonly string[],
   ) => SQL;
+  /**
+   * The composition (item E) variant of {@link buildContendedEdgeRowAudit}:
+   * the peer test is the oriented two-arm union
+   * {@link file://./edge-claims.ts claimHolderTerms} folds a write's
+   * liveness predicate over, not exact-kind equality — R4's axis is
+   * relation-wide, so two different realizing edge kinds must be found
+   * contending for one part.
+   */
+  buildContendedCompositionEdgeRowAudit: (
+    graphId: string,
+    ref: EdgeCardinalityAxisRef,
+    holders: CompositionClaimScope["holders"],
+    reportedEdgeKinds: readonly string[],
+  ) => SQL;
   buildDisjointOverlapAudit: (
     graphId: string,
     kinds: readonly [string, string],
@@ -789,9 +805,9 @@ function createCommonOperationStrategy(
       params: UpsertFulltextParams,
       timestamp: string,
     ): readonly SQL[] =>
-      (fulltextStrategy?.buildUpsert(fulltextTable, params, timestamp) ?? []).map(
-        (statement) => toDrizzleSql(statement, dialect),
-      ),
+      (
+        fulltextStrategy?.buildUpsert(fulltextTable, params, timestamp) ?? []
+      ).map((statement) => toDrizzleSql(statement, dialect)),
     buildDeleteFulltext: (params: DeleteFulltextParams): readonly SQL[] =>
       (fulltextStrategy?.buildDelete(fulltextTable, params) ?? []).map(
         (statement) => toDrizzleSql(statement, dialect),
@@ -1239,11 +1255,20 @@ function createCommonOperationStrategy(
       ref: EdgeCardinalityAxisRef,
       edgeKinds: readonly string[],
     ): SQL {
-      return buildContendedEdgeRowAudit(
+      return buildContendedEdgeRowAudit(tables, graphId, ref, edgeKinds);
+    },
+    buildContendedCompositionEdgeRowAudit(
+      graphId: string,
+      ref: EdgeCardinalityAxisRef,
+      holders: CompositionClaimScope["holders"],
+      reportedEdgeKinds: readonly string[],
+    ): SQL {
+      return buildContendedCompositionEdgeRowAudit(
         tables,
         graphId,
         ref,
-        edgeKinds,
+        holders,
+        reportedEdgeKinds,
       );
     },
     buildDisjointOverlapAudit(

@@ -4018,6 +4018,25 @@ export type HardDeleteUniquesByConcreteKindParams = Readonly<{
 }>;
 
 /**
+ * Present only on a composition claim: the reserved relation-wide axis
+ * (item E, `COMPOSITION_RELATION_NAME`), and the ORIENTED realizing edge
+ * kinds whose live rows can hold it — every edge kind the graph's
+ * `partOf`/`hasPart` declarations resolve to, tagged with which endpoint of
+ * that kind carries the part. Absent means the ordinary per-edge-kind
+ * cardinality claim.
+ *
+ * The two arms this carries (`partSide: "from"` vs `"to"`) are what let
+ * {@link file://./drizzle/operations/edge-claims.ts claimHolderTerms} render
+ * the "does a live edge already hold this part" predicate as a cross-kind,
+ * oriented OR — a plain `kind IN (...)` cannot express which endpoint of each
+ * kind is the part.
+ */
+export type CompositionClaimScope = Readonly<{
+  kind: "composition";
+  holders: readonly Readonly<{ edgeKind: string; partSide: "from" | "to" }>[];
+}>;
+
+/**
  * One edge cardinality claim, named by the components its axis, its key and its
  * holder-liveness predicate are all built from.
  *
@@ -4037,6 +4056,7 @@ export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef &
     fromId: string;
     toKind: string;
     toId: string;
+    scope?: CompositionClaimScope;
   }>;
 
 /**
@@ -4061,6 +4081,14 @@ export type PurgeEdgeClaimsParams = Readonly<{
 export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef &
   Readonly<{
     edgeKind: string;
+    /**
+     * Present when this edge kind's declared axis is a composition axis —
+     * see {@link CompositionClaimScope}. The fence-audit reader groups and
+     * queries a composition declaration by its two oriented arms rather than
+     * by exact-kind equality, because R4's axis is relation-wide: two
+     * different realizing edge kinds contend for the SAME row.
+     */
+    scope?: CompositionClaimScope;
   }>;
 
 /**
@@ -4126,6 +4154,20 @@ export type ContendedUniqueRow = Readonly<{
  * One live edge that shares its declared cardinality's population with at least
  * one other live edge. The endpoints are returned whole so the caller can name
  * the claim key through the one builder that renders it.
+ *
+ * `scope` names which declaration's query produced this row — the ordinary
+ * per-edge-kind axis (`undefined`) or the reserved, relation-wide composition
+ * axis (present) — exactly as {@link EdgeCardinalityDeclaration.scope} names
+ * it for the declaration itself. The reader must never re-derive this from
+ * the row's own (possibly dirty) endpoints: which query found the row already
+ * says which axis it contends on.
+ *
+ * Required-but-nullable, not optional: a custom `readConstraintFenceViolationRows`
+ * implementation that omits the field would compile with `scope` silently
+ * `undefined` on every row, misclassifying every genuine composition row as
+ * an ordinary one — the exact drift this field exists to prevent. Spelling
+ * it `| undefined` forces a backend author to state the fact explicitly,
+ * even when the answer is "never composition" (`undefined` for every row).
  */
 export type ContendedEdgeRow = EdgeCardinalityAxisRef &
   Readonly<{
@@ -4135,6 +4177,7 @@ export type ContendedEdgeRow = EdgeCardinalityAxisRef &
     fromId: string;
     toKind: string;
     toId: string;
+    scope: CompositionClaimScope | undefined;
   }>;
 
 /** One node id live under BOTH kinds of a declared disjoint pair. */

@@ -443,14 +443,14 @@ The contract is deliberately narrow:
   end-of-stream check that would not be a second, unbounded implementation
   of the same predicate `importGraphStream` already enforces per row. Use
   `importGraphStream` for a graph with an acyclic edge kind.
-- A composition relation (`partOf` / `hasPart`) always declares its realizing
-  edge's cardinality, so a graph with any composition pair is already
-  rejected by the `cardinality_unsupported` case above — trusted import
-  writes no claim rows, so a hypothetical composition graph loaded this way
-  could otherwise carry a part with two wholes with nothing to refuse it.
-  Today that hole is closed by construction, for the same reason cardinality
-  itself is refused; the general rule is documented here rather than left
-  implicit.
+- A target graph declaring any `partOf`/`hasPart` pair is rejected with
+  `details.reason === "composition_unsupported"`: trusted import writes no
+  composition claim row and does not check the composition acyclicity
+  relation, so a graph loaded this way can carry a part with two live wholes
+  or a part/whole cycle. Use `importGraphStream` for a graph with a
+  composition pair; `store.verifyConstraintFences()` reports either problem
+  after the fact if trusted import is used anyway on data prepared outside
+  TypeGraph.
 - Operational Identity-enabled target stores are rejected with
   `details.reason === "identity_unsupported"`; identity-bearing input is
   rejected with `details.reason === "invalid_stream"`. The trusted session

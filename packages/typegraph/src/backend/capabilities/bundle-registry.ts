@@ -885,7 +885,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     // seed-hop acyclicity conflict detection (`graph-merge/merge.ts`) each
     // build the `SqlSchema` the acyclicity reader needs from the backend's
     // table names, the same way every other schema-shaped reader here does.
-    accesses: 27,
+    // Item E's composition tightening adds one more: the preflight's SEPARATE
+    // D-10 check over the full proposed composition relation builds its own
+    // `SqlSchema` the same way, alongside (not instead of) the ontology
+    // acyclicity probe above — 27 -> 28.
+    accesses: 28,
   },
   fenceSql: {
     kind: "reasoned",

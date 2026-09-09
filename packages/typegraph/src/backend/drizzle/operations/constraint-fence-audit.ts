@@ -21,6 +21,8 @@ import {
   type EdgeCardinalityAxisRef,
   edgeCardinalitySpec,
 } from "../../../store/claims/edge-claims";
+import type { CompositionClaimScope } from "../../types";
+import { claimHolderTerms } from "./edge-claims";
 import { quotedColumn, type Tables } from "./shared";
 
 /** The alias the correlated subquery reads the same relation under. */
@@ -30,10 +32,7 @@ const PEER = "peer";
 const ALLOWED_PAIR_ALIAS = "tg_allowed_pair";
 
 /** Qualifies a column with a relation name, the rendering both dialects read. */
-function qualified(
-  relation: string,
-  column: Readonly<{ name: string }>,
-): SQL {
+function qualified(relation: string, column: Readonly<{ name: string }>): SQL {
   return sql.raw(`"${relation}"."${column.name}"`);
 }
 
@@ -156,6 +155,86 @@ export function buildContendedEdgeRowAudit(
 }
 
 /**
+ * Live composition-scoped edges sharing one PART identity with another live
+ * edge, across every realizing edge kind and orientation.
+ *
+ * `buildContendedEdgeRowAudit`'s peer test (`peer.kind = relation.kind`) is
+ * wrong for R4: the composition claim's axis is relation-wide, so a `Chapter`
+ * attached via `chapterOf` (`partSide: "from"`) and the SAME `Chapter`
+ * attached via `includedIn` (`partSide: "to"`) must be found contending even
+ * though they are different edge kinds in different orientations. The peer
+ * test below IS {@link file://./edge-claims.ts claimHolderTerms} — the same
+ * function the write-path fence calls — given the OUTER row's own qualified
+ * part column instead of a write's bound literal, so this audit and the
+ * fence can never render two different answers to "does this row hold the
+ * axis this claim contends for".
+ *
+ * `ref` fixes which side of the OUTER row is the part (`edgeCardinalitySpec`'s
+ * `keyShape`, always `"from"` or `"to"` for a composition ref — never
+ * `"fromAndTo"`), so only the outer row's own side needs qualifying; the
+ * PEER may be either side, which `claimHolderTerms`' two-arm OR already
+ * expresses.
+ */
+export function buildContendedCompositionEdgeRowAudit(
+  tables: Tables,
+  graphId: string,
+  ref: EdgeCardinalityAxisRef,
+  holders: CompositionClaimScope["holders"],
+  reportedEdgeKinds: readonly string[],
+): SQL {
+  const { edges } = tables;
+  const relation = getTableName(edges);
+  const spec = edgeCardinalitySpec(ref);
+  const outerPartKindColumn =
+    spec.keyShape === "from" ? edges.fromKind : edges.toKind;
+  const outerPartIdColumn =
+    spec.keyShape === "from" ? edges.fromId : edges.toId;
+  const activeOnly =
+    spec.holderLiveness === "liveAndActive" ?
+      sql` AND ${qualified(relation, edges.validTo)} IS NULL`
+    : sql.empty();
+  const peerActiveOnly =
+    spec.holderLiveness === "liveAndActive" ?
+      sql` AND ${qualified(PEER, edges.validTo)} IS NULL`
+    : sql.empty();
+
+  // The composition overload of `claimHolderTerms` (R8): with `partIdentity`
+  // supplied, it needs nothing beyond the axis ref and `scope` — no
+  // fabricated `edgeKind`/`fromKind`/`fromId`/`toKind`/`toId` for a caller
+  // to invent or a reader to check is unread.
+  const peerHolderTerms = claimHolderTerms(
+    PEER,
+    edges,
+    { ...ref, scope: { kind: "composition", holders } },
+    {
+      kind: qualified(relation, outerPartKindColumn),
+      id: qualified(relation, outerPartIdColumn),
+    },
+  );
+
+  return sql`
+    SELECT
+      ${quotedColumn(edges.id)} as edge_id,
+      ${quotedColumn(edges.kind)} as edge_kind,
+      ${quotedColumn(edges.fromKind)} as from_kind,
+      ${quotedColumn(edges.fromId)} as from_id,
+      ${quotedColumn(edges.toKind)} as to_kind,
+      ${quotedColumn(edges.toId)} as to_id
+    FROM ${edges}
+    WHERE ${qualified(relation, edges.graphId)} = ${graphId}
+      AND ${qualified(relation, edges.kind)} IN (${inList(reportedEdgeKinds)})
+      AND ${qualified(relation, edges.deletedAt)} IS NULL${activeOnly}
+      AND EXISTS (
+        SELECT 1 FROM ${edges} AS ${sql.raw(`"${PEER}"`)}
+        WHERE ${qualified(PEER, edges.graphId)} = ${qualified(relation, edges.graphId)}
+          AND ${peerHolderTerms}
+          AND ${qualified(PEER, edges.deletedAt)} IS NULL${peerActiveOnly}
+          AND ${qualified(PEER, edges.id)} <> ${qualified(relation, edges.id)}
+      )
+  `;
+}
+
+/**
  * The ids live under BOTH kinds of one declared disjoint pair.
  *
  * The nodes relation, not the claim relation, for the same reason as the edge
@@ -230,11 +309,11 @@ export function buildMisassignedEdgeEndpointAudit(
     : sql`
       AND NOT EXISTS (
              SELECT 1 FROM (VALUES ${sql.join(
-          allowedPairs.map(
-            ([fromKind, toKind]) => sql`(${fromKind}, ${toKind})`,
-          ),
-          sql`, `,
-        )}) AS ${sql.raw(`"${ALLOWED_PAIR_ALIAS}"`)}
+               allowedPairs.map(
+                 ([fromKind, toKind]) => sql`(${fromKind}, ${toKind})`,
+               ),
+               sql`, `,
+             )}) AS ${sql.raw(`"${ALLOWED_PAIR_ALIAS}"`)}
              WHERE ${sql.raw(`"${ALLOWED_PAIR_ALIAS}".column1`)} = ${qualified(relation, edges.fromKind)}
                AND ${sql.raw(`"${ALLOWED_PAIR_ALIAS}".column2`)} = ${qualified(relation, edges.toKind)}
            )

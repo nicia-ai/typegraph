@@ -612,6 +612,47 @@ operation, or drop `acyclic: true` from the edge and enforce it in
 application code. Retrying is not suggested — a relation too large for the
 budget will not shrink.
 
+### `CompositionError`
+
+Thrown when a `partOf`/`hasPart` write would give a part a second whole. A
+part holds exactly one whole across **every** declared composition pair,
+enforced by a single reserved claim axis — two different realizing edge
+kinds (or two orientations of one part kind) contend for the same row.
+
+```typescript
+// If Chapter partOf Book (via chapterOf) and Chapter partOf Anthology
+// (via includedIn) are both declared:
+await store.edges.chapterOf.create(chapter, book, {});
+
+try {
+  await store.edges.includedIn.create(chapter, anthology, {});
+} catch (error) {
+  if (error instanceof CompositionError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { partKind: "Chapter", partId: "<chapter-id>", wholeKind: "Anthology",
+    //   wholeId: "<anthology-id>", edgeKind: "includedIn",
+    //   incumbentEdgeId: "<the chapterOf edge's id>" }
+    console.log(error.suggestion);
+    // "Detach the part from its current whole before attaching it to a new
+    //  one, or reparent it through an update instead of a second create."
+  }
+}
+```
+
+`details.incumbentEdgeId` names the edge that already holds the axis — the
+one fact the claim statement's own result reports. It never names the
+incumbent whole's kind or id: reading that would be a second query this
+refusal path does not make. Run `store.verifyConstraintFences()` (the
+`family: "composition"` entries) to find every part already holding more
+than one whole.
+
+The composition claim rides `typegraph_edge_claims`, the same relation
+`CardinalityError`'s claims do. A deployment initialized before that
+relation existed raises `ConfigurationError` (`EDGE_CLAIM_RELATION_MISSING`)
+on the first `partOf`/`hasPart` write and must be migrated under owner
+credentials before declaring one.
+
 ### `UniquenessError`
 
 Thrown when a uniqueness constraint is violated.
@@ -858,6 +899,7 @@ cannot fence constrained writes" is unusable advice while "your
 | --- | --- |
 | `edgeAcyclicity` | Creating, bulk-creating, or resurrecting an edge whose kind declares `acyclic: true`. No claim row backs this axis — a cycle spans a whole reachable subgraph, not a tuple — so it is fenced by the per-graph lock alone. |
 | `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` (`one`, `unique`, `oneActive`) or `targetCardinality` (`one`, `oneActive`) constrains it, on either endpoint. |
+| `edgeComposition` | Creating or resurrecting an edge that realizes a declared `partOf`/`hasPart` pair. Backed by the same `typegraph_edge_claims` relation as `edgeCardinality` — reported in preference to it, so the refusal names the composition declaration rather than a generic cardinality one. |
 | `edgeMatchKeyConvergence` | Endpoint convergence that requires the portable transaction-scoped path: an undeclared dynamic `matchOn`, constrained cardinality, update or temporal options, derived/custom backends, or schema-aware resurrection of a tombstoned winner. A schema-declared durable `matchIdentity` removes this fence from eligible live single-item and bulk create/found paths. |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
 | `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind. A `scope: "kind"` unique is backed by the uniques primary key and needs no fence. |
@@ -1296,14 +1338,17 @@ try {
 ```
 
 The `details.reason` value `"ontology-tightening-violated"` means an ontology
-change — adding `disjointWith`, `subClassOf`, or `equivalentTo`, or
-removing `subClassOf` or `equivalentTo` — is false against rows
-that already exist. `details.changes` carries only the ontology changes in
-this diff that required a data check (a `safe` or `breaking` change in the
-same commit is never included, even one alongside the change that was
-refused); `details.violations` carries the offending rows in exactly the
-shape `store.verifyConstraintFences()` returns. Resolve those rows (delete
-them, change their kind, or narrow the ontology change) and retry. See
+change — adding `disjointWith`, `subClassOf`, `equivalentTo`, or
+`partOf`/`hasPart`, or removing `subClassOf` or `equivalentTo` — is false
+against rows that already exist. `details.changes` carries only the ontology
+changes in this diff that required a data check (a `safe` or `breaking`
+change in the same commit is never included, even one alongside the change
+that was refused); `details.violations` carries the offending rows in
+exactly the shape `store.verifyConstraintFences()` returns — including
+`family: "composition"` entries when a newly-declared `partOf`/`hasPart`
+pair finds a part already holding two live wholes, or a cycle in the
+proposed composition relation. Resolve those rows (delete them, change
+their kind, or narrow the ontology change) and retry. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
 for what each meta-edge checks.
 
@@ -1640,6 +1685,7 @@ try {
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
 | `EDGE_ACYCLICITY_ERROR` | `EdgeAcyclicityError` | constraint | A write would give a declared-acyclic edge relation a cycle |
 | `EDGE_ACYCLICITY_INDETERMINATE` | `EdgeAcyclicityIndeterminateError` | system | The engine cut an acyclicity search short before it could prove or refute a cycle |
+| `COMPOSITION_WHOLE_OCCUPIED` | `CompositionError` | constraint | A `partOf`/`hasPart` write would give a part a second whole |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |

@@ -518,6 +518,8 @@ const CONSTRAINT_FENCE_ADVICE = {
     "drop `acyclic: true` from the edge and detect cycles in application code",
   edgeCardinality:
     'declare the edge `cardinality: "many"` and enforce the limit in application code',
+  edgeComposition:
+    "drop the `partOf`/`hasPart` declaration realized by this edge kind and enforce the single-whole rule in application code",
   edgeMatchKeyConvergence:
     "use `create` with a caller-chosen id, whose uniqueness the edges primary key enforces, instead of `getOrCreateByEndpoints`",
   nodeDisjointness:

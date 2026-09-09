@@ -33,11 +33,15 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-const REASONED_FLOOR = 94;
+// Item E's composition tightening adds one more `tableNames` access
+// (`schema/tightening-preflight.ts`'s separate D-10 check over the full
+// proposed composition relation builds its own `SqlSchema`, alongside the
+// ontology acyclicity probe's) — 94 -> 95.
+const REASONED_FLOOR = 95;
 const DEFERRED_LIVE_TOTAL = 213;
 const DEFERRED_DECLARED_TOTAL = 218;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 321;
+const TOTAL_ROW_COUNT = 322;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:160#executeStatement",
   "backend/migrate-recorded-time.ts:167#executeStatement",

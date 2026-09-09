@@ -21,6 +21,7 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { D1_MAX_BIND_PARAMETERS } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
+import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
 import { resolveAtomicEdgeConvergenceExecutor } from "../src/store/operations/atomic-mutation-program";
@@ -48,6 +49,8 @@ const durableGraph = defineGraph({
     },
   },
 });
+
+const durableGraphRegistry = buildKindRegistry(durableGraph);
 
 const evolvedGraph = defineGraph({
   id: durableGraph.id,
@@ -204,6 +207,7 @@ describe("durable convergence program ratchets", () => {
       resolveAtomicEdgeConvergenceExecutor({
         backend,
         graph: durableGraph,
+        registry: durableGraphRegistry,
         schemaVersion: 1,
         historyEnabled: false,
         revisionTrackingEnabled: false,
@@ -228,6 +232,7 @@ describe("durable convergence program ratchets", () => {
       resolveAtomicEdgeConvergenceExecutor({
         backend,
         graph: durableGraph,
+        registry: durableGraphRegistry,
         schemaVersion: 1,
         historyEnabled: false,
         revisionTrackingEnabled: false,
@@ -242,6 +247,7 @@ describe("durable convergence program ratchets", () => {
       resolveAtomicEdgeConvergenceExecutor({
         backend,
         graph: durableGraph,
+        registry: durableGraphRegistry,
         schemaVersion: 1,
         historyEnabled: false,
         revisionTrackingEnabled: false,
