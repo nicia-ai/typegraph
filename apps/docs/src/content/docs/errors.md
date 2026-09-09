@@ -380,6 +380,34 @@ environment, and stale-plan failures retain their existing system errors.
 Constraint failure is atomic: neither graph writes nor merge provenance records
 survive.
 
+### `AcyclicityMergeConflictError`
+
+Detected at merge **plan time**, alongside `IdentityMergeConflictError`, when
+the resolved plan's edge writes — after canonicalization and repointing,
+layered onto the target's current live edges — would close a cycle in a
+declared-`acyclic: true` relation. This includes a cycle formed entirely from
+edges the plan itself proposes, with nothing live on the target yet.
+
+```typescript
+import {
+  AcyclicityMergeConflictError,
+  isErr,
+  merge,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, branches);
+if (isErr(result) && result.error instanceof AcyclicityMergeConflictError) {
+  console.log(result.error.code); // "GRAPH_MERGE_ACYCLICITY_CONFLICT"
+  console.log(result.error.details.relation); // the declared-acyclic relation
+  console.log(result.error.details.edges); // every offending edge on the cycle
+}
+```
+
+A cycle that only arises from a write racing the plan-time check (which holds
+no per-graph lock, since planning does no write) is not caught here — the
+unchanged apply-time write path still refuses it as
+`MergeConstraintConflictError` wrapping `EdgeAcyclicityError`.
+
 ### Merge plan and evidence errors
 
 The reviewable merge lifecycle also returns errors in its `Result` arm. It does
@@ -1543,6 +1571,7 @@ try {
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
+| `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |

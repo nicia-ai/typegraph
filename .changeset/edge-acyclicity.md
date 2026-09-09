@@ -36,6 +36,22 @@ path. `ConstraintFenceViolation` is now a four-member union whose `target`
 is present only on the claim-backed families, so consumers must narrow on
 `family` before reading it.
 
+Graph-merge catches a would-be cycle earlier, at PLAN time: `merge()`,
+`mergeAgainstBase()`, `planMerge()`, `planMergeIncremental()`, and
+`mergeIncremental()` all run the same reachability check over the resolved
+plan's projected edge writes (after canonicalization and repointing), layered
+onto the target's current live edges — including a cycle formed entirely from
+rows the plan itself proposes, with nothing live yet, which the reachability
+walk did not previously have a way to see. A violation is now the new typed
+`AcyclicityMergeConflictError` (code `GRAPH_MERGE_ACYCLICITY_CONFLICT`),
+carrying the offending relation name and every edge on the cycle
+(`edgeId`/`edgeKind`/`fromKind`/`fromId`/`toKind`/`toId`) in `details`, so a
+`planMerge()` review surfaces the conflict before anything is written. A
+cycle that only appears from a write racing the plan (the preview takes no
+per-graph write lock) is still caught by the unchanged apply-time write-path
+fence and reported as `MergeConstraintConflictError` wrapping
+`EdgeAcyclicityError`, exactly as before.
+
 ### Breaking changes
 
 - `ConstraintFenceViolation` gains an `edgeAcyclicity` member alongside the
@@ -44,6 +60,13 @@ is present only on the claim-backed families, so consumers must narrow on
   first.
 - `EdgeIntrospection.acyclic` is now a required `boolean` field (`false` for
   every edge kind that does not declare `acyclic: true`).
+- A merge whose resolved plan would close a cycle now fails with the new
+  `AcyclicityMergeConflictError` at plan time rather than
+  `MergeConstraintConflictError` at apply time. Code that specifically
+  catches `MergeConstraintConflictError` (or matches on
+  `cause.name === "EdgeAcyclicityError"`) to detect this case must also
+  handle `AcyclicityMergeConflictError`; the apply-time shape still occurs
+  for a cycle that only appears from a write racing the plan.
 
 ### Upgrade notes
 
