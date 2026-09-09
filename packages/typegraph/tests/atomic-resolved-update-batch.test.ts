@@ -526,6 +526,7 @@ describe("atomic resolved update batches", () => {
     const common = {
       backend: budgetedBackend,
       graph,
+      registry: buildKindRegistry(graph),
       schemaVersion: 1,
       historyEnabled: false,
       revisionTrackingEnabled: false,

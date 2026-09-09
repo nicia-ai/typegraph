@@ -297,8 +297,8 @@ const MATRIX: readonly MatrixRow[] = [
     to: "Y",
     via: "edgeA",
     edges: EDGES_FOR_COMPOSITION,
-    expectedSeverity: "safe",
-    expectedProbeKinds: [],
+    expectedSeverity: "warning",
+    expectedProbeKinds: ["compositionSingleWhole"],
   },
   {
     metaEdge: "partOf",
@@ -307,7 +307,7 @@ const MATRIX: readonly MatrixRow[] = [
     to: "Y",
     via: "edgeA",
     edges: EDGES_FOR_COMPOSITION,
-    expectedSeverity: "safe",
+    expectedSeverity: "breaking",
     expectedProbeKinds: [],
   },
   {
@@ -317,8 +317,8 @@ const MATRIX: readonly MatrixRow[] = [
     to: "Y",
     via: "edgeA",
     edges: EDGES_FOR_COMPOSITION,
-    expectedSeverity: "safe",
-    expectedProbeKinds: [],
+    expectedSeverity: "warning",
+    expectedProbeKinds: ["compositionSingleWhole"],
   },
   {
     metaEdge: "hasPart",
@@ -327,7 +327,7 @@ const MATRIX: readonly MatrixRow[] = [
     to: "Y",
     via: "edgeA",
     edges: EDGES_FOR_COMPOSITION,
-    expectedSeverity: "safe",
+    expectedSeverity: "breaking",
     expectedProbeKinds: [],
   },
   {

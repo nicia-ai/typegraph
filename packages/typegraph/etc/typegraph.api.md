@@ -667,6 +667,7 @@ type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef & Readonly<{
     fromId: string;
     toKind: string;
     toId: string;
+    scope?: CompositionClaimScope;
 }>;
 
 // @public
@@ -815,6 +816,15 @@ export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 ext
 export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 extends AliasMap, A3 extends AliasMap, A4 extends AliasMap, A5 extends AliasMap, E1 extends EdgeAliasMap, E2 extends EdgeAliasMap, E3 extends EdgeAliasMap, E4 extends EdgeAliasMap, E5 extends EdgeAliasMap, R1 extends RecursiveAliasMap, R2 extends RecursiveAliasMap, R3 extends RecursiveAliasMap, R4 extends RecursiveAliasMap, R5 extends RecursiveAliasMap>(f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>, f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>, f3: QueryFragment<G, A3, A4, E3, E4, R3, R4>, f4: QueryFragment<G, A4, A5, E4, E5, R4, R5>): QueryFragment<G, A1, A5, E1, E5, R1, R5>;
 
 // @public
+export type CompositionClaimScope = Readonly<{
+    kind: "composition";
+    holders: readonly Readonly<{
+        edgeKind: string;
+        partSide: "from" | "to";
+    }>[];
+}>;
+
+// @public
 export class CompositionCycleError extends TypeGraphError {
     constructor(details: CompositionCycleErrorDetails, options?: {
         cause?: unknown;
@@ -829,6 +839,25 @@ export type CompositionCycleErrorDetails = Readonly<{
     wholeId: string;
     revisitedKind: string;
     revisitedId: string;
+}>;
+
+// @public
+export class CompositionError extends TypeGraphError {
+    constructor(details: CompositionErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: CompositionErrorDetails;
+}
+
+// @public
+export type CompositionErrorDetails = Readonly<{
+    partKind: string;
+    partId: string;
+    wholeKind: string;
+    wholeId: string;
+    edgeKind: string;
+    incumbentEdgeId?: string;
 }>;
 
 // @public
@@ -898,6 +927,10 @@ export type ConstraintFenceViolation = Readonly<{
     target: ClaimTarget;
     edgeIds: readonly string[];
 }> | Readonly<{
+    family: "composition";
+    target: ClaimTarget;
+    edgeIds: readonly string[];
+}> | Readonly<{
     family: "edgeEndpointAssignability";
     edgeKind: string;
     allowedPairs: readonly (readonly [string, string])[];
@@ -925,6 +958,7 @@ type ContendedEdgeRow = EdgeCardinalityAxisRef & Readonly<{
     fromId: string;
     toKind: string;
     toId: string;
+    scope: CompositionClaimScope | undefined;
 }>;
 
 // @public
@@ -1916,6 +1950,7 @@ export type EdgeCardinalityAxisRef = Readonly<{
 // @public
 export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
     edgeKind: string;
+    scope?: CompositionClaimScope;
 }>;
 
 // @public
@@ -5419,6 +5454,9 @@ export type OntologyDataProbe = Readonly<{
 }> | Readonly<{
     kind: "edgeAcyclicity";
     edgeKinds: readonly string[];
+}> | Readonly<{
+    kind: "compositionSingleWhole";
+    edgeKinds: readonly string[];
 }>;
 
 // @public (undocumented)
@@ -7874,7 +7912,7 @@ export class TrustedImportError extends TypeGraphError {
 }
 
 // @public
-export type TrustedImportErrorReason = "acyclicity_unsupported" | "backend_unsupported" | "cardinality_unsupported" | "database_not_empty" | "fulltext_unsupported" | "history_unsupported" | "identity_unsupported" | "invalid_stream" | "revision_tracking_unsupported" | "uniqueness_unsupported" | "vector_unsupported";
+export type TrustedImportErrorReason = "acyclicity_unsupported" | "backend_unsupported" | "cardinality_unsupported" | "composition_unsupported" | "database_not_empty" | "fulltext_unsupported" | "history_unsupported" | "identity_unsupported" | "invalid_stream" | "revision_tracking_unsupported" | "uniqueness_unsupported" | "vector_unsupported";
 
 // @public
 export type TrustedImportOptions = Readonly<{

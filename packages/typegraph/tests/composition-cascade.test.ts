@@ -739,12 +739,17 @@ describe("composition cascade — delete", () => {
     );
 
     // `one` (holderLiveness "live") never frees the slot on an ended window —
-    // a second live edge from the same holder is still a cardinality
-    // conflict, proving a `one` composition edge cannot be reparented behind
-    // its whole's back without deleting the row outright.
+    // a second live edge from the same holder is still a conflict, proving a
+    // `one` composition edge cannot be reparented behind its whole's back
+    // without deleting the row outright. `episodeOf` is BOTH a declared
+    // `cardinality: "one"` edge and a composition (`partOf`) realizing edge,
+    // and the composition claim's write-fence priority (composition >
+    // cardinality) reports its own, more specific `CompositionError` rather
+    // than the generic `CardinalityError` an edge with no composition
+    // declaration would raise for the identical "still held" liveness rule.
     await expect(
       store.edges.episodeOf.create(episode, podcastB, {}),
-    ).rejects.toThrow(matchingObject({ name: "CardinalityError" }));
+    ).rejects.toThrow(matchingObject({ name: "CompositionError" }));
 
     // Deleting the FORMER whole still cascades Episode away: the ended row
     // counts unconditionally under `population: "one"`.
@@ -893,12 +898,18 @@ describe("composition cascade — to-oriented (hasPart) and mixed-orientation cl
     );
 
     // `one` never frees the slot on an ended window — a second live edge
-    // targeting the same Track is still a cardinality conflict, proving a
-    // `one` composition edge cannot be reparented behind its whole's back
-    // without deleting the row outright.
+    // targeting the same Track is still a conflict, proving a `one`
+    // composition edge cannot be reparented behind its whole's back without
+    // deleting the row outright. `hasTrack` is BOTH a declared
+    // `targetCardinality: "one"` edge and a composition (`hasPart`)
+    // realizing edge, and the composition claim's write-fence priority
+    // (composition > cardinality) reports its own, more specific
+    // `CompositionError` rather than the generic `CardinalityError` an edge
+    // with no composition declaration would raise for the identical "still
+    // held" liveness rule.
     await expect(
       store.edges.hasTrack.create(albumB, track, {}),
-    ).rejects.toThrow(matchingObject({ name: "CardinalityError" }));
+    ).rejects.toThrow(matchingObject({ name: "CompositionError" }));
 
     // Deleting the FORMER whole still cascades Track away: the ended row
     // counts unconditionally under `targetCardinality: "one"`.

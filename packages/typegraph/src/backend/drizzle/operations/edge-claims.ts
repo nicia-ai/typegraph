@@ -1,6 +1,7 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
+  type EdgeCardinalityAxisRef,
   edgeCardinalityAxisName,
   edgeCardinalityClaimTarget,
   type EdgeCardinalitySpec,
@@ -9,6 +10,7 @@ import {
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
   ClaimEdgeCardinalityParams,
+  CompositionClaimScope,
   InsertEdgeParams,
   PurgeEdgeClaimsParams,
   SchemaWriteFenceParams,
@@ -252,6 +254,143 @@ function specOf(
     throw new TypeError("A cardinality group is never empty.");
   }
   return edgeCardinalitySpec(first);
+}
+
+/**
+ * The endpoint identity {@link claimHolderTerms} needs from `params` when it
+ * has no `partIdentity` to fall back on: an ordinary claim's own
+ * `edgeKind` (read on that branch) plus the full endpoint tuple a real
+ * `ClaimEdgeCardinalityParams` always carries. This is the shape the write
+ * path passes through unchanged; a caller that instead supplies
+ * `partIdentity` (today, only the audit —
+ * {@link file://../../drizzle/operations/constraint-fence-audit.ts
+ * buildContendedCompositionEdgeRowAudit}) needs none of these fields, which
+ * is exactly what the second overload below states.
+ */
+type BoundClaimHolderIdentity = EdgeCardinalityAxisRef &
+  Readonly<{
+    edgeKind: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    scope?: CompositionClaimScope;
+  }>;
+
+/**
+ * THE rows that can hold this claim: which edge kinds, and — for a
+ * composition claim — on which endpoint. The one owner of that decision, so
+ * {@link competingLiveEdgePredicate}, {@link recordedClaimHolderIsLivePredicate}
+ * and the read-only audit's correlated peer test
+ * ({@link file://../../drizzle/operations/constraint-fence-audit.ts
+ * buildContendedCompositionEdgeRowAudit}) cannot render two different
+ * answers to "does this row hold the axis this claim contends for".
+ *
+ * `scope === undefined` (the ordinary case, unchanged from before item E):
+ * `kind = params.edgeKind`, plus the endpoint terms {@link endpointTerms}
+ * renders off `keyShape`.
+ *
+ * `scope !== undefined` (a composition claim, R4): the claim's key is the
+ * PART's identity regardless of which orientation wrote it, so a holder is
+ * any row of ANY holder edge kind whose PART-side endpoint matches that
+ * identity — an OR over the two oriented arms `scope.holders` carries:
+ * `kind IN (fromSideKinds) AND from_kind/from_id = the part` for a
+ * `partSide: "from"` holder, `kind IN (toSideKinds) AND to_kind/to_id = the
+ * part` for a `partSide: "to"` one. This is what lets `chapterOf`
+ * (`Chapter -> Book`, part `from`) and `includedIn` (`Anthology -> Chapter`,
+ * part `to`) contend for the SAME Chapter's one whole even though they are
+ * different edge kinds in different orientations.
+ *
+ * `partIdentity` overrides where the part's own kind/id come from: omitted
+ * (every write-path caller), they are `params`' bound `fromKind`/`fromId` or
+ * `toKind`/`toId` literal; the correlated audit instead passes the OUTER
+ * row's own qualified columns, so the peer test reads "matches the part THIS
+ * row names" rather than a literal captured ahead of time. The two overloads
+ * below are what let the audit pass a `scope`-only params object with no
+ * `edgeKind`/`fromKind`/`fromId`/`toKind`/`toId` at all, rather than
+ * fabricating placeholder values for fields this branch never reads (R8):
+ * the compiler, not a comment, is what proves they are unread.
+ */
+export function claimHolderTerms(
+  edgesName: string,
+  edges: Tables["edges"],
+  params: BoundClaimHolderIdentity,
+): SQL;
+export function claimHolderTerms(
+  edgesName: string,
+  edges: Tables["edges"],
+  params: EdgeCardinalityAxisRef & Readonly<{ scope: CompositionClaimScope }>,
+  partIdentity: Readonly<{ kind: SQL; id: SQL }>,
+): SQL;
+export function claimHolderTerms(
+  edgesName: string,
+  edges: Tables["edges"],
+  params: EdgeCardinalityAxisRef &
+    Readonly<{
+      scope?: CompositionClaimScope;
+    }> &
+    Partial<
+      Pick<
+        BoundClaimHolderIdentity,
+        "edgeKind" | "fromKind" | "fromId" | "toKind" | "toId"
+      >
+    >,
+  partIdentity?: Readonly<{ kind: SQL; id: SQL }>,
+): SQL {
+  const spec = edgeCardinalitySpec(params);
+  if (params.scope === undefined) {
+    // The first overload guarantees a bound identity whenever `scope` is
+    // absent — the ordinary claim shape.
+    const bound = params as BoundClaimHolderIdentity;
+    return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, bound)}`;
+  }
+  // No `partIdentity` means the first overload matched: a real write-path
+  // composition claim, whose `fromKind`/`fromId`/`toKind`/`toId` are genuine
+  // bound values. Cast once here rather than at each field read below.
+  const bound = params as BoundClaimHolderIdentity;
+  const partKind =
+    partIdentity?.kind ??
+    sql`${spec.keyShape === "from" ? bound.fromKind : bound.toKind}`;
+  const partId =
+    partIdentity?.id ??
+    sql`${spec.keyShape === "from" ? bound.fromId : bound.toId}`;
+  const fromSideKinds = params.scope.holders
+    .filter((holder) => holder.partSide === "from")
+    .map((holder) => holder.edgeKind);
+  const toSideKinds = params.scope.holders
+    .filter((holder) => holder.partSide === "to")
+    .map((holder) => holder.edgeKind);
+  const arms: SQL[] = [];
+  if (fromSideKinds.length > 0) {
+    arms.push(sql`
+      (
+            ${qualified(edgesName, edges.kind)} IN (${sql.join(
+              fromSideKinds.map((kind) => sql`${kind}`),
+              sql`, `,
+            )})
+            AND ${qualified(edgesName, edges.fromKind)} = ${partKind}
+            AND ${qualified(edgesName, edges.fromId)} = ${partId}
+          )
+    `);
+  }
+  if (toSideKinds.length > 0) {
+    arms.push(sql`
+      (
+            ${qualified(edgesName, edges.kind)} IN (${sql.join(
+              toSideKinds.map((kind) => sql`${kind}`),
+              sql`, `,
+            )})
+            AND ${qualified(edgesName, edges.toKind)} = ${partKind}
+            AND ${qualified(edgesName, edges.toId)} = ${partId}
+          )
+    `);
+  }
+  // A composition claim always names its own edge kind on the matching side
+  // (`compositionClaim`, `src/store/claims/composition-claims.ts`), so
+  // `arms` is never empty in practice; the fallback keeps this total rather
+  // than emitting invalid SQL for a hand-built params object with no
+  // holders.
+  return arms.length === 0 ? sql`FALSE` : sql`(${sql.join(arms, sql` OR `)})`;
 }
 
 /**
@@ -699,8 +838,9 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
  *
  * The `valid_to IS NULL` term and the endpoint terms are not spelled here:
  * `holderLiveness` and `keyShape` are read from {@link edgeCardinalitySpec},
- * the same table the TypeScript probe reads, and {@link endpointTerms}
- * renders the from- and/or to-terms `keyShape` names.
+ * the same table the TypeScript probe reads, and {@link claimHolderTerms}
+ * renders the holder predicate itself — the one seam a new `keyShape` or a
+ * new claim scope has to extend.
  */
 export function buildTakeOverEdgeClaim(
   tables: Tables,
@@ -712,6 +852,12 @@ export function buildTakeOverEdgeClaim(
   const spec = edgeCardinalitySpec(params);
   const target = edgeCardinalityClaimTarget(params);
 
+  const edgesName = getTableName(edges);
+  const activeTerm =
+    spec.holderLiveness === "liveAndActive" ?
+      sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
+    : sql``;
+
   return sql`
     UPDATE ${edgeClaims}
     SET ${quotedColumn(edgeClaims.edgeId)} = ${params.edgeId},
@@ -722,7 +868,10 @@ export function buildTakeOverEdgeClaim(
       AND ${qualified(claimsName, edgeClaims.edgeId)} <> ${params.edgeId}
       AND NOT EXISTS (
         SELECT 1 FROM ${edges}
-        WHERE ${recordedClaimHolderIsLivePredicate(tables, boundClaimValues(params), spec)}
+        WHERE ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
+          AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
+          AND ${qualified(edgesName, edges.deletedAt)} IS NULL
+          AND ${claimHolderTerms(edgesName, edges, params)}${activeTerm}
       )
     RETURNING ${quotedColumn(edgeClaims.edgeId)} as holder_edge_id
   `;

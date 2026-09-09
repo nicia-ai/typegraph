@@ -34,6 +34,7 @@ import { type GraphBackend } from "../../backend/types";
 export const CONSTRAINT_FENCE_REASONS = [
   "edgeAcyclicity",
   "edgeCardinality",
+  "edgeComposition",
   "edgeMatchKeyConvergence",
   "nodeDisjointness",
   "nodeUniquenessClaim",
@@ -80,6 +81,12 @@ type ConstraintFenceBacking = "uniques" | "edgeClaims" | "lockOnly";
 export const CONSTRAINT_FENCE_BACKING = {
   edgeAcyclicity: "lockOnly",
   edgeCardinality: "edgeClaims",
+  // The composition claim (item E) is an ordinary `typegraph_edge_claims` row
+  // at the reserved relation-wide axis (`COMPOSITION_RELATION_NAME`) — same
+  // relation, same key shape, as `edgeCardinality`. It is its own reason
+  // rather than folding into `edgeCardinality` so a backend that cannot hold
+  // the fence gets advice naming the `partOf`/`hasPart` declaration.
+  edgeComposition: "edgeClaims",
   edgeMatchKeyConvergence: "lockOnly",
   nodeDisjointness: "uniques",
   nodeUniquenessClaim: "uniques",

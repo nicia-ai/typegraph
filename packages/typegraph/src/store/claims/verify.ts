@@ -61,6 +61,7 @@ import {
   uniquenessAxisOfKinds,
   uniquenessClaimTarget,
 } from "./axis";
+import { compositionEdgeCardinalityDeclarations } from "./composition-claims";
 import {
   edgeCardinalityAxisReferences,
   edgeCardinalityClaimTarget,
@@ -87,6 +88,19 @@ export type ConstraintFenceViolation =
     }>
   | Readonly<{
       family: "edgeCardinality";
+      target: ClaimTarget;
+      edgeIds: readonly string[];
+    }>
+  | Readonly<{
+      /**
+       * Item E: two or more live edges — of any realizing kind, in either
+       * orientation — hold the SAME part's reserved composition axis. Its
+       * own family rather than folding into `edgeCardinality`, even though
+       * the row shape is identical, because the axis it names is R4's
+       * relation-wide one, not a per-edge-kind one, and a caller branching on
+       * `family` should not have to inspect `target.axis` to tell them apart.
+       */
+      family: "composition";
       target: ClaimTarget;
       edgeIds: readonly string[];
     }>
@@ -300,6 +314,17 @@ function disjointnessViolations(
 /**
  * Live edges folded onto the cardinality axis each one would claim, reported
  * where an axis carries more than one holder.
+ *
+ * A row's `scope` — set by the backend loop that queried it, against either
+ * the ordinary per-edge-kind axis or the reserved, relation-wide composition
+ * axis — is what decides the family and the target, never a re-derivation
+ * from the row's own endpoints. Re-deriving it here (via `compositionClaim`)
+ * used to fold EVERY row of a composition-realizing edge kind onto the
+ * composition axis regardless of which query produced it — collapsing that
+ * kind's ordinary-axis violations into the composition group — and to throw
+ * on dirty data whose part-side endpoint kind was not a declared part kind.
+ * The row already knows which query found it; asking the registry again is a
+ * second, disagreeing spelling of the same decision.
  */
 function edgeCardinalityViolations(
   rows: readonly ContendedEdgeRow[],
@@ -307,21 +332,40 @@ function edgeCardinalityViolations(
 ): readonly ConstraintFenceViolation[] {
   const byAxis = new Map<
     string,
-    Readonly<{ target: ClaimTarget; edgeIds: string[] }>
+    Readonly<{
+      target: ClaimTarget;
+      family: "edgeCardinality" | "composition";
+      edgeIds: Set<string>;
+    }>
   >();
   for (const row of rows) {
-    const target = edgeCardinalityClaimTarget({ ...row, graphId });
+    // `scope` is split out and re-added only when defined: `row.scope` is a
+    // required-but-nullable field (R9), so a bare `...row` would spell
+    // `scope: undefined` explicitly into the object literal below, which
+    // `exactOptionalPropertyTypes` refuses for `ClaimEdgeCardinalityParams`'
+    // OPTIONAL `scope`.
+    const { scope, ...rest } = row;
+    const target = edgeCardinalityClaimTarget({
+      ...rest,
+      graphId,
+      ...(scope === undefined ? {} : { scope }),
+    });
+    const family = row.scope === undefined ? "edgeCardinality" : "composition";
     const identity = targetIdentity(target);
-    const entry = byAxis.get(identity) ?? { target, edgeIds: [] };
-    entry.edgeIds.push(row.edgeId);
+    const entry = byAxis.get(identity) ?? {
+      target,
+      family,
+      edgeIds: new Set<string>(),
+    };
+    entry.edgeIds.add(row.edgeId);
     byAxis.set(identity, entry);
   }
   return [...byAxis.values()]
-    .filter((entry) => entry.edgeIds.length > 1)
+    .filter((entry) => entry.edgeIds.size > 1)
     .map((entry) => ({
-      family: "edgeCardinality" as const,
+      family: entry.family,
       target: entry.target,
-      edgeIds: entry.edgeIds.toSorted((left, right) =>
+      edgeIds: [...entry.edgeIds].toSorted((left, right) =>
         compareStrings(left, right),
       ),
     }));
@@ -409,13 +453,16 @@ function fenceDeclarations(
       (registration.unique ?? []).map((constraint) => constraint.name),
     ),
   );
-  const edgeCardinalities = Object.entries(graph.edges).flatMap(
-    ([edgeKind, registration]): readonly EdgeCardinalityDeclaration[] =>
-      edgeCardinalityAxisReferences(registration).map((ref) => ({
-        ...ref,
-        edgeKind,
-      })),
-  );
+  const edgeCardinalities: readonly EdgeCardinalityDeclaration[] = [
+    ...Object.entries(graph.edges).flatMap(
+      ([edgeKind, registration]): readonly EdgeCardinalityDeclaration[] =>
+        edgeCardinalityAxisReferences(registration).map((ref) => ({
+          ...ref,
+          edgeKind,
+        })),
+    ),
+    ...compositionEdgeCardinalityDeclarations(registry),
+  ];
   const edgeEndpointKinds = buildGraphEdgeKindFacts(graph.edges);
   const edgeEndpointAllowances = [...edgeEndpointKinds.entries()]
     .map(([edgeKind, endpoints]) =>
@@ -551,12 +598,16 @@ export async function verifyConstraintFences(
     registry: context.registry,
   });
 
-  const acyclicRelations = acyclicEdgeRelations(context.graph);
+  const acyclicRelations = acyclicEdgeRelations(
+    context.graph,
+    context.registry,
+  );
   if (acyclicRelations.length === 0) return claimBacked;
 
   const acyclicity = await readEdgeAcyclicityViolations(
     {
       graphId: context.graphId,
+      registry: context.registry,
       schema: createSqlSchema(context.backend.tableNames),
       dialect: getDialect(context.backend.dialect),
       target: context.backend,

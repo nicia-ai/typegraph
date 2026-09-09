@@ -124,6 +124,7 @@ type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef & Readonly<{
     fromId: string;
     toKind: string;
     toId: string;
+    scope?: CompositionClaimScope;
 }>;
 
 // @public
@@ -192,6 +193,15 @@ type CompiledStatementSql = IntentSql<"statement">;
 type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
+type CompositionClaimScope = Readonly<{
+    kind: "composition";
+    holders: readonly Readonly<{
+        edgeKind: string;
+        partSide: "from" | "to";
+    }>[];
+}>;
+
+// @public
 type CompositionPartSide = "from" | "to";
 
 // @public
@@ -216,6 +226,7 @@ type ContendedEdgeRow = EdgeCardinalityAxisRef & Readonly<{
     fromId: string;
     toKind: string;
     toId: string;
+    scope: CompositionClaimScope | undefined;
 }>;
 
 // @public
@@ -3840,6 +3851,7 @@ type EdgeCardinalityAxisRef = Readonly<{
 // @public
 type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
     edgeKind: string;
+    scope?: CompositionClaimScope;
 }>;
 
 // @public

@@ -31,6 +31,7 @@ import {
 } from "../src/query/compiler/schema";
 import { getDialect, sqliteDialect } from "../src/query/dialect";
 import { renderSqlite } from "../src/query/sql-fragment";
+import { buildKindRegistry } from "../src/registry";
 import * as acyclicityModule from "../src/store/acyclicity";
 import {
   type AcyclicEdgeRelation,
@@ -81,10 +82,11 @@ const graph = defineGraph({
     plainMany: { type: plainMany, from: [Task], to: [Task] },
   },
 });
+const registry = buildKindRegistry(graph);
 
 describe("acyclicEdgeRelations / acyclicRelationForEdgeKind", () => {
   it("collects every acyclic edge kind as its own singleton, forward relation", () => {
-    expect(acyclicEdgeRelations(graph)).toEqual([
+    expect(acyclicEdgeRelations(graph, registry)).toEqual([
       {
         name: "blockedBy",
         members: [{ edgeKind: "blockedBy", reversed: false }],
@@ -97,7 +99,9 @@ describe("acyclicEdgeRelations / acyclicRelationForEdgeKind", () => {
   });
 
   it("answers undefined for a non-acyclic edge kind", () => {
-    expect(acyclicRelationForEdgeKind(graph, "plainMany")).toBeUndefined();
+    expect(
+      acyclicRelationForEdgeKind(graph, registry, "plainMany"),
+    ).toBeUndefined();
   });
 });
 
@@ -123,11 +127,15 @@ describe("single-create acyclicity gate: routes through the one-owner predicate 
 
     // `plainMany` declares no `acyclic` key at all (see the graph fixture
     // above) — exactly the composed-member shape D-10 describes.
-    expect(acyclicRelationForEdgeKind(graph, "plainMany")).toBeUndefined();
+    expect(
+      acyclicRelationForEdgeKind(graph, registry, "plainMany"),
+    ).toBeUndefined();
 
     const isInAcyclicRelationSpy = vi
       .spyOn(acyclicityModule, "edgeKindIsInAcyclicRelation")
-      .mockImplementation((_graph, edgeKind) => edgeKind === "plainMany");
+      .mockImplementation(
+        (_graph, _registry, edgeKind) => edgeKind === "plainMany",
+      );
     const assertAcyclicSpy = vi
       .spyOn(acyclicityModule, "assertEdgeRelationsAcyclic")
       .mockResolvedValue(undefined);
@@ -267,6 +275,7 @@ describe("recursiveTraversal: { supported: false } refuses both the write and th
         {
           graphId: graph.id,
           graph,
+          registry,
           schema: createSqlSchema(backend.tableNames),
           dialect: getDialect(backend.dialect),
           target: backend,
@@ -296,12 +305,13 @@ describe("recursiveTraversal: { supported: false } refuses both the write and th
       readEdgeAcyclicityViolations(
         {
           graphId: graph.id,
+          registry,
           schema: createSqlSchema(backend.tableNames),
           dialect: getDialect(backend.dialect),
           target: backend,
           operation: "test",
         },
-        acyclicEdgeRelations(graph),
+        acyclicEdgeRelations(graph, registry),
       ),
     ).rejects.toThrow(
       expect.objectContaining({
@@ -360,6 +370,7 @@ function acyclicityContext(backend: GraphBackend) {
   return {
     graphId: graph.id,
     graph,
+    registry,
     schema: createSqlSchema(backend.tableNames),
     dialect: getDialect(backend.dialect),
     target: backend,
@@ -552,6 +563,7 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
 
     const ctx = {
       graphId: graph.id,
+      registry,
       schema: createSqlSchema(backend.tableNames),
       dialect: getDialect(backend.dialect),
       target: backend,
@@ -703,6 +715,7 @@ describe('D-4: the `"proposed"` form\'s direct join sees a cycle among ALREADY-I
         {
           graphId: graph.id,
           graph,
+          registry,
           schema: createSqlSchema(backend.tableNames),
           dialect: getDialect(backend.dialect),
           target: backend,
@@ -725,6 +738,7 @@ describe('D-4: the `"proposed"` form\'s direct join sees a cycle among ALREADY-I
         {
           graphId: graph.id,
           graph,
+          registry,
           schema: createSqlSchema(backend.tableNames),
           dialect: getDialect(backend.dialect),
           target: backend,
@@ -744,6 +758,7 @@ describe('D-4: the `"proposed"` form\'s direct join sees a cycle among ALREADY-I
       await acyclicityModule.readProposedEdgeAcyclicityViolations(
         {
           graphId: graph.id,
+          registry,
           schema: createSqlSchema(backend.tableNames),
           dialect: getDialect(backend.dialect),
           target: backend,
@@ -770,6 +785,7 @@ describe('D-4: the `"proposed"` form\'s direct join sees a cycle among ALREADY-I
       await acyclicityModule.readProposedEdgeAcyclicityViolations(
         {
           graphId: graph.id,
+          registry,
           schema: createSqlSchema(backend.tableNames),
           dialect: getDialect(backend.dialect),
           target: backend,

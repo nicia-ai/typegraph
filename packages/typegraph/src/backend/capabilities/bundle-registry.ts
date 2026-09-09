@@ -939,9 +939,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   tableNames: {
     kind: "reasoned",
     reason:
-      "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three more: the ontology-tightening preflight's acyclicity probe, the constraint-fence audit's acyclicity family, and the merge planner's seed-hop acyclicity conflict detection each build the SqlSchema the acyclicity reader needs from the backend's table names.",
-    // 28: the schema-checked read binding (25) plus three acyclicity readers.
-    accesses: 28,
+      "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers, and composition tightening adds one more for the proposed composition relation.",
+    // 29: schema-checked binding (25) plus three acyclicity readers plus the composition tightening probe.
+    accesses: 29,
   },
   fenceSql: {
     kind: "reasoned",

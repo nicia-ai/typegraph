@@ -48,7 +48,9 @@ import {
   registerClearIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
   registerCollectionAggregateIntegrationTests,
+  registerCompositionFenceIntegrationTests,
   registerCompositionNavigationIntegrationTests,
+  registerCompositionTighteningIntegrationTests,
   registerConstraintFenceErrorIntegrationTests,
   registerConstraintFenceTransactionHealthTests,
   registerConstraintFenceVerificationIntegrationTests,
@@ -323,6 +325,7 @@ export function createIntegrationTestSuite<
     registerCapabilityPortBindingIntegrationTests(context);
     registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
+    registerCompositionFenceIntegrationTests(context);
     registerCompositionNavigationIntegrationTests(context);
     registerGraphAnnotationsIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);
@@ -355,6 +358,7 @@ export function createIntegrationTestSuite<
     registerConstraintFenceVerificationIntegrationTests(context);
     registerOntologyTighteningIntegrationTests(context);
     registerEdgeCardinalityTighteningIntegrationTests(context);
+    registerCompositionTighteningIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
     registerSetNodeMutationIntegrationTests(context);

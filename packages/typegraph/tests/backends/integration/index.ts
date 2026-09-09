@@ -17,7 +17,9 @@ export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identi
 export { registerClearIntegrationTests } from "./clear";
 export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
 export { registerCollectionAggregateIntegrationTests } from "./collection-aggregates";
+export { registerCompositionFenceIntegrationTests } from "./composition-fence";
 export { registerCompositionNavigationIntegrationTests } from "./composition-navigation";
+export { registerCompositionTighteningIntegrationTests } from "./composition-tightening";
 export { registerConstraintFenceErrorIntegrationTests } from "./constraint-fence-errors";
 export { registerConstraintFenceTransactionHealthTests } from "./constraint-fence-transaction-health";
 export { registerConstraintFenceVerificationIntegrationTests } from "./constraint-fence-verification";
