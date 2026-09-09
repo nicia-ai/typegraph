@@ -894,14 +894,28 @@ export const baseKeySource: CandidateSource = {
 export const identitySource: CandidateSource = {
   id: "identity",
   generate(scope) {
-    const { identity } = scope;
+    const { identity, nodes } = scope;
     if (identity === undefined || identity.assertions.length === 0) {
       return Promise.resolve({ pairs: [], forcedEdges: [], baseMembers: [] });
     }
-    const nodesByKey = new Map<MergeKey, Node<NodeType>>();
-    for (const members of scope.blocks.values()) {
-      for (const node of members) nodesByKey.set(mergeKeyOf(node), node);
+    if (nodes === undefined) {
+      throw new CandidateSourceError(
+        "identitySource requires the kind's staged nodes in the source scope.",
+        {
+          details: {
+            kind: scope.kind,
+            source: "identity",
+            sourceId: "identity",
+            operation: "generate",
+          },
+        },
+      );
     }
+    // The kind's staged NEW nodes directly, not the blocked buckets: an
+    // assertion pairs the entities it names, whatever blocking key they carry
+    // (a kind can be identity-paired with no `block` at all).
+    const nodesByKey = new Map<MergeKey, Node<NodeType>>();
+    for (const node of nodes) nodesByKey.set(mergeKeyOf(node), node);
     // One entry per ENDPOINT PAIR: several assertions can name the same pair
     // (a re-assertion under a fresh id, or two branches asserting it
     // independently), and the evidence records every one of them rather than

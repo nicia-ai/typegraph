@@ -1,18 +1,32 @@
 /**
- * The `identity` merge-options bag (design §4.2 / plan-G2 §3): normalization
- * defaults, the `.strict()` scalar validation, the `onAssertionConflict`
- * function/string split, and — the compatibility hinge (§3.2) — that
- * `normalizeMergeOptions` emits the field ONLY when the caller stated
+ * The `identity` merge-options bag: normalization defaults, the `.strict()`
+ * scalar validation, the `onAssertionConflict` function/string split, the
+ * refusal of every value the merge cannot honor, and — the compatibility hinge
+ * — that `normalizeMergeOptions` emits the field ONLY when the caller stated
  * `identity`, so a review artifact captured before this option existed keeps
  * revalidating `compatible`.
+ *
+ * The governed-merge promise runs through here: `reviewOptionEvidence` encodes
+ * what `normalizeMergeOptions` emits, so a policy inside the bag is inside the
+ * review digest, and an applier that changed it is refused.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
+import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import {
+  captureCandidateWriteSetTarget,
+  planCandidateWriteSetReview,
+  revalidateCandidateWriteSetReview,
+  unwrap,
+} from "../../src/graph-merge";
 import {
   MERGE_OPTION_DEFAULTS,
   normalizeMergeOptions,
 } from "../../src/graph-merge/options";
 import { reviewOptionEvidence } from "../../src/graph-merge/review-evidence";
+import type { IdentityReconciliationOptions } from "../../src/graph-merge/types";
 
 describe("T7 — presence-preserving normalization", () => {
   it("omits `identity` entirely when the caller never stated it", () => {
@@ -97,5 +111,128 @@ describe("§3.3 refusal matrix — identity option validation", () => {
         identity: { pairing: "everything" },
       }),
     ).toThrow();
+  });
+
+  // Applied or refused, never ignored: both `"flag"` arms mean "drop the
+  // identity pairing", which needs a plan rebuild this release does not do.
+  // Accepting them and silently applying the default would be the API lying.
+  it("refuses onEdgeConflict: flag, naming what is missing", () => {
+    expect(() =>
+      normalizeMergeOptions({ identity: { onEdgeConflict: "flag" } }),
+    ).toThrow(/onEdgeConflict/);
+  });
+
+  it("refuses onUniquenessConflict: flag, naming what is missing", () => {
+    expect(() =>
+      normalizeMergeOptions({ identity: { onUniquenessConflict: "flag" } }),
+    ).toThrow(/onUniquenessConflict/);
+  });
+
+  it("accepts every arm it does honor", () => {
+    const normalized = normalizeMergeOptions({
+      identity: {
+        pairing: "definitional",
+        onAssertionConflict: "flag",
+        onEdgeConflict: "repoint",
+        onUniquenessConflict: "refuse",
+        onProvenanceConflict: "refuse",
+      },
+    });
+    expect(normalized.identity).toEqual({
+      pairing: "definitional",
+      onAssertionConflict: "flag",
+      onEdgeConflict: "repoint",
+      onUniquenessConflict: "refuse",
+      onProvenanceConflict: "refuse",
+    });
+  });
+});
+
+const ReviewItem = defineNode("Item", {
+  schema: z.object({ name: z.string() }),
+});
+const reviewGraph = defineGraph({
+  id: "identity_options_review",
+  nodes: { Item: { type: ReviewItem } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+const REVIEW_POLICY = { id: "identity-review-policy", context: {} } as const;
+
+const disposers: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  for (const dispose of disposers.splice(0)) await dispose();
+});
+
+async function reviewArgs(identity: IdentityReconciliationOptions | undefined) {
+  const { backend } = createLocalSqliteBackend();
+  disposers.push(() => backend.close());
+  const [target] = await createStoreWithSchema(reviewGraph, backend, {
+    history: true,
+  });
+  return {
+    target,
+    makeBackend: async () => createLocalSqliteBackend().backend,
+    writeSet: {
+      formatVersion: 1 as const,
+      sourceId: "source",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [
+        {
+          kind: "Item",
+          id: "candidate",
+          properties: { name: "New" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      edges: [],
+    },
+    policy: REVIEW_POLICY,
+    ...(identity === undefined ? {} : { options: { identity } }),
+  };
+}
+
+describe("T6 — the identity policy is inside the review digest", () => {
+  it("revalidating an approved plan under a DIFFERENT assertion policy reports changed", async () => {
+    const planned = await reviewArgs({ onAssertionConflict: "assertWins" });
+    const review = unwrap(await planCandidateWriteSetReview(planned));
+    // Same write set, same target, same reviewer — only the policy moved.
+    const applying = await reviewArgs({ onAssertionConflict: "retractWins" });
+    const revalidated = unwrap(
+      await revalidateCandidateWriteSetReview({
+        ...applying,
+        target: planned.target,
+        review: JSON.parse(JSON.stringify(review)),
+      }),
+    );
+    expect(revalidated.status).toBe("changed");
+  });
+
+  it("revalidating under the SAME policy stays compatible", async () => {
+    const planned = await reviewArgs({ onAssertionConflict: "assertWins" });
+    const review = unwrap(await planCandidateWriteSetReview(planned));
+    const applying = await reviewArgs({ onAssertionConflict: "assertWins" });
+    const revalidated = unwrap(
+      await revalidateCandidateWriteSetReview({
+        ...applying,
+        target: planned.target,
+        review: JSON.parse(JSON.stringify(review)),
+      }),
+    );
+    expect(revalidated.status).toBe("compatible");
+  });
+
+  it("T7 at the artifact layer: an identity-free review stays compatible against identity-free options", async () => {
+    const planned = await reviewArgs(undefined);
+    const review = unwrap(await planCandidateWriteSetReview(planned));
+    const applying = await reviewArgs(undefined);
+    const revalidated = unwrap(
+      await revalidateCandidateWriteSetReview({
+        ...applying,
+        target: planned.target,
+        review: JSON.parse(JSON.stringify(review)),
+      }),
+    );
+    expect(revalidated.status).toBe("compatible");
   });
 });

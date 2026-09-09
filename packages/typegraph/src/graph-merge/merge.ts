@@ -641,6 +641,9 @@ function assertClusterNotSeparated(
 
 const EMPTY_ASSERTIONS: readonly IdentityTransferAssertion[] = [];
 
+/** No blocked buckets — the identity source pairs off the kind's staged nodes. */
+const EMPTY_BLOCKS: ReadonlyMap<string, readonly Node<NodeType>[]> = new Map();
+
 /** The identity pairing input for a merge that asked for no pairing at all. */
 const NO_IDENTITY_PAIRING: IdentityPairingPartition = {
   sameByKind: new Map(),
@@ -799,11 +802,51 @@ async function generateAllCandidates<G extends GraphDef>(
         >
       > => {
         const resolveConfig = options.resolve[kind];
+        const nodes = items.map((staged) => asNode(staged));
+        const identityAssertions =
+          identityPairingScopes.sameByKind.get(kind) ?? EMPTY_ASSERTIONS;
         if (resolveConfig === undefined) {
           // No resolution config for this kind: merge by id only (no candidate
-          // edges, so every new node stays a singleton cluster).
+          // edges, so every new node stays a singleton cluster) — UNLESS an
+          // explicit `same` assertion names two of its nodes and the caller
+          // asked for pairing. A DEFINITIONAL pairing needs no threshold, so it
+          // runs here; a `"candidate"` pairing is a SCORED proposal and this
+          // kind has no threshold to score it against, which is a stated option
+          // the state cannot honor rather than one to drop silently.
+          if (
+            identityPairing === undefined ||
+            identityAssertions.length === 0
+          ) {
+            return ok({
+              edges: [],
+              warnings: [],
+              baseMembers: [],
+              diagnostics: [],
+              diagnosticsTotal: 0,
+            });
+          }
+          if (identityPairing === "candidate") {
+            return err(
+              new InvalidMergeOptionsError(
+                `options.identity.pairing: "candidate" proposes a SCORED pair, but kind "${kind}" has no options.resolve entry and therefore no threshold to score it against.`,
+                {
+                  details: { option: "identity.pairing", kind },
+                  suggestion: `Add options.resolve.${kind} with a threshold, or use options.identity.pairing: "definitional" to force the pairing without scoring.`,
+                },
+              ),
+            );
+          }
+          const forced = await identitySource.generate({
+            kind,
+            blocks: EMPTY_BLOCKS,
+            nodes,
+            identity: {
+              pairing: identityPairing,
+              assertions: identityAssertions,
+            },
+          });
           return ok({
-            edges: [],
+            edges: forced.forcedEdges,
             warnings: [],
             baseMembers: [],
             diagnostics: [],
@@ -811,7 +854,6 @@ async function generateAllCandidates<G extends GraphDef>(
           });
         }
 
-        const nodes = items.map((staged) => asNode(staged));
         const uniqueConstraints = uniqueConstraintsFor(
           introspectionKinds,
           kind,
@@ -833,9 +875,7 @@ async function generateAllCandidates<G extends GraphDef>(
           : {
               identity: {
                 pairing: identityPairing,
-                assertions:
-                  identityPairingScopes.sameByKind.get(kind) ??
-                  EMPTY_ASSERTIONS,
+                assertions: identityAssertions,
               },
             }),
         };
