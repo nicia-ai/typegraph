@@ -838,8 +838,4 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
    * persistence was off or failed (a failure adds a {@link MergeReport.warnings}).
    */
   provenancePersisted?: Readonly<{ graphId: string; count: number }>;
-  /** Duplicate-assertion survivor picks the three-way classifier resolved. */
-  identityReconciliations: readonly IdentityReconciliation[];
-  /** Identity-assertion conflicts a resolving `onAssertionConflict` kept rather than refused. */
-  identityConflicts: readonly IdentityUnresolvedConflict[];
 }>;

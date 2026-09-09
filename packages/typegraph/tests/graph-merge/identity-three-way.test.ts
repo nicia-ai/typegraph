@@ -7,10 +7,7 @@
  * `planIdentityChanges`.
  */
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
-import { branch } from "../../src/graph-merge/branch";
 import { IdentityMergeConflictError } from "../../src/graph-merge/errors";
 import {
   classifyIdentityPair,
@@ -18,13 +15,10 @@ import {
   REASSERT_OVERRULED_DROP_REASON,
   RETRACT_OVERRULED_DROP_REASON,
 } from "../../src/graph-merge/identity-three-way";
-import { merge } from "../../src/graph-merge/merge";
 import { planIdentityChanges } from "../../src/graph-merge/merge-identity";
-import { isErr, unwrap } from "../../src/graph-merge/result";
 import type { StagingSet } from "../../src/graph-merge/staging";
 import type { IdentityTransferAssertion } from "../../src/graph-merge/typegraph-internal";
 import { asBranchId, type BranchId } from "../../src/graph-merge/types";
-import { createTestBackend } from "../test-utils";
 
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
@@ -290,99 +284,5 @@ describe("T9 — 'flag' plans applicably; 'refuse' does not, for the same fixtur
     // this pair either way — base identity truth is untouched.
     expect(planned.assertions).toEqual([]);
     expect(planned.retractions).toEqual([]);
-  });
-});
-
-describe("wiring — options.identity.onAssertionConflict reaches a real merge()", () => {
-  const Widget = defineNode("Widget", {
-    schema: z.object({ name: z.string() }),
-  });
-  const widgetGraph = defineGraph({
-    id: "identity-three-way-wiring",
-    nodes: { Widget: { type: Widget } },
-    edges: {},
-    identity: { sameIdAcrossKinds: "fold" },
-  });
-
-  it("threads through to MergeReport.identityReconciliations under a resolving policy", async () => {
-    // Two independent branches assert the SAME semantic pair under
-    // DIFFERENT ids (base absent) — reachable through the real public API,
-    // unlike the retract/reassert race (which the identity service's own
-    // idempotency makes unconstructible without the synthetic staging
-    // fixture `identity-merge.test.ts` documents this same limitation for).
-    const [store] = await createStoreWithSchema(
-      widgetGraph,
-      createTestBackend(),
-    );
-    const first = await store.nodes.Widget.create(
-      { name: "First" },
-      { id: "w1" },
-    );
-    const second = await store.nodes.Widget.create(
-      { name: "Second" },
-      { id: "w2" },
-    );
-
-    const branchA = unwrap(
-      await branch(store, () => Promise.resolve(createTestBackend()), {
-        id: BRANCH_A,
-      }),
-    );
-    const branchB = unwrap(
-      await branch(store, () => Promise.resolve(createTestBackend()), {
-        id: BRANCH_B,
-      }),
-    );
-    await branchA.store.identity.assertSame(first, second);
-    await branchB.store.identity.assertSame(first, second);
-
-    const flagged = await merge(store, [branchA, branchB], {
-      branchOrder: [BRANCH_A, BRANCH_B],
-      identity: { onAssertionConflict: "flag" },
-    });
-    if (isErr(flagged)) throw flagged.error;
-    expect(flagged.data.identityReconciliations).toHaveLength(1);
-    expect(flagged.data.identityReconciliations[0]).toMatchObject({
-      relation: "same",
-    });
-    expect(["earliest-valid-from", "code-point-id"]).toContain(
-      flagged.data.identityReconciliations[0]?.rule,
-    );
-    expect(flagged.data.dropped).toHaveLength(1);
-    expect(await store.identity.areSame(first, second)).toBe(true);
-
-    // Default policy ("refuse", unstated): SAME underlying survivor pick,
-    // just without the new reconciliation visibility — byte-identical to
-    // pre-PR-2 behavior.
-    const [freshStore] = await createStoreWithSchema(
-      widgetGraph,
-      createTestBackend(),
-    );
-    const freshFirst = await freshStore.nodes.Widget.create(
-      { name: "First" },
-      { id: "w1" },
-    );
-    const freshSecond = await freshStore.nodes.Widget.create(
-      { name: "Second" },
-      { id: "w2" },
-    );
-    const freshBranchA = unwrap(
-      await branch(freshStore, () => Promise.resolve(createTestBackend()), {
-        id: BRANCH_A,
-      }),
-    );
-    const freshBranchB = unwrap(
-      await branch(freshStore, () => Promise.resolve(createTestBackend()), {
-        id: BRANCH_B,
-      }),
-    );
-    await freshBranchA.store.identity.assertSame(freshFirst, freshSecond);
-    await freshBranchB.store.identity.assertSame(freshFirst, freshSecond);
-    const defaulted = await merge(freshStore, [freshBranchA, freshBranchB], {
-      branchOrder: [BRANCH_A, BRANCH_B],
-    });
-    if (isErr(defaulted)) throw defaulted.error;
-    expect(defaulted.data.identityReconciliations).toEqual([]);
-    expect(defaulted.data.dropped).toHaveLength(1);
   });
 });
