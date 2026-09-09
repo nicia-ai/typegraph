@@ -31,6 +31,16 @@ export type AliasExpansionAxis = "exact" | "subclasses" | "narrower";
  */
 export type DefaultAliasExpansionAxis = Exclude<AliasExpansionAxis, "narrower">;
 
+/**
+ * The axis an alias takes when neither the call nor the store states one
+ * (roadmap Q3). Named here because both places that resolve a store-wide
+ * default — `createQueryBuilder` and `Store`'s `queryDefaults` — must agree
+ * on it; two spellings of the same literal would let a store-issued builder
+ * and a standalone one drift apart.
+ */
+export const DEFAULT_ALIAS_EXPANSION_AXIS: DefaultAliasExpansionAxis =
+  "subclasses";
+
 export type AliasExpansionOptions = Readonly<{
   /**
    * The alias's expansion axis. Omitted (or `undefined`) takes the store

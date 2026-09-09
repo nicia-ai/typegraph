@@ -203,7 +203,10 @@ import {
   type InitialQueryBuilder,
   type QueryCoordinateState,
 } from "../query/builder";
-import { type DefaultAliasExpansionAxis } from "../query/builder/alias-expansion";
+import {
+  DEFAULT_ALIAS_EXPANSION_AXIS,
+  type DefaultAliasExpansionAxis,
+} from "../query/builder/alias-expansion";
 import {
   createEngineRecordedReadBinding,
   createRecordedReadBinding,
@@ -1322,7 +1325,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#hooks = options?.hooks ?? {};
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
-    this.#defaultExpansion = options?.queryDefaults?.expansion ?? "subclasses";
+    this.#defaultExpansion =
+      options?.queryDefaults?.expansion ?? DEFAULT_ALIAS_EXPANSION_AXIS;
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
