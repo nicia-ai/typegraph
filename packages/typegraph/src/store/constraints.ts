@@ -95,9 +95,12 @@ export type ConstraintContext = Readonly<{
  * {@link edgeCardinalityAxisReferences}, the same fold `checkEdgeCardinalityConstraints`
  * iterates, so a second inline `!== "many"` at a write path — blind to a
  * target-only declaration — can never drift from it. {@link graphOwesClaims}
- * deliberately does NOT call this: it asks the cardinality-only half of the
- * same fold directly, because acyclicity has no claim row to substitute for
- * the per-graph lock import skips (see {@link graphOwesLockOnlyFence}).
+ * routes through this function too, and accepts only its
+ * `"edgeComposition"` / `"edgeCardinality"` answers: acyclicity has no claim
+ * row to substitute for the per-graph lock import skips (see
+ * {@link graphOwesLockOnlyFence}), so an `"edgeAcyclicity"` answer from here
+ * is filtered out at that call site rather than re-derived by a second,
+ * narrower fold.
  */
 export function edgeWriteNeedsConstraintFence(
   declarations: EdgeCardinalityDeclarations &
@@ -240,14 +243,20 @@ export function graphOwesClaims(
     // Routed through `edgeWriteNeedsConstraintFence` — the one owner of
     // "which reason does this edge kind's declaration qualify under, and in
     // what preference order" — rather than re-spelling the cardinality-only
-    // half of that fold here. `acyclic` is left `undefined`: this predicate
-    // asks about cardinality alone (see the docblock above), and
-    // `edgeWriteNeedsConstraintFence` only ever falls through to
-    // `"edgeAcyclicity"` when neither composition nor an ordinary axis
-    // qualifies, so omitting it cannot manufacture a cardinality answer that
-    // is not there.
+    // half of that fold here. Fields are passed explicitly, `acyclic`
+    // omitted, rather than spreading `registration` (which carries its own
+    // `acyclic` field): this predicate asks about cardinality alone (see the
+    // docblock above), and `edgeWriteNeedsConstraintFence` only ever falls
+    // through to `"edgeAcyclicity"` when neither composition nor an ordinary
+    // axis qualifies, so leaving it out cannot manufacture a cardinality
+    // answer that is not there.
     const reason = edgeWriteNeedsConstraintFence({
-      ...registration,
+      ...(registration.cardinality === undefined ?
+        {}
+      : { cardinality: registration.cardinality }),
+      ...(registration.targetCardinality === undefined ?
+        {}
+      : { targetCardinality: registration.targetCardinality }),
       composition: registry.isCompositionEdge(kind),
     });
     if (reason === "edgeComposition" || reason === "edgeCardinality") {
