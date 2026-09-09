@@ -159,12 +159,15 @@ async function readWholeSideEdges(
   backend: GraphReadBackend,
   trustEmptyResult: boolean,
 ): Promise<WholeSideEdgesResult> {
-  const wholeIsFromEdgeKinds = edgeKinds.filter(
-    (edgeKind) => wholeSide(requirePartSide(ctx.registry, edgeKind)) === "from",
-  );
-  const wholeIsToEdgeKinds = edgeKinds.filter(
-    (edgeKind) => wholeSide(requirePartSide(ctx.registry, edgeKind)) === "to",
-  );
+  const wholeIsFromEdgeKinds: string[] = [];
+  const wholeIsToEdgeKinds: string[] = [];
+  for (const edgeKind of edgeKinds) {
+    const bucket =
+      wholeSide(requirePartSide(ctx.registry, edgeKind)) === "from" ?
+        wholeIsFromEdgeKinds
+      : wholeIsToEdgeKinds;
+    bucket.push(edgeKind);
+  }
 
   const setRead = backend.findEdgesByHeterogeneousEndpointSet;
   if (setRead !== undefined) {
