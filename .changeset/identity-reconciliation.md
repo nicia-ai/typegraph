@@ -17,9 +17,11 @@ trims retained explanations and records a watermark that replay reports rather
 than hiding, and archival interchange carries a `transitions` section plus the
 retention watermark, bumping the interchange format to `3.0` (older documents
 still import and validate unchanged). Restoring an archive's transitions
-validates shape only and never re-derives membership; it sets the restored
-graph's own watermark so replay reports the pre-restore range honestly instead
-of claiming a complete history it cannot reconstruct.
+validates shape only and never re-derives membership; every restored row is
+marked as such so `replay` never pairs it with a fabricated before/after, and
+— when the destination has no identity transitions of its own yet — the
+restore also sets its own watermark so `replay` reports the pre-restore range
+honestly instead of claiming a complete history it cannot reconstruct.
 
 Graph merge gains identity reconciliation under a new `identity` merge-options
 bag: `pairing` lets an explicit `same` assertion propose or force a candidate
@@ -51,3 +53,15 @@ A transaction receipt's `writes.identity` gains `transitions`, counted beside
 (never inside) `total`: the number of identity transition-log notes the
 transaction's flush wrote, an annotation of the assertion/retraction writes
 `total` already counts rather than a fourth kind of write.
+
+### Breaking changes
+
+- Restoring an archival export (`identityMode: "archival"`) whose source graph
+  retains identity transitions or has ever pruned them now requires the
+  restore target to be opened with `history: true`. `importGraph` and
+  `importGraphStream` refuse such a document with
+  `IDENTITY_REPLAY_REQUIRES_HISTORY` before writing anything, where they
+  previously wrote the rest of the document successfully because no
+  transitions section existed to carry the transitions in the first place.
+  Open the restore target with `history: true` to keep a backup/restore
+  pipeline that moves data out of a history-enabled graph working.

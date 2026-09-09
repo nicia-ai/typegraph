@@ -156,20 +156,41 @@ current-truth state export is not a backup of explanation.
 Restoring `identity.transitions` validates shape only (a known cause, a
 well-formed reference, a non-decreasing `recordedRevision` sequence) and
 inserts every row verbatim, never re-deriving membership or touching the
-target's closure. The restore then sets the destination's own retention
-watermark to the DESTINATION's own current recorded revision + 1 at restore
-time — never to a number the archive carries, since a restored row's
-`recordedRevision` and the archive's own retention watermark are minted by
-the source graph's clock, a different counter than the destination's own. A
-replay over the restored graph (`store.identity.replay`, see the
-[identity guide](/identity/#replay-and-identity-history)) therefore excludes
-the restored transitions from its `steps` and reports `truncatedBefore` for
-that range: the explanations survived the round trip, but the snapshots they
-narrate did not, and replay says so rather than pairing a restored
-transition with a fabricated before/after. A `state`-mode document naming a
-`transitions` section is refused. Archival transitions export is always
-whole-graph — an export's `nodeKinds` filter does not scope the transitions
-section the way it scopes assertions.
+target's closure. Every restored row is marked internally as such — a
+restore always inserts rows this graph did not record itself, regardless of
+what the archive's own history looks like. A replay over the restored graph
+(`store.identity.replay`, see the [identity guide](/identity/#replay-and-identity-history))
+uses that marker, never a `recordedRevision` comparison, to exclude every
+restored transition from its `steps` (a restored row's revision is minted by
+the SOURCE graph's own clock and interleaves arbitrarily with the
+destination's), so `transitionsOf` answers fully while `replay` never pairs
+a restored transition with a fabricated before/after.
+
+The restore also sets the destination's own retention watermark to the
+destination's own current recorded revision + 1 at restore time — but only
+when the destination has no identity transitions of its own yet. A graph
+that already retains its own history keeps its existing watermark
+untouched, so an unrelated restore can never misreport that graph's own,
+fully-retained classes as truncated. `replay` reports the watermark, when
+set, as `truncatedBefore`.
+
+A `state`-mode document naming a `transitions` section is refused. Archival
+transitions export is always whole-graph — an export's `nodeKinds` filter
+does not scope the transitions section the way it scopes assertions.
+
+A document (or stream) naming a `transitions` section, or carrying a
+non-zero `retention` watermark, into a target opened without `history:
+true` is refused with `IDENTITY_REPLAY_REQUIRES_HISTORY`, before writing any
+node, edge, or identity assertion. On the streaming protocol, the
+`identity-transitions` chunk always arrives last (after nodes, edges, and
+the `identity` assertions chunk), so `importGraphStream` reads a
+`hasTransitions` boolean on the streamed header's `identity` object — set
+whenever the export's transitions section is non-empty — to know this
+before that chunk arrives. **This is a breaking change**: restoring an
+archival export from a `history: true` source that carries retained
+transitions or a retention watermark now requires the target to also be
+opened with `history: true`; previously the transitions section did not
+exist, so nothing was silently dropped, but nothing could refuse it either.
 
 ## Exporting Data
 

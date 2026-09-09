@@ -533,21 +533,47 @@ touches the target's closure and never re-derives membership — the rows are
 inserted verbatim, carrying the source's own revision numbers and
 timestamps, because a restore records history, it does not relive it.
 
-That is also why the restore sets the destination's retention watermark to
-the **destination's own current recorded revision + 1** — never to a number
-the archive carries — rather than leaving it at zero. A restored row's
-`recordedRevision` and the archive's own `retention.prunedBeforeRevision` are
-minted by the *source* graph's clock, a different counter than this graph's;
-writing either straight into this graph's watermark would misclassify this
-graph's own later, fully-retained transitions as pruned the moment its clock
-reached a number below the foreign one. Reading this graph's own clock at
-restore time keeps the watermark honest on its own axis instead. `replay`
-over a restored archive therefore answers `transitionsOf` fully but excludes
-the restored transitions from `steps` and reports `truncatedBefore` — an
-honest signal that the *explanations* survived the round trip but the
-*snapshots* they narrate did not, rather than a replay that pairs a restored
-transition with a fabricated before/after reconstructed from the
-destination's own, unrelated state.
+A document (or stream) naming a `transitions` section, or carrying a
+non-zero `retention` watermark, into a target opened without `history:
+true` is refused with `IDENTITY_REPLAY_REQUIRES_HISTORY` — there is nowhere
+for `transitionsOf` / `replay` to ever read those rows back from. Both
+`importGraph` and `importGraphStream` refuse this **before writing any
+node, edge, or identity assertion** — `importGraphStream` reads the
+streaming header's `hasTransitions` announcement to know this before the
+`identity-transitions` chunk itself, which by protocol always arrives last,
+ever reaches the target. This is a **breaking change**: an archival export
+of a `history: true` source that carries retained transitions or a
+retention watermark now requires the restore target to also be opened with
+`history: true` — previously the transitions section did not exist at all,
+so nothing was silently dropped, but it also could not throw. Open the
+restore target with `history: true` if it needs to accept archival exports
+from a history-enabled source.
+
+Every restored row is also marked as such internally, regardless of what the
+source graph thought of it: a restore always inserts rows this graph did not
+record itself. `replay` uses that marker — never a comparison against
+`recordedRevision` — to decide whether a row may be paired with a
+reconstructed before/after snapshot, because a restored row's revision is
+minted by the *source* graph's own clock and interleaves arbitrarily with
+this graph's; no floor on this graph's axis could tell "restored" from
+"native" by number alone. `replay` over a restored archive therefore answers
+`transitionsOf` fully but excludes every restored transition from `steps` —
+an honest omission rather than a replay that pairs a restored transition
+with a fabricated before/after reconstructed from the destination's own,
+unrelated state.
+
+The restore also sets the destination's retention watermark to the
+**destination's own current recorded revision + 1**, but only when this
+graph has recorded no identity transitions of its own yet. A fresh graph has
+nothing of its own for that floor to misclassify, so setting it there is
+safe, and `replay` reports it as `truncatedBefore` — the point below which
+this graph's own timeline carries no retained explanation. A graph that
+already has its own retained transitions keeps its existing watermark
+untouched: advancing it from a restore-time floor would otherwise
+misclassify this graph's own, fully-retained history for classes the
+restore never touched as pruned. Either way, the watermark is a coarser,
+separate signal from the per-row marker above — it is never what decides
+whether one row's transition may appear in `steps`.
 
 Archival transitions export is always **whole-graph**: unlike assertions,
 `exportGraph`'s `nodeKinds` filter does not scope the transitions section.
