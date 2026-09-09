@@ -37,10 +37,12 @@ import {
   sharesSerializedTransactionResource,
 } from "../src/backend/transaction-resource";
 import {
+  type EngineRevision,
   type GraphBackend,
   SQLITE_CAPABILITIES,
   type TransactionBackend,
 } from "../src/backend/types";
+import { sql } from "../src/query/sql-fragment";
 import { createTestBackend, makeUnauditedBackend } from "./test-utils";
 
 type BaseVerdict = "serialized" | "independent" | "unaudited";
@@ -130,6 +132,49 @@ describe("recordedTableDdl", () => {
 
     expect(derived.recordedTableDdl).toBeInstanceOf(Function);
     expect(projected.recordedTableDdl).toBeInstanceOf(Function);
+  });
+});
+
+describe("lineage", () => {
+  it("carries an optional lineage member through a derivation and a GraphBackend projection", () => {
+    // No bundled backend implements `lineage` yet, so this fixture overlays
+    // one directly onto a real backend the same way a future engine profile
+    // would, and asserts the derivation seam does not drop it.
+    const lineage: NonNullable<GraphBackend["lineage"]> = {
+      revision: () => Promise.resolve("r1" as EngineRevision),
+      changesSince: () => Promise.resolve({ kind: "unbounded" as const }),
+    };
+    const backend = deriveBackend(createTestBackend(), { lineage });
+
+    const derived = deriveBackend(backend, {});
+    const projected = projectGraphBackend(backend);
+
+    expect(derived.lineage).toBe(lineage);
+    expect(projected.lineage).toBe(lineage);
+  });
+});
+
+describe("recordedTime", () => {
+  it("carries an optional recordedTime member through a derivation and a GraphBackend projection", () => {
+    // No bundled backend implements `recordedTime` yet, so this fixture
+    // overlays one directly onto a real backend the same way a future
+    // engine profile would, and asserts the derivation seam does not drop
+    // it.
+    const recordedTime: NonNullable<GraphBackend["recordedTime"]> = {
+      source: (table) => sql.identifier(`engine_${table}`),
+      revisionNow: () =>
+        Promise.resolve({
+          revision: "engine-r1",
+          recordedAt: "2026-01-01T00:00:00.000Z",
+        }),
+    };
+    const backend = deriveBackend(createTestBackend(), { recordedTime });
+
+    const derived = deriveBackend(backend, {});
+    const projected = projectGraphBackend(backend);
+
+    expect(derived.recordedTime).toBe(recordedTime);
+    expect(projected.recordedTime).toBe(recordedTime);
   });
 });
 

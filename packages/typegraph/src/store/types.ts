@@ -719,6 +719,17 @@ export type TransactionReceipt = Readonly<{
    * scoped receipt from {@link ScopedMeasure}** (`tx.measure`) — the recorded
    * instant is a per-transaction flush concern allocated once when the whole
    * transaction's capture flushes, unknowable mid-transaction.
+   *
+   * Under an engine-native store (one whose backend tracks recorded time
+   * itself; see {@link GraphBackend.recordedTime}), "no captured writes were
+   * flushed" instead means no node, edge, or identity write inside the
+   * transaction actually changed a row: a delete of a missing id, an
+   * `insertNodeIfAbsent` that found the row, and a coalesced no-op upsert
+   * all leave this undefined, matching a read-only transaction, even though
+   * each reached the collection surface as a completed write intent. A
+   * transaction whose only effect is a raw `tx.sql` statement also leaves
+   * this undefined, since the engine's own revision advancing is not
+   * something a graph-entity write observed.
    */
   recorded?: RecordedInstant;
 }>;

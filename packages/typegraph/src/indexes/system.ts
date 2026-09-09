@@ -27,6 +27,7 @@
  * rename actually happens, add a retired-suffixes list + drop path here.
  */
 import { quoteIdentifier, shortHash } from "../query/dialect/vector-strategy";
+import { requireDefined } from "../utils/presence";
 
 /** The TypeGraph relations that carry system indexes. */
 export type SystemIndexTable =
@@ -193,6 +194,16 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
   // `degree()` at a recorded coordinate) would otherwise scan every
   // historical version in the graph. See typegraph#280.
   { table: "recordedNodes", suffix: "id_idx", columns: ["graph_id", "id"] },
+  // `recorded_from`-led lookup: `entity_idx` leads with `kind, id`, so it
+  // cannot serve the lineage capability's changed-since scan
+  // (`store/recorded-capture/lineage.ts`), which filters by `graph_id` and
+  // `recorded_from` alone across every kind. Without this the scan is a
+  // full per-graph table scan of every historical row.
+  {
+    table: "recordedNodes",
+    suffix: "since_idx",
+    columns: ["graph_id", "recorded_from"],
+  },
 
   // ---------------------------------------------------------- recordedEdges
   {
@@ -235,6 +246,14 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
     table: "recordedEdges",
     suffix: "valid_idx",
     columns: ["graph_id", "valid_from", "valid_to"],
+  },
+  // `recorded_from`-led lookup, same rationale as recordedNodes' since_idx:
+  // the directional indexes above lead with an endpoint, not `recorded_from`
+  // alone, so they cannot serve the lineage capability's changed-since scan.
+  {
+    table: "recordedEdges",
+    suffix: "since_idx",
+    columns: ["graph_id", "recorded_from"],
   },
 ];
 
@@ -357,4 +376,69 @@ export function generateSystemIndexDDL(
     .join(", ");
   const concurrently = options.concurrent ? "CONCURRENTLY " : "";
   return `CREATE INDEX ${concurrently}IF NOT EXISTS ${name} ON ${table} (${columns});`;
+}
+
+/**
+ * Runtime DDL for the base-schema release's three `since_idx (graph_id,
+ * recorded_from)` indexes — the lineage capability's changed-since scan
+ * (`store/recorded-capture/lineage.ts`): the two recorded relations
+ * (`recordedNodes`, `recordedEdges`, declared in
+ * {@link SYSTEM_INDEX_DECLARATIONS} and managed by `materializeIndexes`),
+ * plus the recorded identity-assertions relation's own `since_idx`, which
+ * `changesSince`'s per-revision completeness scan folds into the same
+ * three-relation scan but which is NOT a {@link SystemIndexTable} — like that
+ * relation's other three indexes (`entity_idx`/`a_idx`/`b_idx`), it is
+ * structural, hand-declared with the table rather than run through
+ * `materializeIndexes`' lazy backfill, and this function follows the same
+ * pattern for it. Both dialect factories thread this into the base-schema
+ * version-3 adoption step (`engine/members/base-schema-members.ts`) the
+ * same way `fencesTableDdl` feeds version 2: a fresh bootstrap already
+ * carries all three indexes through the schema factories' own index
+ * builders, but a database that reaches adoption without re-running
+ * bootstrap DDL (a reopen of an already-provisioned installation) needs
+ * this explicit `CREATE INDEX IF NOT EXISTS` triple. One owner for the
+ * declaration lookup and the identity-assertions index's own name (both
+ * routed through {@link systemIndexName}, the single naming choke point)
+ * keeps the two dialect factories from re-spelling either and risking
+ * drift between them; the identity-assertions name this renders MUST match
+ * the schema factories' own hand-written `index(...)` call byte-for-byte —
+ * the shape-ratchet test (`tests/base-schema-shape-ratchet.test.ts`) is
+ * what would catch a drift.
+ */
+export function sinceIndexAdoptionDdl(
+  recordedTableNames: Readonly<{
+    recordedNodes: string;
+    recordedEdges: string;
+    recordedIdentityAssertions: string;
+  }>,
+): readonly [string, string, string] {
+  function sinceIndexDdlFor(table: "recordedNodes" | "recordedEdges"): string {
+    const declaration = requireDefined(
+      SYSTEM_INDEX_DECLARATIONS.find(
+        (candidate) =>
+          candidate.table === table && candidate.suffix === "since_idx",
+      ),
+      `No "since_idx" system index is declared for "${table}".`,
+    );
+    return generateSystemIndexDDL(declaration, recordedTableNames[table], {
+      concurrent: false,
+    });
+  }
+  function identityAssertionsSinceIndexDdl(): string {
+    const name = quoteIdentifier(
+      systemIndexName(
+        recordedTableNames.recordedIdentityAssertions,
+        "since_idx",
+      ),
+    );
+    const table = quoteIdentifier(
+      recordedTableNames.recordedIdentityAssertions,
+    );
+    return `CREATE INDEX IF NOT EXISTS ${name} ON ${table} (${quoteIdentifier("graph_id")}, ${quoteIdentifier("recorded_from")});`;
+  }
+  return [
+    sinceIndexDdlFor("recordedNodes"),
+    sinceIndexDdlFor("recordedEdges"),
+    identityAssertionsSinceIndexDdl(),
+  ];
 }

@@ -34,18 +34,23 @@ import { assertionIdentityKey, assertionTruthKey } from "./merge-identity";
 import { compareStrings, type MergeKey, mergeKey } from "./node-key";
 import type {
   EdgeId,
+  EntityKey,
   GraphBackend,
   GraphDef,
   IdentityTransferAssertion,
+  LineageDelta,
   NodeId,
   NodeType,
   Store,
   TransactionBackend,
 } from "./typegraph-internal";
 import {
+  batchPointReadVerdict,
   canonicalizeDatabaseTimestamp,
   getEdgeKinds,
+  getEdgeRowsByIds,
   getNodeKinds,
+  getNodeRowsByIds,
 } from "./typegraph-internal";
 import { storeBackend, storeRuntime } from "./typegraph-internal";
 
@@ -396,6 +401,84 @@ export async function enumerateAllEdges(
   return collected;
 }
 
+/**
+ * The ids of one `kind`'s entries in a lineage delta's mixed-kind key list —
+ * the per-kind slice {@link fetchNodesByIds}/{@link fetchEdgesByIds} fetch,
+ * mirroring how {@link enumerateAllNodes}/{@link enumerateAllEdges} are
+ * themselves scoped to one kind at a time.
+ */
+function idsForKind(keys: readonly EntityKey[], kind: string): string[] {
+  return keys.filter((key) => key.kind === kind).map((key) => key.id);
+}
+
+/**
+ * Narrows an already-fetched row set down to the given ids — used when a
+ * FULL enumeration was already required for {@link StateDiff.forkNodeVersions}
+ * / {@link StateDiff.forkEdgeSignatures} (`captureForkState`), so pruning the
+ * fork side for diffing costs a filter, not a second read.
+ */
+function filterRowsByIds<T extends Readonly<{ id: string }>>(
+  rows: readonly T[],
+  ids: readonly string[],
+): readonly T[] {
+  if (ids.length === 0) return [];
+  const idSet = new Set(ids);
+  return rows.filter((row) => idSet.has(row.id));
+}
+
+/**
+ * Fetches exactly the requested node ids for `kind` — live and tombstoned
+ * alike, since {@link getNodeRowsByIds}'s underlying `getNodes`/`getNode`
+ * reads carry no `deleted_at` filter, matching {@link enumerateAllNodes}'s
+ * own `excludeDeleted: false` contract. The pruned counterpart to
+ * {@link enumerateAllNodes}, used only when a caller supplies a `pruneTo`
+ * delta to {@link diffAgainstBase}.
+ */
+async function fetchNodesByIds(
+  backend: GraphBackend,
+  graphId: string,
+  kind: string,
+  ids: readonly string[],
+): Promise<readonly NodeRow[]> {
+  if (ids.length === 0) return [];
+  const rowsById = await getNodeRowsByIds(
+    backend,
+    batchPointReadVerdict(backend),
+    graphId,
+    kind,
+    ids,
+  );
+  return [...rowsById.values()];
+}
+
+/**
+ * The edge analogue of {@link fetchNodesByIds}, with one difference:
+ * `getEdgeRowsByIds` fetches by id ALONE — the edge backend surface
+ * (`getEdge`/`getEdges`) carries no `kind` parameter, unlike the node path,
+ * where `kind` is threaded straight into the query. A row is therefore
+ * filtered to `kind` here, in this function, rather than at the backend: an
+ * id a fork hard-deleted under one edge kind and later recreated under a
+ * different kind resolves, by id alone, to the CURRENT row's kind, and that
+ * row must be excluded from every OTHER kind's pruned fetch — exactly as
+ * {@link enumerateAllEdges}'s own `findEdgesByKind` call already excludes it
+ * by construction.
+ */
+async function fetchEdgesByIds(
+  backend: GraphBackend,
+  graphId: string,
+  kind: string,
+  ids: readonly string[],
+): Promise<readonly EdgeRow[]> {
+  if (ids.length === 0) return [];
+  const rowsById = await getEdgeRowsByIds(
+    backend,
+    batchPointReadVerdict(backend),
+    graphId,
+    ids,
+  );
+  return [...rowsById.values()].filter((row) => row.kind === kind);
+}
+
 /** True when the row is live (not soft-deleted). */
 function isLive(row: Readonly<{ deleted_at: string | undefined }>): boolean {
   return row.deleted_at === undefined;
@@ -681,12 +764,26 @@ function byId<T extends Readonly<{ id: string }>>(left: T, right: T): number {
  *   work — so callers that don't need them for this branch can skip it. Defaults
  *   to `true` so direct callers (e.g. tests) get the full diff without having to
  *   know this parameter exists.
+ * @param pruneTo A lineage delta bounding which rows changed on EITHER side
+ *   since this branch forked (see `staging.ts`'s `stageBranches`, which
+ *   computes the union of the fork's and the base's own `changesSince`). When
+ *   it is `{ kind: "keys" }`, both sides are read by ID SET instead of full
+ *   kind enumeration — a key absent from the delta is guaranteed identical on
+ *   both sides (see the property test asserting this), so restricting reads
+ *   to the union is lossless. `undefined` or `{ kind: "unbounded" }` runs the
+ *   full enumeration, exactly as when this parameter is omitted. When
+ *   `captureForkState` is also true, the fork side is still enumerated IN
+ *   FULL for {@link StateDiff.forkNodeVersions} / {@link StateDiff.forkEdgeSignatures}
+ *   (the lost-update guard needs the whole store); pruning then narrows only
+ *   which of those already-fetched rows are diffed, at no extra read.
  */
 export async function diffAgainstBase<G extends GraphDef>(
   baseStore: Store<G>,
   forkStore: Store<G>,
   captureForkState = true,
+  pruneTo?: LineageDelta,
 ): Promise<StateDiff> {
+  const prunedKeys = pruneTo?.kind === "keys" ? pruneTo : undefined;
   const graph = baseStore.graph;
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
@@ -710,21 +807,46 @@ export async function diffAgainstBase<G extends GraphDef>(
   const forkNodeVersions = new Map<MergeKey, number>();
 
   for (const kind of nodeKinds) {
-    const baseRows = await enumerateAllNodes(
-      storeBackend(baseStore),
-      baseStore.graphId,
-      kind,
-    );
-    const forkRows = await enumerateAllNodes(
-      storeBackend(forkStore),
-      forkStore.graphId,
-      kind,
-    );
+    const nodeIds =
+      prunedKeys === undefined ? [] : idsForKind(prunedKeys.nodes, kind);
+    const baseRows =
+      prunedKeys === undefined ?
+        await enumerateAllNodes(
+          storeBackend(baseStore),
+          baseStore.graphId,
+          kind,
+        )
+      : await fetchNodesByIds(
+          storeBackend(baseStore),
+          baseStore.graphId,
+          kind,
+          nodeIds,
+        );
+    const forkRowsFetched =
+      captureForkState || prunedKeys === undefined ?
+        await enumerateAllNodes(
+          storeBackend(forkStore),
+          forkStore.graphId,
+          kind,
+        )
+      : await fetchNodesByIds(
+          storeBackend(forkStore),
+          forkStore.graphId,
+          kind,
+          nodeIds,
+        );
     if (captureForkState) {
-      for (const row of forkRows) {
+      for (const row of forkRowsFetched) {
         forkNodeVersions.set(mergeKey(kind, row.id), row.version);
       }
     }
+    // When a full fetch above was forced by `captureForkState` while pruning
+    // is active, the rows fed to `diffNodeKind` are narrowed to the pruned
+    // set here — no second read, just a filter over what was already fetched.
+    const forkRows =
+      prunedKeys === undefined || !captureForkState ?
+        forkRowsFetched
+      : filterRowsByIds(forkRowsFetched, nodeIds);
     const delta = diffNodeKind(kind, baseRows, forkRows);
     for (const entry of delta.new) {
       newNodes.push(entry);
@@ -750,18 +872,40 @@ export async function diffAgainstBase<G extends GraphDef>(
   const forkEdgeSignatures = new Map<MergeKey, string>();
 
   for (const kind of edgeKinds) {
-    const baseRows = await enumerateAllEdges(
-      storeBackend(baseStore),
-      baseStore.graphId,
-      kind,
-    );
-    const forkRows = await enumerateAllEdges(
-      storeBackend(forkStore),
-      forkStore.graphId,
-      kind,
-    );
+    const edgeIds =
+      prunedKeys === undefined ? [] : idsForKind(prunedKeys.edges, kind);
+    const baseRows =
+      prunedKeys === undefined ?
+        await enumerateAllEdges(
+          storeBackend(baseStore),
+          baseStore.graphId,
+          kind,
+        )
+      : await fetchEdgesByIds(
+          storeBackend(baseStore),
+          baseStore.graphId,
+          kind,
+          edgeIds,
+        );
+    const forkRowsFetched =
+      captureForkState || prunedKeys === undefined ?
+        await enumerateAllEdges(
+          storeBackend(forkStore),
+          forkStore.graphId,
+          kind,
+        )
+      : await fetchEdgesByIds(
+          storeBackend(forkStore),
+          forkStore.graphId,
+          kind,
+          edgeIds,
+        );
+    const forkRows =
+      prunedKeys === undefined || !captureForkState ?
+        forkRowsFetched
+      : filterRowsByIds(forkRowsFetched, edgeIds);
     if (captureForkState) {
-      for (const row of forkRows) {
+      for (const row of forkRowsFetched) {
         forkEdgeSignatures.set(
           mergeKey(kind, row.id),
           edgeStateSignature({

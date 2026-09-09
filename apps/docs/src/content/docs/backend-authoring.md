@@ -129,7 +129,7 @@ different reasons of their own (see the table).
 | `strategy` | Captured by `buildOperations` and every transaction handle. |
 | `fulltext` | Captured by `buildOperations` and every transaction handle. |
 | `vector` | Captured by `buildOperations` and every transaction handle. |
-| `provisioning` | `ensureTable` and `catalog` are captured by migrations and transaction handles. |
+| `provisioning` | `ensureTable`, `catalog`, and `lineage` are all captured by migrations and transaction handles. |
 | `assembly` | Opaque and bundled-only; a derived profile carries the base's `assembly` forward by reference, so it resolves to the identical `buildOperations` / `lateMembers` pair the base builder closed over. |
 
 An override naming any of these throws `ConfigurationError` with code
@@ -320,6 +320,163 @@ instead — no `drain` key: that field applies only to `mechanism: "advisory"`)
 to actually resolve an `engine-serialized` plan that needs no
 lock spelling at all.
 
+## Supplying `lineage`
+
+`EngineProvisioning.lineage` forwards onto the assembled backend's optional
+`lineage` member unchanged, exactly like `provisioning.catalog` forwards onto
+`catalog`. Neither bundled profile sets it: `buildPostgresEngineProfile` and
+`buildSqliteEngineProfile` both leave it `undefined`, so a store built on a
+bundled backend derives its `lineage` from its own recorded relations when
+`history: true` is on, and has none otherwise (see
+[Lineage and pruned diffs](/graph-merge#lineage-and-pruned-diffs)). An engine
+whose storage layer already tracks a whole-database revision and can answer
+"what changed in this graph since revision R" more cheaply than a full scan
+supplies `lineage` directly.
+
+Both `revision` and `changesSince` take a **session** as their first
+argument — the connection the caller's decision is bound to, never one your
+implementation picks for itself. A caller planning outside any transaction
+(`branch()`'s fork-revision capture, `staging.ts`'s pruned-diff delta) passes
+the root backend it holds. The engine-anchored `base@V` guard's
+IN-TRANSACTION re-validation (`assertTargetUnchanged` in `graph-merge/
+merge.ts`) is the concrete caller a session-less bag could never serve
+correctly: it reads `lineage` off the PINNED TRANSACTION HANDLE and calls
+both members WITH that same handle as the session, so the read observes the
+transaction's own snapshot rather than a separate connection's possibly
+stale view. `requireLineage` refuses with `LINEAGE_UNAVAILABLE` (below) when
+the transaction handle carries no `lineage` of its own — there is no
+fallback to the root: a `lineage` reachable only through a `deriveBackend`
+overlay applied to the already-built root object never reaches a
+`transaction()` handle that way, so a profile that wants its `lineage`
+honored at commit time must thread it through `EngineProvisioning.lineage`,
+which reaches every `transaction()` handle the same way `catalog` does. For
+the same reason, never attach one `lineage` to the root object and a
+different one to the profile: the plan's anchor is minted from the root's
+`lineage` and the commit guard compares it against the handle's, and two
+sources' revisions are not comparable — an untouched target would be refused.
+Implement `revision`/`changesSince` by running the query ON the `session`
+argument (`session.execute`/`session.executeRaw`) — never on a connection
+you closed over instead. A `session` is always either the backend that
+declared this `lineage` or a `transaction()` handle it built, so nothing
+about implementing this member requires opening a connection of your own.
+
+`revision()` must return a token comparable only by equality against another
+revision the SAME `lineage` produced — never parsed, ordered, or compared
+across two different backends' `lineage`. It reports the engine's revision of
+the WHOLE DATABASE, not one graph, which is a stricter (and more useful)
+guarantee than the per-graph anchor `revisionTracking` keeps: a caller
+re-validating an engine anchor cannot treat a raw revision mismatch as a
+divergence the way it does for a per-graph one, because a commit to a
+completely unrelated graph on the same engine also bumps this revision — see
+`graph-merge/merge.ts`'s `engineAnchorMismatch`, which always confirms a
+mismatch through `changesSince` before refusing. `changesSince` must cover
+every way a row can change — insert, update, delete, and resurrection after a
+delete — deduplicated, and must answer `{ kind: "unbounded" }` rather than
+guess whenever it cannot bound the delta for a given revision (an unrecognized
+token, or history older than what it retains).
+
+**A revision must identify the database it came from, or the caller anchoring
+on it must.** Nothing in `EngineRevision`'s own shape distinguishes a revision
+minted by one physical database from a numerically coincidental one minted by
+an entirely different database — two independent engines whose counters both
+happen to read "r1" are indistinguishable by equality alone. `base-version.ts`
+does not trust a raw `lineage.revision()` for this reason: the engine anchor
+it mints pairs your revision with the store's own durable per-graph
+`typegraph_revision_origins` nonce (`engine:<origin>:<revision>`), the SAME
+namespacing the TypeGraph revision anchor already carries, and every
+re-validation checks that origin BEFORE ever comparing the bare revision (see
+[Lineage and pruned diffs](/graph-merge#lineage-and-pruned-diffs)'s engine
+anchor section). If your engine's own revision already carries a durable,
+per-database identity of its own (e.g. it is scoped to a specific cluster or
+instance and can never collide with another one), `revision()` may fold that
+identity into the token itself instead — `base@V`'s pairing still applies on
+top, so this is a belt-and-suspenders option, not a requirement. What you must
+never do is return a revision whose equality-comparable form could coincide
+with another database's, and rely on nothing to disambiguate them.
+
+Test a new `lineage` against `tests/backends/integration/lineage-conformance.ts`'s
+`registerLineageConformanceIntegrationTests` (registered per-dialect through
+`createIntegrationTestSuite`, or called directly against your own backend,
+via `{ getStore: () => ({ backend }) }`). It registers two describes: only
+"lineage: recorded-relations conformance" is portable — it drives every case
+through `resolveLineage`, the same path a real caller takes, and is the case
+the bundled recorded-relations derivation passes: after N writes,
+`changesSince(r0)` is exactly the touched keys, `changesSince(rN)` is empty, a
+hard delete after a revision reports the deleted key once, and an unrecognized
+revision is `unbounded`. "lineage: capture-completeness evidence" is
+TypeGraph-specific — it exercises `recordedRelationsLineage` directly (the
+per-revision evidence a bare engine revision has no equivalent gap for); an
+engine profile's own suite should run against the conformance describe only
+and skip the other.
+
+## Supplying `recordedTime`
+
+`EngineProvisioning.recordedTime` declares an engine that tracks recorded
+(system) time itself, rather than through TypeGraph's own capture relations
+and clock — a backend that declares it must also declare `lineage`
+(engine-native history keeps no recorded relations for TypeGraph to derive a
+change delta from; `createSqlBackend` refuses `recordedTime` without a
+co-declared `lineage` with `ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE`).
+`EngineRecordedTimeMembers` has two members, `source` and `revisionNow`, both
+`this: void`.
+
+`source(table, revision)` names the table expression `table` (`"nodes"` |
+`"edges"` | `"identityAssertions"`) reads its recorded rows from, AS OF
+`revision` — the engine's own temporal-table syntax, with the interval
+already folded in (a system-time `AS OF` clause, or equivalent). It replaces
+what a TypeGraph-relation-backed source spells as two members: the recorded
+relation itself (`recordedNodesTable`/`recordedEdgesTable`) and a separate
+`recorded_from <= r AND r < recorded_to` interval predicate. Because
+`source`'s own expression already scopes every row to exactly one revision,
+there is nothing left for a predicate to narrow — every recorded read this
+member backs compiles with no interval clause at all. `revision` is an
+opaque `{ revision, recordedAt }` pair minted by your own `revisionNow`
+below; never parse `revision.revision` as a number; embed it in the AS OF
+expression as an opaque token. `table` is never called with
+`"identityAssertions"` today — a recorded identity read (`Store.
+identityAtCoordinate` at a past instant, and the query compiler's historical
+identity traversal) is refused outright under engine-native ownership before
+any read compiles, so your implementation must still accept the shared
+union without that arm ever running.
+
+`revisionNow(session)` is called on two different kinds of session, and must
+answer differently for each:
+
+- **On a root backend** (`store.recordedNow()`, `store.revisionNow()`): the
+  engine's current COMMITTED revision.
+- **On an open `transaction()` handle** (both places `TransactionReceipt.recorded`
+  is stamped, called before that transaction's own COMMIT): the revision at
+  which THIS transaction's writes will become visible once it commits — the
+  engine's pending/next revision for that session, not the last one committed
+  before it opened. TypeGraph stamps this still-uncommitted value straight
+  into the receipt it hands back to the caller once the transaction succeeds.
+
+An engine that can only name its last-COMMITTED revision, never its own
+pending one from inside an open transaction, cannot implement `recordedTime`:
+stamping the last-committed value into a receipt would describe the state
+*before* the write the receipt is reporting on, and there is no correct
+point after COMMIT to read the right value from without reopening the race
+`recordedTime` exists to close.
+
+Declaring `recordedTime` changes what `history: true` means on your profile.
+TypeGraph's own recorded relations, clock, and write-fence-gated clock
+allocation are never engaged; `revisionTracking: true` is refused whether or
+not `history: true` is also requested
+(`ENGINE_NATIVE_REVISION_TRACKING_UNSUPPORTED` — there is no
+TypeGraph clock for it to advance, and the engine's own revision is only
+ever available under `history: true`); a `recordedRead` external binding is
+refused (`ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED` — there is no TypeGraph
+recorded relation for one to populate); and `migrateLegacyRecordedTime`
+refuses outright (`ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` — it
+rewrites TypeGraph's own recorded relations, which your backend does not
+have). `RecordedInstant` anchors from a `recordedTime`-declaring store use
+the `e1:<opaque engine revision>:<ISO instant>` form rather than TypeGraph's
+`r1:<16-digit revision>:<ISO instant>` form; `asOfRecorded` refuses an
+anchor minted under the other ownership form with
+`RECORDED_INSTANT_OWNERSHIP_MISMATCH`. See [Engine-native recorded
+time](/queries/temporal#engine-native-recorded-time) for the full reader
+contract.
+
 ## Refusals you may meet
 
 | Code | When |
@@ -329,6 +486,14 @@ lock spelling at all.
 | `WRITE_FENCE_DECLARATION_INVALID` | The declared `writeFence` carries an unrecognized `mechanism`, `drain`, or `conflict` string; a `drain` key on a mechanism other than `"advisory"` / `"row"`; a `conflict` key on anything but `"row"`; or `conflict: "commit-time"` on a target whose own `capabilities.execution.interactiveTransactions` is `false` — that value is honored only by the `"optimistic-retry"` execution tier, which never derives without an interactive transaction to replay inside, so accepting it there would silently drop it rather than apply it. `resolveWriteFencePlan` validates the raw value (a plain-JavaScript author is not held to the discriminated-union type) before shaping a plan from it. |
 | `CALLER_SERIALIZED_REFUSES_ADOPTION` | `adoptTransaction` was called on a backend whose resolved write-fence plan is `caller-serialized` — an externally owned transaction's lifetime cannot be held by the backend's in-process write-unit queue. |
 | `CATALOG_UNAVAILABLE` | A store path that needs the backend's catalog probes (index materialization, the recorded-time schema check, the recorded-time migration's column read) finds `catalog` absent — a profile whose `provisioning.catalog` is unset builds a backend with no `catalog` member at all. |
+| `LINEAGE_UNAVAILABLE` | A caller reached `requireLineage` and found `lineage` absent on the backend it asked. Every OUT-OF-TRANSACTION graph-merge caller consults `lineage` through `resolveLineage`, which already falls back to the recorded-relations lineage or to a full comparison rather than hitting this refusal. `assertTargetUnchanged`'s in-transaction re-validation reads the transaction handle's `lineage` ONLY — no fallback to the root — so this fires whenever a `lineage` that anchored the plan (found on the root at plan time) is not ALSO threaded onto the transaction handle that commits it; see "Supplying `lineage`" above for how to thread it correctly. |
+| `ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE` | The profile declares `recordedTime` without also declaring `lineage` — engine-native history keeps no recorded relations of its own for TypeGraph to derive a graph-merge change delta from, so the engine's own `lineage` is the only source for one. Raised at `createSqlBackend` construction, naming both members. |
+| `RECORDED_TIME_UNAVAILABLE` | A caller reached `requireRecordedTime` and found `recordedTime` absent on the backend it asked. Store construction under `history: true` and the shared `recordedNow()`/`revisionNow()`/receipt-stamping read are the only callers today, both reached only once `recordedTimeOwnership` has already resolved to `"engine-native"`, so this is defense-in-depth rather than a reachable misconfiguration on a bundled backend. |
+| `ENGINE_NATIVE_REVISION_TRACKING_UNSUPPORTED` | A store was constructed with `revisionTracking: true` against a backend that declares `recordedTime`, whether or not `history: true` was also requested — engine-native has no TypeGraph clock for `revisionTracking` to advance on its own. |
+| `ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED` | A store was constructed with an external `recordedRead` binding against a backend that declares `recordedTime` — there is no TypeGraph recorded relation for one to populate; engine-native's own recorded reads are sourced from `recordedTime.source` instead. |
+| `ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED` | `Store.identityAtCoordinate` at a past recorded instant, or the query compiler's historical identity traversal, was reached under engine-native recorded time — identity history reads TypeGraph's own recorded relations directly, which an engine-native backend does not populate. |
+| `ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` | `migrateLegacyRecordedTime` was called against a backend that declares `recordedTime` — the migration rewrites TypeGraph's own recorded relations, which an engine-native backend does not have. |
+| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `asOfRecorded(instant)` was called with an instant minted under the OTHER recorded-time ownership form — an `r1:` instant against an engine-native store, or an `e1:` instant against a TypeGraph-owned one. |
 | `ENGINE_PROFILE_OVERRIDE_UNSUPPORTED` | `deriveEngineProfile`'s `overrides` names a key outside the derivable set, or one of the three adapter-backed sub-fields with a changed value (see [the carve-out](#the-adapter-backed-carve-out)). |
 | `ENGINE_ASSEMBLY_UNRECOGNIZED` | The profile's `assembly` is not a value `assembleEngine` produced — a profile built by hand rather than obtained from a bundled builder (optionally adapted with `deriveEngineProfile`). |
 

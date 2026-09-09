@@ -14,7 +14,7 @@ import { TrustedImportError } from "../errors";
 import { acyclicEdgeKinds } from "../store/acyclicity";
 import { edgeCardinalityAxisReferences } from "../store/claims/edge-claims";
 import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
-import { storeBackend } from "../store/runtime-port";
+import { storeBackend, storeCaptureEnabled } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import { isCanonicalIsoDate, isInvertedValidityWindow } from "../utils/date";
 import { serializedStreamRefusal, withImportStreamLease } from "./import";
@@ -66,7 +66,13 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
       },
     );
   }
-  if (store.historyEnabled) {
+  if (storeCaptureEnabled(store)) {
+    // Trusted import writes rows directly, bypassing the node/edge-
+    // operations layer that TypeGraph's own capture uses to populate the
+    // recorded relations — a check against `storeCaptureEnabled`, not the
+    // public `historyEnabled` getter, so an engine-native `history: true`
+    // store (whose engine versions every write to the live table itself,
+    // regardless of which code path produced it) is unaffected.
     throw new TrustedImportError(
       "Trusted import does not support recorded-time history capture.",
       "history_unsupported",

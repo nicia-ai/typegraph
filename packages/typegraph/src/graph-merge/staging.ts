@@ -26,8 +26,17 @@ import { requireDefined } from "../utils/presence";
  *   - Bucket maps iterate in lexicographic kind order.
  *   The `(…, branchId)` tail breaks ties when the same id is contributed by more
  *   than one branch, so the ordering is total and stable.
+ *
+ * Pruning:
+ *   Each branch's diff is bounded, when possible, by {@link branchPruneTo} — a
+ *   lineage delta naming exactly the rows that changed on either side since
+ *   the branch forked (see `state-diff.ts`'s `diffAgainstBase`). This changes
+ *   which rows are READ, never the result: a row absent from the delta is
+ *   guaranteed unchanged on both sides, so the staged `StagingSet` is
+ *   identical to what a full enumeration would have produced.
  */
-import { compareStrings, type MergeKey } from "./node-key";
+import { lineageDeltaSinceAnchor } from "./base-version";
+import { compareStrings, type MergeKey, mergeKey } from "./node-key";
 import type {
   ChangedEdge,
   ChangedNode,
@@ -41,11 +50,17 @@ import type {
 } from "./state-diff";
 import { diffAgainstBase } from "./state-diff";
 import type {
+  EntityKey,
   GraphDef,
   IdentityTransferAssertion,
+  LineageDelta,
   Store,
 } from "./typegraph-internal";
-import { storeRuntime } from "./typegraph-internal";
+import {
+  resolveLineage,
+  storeBackend,
+  storeRuntime,
+} from "./typegraph-internal";
 import type { BranchId, GraphBranch } from "./types";
 
 /** A new fork node tagged with the branch that introduced it. */
@@ -231,6 +246,90 @@ function groupByKind<
 }
 
 /**
+ * Deduplicates a lineage delta's mixed-kind key list by `(kind, id)` — the
+ * fork's and the base's own `changesSince` results can both name the same
+ * row (e.g. one the fork inherited unmodified but the base itself later
+ * changed), and a duplicate id costs an extra bind in the pruned batch read
+ * `diffAgainstBase` issues for it.
+ */
+function dedupeEntityKeys(keys: readonly EntityKey[]): EntityKey[] {
+  const byMergeKey = new Map<MergeKey, EntityKey>();
+  for (const key of keys) {
+    byMergeKey.set(mergeKey(key.kind, key.id), key);
+  }
+  return [...byMergeKey.values()];
+}
+
+/**
+ * THE one owner of per-branch pruning: the union of what changed on the
+ * FORK since it was branched (`branch.forkRevision`, resolved through the
+ * fork's own lineage) and what changed on the BASE since the branch's `base`
+ * anchor was minted (`lineageDeltaSinceAnchor`, resolved through the base's
+ * own lineage for whichever anchor form `base` carries). A key absent from
+ * BOTH deltas never moved on either side since the fork point, so restricting
+ * `diffAgainstBase`'s reads to this union cannot miss a change — see the
+ * property test in `tests/property/lineage-pruned-diff.test.ts`, which is the
+ * load-bearing proof that the pruned diff deep-equals the full one.
+ *
+ * `undefined` — no pruning; `diffAgainstBase` runs its full enumeration —
+ * whenever EITHER side cannot supply a bounded delta: the branch was not
+ * produced by `branch()` (no `forkRevision`, e.g. `mergeIncremental`'s
+ * hand-built committed-target branch), the fork's own store resolves no
+ * `lineage` at diff time, the fork's `changesSince` answers `unbounded`, the
+ * base-side counterpart of any of those, or either `changesSince` call
+ * itself REJECTING (a transient engine error, an unhealthy connection).
+ * Pruning is a pure optimization over the full diff, never a precondition
+ * for one: a rejection here must fall back to the full comparison rather
+ * than fail a merge the full diff would otherwise have completed, so both
+ * lineage calls below run through {@link safeLineageDelta}.
+ */
+export async function branchPruneTo<G extends GraphDef>(
+  baseStore: Store<G>,
+  branch: GraphBranch<G>,
+): Promise<LineageDelta | undefined> {
+  if (branch.forkRevision === undefined) return undefined;
+  const forkLineage = resolveLineage(branch.store);
+  if (forkLineage === undefined) return undefined;
+  const forkRevision = branch.forkRevision;
+  // The session is the fork's own root backend — the same object
+  // `resolveLineage(branch.store)` just resolved `lineage` off of, and the
+  // only session available this far outside any transaction.
+  const forkDelta = await safeLineageDelta(() =>
+    forkLineage.changesSince(
+      storeBackend(branch.store),
+      forkRevision,
+      branch.store.graphId,
+    ),
+  );
+  if (forkDelta?.kind !== "keys") return undefined;
+  const baseDelta = await safeLineageDelta(() =>
+    lineageDeltaSinceAnchor(baseStore, branch.base),
+  );
+  if (baseDelta?.kind !== "keys") return undefined;
+  return {
+    kind: "keys",
+    nodes: dedupeEntityKeys([...forkDelta.nodes, ...baseDelta.nodes]),
+    edges: dedupeEntityKeys([...forkDelta.edges, ...baseDelta.edges]),
+  };
+}
+
+/**
+ * Runs one lineage delta call, treating a REJECTION the same as an
+ * `undefined`/`unbounded` answer: {@link branchPruneTo}'s own doc comment is
+ * the "one owner" of why a rejection must fall back to the full diff rather
+ * than propagate and fail a merge the full diff would have completed.
+ */
+async function safeLineageDelta(
+  fetch: () => Promise<LineageDelta | undefined>,
+): Promise<LineageDelta | undefined> {
+  try {
+    return await fetch();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Stages the UNION of all branches' diffs against the base, provenance-tagged.
  *
  * Each branch is diffed against `baseStore` (the immutable reference — NEVER a
@@ -271,10 +370,12 @@ export async function stageBranches<G extends GraphDef>(
   let targetEdgeSignatures: ReadonlyMap<MergeKey, string> = new Map();
   for (const branch of branches) {
     const branchId = branch.id;
+    const pruneTo = await branchPruneTo(baseStore, branch);
     const diff = await diffAgainstBase(
       baseStore,
       branch.store,
       branchId === captureTargetStateFor,
+      pruneTo,
     );
     if (branchId === captureTargetStateFor) {
       targetNodeVersions = diff.forkNodeVersions;

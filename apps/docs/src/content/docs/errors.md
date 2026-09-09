@@ -1053,10 +1053,9 @@ its resolved plan, turns out not to cover what a write needs:
 | `WRITE_FENCE_SQL_UNAVAILABLE` | The resolved declaration's `mechanism` is `"advisory"` but the backend's `fenceSql` is missing the member that `mechanism`/`drain` combination needs to spell (`advisoryLockExpression`, `isolationFactExpression`, or, under `drain: "table-lock"`, `lockTables`) — or, independently of any lock plan, a session isolation-level read (recorded capture's isolation guard) finds no `fenceSql` at all. Raised at backend construction for the lock-plan case; at the point of the read for the session-fact case. |
 | `RECORDED_CLOCK_REQUIRES_WRITE_FENCE` | The store is constructed with `history: true` or `revisionTracking: true` — TypeGraph-owned recorded-clock allocation — against a backend whose write-fence plan resolves `unfenced`. |
 | `WRITE_FENCE_UNAVAILABLE` | A resolved plan cannot satisfy what a specific operation needs: either the plan is `unfenced` outright, or it is a `lock` plan whose `drain` is `"none"` meeting an operation whose `requires` is `"drain"`. `details.operation` names the operation and `details.requires` names which kind of exclusion (`"keyed"` or `"drain"`) it needed; a `drain: "none"` refusal also names the drain in the message. `"engine-serialized"` and `"caller-serialized"` satisfy either `requires` value without consulting `drain`. |
-| `ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` | The backend declares `recordedTimeOwnership: "engine-native"` and the store is constructed with `history: true` or `revisionTracking: true` — TypeGraph still allocates its own recorded clock for those options, so the engine-native path is refused as an interim measure, independently of the write-fence plan. See [Recorded-time ownership](/backend-setup#recorded-time-ownership-recordedtimeownership). |
 | `CALLER_SERIALIZED_REFUSES_ADOPTION` | `adoptTransaction` was called on a backend whose resolved write-fence plan is `caller-serialized`. An externally owned transaction's lifetime cannot be held by the backend's in-process write-unit queue, so `store.withTransaction(externalTx)` is refused rather than let its writes silently interleave with the queue's own. `details.member` names `"adoptTransaction"`. |
 
-`RECORDED_CLOCK_REQUIRES_WRITE_FENCE` and `ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` refuse at
+`RECORDED_CLOCK_REQUIRES_WRITE_FENCE` refuses at
 `createStore`, never mid-flush, and the message names the exact declaration line to add.
 `WRITE_FENCE_UNAVAILABLE` is not a `createStore`-time check: `requireWriteFence` is called from
 every individual lock site (the identity graph lock, the identity-enablement drain, identity DDL,
@@ -1391,6 +1390,34 @@ transactions), while the guard code identifies a guard that has already thrown.
 Between them, "history capture forbids raw SQL here" and "this backend has no
 transactions" (which carries **no** guard code) are cleanly distinguishable
 without catching-and-string-matching.
+
+#### Engine-native recorded-time codes
+
+A backend can track recorded (system) time itself by declaring
+`GraphBackend.recordedTime` instead of using TypeGraph's own recorded
+relations and clock — see [Engine-native recorded
+time](/queries/temporal#engine-native-recorded-time) and [Supplying
+`recordedTime`](/backend-authoring#supplying-recordedtime). Which ownership
+form a store reads under is derived from that member's presence, never
+declared separately, so there is no `recordedTimeOwnership` option to set.
+Every refusal specific to that form carries a stable `details.code`:
+
+| `details.code` | Raised when |
+|----------------|-------------|
+| `ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE` | An engine profile declares `recordedTime` without also declaring `lineage` — engine-native history keeps no recorded relations of its own for TypeGraph to derive a graph-merge change delta from. Raised at backend construction, naming both members. |
+| `RECORDED_TIME_UNAVAILABLE` | A caller reached `requireRecordedTime` and found `recordedTime` absent on the backend it asked — store construction under `history: true` and the shared `recordedNow()`/`revisionNow()`/receipt-stamping read, both reached only once ownership has already resolved to `"engine-native"`. |
+| `ENGINE_NATIVE_REVISION_TRACKING_UNSUPPORTED` | A store is constructed with `revisionTracking: true` against an engine-native backend, whether or not `history: true` is also requested — there is no TypeGraph clock for `revisionTracking` to advance; the engine's own revision is available only under `history: true`. |
+| `ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED` | A store is constructed with an external `recordedRead` binding against an engine-native backend — there is no TypeGraph recorded relation for one to populate. |
+| `ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED` | `store.identityAtCoordinate` at a past recorded instant, or the query compiler's historical identity traversal, is reached under engine-native recorded time — identity history reads TypeGraph's own recorded relations directly, which an engine-native backend does not populate. |
+| `ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` | `migrateLegacyRecordedTime` is called against an engine-native backend — the migration rewrites TypeGraph's own recorded relations, which an engine-native backend does not have. |
+| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `store.asOfRecorded(instant)` receives an instant minted under the OTHER recorded-time ownership form — an `r1:` (TypeGraph-owned) instant against an engine-native store, or an `e1:` (engine-native) instant against a TypeGraph-owned store. |
+
+The profile refusal fires at backend construction; the two store-option
+refusals, and `RECORDED_TIME_UNAVAILABLE`'s construction arm, fire at
+`createStore`; the remaining codes, and `RECORDED_TIME_UNAVAILABLE`'s read
+arm, fire at the specific call that cannot be honored. None of these codes
+are members of `RECORDED_CAPTURE_GUARD_CODES` above — that set stays closed
+to the three TypeGraph-capture guards.
 
 ### `SchemaMismatchError`
 

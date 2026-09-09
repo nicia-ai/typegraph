@@ -4,7 +4,11 @@ import {
   type GraphBackend,
   type NodeRow,
 } from "../backend/types";
-import { type ReadCoordinate } from "../core/temporal";
+import {
+  parseRecordedInstant,
+  type ReadCoordinate,
+  type RecordedInstantParts,
+} from "../core/temporal";
 import {
   type AnyEdgeType,
   type EdgeId,
@@ -17,6 +21,7 @@ import {
   type RecordedReadBinding,
   recordedReadSqlSchema,
   requireRecordedReadBinding,
+  type SqlSchema,
 } from "../query/compiler/schema";
 import {
   compileTemporalFilter,
@@ -160,11 +165,18 @@ function createRecordedReadBackend(
   });
 }
 
-function recordedTemporalFilter(
-  backend: GraphBackend,
+/**
+ * The recorded revision a point read or scan reconstructs at, parsed once
+ * from the coordinate's `recorded.asOf` — the single place a missing
+ * recorded pin is refused, consulted by {@link createRecordedReadService}'s
+ * callers before they resolve the recorded schema. The temporal filter below
+ * re-derives the same instant through {@link compileTemporalFilter}'s own
+ * parse rather than repeating the refusal here, since by the time it runs
+ * this function has already guaranteed the coordinate carries one.
+ */
+function requireRecordedRevision(
   coordinate: ReadCoordinate,
-  tableAlias: string,
-): SqlFragment {
+): RecordedInstantParts {
   const recordedAsOf = coordinate.recorded?.asOf;
   if (recordedAsOf === undefined) {
     throw new ConfigurationError(
@@ -172,13 +184,58 @@ function recordedTemporalFilter(
       { code: "RECORDED_POINT_READ_MISSING_COORDINATE" },
     );
   }
+  return parseRecordedInstant(recordedAsOf, "coordinate.recorded.asOf");
+}
+
+function recordedTemporalFilter(
+  coordinate: ReadCoordinate,
+  tableAlias: string,
+  recordedReadBinding: RecordedReadBinding,
+): SqlFragment {
   return compileTemporalFilter({
     mode: coordinate.valid.mode,
     asOf: coordinate.valid.asOf,
-    recordedAsOf,
+    recordedAsOf: coordinate.recorded?.asOf,
     tableAlias,
     currentTimestamp: currentReadInstant(),
+    recordedReadBinding,
   });
+}
+
+/**
+ * The ORDER BY a recorded point read applies, letting `recordedGetByIds`
+ * detect an overlapping-interval anomaly deterministically. Meaningful only
+ * for a binding whose source carries the `recorded_from`/`recorded_to`
+ * interval (`binding.carriesInterval`) — a TypeGraph-relation-backed source
+ * returns every revision of a matching row, and `recorded_from` is what
+ * separates them; a binding without that interval already scopes its source
+ * to exactly one revision, so there is no such column to order by and no
+ * anomaly the ordering could surface — `recordedGetByIds`'s per-id duplicate
+ * check still catches a genuine violation regardless of row order.
+ */
+function recordedPointReadOrderBy(
+  binding: RecordedReadBinding,
+  aliasSql: SqlFragment,
+): SqlFragment {
+  return binding.carriesInterval ?
+      sql`ORDER BY ${aliasSql}.recorded_from`
+    : sql``;
+}
+
+/**
+ * The ORDER BY a recorded scan applies. `id ASC` drives pagination and
+ * dedup on every binding; the `recorded_from ASC` tiebreaker exists only to
+ * make a same-id anomaly's row order deterministic under a binding whose
+ * source carries the recorded-time interval — see
+ * {@link recordedPointReadOrderBy}.
+ */
+function recordedScanOrderBy(
+  binding: RecordedReadBinding,
+  aliasSql: SqlFragment,
+): SqlFragment {
+  return binding.carriesInterval ?
+      sql`ORDER BY ${aliasSql}.id ASC, ${aliasSql}.recorded_from ASC`
+    : sql`ORDER BY ${aliasSql}.id ASC`;
 }
 
 function recordedRelationInvariantError(
@@ -290,17 +347,21 @@ export function createRecordedReadService(
     mapRecordedNodeRow,
     mapRecordedEdgeRow,
   } = params;
-  const recordedSchema =
-    recordedReadBinding === undefined ? undefined : (
-      recordedReadSqlSchema(recordedReadBinding)
-    );
 
-  function schemaForRecordedRead(surface: string) {
-    return (
-      recordedSchema ??
-      recordedReadSqlSchema(
-        requireRecordedReadBinding(recordedReadBinding, surface),
-      )
+  /**
+   * Resolves the recorded relation schema for `revision` — built fresh per
+   * coordinate since {@link RecordedReadSource.source} takes the revision
+   * (an engine-native binding could fold it into the source expression
+   * itself), and refuses the same way every recorded read refuses a missing
+   * binding.
+   */
+  function schemaForRecordedRead(
+    surface: string,
+    revision: RecordedInstantParts,
+  ): SqlSchema {
+    return recordedReadSqlSchema(
+      requireRecordedReadBinding(recordedReadBinding, surface),
+      revision,
     );
   }
 
@@ -312,7 +373,12 @@ export function createRecordedReadService(
 
     const uniqueIds = [...new Set(ids)];
     const aliasSql = sql.raw(alias);
-    const temporalFilter = recordedTemporalFilter(backend, coordinate, alias);
+    const binding = requireRecordedReadBinding(
+      recordedReadBinding,
+      "recorded-point-read",
+    );
+    const temporalFilter = recordedTemporalFilter(coordinate, alias, binding);
+    const orderBy = recordedPointReadOrderBy(binding, aliasSql);
     const chunkResults = await withRelationsPrecondition(
       backend,
       Promise.all(
@@ -324,7 +390,7 @@ export function createRecordedReadService(
                 AND ${aliasSql}.kind = ${kind}
                 AND ${aliasSql}.id IN (${sqlValueList(idChunk)})
                 AND ${temporalFilter}
-              ORDER BY ${aliasSql}.recorded_from
+              ${orderBy}
             `),
           ),
         ),
@@ -362,7 +428,12 @@ export function createRecordedReadService(
         undefined
       : decodeRecordedScanCursor(options.after, scope);
     const aliasSql = sql.raw(alias);
-    const temporalFilter = recordedTemporalFilter(backend, coordinate, alias);
+    const binding = requireRecordedReadBinding(
+      recordedReadBinding,
+      "recorded-scan",
+    );
+    const temporalFilter = recordedTemporalFilter(coordinate, alias, binding);
+    const orderBy = recordedScanOrderBy(binding, aliasSql);
     const rows = await withRelationsPrecondition(
       backend,
       backend.execute<Record<string, unknown>>(
@@ -372,7 +443,7 @@ export function createRecordedReadService(
             AND ${aliasSql}.kind = ${kind}
             ${after === undefined ? sql.raw("") : sql`AND ${aliasSql}.id > ${after}`}
             AND ${temporalFilter}
-          ORDER BY ${aliasSql}.id ASC, ${aliasSql}.recorded_from ASC
+          ${orderBy}
           LIMIT ${limit + 1}
         `),
       ),
@@ -409,7 +480,10 @@ export function createRecordedReadService(
     ids: readonly NodeId<N>[],
     coordinate: ReadCoordinate,
   ): Promise<readonly (Node<N> | undefined)[]> {
-    const schema = schemaForRecordedRead("recorded-point-read");
+    const schema = schemaForRecordedRead(
+      "recorded-point-read",
+      requireRecordedRevision(coordinate),
+    );
     return recordedGetByIds({
       entity: "node",
       table: schema.nodesTable,
@@ -426,7 +500,10 @@ export function createRecordedReadService(
     ids: readonly EdgeId<E>[],
     coordinate: ReadCoordinate,
   ): Promise<readonly (Edge<E> | undefined)[]> {
-    const schema = schemaForRecordedRead("recorded-point-read");
+    const schema = schemaForRecordedRead(
+      "recorded-point-read",
+      requireRecordedRevision(coordinate),
+    );
     return recordedGetByIds({
       entity: "edge",
       table: schema.edgesTable,
@@ -443,7 +520,10 @@ export function createRecordedReadService(
     coordinate: ReadCoordinate,
     options?: RecordedScanOptions,
   ): Promise<RecordedScanPage<Node<N>>> {
-    const schema = schemaForRecordedRead("recorded-scan");
+    const schema = schemaForRecordedRead(
+      "recorded-scan",
+      requireRecordedRevision(coordinate),
+    );
     return recordedScan({
       entity: "node",
       table: schema.nodesTable,
@@ -460,7 +540,10 @@ export function createRecordedReadService(
     coordinate: ReadCoordinate,
     options?: RecordedScanOptions,
   ): Promise<RecordedScanPage<Edge<E>>> {
-    const schema = schemaForRecordedRead("recorded-scan");
+    const schema = schemaForRecordedRead(
+      "recorded-scan",
+      requireRecordedRevision(coordinate),
+    );
     return recordedScan({
       entity: "edge",
       table: schema.edgesTable,

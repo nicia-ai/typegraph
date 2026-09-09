@@ -47,9 +47,15 @@ import type { AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-
 import type { InternalOperationBackend } from "../src/backend/drizzle/operation-backend-core";
 import { buildPostgresEngineProfile } from "../src/backend/drizzle/postgres";
 import { buildSqliteEngineProfile } from "../src/backend/drizzle/sqlite";
+import type {
+  EngineRecordedTimeMembers,
+  EngineRevision,
+  LineageMembers,
+} from "../src/backend/types";
 import { ConfigurationError } from "../src/errors";
 import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strategy";
 import { buildVectorCapabilities } from "../src/query/dialect/vector-strategy";
+import { sql } from "../src/query/sql-fragment";
 import { assertRecordedCaptureTransactionIsolation } from "../src/store/recorded-capture/guards";
 import { requireDefined } from "../src/utils/presence";
 
@@ -324,6 +330,81 @@ describe("createSqlBackend refusals", () => {
 
     expect(backend.capabilities.vector).toEqual(overriddenVector);
     expect(backend.capabilities.fulltext).toEqual(overriddenFulltext);
+  });
+});
+
+function scriptedRecordedTime(): EngineRecordedTimeMembers {
+  return {
+    source: (table) => sql.identifier(`engine_${table}`),
+    revisionNow: () =>
+      Promise.resolve({
+        revision: "engine-r0",
+        recordedAt: "2026-01-01T00:00:00.000Z",
+      }),
+  };
+}
+
+function scriptedLineage(): LineageMembers {
+  return {
+    revision: () => Promise.resolve("engine-r0" as EngineRevision),
+    changesSince: () => Promise.resolve({ kind: "unbounded" }),
+  };
+}
+
+describe("createSqlBackend's recordedTime/lineage co-requirement", () => {
+  it("refuses a profile that declares recordedTime without lineage, naming both members", () => {
+    const base = createRealSqliteProfile();
+    const profile = {
+      ...base,
+      provisioning: {
+        ...base.provisioning,
+        recordedTime: scriptedRecordedTime(),
+      },
+    };
+
+    let thrown: unknown;
+    try {
+      createSqlBackend(profile);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    const configurationError = thrown as ConfigurationError;
+    expect(configurationError.details["code"]).toBe(
+      "ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE",
+    );
+    expect(configurationError.message).toContain("recordedTime");
+    expect(configurationError.message).toContain("lineage");
+  });
+
+  it("constructs a backend that declares BOTH recordedTime and lineage", () => {
+    const base = createRealSqliteProfile();
+    const recordedTime = scriptedRecordedTime();
+    const lineage = scriptedLineage();
+    const profile = {
+      ...base,
+      provisioning: { ...base.provisioning, recordedTime, lineage },
+    };
+
+    const backend = createSqlBackend(profile);
+
+    expect(backend.recordedTime).toBe(recordedTime);
+    expect(backend.lineage).toBe(lineage);
+  });
+
+  it("constructs a backend that declares lineage without recordedTime — the pre-existing shape", () => {
+    const base = createRealSqliteProfile();
+    const lineage = scriptedLineage();
+    const profile = {
+      ...base,
+      provisioning: { ...base.provisioning, lineage },
+    };
+
+    const backend = createSqlBackend(profile);
+
+    expect(backend.lineage).toBe(lineage);
+    expect(backend.recordedTime).toBeUndefined();
   });
 });
 

@@ -173,7 +173,6 @@ type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
-    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public
@@ -262,15 +261,15 @@ type CheckUniqueParams = Readonly<{
 }>;
 
 // @public
-type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef & Readonly<{
+type ClaimEdgeCardinalityParams = Readonly<{
     graphId: string;
+    cardinality: Exclude<Cardinality, "many">;
     edgeKind: string;
     edgeId: string;
     fromKind: string;
     fromId: string;
     toKind: string;
     toId: string;
-    scope?: CompositionClaimScope;
 }>;
 
 // @public
@@ -446,7 +445,7 @@ type CommonOperationStrategy = Readonly<{
     buildHardDeleteEdge: (params: HardDeleteEdgeParams) => SQL;
     buildHardDeleteEdgesBatch: (params: DeleteEdgesBatchParams) => SQL;
     buildHardDeleteEdgesByNode: (graphId: string, nodeKind: string, nodeId: string) => SQL;
-    buildCountEdgesAtEndpoint: (params: CountEdgesAtEndpointParams) => SQL;
+    buildCountEdgesFrom: (params: CountEdgesFromParams) => SQL;
     buildEdgeExistsBetween: (params: EdgeExistsBetweenParams) => SQL;
     buildFindEdgesConnectedTo: (params: FindEdgesConnectedToParams) => SQL;
     buildFindNodesByKind: (params: FindNodesByKindParams) => SQL;
@@ -469,10 +468,8 @@ type CommonOperationStrategy = Readonly<{
     buildTakeOverEdgeClaimGuarded: (params: ClaimEdgeCardinalityParams, timestamp: string) => SQL;
     buildPurgeEdgeClaims: (params: PurgeEdgeClaimsParams) => SQL;
     buildContendedUniqueRowAudit: (graphId: string, constraintNames: readonly string[]) => SQL;
-    buildContendedEdgeRowAudit: (graphId: string, ref: EdgeCardinalityAxisRef, edgeKinds: readonly string[]) => SQL;
-    buildContendedCompositionEdgeRowAudit: (graphId: string, ref: EdgeCardinalityAxisRef, holders: CompositionClaimScope["holders"], reportedEdgeKinds: readonly string[]) => SQL;
+    buildContendedEdgeRowAudit: (graphId: string, cardinality: ConstrainedCardinality, edgeKinds: readonly string[]) => SQL;
     buildDisjointOverlapAudit: (graphId: string, kinds: readonly [string, string]) => SQL;
-    buildMisassignedEdgeEndpointAudit: (graphId: string, edgeKind: string, now: string, allowedPairs: readonly (readonly [string, string])[]) => SQL;
     buildGetActiveSchema: (graphId: string) => SQL;
     buildLockSchemaVersionAndGraphWrite?: (params: SchemaWriteFenceParams, advisoryLockNamespace: string, fenceSql: FenceSql) => SQL;
     buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
@@ -521,43 +518,24 @@ type CompiledStatementSql = IntentSql<"statement">;
 type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
-type CompositionClaimScope = Readonly<{
-    kind: "composition";
-    holders: readonly Readonly<{
-        edgeKind: string;
-        partSide: "from" | "to";
-    }>[];
-}>;
-
-// @public
-type CompositionExistence = "optional" | "required";
-
-// @public
-type CompositionPartSide = "from" | "to";
-
-// @public
 type ConstrainedCardinality = Exclude<Cardinality, "many">;
-
-// @public
-type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
 
 // @public
 type ConstraintFenceViolationRows = Readonly<{
     contendedUniqueRows: readonly ContendedUniqueRow[];
     contendedEdgeRows: readonly ContendedEdgeRow[];
     disjointOverlaps: readonly DisjointOverlapRow[];
-    misassignedEdgeEndpointRows?: readonly MisassignedEdgeEndpointRow[];
 }>;
 
 // @public
-type ContendedEdgeRow = EdgeCardinalityAxisRef & Readonly<{
+type ContendedEdgeRow = Readonly<{
     edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
     edgeId: string;
     fromKind: string;
     fromId: string;
     toKind: string;
     toId: string;
-    scope: CompositionClaimScope | undefined;
 }>;
 
 // @public
@@ -702,16 +680,6 @@ type CopyGraphTemplateContributionMarkersSqlParams = Readonly<{
 }>;
 
 // @public
-type CountEdgesAtEndpointParams = Readonly<{
-    graphId: string;
-    edgeKind: string;
-    endpoint: "from" | "to";
-    endpointKind: string;
-    endpointId: string;
-    activeOnly?: boolean;
-}>;
-
-// @public
 type CountEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -722,6 +690,15 @@ type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+}>;
+
+// @public
+type CountEdgesFromParams = Readonly<{
+    graphId: string;
+    edgeKind: string;
+    fromKind: string;
+    fromId: string;
+    activeOnly?: boolean;
 }>;
 
 // @public
@@ -744,9 +721,7 @@ type CreateBaseSchemaMembersDeps = Readonly<{
     ensureGraphTemplatesTable: () => Promise<void>;
     fencesTableDdl: string;
     ensureEdgeMatchIdentityStorage: () => Promise<void>;
-    identityTransitionsTableDdl: readonly string[];
-    identityTransitionRetentionTableDdl: string;
-    ensureIdentityTransitionsRestoredAtColumn: () => Promise<void>;
+    sinceIndexDdl: readonly [string, string, string];
 }>;
 
 // @public (undocumented)
@@ -2751,309 +2726,6 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
                 enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-        };
-        dialect: "pg";
-    }>;
-    readonly identityTransitions: drizzle_orm_pg_core.PgTableWithColumns<{
-        name: string;
-        schema: undefined;
-        columns: {
-            graphId: drizzle_orm_pg_core.PgColumn<{
-                name: "graph_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "PgText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            transitionId: drizzle_orm_pg_core.PgColumn<{
-                name: "transition_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "PgText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            recordedRevision: drizzle_orm_pg_core.PgColumn<{
-                name: "recorded_revision";
-                tableName: string;
-                dataType: "number";
-                columnType: "PgBigInt53";
-                data: number;
-                driverParam: string | number;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            recordedAt: drizzle_orm_pg_core.PgColumn<{
-                name: "recorded_at";
-                tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            validAt: drizzle_orm_pg_core.PgColumn<{
-                name: "valid_at";
-                tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            cause: drizzle_orm_pg_core.PgColumn<{
-                name: "cause";
-                tableName: string;
-                dataType: "string";
-                columnType: "PgText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            classKind: drizzle_orm_pg_core.PgColumn<{
-                name: "class_kind";
-                tableName: string;
-                dataType: "string";
-                columnType: "PgText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            classId: drizzle_orm_pg_core.PgColumn<{
-                name: "class_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "PgText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            priorClassKind: drizzle_orm_pg_core.PgColumn<{
-                name: "prior_class_kind";
-                tableName: string;
-                dataType: "string";
-                columnType: "PgText";
-                data: string;
-                driverParam: string;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            priorClassId: drizzle_orm_pg_core.PgColumn<{
-                name: "prior_class_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "PgText";
-                data: string;
-                driverParam: string;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            assertionIds: drizzle_orm_pg_core.PgColumn<{
-                name: "assertion_ids";
-                tableName: string;
-                dataType: "json";
-                columnType: "PgJsonb";
-                data: unknown;
-                driverParam: unknown;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            decision: drizzle_orm_pg_core.PgColumn<{
-                name: "decision";
-                tableName: string;
-                dataType: "json";
-                columnType: "PgJsonb";
-                data: unknown;
-                driverParam: unknown;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            txId: drizzle_orm_pg_core.PgColumn<{
-                name: "tx_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "PgText";
-                data: string;
-                driverParam: string;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            restoredAt: drizzle_orm_pg_core.PgColumn<{
-                name: "restored_at";
-                tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
-                driverParam: string;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-        };
-        dialect: "pg";
-    }>;
-    readonly identityTransitionRetention: drizzle_orm_pg_core.PgTableWithColumns<{
-        name: string;
-        schema: undefined;
-        columns: {
-            graphId: drizzle_orm_pg_core.PgColumn<{
-                name: "graph_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "PgText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            prunedBeforeRevision: drizzle_orm_pg_core.PgColumn<{
-                name: "pruned_before_revision";
-                tableName: string;
-                dataType: "number";
-                columnType: "PgBigInt53";
-                data: number;
-                driverParam: string | number;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            prunedAt: drizzle_orm_pg_core.PgColumn<{
-                name: "pruned_at";
-                tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
@@ -6347,339 +6019,6 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
         };
         dialect: "sqlite";
     }>;
-    readonly identityTransitions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
-        name: string;
-        schema: undefined;
-        columns: {
-            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "graph_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            transitionId: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "transition_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            recordedRevision: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "recorded_revision";
-                tableName: string;
-                dataType: "number";
-                columnType: "SQLiteInteger";
-                data: number;
-                driverParam: number;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            recordedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "recorded_at";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            validAt: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "valid_at";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            cause: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "cause";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            classKind: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "class_kind";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            classId: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "class_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            priorClassKind: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "prior_class_kind";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            priorClassId: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "prior_class_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            assertionIds: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "assertion_ids";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            decision: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "decision";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            txId: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "tx_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            restoredAt: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "restored_at";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: false;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-        };
-        dialect: "sqlite";
-    }>;
-    readonly identityTransitionRetention: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
-        name: string;
-        schema: undefined;
-        columns: {
-            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "graph_id";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-            prunedBeforeRevision: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "pruned_before_revision";
-                tableName: string;
-                dataType: "number";
-                columnType: "SQLiteInteger";
-                data: number;
-                driverParam: number;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: undefined;
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {}>;
-            prunedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "pruned_at";
-                tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
-                notNull: true;
-                hasDefault: false;
-                isPrimaryKey: false;
-                isAutoincrement: false;
-                hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
-                baseColumn: never;
-                identity: undefined;
-                generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
-        };
-        dialect: "sqlite";
-    }>;
     readonly uniques: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
         name: string;
         schema: undefined;
@@ -7863,18 +7202,9 @@ type DurableEdgeBatchMembers = Readonly<{
 }>;
 
 // @public
-type EdgeCardinalityAxisRef = Readonly<{
-    direction: "source";
-    cardinality: ConstrainedCardinality;
-}> | Readonly<{
-    direction: "target";
-    cardinality: ConstrainedTargetCardinality;
-}>;
-
-// @public
-type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
+type EdgeCardinalityDeclaration = Readonly<{
     edgeKind: string;
-    scope?: CompositionClaimScope;
+    cardinality: Exclude<Cardinality, "many">;
 }>;
 
 // @public
@@ -7949,16 +7279,10 @@ type EdgeCreateCommandResult = Readonly<{
 }>;
 
 // @public
-type EdgeEndpointAllowance = Readonly<{
-    edgeKind: string;
-    allowedPairs: readonly (readonly [string, string])[];
-}>;
-
-// @public
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -8014,6 +7338,9 @@ type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 // @public (undocumented)
 const ENGINE_ASSEMBLY_BRAND: unique symbol;
 
+// @public (undocumented)
+const ENGINE_REVISION_BRAND: unique symbol;
+
 // @public
 export type EngineAssembly<TTx> = Readonly<{
     readonly [ENGINE_ASSEMBLY_BRAND]: (transaction: TTx) => TTx;
@@ -8026,10 +7353,35 @@ export type EngineProvisioning = Readonly<{
     generateDdl: () => readonly string[];
     ensureIndexMaterializationColumns?: (tableName: string) => Promise<void>;
     catalog?: BackendCatalogProbes;
+    lineage?: LineageMembers;
+    recordedTime?: EngineRecordedTimeMembers;
+}>;
+
+// @public
+type EngineRecordedRevision = Readonly<{
+    revision: string;
+    recordedAt: string;
+}>;
+
+// @public
+type EngineRecordedTimeMembers = Readonly<{
+    source: (this: void, table: RecordedSourceTable, revision: EngineRecordedRevision) => SqlFragment;
+    revisionNow: (this: void, session: RecordedTimeSession) => Promise<EngineRecordedRevision>;
+}>;
+
+// @public
+type EngineRevision = string & Readonly<{
+    [ENGINE_REVISION_BRAND]: "EngineRevision";
 }>;
 
 // @public
 export type EngineTableNames = ResolvedSqlTableNames;
+
+// @public
+type EntityKey = Readonly<{
+    kind: string;
+    id: string;
+}>;
 
 // @public (undocumented)
 type ExecutableSql = SQL | SqlFragment;
@@ -8055,9 +7407,6 @@ type ExtensionEdgeDef = Readonly<{
     from: readonly string[];
     to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
-    cardinality?: Cardinality;
-    targetCardinality?: TargetCardinality;
-    acyclic?: boolean;
 }>;
 
 // @public
@@ -8135,9 +7484,6 @@ type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
 }>;
 
 // @public
@@ -8383,7 +7729,7 @@ type GraphBackend = Readonly<{
     hardDeleteEdgesBatch?: (this: void, params: DeleteEdgesBatchParams) => Promise<void>;
     getEdge: (this: void, graphId: string, id: string) => Promise<EdgeRow | undefined>;
     getEdges?: (this: void, graphId: string, ids: readonly string[]) => Promise<readonly EdgeRow[]>;
-    countEdgesAtEndpoint: (this: void, params: CountEdgesAtEndpointParams) => Promise<number>;
+    countEdgesFrom: (this: void, params: CountEdgesFromParams) => Promise<number>;
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
@@ -8467,6 +7813,8 @@ type GraphBackend = Readonly<{
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
     catalog?: BackendCatalogProbes | undefined;
+    lineage?: LineageMembers | undefined;
+    recordedTime?: EngineRecordedTimeMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -8685,8 +8033,6 @@ type IdentityTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
-    identityTransitions: string;
-    identityTransitionRetention: string;
 }>;
 
 // @public
@@ -8806,6 +8152,9 @@ type IndexWhereOperand = Readonly<{
 }>;
 
 // @public
+type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
+
+// @public
 type InsertEdgeParams = Readonly<{
     graphId: string;
     id: string;
@@ -8880,11 +8229,7 @@ type JsonSchema = Readonly<{
     properties?: Record<string, JsonSchema>;
     required?: readonly string[];
     items?: JsonSchema;
-    prefixItems?: readonly JsonSchema[];
-    minItems?: number;
-    maxItems?: number;
     additionalProperties?: boolean | JsonSchema;
-    propertyNames?: JsonSchema;
     enum?: readonly unknown[];
     const?: unknown;
     anyOf?: readonly JsonSchema[];
@@ -8895,7 +8240,6 @@ type JsonSchema = Readonly<{
     default?: unknown;
     minimum?: number;
     maximum?: number;
-    multipleOf?: number;
     minLength?: number;
     maxLength?: number;
     pattern?: string;
@@ -8935,6 +8279,27 @@ type KindRemovalRowAccess = Readonly<{
 // @public
 export type KindRemovalRuntime = Omit<CreateKindRemovalMembersDeps, "ensureTable">;
 
+// @public
+type LineageBackend = Pick<GraphBackend, "lineage">;
+
+// @public
+type LineageDelta = Readonly<{
+    kind: "keys";
+    nodes: readonly EntityKey[];
+    edges: readonly EntityKey[];
+}> | Readonly<{
+    kind: "unbounded";
+}>;
+
+// @public
+type LineageMembers = Readonly<{
+    revision: (this: void, session: LineageSession) => Promise<EngineRevision>;
+    changesSince: (this: void, session: LineageSession, revision: EngineRevision, graphId: string) => Promise<LineageDelta>;
+}>;
+
+// @public
+type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
+
 // @public (undocumented)
 type LockSchemaVersionForWriteParams = Readonly<{
     graphId: string;
@@ -8946,7 +8311,7 @@ type ManagedEdgeCreatePlan = Readonly<{
     entity: "edge";
     params: InsertEdgeParams;
     schemaFence?: SchemaWriteFenceParams;
-    cardinalityClaims?: readonly ClaimEdgeCardinalityParams[];
+    cardinalityClaim?: ClaimEdgeCardinalityParams;
 }>;
 
 // @public
@@ -8969,16 +8334,6 @@ type ManagedNodeCreatePlan = Readonly<{
 
 // @public (undocumented)
 type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
-
-// @public
-type MisassignedEdgeEndpointRow = Readonly<{
-    edgeKind: string;
-    edgeId: string;
-    fromKind: string;
-    fromId: string;
-    toKind: string;
-    toId: string;
-}>;
 
 // @public
 type NodeCreateCommand = Readonly<{
@@ -9119,8 +8474,6 @@ type PostgresTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
-    identityTransitions: string;
-    identityTransitionRetention: string;
     uniques: string;
     edgeClaims: string;
     baseSchemaVersions: string;
@@ -9214,7 +8567,6 @@ type ReadConstraintFenceViolationsParams = Readonly<{
     uniqueConstraintNames: readonly string[];
     disjointKindPairs: readonly (readonly [string, string])[];
     edgeCardinalities: readonly EdgeCardinalityDeclaration[];
-    edgeEndpointAllowances?: readonly EdgeEndpointAllowance[];
 }>;
 
 // @public
@@ -9250,11 +8602,20 @@ type RecordedRelationDdl = Readonly<{
 }>;
 
 // @public
+type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
+
+// @public
 type RecordedTableNames = Readonly<{
     recordedClock: string;
     recordedEdges: string;
     recordedNodes: string;
 }>;
+
+// @public
+type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
+
+// @public
+type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 type RecordIndexMaterializationParams = Readonly<{
@@ -9320,8 +8681,6 @@ type ResolvedSqlTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
-    identityTransitions: string;
-    identityTransitionRetention: string;
     fulltext: string;
     uniques: string;
     edgeClaims: string;
@@ -9334,7 +8693,6 @@ type RowProps = string | Readonly<Record<string, unknown>>;
 // @internal
 type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
     executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
-    readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
 }>;
 
 // @public (undocumented)
@@ -9395,13 +8753,11 @@ type SerializedEdgeDef = Readonly<{
     targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
     properties: JsonSchema;
     cardinality: Cardinality;
-    targetCardinality?: TargetCardinality;
     endpointExistence: EndpointExistence;
     matchIdentity?: Readonly<{
         name: string;
         fields: readonly string[];
     }>;
-    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;
@@ -9409,6 +8765,11 @@ type SerializedEdgeDef = Readonly<{
 // @public
 type SerializedMetaEdge = Readonly<{
     name: string;
+    transitive: boolean;
+    symmetric: boolean;
+    reflexive: boolean;
+    inverse: string | undefined;
+    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -9434,9 +8795,6 @@ type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
-    via?: string;
-    partSide?: CompositionPartSide;
-    existence?: CompositionExistence;
 }>;
 
 // @public
@@ -9579,8 +8937,6 @@ type SqliteTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
-    identityTransitions: string;
-    identityTransitionRetention: string;
     uniques: string;
     edgeClaims: string;
     baseSchemaVersions: string;
@@ -9624,8 +8980,6 @@ type SqlTableNames = Readonly<{
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
     identitySeparation?: string | undefined;
-    identityTransitions?: string | undefined;
-    identityTransitionRetention?: string | undefined;
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;
@@ -9661,13 +9015,10 @@ type TableState = Readonly<{
 }>;
 
 // @public
-type TargetCardinality = Exclude<Cardinality, "unique">;
-
-// @public
 type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
 
 // @public
-type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & RecordedTimeBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 type TransactionOptions = Readonly<{

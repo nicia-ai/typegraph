@@ -9,6 +9,7 @@ import { optionalRecordedInstantParts } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
 import { nowIso } from "../../utils/date";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { type RecordedReadBinding, requireRecordedReadBinding } from "./schema";
 
 /**
  * The instant every `currentReadInstant()` inside {@link withPinnedReadInstant}
@@ -118,6 +119,13 @@ export type TemporalFilterOptions = Readonly<{
   currentTimestamp?: SqlFragment | undefined;
   /** Recorded/system-time timestamp for recorded-pinned reads. */
   recordedAsOf?: string | undefined;
+  /**
+   * The recorded read binding whose `predicate` narrows the recorded rows
+   * `recordedAsOf` pins to. Required whenever `recordedAsOf` is set —
+   * refused otherwise, the same way every other recorded read refuses a
+   * missing binding.
+   */
+  recordedReadBinding?: RecordedReadBinding | undefined;
 }>;
 
 /**
@@ -162,7 +170,14 @@ export const RECORDED_TEMPORAL_COLUMNS = [
 export function compileTemporalFilter(
   options: TemporalFilterOptions,
 ): SqlFragment {
-  const { mode, asOf, tableAlias, currentTimestamp, recordedAsOf } = options;
+  const {
+    mode,
+    asOf,
+    tableAlias,
+    currentTimestamp,
+    recordedAsOf,
+    recordedReadBinding,
+  } = options;
   const recorded = optionalRecordedInstantParts(recordedAsOf, "recordedAsOf");
 
   // Build column references with optional prefix
@@ -211,10 +226,13 @@ export function compileTemporalFilter(
 
   if (recorded === undefined) return validFilter;
 
-  const recordedFrom = sql`${prefix}recorded_from`;
-  const recordedTo = sql`${prefix}recorded_to`;
-  const { revision } = recorded;
-  return sql`(${validFilter}) AND ${recordedFrom} <= ${revision} AND ${revision} < ${recordedTo}`;
+  const binding = requireRecordedReadBinding(
+    recordedReadBinding,
+    "recorded-temporal-filter",
+  );
+  const recordedPredicate = binding.predicate(prefix, recorded);
+  if (recordedPredicate === undefined) return validFilter;
+  return sql`(${validFilter}) AND ${recordedPredicate}`;
 }
 
 /**

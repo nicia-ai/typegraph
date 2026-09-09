@@ -358,6 +358,15 @@ export function createPostgresTables(
         t.recordedFrom,
         t.recordedTo,
       ),
+      // `recorded_from`-led lookup, same rationale as the two recorded
+      // relations' `since_idx` (`../../../indexes/system.ts`): `entity_idx`/
+      // `a_idx`/`b_idx` all lead with an endpoint, not `recorded_from`
+      // alone, so none can serve `changesSince`'s per-revision completeness
+      // scan (`store/recorded-capture/lineage.ts`) without a full table scan.
+      index(systemIndexName(n.recordedIdentityAssertions, "since_idx")).on(
+        t.graphId,
+        t.recordedFrom,
+      ),
     ],
   );
 

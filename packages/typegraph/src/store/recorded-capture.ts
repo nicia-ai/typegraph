@@ -8,7 +8,6 @@ import {
   type BundleVerdictOf,
 } from "../backend/capabilities/resolve";
 import {
-  assertCommandResultMatchesCommand,
   assertGraphCommandExecutionContext,
   executeAuthoritativeGraphCommand,
   type GraphCommandExecutionContext,
@@ -19,7 +18,6 @@ import {
   type EdgeRow,
   type GraphBackend,
   type GraphCommand,
-  type GraphCommandPort,
   type GraphCommandResult,
   type InsertEdgeParams,
   type InsertNodeParams,
@@ -75,15 +73,23 @@ import {
   requireRecordedSchema,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
+import {
+  buildRecordedCommandsPort,
+  buildRecordedWriteMembers,
+  type WriteMemberHooks,
+  type WriteTouchSink,
+} from "./recorded-capture/write-touch";
 
 export {
   advanceRevisionClock,
   ensureRevisionOrigin,
+  ensureRevisionOriginsRelation,
   lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
+  resetRevisionOrigin,
 } from "./recorded-capture/clock";
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
 export {
@@ -95,6 +101,12 @@ export {
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
 export {
+  encodeRecordedLineageRevision,
+  mintsOriginNamespacedAnchor,
+  recordedRelationsLineage,
+  resolveLineage,
+} from "./recorded-capture/lineage";
+export {
   RECORDED_EDGE_COLUMNS,
   RECORDED_NODE_COLUMNS,
 } from "./recorded-capture/relations";
@@ -103,6 +115,7 @@ export {
   RECORDED_OPTIONAL_WRITE_METHODS,
   RECORDED_REQUIRED_WRITE_METHODS,
 } from "./recorded-capture/write-surface";
+export { createMutationWitness } from "./recorded-capture/write-touch";
 
 type RecordedCaptureSession = Readonly<{
   /**
@@ -222,47 +235,6 @@ type RecordedTransactionScope = Readonly<{
   backend: TransactionBackend;
   flush: () => Promise<RecordedFlushInstants>;
 }>;
-
-declare const NODE_IDENTITY_KEY_BRAND: unique symbol;
-declare const EDGE_IDENTITY_KEY_BRAND: unique symbol;
-
-type NodeIdentityKey = string &
-  Readonly<{ [NODE_IDENTITY_KEY_BRAND]: "node-identity-key" }>;
-type EdgeIdentityKey = string &
-  Readonly<{ [EDGE_IDENTITY_KEY_BRAND]: "edge-identity-key" }>;
-
-type NodeIdentityParams = Pick<InsertNodeParams, "graphId" | "kind" | "id">;
-type NodeIdentityRow = Pick<NodeRow, "graph_id" | "kind" | "id">;
-type EdgeIdentityParams = Pick<InsertEdgeParams, "graphId" | "id">;
-type EdgeIdentityRow = Pick<EdgeRow, "graph_id" | "id">;
-
-function nodeIdentityKey(
-  graphId: string,
-  kind: string,
-  id: string,
-): NodeIdentityKey {
-  return `${graphId}\u0000${kind}\u0000${id}` as NodeIdentityKey;
-}
-
-function nodeParamsIdentityKey(params: NodeIdentityParams): NodeIdentityKey {
-  return nodeIdentityKey(params.graphId, params.kind, params.id);
-}
-
-function nodeRowIdentityKey(row: NodeIdentityRow): NodeIdentityKey {
-  return nodeIdentityKey(row.graph_id, row.kind, row.id);
-}
-
-function edgeIdentityKey(graphId: string, id: string): EdgeIdentityKey {
-  return `${graphId}\u0000${id}` as EdgeIdentityKey;
-}
-
-function edgeParamsIdentityKey(params: EdgeIdentityParams): EdgeIdentityKey {
-  return edgeIdentityKey(params.graphId, params.id);
-}
-
-function edgeRowIdentityKey(row: EdgeIdentityRow): EdgeIdentityKey {
-  return edgeIdentityKey(row.graph_id, row.id);
-}
 
 function recordedCaptureSealedError(
   details: Record<string, unknown>,
@@ -487,10 +459,23 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
   };
 }
 
+/**
+ * What `recordedTransactionBindings` maps a transaction object to. Every
+ * binding can answer `withRecordedIdentityMutationTarget`'s question ("is
+ * this identity write touched, and what is the underlying raw target?");
+ * `capture` carries the additional session state only a TypeGraph-owned
+ * transaction has — the engine-native mutation witness registers a binding
+ * with `capture` absent, since it keeps no checkpoint to restore across a
+ * savepoint and takes no advisory lock to release one.
+ */
 type RecordedTransactionBinding = Readonly<{
   target: TransactionBackend;
-  session: RecordedCaptureSession;
-  graphLocks: ReturnType<typeof createRecordedGraphLockMemo>;
+  assertOpen: () => void;
+  sink: WriteTouchSink;
+  capture?: Readonly<{
+    session: RecordedCaptureSession;
+    graphLocks: ReturnType<typeof createRecordedGraphLockMemo>;
+  }>;
 }>;
 
 type TransactionControlTarget = Readonly<
@@ -529,26 +514,32 @@ export async function runRecordedTransactionSavepoint<T>(
   fn: () => Promise<RecordedSavepointDecision<T>>,
 ): Promise<T> {
   const binding = recordedTransactionBindings.get(target);
-  binding?.session.assertOpen();
+  binding?.assertOpen();
   const rawTarget = binding?.target ?? target;
   const { executeStatement } = statementExecutionMembers(
     rawTarget,
     statementExecution,
   );
-  const captureCheckpoint = binding?.session.checkpoint();
+  // Only a TypeGraph-owned capture binding carries session state to
+  // checkpoint/restore across this savepoint — an engine-native mutation
+  // witness's binding has no `capture`, so it degrades to the same no-op
+  // `restoreCapture` an entirely unbound target already gets below.
+  const captureCheckpoint = binding?.capture?.session.checkpoint();
   const graphLockCheckpoint =
-    binding === undefined ? undefined : new Map(binding.graphLocks);
+    binding?.capture === undefined ?
+      undefined
+    : new Map(binding.capture.graphLocks);
   const restoreCapture = (): void => {
     if (
-      binding === undefined ||
+      binding?.capture === undefined ||
       captureCheckpoint === undefined ||
       graphLockCheckpoint === undefined
     )
       return;
-    binding.session.restore(captureCheckpoint);
-    binding.graphLocks.clear();
+    binding.capture.session.restore(captureCheckpoint);
+    binding.capture.graphLocks.clear();
     for (const [graphId, lock] of graphLockCheckpoint) {
-      binding.graphLocks.set(graphId, lock);
+      binding.capture.graphLocks.set(graphId, lock);
     }
   };
   const executeControl = (sql: string): Promise<unknown> =>
@@ -638,15 +629,18 @@ export async function withRecordedIdentityMutationTarget<T>(
   if (binding === undefined) {
     return fn(target, ignoreIdentityTouch, ignoreIdentityTransitionNote);
   }
-  binding.session.assertOpen();
+  binding.assertOpen();
+  const capture = binding.capture;
   return fn(
     binding.target,
     (graphId, id, afterImage) => {
-      binding.session.touchIdentityAssertion(graphId, id, afterImage);
+      binding.sink.touchIdentity(graphId, id, afterImage);
     },
-    (graphId, note) => {
-      binding.session.noteIdentityTransition(graphId, note);
-    },
+    capture === undefined ?
+      ignoreIdentityTransitionNote
+    : (graphId, note) => {
+        capture.session.noteIdentityTransition(graphId, note);
+      },
   );
 }
 
@@ -654,18 +648,46 @@ export async function withRecordedIdentityMutationTarget<T>(
  * Runs `fn` with every `noteIdentityTransition` call inside it stamped with
  * `decision` — the seam `applyIdentityChangesForContext` (reconcile) uses so a
  * governed merge apply's transitions carry the plan/review digests and branch
- * ancestry that produced them. A target with no capture session (no history)
- * simply runs `fn` — there is no ambient decision to attach to a note that
- * will never be written.
+ * ancestry that produced them. A target with no capture session (no history,
+ * or an engine-native mutation witness that writes no transition log) simply
+ * runs `fn` — there is no ambient decision to attach to a note that will never
+ * be written.
  */
 export async function withRecordedIdentityDecision<T>(
   target: IdentityTarget,
   decision: IdentityDecisionProvenance,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const binding = recordedTransactionBindings.get(target);
-  if (binding === undefined) return fn();
-  return binding.session.withIdentityDecision(decision, fn);
+  const capture = recordedTransactionBindings.get(target)?.capture;
+  if (capture === undefined) return fn();
+  return capture.session.withIdentityDecision(decision, fn);
+}
+
+/**
+ * Registers an engine-native mutation witness's sink against `overlay` (the
+ * wrapped committing transaction {@link createMutationWitness}'s `wrap`
+ * returned) and `target` (the raw session it wrapped) through the same
+ * binding seam {@link createRecordedTransactionBackend} registers a
+ * TypeGraph-owned capture session's sink through — so an identity assertion
+ * issued via either object flips the witness's `mutated` flag the same way a
+ * real node or edge write does. There is no session to assert open (the
+ * witness never seals) and no capture-only session/lock state to carry, so
+ * this binding's `capture` stays absent.
+ */
+export function registerRecordedIdentityMutationWitness(
+  overlay: TransactionBackend,
+  target: TransactionBackend,
+  sink: WriteTouchSink,
+): void {
+  const binding: RecordedTransactionBinding = {
+    target,
+    assertOpen: () => {
+      /* An engine-native mutation witness never seals. */
+    },
+    sink,
+  };
+  recordedTransactionBindings.set(overlay, binding);
+  recordedTransactionBindings.set(target, binding);
 }
 
 function createRecordedTransactionBackend(
@@ -673,9 +695,6 @@ function createRecordedTransactionBackend(
   session: RecordedCaptureSession,
   schema: SqlSchema,
 ): TransactionBackend {
-  const nodeDispatch = nodeInsertDispatch(target);
-  const edgeDispatch = edgeInsertDispatch(target);
-
   // One advisory-lock round trip per graph per transaction: the memo is
   // shared with the returned overlay (see registerRecordedGraphLockMemo),
   // so external lock paths handed this backend dedupe against the same
@@ -702,336 +721,34 @@ function createRecordedTransactionBackend(
     }
   }
 
-  const commands = {
-    session: target.commands.session,
-    execute: async (
-      command: GraphCommand,
-      context: GraphCommandExecutionContext,
-    ): Promise<GraphCommandResult> => {
+  // The per-member "did this write actually change a row" decision, and the
+  // member enumeration it covers, live in `write-touch.ts` — shared with the
+  // engine-native mutation witness rather than re-implemented here. Capture's
+  // sink collects the after-image every touched entity needs for its history
+  // row; its hooks are the session-liveness assertion and the advisory lock
+  // this factory always took inline.
+  const sink: WriteTouchSink = {
+    touchNode: session.touchNode,
+    touchEdge: session.touchEdge,
+    touchIdentity: session.touchIdentityAssertion,
+  };
+  const hooks: WriteMemberHooks = {
+    beforeOne: async (graphId) => {
       session.assertOpen();
-      await lockGraph(command.plan.params.graphId);
-      const result = await target.commands.execute(command, context);
-      assertCommandResultMatchesCommand(command, result);
-      if (result.outcome === "created") {
-        if (result.entity === "node") {
-          session.touchNode(
-            command.plan.params.graphId,
-            command.plan.params.kind,
-            command.plan.params.id,
-            result.row,
-          );
-        } else {
-          session.touchEdge(
-            command.plan.params.graphId,
-            command.plan.params.id,
-            result.row,
-          );
-        }
-      }
-      return result;
+      await lockGraph(graphId);
     },
-  } satisfies GraphCommandPort;
+    beforeMany: async (params) => {
+      session.assertOpen();
+      await lockGraphs(params);
+    },
+    connectedEdgeIdsForHardDelete: (params) =>
+      queryConnectedEdgeIds(target, schema, params),
+  };
 
   const overlay = deriveBackend(target, {
     ...rawWriteGuards(target, "tx.backend"),
-
-    async insertNode(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const row = await target.insertNode(params);
-      session.touchNode(params.graphId, params.kind, params.id, row);
-      return row;
-    },
-
-    ...(target.insertNodeIfAbsent === undefined ?
-      {}
-    : {
-        async insertNodeIfAbsent(
-          params: InsertNodeParams,
-        ): Promise<NodeRow | undefined> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          const row = await requireDefined(target.insertNodeIfAbsent)(params);
-          if (row !== undefined) {
-            session.touchNode(params.graphId, params.kind, params.id, row);
-          }
-          return row;
-        },
-      }),
-
-    ...(target.insertNodeIfAbsentWithSchemaFence === undefined ?
-      {}
-    : {
-        async insertNodeIfAbsentWithSchemaFence(
-          params: InsertNodeParams,
-          schemaFence: SchemaWriteFenceParams,
-        ): Promise<NodeRow | undefined> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          const row = await requireDefined(
-            target.insertNodeIfAbsentWithSchemaFence,
-          )(params, schemaFence);
-          if (row !== undefined) {
-            session.touchNode(params.graphId, params.kind, params.id, row);
-          }
-          return row;
-        },
-      }),
-
-    ...(target.insertNodeWithSchemaFence === undefined ?
-      {}
-    : {
-        async insertNodeWithSchemaFence(
-          params: InsertNodeParams,
-          schemaFence: SchemaWriteFenceParams,
-        ): Promise<NodeRow | undefined> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          const row = await requireDefined(target.insertNodeWithSchemaFence)(
-            params,
-            schemaFence,
-          );
-          if (row !== undefined) {
-            session.touchNode(params.graphId, params.kind, params.id, row);
-          }
-          return row;
-        },
-      }),
-
-    commands,
-
-    ...(target.insertNodeNoReturn === undefined ?
-      {}
-    : {
-        async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          await runInsertNoReturn(nodeDispatch, params);
-          session.touchNode(params.graphId, params.kind, params.id);
-        },
-      }),
-
-    ...(target.insertNodesBatch === undefined ?
-      {}
-    : {
-        async insertNodesBatch(
-          params: readonly InsertNodeParams[],
-        ): Promise<void> {
-          session.assertOpen();
-          await lockGraphs(params);
-          await runInsertBatch(nodeDispatch, params);
-          for (const node of params) {
-            session.touchNode(node.graphId, node.kind, node.id);
-          }
-        },
-      }),
-
-    ...(target.insertNodesBatchReturning === undefined ?
-      {}
-    : {
-        async insertNodesBatchReturning(
-          params: readonly InsertNodeParams[],
-        ): Promise<readonly NodeRow[]> {
-          session.assertOpen();
-          await lockGraphs(params);
-          const rows = await runInsertBatchReturning(nodeDispatch, params);
-          const rowsByIdentity = new Map(
-            rows.map((row) => [nodeRowIdentityKey(row), row] as const),
-          );
-          for (const node of params) {
-            session.touchNode(
-              node.graphId,
-              node.kind,
-              node.id,
-              rowsByIdentity.get(nodeParamsIdentityKey(node)),
-            );
-          }
-          return rows;
-        },
-      }),
-
-    async updateNode(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const row = await target.updateNode(params);
-      session.touchNode(params.graphId, params.kind, params.id, row);
-      return row;
-    },
-
-    ...(target.updateNodeSet === undefined ?
-      {}
-    : {
-        async updateNodeSet(params) {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          const result = await requireDefined(target.updateNodeSet)(params);
-          for (const row of result.rows) {
-            session.touchNode(row.graph_id, row.kind, row.id, row);
-          }
-          return result;
-        },
-      }),
-
-    ...(target.compareAndSetNode === undefined ?
-      {}
-    : {
-        async compareAndSetNode(params) {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          const result = await requireDefined(target.compareAndSetNode)(params);
-          for (const row of result.rows) {
-            session.touchNode(row.graph_id, row.kind, row.id, row);
-          }
-          return result;
-        },
-      }),
-
-    async deleteNode(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      await target.deleteNode(params);
-      session.touchNode(params.graphId, params.kind, params.id);
-    },
-
-    async hardDeleteNode(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const connectedEdgeIds = await queryConnectedEdgeIds(
-        target,
-        schema,
-        params,
-      );
-      await target.hardDeleteNode(params);
-      session.touchNode(params.graphId, params.kind, params.id);
-      for (const edgeId of connectedEdgeIds) {
-        session.touchEdge(params.graphId, edgeId);
-      }
-    },
-
-    async insertEdge(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const row = await target.insertEdge(params);
-      session.touchEdge(params.graphId, params.id, row);
-      return row;
-    },
-
-    ...(target.insertEdgeNoReturn === undefined ?
-      {}
-    : {
-        async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          await runInsertNoReturn(edgeDispatch, params);
-          session.touchEdge(params.graphId, params.id);
-        },
-      }),
-
-    ...(target.insertEdgesBatch === undefined ?
-      {}
-    : {
-        async insertEdgesBatch(
-          params: readonly InsertEdgeParams[],
-        ): Promise<void> {
-          session.assertOpen();
-          await lockGraphs(params);
-          await runInsertBatch(edgeDispatch, params);
-          for (const edge of params) {
-            session.touchEdge(edge.graphId, edge.id);
-          }
-        },
-      }),
-
-    ...(target.insertEdgesBatchReturning === undefined ?
-      {}
-    : {
-        async insertEdgesBatchReturning(
-          params: readonly InsertEdgeParams[],
-        ): Promise<readonly EdgeRow[]> {
-          session.assertOpen();
-          await lockGraphs(params);
-          const rows = await runInsertBatchReturning(edgeDispatch, params);
-          const rowsByIdentity = new Map(
-            rows.map((row) => [edgeRowIdentityKey(row), row] as const),
-          );
-          for (const edge of params) {
-            session.touchEdge(
-              edge.graphId,
-              edge.id,
-              rowsByIdentity.get(edgeParamsIdentityKey(edge)),
-            );
-          }
-          return rows;
-        },
-      }),
-
-    ...(target.insertEdgesDurableBatchReturning === undefined ?
-      {}
-    : {
-        async insertEdgesDurableBatchReturning(
-          params: readonly InsertEdgeParams[],
-        ): Promise<readonly EdgeRow[]> {
-          session.assertOpen();
-          await lockGraphs(params);
-          const rows = await requireDefined(
-            target.insertEdgesDurableBatchReturning,
-          )(params);
-          for (const row of rows) {
-            session.touchEdge(row.graph_id, row.id, row);
-          }
-          return rows;
-        },
-      }),
-
-    async updateEdge(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const row = await target.updateEdge(params);
-      session.touchEdge(params.graphId, params.id, row);
-      return row;
-    },
-
-    async deleteEdge(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      await target.deleteEdge(params);
-      session.touchEdge(params.graphId, params.id);
-    },
-
-    async hardDeleteEdge(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      await target.hardDeleteEdge(params);
-      session.touchEdge(params.graphId, params.id);
-    },
-
-    ...(target.deleteEdgesBatch === undefined ?
-      {}
-    : {
-        async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          await requireDefined(target.deleteEdgesBatch)(params);
-          for (const id of params.ids) {
-            session.touchEdge(params.graphId, id);
-          }
-        },
-      }),
-
-    ...(target.hardDeleteEdgesBatch === undefined ?
-      {}
-    : {
-        async hardDeleteEdgesBatch(
-          params: DeleteEdgesBatchParams,
-        ): Promise<void> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          await requireDefined(target.hardDeleteEdgesBatch)(params);
-          for (const id of params.ids) {
-            session.touchEdge(params.graphId, id);
-          }
-        },
-      }),
+    ...buildRecordedWriteMembers(target, sink, hooks),
+    commands: buildRecordedCommandsPort(target, sink, hooks),
   });
   registerRecordedGraphLockMemo(overlay, graphLocks);
   // Bind BOTH the overlay and the raw target to this capture session. Identity
@@ -1039,8 +756,14 @@ function createRecordedTransactionBackend(
   // then a nested coordinator (importIdentityAssertionsIntoTarget) re-wraps that
   // RAW target — without a raw-target binding the second lookup would miss and
   // silently drop every touch, losing the merge-created assertions from history.
-  recordedTransactionBindings.set(overlay, { target, session, graphLocks });
-  recordedTransactionBindings.set(target, { target, session, graphLocks });
+  const binding: RecordedTransactionBinding = {
+    target,
+    assertOpen: session.assertOpen,
+    sink,
+    capture: { session, graphLocks },
+  };
+  recordedTransactionBindings.set(overlay, binding);
+  recordedTransactionBindings.set(target, binding);
   recordedRevisionBindings.set(overlay, session);
   return overlay;
 }

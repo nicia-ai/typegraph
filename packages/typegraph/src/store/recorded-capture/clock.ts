@@ -402,16 +402,20 @@ export async function readRevisionOrigin(
 }
 
 /**
- * Returns a graph's durable revision-origin nonce, creating it exactly once.
- * The unique graph-id row makes concurrent first readers converge on the
- * winner's origin rather than manufacturing incompatible anchors.
+ * Ensures the origins relation exists and refuses a backend that cannot
+ * bootstrap it. Runs the same `ensureRevisionOriginsTable` DDL member
+ * {@link ensureRevisionOrigin} bootstraps from — exported separately (rather
+ * than folded into a single ensure-and-write call) because that member is a
+ * schema-DDL operation, never projected onto an open `transaction()` handle:
+ * a caller that needs a row change inside a transaction (`Store.clear()`
+ * pairing this with {@link resetRevisionOrigin}) must ensure the table on
+ * the ROOT backend, BEFORE opening that transaction, then touch the row
+ * inside it.
  */
-export async function ensureRevisionOrigin(
+export async function ensureRevisionOriginsRelation(
   target: RevisionOriginBackend,
   verdict: BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>,
-  schema: SqlSchema,
-  graphId: string,
-): Promise<string> {
+): Promise<void> {
   if (!verdict.supported) {
     throw new ConfigurationError(
       "Revision tracking requires a backend that can bootstrap revision origins.",
@@ -422,9 +426,35 @@ export async function ensureRevisionOrigin(
       },
     );
   }
+  if (ENSURED_ORIGINS_RELATIONS.has(target)) return;
   const { ensureRevisionOriginsTable: ensureTable } =
     recordedRevisionOriginsMembers(target, verdict);
   await ensureTable();
+  ENSURED_ORIGINS_RELATIONS.add(target);
+}
+
+/**
+ * Backends whose origins relation this process has already ensured. The
+ * relation is DDL (`CREATE TABLE IF NOT EXISTS`) and a table never goes
+ * away once created, so ensuring it once per backend object is enough; the
+ * origin ROW is read fresh on every call because `Store.clear()` rotates
+ * it, and that freshness is what callers of {@link ensureRevisionOrigin}
+ * pay for — not a DDL round trip per mint.
+ */
+const ENSURED_ORIGINS_RELATIONS = new WeakSet<object>();
+
+/**
+ * Returns a graph's durable revision-origin nonce, creating it exactly once.
+ * The unique graph-id row makes concurrent first readers converge on the
+ * winner's origin rather than manufacturing incompatible anchors.
+ */
+export async function ensureRevisionOrigin(
+  target: RevisionOriginBackend,
+  verdict: BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<string> {
+  await ensureRevisionOriginsRelation(target, verdict);
   const existing = await readRevisionOrigin(target, schema, graphId);
   if (existing !== undefined) return existing;
 
@@ -441,6 +471,42 @@ export async function ensureRevisionOrigin(
   throw new ConfigurationError(
     "Revision origin was not persisted after initialization.",
     { graphId, dialect: target.dialect },
+  );
+}
+
+/**
+ * Deletes a graph's durable revision-origin row so the next
+ * {@link ensureRevisionOrigin} call mints a fresh nonce. Row-write only
+ * (`execute`/`executeStatement`, the same narrow surface
+ * {@link readRecordedClock} needs) — deliberately NOT the DDL-capable
+ * {@link RevisionOriginBackend} `ensureRevisionOrigin` takes, so this is
+ * safe to call on an open `transaction()` handle. A caller whose origins
+ * table might not exist yet must call {@link ensureRevisionOriginsRelation}
+ * on the root backend first (`Store.clear()` does, before opening its
+ * transaction).
+ *
+ * `Store.clear()` calls this inside the same transaction as `clearGraph`:
+ * the recorded clock (and, for a non-capturing revision-tracked store, its
+ * immediate reseed) restarts numbering from the same low values every
+ * clear, so leaving the origin row untouched would let a graph repopulated
+ * to the same revision COUNT after a clear silently reconstruct the exact
+ * `base@V` anchor a pre-clear branch forked from — schema half unchanged,
+ * origin unchanged, revision numbering coincidentally realigned. Rotating
+ * the origin here is what makes that recurrence impossible: every mint
+ * after this point draws a new random nonce, so no later anchor can equal
+ * one minted before the clear.
+ */
+export async function resetRevisionOrigin(
+  target: RecordedClockBackend,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<void> {
+  await executeStatement(
+    target,
+    sql`
+      DELETE FROM ${schema.revisionOriginsTable}
+      WHERE graph_id = ${graphId}
+    `,
   );
 }
 
@@ -575,6 +641,25 @@ async function lockRecordedClock(
   }
 }
 
+/**
+ * Narrows a parsed `previousRevision` to TypeGraph's own numeric clock shape.
+ * This module allocates ONLY TypeGraph-owned commits — an engine-native
+ * backend never touches a TypeGraph clock at all, so it never reaches
+ * `allocateRecordedCommit` — so a caller-supplied `previousRevision` that
+ * parses as an engine-native (`e1`) anchor can only be a caller mistake.
+ */
+function requireTypeGraphClockParts(
+  parts: ReturnType<typeof parseRecordedInstant>,
+): RecordedClockParts {
+  if (parts.kind !== "typegraph") {
+    throw new ConfigurationError(
+      "allocateRecordedCommit's previousRevision must be a TypeGraph-owned (r1) recorded instant.",
+      { revisionKind: parts.kind },
+    );
+  }
+  return parts;
+}
+
 export async function allocateRecordedCommit(
   target: RecordedClockBackend,
   schema: SqlSchema,
@@ -586,7 +671,9 @@ export async function allocateRecordedCommit(
   const previous =
     previousRevision === undefined ?
       await readRecordedClockParts(target, schema, graphId)
-    : parseRecordedInstant(previousRevision, "previous recorded revision");
+    : requireTypeGraphClockParts(
+        parseRecordedInstant(previousRevision, "previous recorded revision"),
+      );
   const { revision, recordedAt } = nextRecordedCommitParts(previous);
   if (revision >= RECORDED_MAX_REVISION) {
     throw new ConfigurationError(

@@ -739,6 +739,7 @@ const AUDITED_OVERLAY_FILES = [
   "src/store/operations/node-operations.ts",
   "src/store/operations/write-executor.ts",
   "src/store/recorded-capture.ts",
+  "src/store/recorded-capture/write-touch.ts",
   "src/store/recorded-read-service.ts",
   "src/store/store.ts",
 ];
@@ -968,6 +969,8 @@ const LINT_BLOCKS = [
   {
     files: [
       "src/backend/capabilities/catalog.ts",
+      "src/backend/capabilities/lineage.ts",
+      "src/backend/capabilities/recorded-time.ts",
       "src/backend/types.ts",
       "src/query/dialect/fulltext-strategy.ts",
       "src/query/dialect/types.ts",

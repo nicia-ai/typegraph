@@ -79,8 +79,20 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    */
   ensureEdgeMatchIdentityStorage: () => Promise<void>;
   /**
+   * `CREATE INDEX IF NOT EXISTS` for the base-schema release's three
+   * `since_idx` indexes (the lineage capability's changed-since scan), in
+   * `(recordedNodes, recordedEdges, recordedIdentityAssertions)` order —
+   * the version-3 adoption step, built once by the caller via
+   * `sinceIndexAdoptionDdl` (`../../../indexes/system`) from its own
+   * dialect's physical table names. All three indexes already exist after
+   * a fresh bootstrap (the schema factories derive them from the same
+   * declarations), so this dep is only exercised by the offline `adopt()`
+   * path, the same way `fencesTableDdl` is for version 2.
+   */
+  sinceIndexDdl: readonly [string, string, string];
+  /**
    * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
-   * statements for the identity transition log, the version-3 adoption
+   * statements for the identity transition log, the version-4 adoption
    * step — rendered once by the caller from its own dialect's DDL
    * generators, the same way `fencesTableDdl` is. A brand-new relation
    * needs no ALTER-shaped migration, so this step's `bootstrap` is
@@ -94,15 +106,15 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
   identityTransitionsTableDdl: readonly string[];
   /**
    * Idempotent `CREATE TABLE ...` for the transition log's per-graph
-   * retention watermark, the version-3 adoption step's other half.
+   * retention watermark, the version-4 adoption step's other half.
    */
   identityTransitionRetentionTableDdl: string;
   /**
    * Ensures the identity-transitions table's `restored_at` column exists,
-   * the version-4 adoption step. A brand-new relation created by
+   * the version-5 adoption step. A brand-new relation created by
    * `generateDdl()` already carries the column (bootstrap is
    * `"covered-by-generated-ddl"`); this ALTER-shaped migration is what an
-   * EXISTING version-3 relation, created before this column existed, still
+   * EXISTING version-4 relation, created before this column existed, still
    * needs. Dialect-owned for the same reason `ensureEdgeMatchIdentityStorage`
    * is: PostgreSQL's native `ADD COLUMN IF NOT EXISTS` needs no
    * introspection, while SQLite re-reads `PRAGMA table_info` under a
@@ -120,9 +132,13 @@ export type BaseSchemaMembers = Readonly<{
 
 /**
  * Builds the base-schema member group. Moved out of the two dialect files
- * unchanged: same single release step (version 1: the graph-templates table
- * plus edge-match-identity adoption, run before bootstrap's generated DDL),
- * same prepare/adopt-before/adopt-after bootstrap sequencing.
+ * unchanged: version 1 (the graph-templates table plus edge-match-identity
+ * adoption, run before bootstrap's generated DDL), version 2 (the fence
+ * rows table), version 3 (the recorded-relations' and recorded
+ * identity-assertions relation's `since_idx` indexes), version 4 (the
+ * identity transition log and its retention watermark) and version 5 (the
+ * transition log's `restored_at` column) all follow the same
+ * prepare/adopt-before/adopt-after bootstrap sequencing.
  */
 export function createBaseSchemaMembers(
   deps: CreateBaseSchemaMembersDeps,
@@ -137,6 +153,7 @@ export function createBaseSchemaMembers(
     ensureGraphTemplatesTable,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl,
+    sinceIndexDdl,
     identityTransitionsTableDdl,
     identityTransitionRetentionTableDdl,
     ensureIdentityTransitionsRestoredAtColumn,
@@ -170,6 +187,15 @@ export function createBaseSchemaMembers(
       {
         version: 3,
         async adopt(): Promise<void> {
+          for (const ddl of sinceIndexDdl) {
+            await ensureTable(ddl);
+          }
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 4,
+        async adopt(): Promise<void> {
           for (const ddl of identityTransitionsTableDdl) {
             await ensureTable(ddl);
           }
@@ -178,7 +204,7 @@ export function createBaseSchemaMembers(
         bootstrap: { phase: "covered-by-generated-ddl" },
       },
       {
-        version: 4,
+        version: 5,
         async adopt(): Promise<void> {
           await ensureIdentityTransitionsRestoredAtColumn();
         },

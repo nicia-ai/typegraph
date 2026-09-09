@@ -1,5 +1,6 @@
 import type { QueryAst } from "../../ast";
 import { type SqlFragment } from "../../sql-fragment";
+import { type RecordedReadBinding } from "../schema";
 import {
   compileTemporalFilter,
   currentReadInstantFor,
@@ -45,6 +46,7 @@ export type TemporalFilterPass = Readonly<{
 export function createTemporalFilterPass(
   ast: QueryAst,
   readInstant: ReadInstantMode = "literal",
+  recordedReadBinding?: RecordedReadBinding,
 ): TemporalFilterPass {
   const currentTimestamp = currentReadInstantFor(readInstant);
   const recordedColumns: readonly string[] =
@@ -54,6 +56,7 @@ export function createTemporalFilterPass(
       return compileTemporalFilter({
         ...extractTemporalOptions(ast, tableAlias),
         currentTimestamp,
+        recordedReadBinding,
       });
     },
     currentInstant: currentTimestamp,

@@ -1,51 +1,98 @@
 /**
- * The `recordedTimeOwnership` capability: who allocates recorded-time
- * revisions. Lives in its own module, sibling to `write-fence.ts`, because
- * the interim refusal below is not about locking (§5.3.1 is emphatic that
- * `engine-native` is exempt from the fence gate) and the absent ⇒
- * `"typegraph-relations"` default needs one owner.
+ * Who allocates recorded-time revisions for a backend: TypeGraph's own
+ * capture relations and clock, or the engine itself through
+ * `GraphBackend.recordedTime` (`./recorded-time.ts`). Lives in its own
+ * module, sibling to `write-fence.ts` and `recorded-time.ts`, because the
+ * derivation is a one-line decision that several construction sites read
+ * and must never re-spell.
  */
+import {
+  parseRecordedInstant,
+  type RecordedInstant,
+} from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
-import { type BackendCapabilities } from "../types";
+import { type RecordedReadBinding } from "../../query/compiler/schema";
+import { type GraphBackend } from "../types";
+
+/** Who allocates recorded-time revisions for a backend. See {@link resolveRecordedTimeOwnership}. */
+export type RecordedTimeOwnership = "typegraph-relations" | "engine-native";
 
 /**
- * THE one reader of `capabilities.recordedTimeOwnership`. Absent means
- * `"typegraph-relations"` — today's behavior for every existing backend.
+ * THE one reader of backend recorded-time ownership: `"engine-native"` when
+ * the backend declares `recordedTime`, `"typegraph-relations"` otherwise —
+ * today's behavior for every existing backend. There is no separate
+ * declared flag to fall out of sync with the member: a backend that
+ * supplies `recordedTime` IS engine-native, by construction.
  */
 export function resolveRecordedTimeOwnership(
-  capabilities: BackendCapabilities,
-): NonNullable<BackendCapabilities["recordedTimeOwnership"]> {
-  return capabilities.recordedTimeOwnership ?? "typegraph-relations";
+  backend: Pick<GraphBackend, "recordedTime">,
+): RecordedTimeOwnership {
+  return backend.recordedTime === undefined ?
+      "typegraph-relations"
+    : "engine-native";
 }
 
 /**
- * THE refusal for a backend that declares `recordedTimeOwnership:
- * "engine-native"` while constructing a store that allocates the
- * TypeGraph-owned recorded clock (`history` / `revisionTracking`).
+ * THE one check for "is this recorded read reached under engine-native
+ * ownership," for the callers that hold a read binding rather than a
+ * backend: the query compiler's historical identity traversal
+ * (`query/compiler/identity-traversal.ts`) only ever sees
+ * `ctx.recordedReadBinding`, never the store or its backend.
  *
- * TODAY THE ENGINE-NATIVE READ/WRITE PATH DOES NOT EXIST YET (follow-up
- * F8, owned by WS9). The capture path allocates the TypeGraph clock
- * unconditionally, so this configuration is refused at construction by its
- * own typed error naming the interim state — never admitted and left to
- * throw mid-flush inside `lockRecordedClock` (critique B3). This refusal
- * fires regardless of the write-fence plan: it is about the missing
- * read/write path, not about locking, and a SEPARATELY-named gate handles
- * the fence (§5.3.1, R-2).
- *
- * @throws {ConfigurationError} always.
+ * A binding of kind `"engine-native"` implies that
+ * {@link resolveRecordedTimeOwnership} answered `"engine-native"` for the
+ * backend it was built from: `Store`'s constructor builds that binding kind
+ * (`createEngineRecordedReadBinding`) only after the derivation already
+ * held. The converse does not hold: an engine-native backend constructed
+ * with neither `history` nor `recordedRead` binds nothing at all, so
+ * ownership is engine-native while no binding exists — but `asOfRecorded()`
+ * refuses such a store before any recorded read can reach this check. `Store.
+ * identityAtCoordinate` — the other entry point a recorded identity read can
+ * reach — therefore calls this same function over its own bound binding
+ * rather than re-deriving the ownership from `#recordedTimeOwnership`, so
+ * the two entry points cannot drift into disagreeing about which reads this
+ * refuses.
  */
-export function refuseEngineNativeRecordedTimeNotYetImplemented(): never {
+export function isEngineNativeRecordedReadBinding(
+  binding: RecordedReadBinding | undefined,
+): boolean {
+  return binding?.kind === "engine-native";
+}
+
+/**
+ * THE one check that an `asOfRecorded` anchor was minted by the SAME
+ * ownership form this store reads under: an engine-native store requires an
+ * `e1:` instant (one its own `recordedTime.revisionNow` produced), and a
+ * TypeGraph-owned store requires an `r1:` instant (one its own capture clock
+ * produced). Reusing an anchor across ownership forms — or across two
+ * differently-configured stores over the same graph — would otherwise
+ * silently source rows through the wrong seam, since `RecordedReadSource`
+ * only refuses the mismatch once a read is compiled ({@link
+ * CompilerInvariantError} deep in `query/compiler/schema.ts`); this check
+ * gives the same mismatch a typed, caller-facing refusal at the point the
+ * anchor is supplied.
+ */
+export function assertRecordedInstantOwnershipMatch(
+  ownership: RecordedTimeOwnership,
+  instant: RecordedInstant,
+  surface: string,
+): void {
+  const parts = parseRecordedInstant(instant, surface);
+  const expectedKind = ownership === "engine-native" ? "engine" : "typegraph";
+  if (parts.kind === expectedKind) return;
   throw new ConfigurationError(
-    'This backend declares `recordedTimeOwnership: "engine-native"`, but ' +
-      "TypeGraph still allocates its own recorded clock for `history` / " +
-      "`revisionTracking`; the engine-native path lands with a later " +
-      "release. Construct the store without `history` / `revisionTracking`, " +
-      'or declare `recordedTimeOwnership: "typegraph-relations"` and let ' +
-      "TypeGraph own the clock.",
-    { code: "ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED" },
+    `${surface} requires a recorded instant minted under this store's own recorded-time ownership ("${ownership}"), but got a "${parts.kind}"-form instant.`,
+    {
+      code: "RECORDED_INSTANT_OWNERSHIP_MISMATCH",
+      surface,
+      ownership,
+      instantKind: parts.kind,
+    },
     {
       suggestion:
-        'Construct the store without `history`/`revisionTracking`, or declare `recordedTimeOwnership: "typegraph-relations"`.',
+        ownership === "engine-native" ?
+          "Pass an e1: instant read from this store's own recordedNow() — an r1: instant belongs to a TypeGraph-owned recorded-time store."
+        : "Pass an r1: instant read from this store's own recordedNow() — an e1: instant belongs to an engine-native recorded-time store.",
     },
   );
 }

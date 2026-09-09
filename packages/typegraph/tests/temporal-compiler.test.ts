@@ -5,6 +5,11 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { ConfigurationError } from "../src/errors";
+import {
+  createRecordedReadBinding,
+  createSqlSchema,
+} from "../src/query/compiler/schema";
 import {
   compileTemporalFilter,
   extractTemporalOptions,
@@ -136,6 +141,7 @@ describe("compileTemporalFilter", () => {
 
   describe("recorded predicate", () => {
     const recordedAsOf = "r1:0000000000000007:2024-03-04T05:06:07.000Z";
+    const recordedReadBinding = createRecordedReadBinding(createSqlSchema());
 
     it("omits the recorded predicate when recordedAsOf is absent", () => {
       const sql = getSqlString({ mode: "asOf", asOf: "2024-01-01T00:00:00Z" });
@@ -144,11 +150,29 @@ describe("compileTemporalFilter", () => {
       expect(sql).not.toContain("recorded_to");
     });
 
+    it("refuses recordedAsOf without a recorded read binding", () => {
+      expect(() =>
+        compileTemporalFilter({
+          mode: "asOf",
+          asOf: "2024-01-01T00:00:00Z",
+          recordedAsOf,
+        }),
+      ).toThrow(ConfigurationError);
+      expect(() =>
+        compileTemporalFilter({
+          mode: "asOf",
+          asOf: "2024-01-01T00:00:00Z",
+          recordedAsOf,
+        }),
+      ).toThrow("Recorded-time reads require a recorded read relation");
+    });
+
     it("composes a half-open recorded interval onto the valid filter", () => {
       const sql = getSqlString({
         mode: "asOf",
         asOf: "2024-01-01T00:00:00Z",
         recordedAsOf,
+        recordedReadBinding,
       });
 
       // The valid filter is wrapped so the recorded conjunction binds correctly.
@@ -165,6 +189,7 @@ describe("compileTemporalFilter", () => {
       const sql = getSqlString({
         mode: "current",
         recordedAsOf,
+        recordedReadBinding,
         tableAlias: "n",
       });
 
@@ -173,7 +198,11 @@ describe("compileTemporalFilter", () => {
     });
 
     it("applies the recorded predicate even in includeTombstones mode", () => {
-      const sql = getSqlString({ mode: "includeTombstones", recordedAsOf });
+      const sql = getSqlString({
+        mode: "includeTombstones",
+        recordedAsOf,
+        recordedReadBinding,
+      });
 
       expect(sql).toContain("1=1");
       expect(sql).toContain("recorded_from <=");

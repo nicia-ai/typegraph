@@ -78,6 +78,7 @@ import {
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
   registerLegacyClaimAxisIntegrationTests,
+  registerLineageConformanceIntegrationTests,
   registerMigrateSchemaKindIntegrationTests,
   registerOntologyEquivalenceIntegrationTests,
   registerOntologyTighteningIntegrationTests,
@@ -319,6 +320,7 @@ export function createIntegrationTestSuite<
     registerOntologyEquivalenceIntegrationTests(context);
     registerOntologyTypedSubsumptionIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
+    registerLineageConformanceIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
     registerLegacyClaimAxisIntegrationTests(context);
     registerClaimOwnerIdentityIntegrationTests(context);

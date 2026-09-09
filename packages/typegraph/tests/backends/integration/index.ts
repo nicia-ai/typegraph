@@ -50,6 +50,7 @@ export { registerImportTargetCardinalityIntegrationTests } from "./import-target
 export { registerImportUniquenessIntegrationTests } from "./import-uniqueness";
 export { registerLateMaterializationIntegrationTests } from "./late-materialization";
 export { registerLegacyClaimAxisIntegrationTests } from "./legacy-claim-axis";
+export { registerLineageConformanceIntegrationTests } from "./lineage-conformance";
 export { registerMigrateSchemaKindIntegrationTests } from "./migrate-schema-kinds";
 export { registerOntologyEquivalenceIntegrationTests } from "./ontology-equivalence";
 export { registerOntologyTighteningIntegrationTests } from "./ontology-tightening";

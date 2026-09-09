@@ -8286,5 +8286,957 @@
     "kind": "required-member-added",
     "reason": "`parts()` / `wholes()` are new navigation methods on the library-produced query builder, and `TraversalBuilder` gains the `toKindSet` the composition traversal resolves against. A consumer calls the builder `store.query()` returns and never implements one, and `TraversalBuilder` is not exported from any entrypoint. Declared in .changeset/composition-navigation.md.",
     "issue": "#646"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ExternalRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"external\"` was renamed to `kind` to free the `source` name for the RecordedReadSource seam's `source(table, revision)` method; ExternalRecordedReadSource is only ever constructed by recordedRelation({ schema }), which stamps its private brand symbol, so no external caller could construct or destructure a conforming value by hand before this change either.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TypeGraphRecordedReadSource",
+    "member": "source",
+    "kind": "member-removed",
+    "reason": "the string discriminant `source: \"typegraph-capture\"` was renamed to `kind` for the same reason as ExternalRecordedReadSource's; TypeGraphRecordedReadSource is never directly exported and is only ever constructed by the store's own history: true capture path.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor, createStore's overloads, rebuildIdentityClosure, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "StoreCore is reached at a contravariant (parameter) position through WorkingCopyStrategy.create(baseStore: Store<G>, base: BaseVersion), an existing public callable a caller implements to supply a custom working-copy strategy to branch(). No code hand-authors a Store-shaped object literal to pass as that parameter; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor, exportGraph, exportGraphStream, trustedImportGraph, trustedImportGraphStream, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor, ProfiledStore.attachToStore, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "recordedTimeOwnership",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate recordedTimeOwnership.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedInstantParts is the other arm of the same RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TypeGraphRecordedInstantParts",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "TypeGraphRecordedInstantParts is one arm of the RecordedInstantParts union RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate parseRecordedInstant narrows internally, so implementing RecordedReadSource.source/.predicate only requires reading `.kind`/`.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
   }
 ]

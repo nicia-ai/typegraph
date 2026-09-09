@@ -41,6 +41,7 @@ import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createSqliteBackend, createSqliteTables } from "../src/backend/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { systemIndexName } from "../src/indexes/system";
 import { requireDefined } from "../src/utils/presence";
 import { isSqliteMissingEdgeMatchIdentityColumnError } from "../src/utils/sql-errors";
 
@@ -579,13 +580,197 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  it("catches an installed version-3 SQLite database up to version 4, adding the identity-transitions restored_at column", async () => {
+  it("catches an installed version-2 SQLite database up to version 3, gaining the since_idx indexes", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    const sinceIndexNames = [
+      systemIndexName("typegraph_recorded_nodes", "since_idx"),
+      systemIndexName("typegraph_recorded_edges", "since_idx"),
+      systemIndexName("typegraph_recorded_identity_assertions", "since_idx"),
+    ];
+    try {
+      // Same shape as the version-1-to-2 case above: reach current the
+      // normal way, then roll the installed shape back to what a real
+      // version-2 deployment left behind — every `since_idx` index absent,
+      // marker at 2.
+      await createStoreWithSchema(graph, backend);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      for (const indexName of sinceIndexNames) {
+        client.exec(`DROP INDEX "${indexName}"`);
+      }
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 2 WHERE installation = 1",
+      );
+
+      await createStoreWithSchema(graph, backend);
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      for (const indexName of sinceIndexNames) {
+        expect(
+          client
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            )
+            .get(indexName),
+        ).toEqual({ name: indexName });
+      }
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("accepts two concurrent version-2-to-3 adopters without either failing", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    const sinceIndexNames = [
+      systemIndexName("typegraph_recorded_nodes", "since_idx"),
+      systemIndexName("typegraph_recorded_edges", "since_idx"),
+      systemIndexName("typegraph_recorded_identity_assertions", "since_idx"),
+    ];
+    try {
+      await createStoreWithSchema(graph, backend);
+      for (const indexName of sinceIndexNames) {
+        client.exec(`DROP INDEX "${indexName}"`);
+      }
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 2 WHERE installation = 1",
+      );
+
+      // Both calls race the same monotonic upsert (`writeBaseSchemaVersion`'s
+      // `setWhere: lte(marker.version, version)`); whichever publishes second
+      // observes a version its own step already reached and stops, per
+      // `runSteps`'s short-circuit — neither call is allowed to throw.
+      await expect(
+        Promise.all([
+          requireDefined(backend.adoptBaseSchema)(),
+          requireDefined(backend.adoptBaseSchema)(),
+        ]),
+      ).resolves.toEqual([undefined, undefined]);
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      // This is the SQLite test exercising the OFFLINE `adoptBaseSchema()`
+      // path for version 3 directly, rather than through
+      // `createStoreWithSchema`'s bootstrap as the reopen-based test above
+      // does. Both now catch a gutted version-3 step: the boot path's
+      // system-index materializer only recreates the two
+      // `materializeIndexes`-managed `since_idx` indexes (`recordedNodes`,
+      // `recordedEdges`) — the identity-assertions relation's `since_idx` is
+      // hand-declared, not a `SystemIndexTable`, so nothing but the step
+      // body itself ever creates it, and the reopen-based test's own
+      // assertion on that index fails too.
+      for (const indexName of sinceIndexNames) {
+        expect(
+          client
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            )
+            .get(indexName),
+        ).toEqual({ name: indexName });
+      }
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-2 PGlite database up to version 3, gaining the since_idx indexes", async () => {
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    const sinceIndexNames = [
+      systemIndexName("typegraph_recorded_nodes", "since_idx"),
+      systemIndexName("typegraph_recorded_edges", "since_idx"),
+      systemIndexName("typegraph_recorded_identity_assertions", "since_idx"),
+    ];
+    try {
+      await createStoreWithSchema(graph, backend);
+      const initialMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(initialMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+
+      await client.exec(
+        [
+          ...sinceIndexNames.map((indexName) => `DROP INDEX "${indexName}"`),
+          'UPDATE "typegraph_base_schema_versions" SET version = 2 WHERE installation = 1',
+        ].join(";\n"),
+      );
+
+      await createStoreWithSchema(graph, backend);
+
+      const advancedMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const indexes = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE indexname IN (${sinceIndexNames.map((indexName) => `'${indexName}'`).join(", ")})`,
+      );
+      expect(indexes.rows.map((row) => row.indexname).toSorted()).toEqual(
+        sinceIndexNames.toSorted(),
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-2 PGlite database up to version 3 through adoptBaseSchema() directly, gaining the since_idx indexes", async () => {
+    // The reopen-based case above routes through `createStoreWithSchema`,
+    // whose bootstrap DDL / boot system-index materializer recreates only
+    // the two `materializeIndexes`-managed `since_idx` indexes
+    // (`recordedNodes`, `recordedEdges`); the identity-assertions relation's
+    // `since_idx` is hand-declared, not a `SystemIndexTable`, so nothing but
+    // the version-3 step body itself ever creates it, and the reopen-based
+    // case now also catches a gutted step through that index. This case
+    // calls `backend.adoptBaseSchema()` directly (the offline path, which
+    // never calls `generateDdl()`) so a broken step body is what pins ALL
+    // THREE indexes at once, mirroring the SQLite concurrent-adopters
+    // case's own rationale above.
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    const sinceIndexNames = [
+      systemIndexName("typegraph_recorded_nodes", "since_idx"),
+      systemIndexName("typegraph_recorded_edges", "since_idx"),
+      systemIndexName("typegraph_recorded_identity_assertions", "since_idx"),
+    ];
+    try {
+      await createStoreWithSchema(graph, backend);
+      await client.exec(
+        [
+          ...sinceIndexNames.map((indexName) => `DROP INDEX "${indexName}"`),
+          'UPDATE "typegraph_base_schema_versions" SET version = 2 WHERE installation = 1',
+        ].join(";\n"),
+      );
+
+      await requireDefined(backend.adoptBaseSchema)();
+
+      const advancedMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const indexes = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE indexname IN (${sinceIndexNames.map((indexName) => `'${indexName}'`).join(", ")})`,
+      );
+      expect(indexes.rows.map((row) => row.indexname).toSorted()).toEqual(
+        sinceIndexNames.toSorted(),
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-4 SQLite database up to version 5, adding the identity-transitions restored_at column", async () => {
     const { backend, db } = createLocalSqliteBackend();
     const client = sqliteClient(db);
     try {
       // Reach the current version the normal way, then roll the
-      // identity-transitions table back to its version-3 shape — no
-      // `restored_at` — and the marker back to 3, what a real version-3
+      // identity-transitions table back to its version-4 shape — no
+      // `restored_at` — and the marker back to 4, what a real version-4
       // deployment left behind. The legacy CREATE TABLE is derived from the
       // CURRENT schema (never hand-duplicated) with the one additive column
       // stripped back out, so this test cannot drift from the real DDL.
@@ -605,7 +790,7 @@ describe("deployment-wide base-schema adoption", () => {
         client.exec(statement);
       }
       client.exec(
-        "UPDATE typegraph_base_schema_versions SET version = 3 WHERE installation = 1",
+        "UPDATE typegraph_base_schema_versions SET version = 4 WHERE installation = 1",
       );
 
       await createStoreWithSchema(graph, backend);
@@ -846,8 +1031,9 @@ describe("deployment-wide base-schema adoption", () => {
     const client = sqliteClient(db);
     try {
       await createStoreWithSchema(graph, backend);
+      const newerVersion = CURRENT_BASE_SCHEMA_VERSION + 1;
       client.exec(
-        `UPDATE typegraph_base_schema_versions SET version = ${String(CURRENT_BASE_SCHEMA_VERSION + 1)} WHERE installation = 1`,
+        `UPDATE typegraph_base_schema_versions SET version = ${String(newerVersion)} WHERE installation = 1`,
       );
 
       await expect(backend.bootstrapTables?.()).rejects.toSatisfy(
@@ -856,7 +1042,7 @@ describe("deployment-wide base-schema adoption", () => {
           error.details.reason === "newer",
       );
       expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
-        CURRENT_BASE_SCHEMA_VERSION + 1,
+        newerVersion,
       );
     } finally {
       await backend.close();
@@ -873,12 +1059,13 @@ describe("deployment-wide base-schema adoption", () => {
       );
 
       const prepare = client.prepare.bind(client);
+      const newerVersion = CURRENT_BASE_SCHEMA_VERSION + 1;
       let publishedNewerMarker = false;
       vi.spyOn(client, "prepare").mockImplementation((source) => {
         if (!publishedNewerMarker && source.includes("CREATE TABLE")) {
           publishedNewerMarker = true;
           prepare(
-            `INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, ${String(CURRENT_BASE_SCHEMA_VERSION + 1)}, CURRENT_TIMESTAMP)`,
+            `INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, ${String(newerVersion)}, CURRENT_TIMESTAMP)`,
           ).run();
         }
         return prepare(source);
@@ -891,7 +1078,7 @@ describe("deployment-wide base-schema adoption", () => {
       );
       expect(publishedNewerMarker).toBe(true);
       expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
-        CURRENT_BASE_SCHEMA_VERSION + 1,
+        newerVersion,
       );
     } finally {
       await backend.close();

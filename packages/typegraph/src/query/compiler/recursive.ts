@@ -141,6 +141,7 @@ function runRecursiveQueryPassPipeline(
       return createTemporalFilterPass(
         currentState.ast,
         currentState.ctx.readInstant,
+        currentState.ctx.recordedReadBinding,
       );
     },
     update(currentState, temporalFilterPass): RecursiveQueryPassState {

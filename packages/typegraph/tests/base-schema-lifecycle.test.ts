@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { BaseSchemaMigrationError, CompilerInvariantError } from "../src";
-import { createBaseSchemaLifecycle } from "../src/backend/drizzle/base-schema";
+import {
+  createBaseSchemaLifecycle,
+  CURRENT_BASE_SCHEMA_VERSION,
+} from "../src/backend/drizzle/base-schema";
 
 function migrationReason(error: unknown): string | undefined {
   return error instanceof BaseSchemaMigrationError ?
@@ -54,6 +57,27 @@ describe("base schema lifecycle state machine", () => {
         ensureVersionTable: resolvedVoid,
         writeVersion: (version) => Promise.resolve(version),
         steps: [coveredStep(1)],
+      }),
+    ).toThrow(CompilerInvariantError);
+  });
+
+  it("refuses the real bundled release ledger's step registry if it stopped one release short", () => {
+    // Tied to the real ledger (`base-schema.ts`'s `CURRENT_BASE_SCHEMA_VERSION`)
+    // rather than a literal, so this keeps proving the same thing — a
+    // registry missing its last step is refused — as the ledger grows past
+    // today's version 3 ("lineage-since-index"). A bundled dialect factory
+    // that forgot to register its newest adoption step would fail to
+    // construct ANY backend with exactly this error.
+    expect(() =>
+      createBaseSchemaLifecycle({
+        currentVersion: CURRENT_BASE_SCHEMA_VERSION,
+        readVersion: () => Promise.resolve(0),
+        ensureVersionTable: resolvedVoid,
+        writeVersion: (version) => Promise.resolve(version),
+        steps: Array.from(
+          { length: CURRENT_BASE_SCHEMA_VERSION - 1 },
+          (_ignored, index) => coveredStep(index + 1),
+        ),
       }),
     ).toThrow(CompilerInvariantError);
   });

@@ -229,6 +229,7 @@ describe("recorded commit clock", () => {
 
     expect(secondCommit > firstCommit).toBe(true);
     expect(parseRecordedInstant(secondCommit)).toEqual({
+      kind: "typegraph",
       revision: 2,
       recordedAt: "2026-06-01T12:00:00.000Z",
     });

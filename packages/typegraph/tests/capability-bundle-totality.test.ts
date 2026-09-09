@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("15 pilot + 81 unbundled = 96, with no member counted twice", () => {
+  it("15 pilot + 83 unbundled = 98, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(15);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(81);
+    expect(unbundledNames.length).toBe(83);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(96);
+    expect(bundledSet.size + unbundledNames.length).toBe(98);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("31 reasoned entries sum to 95 accesses; 50 deferred entries sum to 218", () => {
+  it("33 reasoned entries sum to 97 accesses; 50 deferred entries sum to 218", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(31);
+    expect(reasoned.length).toBe(33);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -145,8 +145,25 @@ describe("capability bundle totality (T9)", () => {
     // tightening then adds one more `tableNames` access on top of that: the
     // preflight's SEPARATE D-10 check over the full proposed composition
     // relation builds its own `SqlSchema`, alongside the ontology
-    // acyclicity probe's — 94 -> 95.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(95);
+    // acyclicity probe's — 94 -> 95. The lineage capability then added
+    // `lineage`, a reasoned member with two live accesses (`resolveLineage`'s
+    // two reads of the backend's own `lineage`, in
+    // `store/recorded-capture/lineage.ts`) — 95 -> 97. A prior fix round
+    // briefly grew that further by re-deriving `resolveLineage(target)`'s
+    // resolution and comparing it against the transaction handle's own
+    // `lineage` by identity inside `assertTargetUnchanged` — a dead read
+    // (`LineageMembers` took no session argument, so the comparison never
+    // actually pinned anything to the transaction). Giving `revision`/
+    // `changesSince` a real `session` parameter made that comparison
+    // unnecessary: `assertTargetUnchanged` now reaches `lineage` through
+    // `requireLineage(txBackend, …)`, which reads `.lineage` inside
+    // `backend/capabilities/`, outside the scanner's scope — back to 97.
+    // The engine-native recorded-time capability then added `recordedTime`,
+    // a reasoned member with zero measured accesses for the same reason as
+    // `catalog`: every current read is either inside `backend/capabilities/`
+    // or off `EngineProvisioning`, never off a `GraphBackend`/
+    // `TransactionBackend`-typed receiver — still 97.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(97);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(218);
   });
 });

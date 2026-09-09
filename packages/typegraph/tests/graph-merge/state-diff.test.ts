@@ -28,6 +28,18 @@ import {
   getStoreBackend,
 } from "./test-utils";
 
+/** Every anchor in this suite comes from `revisionTracking: true`, never an
+ * engine-native backend, so its numeric revision always parses this way. */
+function typeGraphRevisionOf(instant: string): number {
+  const parts = parseRecordedInstant(instant);
+  if (parts.kind !== "typegraph") {
+    throw new Error(
+      `Expected a TypeGraph-owned recorded instant, got kind "${parts.kind}"`,
+    );
+  }
+  return parts.revision;
+}
+
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
 });
@@ -393,10 +405,8 @@ describe.each(backendMatrix())("computeBaseVersion [$name]", (entry) => {
       const afterClear = revisionAnchorOf(await computeBaseVersion(store));
 
       expect(afterClear).toBeDefined();
-      expect(
-        parseRecordedInstant(requireDefined(afterClear)).revision,
-      ).toBeGreaterThan(
-        parseRecordedInstant(requireDefined(beforeClear)).revision,
+      expect(typeGraphRevisionOf(requireDefined(afterClear))).toBeGreaterThan(
+        typeGraphRevisionOf(requireDefined(beforeClear)),
       );
     } finally {
       vi.useRealTimers();

@@ -147,6 +147,7 @@ export function resolveTemporalFilter(
     recordedAsOf: resolved.recordedAsOf,
     tableAlias,
     currentTimestamp: currentReadInstant(),
+    recordedReadBinding: ctx.recordedReadBinding,
   };
   return compileTemporalFilter(filterOptions);
 }

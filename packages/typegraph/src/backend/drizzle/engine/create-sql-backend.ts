@@ -66,15 +66,22 @@ const PROVISIONING_DERIVATION_MEMBER_KEYS = [
 ] as const;
 
 /**
- * `provisioning`-class member excluded because it is not itself a callable
+ * `provisioning`-class members excluded because none is itself a callable
  * write: `catalog` is a bag of read-only introspection probes
- * (`BackendCatalogProbes`), not a function. `buildQueuedWriteUnits` already
- * skips any non-function member it reads, so an included `catalog` would be
- * silently dropped regardless — it is named here so the totality ratchet in
- * `tests/caller-serialized-queue.test.ts` sees a documented exclusion
- * instead of an accidental one.
+ * (`BackendCatalogProbes`), `lineage` is a bag of read-only revision/delta
+ * probes (`LineageMembers`), and `recordedTime` is a bag of a read-only
+ * source function and a revision-clock read (`EngineRecordedTimeMembers`) —
+ * none a function itself. `buildQueuedWriteUnits` already skips any
+ * non-function member it reads, so an included `catalog`, `lineage`, or
+ * `recordedTime` would be silently dropped regardless — all three are named
+ * here so the totality ratchet in `tests/caller-serialized-queue.test.ts`
+ * sees a documented exclusion instead of an accidental one.
  */
-const PROVISIONING_PROBE_MEMBER_KEYS = ["catalog"] as const;
+const PROVISIONING_PROBE_MEMBER_KEYS = [
+  "catalog",
+  "lineage",
+  "recordedTime",
+] as const;
 
 /**
  * `rawSql`-class member excluded for the same reason as the two provisioning
@@ -129,10 +136,10 @@ const TRANSACTION_OPENER_MEMBER_KEYS = ["transactionWithNative"] as const;
  * Read from the taxonomy's own exported classes (`GRAPH_BACKEND_MEMBER_CLASSES`),
  * so a write member a class adds later is queued here automatically, never
  * from a second, hand-kept list this factory would have to remember to
- * update; only the four documented exceptions above (two pure derivations,
- * one probe bag, one raw-SQL compiler) are named individually, each with its
+ * update; only the five documented exceptions above (two pure derivations,
+ * two probe bags, one raw-SQL compiler) are named individually, each with its
  * own reason, and `tests/caller-serialized-queue.test.ts` pins that this list
- * plus those four exceptions is exactly `keyof AdapterBackend` (minus
+ * plus those five exceptions is exactly `keyof AdapterBackend` (minus
  * `adoptTransaction`, refused rather than queued or excluded).
  *
  * Why per-member queueing (rather than, say, one lock spanning every call) is
@@ -168,7 +175,7 @@ export const QUEUED_ROOT_MEMBER_KEYS = [
  * {@link QUEUED_ROOT_MEMBER_KEYS}, each with the one-line reason it stays
  * unqueued: every `read` and `identity` member (never writes / a static
  * description property, not an operation), the two provisioning derivations,
- * the one provisioning probe bag, the one raw-SQL compiler, `close`
+ * the two provisioning probe bags, the one raw-SQL compiler, `close`
  * (this file's own disposal wrapper), and `adoptTransaction` (refused
  * outright rather than queued or silently left alone).
  *
@@ -430,6 +437,32 @@ export function createSqlBackend<TTx>(
     );
   }
 
+  // Engine-native recorded time keeps no recorded relations of its own: a
+  // graph-merge diff against such a store has nothing to derive a change
+  // delta from except the engine's own `lineage`. Refusing the lopsided
+  // declaration here, at construction, is cheaper than letting it surface
+  // later as an unexplained full-comparison fallback on every merge.
+  if (
+    profile.provisioning.recordedTime !== undefined &&
+    profile.provisioning.lineage === undefined
+  ) {
+    throw new ConfigurationError(
+      "This engine profile declares `recordedTime` without also declaring " +
+        "`lineage`: engine-native recorded time keeps no recorded relations " +
+        "of its own, so graph-merge has no other source for this backend's " +
+        "change delta. Declare both EngineProvisioning.recordedTime and " +
+        "EngineProvisioning.lineage on this profile.",
+      {
+        code: "ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE",
+        dialect: profile.dialect,
+      },
+      {
+        suggestion:
+          "Declare EngineProvisioning.lineage alongside EngineProvisioning.recordedTime on this profile.",
+      },
+    );
+  }
+
   // Resolved once and reused for every mark below: whether `profile` is the
   // exact object one of the two bundled builders returned, not merely an
   // object shaped like one. Only that object was ever registered, so this
@@ -659,6 +692,12 @@ export function createSqlBackend<TTx>(
     ...(profile.provisioning.catalog === undefined ?
       {}
     : { catalog: profile.provisioning.catalog }),
+    ...(profile.provisioning.lineage === undefined ?
+      {}
+    : { lineage: profile.provisioning.lineage }),
+    ...(profile.provisioning.recordedTime === undefined ?
+      {}
+    : { recordedTime: profile.provisioning.recordedTime }),
     close: profile.close,
   } satisfies AdapterBackend<TTx>;
 

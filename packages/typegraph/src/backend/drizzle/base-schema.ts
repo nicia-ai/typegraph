@@ -32,22 +32,28 @@ export const BASE_SCHEMA_RELEASES = [
   },
   {
     version: 3,
-    id: "identity-transition-log",
+    id: "lineage-since-index",
     orderedShapeDigests: {
       postgres:
-        "7b8657ec9d46150c5b7ba3c46da8e44e16bce1f799bcf93222a395f596f6f67c",
+        "3566f85b41ee4139e580fb6964ef6258ba9fa1d3756dcc42b47a5235690d6375",
       sqlite:
-        "4e9c16c3761e83663f4a25da916c8e4ee171c792c215e1a7c704d4f674435e59",
+        "4bd7e6a5caeb3b5e54933b26f6697e53fc7a9aa916c0606c77006fdc93080981",
     },
   },
   {
     version: 4,
+    id: "identity-transition-log",
+    orderedShapeDigests: {
+      postgres: "PENDING_PG_4",
+      sqlite: "PENDING_SQLITE_4",
+    },
+  },
+  {
+    version: 5,
     id: "identity-transitions-restored-at",
     orderedShapeDigests: {
-      postgres:
-        "c51f7f23d98915d9e29de43184cb94c3f1ad98bd74bf764123f732e9073f8fa4",
-      sqlite:
-        "f474cc2305f442c188686d9cf146c3eb2c37528edfc004d50373e9072870ea18",
+      postgres: "PENDING_PG_5",
+      sqlite: "PENDING_SQLITE_5"
     },
   },
 ] as const;
