@@ -347,6 +347,44 @@ describe("trusted import", () => {
     ).toBeUndefined();
   });
 
+  it("refuses an identity-transitions chunk instead of dropping identity history", async () => {
+    const backend = createTestBackend();
+    const store = createStore(trustedGraph, backend);
+    const data = graphData([
+      { kind: "TrustedPerson", id: "alice", properties: { name: "Alice" } },
+    ]);
+    const { nodes, edges, ...header } = data;
+
+    await expect(
+      trustedImportGraphStream(
+        store,
+        chunkStream([
+          { type: "header", header },
+          { type: "nodes", nodes },
+          {
+            type: "identity-transitions",
+            transitions: [
+              {
+                transitionId: "transition-1",
+                cause: "assert",
+                recordedRevision: 1,
+                recordedAt: "2026-01-01T00:00:00.000Z",
+                validAt: "2026-01-01T00:00:00.000Z",
+                class: { kind: "TrustedPerson", id: "alice" },
+                assertionIds: ["assertion-1"],
+              },
+            ],
+          },
+          { type: "edges", edges },
+        ]),
+      ),
+    ).rejects.toEqual(expectReason("invalid_stream"));
+
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
+    ).toBeUndefined();
+  });
+
   it("refuses a node whose validity window is inverted", async () => {
     // The trusted path skips schema validation for throughput, but a window of
     // negative width is a stream SHAPE fault: the row would be observable at no
