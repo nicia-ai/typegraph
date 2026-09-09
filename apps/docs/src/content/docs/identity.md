@@ -350,7 +350,16 @@ transitions in it.
 `nextFrom`, the recorded instant of the first boundary it stopped short of,
 and passing that back as `fromRecorded` reads the next page. They page on
 identical boundaries, so a `replay` page and a `transitionsOf` page taken
-with the same options always cover the same revisions.
+with the same options always stop at the same boundary — though `steps` can
+be shorter than `transitions` on that page (see below): `nextFrom` names
+where the page stopped, not how many revisions it covered.
+
+`nextFrom` addresses the transition log only. When the boundary it names
+holds a restored row (see [Archival transitions and the retention
+watermark](#archival-transitions-and-the-retention-watermark)), the revision
+it names was minted by the *source* graph's clock, not this graph's — pass it
+only as the next call's `fromRecorded`, and never to `store.asOfRecorded`,
+which anchors a historical read on this graph's own recorded axis.
 
 ```typescript
 let cursor: RecordedInstant | undefined;

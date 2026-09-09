@@ -333,11 +333,16 @@ cannot answer a request. Its code names the reason:
   below the graph's retention watermark (see
   [`pruneIdentityTransitions`](/identity/#retention)); `details.prunedBefore`
   names the watermark.
-- `IDENTITY_REPLAY_WALK_INCOMPLETE` — an internal safety ceiling on the
-  lineage walk's own reads was hit; prune older history with
-  `pruneIdentityTransitions`. Narrowing `fromRecorded`/`toRecorded` does not
-  help: lineage discovery reads the whole log deliberately, so that a
-  requested window can never hide the notes that name a class.
+- `IDENTITY_REPLAY_WALK_INCOMPLETE` — the lineage walk keyset-pages through
+  every matching row with no per-round limit, so ordinary lineages — however
+  many rows they hold — never hit this refusal; it fires only when a single
+  class lineage's transition rows exceed an internal total safety ceiling
+  (`details.ceiling`), which is a backstop against a pathologically large or
+  corrupted log, not a cap on legitimate history. Its only remedy is
+  destructive: prune older history with `pruneIdentityTransitions`.
+  Narrowing `fromRecorded`/`toRecorded` does not help: lineage discovery
+  reads the whole log deliberately, so that a requested window can never
+  hide the notes that name a class.
 
 A range with more boundaries than the requested `limit` is not an error —
 `replay` and `transitionsOf` page, returning a `nextFrom` cursor on the
@@ -1805,7 +1810,7 @@ try {
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store opened without `history: true` |
 | `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
-| `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | The lineage walk's internal read ceiling was hit before the seed set converged |
+| `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | A single lineage's transition rows exceeded the walk's internal total safety ceiling |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
 | `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A forced identity-paired match crosses a class-lifted `different` assertion |
 | `GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT` | `IdentityMergeConflictError` | system | `onProvenanceConflict: "refuse"` found contradictory branch attribution across a fused cluster |

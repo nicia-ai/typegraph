@@ -33,6 +33,7 @@ import {
 import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
 import { type IdentityServiceContext } from "../src/identity/service-types";
 import {
+  type IdentityTransitionRow,
   pruneIdentityTransitions,
   pruneIdentityTransitionsForContext,
   readIdentityTransitions,
@@ -104,6 +105,77 @@ describe("identity transition log", () => {
     const assertRows = rows.filter((row) => row.cause === "assert");
     expect(assertRows.length).toBeGreaterThanOrEqual(1);
     expect(assertRows[0]?.assertion_ids.length).toBe(1);
+  });
+
+  // Load-bearing: `scope.after` keyset-pages `readIdentityTransitions` past a
+  // prior page's last row — this is what lets `walkClassLineage` (replay.ts)
+  // read a fixed-point round to exhaustion via many small pages instead of
+  // one read capped at a fixed ceiling. Mutation check: change the cursor
+  // filter's `recorded_revision > ${scope.after.recordedRevision}` to `>=`
+  // (transition-log.ts) and this fails: the second page re-includes the
+  // first page's own last row (and any earlier same-revision row), so
+  // `collected` gains a duplicate the equality check catches before the
+  // bounded round guard below would otherwise mask an infinite loop as a
+  // length mismatch.
+  it("keyset-pages past scope.after, converging to the same rows a single unbounded read returns", async () => {
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await store.nodes.Person.create({ name: "A" }, { id: "a" });
+    await store.nodes.Person.create({ name: "B" }, { id: "b" });
+    await store.identity.assertSame(
+      { kind: "Person", id: "a" },
+      { kind: "Person", id: "b" },
+    );
+    const [firstAssertion] = await store.identity.assertionsOf({
+      kind: "Person",
+      id: "a",
+    });
+    if (firstAssertion === undefined) throw new Error("expected an assertion");
+    await store.identity.retractAssertion(firstAssertion.id);
+    await store.identity.assertSame(
+      { kind: "Person", id: "a" },
+      { kind: "Person", id: "b" },
+    );
+
+    const ctx = storeRuntime(store).identityContext();
+    const everything = await readTransitions(ctx);
+    expect(everything.length).toBeGreaterThanOrEqual(3);
+
+    const pageSize = 1;
+    const collected: IdentityTransitionRow[] = [];
+    let after:
+      Readonly<{ recordedRevision: number; transitionId: string }> | undefined;
+    // Bounded by `everything.length + 1` rounds: a correct pager finishes in
+    // exactly `everything.length` rounds (one row per page), so one extra
+    // round of slack still turns a broken, non-advancing cursor into a
+    // length/content mismatch below rather than an unbounded loop.
+    for (let round = 0; round <= everything.length; round += 1) {
+      const page = await readIdentityTransitions(
+        ctx.backend,
+        ctx.schema,
+        ctx.graphId,
+        {
+          classRefs: PERSON_CLASS_REFS,
+          limit: pageSize,
+          ...(after === undefined ? {} : { after }),
+        },
+      );
+      collected.push(...page);
+      if (page.length < pageSize) break;
+      const last = page.at(-1);
+      if (last === undefined) break;
+      after = {
+        recordedRevision: last.recorded_revision,
+        transitionId: last.transition_id,
+      };
+    }
+
+    expect(collected.map((row) => row.transition_id)).toEqual(
+      everything.map((row) => row.transition_id),
+    );
   });
 
   it("notes a retract transition when a same assertion is retracted", async () => {

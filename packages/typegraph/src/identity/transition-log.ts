@@ -484,9 +484,25 @@ export function toTransitionTransfer(
   };
 }
 
+/** A (recorded revision, transition id) keyset cursor, ordering ties by the transition id. */
+export type IdentityTransitionCursor = Readonly<{
+  recordedRevision: number;
+  transitionId: string;
+}>;
+
 export type IdentityTransitionReadScope = Readonly<{
   classRefs: readonly PlainNodeRef[];
   limit: number;
+  /**
+   * Keyset-pages the read strictly past this cursor, ordered the same way
+   * the result is (`recorded_revision` then `transition_id`) — pass the
+   * cursor built from the previous page's LAST row to read the next `limit`
+   * rows. `undefined` (the default) reads from the start. This is how
+   * `walkClassLineage`'s fixed-point walk (replay.ts) reads one round to
+   * exhaustion without a fixed per-round ceiling: it keeps requesting pages
+   * until a page comes back shorter than `limit`.
+   */
+  after?: IdentityTransitionCursor | undefined;
 }>;
 
 /**
@@ -518,9 +534,20 @@ export type IdentityTransitionReadScope = Readonly<{
  * (`deleteAssertionsTouchingKinds`, `loadCurrentStructuralClasses`) — a wide
  * lineage must hit a typed refusal, never the driver's own opaque
  * bind-variable-limit error. Each chunk is read with the full `scope.limit`
- * and the merged, deduplicated rows are re-sorted and re-truncated to that
- * same limit, so chunking never changes the result a single unchunked query
- * would have returned.
+ * (past `scope.after`, when given) and the merged, deduplicated rows are
+ * re-sorted and re-truncated to that same limit, so chunking never changes
+ * the result a single unchunked query would have returned.
+ *
+ * `scope.after` keyset-pages the result past a prior page's last row: the
+ * caller (`walkClassLineage`, replay.ts) reads one fixed-point round to
+ * exhaustion by re-issuing this call with `after` set to the previous page's
+ * last row until a page comes back shorter than `scope.limit`, rather than
+ * capping the round at a fixed row ceiling. The tie-break column
+ * (`transition_id`) goes through the same `binaryText` collation-safety seam
+ * `readIdentityTransitionPageForInterchange` uses, for the same reason: left
+ * bare, `>` on that column would compare under the column's collation, which
+ * is locale-dependent on PostgreSQL and would disagree with the ORDER BY's
+ * own comparison of the same rows on some inputs.
  */
 export async function readIdentityTransitions(
   target: IdentityTarget,
@@ -530,7 +557,7 @@ export async function readIdentityTransitions(
 ): Promise<readonly IdentityTransitionRow[]> {
   if (scope.classRefs.length === 0) return [];
   const chunkSize = identityChunkSize(target, {
-    fixedParameters: 4,
+    fixedParameters: scope.after === undefined ? 4 : 6,
     maxItems: MAX_REFERENCE_CHUNK_SIZE,
     parametersPerItem: 4,
   });
@@ -566,24 +593,34 @@ export async function readIdentityTransitions(
     ),
     sql` OR `,
   );
+  const transitionIdKey = getDialect(target.dialect).binaryText(
+    sql`transition_id`,
+  );
+  const cursorFilter =
+    scope.after === undefined ?
+      sql``
+    : sql`
+      AND (
+        recorded_revision > ${scope.after.recordedRevision}
+        OR (
+          recorded_revision = ${scope.after.recordedRevision}
+          AND ${transitionIdKey} > ${scope.after.transitionId}
+        )
+      )
+    `;
   const rows = await target.execute<RawIdentityTransitionRow>(
     asCompiledRowsSql(sql`
       SELECT ${IDENTITY_TRANSITION_COLUMNS}
       FROM ${schema.identityTransitionsTable}
       WHERE graph_id = ${graphId}
         AND (${classMatches} OR ${priorMatches})
-      ORDER BY recorded_revision ASC, transition_id ASC
+        ${cursorFilter}
+      ORDER BY recorded_revision ASC, ${transitionIdKey} ASC
       LIMIT ${scope.limit}
     `),
   );
   return rows.map((row) => normalizeIdentityTransitionRow(row));
 }
-
-/** A (recorded revision, transition id) keyset cursor, ordering ties by the transition id. */
-export type IdentityTransitionCursor = Readonly<{
-  recordedRevision: number;
-  transitionId: string;
-}>;
 
 export type IdentityTransitionPage = Readonly<{
   transitions: readonly IdentityTransitionRow[];

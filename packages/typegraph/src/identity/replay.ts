@@ -33,6 +33,7 @@ import {
   type IdentityDecisionProvenance,
   identityReplayRequiresHistoryError,
   type IdentityTransitionCause,
+  type IdentityTransitionCursor,
   type IdentityTransitionRow,
   isRestoredTransitionRow,
   readIdentityTransitions,
@@ -80,6 +81,17 @@ export type IdentityTransition<G extends GraphDef> = Readonly<{
   restored?: Readonly<{ at: string }> | undefined;
 }>;
 
+/**
+ * One paired boundary from {@link identityReplay}. `transition.restored` is
+ * NEVER set here — `identityReplay` builds `steps` only from `nativeRows`
+ * (rows this graph's own history capture recorded), by construction; a
+ * restored row's revision is minted by the source graph's clock and cannot
+ * be paired with a before/after reconstructed on THIS graph's historical
+ * reader (see {@link IdentityTransition.restored}'s docblock for why). The
+ * invariant lives on the `IdentityTransition` field rather than a narrower
+ * type here so the two APIs share one transition shape; a step's `restored`
+ * check, if ever written, is permanently dead code.
+ */
 export type IdentityReplayStep<G extends GraphDef> = Readonly<{
   transition: IdentityTransition<G>;
   before: readonly IdentityNodeReference<G>[];
@@ -92,6 +104,15 @@ export type IdentityReplayStep<G extends GraphDef> = Readonly<{
  * the page reached the end of the lineage. Pass it back as `fromRecorded` to
  * read the next page — `fromRecorded` is inclusive, so the boundary this
  * names opens the next page exactly once.
+ *
+ * SCOPED TO THE TRANSITION LOG ONLY. When the cutoff boundary holds a
+ * restored row (see {@link IdentityTransition.restored}), the revision this
+ * names was minted by the SOURCE graph's clock, not this graph's — it is
+ * `RecordedInstant`-shaped by construction (`requireTypeGraphRecordedRevision`
+ * cannot tell the two apart), but it must never be passed to
+ * `store.asOfRecorded`, which anchors a historical read on THIS graph's own
+ * recorded axis. Use it only as `fromRecorded` on the next `transitionsOf` /
+ * `replay` call.
  */
 type PagedTransitions = Readonly<{
   rows: readonly IdentityTransitionRow[];
@@ -102,14 +123,26 @@ export type IdentityReplay<G extends GraphDef> = Readonly<{
   steps: readonly IdentityReplayStep<G>[];
   /** Set when the retention watermark cut history above the requested start. */
   truncatedBefore?: RecordedInstant | undefined;
-  /** Set when `limit` capped this page; pass it as `fromRecorded` for the next one. */
+  /**
+   * Set when `limit` capped this page; pass it as `fromRecorded` for the
+   * next one. Addresses the TRANSITION LOG only — like
+   * {@link IdentityTransition.restored}'s `at`, this can name a revision a
+   * restored row's SOURCE graph allocated, not this graph. Never pass it to
+   * `store.asOfRecorded`; pass it only as `fromRecorded`.
+   */
   nextFrom?: RecordedInstant | undefined;
 }>;
 
 /** One page of {@link identityTransitionsOf}'s answer. */
 export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
   transitions: readonly IdentityTransition<G>[];
-  /** Set when `limit` capped this page; pass it as `fromRecorded` for the next one. */
+  /**
+   * Set when `limit` capped this page; pass it as `fromRecorded` for the
+   * next one. Addresses the TRANSITION LOG only — like
+   * {@link IdentityTransition.restored}'s `at`, this can name a revision a
+   * restored row's SOURCE graph allocated, not this graph. Never pass it to
+   * `store.asOfRecorded`; pass it only as `fromRecorded`.
+   */
   nextFrom?: RecordedInstant | undefined;
 }>;
 
@@ -177,13 +210,25 @@ async function currentClassCanonicalSeed<G extends GraphDef>(
 }
 
 /**
- * Generous internal ceiling for the seed-lineage walk's OWN reads (never the
+ * Page size for each ROUND-TRIP the seed-lineage walk issues while reading
+ * one round to exhaustion (see {@link walkClassLineage}): generous enough
+ * that a typical lineage's round completes in a single page, but never the
  * caller's `limit`, which caps the PAGE assembled from the fully-converged
- * result below): a round that truncated its read before the seed set
- * converged could hide the very rows that would have grown that set,
- * silently returning an incomplete lineage instead of a typed refusal.
+ * result below.
  */
-const IDENTITY_REPLAY_WALK_READ_CEILING = 100_000;
+const IDENTITY_REPLAY_WALK_PAGE_SIZE = 100_000;
+
+/**
+ * Safety backstop on the fixed-point walk's TOTAL accumulated row count,
+ * across every round and every page within a round combined. This is not a
+ * bound on any lineage's legitimate size — a real lineage, however large,
+ * pages through {@link IDENTITY_REPLAY_WALK_PAGE_SIZE}-sized reads via the
+ * `after` keyset cursor with no destructive remedy required, up to this
+ * ceiling. Reached only by a pathologically large or corrupted transition
+ * log, where the alternative is an unbounded read; see
+ * `identityReplayWalkIncompleteError`.
+ */
+const IDENTITY_REPLAY_WALK_ROW_CEILING = 2_000_000;
 
 /**
  * The fixed-point class-lineage walk (§3.2 step 2): starting from `ref`'s
@@ -206,43 +251,52 @@ const IDENTITY_REPLAY_WALK_READ_CEILING = 100_000;
  * `readIdentityTransitions` therefore takes no revision bounds at all
  * (transition-log.ts) — the window is applied once, by
  * {@link windowedRows}, to the converged result.
+ *
+ * DISCOVERY IS ALSO UNBOUNDED BY ROW COUNT, deliberately: each round pages
+ * to exhaustion through `readIdentityTransitions`'s `after` keyset cursor
+ * rather than capping at a fixed ceiling, so a class lineage with more rows
+ * than any one page holds still converges correctly — it costs more round
+ * trips, never an incomplete or refused read. Only
+ * {@link IDENTITY_REPLAY_WALK_ROW_CEILING}, a backstop against a
+ * pathologically large or corrupted log, can still refuse.
  */
 async function walkClassLineage<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   seed: PlainNodeRef,
 ): Promise<readonly IdentityTransitionRow[]> {
   const seeds = new Map<string, PlainNodeRef>([[refKey(seed), seed]]);
+  let totalRowsRead = 0;
   for (;;) {
     const scopeReferences = [...seeds.values()];
-    const rows = await readIdentityTransitions(
-      ctx.backend,
-      ctx.schema,
-      ctx.graphId,
-      {
-        classRefs: scopeReferences,
-        limit: IDENTITY_REPLAY_WALK_READ_CEILING,
-      },
-    );
-    // A round that read exactly the ceiling cannot tell "these are all the
-    // rows there are" from "the read cut off before the seed set converged" —
-    // exactly the hazard this constant's docblock names. Refuse rather than
-    // silently return a lineage that might be missing the rows that would
-    // have grown the seed set further.
-    if (rows.length === IDENTITY_REPLAY_WALK_READ_CEILING) {
-      throw new IdentityReplayError(
-        "Identity replay's lineage walk read more transition rows in one round than its internal ceiling allows, so completeness cannot be guaranteed.",
+    const roundRows: IdentityTransitionRow[] = [];
+    let after: IdentityTransitionCursor | undefined;
+    for (;;) {
+      const page = await readIdentityTransitions(
+        ctx.backend,
+        ctx.schema,
+        ctx.graphId,
         {
-          code: "IDENTITY_REPLAY_WALK_INCOMPLETE",
-          ceiling: IDENTITY_REPLAY_WALK_READ_CEILING,
-        },
-        {
-          suggestion:
-            "Prune older transitions with pruneIdentityTransitions. Narrowing fromRecorded/toRecorded does not help: lineage discovery reads the whole log on purpose, so that a window can never hide the notes that name a class.",
+          classRefs: scopeReferences,
+          limit: IDENTITY_REPLAY_WALK_PAGE_SIZE,
+          ...(after === undefined ? {} : { after }),
         },
       );
+      roundRows.push(...page);
+      totalRowsRead += page.length;
+      if (totalRowsRead > IDENTITY_REPLAY_WALK_ROW_CEILING) {
+        throw identityReplayWalkIncompleteError(
+          IDENTITY_REPLAY_WALK_ROW_CEILING,
+        );
+      }
+      if (page.length < IDENTITY_REPLAY_WALK_PAGE_SIZE) break;
+      const lastOfPage = requireDefined(page.at(-1));
+      after = {
+        recordedRevision: lastOfPage.recorded_revision,
+        transitionId: lastOfPage.transition_id,
+      };
     }
     let grew = false;
-    for (const row of rows) {
+    for (const row of roundRows) {
       const classRef = transitionClassRef(row);
       const priorClassRef = transitionPriorClassRef(row);
       if (!seeds.has(refKey(classRef))) {
@@ -254,7 +308,7 @@ async function walkClassLineage<G extends GraphDef>(
         grew = true;
       }
     }
-    if (!grew) return rows;
+    if (!grew) return roundRows;
   }
 }
 
@@ -314,6 +368,28 @@ function invalidReplayLimitError(
   return new ValidationError(`replay limit must be ${requirement}.`, {
     issues: [{ path: "limit", message: `Got ${String(resolved)}.` }],
   });
+}
+
+/**
+ * The typed refusal `walkClassLineage` throws when
+ * {@link IDENTITY_REPLAY_WALK_ROW_CEILING} is exceeded. Exported (module
+ * path only, not through a package barrel — mirrors how `readIdentityTransitions`
+ * is imported "by module path directly" in transition-log.ts's own tests) so
+ * a unit test can assert its `code`, `ceiling` detail, and suggestion string
+ * directly, without constructing a lineage large enough to trigger it for
+ * real.
+ */
+export function identityReplayWalkIncompleteError(
+  ceiling: number,
+): IdentityReplayError {
+  return new IdentityReplayError(
+    "Identity replay's lineage walk accumulated more transition rows than its internal safety ceiling allows, so completeness cannot be guaranteed.",
+    { code: "IDENTITY_REPLAY_WALK_INCOMPLETE", ceiling },
+    {
+      suggestion:
+        "Prune older transitions with pruneIdentityTransitions. Narrowing fromRecorded/toRecorded does not help: lineage discovery reads the whole log on purpose, so that a window can never hide the notes that name a class.",
+    },
+  );
 }
 
 /**
@@ -538,9 +614,11 @@ export async function identityReplay<G extends GraphDef>(
   // are therefore built ONLY from this graph's own (never restored) rows;
   // `transitionsOf` (no such filter) remains the complete answer for "what
   // changed and why". Filtering the boundary set itself — not merely the
-  // rows matched at each boundary — also means the next NATIVE boundary
-  // computes its own fresh `before` here (`previousAfter` never chains
-  // through a boundary that held only restored rows).
+  // rows matched at each boundary — also means `previousAfter` is only ever
+  // set from a `reconstructAt` at a revision THIS graph allocated: a
+  // restored-only boundary is dropped from `boundaries` entirely, so it can
+  // never overwrite `previousAfter` with a reconstruction at a foreign
+  // revision, and the next NATIVE boundary's `before` stays sound.
   const nativeRows = rows.filter((row) => !isRestoredTransitionRow(row));
   const boundaries = distinctBoundaries(nativeRows);
 

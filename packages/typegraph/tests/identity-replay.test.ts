@@ -24,6 +24,7 @@ import { IdentityReplayError, ValidationError } from "../src/errors";
 import {
   IDENTITY_REPLAY_MAX_LIMIT,
   identityReplay,
+  identityReplayWalkIncompleteError,
   identityTransitionsOf,
 } from "../src/identity/replay";
 import { pruneIdentityTransitionsForContext } from "../src/identity/transition-log";
@@ -410,6 +411,25 @@ describe("identity replay", () => {
         error.details.requestedTo === beforePruneRecorded
       );
     });
+  });
+
+  // Load-bearing: `IDENTITY_REPLAY_WALK_INCOMPLETE`'s code, `ceiling` detail,
+  // and suggestion are pinned directly against the factory `walkClassLineage`
+  // throws, rather than against a fixture large enough to trigger the
+  // multi-million-row safety ceiling for real. Mutation check: change the
+  // `code`, drop the `ceiling` detail, or edit the suggestion string in
+  // `identityReplayWalkIncompleteError` (replay.ts) and this test fails on
+  // the exact field that changed.
+  it("identityReplayWalkIncompleteError names the safety ceiling that tripped it", () => {
+    const error = identityReplayWalkIncompleteError(2_000_000);
+    expect(error).toBeInstanceOf(IdentityReplayError);
+    expect(error.details).toEqual({
+      code: "IDENTITY_REPLAY_WALK_INCOMPLETE",
+      ceiling: 2_000_000,
+    });
+    expect(error.suggestion).toBe(
+      "Prune older transitions with pruneIdentityTransitions. Narrowing fromRecorded/toRecorded does not help: lineage discovery reads the whole log on purpose, so that a window can never hide the notes that name a class.",
+    );
   });
 });
 
