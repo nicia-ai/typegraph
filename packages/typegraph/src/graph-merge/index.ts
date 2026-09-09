@@ -77,6 +77,11 @@ export type {
   MatchSource,
   MatchStrategy,
 } from "./evidence";
+export type {
+  IdentityAssertionConflict,
+  IdentityAssertionConflictPolicy,
+  IdentityAssertionDecision,
+} from "./identity-three-way";
 export { ingestionBranch } from "./ingestion-branch";
 export {
   applyMergePlan,
@@ -167,6 +172,10 @@ export type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IdentityAssertionConflictReason,
+  IdentityReconciliation,
+  IdentityReconciliationOptions,
+  IdentityUnresolvedConflict,
   IngestionBranch,
   IngestionNodeCollections,
   MergeBranch,
