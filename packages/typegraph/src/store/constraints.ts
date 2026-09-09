@@ -236,9 +236,22 @@ export function graphOwesClaims(
       if (gating !== undefined) return gating.refusalReason;
     }
   }
-  for (const registration of Object.values(graph.edges)) {
-    if (edgeCardinalityAxisReferences(registration).length > 0) {
-      return "edgeCardinality";
+  for (const [kind, registration] of Object.entries(graph.edges)) {
+    // Routed through `edgeWriteNeedsConstraintFence` — the one owner of
+    // "which reason does this edge kind's declaration qualify under, and in
+    // what preference order" — rather than re-spelling the cardinality-only
+    // half of that fold here. `acyclic` is left `undefined`: this predicate
+    // asks about cardinality alone (see the docblock above), and
+    // `edgeWriteNeedsConstraintFence` only ever falls through to
+    // `"edgeAcyclicity"` when neither composition nor an ordinary axis
+    // qualifies, so omitting it cannot manufacture a cardinality answer that
+    // is not there.
+    const reason = edgeWriteNeedsConstraintFence({
+      ...registration,
+      composition: registry.isCompositionEdge(kind),
+    });
+    if (reason === "edgeComposition" || reason === "edgeCardinality") {
+      return reason;
     }
   }
   return undefined;

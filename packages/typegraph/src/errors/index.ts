@@ -1173,10 +1173,12 @@ export class CompositionCycleError extends TypeGraphError {
 /**
  * Details for CompositionError.
  *
- * `incumbentWholeKind`/`incumbentWholeId` are omitted when the refusal is
- * raised from the claim row alone (the common case: the claim statement
- * reports only which edge holds the axis, not that edge's own endpoints) —
- * present only where a caller already read the incumbent whole's identity.
+ * `incumbentEdgeId` is omitted only when a caller builds this error with no
+ * claim outcome in hand at all; every claim-issuing call site has one and
+ * supplies it. It names the EDGE that already holds the axis — the one fact
+ * the claim statement's `holder_edge_id` actually reports — never the
+ * incumbent whole's own kind/id, which would need a second read this refusal
+ * path does not make.
  */
 export type CompositionErrorDetails = Readonly<{
   partKind: string;
@@ -1184,8 +1186,7 @@ export type CompositionErrorDetails = Readonly<{
   wholeKind: string;
   wholeId: string;
   edgeKind: string;
-  incumbentWholeKind?: string;
-  incumbentWholeId?: string;
+  incumbentEdgeId?: string;
 }>;
 
 /**
@@ -1201,12 +1202,9 @@ export class CompositionError extends TypeGraphError {
     super(
       `Cannot attach ${details.partKind}/${details.partId} to ${details.wholeKind}/${details.wholeId} via "${details.edgeKind}": ` +
         `it already has a whole${
-          (
-            details.incumbentWholeKind === undefined ||
-            details.incumbentWholeId === undefined
-          ) ?
+          details.incumbentEdgeId === undefined ?
             ""
-          : ` (${details.incumbentWholeKind}/${details.incumbentWholeId})`
+          : ` (held by edge ${details.incumbentEdgeId})`
         }, and composition allows exactly one.`,
       "COMPOSITION_WHOLE_OCCUPIED",
       {

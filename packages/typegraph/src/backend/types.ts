@@ -4018,16 +4018,6 @@ export type HardDeleteUniquesByConcreteKindParams = Readonly<{
 }>;
 
 /**
- * One edge cardinality claim, named by the components its axis, its key and its
- * holder-liveness predicate are all built from.
- *
- * The components are passed RAW rather than pre-rendered: `edgeCardinalitySpec`
- * (`store/claims/edge-claims.ts`) is the one function that decides which
- * endpoints the key covers and what a holder must still be, and both the
- * TypeScript probe and the SQL builder read it. A caller that rendered the
- * axis and key itself would be a second spelling of that decision.
- */
-/**
  * Present only on a composition claim: the reserved relation-wide axis
  * (item E, `COMPOSITION_RELATION_NAME`), and the ORIENTED realizing edge
  * kinds whose live rows can hold it — every edge kind the graph's
@@ -4046,6 +4036,16 @@ export type CompositionClaimScope = Readonly<{
   holders: readonly Readonly<{ edgeKind: string; partSide: "from" | "to" }>[];
 }>;
 
+/**
+ * One edge cardinality claim, named by the components its axis, its key and its
+ * holder-liveness predicate are all built from.
+ *
+ * The components are passed RAW rather than pre-rendered: `edgeCardinalitySpec`
+ * (`store/claims/edge-claims.ts`) is the one function that decides which
+ * endpoints the key covers and what a holder must still be, and both the
+ * TypeScript probe and the SQL builder read it. A caller that rendered the
+ * axis and key itself would be a second spelling of that decision.
+ */
 export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef &
   Readonly<{
     graphId: string;
@@ -4154,6 +4154,13 @@ export type ContendedUniqueRow = Readonly<{
  * One live edge that shares its declared cardinality's population with at least
  * one other live edge. The endpoints are returned whole so the caller can name
  * the claim key through the one builder that renders it.
+ *
+ * `scope` names which declaration's query produced this row — the ordinary
+ * per-edge-kind axis (`undefined`) or the reserved, relation-wide composition
+ * axis (present) — exactly as {@link EdgeCardinalityDeclaration.scope} names
+ * it for the declaration itself. The reader must never re-derive this from
+ * the row's own (possibly dirty) endpoints: which query found the row already
+ * says which axis it contends on.
  */
 export type ContendedEdgeRow = EdgeCardinalityAxisRef &
   Readonly<{
@@ -4163,6 +4170,7 @@ export type ContendedEdgeRow = EdgeCardinalityAxisRef &
     fromId: string;
     toKind: string;
     toId: string;
+    scope?: CompositionClaimScope;
   }>;
 
 /** One node id live under BOTH kinds of a declared disjoint pair. */

@@ -437,9 +437,16 @@ export function edgeCardinalityClaimRefusal(
  * a back-import here would be a value-level cycle, the exact shape
  * `axis.ts`'s docblock records avoiding for its own type-only back-edge onto
  * this module.
+ *
+ * `incumbentEdgeId` is the one fact a caller can actually have in hand: the
+ * claim statement's own `holder_edge_id` (or, for an in-batch collision, the
+ * earlier claim in the same batch). It is never the incumbent WHOLE's
+ * identity — reading that would be a second query this refusal path does not
+ * make — so `CompositionErrorDetails` names the edge, not the whole.
  */
 export function compositionClaimRefusal(
   params: ClaimEdgeCardinalityParams,
+  incumbentEdgeId?: string,
 ): CompositionError {
   const spec = edgeCardinalitySpec(params);
   const part =
@@ -456,6 +463,7 @@ export function compositionClaimRefusal(
     wholeKind: whole.kind,
     wholeId: whole.id,
     edgeKind: params.edgeKind,
+    ...(incumbentEdgeId === undefined ? {} : { incumbentEdgeId }),
   });
 }
 
@@ -465,13 +473,20 @@ export function compositionClaimRefusal(
  * {@link edgeCardinalityClaimRefusal} and {@link compositionClaimRefusal}
  * itself, so a caller cannot forget the composition arm the way a second
  * inline `claim.scope !== undefined` spelling could.
+ *
+ * `incumbentEdgeId` (when the caller has one — a claim statement's returned
+ * holder, or an in-batch collision's earlier claim) is forwarded only to the
+ * composition arm: `CardinalityError` names no such field, and inventing one
+ * here would be exactly the fabricated-value-a-reader-has-to-check-is-unread
+ * shape this module's own `EdgeClaimSubject` docblock warns against.
  */
 export function claimRefusalFor(
   params: ClaimEdgeCardinalityParams,
+  incumbentEdgeId?: string,
 ): CardinalityError | CompositionError {
   return params.scope === undefined ?
       edgeCardinalityClaimRefusal(params)
-    : compositionClaimRefusal(params);
+    : compositionClaimRefusal(params, incumbentEdgeId);
 }
 
 /**
@@ -503,7 +518,10 @@ export function edgeClaimRelationMissing(
         "Run the generated migration SQL (generatePostgresMigrationSQL / " +
         "generateSqliteMigrationSQL) against this database, or declare the " +
         'edge kind `cardinality: "many"` and enforce the limit in ' +
-        "application code.",
+        "application code — or, for a composition edge kind, drop the " +
+        "`partOf`/`hasPart` declaration it realizes, since a composition " +
+        'edge cannot take the `cardinality: "many"` escape (it always ' +
+        "declares a constrained whole-side cardinality).",
     },
   );
 }
@@ -578,7 +596,7 @@ async function claimEdgeCardinality(
       mode.claim(claim),
     );
     if (outcome.status === "refused") {
-      throw claimRefusalFor(claim);
+      throw claimRefusalFor(claim, outcome.holderEdgeId);
     }
     return;
   }
@@ -587,7 +605,9 @@ async function claimEdgeCardinality(
   const outcome = await withEdgeClaimRelationPrecondition(claim.graphId, () =>
     support.claims.claimEdgeCardinality(claim),
   );
-  if (outcome.status === "refused") throw claimRefusalFor(claim);
+  if (outcome.status === "refused") {
+    throw claimRefusalFor(claim, outcome.holderEdgeId);
+  }
 }
 
 /**
@@ -639,7 +659,7 @@ export async function claimEdgeCardinalityBatch(
   for (const [index, outcome] of outcomes.entries()) {
     const entry = ordered[index];
     if (entry !== undefined && outcome.status === "refused") {
-      throw claimRefusalFor(entry.claim);
+      throw claimRefusalFor(entry.claim, outcome.holderEdgeId);
     }
   }
 }

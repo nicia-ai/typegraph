@@ -21,6 +21,8 @@ import {
   type EdgeCardinalityAxisRef,
   edgeCardinalitySpec,
 } from "../../../store/claims/edge-claims";
+import type { CompositionClaimScope } from "../../types";
+import { claimHolderTerms } from "./edge-claims";
 import { quotedColumn, type Tables } from "./shared";
 
 /** The alias the correlated subquery reads the same relation under. */
@@ -160,26 +162,24 @@ export function buildContendedEdgeRowAudit(
  * wrong for R4: the composition claim's axis is relation-wide, so a `Chapter`
  * attached via `chapterOf` (`partSide: "from"`) and the SAME `Chapter`
  * attached via `includedIn` (`partSide: "to"`) must be found contending even
- * though they are different edge kinds in different orientations. This is
- * the SAME two-arm oriented union {@link file://./edge-claims.ts
- * claimHolderTerms} folds a write's liveness predicate over — a `fromSide`
- * peer's part sits at `(from_kind, from_id)`, a `toSide` peer's at `(to_kind,
- * to_id)` — reused here as the read-only audit's peer test instead of a
- * second SQL shape.
+ * though they are different edge kinds in different orientations. The peer
+ * test below IS {@link file://./edge-claims.ts claimHolderTerms} — the same
+ * function the write-path fence calls — given the OUTER row's own qualified
+ * part column instead of a write's bound literal, so this audit and the
+ * fence can never render two different answers to "does this row hold the
+ * axis this claim contends for".
  *
  * `ref` fixes which side of the OUTER row is the part (`edgeCardinalitySpec`'s
  * `keyShape`, always `"from"` or `"to"` for a composition ref — never
  * `"fromAndTo"`), so only the outer row's own side needs qualifying; the
- * PEER may be either side, which is exactly the two-arm OR below.
+ * PEER may be either side, which `claimHolderTerms`' two-arm OR already
+ * expresses.
  */
 export function buildContendedCompositionEdgeRowAudit(
   tables: Tables,
   graphId: string,
   ref: EdgeCardinalityAxisRef,
-  scope: Readonly<{
-    fromSideKinds: readonly string[];
-    toSideKinds: readonly string[];
-  }>,
+  holders: CompositionClaimScope["holders"],
   reportedEdgeKinds: readonly string[],
 ): SQL {
   const { edges } = tables;
@@ -187,7 +187,8 @@ export function buildContendedCompositionEdgeRowAudit(
   const spec = edgeCardinalitySpec(ref);
   const outerPartKindColumn =
     spec.keyShape === "from" ? edges.fromKind : edges.toKind;
-  const outerPartIdColumn = spec.keyShape === "from" ? edges.fromId : edges.toId;
+  const outerPartIdColumn =
+    spec.keyShape === "from" ? edges.fromId : edges.toId;
   const activeOnly =
     spec.holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(relation, edges.validTo)} IS NULL`
@@ -197,27 +198,30 @@ export function buildContendedCompositionEdgeRowAudit(
       sql` AND ${qualified(PEER, edges.validTo)} IS NULL`
     : sql.empty();
 
-  const arms: SQL[] = [];
-  if (scope.fromSideKinds.length > 0) {
-    arms.push(sql`
-      (
-            ${qualified(PEER, edges.kind)} IN (${inList(scope.fromSideKinds)})
-            AND ${qualified(PEER, edges.fromKind)} = ${qualified(relation, outerPartKindColumn)}
-            AND ${qualified(PEER, edges.fromId)} = ${qualified(relation, outerPartIdColumn)}
-          )
-    `);
-  }
-  if (scope.toSideKinds.length > 0) {
-    arms.push(sql`
-      (
-            ${qualified(PEER, edges.kind)} IN (${inList(scope.toSideKinds)})
-            AND ${qualified(PEER, edges.toKind)} = ${qualified(relation, outerPartKindColumn)}
-            AND ${qualified(PEER, edges.toId)} = ${qualified(relation, outerPartIdColumn)}
-          )
-    `);
-  }
-  const peerPartTerms =
-    arms.length === 0 ? sql`FALSE` : sql.join(arms, sql` OR `);
+  // A stand-in `ClaimEdgeCardinalityParams`: `claimHolderTerms` only reads
+  // `edgeKind`/`fromKind`/`fromId`/`toKind`/`toId` on its ordinary
+  // (`scope === undefined`) branch, never on this composition one — the
+  // fields below are structurally required but unread here, since
+  // `partIdentity` supplies the part's identity instead.
+  const peerHolderTerms = claimHolderTerms(
+    PEER,
+    edges,
+    {
+      ...ref,
+      graphId,
+      edgeKind: "",
+      edgeId: "",
+      fromKind: "",
+      fromId: "",
+      toKind: "",
+      toId: "",
+      scope: { kind: "composition", holders },
+    },
+    {
+      kind: qualified(relation, outerPartKindColumn),
+      id: qualified(relation, outerPartIdColumn),
+    },
+  );
 
   return sql`
     SELECT
@@ -234,7 +238,7 @@ export function buildContendedCompositionEdgeRowAudit(
       AND EXISTS (
         SELECT 1 FROM ${edges} AS ${sql.raw(`"${PEER}"`)}
         WHERE ${qualified(PEER, edges.graphId)} = ${qualified(relation, edges.graphId)}
-          AND (${peerPartTerms})
+          AND ${peerHolderTerms}
           AND ${qualified(PEER, edges.deletedAt)} IS NULL${peerActiveOnly}
           AND ${qualified(PEER, edges.id)} <> ${qualified(relation, edges.id)}
       )

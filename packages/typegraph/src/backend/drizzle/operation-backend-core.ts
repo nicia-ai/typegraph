@@ -5478,14 +5478,7 @@ export function createCommonOperationBackend(
           operationStrategy.buildContendedCompositionEdgeRowAudit(
             params.graphId,
             ref,
-            {
-              fromSideKinds: holders
-                .filter((holder) => holder.partSide === "from")
-                .map((holder) => holder.edgeKind),
-              toSideKinds: holders
-                .filter((holder) => holder.partSide === "to")
-                .map((holder) => holder.edgeKind),
-            },
+            holders,
             edgeKinds,
           ),
         );
@@ -5498,6 +5491,7 @@ export function createCommonOperationBackend(
             fromId: row.from_id,
             toKind: row.to_kind,
             toId: row.to_id,
+            scope: { kind: "composition", holders },
           });
         }
       }

@@ -24,6 +24,7 @@ import type {
   CheckUniqueParams,
   ClaimEdgeCardinalityParams,
   CompareAndSetNodeParams,
+  CompositionClaimScope,
   ContributionMaterializationIdentity,
   CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
@@ -587,10 +588,7 @@ export type CommonOperationStrategy = Readonly<{
   buildContendedCompositionEdgeRowAudit: (
     graphId: string,
     ref: EdgeCardinalityAxisRef,
-    scope: Readonly<{
-      fromSideKinds: readonly string[];
-      toSideKinds: readonly string[];
-    }>,
+    holders: CompositionClaimScope["holders"],
     reportedEdgeKinds: readonly string[],
   ) => SQL;
   buildDisjointOverlapAudit: (
@@ -1262,17 +1260,14 @@ function createCommonOperationStrategy(
     buildContendedCompositionEdgeRowAudit(
       graphId: string,
       ref: EdgeCardinalityAxisRef,
-      scope: Readonly<{
-        fromSideKinds: readonly string[];
-        toSideKinds: readonly string[];
-      }>,
+      holders: CompositionClaimScope["holders"],
       reportedEdgeKinds: readonly string[],
     ): SQL {
       return buildContendedCompositionEdgeRowAudit(
         tables,
         graphId,
         ref,
-        scope,
+        holders,
         reportedEdgeKinds,
       );
     },

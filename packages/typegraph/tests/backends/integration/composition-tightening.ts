@@ -1,20 +1,19 @@
 /**
- * Data-validated tightening for a newly-declared composition pair (item E,
- * lane E-b), stacking on item A's schema-tightening preflight
+ * Data-validated tightening for a newly-declared composition pair (item E),
+ * stacking on item A's schema-tightening preflight
  * (`src/schema/tightening-preflight.ts`, `prepareSchemaTighteningPreflight`).
  *
- * Before this lane, `partOf`/`hasPart` classified as `safe` in both
- * directions (item A shipped it that way, pending composition's own
- * constraints — see `src/schema/ontology-change.ts`'s module docblock).
- * Adding the FIRST `partOf`/`hasPart` pair over two edge kinds that already
- * exist as ordinary, independent cardinality-`one` edges is exactly the
- * shape that can be dirty: nothing prevented one part from already holding a
- * live edge under EACH kind before the pair existed to say that is now one
- * whole too many.
+ * Before item E, `partOf`/`hasPart` classified as `safe` in both directions
+ * (item A shipped it that way, pending composition's own constraints — see
+ * `src/schema/ontology-change.ts`'s module docblock). Adding the FIRST
+ * `partOf`/`hasPart` pair over two edge kinds that already exist as
+ * ordinary, independent cardinality-`one` edges is exactly the shape that
+ * can be dirty: nothing prevented one part from already holding a live edge
+ * under EACH kind before the pair existed to say that is now one whole too
+ * many.
  *
- * Each case states, in a comment, the mutation that must make it fail; the
- * revert/mutation checks actually performed are recorded in the scratchpad
- * `lane-Eb-load-bearing.md` note.
+ * Each case states, in a comment, the mutation that must make it fail (the
+ * revert/mutation check load-bearing tests require).
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";

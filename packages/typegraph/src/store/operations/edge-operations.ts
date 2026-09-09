@@ -154,10 +154,10 @@ import {
 import {
   activeOnlyAxisReferences,
   claimEdgeCardinalities,
+  claimRefusalFor,
   type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
   edgeCardinalityClaimMode,
-  edgeCardinalityClaimRefusal,
   edgeCardinalityClaims,
   edgeCardinalityClaimTarget,
   type EdgeCardinalityDeclarations,
@@ -1410,7 +1410,7 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
 ): Promise<AtomicEdgeBatchPreparation> {
   const preparedCreates: EdgeCreatePrepared[] = [];
   const claims: ClaimEdgeCardinalityParams[] = [];
-  const claimedTargets = new Set<string>();
+  const claimedTargets = new Map<string, string>();
   for (const input of inputs) {
     const prepared = await validateAndPrepareEdgeCreate(
       ctx,
@@ -1432,10 +1432,11 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
     for (const claim of edgeInsertWork(ctx, prepared).claims) {
       const target = edgeCardinalityClaimTarget(claim);
       const targetKey = `${target.axis}\u0000${target.key}`;
-      if (claimedTargets.has(targetKey)) {
-        throw edgeCardinalityClaimRefusal(claim);
+      const incumbentEdgeId = claimedTargets.get(targetKey);
+      if (incumbentEdgeId !== undefined) {
+        throw claimRefusalFor(claim, incumbentEdgeId);
       }
-      claimedTargets.add(targetKey);
+      claimedTargets.set(targetKey, claim.edgeId);
       claims.push(claim);
     }
   }

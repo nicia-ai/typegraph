@@ -315,7 +315,7 @@ describe("generated edge batch store consumer", () => {
     }
   });
 
-  it("excludes a composition edge kind even when the mark and the registration would otherwise be eligible (E-b)", () => {
+  it("excludes a composition edge kind even when the mark and the registration would otherwise be eligible", () => {
     // A composition edge kind declares exactly ONE ordinary cardinality
     // axis, same as `cardinalityGraph` below — the `length > 1` two-axis
     // exclusion alone cannot see the SECOND claim `compositionClaim` adds.

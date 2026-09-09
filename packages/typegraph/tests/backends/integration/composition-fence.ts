@@ -1,5 +1,5 @@
 /**
- * The composition claim (item E, lane E-b), on every backend.
+ * The composition claim (item E), on every backend.
  *
  * R4: a part holds exactly one whole across every declared `partOf`/
  * `hasPart` pair, enforced by one claim row on the reserved, relation-wide
@@ -8,9 +8,8 @@
  * whole, is ONE acyclic relation, checked by D.2's exhaustive reachability
  * probe with no code of its own.
  *
- * Each case states, in a comment, the mutation that must make it fail; the
- * revert/mutation checks actually performed are recorded in the scratchpad
- * `lane-Eb-load-bearing.md` note.
+ * Each case states, in a comment, the mutation that must make it fail (the
+ * revert/mutation check load-bearing tests require).
  *
  * The genuine-concurrency case (below, "two concurrent attaches") is what
  * stands in for a real-PostgreSQL contention test: this suite already runs
@@ -59,6 +58,16 @@ const CfActivePart = defineNode("CfActivePart", { schema: z.object({}) });
 const CfActiveWhole = defineNode("CfActiveWhole", { schema: z.object({}) });
 const CfOnePart = defineNode("CfOnePart", { schema: z.object({}) });
 const CfOneWhole = defineNode("CfOneWhole", { schema: z.object({}) });
+/**
+ * DualPart -> DualWhole, part `from`, declaring BOTH `cardinality: "one"`
+ * (composition's own population axis) AND an orthogonal `targetCardinality:
+ * "one"` — the shape that exposed E2/E3: a per-row re-derivation of "is this
+ * a composition row" folded a composition edge kind's ORDINARY axis
+ * violations onto the reserved composition axis too, regardless of which
+ * declaration's query actually produced the row.
+ */
+const CfDualPart = defineNode("CfDualPart", { schema: z.object({}) });
+const CfDualWhole = defineNode("CfDualWhole", { schema: z.object({}) });
 
 /** Chapter -> Book, the ordinary "from"-side-part orientation. */
 const cfChapterOf = defineEdge("cfChapterOf", { schema: z.object({}) });
@@ -80,6 +89,8 @@ const cfContainsC = defineEdge("cfContainsC", { schema: z.object({}) });
 const cfActiveOf = defineEdge("cfActiveOf", { schema: z.object({}) });
 /** OnePart -> OneWhole, population `one`. */
 const cfOneOf = defineEdge("cfOneOf", { schema: z.object({}) });
+/** DualPart -> DualWhole, `cardinality: "one"` AND `targetCardinality: "one"`. */
+const cfDualOf = defineEdge("cfDualOf", { schema: z.object({}) });
 
 function buildGraph(id: string) {
   return defineGraph({
@@ -95,6 +106,8 @@ function buildGraph(id: string) {
       CfActiveWhole: { type: CfActiveWhole },
       CfOnePart: { type: CfOnePart },
       CfOneWhole: { type: CfOneWhole },
+      CfDualPart: { type: CfDualPart },
+      CfDualWhole: { type: CfDualWhole },
     },
     edges: {
       cfChapterOf: {
@@ -157,6 +170,13 @@ function buildGraph(id: string) {
         to: [CfOneWhole],
         cardinality: "one",
       },
+      cfDualOf: {
+        type: cfDualOf,
+        from: [CfDualPart],
+        to: [CfDualWhole],
+        cardinality: "one",
+        targetCardinality: "one",
+      },
     },
     ontology: [
       partOf(CfChapter, CfBook, { via: cfChapterOf }),
@@ -169,6 +189,7 @@ function buildGraph(id: string) {
       hasPart(CfFolder, CfFolder, { via: cfContainsC, partSide: "to" }),
       partOf(CfActivePart, CfActiveWhole, { via: cfActiveOf }),
       partOf(CfOnePart, CfOneWhole, { via: cfOneOf }),
+      partOf(CfDualPart, CfDualWhole, { via: cfDualOf }),
     ],
   });
 }
@@ -388,6 +409,39 @@ export function registerCompositionFenceIntegrationTests(
     // batch support, and the fused program never applies the composition
     // claim.
 
+    it("a bulk create's stale-claim takeover cannot steal a live incumbent held by a DIFFERENT composition edge kind", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const chapter = await store.nodes.CfChapter.create({});
+      const book = await store.nodes.CfBook.create({});
+      const anthology = await store.nodes.CfAnthology.create({});
+
+      await store.edges.cfChapterOf.create(chapter, book, {});
+
+      // The batch claim path's initial lock reports an existing holder of a
+      // DIFFERENT edge id (`cfChapterOf`'s) than this write's own
+      // (`cfIncludedIn`'s), so it falls to the stale-claim takeover
+      // statement. That statement's liveness check must read every
+      // composition-scope holder kind, not only the WRITING edge's own kind
+      // — otherwise the live `cfChapterOf` incumbent is invisible to it and
+      // the axis is stolen out from under a still-live edge.
+      await expect(
+        store.edges.cfIncludedIn.bulkCreate([{ from: chapter, to: anthology }]),
+      ).rejects.toBeInstanceOf(CompositionError);
+
+      // The part still holds exactly its original whole.
+      expect(await store.edges.cfChapterOf.findFrom(chapter)).toHaveLength(1);
+      expect(await store.edges.cfIncludedIn.findFrom(chapter)).toHaveLength(0);
+    });
+    // MUTATION CHECK: revert `claimHolderTerms(edgesName, edges, params)` in
+    // `buildTakeOverEdgeClaim` (src/backend/drizzle/operations/edge-claims.ts)
+    // back to the inline `edges.kind = params.edgeKind` +
+    // `endpointTerms(...)` spelling. The takeover's liveness sub-select then
+    // filters on the WRITING edge's own kind (`cfIncludedIn`) instead of
+    // every composition holder kind, finds no live `cfIncludedIn` row at the
+    // part, and the stale-claim takeover wrongly succeeds: `bulkCreate`
+    // resolves instead of rejecting, and the part ends up with two live
+    // wholes (verified, reverted).
+
     it("self-heals across a DIFFERENT edge kind once the incumbent is hard-deleted behind the store's back", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const backend = store.backend;
@@ -465,6 +519,67 @@ export function registerCompositionFenceIntegrationTests(
     // rows above then fold onto two DIFFERENT axes (`one:cfChapterOf` and
     // `one:cfIncludedIn`), each with exactly one holder, and this test finds
     // a clean graph instead of the violation.
+
+    it("verifyConstraintFences still reports a composition edge kind's OWN orthogonal axis violation (E2/E3)", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const backend = store.backend;
+      const partA = await store.nodes.CfDualPart.create({});
+      const partB = await store.nodes.CfDualPart.create({});
+      const whole = await store.nodes.CfDualWhole.create({});
+
+      // Two DIFFERENT parts attached to the SAME whole: a genuine
+      // `targetCardinality: "one"` violation on `cfDualOf`'s own ordinary
+      // target axis. Neither part holds more than one whole, so this is NOT
+      // a composition (R4) violation — planted directly, bypassing the
+      // store's claims entirely, the shape a trusted import or a
+      // pre-upgrade database leaves behind.
+      await backend.insertEdge({
+        graphId: store.graphId,
+        id: "cf-dual-row-a",
+        kind: "cfDualOf",
+        fromKind: "CfDualPart",
+        fromId: partA.id,
+        toKind: "CfDualWhole",
+        toId: whole.id,
+        props: {},
+      });
+      await backend.insertEdge({
+        graphId: store.graphId,
+        id: "cf-dual-row-b",
+        kind: "cfDualOf",
+        fromKind: "CfDualPart",
+        fromId: partB.id,
+        toKind: "CfDualWhole",
+        toId: whole.id,
+        props: {},
+      });
+
+      const violations = await store.verifyConstraintFences();
+      const cardinalityViolation = violations.find(
+        (violation) => violation.family === "edgeCardinality",
+      );
+      expect(cardinalityViolation).toBeDefined();
+      if (cardinalityViolation?.family !== "edgeCardinality") {
+        throw new Error("expected an edgeCardinality violation");
+      }
+      expect([...cardinalityViolation.edgeIds].toSorted()).toEqual(
+        ["cf-dual-row-a", "cf-dual-row-b"].toSorted(),
+      );
+      // No composition (R4) violation: each part still holds exactly one
+      // whole, and no `edgeIds` entry repeats (E3's double-count).
+      expect(
+        violations.some((violation) => violation.family === "composition"),
+      ).toBe(false);
+    });
+    // MUTATION CHECK: restore the per-row `compositionClaim(registry, row)`
+    // re-derivation in `edgeCardinalityViolations` (src/store/claims/
+    // verify.ts) instead of reading the row's own `scope`. Both planted rows
+    // are of a composition-realizing edge kind (`cfDualOf`), so the
+    // re-derivation folds them onto the reserved composition axis
+    // regardless of which query produced them; grouped there they share one
+    // axis with 2 edge ids, so `family: "composition"` becomes truthy above
+    // and the genuine `edgeCardinality` violation disappears (verified,
+    // reverted).
 
     it("two concurrent attaches of one part to two different wholes: exactly one commits", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));

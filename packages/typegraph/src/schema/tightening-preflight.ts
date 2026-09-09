@@ -300,7 +300,13 @@ export function prepareSchemaTighteningPreflight(
   // `partOf`/`hasPart` pairs THIS commit adds (`grouped.composition.edgeKinds`)
   // — a pre-existing, already-tightened pair's data is never re-walked by an
   // unrelated commit, the same discipline `edgeCardinalities`/
-  // `disjointKindPairs` above already honor.
+  // `disjointKindPairs` above already honor. That delta-scoping is only
+  // which edge kinds' rows are the OUTER (reported) rows: each declaration's
+  // own `scope.holders` — R4's oriented holder list — is still the WHOLE
+  // graph's composition holders, from `compositionEdgeCardinalityDeclarations`,
+  // because a delta-scoped edge kind can still be found contending against a
+  // pre-existing, unrelated composition edge kind's live row (R4 is one
+  // relation-wide invariant, not one per pair).
   const compositionEdgeCardinalities =
     grouped.composition === undefined ?
       []

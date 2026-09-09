@@ -1,5 +1,5 @@
 /**
- * Validating import and the composition claim (item E, lane E-b).
+ * Validating import and the composition claim (item E).
  *
  * `importEdgeInsertWork` (`src/interchange/import.ts`) is the ONE owner of an
  * imported edge's insert unit, and it now calls `edgeInsertClaims` — the same
@@ -10,18 +10,24 @@
  * commits inside its own savepoint) is untouched by adding a second claim to
  * the row's insert unit.
  */
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
   CompositionError,
+  createStore,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   partOf,
 } from "../../src";
+import { generateSqliteDDL } from "../../src/backend/drizzle/ddl";
+import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import type { GraphBackend } from "../../src/backend/types";
 import {
   FORMAT_VERSION,
   type GraphData,
@@ -141,4 +147,51 @@ describe("validating import: composition claim", () => {
   // Companion to the import case above — proves a store write and a
   // validating-import row refuse with the SAME typed error rather than two
   // independent spellings of "the part already has a whole".
+
+  it("refuses the whole import up front on a backend with no transactions, naming edgeComposition (E7)", async () => {
+    const sqlite = new Database(":memory:");
+    try {
+      const db = drizzle(sqlite);
+      for (const statement of generateSqliteDDL()) sqlite.exec(statement);
+      const backend: GraphBackend = createSqliteBackend(db, {
+        executionProfile: { transactionMode: "none", isSync: true },
+      });
+      const store = createStore(buildGraph(), backend);
+
+      // `graphOwesClaims` (src/store/constraints.ts) is asked directly here
+      // — this graph declares no OTHER constrained edge kind, so a fold that
+      // never reaches the composition arm would find nothing to refuse on
+      // and let the import proceed unfenced.
+      await expect(
+        importGraph(
+          store,
+          payload([
+            {
+              kind: "ciChapterOf",
+              id: "e-chapter-of",
+              from: { kind: "CiChapter", id: "c1" },
+              to: { kind: "CiBook", id: "b1" },
+              properties: {},
+            },
+          ]),
+          { onConflict: "error", batchSize: 100 },
+        ),
+      ).rejects.toMatchObject({
+        details: {
+          code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
+          constraint: "edgeComposition",
+        },
+      });
+    } finally {
+      sqlite.close();
+    }
+  });
+  // MUTATION CHECK: revert `graphOwesClaims`'s edge loop
+  // (src/store/constraints.ts) to its pre-fix inline
+  // `edgeCardinalityAxisReferences(registration).length > 0 ->
+  // "edgeCardinality"` spelling. This graph's edge kinds are composition-only
+  // (no plain `cardinality`/`targetCardinality` outside what composition
+  // itself requires), so the reported `constraint` becomes `"edgeCardinality"`
+  // instead of `"edgeComposition"` and the `toMatchObject` assertion above
+  // fails (verified, reverted).
 });

@@ -67,8 +67,10 @@ function endpointTerms(
 /**
  * THE rows that can hold this claim: which edge kinds, and — for a
  * composition claim — on which endpoint. The one owner of that decision, so
- * {@link competingLiveEdgePredicate} and
- * {@link recordedClaimHolderIsLivePredicate} cannot render two different
+ * {@link competingLiveEdgePredicate}, {@link recordedClaimHolderIsLivePredicate}
+ * and the read-only audit's correlated peer test
+ * ({@link file://../../drizzle/operations/constraint-fence-audit.ts
+ * buildContendedCompositionEdgeRowAudit}) cannot render two different
  * answers to "does this row hold the axis this claim contends for".
  *
  * `scope === undefined` (the ordinary case, unchanged from before item E):
@@ -85,18 +87,29 @@ function endpointTerms(
  * (`Chapter -> Book`, part `from`) and `includedIn` (`Anthology -> Chapter`,
  * part `to`) contend for the SAME Chapter's one whole even though they are
  * different edge kinds in different orientations.
+ *
+ * `partIdentity` overrides where the part's own kind/id come from: omitted
+ * (every write-path caller), they are `params`' bound `fromKind`/`fromId` or
+ * `toKind`/`toId` literal; the correlated audit instead passes the OUTER
+ * row's own qualified columns, so the peer test reads "matches the part THIS
+ * row names" rather than a literal captured ahead of time.
  */
-function claimHolderTerms(
+export function claimHolderTerms(
   edgesName: string,
   edges: Tables["edges"],
   params: ClaimEdgeCardinalityParams,
+  partIdentity?: Readonly<{ kind: SQL; id: SQL }>,
 ): SQL {
   const spec = edgeCardinalitySpec(params);
   if (params.scope === undefined) {
     return sql`${qualified(edgesName, edges.kind)} = ${params.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, params)}`;
   }
-  const partKind = spec.keyShape === "from" ? params.fromKind : params.toKind;
-  const partId = spec.keyShape === "from" ? params.fromId : params.toId;
+  const partKind =
+    partIdentity?.kind ??
+    sql`${spec.keyShape === "from" ? params.fromKind : params.toKind}`;
+  const partId =
+    partIdentity?.id ??
+    sql`${spec.keyShape === "from" ? params.fromId : params.toId}`;
   const fromSideKinds = params.scope.holders
     .filter((holder) => holder.partSide === "from")
     .map((holder) => holder.edgeKind);
@@ -108,9 +121,9 @@ function claimHolderTerms(
     arms.push(sql`
       (
             ${qualified(edgesName, edges.kind)} IN (${sql.join(
-        fromSideKinds.map((kind) => sql`${kind}`),
-        sql`, `,
-      )})
+              fromSideKinds.map((kind) => sql`${kind}`),
+              sql`, `,
+            )})
             AND ${qualified(edgesName, edges.fromKind)} = ${partKind}
             AND ${qualified(edgesName, edges.fromId)} = ${partId}
           )
@@ -120,9 +133,9 @@ function claimHolderTerms(
     arms.push(sql`
       (
             ${qualified(edgesName, edges.kind)} IN (${sql.join(
-        toSideKinds.map((kind) => sql`${kind}`),
-        sql`, `,
-      )})
+              toSideKinds.map((kind) => sql`${kind}`),
+              sql`, `,
+            )})
             AND ${qualified(edgesName, edges.toKind)} = ${partKind}
             AND ${qualified(edgesName, edges.toId)} = ${partId}
           )
@@ -583,7 +596,7 @@ export function buildTakeOverEdgeClaim(
         WHERE ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
           AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
           AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-          AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, params)}${activeTerm}
+          AND ${claimHolderTerms(edgesName, edges, params)}${activeTerm}
       )
     RETURNING ${quotedColumn(edgeClaims.edgeId)} as holder_edge_id
   `;

@@ -631,7 +631,8 @@ try {
     console.log(error.category); // "constraint"
     console.log(error.details);
     // { partKind: "Chapter", partId: "<chapter-id>", wholeKind: "Anthology",
-    //   wholeId: "<anthology-id>", edgeKind: "includedIn" }
+    //   wholeId: "<anthology-id>", edgeKind: "includedIn",
+    //   incumbentEdgeId: "<the chapterOf edge's id>" }
     console.log(error.suggestion);
     // "Detach the part from its current whole before attaching it to a new
     //  one, or reparent it through an update instead of a second create."
@@ -639,11 +640,12 @@ try {
 }
 ```
 
-`details.incumbentWholeKind` / `details.incumbentWholeId` are present only
-when the caller already knows the incumbent whole's identity — the claim
-statement itself reports only which edge holds the axis, not that edge's
-endpoints. Run `store.verifyConstraintFences()` (the `family: "composition"`
-entries) to find every part already holding more than one whole.
+`details.incumbentEdgeId` names the edge that already holds the axis — the
+one fact the claim statement's own result reports. It never names the
+incumbent whole's kind or id: reading that would be a second query this
+refusal path does not make. Run `store.verifyConstraintFences()` (the
+`family: "composition"` entries) to find every part already holding more
+than one whole.
 
 The composition claim rides `typegraph_edge_claims`, the same relation
 `CardinalityError`'s claims do. A deployment initialized before that

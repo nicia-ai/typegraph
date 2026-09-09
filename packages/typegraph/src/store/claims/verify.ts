@@ -61,10 +61,7 @@ import {
   uniquenessAxisOfKinds,
   uniquenessClaimTarget,
 } from "./axis";
-import {
-  compositionClaim,
-  compositionEdgeCardinalityDeclarations,
-} from "./composition-claims";
+import { compositionEdgeCardinalityDeclarations } from "./composition-claims";
 import {
   edgeCardinalityAxisReferences,
   edgeCardinalityClaimTarget,
@@ -317,51 +314,48 @@ function disjointnessViolations(
 /**
  * Live edges folded onto the cardinality axis each one would claim, reported
  * where an axis carries more than one holder.
+ *
+ * A row's `scope` — set by the backend loop that queried it, against either
+ * the ordinary per-edge-kind axis or the reserved, relation-wide composition
+ * axis — is what decides the family and the target, never a re-derivation
+ * from the row's own endpoints. Re-deriving it here (via `compositionClaim`)
+ * used to fold EVERY row of a composition-realizing edge kind onto the
+ * composition axis regardless of which query produced it — collapsing that
+ * kind's ordinary-axis violations into the composition group — and to throw
+ * on dirty data whose part-side endpoint kind was not a declared part kind.
+ * The row already knows which query found it; asking the registry again is a
+ * second, disagreeing spelling of the same decision.
  */
 function edgeCardinalityViolations(
   rows: readonly ContendedEdgeRow[],
   graphId: string,
-  registry: KindRegistry,
 ): readonly ConstraintFenceViolation[] {
   const byAxis = new Map<
     string,
     Readonly<{
       target: ClaimTarget;
       family: "edgeCardinality" | "composition";
-      edgeIds: string[];
+      edgeIds: Set<string>;
     }>
   >();
   for (const row of rows) {
-    // A composition-realizing edge kind's row folds onto the RESERVED
-    // relation-wide axis rather than its own `(cardinality, edgeKind)` one —
-    // `compositionClaim` is the one owner of that decision (the same
-    // function every composition write calls), so this audit and the fence
-    // cannot compute two different targets for the same row.
-    const compositionClaimParams = compositionClaim(registry, {
-      graphId,
-      id: row.edgeId,
-      kind: row.edgeKind,
-      fromKind: row.fromKind,
-      fromId: row.fromId,
-      toKind: row.toKind,
-      toId: row.toId,
-    });
-    const target = edgeCardinalityClaimTarget(
-      compositionClaimParams ?? { ...row, graphId },
-    );
-    const family =
-      compositionClaimParams === undefined ? "edgeCardinality" : "composition";
+    const target = edgeCardinalityClaimTarget({ ...row, graphId });
+    const family = row.scope === undefined ? "edgeCardinality" : "composition";
     const identity = targetIdentity(target);
-    const entry = byAxis.get(identity) ?? { target, family, edgeIds: [] };
-    entry.edgeIds.push(row.edgeId);
+    const entry = byAxis.get(identity) ?? {
+      target,
+      family,
+      edgeIds: new Set<string>(),
+    };
+    entry.edgeIds.add(row.edgeId);
     byAxis.set(identity, entry);
   }
   return [...byAxis.values()]
-    .filter((entry) => entry.edgeIds.length > 1)
+    .filter((entry) => entry.edgeIds.size > 1)
     .map((entry) => ({
       family: entry.family,
       target: entry.target,
-      edgeIds: entry.edgeIds.toSorted((left, right) =>
+      edgeIds: [...entry.edgeIds].toSorted((left, right) =>
         compareStrings(left, right),
       ),
     }));
@@ -558,7 +552,6 @@ export async function auditConstraintFences(
     ...edgeCardinalityViolations(
       rows.contendedEdgeRows,
       plan.declarations.graphId,
-      plan.registry,
     ),
     ...edgeEndpointViolations(
       rows.misassignedEdgeEndpointRows ?? [],
