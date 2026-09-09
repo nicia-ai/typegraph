@@ -340,6 +340,23 @@ only, never on a coordinate-pinned read lens (`store.asOf(t).identity`,
 `store.snapshot().identity`): both answer **across** every recorded
 coordinate, which a lens pinned to one coordinate cannot honor.
 
+On `tx.identity` specifically, both are the one read on the transaction
+facade that is **not** read-your-writes: they read the transition log table
+directly, while a note for a write made earlier in the same transaction sits
+buffered in the capture session until the transaction commits. `tx.identity
+.assertionsOf(ref)` sees a pending `assertSame` immediately; `tx.identity
+.transitionsOf(ref)` does not see the transition it noted until after
+commit, when `store.identity.transitionsOf(ref)` does.
+
+```typescript
+await store.transaction(async (tx) => {
+  await tx.identity.assertSame(alice, bob);
+  await tx.identity.assertionsOf(alice); // includes the pending assertion
+  await tx.identity.transitionsOf(alice); // does NOT yet include its note
+});
+await store.identity.transitionsOf(alice); // now includes it, post-commit
+```
+
 ### Retention
 
 Retained transitions are pruned only on explicit operator action — there is
@@ -517,14 +534,27 @@ inserted verbatim, carrying the source's own revision numbers and
 timestamps, because a restore records history, it does not relive it.
 
 That is also why the restore sets the destination's retention watermark to
-the **highest restored revision + 1** (or to the archive's own carried
-watermark, when nothing was restored) rather than leaving it at zero: the
-imported rows explain revisions that never happened, in that numbering, on
-the destination graph. `replay` over a restored archive therefore answers
-`transitionsOf` fully but reports `truncatedBefore` for the restored range —
-an honest signal that the *explanations* survived the round trip but the
-*snapshots* they narrate did not, rather than a replay that silently claims
-a complete history it cannot actually reconstruct.
+the **destination's own current recorded revision + 1** — never to a number
+the archive carries — rather than leaving it at zero. A restored row's
+`recordedRevision` and the archive's own `retention.prunedBeforeRevision` are
+minted by the *source* graph's clock, a different counter than this graph's;
+writing either straight into this graph's watermark would misclassify this
+graph's own later, fully-retained transitions as pruned the moment its clock
+reached a number below the foreign one. Reading this graph's own clock at
+restore time keeps the watermark honest on its own axis instead. `replay`
+over a restored archive therefore answers `transitionsOf` fully but excludes
+the restored transitions from `steps` and reports `truncatedBefore` — an
+honest signal that the *explanations* survived the round trip but the
+*snapshots* they narrate did not, rather than a replay that pairs a restored
+transition with a fabricated before/after reconstructed from the
+destination's own, unrelated state.
+
+Archival transitions export is always **whole-graph**: unlike assertions,
+`exportGraph`'s `nodeKinds` filter does not scope the transitions section.
+Pairing a `nodeKinds`-filtered archival export with a target that never
+receives the excluded kinds' nodes can restore transitions naming class
+references the target does not have — shape validation accepts them, since
+it checks reference shape, not referential presence.
 
 Graph merge includes identity truth in staleness fingerprints and diffs.
 Duplicate current assertions use the earliest `validFrom`, then the

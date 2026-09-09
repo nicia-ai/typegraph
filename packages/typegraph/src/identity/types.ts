@@ -200,6 +200,15 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * `ref`'s identity class, ascending by recorded revision. Requires the
      * store to be opened with `history: true`.
      *
+     * On `tx.identity` specifically: reads the transition log itself, which
+     * — unlike every other read on this facade — is NOT read-your-writes
+     * inside an open transaction. A transition a write earlier in the SAME
+     * transaction notes is buffered in the capture session and only reaches
+     * this table when the transaction commits, so `tx.identity.transitionsOf`
+     * can undercount relative to `tx.identity.assertionsOf` on the identical
+     * pending write until the transaction flushes; call it again on
+     * `store.identity` after commit for the complete answer.
+     *
      * Deliberately absent from {@link IdentityReadFacade}: it answers across
      * every recorded coordinate, not the one a read-only lens is pinned to.
      */
@@ -212,6 +221,11 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * class membership immediately before and after it, reconstructed through
      * the same historical reader `asOf` / `asOfRecorded` reads use. Requires
      * the store to be opened with `history: true`.
+     *
+     * On `tx.identity`: carries the same pending-notes caveat as
+     * {@link IdentityFacade.transitionsOf} — a transition noted earlier in
+     * the SAME open transaction is not yet in the log this reads, so it is
+     * absent from `steps` until the transaction commits.
      *
      * Deliberately absent from {@link IdentityReadFacade}: it answers across
      * every recorded coordinate, not the one a read-only lens is pinned to.
@@ -248,6 +262,13 @@ export type IdentityWriteSummary = Readonly<{
    * write — deliberately excluded from `total`, which stays the count of
    * ledger truth rows the transaction produced. Always `0` when identity is
    * disabled or opened without `history: true`.
+   *
+   * Counted at commit-flush time, not at the collection surface `nodes`/
+   * `edges`/the assertion counters above are: a `tx.measure(fn)` scoped
+   * receipt (see `TransactionReceipt`) therefore always reports `0` here even
+   * when `fn` made identity writes that go on to note real transitions —
+   * those notes are attributed to the transaction's own flush, which happens
+   * once, after every scope has already returned.
    */
   transitions: number;
   total: number;

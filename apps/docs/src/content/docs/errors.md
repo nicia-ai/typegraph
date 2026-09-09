@@ -324,7 +324,11 @@ cannot answer a request. Its code names the reason:
 
 - `IDENTITY_REPLAY_REQUIRES_HISTORY` — the store was opened without
   `history: true`; there is no transition log to annotate reads with. Open
-  with `createStore(graph, backend, { history: true })`.
+  with `createStore(graph, backend, { history: true })`. Also thrown by
+  `importGraph`/`importGraphStream` when an archival document's `transitions`
+  section targets a history-off store: without `history: true` those rows
+  could never be read back through `transitionsOf` / `replay` either, so the
+  import refuses rather than writing them write-only.
 - `IDENTITY_REPLAY_LIMIT_EXCEEDED` — the lineage walk found more boundaries
   than the requested `limit` (default 200, maximum 2000). `details
   .resumeFromRecorded` names a cursor; pass it as `fromRecorded` to page.
@@ -1214,6 +1218,16 @@ assertion's id structurally in `details.issues[].assertionId`, and
 | `IDENTITY_IMPORT_ENDED_BY_WITHOUT_END` | An assertion names an `endedBy` cause but carries no `validTo`; only an ended assertion has a cause. |
 | `IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT` | An assertion's `endedBy` names a node that is not one of its own endpoints; a deletion cascade only ends assertions that touch the deleted node. |
 | `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
+
+Archival transitions carry two of their own `ValidationError` codes, both
+precondition failures on the `identity.transitions` section as a whole rather
+than a per-row outcome — unlike the table above, these THROW uncaught and are
+never recorded in `result.errors`:
+
+| Issue `code` | Meaning |
+| --- | --- |
+| `IDENTITY_STATE_IMPORT_TRANSITIONS` | A `state`-mode document names a `transitions` section; only `identityMode: "archival"` exports carry one. |
+| `IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE` | An archival document's `transitions` array is not ordered by non-decreasing `recordedRevision`. |
 
 #### Merge provenance sidecar codes
 

@@ -157,13 +157,19 @@ Restoring `identity.transitions` validates shape only (a known cause, a
 well-formed reference, a non-decreasing `recordedRevision` sequence) and
 inserts every row verbatim, never re-deriving membership or touching the
 target's closure. The restore then sets the destination's own retention
-watermark to the highest restored revision + 1, so a replay over the
-restored graph (`store.identity.replay`, see the
-[identity guide](/identity/#replay-and-identity-history)) reports
-`truncatedBefore` for that range: the explanations survived the round trip,
-but the snapshots they narrate did not, and replay says so rather than
-silently claiming a complete history. A `state`-mode document naming a
-`transitions` section is refused.
+watermark to the DESTINATION's own current recorded revision + 1 at restore
+time — never to a number the archive carries, since a restored row's
+`recordedRevision` and the archive's own retention watermark are minted by
+the source graph's clock, a different counter than the destination's own. A
+replay over the restored graph (`store.identity.replay`, see the
+[identity guide](/identity/#replay-and-identity-history)) therefore excludes
+the restored transitions from its `steps` and reports `truncatedBefore` for
+that range: the explanations survived the round trip, but the snapshots they
+narrate did not, and replay says so rather than pairing a restored
+transition with a fabricated before/after. A `state`-mode document naming a
+`transitions` section is refused. Archival transitions export is always
+whole-graph — an export's `nodeKinds` filter does not scope the transitions
+section the way it scopes assertions.
 
 ## Exporting Data
 

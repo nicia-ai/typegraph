@@ -46,3 +46,8 @@ prior behavior.
 Replay requires `history: true` and refuses with
 `IDENTITY_REPLAY_REQUIRES_HISTORY` otherwise; Cloudflare D1 and neon-http
 continue to refuse identity-enabled graphs outright.
+
+A transaction receipt's `writes.identity` gains `transitions`, counted beside
+(never inside) `total`: the number of identity transition-log notes the
+transaction's flush wrote, an annotation of the assertion/retraction writes
+`total` already counts rather than a fourth kind of write.
