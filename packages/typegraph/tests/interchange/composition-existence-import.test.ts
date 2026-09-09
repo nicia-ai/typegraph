@@ -33,8 +33,10 @@ import { requireDefined } from "../../src/utils/presence";
 
 const CeiSegment = defineNode("CeiSegment", { schema: z.object({}) });
 const CeiEpisode = defineNode("CeiEpisode", { schema: z.object({}) });
+const CeiTag = defineNode("CeiTag", { schema: z.object({}) });
 
 const ceiSegmentOf = defineEdge("ceiSegmentOf", { schema: z.object({}) });
+const ceiTaggedBy = defineEdge("ceiTaggedBy", { schema: z.object({}) });
 
 function buildGraph() {
   return defineGraph({
@@ -49,6 +51,42 @@ function buildGraph() {
         from: [CeiSegment],
         to: [CeiEpisode],
         cardinality: "one",
+      },
+    },
+    ontology: [
+      partOf(CeiSegment, CeiEpisode, {
+        via: ceiSegmentOf,
+        existence: "required",
+      }),
+    ],
+  });
+}
+
+/**
+ * Item E.2: the SAME required-existence pair, plus an ordinary (non-composition)
+ * edge kind on the part — `CeiTag`, connected via `ceiTaggedBy`. A part
+ * refused for lacking a whole may still carry live, non-composition edges
+ * this same import created; the purge must not choke on those.
+ */
+function buildGraphWithTag() {
+  return defineGraph({
+    id: "composition-existence-import-tagged",
+    nodes: {
+      CeiSegment: { type: CeiSegment },
+      CeiEpisode: { type: CeiEpisode },
+      CeiTag: { type: CeiTag },
+    },
+    edges: {
+      ceiSegmentOf: {
+        type: ceiSegmentOf,
+        from: [CeiSegment],
+        to: [CeiEpisode],
+        cardinality: "one",
+      },
+      ceiTaggedBy: {
+        type: ceiTaggedBy,
+        from: [CeiSegment],
+        to: [CeiTag],
       },
     },
     ontology: [
@@ -207,7 +245,70 @@ describe("validating import: required composition existence", () => {
   // then commits as a live, unattached required part, and the last
   // assertion above (`toBeUndefined()`) fails.
 
-  it("item E2-7: a purged required part leaves no identity membership behind on an identity-enabled store", async () => {
+  it("refuses an unattached required part that also carries a live, non-composition edge without aborting the whole import", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(buildGraphWithTag(), backend);
+
+      // `seg-1` has no `partOf`/`ceiSegmentOf` edge at all (refused for
+      // lacking a whole) but DOES carry a live `ceiTaggedBy` edge to
+      // `tag-1` — an ordinary edge this same import creates alongside it.
+      const result = await importGraph(
+        store,
+        payload({
+          nodes: [
+            { kind: "CeiSegment", id: "seg-1", properties: {} },
+            { kind: "CeiTag", id: "tag-1", properties: {} },
+          ],
+          edges: [
+            {
+              kind: "ceiTaggedBy",
+              id: "e-tag-1",
+              from: { kind: "CeiSegment", id: "seg-1" },
+              to: { kind: "CeiTag", id: "tag-1" },
+              properties: {},
+            },
+          ],
+        }),
+        { onConflict: "error", batchSize: 100 },
+      );
+
+      // One per-row error for the refused part — not a thrown transaction
+      // abort. Before the fix, `session.purgeNode`'s default `restrict`
+      // policy saw the still-live `ceiTaggedBy` edge and threw
+      // `RestrictedDeleteError` PAST this function's per-row error channel,
+      // aborting the whole import.
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]?.entityType).toBe("node");
+      expect(result.errors[0]?.id).toBe("seg-1");
+      expect(result.errors[0]?.error).toMatch(/requires a whole/u);
+
+      // No orphan CeiSegment row survives for the refused part...
+      expect(
+        await store.nodes.CeiSegment.getById("seg-1" as never),
+      ).toBeUndefined();
+      // ...its ordinary edge is gone too (purge is a real hard-delete, not
+      // a bare row removal that leaves the edge dangling)...
+      expect(await store.edges.ceiTaggedBy.find({})).toHaveLength(0);
+      // ...and — this IS the regression's signature — the unrelated
+      // CeiTag/tag-1 row this same import created still commits.
+      expect(await store.nodes.CeiTag.getById("tag-1" as never)).toBeDefined();
+    } finally {
+      await backend.close();
+    }
+  });
+  // MUTATION CHECK: in `assertImportedRequiredPartsAttached`
+  // (src/interchange/import.ts), drop the `{ enforceDeleteBehavior: false }`
+  // argument from the `session.purgeNode` call (revert to the default
+  // policy). `purgeNode` then throws `RestrictedDeleteError` for the live
+  // `ceiTaggedBy` edge; the surrounding `try`/`catch` still catches it (so
+  // the import itself does not abort), but the caught error is
+  // `RestrictedDeleteError`'s message, not "requires a whole" — the
+  // `result.errors[0].error` assertion above fails — and the segment row is
+  // never purged at all (the restrict check runs before any deletion), so
+  // the `CeiSegment.getById("seg-1")` assertion fails too.
+
+  it("a purged required part leaves no identity membership behind on an identity-enabled store", async () => {
     const { backend } = createLocalSqliteBackend();
     try {
       const [store] = await createStoreWithSchema(

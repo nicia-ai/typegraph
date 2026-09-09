@@ -331,7 +331,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
   /**
-   * Item E2-7: detaches a node import purges AFTER `foldImportedIdentityNodes`
+   * Item E.2: detaches a node import purges AFTER `foldImportedIdentityNodes`
    * already folded it into identity for this attempt's batch — see
    * `assertImportedRequiredPartsAttached` (`src/interchange/import.ts`).
    */

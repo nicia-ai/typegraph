@@ -471,8 +471,8 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   // payload is seen is either attached on the TARGET from before this
   // import, or genuinely orphaned. Runs AFTER `foldImportedIdentityNodes`
   // above (which needs the full node batch, before edges can clear any
-  // pending part) — see ruling E2-7: a part purged here undoes that fold
-  // itself, through `runtime.detachDeletedImportedIdentityNode`, rather than
+  // pending part) — a part purged here undoes that fold itself, through
+  // `runtime.detachDeletedImportedIdentityNode`, rather than
   // never having been folded in the first place.
   await assertImportedRequiredPartsAttached(
     frame,
@@ -2606,9 +2606,21 @@ function clearAttachedRequiredPart(
  * A refused part's node row is removed in the SAME transaction — `no orphan
  * node row survives` is the whole point of this assertion — through the
  * session's ordinary hard-delete step (the row was created THIS import, so
- * `session.purgeNode`'s delete-behavior enforcement, uniqueness release, and
- * embedding cleanup are exactly what an ordinary `hardDelete` would run).
- * Ruling E2-7: this runs AFTER `foldImportedIdentityNodes` already folded
+ * `session.purgeNode`'s uniqueness release and embedding cleanup are exactly
+ * what an ordinary `hardDelete` would run). Its delete-behavior enforcement
+ * is explicitly turned OFF (`enforceDeleteBehavior: false`): the part row
+ * AND every edge touching it (e.g. an ordinary, non-composition edge this
+ * same import also created) were all born this import, so there is no
+ * pre-existing reference for `restrict` to protect — `hardDeleteNode`
+ * (`src/backend/drizzle/operation-backend-core.ts`) unconditionally deletes
+ * every edge connected to the node before deleting the node row itself,
+ * `restrict` or not, so nothing is left dangling. Passing the default
+ * policy here would let a part's ordinary edge (not the composition edge
+ * that makes it a part) throw `RestrictedDeleteError` PAST this function —
+ * an uncaught throw inside the same transaction as every other accepted
+ * row, aborting the whole import instead of refusing this one row.
+ *
+ * This runs AFTER `foldImportedIdentityNodes` already folded
  * the batch's new node references into identity (the fold needs the
  * complete node batch, and `pendingRequiredParts` is not fully resolved
  * until every edge is processed too, so neither can move ahead of the
@@ -2616,9 +2628,12 @@ function clearAttachedRequiredPart(
  * `runtime.detachDeletedImportedIdentityNode`, the same
  * `identity.detachDeleted(..., "hard")` `executeNodeHardDelete`
  * (`src/store/operations/node-operations.ts`) issues for an ordinary hard
- * delete. One per-row `ImportError` is recorded for each refusal; the rest
- * of the import's accepted rows are unaffected (the catch-per-row contract
- * holds — this is not a thrown abort).
+ * delete. That call, too, is inside the `try`: an identity-layer failure
+ * on an already-purged row must not abort every other accepted row either.
+ * One per-row `ImportError` is recorded for each refusal, or — on the
+ * unexpected path — for whatever the purge/detach itself failed with; the
+ * rest of the import's accepted rows are unaffected (the catch-per-row
+ * contract holds).
  */
 async function assertImportedRequiredPartsAttached<G extends GraphDef>(
   frame: ImportWriteFrame,
@@ -2645,16 +2660,32 @@ async function assertImportedRequiredPartsAttached<G extends GraphDef>(
 
     const registration = frame.graph.nodes[part.kind];
     if (registration === undefined) continue;
-    await frame.session.purgeNode({
-      kind: part.kind,
-      id: part.id,
-      schema: registration.type.schema,
-      onDelete: registration.onDelete,
-    });
-    await runtime.detachDeletedImportedIdentityNode(frame.target, {
-      kind: part.kind,
-      id: part.id,
-    });
+    try {
+      await frame.session.purgeNode(
+        {
+          kind: part.kind,
+          id: part.id,
+          schema: registration.type.schema,
+          onDelete: registration.onDelete,
+        },
+        { enforceDeleteBehavior: false },
+      );
+      await runtime.detachDeletedImportedIdentityNode(frame.target, {
+        kind: part.kind,
+        id: part.id,
+      });
+    } catch (error: unknown) {
+      errors.push({
+        entityType: "node",
+        kind: part.kind,
+        id: part.id,
+        error:
+          error instanceof Error ?
+            error.message
+          : `Failed to purge unattached required-existence part: ${String(error)}`,
+      });
+      continue;
+    }
     result.nodes.created--;
     importedNodeIds.delete(makeNodeKey(part.kind, part.id));
     errors.push({
