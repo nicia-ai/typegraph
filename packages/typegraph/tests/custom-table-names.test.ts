@@ -60,6 +60,9 @@ describe("custom table names", () => {
     recordedIdentityAssertions: "app_recorded_identity_assertions",
     identityClosure: "app_identity_closure",
     identitySeparation: "app_identity_separation",
+    // Not overridden below (this test predates the transition log): defaults.
+    identityTransitions: "typegraph_identity_transitions",
+    identityTransitionRetention: "typegraph_identity_transition_retention",
     fences: "app_fences",
   } as const;
 
@@ -202,6 +205,8 @@ describe("custom table names", () => {
       recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
       identityClosure: "typegraph_identity_closure",
       identitySeparation: "typegraph_identity_separation",
+      identityTransitions: "typegraph_identity_transitions",
+      identityTransitionRetention: "typegraph_identity_transition_retention",
       fences: "typegraph_fences",
     });
   });

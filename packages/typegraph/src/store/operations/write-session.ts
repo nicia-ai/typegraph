@@ -120,6 +120,8 @@ import {
   applyNodeSoftDelete,
   applyNodeUpdate,
   createNodeWriteContext,
+  deleteEdgesById,
+  type NodeDeleteMode,
   type NodeDeletePolicy,
   type NodeSetUpdateResult,
   type NodeSetUpdateWork,
@@ -415,8 +417,24 @@ export type NodeWriteSession = Readonly<{
     work: NodeDeleteWork,
     policy?: NodeDeletePolicy,
   ) => Promise<void>;
-  purgeNode: (work: NodeHardDeleteWork) => Promise<void>;
+  purgeNode: (
+    work: NodeHardDeleteWork,
+    policy?: NodeDeletePolicy,
+  ) => Promise<void>;
   reviveNode: (work: NodeResurrectWork) => Promise<NodeRow>;
+  /**
+   * Deletes a set of composition edges by id, in `mode` — the composition
+   * cascade's explicit cleanup of the edges it consumed
+   * (`node-operations.ts`'s `runCompositionCascade`), which every member's
+   * own delete-behavior enforcement was told to skip via
+   * `NodeDeletePolicy.consumedEdgeIds`. Row work has no direct edge-write
+   * member to call (only the session may write), so this is that write's
+   * one seam.
+   */
+  deleteCompositionEdges: (
+    edgeIds: readonly string[],
+    mode: NodeDeleteMode,
+  ) => Promise<void>;
 
   // ---- B1b: delegates to node-write-pipeline.ts's applyNodeSetUpdate
   reviseNodeSet: (
@@ -714,9 +732,13 @@ export function createWriteSession(
     retireNode: (work, policy) =>
       applyNodeSoftDelete(writeContext, work, target, policy),
 
-    purgeNode: (work) => applyNodeHardDelete(writeContext, work, target),
+    purgeNode: (work, policy) =>
+      applyNodeHardDelete(writeContext, work, target, policy),
 
     reviveNode: (work) => applyNodeResurrect(writeContext, work, target),
+
+    deleteCompositionEdges: (edgeIds, mode) =>
+      deleteEdgesById(writeContext, target, mode, edgeIds),
 
     reviseNodeSet: (work, fences) => {
       // The fences are applied for their REFUSAL, not for their contribution:

@@ -6,7 +6,6 @@ import {
   generateId,
   type NodeType,
   type OntologyRelation,
-  sameAs,
   subClassOf,
 } from "@nicia-ai/typegraph";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -19,9 +18,29 @@ import {
   mostSpecificCommonKind,
   reconcileTypes,
 } from "../../src/graph-merge/type-reconcile";
+import { metaEdgesByName } from "../../src/ontology/core-meta-edges";
 import type { KindRegistry } from "../../src/registry/kind-registry";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend } from "./test-utils";
+
+/**
+ * `sameAs` has no public factory any more (roadmap F removed it, alongside
+ * `MetaEdgeOptions`/`InferenceType`), and its meta-edge object is absent
+ * from the public `core` export too. A document persisted before the
+ * removal that still names a `sameAs` relation must keep loading and
+ * folding exactly like `equivalentTo` (`collectOntologyRelations`,
+ * `src/registry/kind-registry.ts`, still switches on the meta-edge NAME, a
+ * plain string in that path); building the relation directly from the
+ * internal `metaEdgesByName.sameAs` object — the same object
+ * `compileOntologyRelation` resolves that name to — exercises the identical
+ * registry fold a persisted `sameAs` document would produce.
+ */
+function sameAsRelation(
+  kindA: NodeType,
+  kindBOrIri: NodeType | string,
+): OntologyRelation {
+  return { metaEdge: metaEdgesByName.sameAs, from: kindA, to: kindBOrIri };
+}
 
 /**
  * Brands a plain string as a canonical identity key for the pure reconciliation
@@ -444,17 +463,17 @@ describe("mostSpecificCommonKind and reconcileTypes port cases (formerly graph-m
 
   describe("sameAs folding", () => {
     /**
-     * `sameAs` is the deprecated alias of `equivalentTo`. The registry fold
+     * `sameAs` was the deprecated alias of `equivalentTo`, removed as a
+     * public factory (roadmap F) — only a persisted document can still name
+     * it, via {@link sameAsRelation}. The registry fold
      * (`collectOntologyRelations`) folds both meta-edges into the same
      * `equivalent` bucket, so a closure recognizing only `equivalentTo` would
-     * silently give these two graphs — identical up to that one keyword —
+     * silently give these two graphs — identical up to that one meta-edge —
      * different type-reconciliation outcomes.
      */
     function equivalenceGraphUsing(
-      // The shared, NodeType-only shape both `equivalentTo` and `sameAs`
-      // satisfy — `typeof equivalentTo` itself is too wide to accept `sameAs`
-      // here now that `equivalentTo`'s left parameter is widened to
-      // `NodeType | AnyEdgeType` (D1's `sameAs` stays unwidened by design).
+      // The shared, NodeType-only shape both `equivalentTo` and
+      // `sameAsRelation` satisfy.
       relation: (
         kindA: NodeType,
         kindBOrIri: NodeType | string,
@@ -480,8 +499,10 @@ describe("mostSpecificCommonKind and reconcileTypes port cases (formerly graph-m
 
     it("makes sameAs types mutually assignable", async () => {
       const registry = await registryFromGraph(
-        // eslint-disable-next-line @typescript-eslint/no-deprecated -- pins the migration-period alias behavior
-        equivalenceGraphUsing(sameAs, "type-reconcile-closures-port-same-as"),
+        equivalenceGraphUsing(
+          sameAsRelation,
+          "type-reconcile-closures-port-same-as",
+        ),
       );
       expect(registry.isAssignableTo("Physician", "Doctor")).toBe(true);
       expect(registry.isAssignableTo("Doctor", "Physician")).toBe(true);
@@ -520,8 +541,7 @@ describe("mostSpecificCommonKind and reconcileTypes port cases (formerly graph-m
 
       const viaSameAs = await registryFromGraph(
         equivalenceGraphUsing(
-          // eslint-disable-next-line @typescript-eslint/no-deprecated -- pins the migration-period alias behavior
-          sameAs,
+          sameAsRelation,
           "type-reconcile-closures-port-same-as-parity",
         ),
       );

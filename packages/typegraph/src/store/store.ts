@@ -203,12 +203,13 @@ import { type CompiledRowsSql } from "../query/sql-intent";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import { canonicalEqual } from "../schema/canonical";
 import {
+  adoptBaseSchemaStorage,
   applyDeprecatedKinds,
   commitNewSchemaVersion,
   commitNewSchemaVersionIfKindsEmpty,
   commitNewSchemaVersionWithPreflight,
   composeSchemaCommitPreflight,
-  ensureSchema as ensureSchemaImpl,
+  ensureSchemaInternal as ensureSchemaImpl,
   getSchemaChanges,
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
@@ -329,6 +330,7 @@ import {
   type RecordedFlushInstants,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
+  transactionOwnsSqliteWriteLock,
   withRecordedFlushObserver,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture";
@@ -1258,6 +1260,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.algorithmsAtCoordinate(coordinate),
       identityAtCoordinate: (coordinate) =>
         this.identityAtCoordinate(coordinate),
+      identityContext: () => {
+        this.#requireIdentityEnabled();
+        return this.#identityContext(this.#backend);
+      },
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
       deleteNodeWithPolicy: (target, work, policy) =>
@@ -1543,7 +1549,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       target,
       this.#batchPointRead,
       this.#sqlSchema(),
-      target.dialect === "sqlite",
+      transactionOwnsSqliteWriteLock(target),
     );
     await removeIdentityKindsForContext(
       this.#identityContext(scope.backend),
@@ -1614,7 +1620,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       : lockIdentityGraph(target, this.graphId);
   }
 
-  /** @internal Restores same-id folding after the ops-layer import bypass. */
+  /**
+   * @internal Restores same-id folding after the ops-layer import bypass.
+   *
+   * Always `"fold"`: import never resurrects a tombstone (a soft-deleted node
+   * is not updatable through it — see `src/interchange/import.ts`), so every
+   * reference this reaches is a genuine first materialization, never a
+   * restore.
+   */
   foldImportedIdentityNodes(
     target: IdentityTarget,
     references: readonly Readonly<{ kind: string; id: string }>[],
@@ -1631,6 +1644,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       },
       target,
       references,
+      "fold",
     );
   }
 
@@ -3125,6 +3139,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       dialect: getDialect(this.#backend.dialect),
       schema: this.#schema,
       recordedReadBinding: this.#recordedReadBinding,
+      registry: this.#registry,
       options,
     });
   }
@@ -5630,6 +5645,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             foldCreated: (
               target: IdentityTarget,
               references: readonly Readonly<{ kind: string; id: string }>[],
+              cause: "fold" | "restore",
             ) =>
               foldIdentityForCreatedNodes(
                 {
@@ -5640,6 +5656,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 },
                 target,
                 references,
+                cause,
               ),
             detachDeleted: (
               target: IdentityTarget,
@@ -6847,6 +6864,14 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   // exist.
   const identityProfile = merged.identity;
   if (identityProfile !== undefined) {
+    // Deployment-wide physical storage (e.g. the identity transition log,
+    // base-schema release 3) must be current BEFORE the identity-storage
+    // check below runs: that check treats a missing identity relation on an
+    // already-enabled graph as ledger data loss, and a relation this library
+    // version added since the database's last open is an upgrade, not data
+    // loss. `ensureSchema` also calls this, later — idempotent by the same
+    // durable version marker, so the repeat costs one read, not new DDL.
+    await adoptBaseSchemaStorage(backend);
     // Brand-validate BEFORE the DDL: a counterfeit schema-shaped object must
     // reject with INVALID_SQL_SCHEMA and leave no tables behind — and must
     // not surface as IDENTITY_STORAGE_MISSING on an already enabled graph.
@@ -6928,6 +6953,12 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     // eslint-disable-next-line unicorn/no-useless-fallback-in-spread
     ...(options ?? {}),
     preloaded: { activeRow, storedSchema },
+    // This IS the first point a capture session could exist for this graph —
+    // `StoreImplementation`'s constructor, which normally wraps the backend
+    // with `createRecordedBackend`, has not run yet. Threaded so the identity
+    // preflight can bind its OWN transaction target to a capture session
+    // instead of silently dropping every ledger touch and transition note.
+    historyEnabled: options?.history === true,
   };
 
   // An identity semantic change reaches the store only after the preflight

@@ -128,9 +128,7 @@ function generateSqliteEdgeMatchIdentityColumnDDL(
   return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${quoteDdlIdentifier(column)} TEXT${pairCheck};`;
 }
 
-function generateSqliteEdgeMatchIdentityIndexDDL(
-  tableName: string,
-): string {
+function generateSqliteEdgeMatchIdentityIndexDDL(tableName: string): string {
   return `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteDdlIdentifier(edgeMatchIdentityUniqueIndexName(tableName))} ON ${quoteDdlIdentifier(tableName)} (${quoteDdlIdentifier("graph_id")}, ${quoteDdlIdentifier("kind")}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN)}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN)});`;
 }
 
@@ -360,7 +358,7 @@ function inlineSqlOrThrow(value: unknown, context: string): string {
 /**
  * Generates CREATE INDEX SQL statements from a Drizzle SQLite table definition.
  */
-function generateSqliteCreateIndexSQL(
+export function generateSqliteCreateIndexSQL(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   table: SQLiteTableWithColumns<any>,
 ): string[] {
@@ -589,7 +587,7 @@ export function generatePgCreateTableSQL(
 /**
  * Generates CREATE INDEX SQL statements from a Drizzle PostgreSQL table definition.
  */
-function generatePgCreateIndexSQL(
+export function generatePgCreateIndexSQL(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   table: PgTableWithColumns<any>,
 ): string[] {

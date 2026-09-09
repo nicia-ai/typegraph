@@ -6,10 +6,10 @@ import {
 } from "./plan-canonical";
 import {
   MERGE_PLAN_FORMAT_VERSION,
-  type MergePlanArtifactV1,
-  type MergePlanArtifactV1Input,
-  mergePlanArtifactV1InputSchema,
-  mergePlanArtifactV1Schema,
+  type MergePlanArtifactV2,
+  type MergePlanArtifactV2Input,
+  mergePlanArtifactV2InputSchema,
+  mergePlanArtifactV2Schema,
 } from "./plan-schema";
 
 type MergePlanParseFailure =
@@ -17,7 +17,7 @@ type MergePlanParseFailure =
   | Readonly<{ kind: "malformed"; issues: z.core.$ZodIssue[] }>;
 
 export type MergePlanParseResult =
-  | Readonly<{ success: true; artifact: MergePlanArtifactV1 }>
+  | Readonly<{ success: true; artifact: MergePlanArtifactV2 }>
   | Readonly<{ success: false; error: MergePlanParseFailure }>;
 
 export type MergePlanDigestResult =
@@ -25,7 +25,7 @@ export type MergePlanDigestResult =
   | Readonly<{ valid: false; expected: string; received: string }>;
 
 export type MergePlanValidationResult =
-  | Readonly<{ success: true; artifact: MergePlanArtifactV1 }>
+  | Readonly<{ success: true; artifact: MergePlanArtifactV2 }>
   | Readonly<{
       success: false;
       error:
@@ -37,7 +37,7 @@ export type MergePlanValidationResult =
           }>;
     }>;
 
-/** Parses an untrusted value without conflating an unknown version with bad V1 data. */
+/** Parses an untrusted value without conflating an unknown version with bad V2 data. */
 export function parseMergePlanArtifact(input: unknown): MergePlanParseResult {
   const version = readFormatVersion(input);
   if (version !== MERGE_PLAN_FORMAT_VERSION) {
@@ -46,7 +46,7 @@ export function parseMergePlanArtifact(input: unknown): MergePlanParseResult {
       error: { kind: "unsupported-version", received: version },
     };
   }
-  const parsed = mergePlanArtifactV1Schema.safeParse(input);
+  const parsed = mergePlanArtifactV2Schema.safeParse(input);
   if (!parsed.success) {
     return {
       success: false,
@@ -55,13 +55,13 @@ export function parseMergePlanArtifact(input: unknown): MergePlanParseResult {
   }
   return {
     success: true,
-    artifact: parsed.data as unknown as MergePlanArtifactV1,
+    artifact: parsed.data as unknown as MergePlanArtifactV2,
   };
 }
 
 /** Verifies the digest on a structurally valid artifact. */
 export async function verifyMergePlanDigest(
-  artifact: MergePlanArtifactV1,
+  artifact: MergePlanArtifactV2,
 ): Promise<MergePlanDigestResult> {
   const expected = await computeMergePlanDigest(artifact);
   const received = artifact.digest.value;
@@ -90,13 +90,13 @@ export async function validateMergePlanArtifact(
   return parsed;
 }
 
-/** Constructs and hashes a V1 wire artifact. */
+/** Constructs and hashes a V2 wire artifact. */
 export async function constructMergePlanArtifact(
-  input: MergePlanArtifactV1Input,
-): Promise<MergePlanArtifactV1> {
-  const validatedInput = mergePlanArtifactV1InputSchema.parse(input);
+  input: MergePlanArtifactV2Input,
+): Promise<MergePlanArtifactV2> {
+  const validatedInput = mergePlanArtifactV2InputSchema.parse(input);
   return finalizeMergePlanArtifact(
-    validatedInput as unknown as MergePlanArtifactV1Input,
+    validatedInput as unknown as MergePlanArtifactV2Input,
   );
 }
 
@@ -108,6 +108,6 @@ function readFormatVersion(input: unknown): unknown {
 }
 
 export type {
-  MergePlanArtifactV1,
-  MergePlanArtifactV1Input,
+  MergePlanArtifactV2,
+  MergePlanArtifactV2Input,
 } from "./plan-schema";

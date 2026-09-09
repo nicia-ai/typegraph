@@ -664,7 +664,6 @@ type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends Nod
     targetCardinality?: TargetCardinality;
     endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
-    acyclic?: boolean;
 }>;
 
 // @public
@@ -707,12 +706,15 @@ type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = 
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
-export function ensureSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: SchemaManagerOptions & {
+export function ensureSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: SchemaManagerOptions & EnsureSchemaPreloadedOptions): Promise<SchemaValidationResult>;
+
+// @public
+type EnsureSchemaPreloadedOptions = Readonly<{
     preloaded?: Readonly<{
         activeRow: SchemaVersionRow | undefined;
         storedSchema: SerializedSchema | undefined;
     }>;
-}): Promise<SchemaValidationResult>;
+}>;
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
@@ -747,7 +749,6 @@ type ExtensionEdgeDef = Readonly<{
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
-    acyclic?: boolean;
 }>;
 
 // @public
@@ -1405,6 +1406,8 @@ type IdentityTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
 }>;
 
 // @public
@@ -1523,9 +1526,6 @@ type IndexWhereOperand = Readonly<{
     field: string;
     valueType: ValueType | undefined;
 }>;
-
-// @public
-type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
 // @public (undocumented)
 export function initializeSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: Readonly<{
@@ -1710,6 +1710,8 @@ class KindRegistry {
     isAssignableToAny(concreteKind: string, targetKinds: readonly string[]): boolean;
     isBroaderThan(broaderConcept: string, narrowerConcept: string): boolean;
     isCompositionEdge(edgeKind: string): boolean;
+    isCompositionPart(kind: string): boolean;
+    isCompositionWhole(kind: string): boolean;
     isNarrowerThan(narrowerConcept: string, broaderConcept: string): boolean;
     isPartOf(part: string, whole: string): boolean;
     isSubClassOf(child: string, parent: string): boolean;
@@ -1796,11 +1798,6 @@ type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
 type MetaEdgeProperties = Readonly<{
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -1965,7 +1962,7 @@ type NullCheckOp = "isNull" | "isNotNull";
 // @public
 export type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "metaEdge" | "relation" | "edgeRegistration";
+    entity: "relation";
     name: string;
     severity: ChangeSeverity;
     details: string;
@@ -1982,9 +1979,6 @@ export type OntologyDataProbe = Readonly<{
 }> | Readonly<{
     kind: "edgeEndpointAssignability";
     allowances: readonly EdgeEndpointAllowance[];
-}> | Readonly<{
-    kind: "edgeAcyclicity";
-    edgeKinds: readonly string[];
 }>;
 
 // @public
@@ -2165,6 +2159,8 @@ type ResolvedSqlTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
     fulltext: string;
     uniques: string;
     edgeClaims: string;
@@ -2297,7 +2293,6 @@ export type SerializedEdgeDef = Readonly<{
         name: string;
         fields: readonly string[];
     }>;
-    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;
@@ -2305,11 +2300,6 @@ export type SerializedEdgeDef = Readonly<{
 // @public
 export type SerializedMetaEdge = Readonly<{
     name: string;
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -2440,6 +2430,10 @@ abstract class SqlSchema implements SqlSchemaFields {
     // (undocumented)
     abstract readonly identitySeparationTable: SqlFragment;
     // (undocumented)
+    abstract readonly identityTransitionRetentionTable: SqlFragment;
+    // (undocumented)
+    abstract readonly identityTransitionsTable: SqlFragment;
+    // (undocumented)
     abstract readonly nodesTable: SqlFragment;
     // (undocumented)
     abstract readonly recordedClockTable: SqlFragment;
@@ -2468,6 +2462,8 @@ type SqlSchemaFields = Readonly<{
     recordedIdentityAssertionsTable: SqlFragment;
     identityClosureTable: SqlFragment;
     identitySeparationTable: SqlFragment;
+    identityTransitionsTable: SqlFragment;
+    identityTransitionRetentionTable: SqlFragment;
     fulltextTable: SqlFragment;
 }>;
 
@@ -2483,6 +2479,8 @@ type SqlTableNames = Readonly<{
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
     identitySeparation?: string | undefined;
+    identityTransitions?: string | undefined;
+    identityTransitionRetention?: string | undefined;
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;

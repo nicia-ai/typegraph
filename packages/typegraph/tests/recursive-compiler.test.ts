@@ -351,11 +351,131 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
+      // Both directions read from a preceding, non-recursive CTE that
+      // normalizes each orientation to tg_source_*/tg_target_* columns —
+      // never two branches each self-joining `recursive_cte` (PostgreSQL
+      // refuses more than one such self-reference; see
+      // `compileRecursiveDirectedEdgesCte`'s doc comment).
+      expect(sql).toContain("_directed_edges AS (");
       expect(sql).toContain('"typegraph_edges" e');
-      expect(sql).toContain("e.from_id = r.target_id");
-      expect(sql).toContain("e.to_id = r.target_id");
+      expect(sql).toContain("e.from_id AS tg_source_id");
+      expect(sql).toContain("e.to_id AS tg_target_id");
+      expect(sql).toContain("e.to_id AS tg_source_id");
+      expect(sql).toContain("e.from_id AS tg_target_id");
+      // The self-loop duplicate guard still applies inside the CTE.
       expect(sql).toContain("e.from_id = e.to_id");
       expect(sql).toContain("e.from_kind = e.to_kind");
+      // The recursive term itself joins the normalized relation exactly once.
+      expect(sql).toContain("e.tg_source_id = r.target_id");
+      expect(sql).toContain("e.tg_source_kind = r.target_kind");
+      // `edgeKinds` and `inverseEdgeKinds` both name "RELATES_TO" here (an
+      // ordinary symmetric `direction: "both"` traversal on one edge kind):
+      // the merged kind filter must dedupe the union, not bind the same
+      // kind twice in one IN list (Ed-09).
+      expect(sql).not.toContain("'RELATES_TO', 'RELATES_TO'");
+      // No edge predicate and no identity frontier widening on this
+      // traversal, so the directed-edges CTE projects only the columns the
+      // recursive term structurally needs — not `e.*` (Ed-04's
+      // materialization regression).
+      expect(sql).not.toContain("SELECT e.*");
+      expect(sql).toContain(
+        "SELECT e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at,",
+      );
+    });
+
+    it("adds recorded_from/recorded_to to the narrowed directed-edges projection under a recorded-pinned read", () => {
+      // MUTATION CHECK: reverting Ed-r2-1 (dropping the
+      // `temporalFilterPass.recordedColumns` spread, restoring the bare
+      // `e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at` list)
+      // makes this assertion fail while the recursive term's
+      // `e.recorded_from`/`e.recorded_to` reference (below) still compiles
+      // — it would only fail at execution time against a real edges table,
+      // which this unit test does not hit — verified and reverted.
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+        recordedAsOf: "r1:0000000000000009:2024-07-01T00:00:00.000Z",
+      });
+
+      const sql = getSqlString(ast);
+
+      // No edge predicate and no identity frontier widening, so the
+      // narrowed (non-`e.*`) branch still applies...
+      expect(sql).not.toContain("SELECT e.*");
+      // ...but it must carry the two columns the recorded-pinned temporal
+      // filter references on this alias, or the emitted
+      // `e.recorded_from <= ... AND ... < e.recorded_to` predicate fails
+      // with "no such column" against the CTE (SQLite) / an undefined-column
+      // error (PostgreSQL) once a real edges table backs it.
+      expect(sql).toContain(
+        "SELECT e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at, e.recorded_from, e.recorded_to,",
+      );
+      expect(sql).toContain("e.recorded_from");
+      expect(sql).toContain("e.recorded_to");
+    });
+
+    it("pushes graph_id into both arms of the directed-edges CTE", () => {
+      // MUTATION CHECK: reverting Ed-r2-4 (dropping the `e.graph_id =
+      // ${graphId} AND` prefix from both arms' WHERE clauses) makes this
+      // assertion fail — the two arms would filter on `e.kind` alone —
+      // verified and reverted. Functional behavior is unchanged either way
+      // (the recursive term already requires `graph_id = ${graphId}`), so
+      // this guards a normalization-cost regression, not a correctness one.
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+      const directedEdgesCte = requireDefined(
+        sql.split("_directed_edges AS (")[1],
+      );
+
+      expect(
+        directedEdgesCte.match(/WHERE e\.graph_id = 'test-graph' AND/g),
+      ).toHaveLength(2);
+    });
+
+    it("keeps the full e.* projection when an edge predicate targets a mixed-orientation traversal", () => {
+      const ast = createAst({
+        predicates: [
+          {
+            targetAlias: "e",
+            targetType: "edge",
+            expression: {
+              __type: "comparison",
+              op: "gte",
+              left: createFieldRef("e", ["props", "weight"], "number"),
+              right: { __type: "literal", value: 10, valueType: "number" },
+            },
+          },
+        ],
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      // The predicate reads `e.props`, which the narrowed column list
+      // (Ed-04) does not carry — the safe fallback keeps `e.*` whenever an
+      // edge predicate is present, so the property is still readable.
+      expect(sql).toContain("SELECT e.*,");
+      expect(sql).toContain("weight");
     });
 
     it("forces worktable-first join order on sqlite recursive steps", () => {

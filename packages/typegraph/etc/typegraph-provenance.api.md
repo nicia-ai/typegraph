@@ -632,6 +632,21 @@ type CompileQueryOptions = Readonly<{
 type ComposableQuery = QueryAst | SetOperation;
 
 // @public
+type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
+    from?: keyof Aliases & string;
+    maxHops?: number;
+    depth?: string;
+    path?: string;
+}>;
+
+// @public
+type CompositionNavigationResult<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState, NA extends string, O> = QueryBuilder<G, Aliases & Record<NA, NodeAlias<DynamicNodeType>>, EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>, RecursiveAliases & BuildRecursiveAliases<O extends {
+    depth: infer D extends string;
+} ? D : false, O extends {
+    path: infer P extends string;
+} ? P : false, NA>, CoordinateState>;
+
+// @public
 type CompositionPair = Readonly<{
     partKind: string;
     wholeKind: string;
@@ -670,7 +685,7 @@ type ConstraintFenceViolation = Readonly<{
     edgeKind: string;
     allowedPairs: readonly (readonly [string, string])[];
     edges: readonly MisassignedEdgeEndpointRow[];
-}> | EdgeAcyclicityViolation;
+}>;
 
 // @public
 type ConstraintFenceViolationRows = Readonly<{
@@ -1138,13 +1153,6 @@ type EdgeAccessor<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? D
 }> & EdgePropsAccessor<E>;
 
 // @public
-type EdgeAcyclicityViolation = Readonly<{
-    family: "edgeAcyclicity";
-    relation: string;
-    edgeIds: readonly string[];
-}>;
-
-// @public
 type EdgeAlias<E extends AnyEdgeType = EdgeType, Optional extends boolean = false> = Readonly<{
     type: E;
     alias: string;
@@ -1458,7 +1466,6 @@ type EdgeIntrospection = Readonly<{
     cardinality: Cardinality;
     targetCardinality: TargetCardinality;
     endpointExistence: EndpointExistence;
-    acyclic: boolean;
     properties: JsonSchema;
     annotations: KindAnnotations | undefined;
     deprecated: boolean;
@@ -1502,7 +1509,6 @@ type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends Nod
     targetCardinality?: TargetCardinality;
     endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
-    acyclic?: boolean;
 }>;
 
 // @public
@@ -1672,7 +1678,6 @@ type ExtensionEdgeDef = Readonly<{
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
-    acyclic?: boolean;
 }>;
 
 // @public
@@ -2647,12 +2652,29 @@ type IdentityReadFacade<G extends GraphDef> = Readonly<{
 // @public
 type IdentityRelation = "same" | "different";
 
+// @public (undocumented)
+type IdentityServiceContext<G extends GraphDef> = Readonly<{
+    graph: G;
+    graphId: string;
+    schemaVersion: number | undefined;
+    registry: KindRegistry;
+    backend: GraphBackend | TransactionBackend;
+    schema: SqlSchema;
+    historyEnabled: boolean;
+    revisionTrackingEnabled: boolean;
+    sameIdAcrossKinds: "fold" | "ignore";
+    coordinate?: ReadCoordinate;
+    loadNodes: (references: readonly PlainNodeRef[], coordinate?: ReadCoordinate) => Promise<readonly (IdentityNode<G> | undefined)[]>;
+}>;
+
 // @public
 type IdentityTableNames = Readonly<{
     identityAssertions: string;
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
 }>;
 
 // @public
@@ -2795,9 +2817,6 @@ type IndexWhereOperand = Readonly<{
     field: string;
     valueType: ValueType | undefined;
 }>;
-
-// @public
-type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
 // @public
 type InitialQueryBuilder<G extends GraphDef, CoordinateState extends QueryCoordinateState = "open"> = QueryBuilder<G, EmptyAliasMap, EmptyEdgeAliasMap, EmptyRecursiveAliasMap, CoordinateState>;
@@ -3057,6 +3076,8 @@ class KindRegistry {
     isAssignableToAny(concreteKind: string, targetKinds: readonly string[]): boolean;
     isBroaderThan(broaderConcept: string, narrowerConcept: string): boolean;
     isCompositionEdge(edgeKind: string): boolean;
+    isCompositionPart(kind: string): boolean;
+    isCompositionWhole(kind: string): boolean;
     isNarrowerThan(narrowerConcept: string, broaderConcept: string): boolean;
     isPartOf(part: string, whole: string): boolean;
     isSubClassOf(child: string, parent: string): boolean;
@@ -3243,11 +3264,6 @@ type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
 type MetaEdgeProperties = Readonly<{
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -3636,7 +3652,7 @@ type ObjectPredicate = Readonly<{
 // @public
 type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "metaEdge" | "relation" | "edgeRegistration";
+    entity: "relation";
     name: string;
     severity: ChangeSeverity;
     details: string;
@@ -3653,9 +3669,6 @@ type OntologyDataProbe = Readonly<{
 }> | Readonly<{
     kind: "edgeEndpointAssignability";
     allowances: readonly EdgeEndpointAllowance[];
-}> | Readonly<{
-    kind: "edgeAcyclicity";
-    edgeKinds: readonly string[];
 }>;
 
 // @public (undocumented)
@@ -3777,6 +3790,12 @@ class Placeholder {
     // (undocumented)
     readonly name: string;
 }
+
+// @public
+type PlainNodeRef = Readonly<{
+    kind: string;
+    id: string;
+}>;
 
 // @public (undocumented)
 type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
@@ -3997,6 +4016,7 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
         from?: keyof Aliases & string;
     } & IdentityTraversalOption<G>): TraversalBuilder<G, Aliases, EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>, true>>, string, EA, TraversalDirection, true, false, false, RecursiveAliases, CoordinateState, DynamicEdgeTypeFor<T>>;
     orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(alias: A, field: string, direction?: SortDirection): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
+    parts<NA extends string, const O extends CompositionNavigationOptions<Aliases> = Record<string, never>>(nodeAlias: UniqueAlias<NA, Aliases>, options?: O): CompositionNavigationResult<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState, NA, O>;
     pipe<OutAliases extends AliasMap, OutEdgeAliases extends EdgeAliasMap = EdgeAliases, OutRecAliases extends RecursiveAliasMap = RecursiveAliases>(fragment: (builder: QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>) => QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases, CoordinateState>): QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases, CoordinateState>;
     select<R>(selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R>;
     // (undocumented)
@@ -4018,6 +4038,7 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     } & IdentityTraversalOption<G>): TraversalBuilder<G, Aliases, EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>>>, string, EA, TraversalDirection, false, false, false, RecursiveAliases, CoordinateState, DynamicEdgeTypeFor<T>>;
     whereEdge<EA extends keyof EdgeAliases & string>(alias: EA, predicateFunction: (edge: EdgeAccessor<EdgeAliases[EA]["type"]>) => Predicate): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     whereNode<A extends keyof Aliases & string>(alias: A, predicateFunction: (n: NodeAccessor<Aliases[A]["type"]>) => Predicate): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
+    wholes<NA extends string, const O extends CompositionNavigationOptions<Aliases> = Record<string, never>>(nodeAlias: UniqueAlias<NA, Aliases>, options?: O): CompositionNavigationResult<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState, NA, O>;
 }
 
 // @public
@@ -4392,6 +4413,8 @@ type ResolvedSqlTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
     fulltext: string;
     uniques: string;
     edgeClaims: string;
@@ -4648,7 +4671,6 @@ type SerializedEdgeDef = Readonly<{
         name: string;
         fields: readonly string[];
     }>;
-    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;
@@ -4656,11 +4678,6 @@ type SerializedEdgeDef = Readonly<{
 // @public
 type SerializedMetaEdge = Readonly<{
     name: string;
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -4825,6 +4842,10 @@ abstract class SqlSchema implements SqlSchemaFields {
     // (undocumented)
     abstract readonly identitySeparationTable: SqlFragment;
     // (undocumented)
+    abstract readonly identityTransitionRetentionTable: SqlFragment;
+    // (undocumented)
+    abstract readonly identityTransitionsTable: SqlFragment;
+    // (undocumented)
     abstract readonly nodesTable: SqlFragment;
     // (undocumented)
     abstract readonly recordedClockTable: SqlFragment;
@@ -4853,6 +4874,8 @@ type SqlSchemaFields = Readonly<{
     recordedIdentityAssertionsTable: SqlFragment;
     identityClosureTable: SqlFragment;
     identitySeparationTable: SqlFragment;
+    identityTransitionsTable: SqlFragment;
+    identityTransitionRetentionTable: SqlFragment;
     fulltextTable: SqlFragment;
 }>;
 
@@ -4868,6 +4891,8 @@ type SqlTableNames = Readonly<{
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
     identitySeparation?: string | undefined;
+    identityTransitions?: string | undefined;
+    identityTransitionRetention?: string | undefined;
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;
@@ -5035,6 +5060,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
     identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
+    identityContext: () => IdentityServiceContext<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
     deleteNodeWithPolicy: (target: GraphBackend | TransactionBackend, work: Readonly<{
@@ -5464,6 +5490,7 @@ type SubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends Nod
     excludeRoot?: boolean;
     direction?: "out" | "both";
     cyclePolicy?: RecursiveCyclePolicy;
+    composition?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
     recordedAsOf?: never;
@@ -5676,6 +5703,7 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
         includeNarrower: true;
         includeSubClasses?: false;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
+    toKindSet<A extends string>(kinds: readonly string[], alias: A): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
     whereEdge(alias: EA, predicateFunction: (edge: EdgeAccessor<ET>) => Predicate): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, DC, PC, RecAliases, CoordinateState, ET>;
 }
 

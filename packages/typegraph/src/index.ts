@@ -91,7 +91,6 @@ export {
   isGraphDef,
   isNodeType,
   isSearchableSchema,
-  metaEdge,
   type NodeKinds,
   type RecordedInstant,
   recordedInstantRevision,
@@ -314,7 +313,6 @@ export type {
   JsonScalar,
   JsonValue,
   KindAnnotations,
-  MetaEdgeOptions,
   NodeId,
   NodeProps,
   NodeRegistration,
@@ -332,7 +330,6 @@ export type {
 export type {
   CompositionOptions,
   CompositionPartSide,
-  InferenceType,
   MetaEdge,
   MetaEdgeProperties,
   OntologyRelation,
@@ -344,8 +341,6 @@ export {
   computeTransitiveClosure,
   // Core ontology module
   core,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
-  differentFrom,
   disjointWith,
   equivalentTo,
   hasPart,
@@ -358,8 +353,6 @@ export {
   narrower,
   partOf,
   relatedTo,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
-  sameAs,
   subClassOf,
 } from "./ontology";
 
@@ -370,6 +363,7 @@ export {
 export type {
   BaseSchemaMigrationErrorDetails,
   CardinalityErrorDetails,
+  CompositionCycleErrorDetails,
   ContributionRebuildRefusal,
   ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
@@ -418,6 +412,7 @@ export {
   BaseSchemaMigrationError,
   CardinalityError,
   CompilerInvariantError,
+  CompositionCycleError,
   ConfigurationError,
   ContributionRebuildUnsupportedError,
   ContributionUnavailableError,
@@ -755,6 +750,7 @@ export type {
   CompiledRowsSql,
   CompiledSelectSql,
   CompiledStatementSql,
+  CompositionNavigationOptions,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,

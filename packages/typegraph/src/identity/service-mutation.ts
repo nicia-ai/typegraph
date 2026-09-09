@@ -14,6 +14,7 @@ import {
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { type IdentityTransitionNoteFunction } from "../store/recorded-capture";
 import { chunk } from "../utils/array";
 import { canonicalizeDatabaseTimestamp } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -72,6 +73,11 @@ import {
 } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
+  type ClosureTransitionRecord,
+  diffClosureTransitions,
+  type IdentityTransitionCause,
+} from "./transition-log";
+import {
   type IdentityAssertionResult,
   type IdentityNodeRefInput,
   type IdentityRelation,
@@ -81,6 +87,34 @@ import {
   type ResolvedIdentityValidityWindow,
   resolveIdentityValidityWindow,
 } from "./validity-window";
+
+/**
+ * Notes every closure transition a structural mutation (`mergeCurrentClasses`,
+ * `replaceAffectedClosure`) returned, under one shared cause/assertionIds/
+ * validAt. The single call every note site in this file routes through,
+ * rather than re-spelling the `noteTransition({...record, ...common})` object
+ * literal at each of the nine call sites.
+ */
+export function noteClassTransitions(
+  graphId: string,
+  noteTransition: IdentityTransitionNoteFunction,
+  transitions: readonly ClosureTransitionRecord[],
+  common: Readonly<{
+    cause: IdentityTransitionCause;
+    assertionIds: readonly string[];
+    validAt: string;
+  }>,
+): void {
+  for (const transition of transitions) {
+    noteTransition(graphId, {
+      cause: common.cause,
+      classRef: transition.classRef,
+      priorClassRef: transition.priorClassRef,
+      assertionIds: common.assertionIds,
+      validAt: common.validAt,
+    });
+  }
+}
 
 export async function validateCurrentRelation(
   ctx: Pick<
@@ -1041,15 +1075,27 @@ async function insertClosureComponents(
   }
 }
 
+/**
+ * Recomputes the current structural closure for every class touched by
+ * `references`, returning the resulting closure transitions — the diff
+ * between each affected member's OLD class (captured here, before the
+ * DELETE) and its NEW class (`components`, computed below). Shared by every
+ * caller that can split, shrink, or grow a class through this recompute:
+ * retraction, detach, fold, and the retraction half of a reconciliation
+ * apply. The caller — never this function — decides the `cause` a returned
+ * record notes through, because the same recompute serves causes with
+ * opposite membership effects.
+ */
 export async function replaceAffectedClosure(
   target: Backend,
   schema: SqlSchema,
   graphId: string,
   references: readonly PlainNodeRef[],
   sameIdAcrossKinds: "fold" | "ignore" = "fold",
-): Promise<void> {
-  if (references.length === 0) return;
+): Promise<readonly ClosureTransitionRecord[]> {
+  if (references.length === 0) return [];
   const affectedByKey = new Map<string, PlainNodeRef>();
+  const oldClassOf = new Map<string, readonly PlainNodeRef[]>();
   const classes = await loadCurrentStructuralClasses(
     target,
     schema,
@@ -1057,8 +1103,12 @@ export async function replaceAffectedClosure(
     references,
   );
   for (const ref of references) {
-    for (const member of requireDefined(classes.get(refKey(ref)))) {
+    const priorClass = requireDefined(classes.get(refKey(ref)));
+    for (const member of priorClass) {
       affectedByKey.set(refKey(member), member);
+      if (!oldClassOf.has(refKey(member))) {
+        oldClassOf.set(refKey(member), priorClass);
+      }
     }
   }
   const affected = [...affectedByKey.values()];
@@ -1107,22 +1157,35 @@ export async function replaceAffectedClosure(
   // singleton class is gone, so its rows must be rewritten too.
   const separationMembers = [...affected, ...[...components.values()].flat()];
   await replaceSeparationForMembers(target, schema, graphId, separationMembers);
+  return diffClosureTransitions(affected, oldClassOf, components);
 }
 
+/**
+ * Fuses `a`'s and `b`'s current structural classes into one, returning the
+ * resulting closure transition — the "assert" cause's whole `class`/`priorClass`
+ * derivation, so `assertPair` and every other caller note through this return
+ * value rather than re-deriving which side was absorbed.
+ *
+ * Exactly one record, or none when the pair was already fused: the fused
+ * canonical is always one of `aClass[0]` / `bClass[0]` (the minimum of the
+ * two, since each is already sorted), so the OTHER side is the one absorbed —
+ * `priorClassRef` names it (`undefined` when that side was a singleton with
+ * no real closure row to absorb).
+ */
 export async function mergeCurrentClasses(
   target: Backend,
   schema: SqlSchema,
   graphId: string,
   a: PlainNodeRef,
   b: PlainNodeRef,
-): Promise<void> {
+): Promise<readonly ClosureTransitionRecord[]> {
   const classes = await loadCurrentStructuralClasses(target, schema, graphId, [
     a,
     b,
   ]);
   const aClass = requireDefined(classes.get(refKey(a)));
   const bClass = requireDefined(classes.get(refKey(b)));
-  if (containsRef(aClass, b)) return;
+  if (containsRef(aClass, b)) return [];
 
   const fusedMembers = [...aClass, ...bClass];
   const [smaller, larger] =
@@ -1174,6 +1237,17 @@ export async function mergeCurrentClasses(
   // classes were separated, both sides of their row become `canonical` and the
   // relation's CHECK aborts the transaction.
   await replaceSeparationForMembers(target, schema, graphId, fusedMembers);
+  const survivorIsA = refKey(canonical) === refKey(requireDefined(aClass[0]));
+  const priorAClass =
+    aClass.length >= 2 ? requireDefined(aClass[0]) : undefined;
+  const priorBClass =
+    bClass.length >= 2 ? requireDefined(bClass[0]) : undefined;
+  return [
+    {
+      classRef: canonical,
+      priorClassRef: survivorIsA ? priorBClass : priorAClass,
+    },
+  ];
 }
 
 export async function assertPair<G extends GraphDef>(
@@ -1183,6 +1257,7 @@ export async function assertPair<G extends GraphDef>(
   firstInput: IdentityNodeRefInput<G>,
   secondInput: IdentityNodeRefInput<G>,
   touch: IdentityTouch,
+  noteTransition: IdentityTransitionNoteFunction,
   windowInput: IdentityValidityWindow | undefined,
   operationInstant: string,
   windowValidator?: IdentityWindowValidator,
@@ -1227,7 +1302,18 @@ export async function assertPair<G extends GraphDef>(
     );
     windowValidator?.record(row);
     if (relation === "same") {
-      await mergeCurrentClasses(target, ctx.schema, ctx.graphId, a, b);
+      const transitions = await mergeCurrentClasses(
+        target,
+        ctx.schema,
+        ctx.graphId,
+        a,
+        b,
+      );
+      noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+        cause: "assert",
+        assertionIds: [row.id],
+        validAt: operationInstant,
+      });
     } else {
       await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
         a,
@@ -1307,7 +1393,18 @@ export async function assertPair<G extends GraphDef>(
     return assertionResult(publicAssertion(row), "created");
   }
   if (relation === "same") {
-    await mergeCurrentClasses(target, ctx.schema, ctx.graphId, a, b);
+    const transitions = await mergeCurrentClasses(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      a,
+      b,
+    );
+    noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+      cause: "assert",
+      assertionIds: [row.id],
+      validAt: operationInstant,
+    });
   } else {
     await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
       a,

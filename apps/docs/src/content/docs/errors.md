@@ -408,6 +408,39 @@ no per-graph lock, since planning does no write) is not caught here — the
 unchanged apply-time write path still refuses it as
 `MergeConstraintConflictError` wrapping `EdgeAcyclicityError`.
 
+### `MergeCompositionOrphanError`
+
+Thrown from inside `applyMergePlan`'s transaction when applying the plan would
+delete a composition whole while one of its live parts is not itself among
+the plan's node deletions — the target gained that part after the branch
+point (or independently of it), and the branch's diff carries no deletion for
+it. Applying the plan as trusted would leave the part's composition edge
+pointing at a whole that no longer exists.
+
+```typescript
+import {
+  applyMergePlan,
+  isErr,
+  MergeCompositionOrphanError,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const applied = await applyMergePlan(store, plan);
+if (isErr(applied) && applied.error instanceof MergeCompositionOrphanError) {
+  console.log(applied.error.code); // "MERGE_COMPOSITION_ORPHAN"
+  console.log(applied.error.details.part); // { kind, id }
+  console.log(applied.error.details.whole); // { kind, id }
+  console.log(applied.error.details.viaEdgeKind);
+}
+```
+
+`planMerge` and `planMergeIncremental` surface the same finding, best-effort,
+in `MergePlanReview.compositionOrphans` — a dry-run report computed against
+the target's state at plan time. This error is the authoritative,
+apply-time re-verification of that same check, run under the per-graph write
+lock so it cannot miss an orphan the plan-time report's unlocked read raced
+past. Recompute the merge plan against the target's current state, or delete
+the orphaned part in the branch before merging.
+
 ### Merge plan and evidence errors
 
 The reviewable merge lifecycle also returns errors in its `Result` arm. It does
@@ -701,6 +734,34 @@ try {
   }
 }
 ```
+
+### `CompositionCycleError`
+
+Thrown when the composition parts closure of a whole revisits a node already
+in the walk — an instance-level cycle among reflexive composition edges (a
+kind declared `partOf`/`hasPart` against itself, such as `Section partOf
+Section`). Reflexive composition is permitted at the kind level; nothing yet
+refuses the corresponding write-time cycle, so two or more nodes can end up
+mutually `partOf` each other. Deleting any node in the cycle throws this
+error instead of looping or silently truncating the closure.
+
+```typescript
+try {
+  await store.nodes.Section.delete(sectionA.id);
+} catch (error) {
+  if (error instanceof CompositionCycleError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { wholeKind: "Section", wholeId: "<a>", revisitedKind: "Section", revisitedId: "<a>" }
+    console.log(error.suggestion);
+    // "Delete or reassign one of the composition edges that closes this cycle..."
+  }
+}
+```
+
+The affected nodes stay undeletable through the ordinary delete path until
+one of the composition edges that closes the cycle is removed or reassigned
+by hand.
 
 ## Configuration Errors
 
@@ -1235,8 +1296,8 @@ try {
 ```
 
 The `details.reason` value `"ontology-tightening-violated"` means an ontology
-change — adding `disjointWith`, `subClassOf`, `equivalentTo`, or `sameAs`, or
-removing `subClassOf`, `equivalentTo`, or `sameAs` — is false against rows
+change — adding `disjointWith`, `subClassOf`, or `equivalentTo`, or
+removing `subClassOf` or `equivalentTo` — is false against rows
 that already exist. `details.changes` carries only the ontology changes in
 this diff that required a data check (a `safe` or `breaking` change in the
 same commit is never included, even one alongside the change that was
@@ -1573,6 +1634,7 @@ try {
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
 | `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
+| `MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
@@ -1585,6 +1647,7 @@ try {
 | `KIND_NOT_FOUND` | `KindNotFoundError` | user | Unknown node/edge type |
 | `ENDPOINT_NOT_FOUND` | `EndpointNotFoundError` | user | Edge endpoint node doesn't exist |
 | `RESTRICTED_DELETE` | `RestrictedDeleteError` | constraint | Delete blocked by existing edges |
+| `COMPOSITION_CYCLE_DETECTED` | `CompositionCycleError` | constraint | An instance-level cycle exists among reflexive composition edges |
 | `CONFIGURATION_ERROR` | `ConfigurationError` | system | Invalid configuration |
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |

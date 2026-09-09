@@ -13,6 +13,7 @@ import {
   META_EDGE_RELATED_TO,
   META_EDGE_SAME_AS,
   META_EDGE_SUB_CLASS_OF,
+  type MetaEdgeName,
 } from "./constants";
 import {
   type EquivalentToCheck,
@@ -29,33 +30,12 @@ import {
 
 function createMetaEdge<K extends string>(
   name: K,
-  properties: {
-    transitive?: boolean;
-    symmetric?: boolean;
-    reflexive?: boolean;
-    inverse?: string;
-    inference:
-      | "subsumption"
-      | "hierarchy"
-      | "substitution"
-      | "constraint"
-      | "composition"
-      | "association"
-      | "none";
-    description: string;
-  },
+  description: string,
 ): MetaEdge<K> {
   return Object.freeze({
     [META_EDGE_BRAND]: true as const,
     name,
-    properties: {
-      transitive: properties.transitive ?? false,
-      symmetric: properties.symmetric ?? false,
-      reflexive: properties.reflexive ?? false,
-      inverse: properties.inverse,
-      inference: properties.inference,
-      description: properties.description,
-    },
+    properties: { description },
   });
 }
 
@@ -67,11 +47,10 @@ function createMetaEdge<K extends string>(
  * Type inheritance relationship.
  * A subClassOf B means instances of A are also instances of B.
  */
-const subClassOfMetaEdge = createMetaEdge(META_EDGE_SUB_CLASS_OF, {
-  transitive: true,
-  inference: "subsumption",
-  description: "Type inheritance (Podcast subClassOf Media)",
-});
+const subClassOfMetaEdge = createMetaEdge(
+  META_EDGE_SUB_CLASS_OF,
+  "Type inheritance (Podcast subClassOf Media)",
+);
 
 /**
  * Creates a subClassOf ontology relation.
@@ -111,12 +90,10 @@ export function subClassOf<C extends NodeType, P extends NodeType>(
  * Broader concept relationship.
  * A broader B means A is a more specific concept than B.
  */
-const broaderMetaEdge = createMetaEdge(META_EDGE_BROADER, {
-  transitive: true,
-  inverse: META_EDGE_NARROWER,
-  inference: "hierarchy",
-  description: "Broader concept (ML broader AI)",
-});
+const broaderMetaEdge = createMetaEdge(
+  META_EDGE_BROADER,
+  "Broader concept (ML broader AI)",
+);
 
 /**
  * Creates a broader ontology relation.
@@ -136,12 +113,10 @@ export function broader(
  * Narrower concept relationship.
  * A narrower B means A is a more general concept than B.
  */
-const narrowerMetaEdge = createMetaEdge(META_EDGE_NARROWER, {
-  transitive: true,
-  inverse: META_EDGE_BROADER,
-  inference: "hierarchy",
-  description: "Narrower concept (AI narrower ML)",
-});
+const narrowerMetaEdge = createMetaEdge(
+  META_EDGE_NARROWER,
+  "Narrower concept (AI narrower ML)",
+);
 
 /**
  * Creates a narrower ontology relation.
@@ -161,11 +136,10 @@ export function narrower(
  * Related concept relationship.
  * Non-hierarchical association between concepts.
  */
-const relatedToMetaEdge = createMetaEdge(META_EDGE_RELATED_TO, {
-  symmetric: true,
-  inference: "association",
-  description: "Non-hierarchical association",
-});
+const relatedToMetaEdge = createMetaEdge(
+  META_EDGE_RELATED_TO,
+  "Non-hierarchical association",
+);
 
 /**
  * Creates a relatedTo ontology relation.
@@ -189,12 +163,10 @@ export function relatedTo(
  * Type equivalence relationship.
  * A equivalentTo B means they represent the same class.
  */
-const equivalentToMetaEdge = createMetaEdge(META_EDGE_EQUIVALENT_TO, {
-  symmetric: true,
-  transitive: true,
-  inference: "substitution",
-  description: "Same class, different representation",
-});
+const equivalentToMetaEdge = createMetaEdge(
+  META_EDGE_EQUIVALENT_TO,
+  "Same class, different representation",
+);
 
 /**
  * Creates an equivalentTo ontology relation.
@@ -215,6 +187,13 @@ const equivalentToMetaEdge = createMetaEdge(META_EDGE_EQUIVALENT_TO, {
  * form (`equivalentTo(kind, iri)`) and the edge-to-node form carry no
  * check: an external IRI, and an edge kind paired with a node kind (always
  * refused at registry build), have no comparable schema pair.
+ *
+ * `sameAs` (removed, roadmap F) was a type-level alias of this relation: a
+ * document persisted before the removal that still names a `sameAs`
+ * relation continues to load and fold into the same equivalence bucket as
+ * `equivalentTo` — `collectOntologyRelations`
+ * (`src/registry/kind-registry.ts`) switches on the meta-edge name, not on
+ * whether the deleted factory produced it.
  */
 export function equivalentTo<A extends NodeType, B extends NodeType>(
   kindA: A,
@@ -239,78 +218,42 @@ export function equivalentTo(
   };
 }
 
-/** Type-level compatibility alias retained for migration only. */
-const sameAsMetaEdge = createMetaEdge(META_EDGE_SAME_AS, {
-  symmetric: true,
-  transitive: true,
-  inference: "substitution",
-  description: "Deprecated type-level equivalence alias",
-});
-
 /**
- * Creates the deprecated type-level `sameAs` alias of `equivalentTo`.
- *
- * Carries the same compile-time structural contract as `equivalentTo` (C.1):
- * `collectOntologyRelations` (`src/registry/kind-registry.ts`) folds `sameAs`
- * into the same equivalence bucket as `equivalentTo`, so leaving this alias
- * unchecked would make it an escape hatch around C.1/C.2.
- *
- * @deprecated Enable `identity: { sameIdAcrossKinds: "fold" }` and use the
- * TypeGraph Identity Profile's runtime `store.identity` ledger. The ledger
- * does not perform OWL property substitution or automatic query expansion.
+ * `sameAs`'s meta-edge object. The public `sameAs()`/`differentFrom()`
+ * factories were removed (roadmap F, R1), and neither this object nor
+ * {@link differentFromMetaEdge} is a member of the public `core` export: a
+ * new graph definition cannot construct a relation carrying either name any
+ * more, whether through a factory or by reaching into `core` directly.
+ * `buildRegistryFromSerializedSchema` needs neither object — a persisted
+ * document's relations carry the meta-edge as a plain string name, and
+ * `collectOntologyRelations` (`src/registry/kind-registry.ts`) switches on
+ * that string. The one reader that still resolves a meta-edge NAME to its
+ * object is `compileOntologyRelation` (`src/graph-extension/compiler.ts`,
+ * compiling a declarative graph extension into the same `OntologyRelation`
+ * shape a compile-time factory produces): it looks every
+ * `ALL_META_EDGE_NAMES` member up by `${name}MetaEdge` through
+ * {@link metaEdgesByName} below, the one internal record both deprecated
+ * meta-edges are exported for.
  */
-/** @deprecated see the primary `sameAs` declaration above. */
-export function sameAs<A extends NodeType, B extends NodeType>(
-  kindA: A,
-  kindB: B & EquivalentToCheck<A, B>,
-): TypedOntologyRelation<typeof META_EDGE_SAME_AS, A, B>;
-/** @deprecated see the primary `sameAs` declaration above. */
-export function sameAs(kindA: NodeType, kindBOrIri: string): OntologyRelation;
-export function sameAs(
-  kindA: NodeType,
-  kindBOrIri: NodeType | string,
-): OntologyRelation {
-  return {
-    metaEdge: sameAsMetaEdge,
-    from: kindA,
-    to: kindBOrIri,
-  };
-}
+const sameAsMetaEdge = createMetaEdge(
+  META_EDGE_SAME_AS,
+  "Deprecated type-level equivalence alias",
+);
 
-/** Deprecated decorative type-level non-identity relation. */
-const differentFromMetaEdge = createMetaEdge(META_EDGE_DIFFERENT_FROM, {
-  symmetric: true,
-  inference: "constraint",
-  description: "Deprecated decorative type-level non-identity relation",
-});
-
-/**
- * Creates the deprecated decorative type-level `differentFrom` relation.
- *
- * @deprecated Enable `identity: { sameIdAcrossKinds: "fold" }` and use the
- * TypeGraph Identity Profile's runtime `store.identity` ledger. The ledger
- * does not perform OWL property substitution or automatic query expansion.
- */
-export function differentFrom(
-  kindA: NodeType,
-  kindB: NodeType,
-): OntologyRelation {
-  return {
-    metaEdge: differentFromMetaEdge,
-    from: kindA,
-    to: kindB,
-  };
-}
+/** See {@link sameAsMetaEdge} — the `differentFrom` counterpart. */
+const differentFromMetaEdge = createMetaEdge(
+  META_EDGE_DIFFERENT_FROM,
+  "Deprecated decorative type-level non-identity relation",
+);
 
 /**
  * Disjoint types relationship.
  * A disjointWith B means nothing can be both an A and a B.
  */
-const disjointWithMetaEdge = createMetaEdge(META_EDGE_DISJOINT_WITH, {
-  symmetric: true,
-  inference: "constraint",
-  description: "Mutually exclusive types",
-});
+const disjointWithMetaEdge = createMetaEdge(
+  META_EDGE_DISJOINT_WITH,
+  "Mutually exclusive types",
+);
 
 /**
  * Creates a disjointWith ontology relation.
@@ -334,12 +277,7 @@ export function disjointWith(
  * Part-of relationship.
  * A partOf B means A is a component of B.
  */
-const partOfMetaEdge = createMetaEdge(META_EDGE_PART_OF, {
-  transitive: true,
-  inverse: META_EDGE_HAS_PART,
-  inference: "composition",
-  description: "X is part of Y",
-});
+const partOfMetaEdge = createMetaEdge(META_EDGE_PART_OF, "X is part of Y");
 
 /**
  * The options every composition relation (`partOf`/`hasPart`) requires.
@@ -375,12 +313,7 @@ export function partOf(
  * Has-part relationship.
  * A hasPart B means A contains B as a component.
  */
-const hasPartMetaEdge = createMetaEdge(META_EDGE_HAS_PART, {
-  transitive: true,
-  inverse: META_EDGE_PART_OF,
-  inference: "composition",
-  description: "Y has part X",
-});
+const hasPartMetaEdge = createMetaEdge(META_EDGE_HAS_PART, "Y has part X");
 
 /**
  * Creates a hasPart ontology relation.
@@ -410,21 +343,19 @@ export function hasPart(
  * Inverse edge relationship.
  * Edge A inverseOf edge B means traversing A is equivalent to traversing B backwards.
  */
-const inverseOfMetaEdge = createMetaEdge(META_EDGE_INVERSE_OF, {
-  symmetric: true,
-  inference: "none",
-  description: "Edge A is inverse of edge B",
-});
+const inverseOfMetaEdge = createMetaEdge(
+  META_EDGE_INVERSE_OF,
+  "Edge A is inverse of edge B",
+);
 
 /**
  * Implication relationship.
  * Edge A implies edge B means if A exists, B should also exist.
  */
-const impliesMetaEdge = createMetaEdge(META_EDGE_IMPLIES, {
-  transitive: true,
-  inference: "none",
-  description: "Edge A implies edge B exists",
-});
+const impliesMetaEdge = createMetaEdge(
+  META_EDGE_IMPLIES,
+  "Edge A implies edge B exists",
+);
 
 /**
  * Creates an inverseOf ontology relation.
@@ -461,8 +392,13 @@ export function implies(
 // ============================================================
 
 /**
- * The core ontology module containing all built-in meta-edges
- * and their relation factory functions.
+ * The core ontology module containing all built-in meta-edges and their
+ * relation factory functions. Deliberately excludes `sameAsMetaEdge` and
+ * `differentFromMetaEdge` (roadmap F, R1 fix): a package consumer with
+ * `core` in hand cannot construct a `sameAs`/`differentFrom` relation by
+ * reaching into it any more than by calling the deleted factories — see
+ * {@link metaEdgesByName} below for the internal-only record that still
+ * carries them.
  */
 export const core = {
   // Meta-edges
@@ -471,8 +407,6 @@ export const core = {
   narrowerMetaEdge,
   relatedToMetaEdge,
   equivalentToMetaEdge,
-  sameAsMetaEdge,
-  differentFromMetaEdge,
   disjointWithMetaEdge,
   partOfMetaEdge,
   hasPartMetaEdge,
@@ -485,13 +419,54 @@ export const core = {
   narrower,
   relatedTo,
   equivalentTo,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility member until the next major
-  sameAs,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility member until the next major
-  differentFrom,
   disjointWith,
   partOf,
   hasPart,
   inverseOf,
   implies,
 } as const;
+
+// ============================================================
+// Internal by-name lookup (NOT part of the public `core` export)
+// ============================================================
+
+/**
+ * Every built-in meta-edge by name, including `sameAs`/`differentFrom` —
+ * which have no public factory and are absent from the public `core`
+ * export above. This record is kept, per roadmap F ruling F-2, for exactly
+ * as long as PERSISTED-DOCUMENT interpretation needs it: a `schema_doc`
+ * committed before this removal can carry a `sameAs`/`differentFrom`
+ * relation by name (`SerializedOntology.relations`,
+ * `src/schema/types.ts`), and `collectOntologyRelations`
+ * (`src/registry/kind-registry.ts`) must still fold that name into the same
+ * `KindRegistry` state the pre-removal code produced when the document
+ * loads.
+ *
+ * `compileOntologyRelation` (`src/graph-extension/compiler.ts`) is the one
+ * reader that resolves an `ALL_META_EDGE_NAMES` member to its `MetaEdge`
+ * object this way, by name, rather than through a factory. That path
+ * compiles a DECLARATIVE graph extension, not only a persisted document —
+ * and `ALL_META_EDGE_NAMES` stays closed, not narrowed, so a new extension
+ * naming `sameAs`/`differentFrom` still compiles today. That is by design:
+ * the closed name set is what graph extensions validate against
+ * (`src/graph-extension/validation.ts`), and narrowing it to exclude these
+ * two names — rather than merely declining to ship a public factory or
+ * relation-declaration sugar for them — was never part of this removal.
+ *
+ * Not re-exported from `../ontology` or the package root — reach it only by
+ * importing `./core-meta-edges` directly from inside this package.
+ */
+export const metaEdgesByName: Readonly<Record<MetaEdgeName, MetaEdge>> = {
+  [META_EDGE_SUB_CLASS_OF]: subClassOfMetaEdge,
+  [META_EDGE_BROADER]: broaderMetaEdge,
+  [META_EDGE_NARROWER]: narrowerMetaEdge,
+  [META_EDGE_RELATED_TO]: relatedToMetaEdge,
+  [META_EDGE_EQUIVALENT_TO]: equivalentToMetaEdge,
+  [META_EDGE_SAME_AS]: sameAsMetaEdge,
+  [META_EDGE_DIFFERENT_FROM]: differentFromMetaEdge,
+  [META_EDGE_DISJOINT_WITH]: disjointWithMetaEdge,
+  [META_EDGE_PART_OF]: partOfMetaEdge,
+  [META_EDGE_HAS_PART]: hasPartMetaEdge,
+  [META_EDGE_INVERSE_OF]: inverseOfMetaEdge,
+  [META_EDGE_IMPLIES]: impliesMetaEdge,
+};

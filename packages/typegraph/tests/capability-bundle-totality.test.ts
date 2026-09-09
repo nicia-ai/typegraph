@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("31 reasoned entries sum to 94 accesses; 50 deferred entries sum to 217", () => {
+  it("31 reasoned entries sum to 94 accesses; 50 deferred entries sum to 218", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -139,8 +139,10 @@ describe("capability bundle totality (T9)", () => {
     // tightening preflight and constraint-fence audit families need — 91
     // -> 93. The merge planner's seed-hop acyclicity conflict detection reads
     // `tableNames` once more to build the `SqlSchema` its plan-time preview
-    // needs — 93 -> 94.
+    // needs — 93 -> 94. The composition delete cascade's parts-closure read
+    // then added a 5th `findEdgesByHeterogeneousEndpointSet` consumer,
+    // raising its ceiling by one — 217 -> 218.
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(94);
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(218);
   });
 });

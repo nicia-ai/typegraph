@@ -447,6 +447,25 @@ export class KindRegistry {
   }
 
   /**
+   * Whether `kind` (or a superclass it is assignable to) is a composition
+   * WHOLE — declares parts under {@link compositionEdgeKindsUnder}. The one
+   * owner of this classification: a node-delete's constraint fence, the
+   * fused-delete-command eligibility guard, and merge's orphan scan each
+   * used to spell `compositionEdgeKindsUnder(kind).length > 0` inline, which
+   * is exactly the kind of second copy that lets a future refinement (e.g. a
+   * subclass whole `compositionEdgeKindsUnder` currently misses) teach one
+   * call site about itself and not the others.
+   */
+  isCompositionWhole(kind: string): boolean {
+    return this.compositionEdgeKindsUnder(kind).length > 0;
+  }
+
+  /** The parts mirror of {@link isCompositionWhole}, over {@link compositionEdgeKindsOver}. */
+  isCompositionPart(kind: string): boolean {
+    return this.compositionEdgeKindsOver(kind).length > 0;
+  }
+
+  /**
    * Every literal kind name a declared composition pair names as either
    * endpoint, restricted to the ones `concreteKind` is assignable to. This is
    * the one place a concrete node kind — which may be an undeclared subclass

@@ -523,7 +523,6 @@ export type {
 } from "../indexes/types";
 export type { MetaEdgeName } from "../ontology/constants";
 export { ALL_META_EDGE_NAMES } from "../ontology/constants";
-export type { InferenceType } from "../ontology/types";
 export type { ValueType } from "../query/ast";
 export type { JsonPointer } from "../query/json-pointer";
 export type {

@@ -85,16 +85,17 @@ function installLocalSqliteBaseSchema(
   tables: SqliteTables,
   fulltextStrategy: FulltextStrategy | false | undefined,
 ): void {
-  // v2 (the fences relation) needs no adoption logic beyond what
-  // `generateSqliteMigrationSQL` already emits: a brand-new relation is
+  // v2 (the fences relation) and v3 (the identity transition log plus its
+  // retention watermark) need no adoption logic beyond what
+  // `generateSqliteMigrationSQL` already emits: each is a brand-new relation,
   // fully covered by its own `CREATE TABLE IF NOT EXISTS`, on both a fresh
   // database and one that already has every OTHER base table. Only v1's
   // edge-match-identity `ADD COLUMN` migration — handled by the catch block
   // below — needed runtime introspection this synchronous path writes by
   // hand instead of running `BaseSchemaLifecycle`'s async state machine.
-  if (CURRENT_BASE_SCHEMA_VERSION !== 2) {
+  if (CURRENT_BASE_SCHEMA_VERSION !== 3) {
     throw new CompilerInvariantError(
-      "The synchronous managed SQLite installation path only implements base-schema v1 and v2 adoption.",
+      "The synchronous managed SQLite installation path only implements base-schema v1 through v3 adoption.",
       { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
     );
   }

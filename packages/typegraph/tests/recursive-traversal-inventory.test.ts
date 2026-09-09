@@ -21,8 +21,8 @@
  * and `query/compiler/emitter/recursive.ts:13`, sit in files that also hold
  * a real site, so they do not change the file-set count.) A ratchet keyed
  * on the file set would have failed on arrival at 8. The fix is to key on
- * `(file, line)` after parsing comments out, so the six emission sites are
- * counted and the four comment occurrences are not.
+ * `(file, line)` after parsing comments out, so the (now seven) emission
+ * sites are counted and the four comment occurrences are not.
  *
  * ## Honest statement of its limits
  *
@@ -87,7 +87,7 @@
  *
  * Comment stripping is done by parsing with `ts.createSourceFile` and walking
  * the resulting AST (`ts.forEachChild`), not with a bare `ts.createScanner`
- * token loop or a regex: every one of the six sites lives inside a tagged
+ * token loop or a regex: every one of the seven sites lives inside a tagged
  * template with `${...}` interpolations, and a scanner that re-enters a
  * template body after a `}` re-lexes it as ordinary source — which mis-lexes
  * apostrophes and `--` inside the embedded SQL and can blank or swallow real
@@ -117,7 +117,7 @@ const RECURSION_PHRASE = "WITH RECURSIVE";
  * case. A same-case single-space `String.prototype.indexOf` would miss a
  * hand-written `with\n  recursive` (an actual line break) inside a tagged
  * template in BOTH ratchet directions (no `undeclared` row because the
- * phrase never matches, and no `stale` row because the six declared sites
+ * phrase never matches, and no `stale` row because the seven declared sites
  * are unaffected); the `\n`/`\r`/`\t` alternation closes the same gap for
  * the escape-sequence spelling of the same shape (`` `WITH\n  RECURSIVE` ``
  * written literally, not a real newline), which a whitespace-only pattern
@@ -141,7 +141,7 @@ type FoundSite = Readonly<{
   line: string;
 }>;
 
-/** A declared site: where it is, which of the six/one it is, and why. */
+/** A declared site: where it is, which of the seven/one it is, and why. */
 type InventoryEntry = Readonly<{
   /** Path relative to `packages/typegraph/src`. */
   file: string;
@@ -169,10 +169,21 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/recursive-cte.ts",
-    line: "return sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`;",
+    line: "return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;",
     site: "B",
     reason:
       "buildReachableCte compiles a fixed/variable-length traversal into a bounded reachable set.",
+  },
+  {
+    // Same file and (post-refactor) identical source line as site B: both
+    // functions share `prepareReachableCte`'s base case and close with the
+    // same `WITH RECURSIVE reachable AS (...)` template, so this entry is
+    // the second occurrence the multiset comparison (siteKey) expects.
+    file: "store/recursive-cte.ts",
+    line: "return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;",
+    site: "G",
+    reason:
+      "buildDirectedReachableCte compiles the composition-navigation directed-groups traversal (Ed-01) into the same bounded reachable set, sharing buildReachableCte's base case via prepareReachableCte.",
   },
   {
     file: "identity/service-read.ts",
@@ -546,9 +557,9 @@ describe("recursion inventory ratchet", () => {
   it("finds a case-, whitespace-, and escape-sequence-variant phrase a same-case single-space match would miss", () => {
     // A same-case, exact-single-space `String.indexOf` (the defect this
     // test guards against) matches none of these four lines, so a new
-    // seventh emission site written in any of these shapes would be
+    // eighth emission site written in any of these shapes would be
     // invisible in BOTH ratchet directions: no `undeclared` row (the
-    // phrase never matches) and no `stale` row (the six declared sites are
+    // phrase never matches) and no `stale` row (the seven declared sites are
     // unaffected). The fourth shape — `\n` typed literally as two source
     // characters (backslash, then `n`), never a real line break — is the
     // escape-sequence bypass the checkpoint measured as still invisible

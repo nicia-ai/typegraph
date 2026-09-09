@@ -869,6 +869,17 @@ async function closeFactCurrency<G extends GraphDef>(
     // its connected edges neither block the close (`restrict`) nor get
     // removed (`cascade` / `disconnect`). Every edge survives untouched,
     // making a later reopen an exact inverse of this close.
+    //
+    // UNDECIDED, flagged rather than silent: no `NodeDeletePolicy` is built
+    // here, so a whole retracted through this path never runs
+    // `runCompositionCascade` — its parts stay live and attached to a
+    // now-closed whole, the exact orphan shape `MERGE_COMPOSITION_ORPHAN`
+    // and the runtime cascade both exist to prevent, reachable here with no
+    // cascade and no refusal. Whether a belief-status close is deliberately
+    // exempt from composition too (this comment's "not a domain delete"
+    // reasoning would need to extend to cover it explicitly), or a retracted
+    // whole with live parts should cascade or refuse, is an open call for
+    // composition-contract-design.md — not decided by this file.
     await applyNodeSoftDelete(
       createNodeWriteContext(
         store.graphId,

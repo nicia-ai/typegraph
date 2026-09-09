@@ -435,8 +435,8 @@ async function consumeTrustedChunks<G extends GraphDef>(
  * Atomically imports a header-first stream into a fresh, dedicated database.
  *
  * This is an intentionally trusted path. It checks stream ordering and kind
- * names, but it does not validate properties, references, cardinality, or
- * conflicts. The caller must guarantee those invariants. Use
+ * names, but it does not validate properties, references, cardinality,
+ * composition, or conflicts. The caller must guarantee those invariants. Use
  * {@link importGraphStream} for untrusted data.
  *
  * Trusted of the DATA, not of the connection: this holds ONE write transaction

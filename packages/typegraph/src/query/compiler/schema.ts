@@ -46,6 +46,10 @@ export type SqlTableNames = Readonly<{
   identityClosure?: string | undefined;
   /** Derived separation relation over identity classes */
   identitySeparation?: string | undefined;
+  /** Identity transition log — append-only annotation on the recorded axis (default: "typegraph_identity_transitions") */
+  identityTransitions?: string | undefined;
+  /** Per-graph identity-transition retention watermark (default: "typegraph_identity_transition_retention") */
+  identityTransitionRetention?: string | undefined;
   /** Node fulltext table name (default: "typegraph_node_fulltext") */
   fulltext: string;
   /** Node uniques table name (default: "typegraph_node_uniques") */
@@ -78,6 +82,8 @@ export type ResolvedSqlTableNames = Readonly<{
   recordedIdentityAssertions: string;
   identityClosure: string;
   identitySeparation: string;
+  identityTransitions: string;
+  identityTransitionRetention: string;
   /** Node fulltext table name */
   fulltext: string;
   /** Node uniques table name */
@@ -111,6 +117,10 @@ type SqlSchemaFields = Readonly<{
   identityClosureTable: SqlFragment;
   /** Get a `SqlFragment` reference to the derived identity separation relation. */
   identitySeparationTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the identity transition log. */
+  identityTransitionsTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the identity-transition retention watermark. */
+  identityTransitionRetentionTable: SqlFragment;
   /** Get a `SqlFragment` reference to the fulltext table. */
   fulltextTable: SqlFragment;
 }>;
@@ -135,6 +145,8 @@ export abstract class SqlSchema implements SqlSchemaFields {
   abstract readonly recordedIdentityAssertionsTable: SqlFragment;
   abstract readonly identityClosureTable: SqlFragment;
   abstract readonly identitySeparationTable: SqlFragment;
+  abstract readonly identityTransitionsTable: SqlFragment;
+  abstract readonly identityTransitionRetentionTable: SqlFragment;
   abstract readonly fulltextTable: SqlFragment;
 }
 
@@ -151,6 +163,8 @@ class SqlSchemaDescriptor extends SqlSchema {
   readonly recordedIdentityAssertionsTable: SqlFragment;
   readonly identityClosureTable: SqlFragment;
   readonly identitySeparationTable: SqlFragment;
+  readonly identityTransitionsTable: SqlFragment;
+  readonly identityTransitionRetentionTable: SqlFragment;
   readonly fulltextTable: SqlFragment;
 
   constructor(fields: SqlSchemaFields) {
@@ -173,6 +187,9 @@ class SqlSchemaDescriptor extends SqlSchema {
       fields.recordedIdentityAssertionsTable;
     this.identityClosureTable = fields.identityClosureTable;
     this.identitySeparationTable = fields.identitySeparationTable;
+    this.identityTransitionsTable = fields.identityTransitionsTable;
+    this.identityTransitionRetentionTable =
+      fields.identityTransitionRetentionTable;
     this.fulltextTable = fields.fulltextTable;
     Object.freeze(this);
   }
@@ -192,6 +209,8 @@ const DEFAULT_TABLE_NAMES: ResolvedSqlTableNames = {
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
   identitySeparation: "typegraph_identity_separation",
+  identityTransitions: "typegraph_identity_transitions",
+  identityTransitionRetention: "typegraph_identity_transition_retention",
   fulltext: "typegraph_node_fulltext",
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
@@ -218,6 +237,11 @@ function resolveTableNames(
       names.identityClosure ?? DEFAULT_TABLE_NAMES.identityClosure,
     identitySeparation:
       names.identitySeparation ?? DEFAULT_TABLE_NAMES.identitySeparation,
+    identityTransitions:
+      names.identityTransitions ?? DEFAULT_TABLE_NAMES.identityTransitions,
+    identityTransitionRetention:
+      names.identityTransitionRetention ??
+      DEFAULT_TABLE_NAMES.identityTransitionRetention,
     fulltext: names.fulltext ?? DEFAULT_TABLE_NAMES.fulltext,
     uniques: names.uniques ?? DEFAULT_TABLE_NAMES.uniques,
     edgeClaims: names.edgeClaims ?? DEFAULT_TABLE_NAMES.edgeClaims,
@@ -333,6 +357,11 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   );
   validateTableName(tables.identityClosure, "identityClosure");
   validateTableName(tables.identitySeparation, "identitySeparation");
+  validateTableName(tables.identityTransitions, "identityTransitions");
+  validateTableName(
+    tables.identityTransitionRetention,
+    "identityTransitionRetention",
+  );
   validateTableName(tables.fulltext, "fulltext");
   validateTableName(tables.uniques, "uniques");
   validateTableName(tables.edgeClaims, "edgeClaims");
@@ -352,6 +381,10 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
     ),
     identityClosureTable: sql.identifier(tables.identityClosure),
     identitySeparationTable: sql.identifier(tables.identitySeparation),
+    identityTransitionsTable: sql.identifier(tables.identityTransitions),
+    identityTransitionRetentionTable: sql.identifier(
+      tables.identityTransitionRetention,
+    ),
     fulltextTable: sql.identifier(tables.fulltext),
   });
 }
@@ -527,6 +560,8 @@ export function recordedReadSqlSchema(binding: RecordedReadBinding): SqlSchema {
     recordedIdentityAssertionsTable: schema.recordedIdentityAssertionsTable,
     identityClosureTable: schema.identityClosureTable,
     identitySeparationTable: schema.identitySeparationTable,
+    identityTransitionsTable: schema.identityTransitionsTable,
+    identityTransitionRetentionTable: schema.identityTransitionRetentionTable,
     fulltextTable: schema.fulltextTable,
   });
 }

@@ -78,6 +78,25 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * `execution.execAll`/`execGet`/`execRun` or `EngineProvisioning`.
    */
   ensureEdgeMatchIdentityStorage: () => Promise<void>;
+  /**
+   * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
+   * statements for the identity transition log, the version-3 adoption
+   * step — rendered once by the caller from its own dialect's DDL
+   * generators, the same way `fencesTableDdl` is. A brand-new relation
+   * needs no ALTER-shaped migration, so this step's `bootstrap` is
+   * `"covered-by-generated-ddl"`; `adopt()` still ensures it for the
+   * OFFLINE adoption path, which never calls `generateDdl()`. Scoped to
+   * exactly this relation (not the identity-enablement `ensureIdentityTables`
+   * port) because the transition log, like `fences`, is a DEPLOYMENT-wide
+   * relation: a database that predates this release owes it regardless of
+   * whether any graph in it has Operational Identity enabled.
+   */
+  identityTransitionsTableDdl: readonly string[];
+  /**
+   * Idempotent `CREATE TABLE ...` for the transition log's per-graph
+   * retention watermark, the version-3 adoption step's other half.
+   */
+  identityTransitionRetentionTableDdl: string;
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -106,6 +125,8 @@ export function createBaseSchemaMembers(
     ensureGraphTemplatesTable,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl,
+    identityTransitionsTableDdl,
+    identityTransitionRetentionTableDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -133,6 +154,16 @@ export function createBaseSchemaMembers(
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },
+      {
+        version: 3,
+        async adopt(): Promise<void> {
+          for (const ddl of identityTransitionsTableDdl) {
+            await ensureTable(ddl);
+          }
+          await ensureTable(identityTransitionRetentionTableDdl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
     ],
   });
 
@@ -143,9 +174,7 @@ export function createBaseSchemaMembers(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
-      await baseSchemaLifecycle.adoptBeforeBootstrap(
-        startingBaseSchemaVersion,
-      );
+      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
       const statements = generateDdl();
       for (const statement of statements) {
         await ensureTable(statement);

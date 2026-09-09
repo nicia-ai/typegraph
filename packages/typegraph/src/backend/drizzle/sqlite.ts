@@ -172,6 +172,7 @@ import {
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
+  generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
   planSqliteEdgeMatchIdentityAdoption,
@@ -1267,6 +1268,10 @@ export function buildSqliteEngineProfile(
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
     identitySeparation: getTableName(tables.identitySeparation),
+    identityTransitions: getTableName(tables.identityTransitions),
+    identityTransitionRetention: getTableName(
+      tables.identityTransitionRetention,
+    ),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
@@ -1311,16 +1316,16 @@ export function buildSqliteEngineProfile(
   // neon-http) have no transactions and manage their own concurrency, so they
   // stay unqueued.
   const serializedQueue =
-    transactionMode === "none" ?
-      undefined
-    : createSerializedExecutionQueue({
+    transactionMode === "none" ? undefined : (
+      createSerializedExecutionQueue({
         // Best-effort: undetected reentrancy here degrades to the deadlock
         // this queue has always risked when AsyncLocalStorage is
         // unavailable, not a broken correctness promise — SQLite's own
         // engine-serialized fence never depended on this detection.
         reentrancy: "detect",
         subject: "sqlite",
-      });
+      })
+    );
 
   // Durable fulltext + vector materialization (#135): the dialect-specific
   // marker-table primitives. Orchestration (materialize / assert /
@@ -1600,6 +1605,13 @@ export function buildSqliteEngineProfile(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generateSqliteCreateTableSQL(tables.fences),
+    identityTransitionsTableDdl: [
+      generateSqliteCreateTableSQL(tables.identityTransitions),
+      ...generateSqliteCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generateSqliteCreateTableSQL(
+      tables.identityTransitionRetention,
+    ),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`

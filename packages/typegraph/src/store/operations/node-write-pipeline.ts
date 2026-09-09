@@ -108,7 +108,7 @@ export function createNodeWriteContext(
 }
 
 /** Whether a delete removes the node (`hard`) or tombstones it (`soft`). */
-type NodeDeleteMode = "soft" | "hard";
+export type NodeDeleteMode = "soft" | "hard";
 
 /**
  * Tunes how a delete treats the node's connected edges.
@@ -129,36 +129,33 @@ export type NodeDeletePolicy = Readonly<{
    * once — by whichever caller planned the consumption, not a second time by
    * this delete's own delete-behavior enforcement.
    *
-   * This is the generic seam a future composition cascade plans against
-   * (`planCompositionCascade`, not part of this slice): the cascade will
-   * populate it with the composition edge ids it is consuming itself. No
-   * producer populates it yet, so it is always `undefined` today and every
-   * delete's behavior is unchanged from before this field existed — proven by
-   * the byte-identical-when-empty tests alongside this type.
-   *
-   * Honored on the SOFT-delete path only (`applyNodeSoftDelete`, via
-   * `enforceNodeDeleteBehavior`). `applyNodeHardDelete` and the batch delete
-   * path (`executeNodeDeleteBatch`) take no policy at all today and remove
-   * every connected edge unconditionally — a future cascade reaching either
-   * path (a hard-delete cascade, or a batched leaf-first sweep) must not
-   * populate `consumedEdgeIds` and expect it to be honored there.
+   * Populated by `runCompositionCascade` (`node-operations.ts`): every
+   * composition edge id a whole's cascade consumes is folded into the
+   * ROOT's own policy via `withCascadeConsumedEdges`, and each individual
+   * MEMBER delete the cascade drives is itself given a policy naming the
+   * edge that bound it to its (already-being-deleted) whole. Honored on
+   * the SOFT-delete path (`applyNodeSoftDelete`), the HARD-delete path
+   * (`applyNodeHardDelete`), and the batch delete path
+   * (`executeNodeDeleteBatch`, which builds its own per-item policy from
+   * that item's cascade plan internally) — all three route through
+   * `enforceNodeDeleteBehavior`, the one place this field is read.
    */
   consumedEdgeIds?: ReadonlySet<string>;
   /**
-   * Whether a whole delete cascades to its parts. Default `true`. Reserved
-   * for the composition cascade prologue (not part of this slice, see
-   * `consumedEdgeIds`) — no code reads this field yet, so it has no runtime
-   * effect today. Plumbed now so a caller with a stable opinion (merge apply,
-   * which must pass `false` once the cascade exists because its plan already
-   * carries the part deletions) has a stable policy shape to pass through
-   * ahead of the cascade landing.
+   * Whether a whole delete cascades to its parts. Default `true`.
+   * `runCompositionCascade` reads this: `false` makes it a no-op that
+   * returns an empty plan without touching a single part row. Merge apply
+   * passes `false` (`graph-merge/merge.ts`) because its plan already
+   * carries every part deletion the cascade would otherwise recompute —
+   * apply trusts the plan rather than re-walking the closure a second time
+   * under its own lock.
    */
   cascadeComposition?: boolean;
 }>;
 
 /**
- * Whether a stated {@link NodeDeletePolicy} carries a dimension the fused
- * atomic delete command cannot honor.
+ * Whether a stated {@link NodeDeletePolicy} carries a POLICY-SHAPED dimension
+ * the fused atomic delete command cannot honor.
  *
  * The fused command is a single, read-free SQL shape: it has no notion of
  * `consumedEdgeIds` and cannot skip its own delete-behavior enforcement. A
@@ -166,11 +163,25 @@ export type NodeDeletePolicy = Readonly<{
  * non-empty `consumedEdgeIds` — must therefore route around the fused
  * command to the portable path (`enforceNodeDeleteBehavior`), which is the
  * only path that reads and honors a policy at all. This is the ONE place
- * that decision is made: a caller choosing between the fused and portable
- * delete must call this rather than re-deriving the answer from a single
- * field, so a third policy dimension cannot be added to
- * {@link NodeDeletePolicy} without this predicate — and every caller of it —
- * being forced to account for it.
+ * that decision is made for these two fields: a caller choosing between the
+ * fused and portable delete for `enforceDeleteBehavior` / `consumedEdgeIds`
+ * must call this rather than re-deriving the answer from either field
+ * directly.
+ *
+ * This predicate does NOT own `cascadeComposition`, and is not the only
+ * fused-vs-portable gate in the store. That dimension is registry-shaped,
+ * not policy-shaped — "does this kind participate in composition at all"
+ * is knowable from the graph's declaration alone, before any policy is
+ * constructed — so it is decided statically by
+ * `resolveAtomicNodeDeleteBatchExecutor`'s composition guard
+ * (`atomic-mutation-program.ts`), which returns no executor for a kind that
+ * is a composition whole (`registry.isCompositionWhole`) or part
+ * (`registry.isCompositionPart`) on either side, unconditionally on the
+ * caller's policy. Together these are the two EXHAUSTIVE owners of "should this
+ * delete run the portable path": one for policy fields, one for static
+ * composition participation. A future third dimension must extend one of
+ * these two predicates (or, if neither shape fits, add and name a third
+ * owner here) — never re-derive the routing decision inline at a call site.
  */
 export function nodeDeletePolicyRequiresPortablePath(
   policy: NodeDeletePolicy | undefined,
@@ -215,6 +226,24 @@ function nodeSyncContext(
  * a `restrict` delete nor gets removed a second time by this delete's own
  * `cascade` / `disconnect` cleanup. The narrowing is the single seam a future
  * composition cascade plans against — see {@link NodeDeletePolicy}.
+ *
+ * A composition edge is a SEPARATE, unconditional exclusion from the
+ * `restrict` OBSTACLE count only (composition-contract-design.md's binding
+ * ruling: a composition edge is never a restrict obstacle, on either the
+ * part end — a part may always be deleted out of its whole — or an
+ * intermediate whole's upward edge into ITS OWN whole). This holds whether
+ * or not the edge is this delete's own `consumedEdgeIds`, so it is checked
+ * independently via `registry.isCompositionEdge` rather than folded into
+ * that set. Exclusion from the obstacle count is not exclusion from
+ * removal: a `restrict` delete that clears (no non-composition obstacle
+ * remains) still removes every unconsumed composition edge before
+ * returning, through the same {@link deleteEdgesById} owner the
+ * `cascade` / `disconnect` arm uses — otherwise the node would tombstone
+ * while a composition edge still pointed at it, which is the state edges
+ * can never be in (see that arm's own comment). The `cascade` / `disconnect`
+ * arm is untouched by the obstacle exclusion: a composition edge not already
+ * consumed by a policy is still removed alongside the node, exactly as any
+ * other cascaded/disconnected edge is.
  */
 async function enforceNodeDeleteBehavior(
   ctx: NodeWriteContext,
@@ -246,11 +275,32 @@ async function enforceNodeDeleteBehavior(
 
   switch (behavior) {
     case "restrict": {
+      const restrictedEdges = unconsumedEdges.filter(
+        (edge) => !ctx.registry.isCompositionEdge(edge.kind),
+      );
+      if (restrictedEdges.length === 0) {
+        // Every unconsumed edge is a composition edge: none of them blocks
+        // the delete, but they are not this delete's `cascade`/`disconnect`
+        // arm's business either (that arm never runs for `restrict`), so
+        // nothing else removes their rows. Leaving them live would point a
+        // composition edge at the node this delete is about to tombstone —
+        // the exact state the comment above the cascade/disconnect arm says
+        // cannot exist. Remove them here through the same owner that arm
+        // uses, so a restrict-behaved delete leaves no dangling composition
+        // edge on either the part or an intermediate whole's upward edge.
+        await deleteEdgesById(
+          ctx,
+          backend,
+          args.mode,
+          unconsumedEdges.map((edge) => edge.id),
+        );
+        return;
+      }
       throw new RestrictedDeleteError({
         nodeKind: args.kind,
         nodeId: args.id,
-        edgeCount: unconsumedEdges.length,
-        edgeKinds: [...new Set(unconsumedEdges.map((edge) => edge.kind))],
+        edgeCount: restrictedEdges.length,
+        edgeKinds: [...new Set(restrictedEdges.map((edge) => edge.kind))],
       });
     }
 
@@ -259,40 +309,54 @@ async function enforceNodeDeleteBehavior(
       // Both behaviors remove connected edges. "cascade" signals intent to
       // remove dependent data; "disconnect" signals intent to sever the
       // relationship. The effect is identical because edges cannot exist
-      // without both endpoints. One batched statement per bind-budget
-      // chunk instead of one statement per edge; the per-edge loop remains
-      // for backends without the batch members.
-      const connectedEdgeIds = unconsumedEdges.map((edge) => edge.id);
-      const batchDelete =
-        args.mode === "hard" ?
-          backend.hardDeleteEdgesBatch
-        : backend.deleteEdgesBatch;
-      if (batchDelete === undefined) {
-        for (const edge of unconsumedEdges) {
-          await (args.mode === "hard" ?
-            backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })
-          : backend.deleteEdge({ graphId: ctx.graphId, id: edge.id }));
-        }
-      } else {
-        await batchDelete({
-          graphId: ctx.graphId,
-          ids: connectedEdgeIds,
-        });
-      }
-      // Hard-deleted holders are already takeable through the liveness probe;
-      // this is housekeeping so node cascades do not grow edgeClaims forever.
-      // Soft-deleted edges retain their rows for resurrection and are not
-      // reaped here.
-      if (args.mode === "hard") {
-        await purgeEdgeClaims(
-          backend,
-          ctx.claimsVerdict(),
-          ctx.graphId,
-          connectedEdgeIds,
-        );
-      }
+      // without both endpoints.
+      await deleteEdgesById(
+        ctx,
+        backend,
+        args.mode,
+        unconsumedEdges.map((edge) => edge.id),
+      );
       break;
     }
+  }
+}
+
+/**
+ * Deletes a set of edges by id, in the given mode. One batched statement per
+ * bind-budget chunk instead of one statement per edge; the per-edge loop
+ * remains for backends without the batch members.
+ *
+ * The one owner of "how does a delete remove an edge row" for both
+ * {@link enforceNodeDeleteBehavior}'s cascade/disconnect arm (unconsumed
+ * edges) and the composition cascade's explicit cleanup of the edges it
+ * consumed (`node-operations.ts`) — a composition edge is deliberately
+ * excluded from every member's OWN `unconsumedEdges` pass, so nothing else
+ * ever removes its row.
+ */
+export async function deleteEdgesById(
+  ctx: Pick<NodeWriteContext, "graphId" | "claimsVerdict">,
+  backend: Backend,
+  mode: NodeDeleteMode,
+  edgeIds: readonly string[],
+): Promise<void> {
+  if (edgeIds.length === 0) return;
+  const batchDelete =
+    mode === "hard" ? backend.hardDeleteEdgesBatch : backend.deleteEdgesBatch;
+  if (batchDelete === undefined) {
+    for (const edgeId of edgeIds) {
+      await (mode === "hard" ?
+        backend.hardDeleteEdge({ graphId: ctx.graphId, id: edgeId })
+      : backend.deleteEdge({ graphId: ctx.graphId, id: edgeId }));
+    }
+  } else {
+    await batchDelete({ graphId: ctx.graphId, ids: [...edgeIds] });
+  }
+  // Hard-deleted holders are already takeable through the liveness probe;
+  // this is housekeeping so node cascades do not grow edgeClaims forever.
+  // Soft-deleted edges retain their rows for resurrection and are not
+  // reaped here.
+  if (mode === "hard") {
+    await purgeEdgeClaims(backend, ctx.claimsVerdict(), ctx.graphId, edgeIds);
   }
 }
 
@@ -578,10 +642,10 @@ export async function applyNodeSoftDelete(
  * per-`(kind, field)` tables the graph-agnostic cascade cannot reach, so they
  * are cleaned here.
  *
- * Takes no {@link NodeDeletePolicy}: enforcement always runs and there is no
- * `consumedEdgeIds` narrowing on this path (see that field's doc). A future
- * hard-delete cascade needs its own plumbing here before it can consume an
- * edge on this path.
+ * Takes an optional {@link NodeDeletePolicy}, honored exactly as the soft
+ * delete path honors it (`enforceDeleteBehavior`, `consumedEdgeIds`): the
+ * composition cascade's hard-delete arm narrows a member's restrict count by
+ * the edges it is itself consuming, the same way the soft-delete arm does.
  */
 export async function applyNodeHardDelete(
   ctx: NodeWriteContext,
@@ -592,11 +656,13 @@ export async function applyNodeHardDelete(
     onDelete: DeleteBehavior | undefined;
   }>,
   backend: Backend,
+  policy?: NodeDeletePolicy,
 ): Promise<void> {
   await enforceNodeDeleteBehavior(
     ctx,
     { kind: args.kind, id: args.id, mode: "hard", onDelete: args.onDelete },
     backend,
+    policy,
   );
   await backend.hardDeleteNode({
     graphId: ctx.graphId,

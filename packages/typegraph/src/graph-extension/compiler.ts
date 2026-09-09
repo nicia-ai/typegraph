@@ -22,9 +22,8 @@ import {
   type TargetCardinality,
   type UniqueConstraint,
 } from "../core/types";
-import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
-import { core as coreOntology } from "../ontology/core-meta-edges";
-import { type MetaEdge, type OntologyRelation } from "../ontology/types";
+import { metaEdgesByName } from "../ontology/core-meta-edges";
+import { type OntologyRelation } from "../ontology/types";
 import { compositionRelationFields } from "../registry/composition-relation";
 import { compactUndefined, createDataKeyedBag } from "../utils/object";
 import {
@@ -471,19 +470,16 @@ function makeWherePredicate(
 // Ontology compilation
 // ============================================================
 
-const META_EDGE_BY_NAME: Readonly<Record<MetaEdgeName, MetaEdge>> =
-  Object.fromEntries(
-    ALL_META_EDGE_NAMES.map((name) => [name, coreOntology[`${name}MetaEdge`]]),
-  ) as Readonly<Record<MetaEdgeName, MetaEdge>>;
-
 function compileOntologyRelation(
   relation: ExtensionOntologyRelation,
   nodeTypeByName: ReadonlyMap<string, NodeType>,
 ): OntologyRelation {
   // `relation.metaEdge` is typed as `MetaEdgeName` so the lookup is
   // total. Validation rejects out-of-range names before they ever
-  // reach the compiler.
-  const metaEdge = META_EDGE_BY_NAME[relation.metaEdge];
+  // reach the compiler. `metaEdgesByName` (`../ontology/core-meta-edges`,
+  // internal — not the public `core` export) is the one record that still
+  // carries `sameAs`/`differentFrom` by name for this by-name reader.
+  const metaEdge = metaEdgesByName[relation.metaEdge];
 
   const fromNode = nodeTypeByName.get(relation.from);
   const toNode = nodeTypeByName.get(relation.to);

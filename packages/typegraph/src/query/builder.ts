@@ -58,6 +58,7 @@ export type {
   AliasMap,
   BatchableQuery,
   BatchResults,
+  CompositionNavigationOptions,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,

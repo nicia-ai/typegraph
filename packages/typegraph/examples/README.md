@@ -38,7 +38,7 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 | [04-disjoint-constraints.ts](./04-disjoint-constraints.ts) | Mutual exclusion with `disjointWith` |
 | [05-edge-implications.ts](./05-edge-implications.ts) | Edge hierarchies with `implies` |
 | [06-inverse-edges.ts](./06-inverse-edges.ts) | Bidirectional relationships with `inverseOf` |
-| [08-custom-ontology.ts](./08-custom-ontology.ts) | The core meta-edges working together (`broader`, `equivalentTo`, `disjointWith`, `partOf`, `inverseOf`, `implies`) plus custom `metaEdge()` relations — persisted, introspectable, and serialized, with custom semantics interpreted by your application |
+| [08-custom-ontology.ts](./08-custom-ontology.ts) | The core meta-edges working together (`broader`, `equivalentTo`, `disjointWith`, `partOf`, `inverseOf`, `implies`) plus free-form type-level semantics via `defineGraph({ annotations })` — persisted, introspectable, and serialized, with the vocabulary interpreted by your application |
 
 ### Data Management
 

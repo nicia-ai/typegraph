@@ -44,6 +44,7 @@ import {
   registerClaimLookupPreferenceIntegrationTests,
   registerClaimOwnerIdentityIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
+  registerCompositionNavigationIntegrationTests,
   registerConstraintFenceErrorIntegrationTests,
   registerConstraintFenceTransactionHealthTests,
   registerConstraintFenceVerificationIntegrationTests,
@@ -68,6 +69,7 @@ import {
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
   registerIdentityIntegrationTests,
+  registerIdentityReplayIntegrationTests,
   registerIdentitySeparationIntegrationTests,
   registerImportTargetCardinalityIntegrationTests,
   registerImportUniquenessIntegrationTests,
@@ -294,6 +296,7 @@ export function createIntegrationTestSuite<
     registerCapabilityPortBindingIntegrationTests(context);
     registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
+    registerCompositionNavigationIntegrationTests(context);
     registerGraphAnnotationsIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);
     registerValidityEndClearingIntegrationTests(context);
@@ -345,6 +348,7 @@ export function createIntegrationTestSuite<
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);
     registerIdentityImportIntegrationTests(context);
+    registerIdentityReplayIntegrationTests(context);
     registerHistoricalIdentityTraversalTests(context);
     registerCurrentIdentityTraversalTests(context);
     registerIdentitySeparationIntegrationTests(context);

@@ -542,6 +542,17 @@ Use `store.verifyConstraintFences()` to find edges already on a cycle (the
 [Limitations](/limitations) for what a transactionless backend and a fused
 write program cannot do with an acyclic edge kind.
 
+Cardinality and target cardinality constrain one edge kind's own population;
+they say nothing about what happens to the nodes on either end when the
+relation is a real whole/part relationship. That's a separate declaration,
+[**composition**](/ontology#composition) (`partOf` / `hasPart`): it names
+which edge kind *realizes* containment and requires that edge to declare
+`cardinality`/`targetCardinality: "one"` or `"oneActive"` on the whole side.
+Ownership (one whole per part, enforced cross-relation) and cascade (deleting
+a whole deletes its parts) are the guarantees this declaration is *for* — see
+the [containment tiers](/ontology#choosing-a-containment-tier) table for
+which of them are enforced today versus still forthcoming.
+
 ### Edge Operations
 
 ```typescript

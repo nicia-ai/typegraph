@@ -2116,19 +2116,26 @@ export type InternalTransactionOptions = TransactionOptions &
 // ============================================================
 
 /**
- * The physical names of the four Operational Identity relations: the current
- * assertion ledger, its recorded-time twin, and the two DERIVED relations
- * (closure, separation) rebuilt from the ledger.
+ * The physical names of the six Operational Identity relations: the current
+ * assertion ledger, its recorded-time twin, the two DERIVED relations
+ * (closure, separation) rebuilt from the ledger, and the transition log's
+ * append-only annotation relation plus its retention watermark.
  *
  * Named once so the two ports that speak about them —
  * {@link GraphBackend.ensureIdentityTables} and
- * {@link GraphBackend.identityTableDdl} — cannot drift apart.
+ * {@link GraphBackend.identityTableDdl} — cannot drift apart. A backend
+ * that implements those ports directly (rather than through the bundled
+ * Drizzle profiles, which also self-heal these two relations through base
+ * schema adoption) is the sole provisioning path for the transition log on
+ * such a backend, so both fields are required here, not optional.
  */
 export type IdentityTableNames = Readonly<{
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
   identitySeparation: string;
+  identityTransitions: string;
+  identityTransitionRetention: string;
 }>;
 
 /**

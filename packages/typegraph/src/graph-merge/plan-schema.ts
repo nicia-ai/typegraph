@@ -3,7 +3,15 @@ import { z } from "zod";
 import { compareEntityRefs, compareMatchSources } from "./evidence";
 import type { JsonValue } from "./typegraph-internal";
 
-export const MERGE_PLAN_FORMAT_VERSION = 1 as const;
+// Bumped 1 -> 2 for the composition-orphan review field: a required field
+// added under the SAME version number would make `mergePlanArtifactV2Schema`
+// (`.strict()`) reject every plan artifact serialized before composition
+// existed as "malformed", when the correct signal is "this artifact predates
+// a format this library version understands" — `parseMergePlanArtifact`
+// reads `formatVersion` before any other validation specifically to draw
+// that distinction (`unsupported-version` vs `malformed`), and a same-version
+// field addition would defeat it silently by falling through to the schema.
+export const MERGE_PLAN_FORMAT_VERSION = 2 as const;
 export const MERGE_PLAN_DIGEST_ALGORITHM = "sha256" as const;
 
 export type MergePlanEntityRef = Readonly<{ kind: string; id: string }>;
@@ -202,6 +210,20 @@ export type MergePlanTypeReconciliation = Readonly<{
   decisiveEdges?: readonly MergePlanMatchEvidence[] | undefined;
 }>;
 
+/**
+ * A live composition part of a whole the plan deletes, which the plan does
+ * NOT itself delete — a part attached on the target after the branch point
+ * (or independently of it), found by re-reading the parts closure
+ * (`planCompositionCascade`) against every planned node deletion. Surfaced
+ * here so a dry run reports it; apply re-verifies the same finding under the
+ * write lock and refuses with `MergeCompositionOrphanError` when it recurs.
+ */
+export type MergePlanCompositionOrphan = Readonly<{
+  part: MergePlanEntityRef;
+  whole: MergePlanEntityRef;
+  viaEdgeKind: string;
+}>;
+
 export type MergePlanReview = Readonly<{
   resolutions: readonly MergePlanEntityResolution[];
   conflicts: readonly JsonValue[];
@@ -212,6 +234,7 @@ export type MergePlanReview = Readonly<{
   baseAmbiguities: readonly JsonValue[];
   provenanceRecords: readonly JsonValue[];
   warnings: readonly string[];
+  compositionOrphans: readonly MergePlanCompositionOrphan[];
   diagnostics?: MergePlanDiagnostics | undefined;
 }>;
 
@@ -225,7 +248,7 @@ export type MergePlanDigest = Readonly<{
   value: string;
 }>;
 
-export type MergePlanArtifactV1 = Readonly<{
+export type MergePlanArtifactV2 = Readonly<{
   formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
   digest: MergePlanDigest;
   mode: "snapshot" | "incremental";
@@ -239,9 +262,9 @@ export type MergePlanArtifactV1 = Readonly<{
 }>;
 
 /** Current public merge-plan artifact type. */
-export type MergePlanArtifact = MergePlanArtifactV1;
+export type MergePlanArtifact = MergePlanArtifactV2;
 
-export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
 
 const nonEmptyStringSchema = z.string().min(1);
 // Zod 4's number schema rejects NaN and infinities by default.
@@ -637,6 +660,15 @@ const mergePlanReviewSchema = z
         .strict(),
     ),
     warnings: z.array(z.string()),
+    compositionOrphans: z.array(
+      z
+        .object({
+          part: mergePlanEntityRefSchema,
+          whole: mergePlanEntityRefSchema,
+          viaEdgeKind: nonEmptyStringSchema,
+        })
+        .strict(),
+    ),
     diagnostics: diagnosticsSchema.optional(),
   })
   .strict();
@@ -648,7 +680,7 @@ const mergePlanDigestSchema = z
   })
   .strict();
 
-const mergePlanArtifactV1BaseSchema = z
+const mergePlanArtifactV2BaseSchema = z
   .object({
     formatVersion: z.literal(MERGE_PLAN_FORMAT_VERSION),
     digest: mergePlanDigestSchema,
@@ -665,15 +697,15 @@ const mergePlanArtifactV1BaseSchema = z
   })
   .strict();
 
-const mergePlanArtifactV1InputBaseSchema = mergePlanArtifactV1BaseSchema.omit({
+const mergePlanArtifactV2InputBaseSchema = mergePlanArtifactV2BaseSchema.omit({
   digest: true,
 });
-type ParsedMergePlanArtifactV1Input = z.infer<
-  typeof mergePlanArtifactV1InputBaseSchema
+type ParsedMergePlanArtifactV2Input = z.infer<
+  typeof mergePlanArtifactV2InputBaseSchema
 >;
 
 function addSemanticIssues(
-  artifact: ParsedMergePlanArtifactV1Input,
+  artifact: ParsedMergePlanArtifactV2Input,
   ctx: z.RefinementCtx,
 ): void {
   if (artifact.mode !== artifact.anchors.kind) {
@@ -831,8 +863,8 @@ function addSemanticIssues(
 }
 
 function addResolutionEvidenceIssues(
-  artifact: ParsedMergePlanArtifactV1Input,
-  resolution: ParsedMergePlanArtifactV1Input["review"]["resolutions"][number],
+  artifact: ParsedMergePlanArtifactV2Input,
+  resolution: ParsedMergePlanArtifactV2Input["review"]["resolutions"][number],
   resolutionIndex: number,
   ctx: z.RefinementCtx,
 ): void {
@@ -916,7 +948,7 @@ function addResolutionEvidenceIssues(
 }
 
 function addEvidenceIssues(
-  evidence: ParsedMergePlanArtifactV1Input["review"]["resolutions"][number]["decisiveEdges"][number],
+  evidence: ParsedMergePlanArtifactV2Input["review"]["resolutions"][number]["decisiveEdges"][number],
   path: readonly (string | number)[],
   ctx: z.RefinementCtx,
 ): void {
@@ -1012,12 +1044,12 @@ function entityKey(entity: MergePlanEntityRef): string {
   return JSON.stringify([entity.kind, entity.id]);
 }
 
-export const mergePlanArtifactV1InputSchema =
-  mergePlanArtifactV1InputBaseSchema.superRefine((artifact, ctx) =>
+export const mergePlanArtifactV2InputSchema =
+  mergePlanArtifactV2InputBaseSchema.superRefine((artifact, ctx) =>
     addSemanticIssues(artifact, ctx),
   );
 
-export const mergePlanArtifactV1Schema =
-  mergePlanArtifactV1BaseSchema.superRefine((artifact, ctx) =>
+export const mergePlanArtifactV2Schema =
+  mergePlanArtifactV2BaseSchema.superRefine((artifact, ctx) =>
     addSemanticIssues(artifact, ctx),
   );

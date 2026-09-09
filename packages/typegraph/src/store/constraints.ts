@@ -151,6 +151,35 @@ export function nodeWriteNeedsConstraintFence(
 }
 
 /**
+ * WHICH constraint makes a node DELETE a constrained write: a composition
+ * WHOLE's delete cascades leaf-first through its parts closure under the
+ * per-graph write lock (`planCompositionCascade`), so a concurrent attach
+ * cannot slip a part past it. The classification is STATIC — a declared-
+ * schema property (`registry.isCompositionWhole`), decided before any row
+ * read — which is what lets a part-less kind's delete stay unfenced on
+ * every backend, interactive transactions or not.
+ *
+ * Sibling of {@link nodeWriteNeedsConstraintFence}: that one folds
+ * `nodeClaimSites` (a create/update write owes a claim); this one is a
+ * one-line registry lookup because a composition delete owes no claim row —
+ * it owes exclusive access to the closure it is about to walk. Kept as its
+ * own function rather than a third value in that one's `operation` union so
+ * a delete's very different reason ("this kind cascades") is never confused
+ * with a create/update's ("this kind claims a scope").
+ *
+ * `"edgeComposition"` is E-b's eventual constant; until it lands this
+ * reports the existing `"edgeCardinality"` reason (both name the same
+ * remediation class to `CONSTRAINT_FENCE_ADVICE`: declare cardinality on
+ * the realizing edge).
+ */
+export function nodeDeleteNeedsConstraintFence(
+  registry: KindRegistry,
+  kind: string,
+): ConstraintFenceReason | undefined {
+  return registry.isCompositionWhole(kind) ? "edgeCardinality" : undefined;
+}
+
+/**
  * THE graph-level answer to "does writing into this graph owe a claim that must
  * precede the row it gates?", folded over the SAME per-kind functions the write
  * paths consult — a node kind any of whose claim sites is `pre-insert` under

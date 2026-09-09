@@ -35,6 +35,7 @@ import { buildKindRegistry } from "../src/registry";
 import {
   type CompositionIssueCode,
   inferCompositionPartSide,
+  partitionCompositionEdgeKindsByDirection,
 } from "../src/registry/composition-relation";
 import { type EdgeKindFacts } from "../src/registry/edge-kind-facts";
 import { matchingObject } from "./test-utils";
@@ -528,6 +529,18 @@ describe("a valid multi-relation composition declaration", () => {
       "segmentOf",
     ]);
   });
+
+  it("isCompositionWhole/isCompositionPart classify each kind by its role, both ways for an intermediate kind", () => {
+    // Podcast is a whole only (declares parts, is never itself a part).
+    expect(registry.isCompositionWhole("Podcast")).toBe(true);
+    expect(registry.isCompositionPart("Podcast")).toBe(false);
+    // Segment is a part only (never itself declares parts).
+    expect(registry.isCompositionWhole("Segment")).toBe(false);
+    expect(registry.isCompositionPart("Segment")).toBe(true);
+    // Episode is BOTH: a whole (of Segment) and a part (of Podcast).
+    expect(registry.isCompositionWhole("Episode")).toBe(true);
+    expect(registry.isCompositionPart("Episode")).toBe(true);
+  });
 });
 
 // ============================================================
@@ -717,6 +730,76 @@ describe("two realizing edges over one (part, whole) pair (E-a-2)", () => {
       "edgeA",
       "edgeB",
     ]);
+  });
+});
+
+// ============================================================
+// partitionCompositionEdgeKindsByDirection — direct unit tests (Ed-r2-3)
+// ============================================================
+//
+// `QueryBuilder#navigateComposition` (parts()/wholes()) and
+// `buildSubgraphCompositionReachableCte` (subgraph({ composition: true }))
+// both call this one function instead of each re-spelling "resolve this
+// edge kind's part side, then its direction" — see the composition-relation
+// module doc comment on `partitionCompositionEdgeKindsByDirection`.
+
+describe("partitionCompositionEdgeKindsByDirection", () => {
+  const Podcast = defineNode("Podcast", { schema: emptySchema });
+  const Episode = defineNode("Episode", { schema: emptySchema });
+  const episodeOf = defineEdge("episodeOf", { schema: emptySchema });
+
+  const graph = defineGraph({
+    id: "composition-partition-direction",
+    nodes: { Podcast: { type: Podcast }, Episode: { type: Episode } },
+    edges: {
+      episodeOf: {
+        type: episodeOf,
+        from: [Episode],
+        to: [Podcast],
+        cardinality: "one",
+      },
+    },
+    ontology: [partOf(Episode, Podcast, { via: episodeOf })],
+  });
+  const registry = buildKindRegistry(graph);
+
+  it("partitions a part->whole edge kind reversed toward parts and forward toward wholes", () => {
+    expect(
+      partitionCompositionEdgeKindsByDirection(
+        registry,
+        ["episodeOf"],
+        "parts",
+      ),
+    ).toEqual({ outEdgeKinds: [], inEdgeKinds: ["episodeOf"] });
+    expect(
+      partitionCompositionEdgeKindsByDirection(
+        registry,
+        ["episodeOf"],
+        "wholes",
+      ),
+    ).toEqual({ outEdgeKinds: ["episodeOf"], inEdgeKinds: [] });
+  });
+
+  it("throws — never silently defaults — on an edge kind with no recorded part side", () => {
+    // MUTATION CHECK: before Ed-r2-3, `QueryBuilder#navigateComposition`
+    // silently defaulted a missing part side to "from"
+    // (`registry.compositionPartSide(edgeKind) ?? "from"`) while
+    // `buildSubgraphCompositionReachableCte` threw via `requireDefined` —
+    // one predicate, two disagreeing owners. Extracting both call sites
+    // onto this shared function is what makes them agree: reverting this
+    // function's `requireDefined` back to `?? "from"` makes this assertion
+    // fail (no throw; returns `{ outEdgeKinds: [], inEdgeKinds:
+    // ["notComposition"] }` instead, walking the wrong direction) —
+    // verified and reverted.
+    expect(() =>
+      partitionCompositionEdgeKindsByDirection(
+        registry,
+        ["notComposition"],
+        "parts",
+      ),
+    ).toThrow(
+      '"notComposition" is not a composition edge kind, but was returned by the registry\'s composition edge-kind reader.',
+    );
   });
 });
 

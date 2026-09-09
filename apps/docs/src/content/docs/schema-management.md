@@ -266,8 +266,8 @@ These changes are backwards compatible and can be auto-migrated:
   relations
 - Removing `disjointWith` ontology relations
 
-Adding `disjointWith`, `subClassOf`, `equivalentTo`, or `sameAs` — and
-removing `subClassOf`, `equivalentTo`, or `sameAs` — also auto-migrate, but
+Adding `disjointWith`, `subClassOf`, or `equivalentTo` — and
+removing `subClassOf` or `equivalentTo` — also auto-migrate, but
 only after a data check inside the commit transaction: see
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
 for what each one checks and how a refusal is reported.

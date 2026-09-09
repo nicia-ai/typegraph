@@ -2489,6 +2489,320 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
         };
         dialect: "sqlite";
     }>;
+    readonly identityTransitions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            transitionId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "transition_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            recordedRevision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            cause: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "cause";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            classKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "class_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            classId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "class_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            priorClassKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "prior_class_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            priorClassId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "prior_class_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            assertionIds: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "assertion_ids";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            decision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "decision";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            txId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly identityTransitionRetention: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            prunedBeforeRevision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "pruned_before_revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            prunedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "pruned_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
     readonly uniques: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
         name: string;
         schema: undefined;
@@ -4429,6 +4743,8 @@ type IdentityTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
 }>;
 
 // @public
@@ -4536,9 +4852,6 @@ type IndexWhereOperand = Readonly<{
     field: string;
     valueType: ValueType | undefined;
 }>;
-
-// @public
-type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
 // @public
 type InsertEdgeParams = Readonly<{
@@ -5000,11 +5313,6 @@ type SerializedEdgeDef = Readonly<{
 // @public
 type SerializedMetaEdge = Readonly<{
     name: string;
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -5112,6 +5420,8 @@ type SqliteTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
     uniques: string;
     edgeClaims: string;
     baseSchemaVersions: string;
@@ -5152,6 +5462,8 @@ type SqlTableNames = Readonly<{
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
     identitySeparation?: string | undefined;
+    identityTransitions?: string | undefined;
+    identityTransitionRetention?: string | undefined;
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;

@@ -184,7 +184,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 317)", () => {
+  it("the class partition covers every scanned row (total 318)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

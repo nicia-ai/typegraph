@@ -558,46 +558,85 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // Store-bearing entrypoints above (+1 apiece: `./interchange` 717 → 718,
 // `./profiler` 719 → 720, `./graph-merge` 734 → 735, `./provenance`
 // 725 → 726, `./sqlite/local` 714 → 715, `./postgres/pglite` 714 → 715).
+//
+// Identity transition log batch: `StoreRuntime.identityContext()` (added
+// earlier in this feature, alongside the transition log's relations and
+// `IdentityTableNames`/`SqlTableNames` gaining `identityTransitions` /
+// `identityTransitionRetention`) was never reconciled against this ledger —
+// `pnpm api-report:update` had not been run since. It returns
+// `IdentityServiceContext<G>`, an internal (non-exported) type that itself
+// names `PlainNodeRef`; neither is exported directly anywhere, including the
+// root. Both become newly reachable, and so newly forgotten-exported, at
+// every entrypoint whose full `StoreRuntime` member set renders: `.`
+// (388→390), `./interchange` (709→711), `./profiler` (711→713),
+// `./graph-merge` (726→728), `./provenance` (717→719), `./sqlite/local`
+// (706→708), `./postgres/pglite` (706→708) — +2 apiece, `IdentityServiceContext`
+// and `PlainNodeRef` exactly. The `identityTransitions`/`identityTransitionRetention`
+// string fields introduce no new symbol names, so they move no entrypoint's
+// debt on their own. Gate: every moved entrypoint's delta is exactly +2,
+// both added names are `IdentityServiceContext`/`PlainNodeRef`, and no other
+// entrypoint moved.
+//
+// This is internal-convenience debt, not a user-facing requirement (G1R3-05):
+// `identityContext()`'s two consumers, replay and prune, are plain functions
+// over `IdentityServiceContext<G>`. PR-3, which brings `store.identity.replay`
+// / `transitionsOf` to the public surface, is expected to either narrow
+// `identityContext()`'s declared return to the exported slice those consumers
+// need, or export `IdentityServiceContext`/`PlainNodeRef` deliberately — either
+// way retiring these seven +2 entries, so this batch reads as staged rather
+// than permanent.
+//
+// `ensureSchema`'s `historyEnabled` extra moved off the public
+// `SchemaManagerOptions` (G1R3-04) onto an unexported `EnsureSchemaInternalOptions`
+// that only `ensureSchemaInternal` (imported directly by `store.ts`, never
+// re-exported) accepts, so it renders at no entrypoint at all — no ledger
+// entry to update for that change.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
+  // Roadmap F (meta-edge removal): removing the public `InferenceType`
+  // union (never re-exported from most entrypoints, only pulled in
+  // transitively through `MetaEdgeProperties`/`SerializedMetaEdge`) dropped
+  // exactly one forgotten export apiece from every entrypoint below that
+  // saw its count change — every value here is measured lower than before,
+  // never raised.
   ".": {
     count: 408,
     sha256: "2f80a89109da50299543425b58c61d498aefe91bfbab0da80ab522f1e64b89e1",
   },
   "./adapters/drizzle/engine": {
-    count: 326,
-    sha256: "7dfec1a8e9937450ce718c9a17bf6ed5a76ce7335f8f4dc9fbc7011cb06d31d6",
+    count: 325,
+    sha256: "a8f21cfed5d82117d7f11e9faf59ac33ce75e4864db856054efa35bead7779cf",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 253,
-    sha256: "9e42929bfab571d3f869a2b8c5fd0a8fc83f5e6772b77f1495e5541df15692d1",
+    count: 252,
+    sha256: "ffd4766ce085bb10ace2b3ddc91d425ed057eec3bd2ee2d604931a217f1169a2",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 257,
-    sha256: "da9c7ad400e95a30212816e5c595c8af61e540c3531a23bf007d8ea397f3d8d7",
+    count: 256,
+    sha256: "3539bf5348d1164893324fb0dc3004f2aafc55eab038087e7d64c17acff52bd4",
   },
   "./adapters/drizzle/sqlite": {
-    count: 254,
-    sha256: "38c16c3b0646f2e0e876bbefcce61a470d55508b3f3ea0f73d682819d69c85c2",
+    count: 253,
+    sha256: "d90d6c4ac973788c26aa871574081677322431a1887d4e70a49c9fae6d9fbe2e",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 257,
-    sha256: "0e6fc3a6d64d2b4c8f4c9a3eeffb0ea9be67e813fd1f0b69de856fed075baa6f",
+    count: 256,
+    sha256: "66f9ed384c586a34ed561e89654df0bb12d96a641166b0f8eee0e0549542b5f4",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 257,
-    sha256: "0e6fc3a6d64d2b4c8f4c9a3eeffb0ea9be67e813fd1f0b69de856fed075baa6f",
+    count: 256,
+    sha256: "66f9ed384c586a34ed561e89654df0bb12d96a641166b0f8eee0e0549542b5f4",
   },
   "./backend": {
     count: 21,
     sha256: "fbf0fba6e529961f739f68a602e7896b97108515fc4f0cdcab68c91a7f58f84d",
   },
   "./core": {
-    count: 73,
-    sha256: "8a65d5628e516ca9bc20f3a31da6438c60c27ffc656d376739db0dd1d0498f5e",
+    count: 72,
+    sha256: "c75302b1dabb728a21f9843d89d14432a97df8f07a9c513ce3832dcd8ccfded0",
   },
   "./graph-extension": {
     count: 19,
@@ -630,9 +669,18 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 736,
     sha256: "d1ff0b2058450b2ebc23a581387978fc3fbcf92b621890c282af94201c580c09",
   },
+  // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
+  // options type was extracted into the named (but non-exported)
+  // `EnsureSchemaPreloadedOptions` alias so `EnsureSchemaInternalOptions`
+  // could extend it for `ensureSchemaInternal` (the new export `store.ts`
+  // calls directly with `historyEnabled`, never re-exported from a public
+  // entry point). An anonymous inline type never registers as a forgotten
+  // export; a named non-exported one used in `ensureSchema`'s public
+  // signature does. +1, only on `./schema` — the sole entrypoint that
+  // names `ensureSchema`.
   "./schema": {
     count: 281,
-    sha256: "680f42a4071d001152f018bdbbec952785ccb1f1aa1ec5400b6ae35b177c2a50",
+    sha256: "b2605158261e8e8a5d0ca0aaf9bffc9b64a081187f39e0ace5d0e4f577353ade",
   },
   "./sqlite/local": {
     count: 725,

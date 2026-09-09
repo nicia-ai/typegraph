@@ -45,24 +45,27 @@ properties between types, or automatically expand every query.
 
 | Relation / feature | Runtime contract |
 | --- | --- |
-| `subClassOf` | Transitive registry closure, write-path endpoint assignability, and node-query expansion with `includeSubClasses` (default: `true`). The closure now also includes every `equivalentTo`/`sameAs` class — two equivalent kinds are mutual subclasses of each other. The child's schema output must structurally extend the parent's — checked at compile time and refused at registry build otherwise |
-| `disjointWith` | Same-ID collision enforcement, propagated through interleaved `subClassOf` and `equivalentTo` closure (`sameAs` remains a deprecated equivalence alias) |
+| `subClassOf` | Transitive registry closure, write-path endpoint assignability, and node-query expansion with `includeSubClasses` (default: `true`). The closure now also includes every `equivalentTo` class — two equivalent kinds are mutual subclasses of each other. The child's schema output must structurally extend the parent's — checked at compile time and refused at registry build otherwise |
+| `disjointWith` | Same-ID collision enforcement, propagated through interleaved `subClassOf` and `equivalentTo` closure |
 | `implies` | Transitive registry closure and opt-in traversal expansion with `expand: "implying"`; endpoints are validated |
 | `inverseOf` | Single inverse partner, endpoint reversal validation, and traversal expansion with `expand: "inverse"` (the default store setting) |
-| `equivalentTo` | Between two registered kinds, MUTUAL SUBSUMPTION: folded into the same closure `subClassOf` reads, so `isAssignableTo`, `expandSubClasses`/`includeSubClasses`, edge-endpoint acceptance, disjointness propagation and the `kindWithSubClasses` claim axis all treat the two kinds as substitutable. An IRI on either side stays an inert cross-system reference — it never becomes a kind, but a class reached *through* one still folds together. Restricted to node kinds: an equivalence class that mixes a node kind and an edge kind, or that holds more than one registered edge kind, is refused (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`). `sameAs` is folded in as a full alias — the merge type reconciler and the registry treat a `sameAs` declaration identically to `equivalentTo` |
+| `equivalentTo` | Between two registered kinds, MUTUAL SUBSUMPTION: folded into the same closure `subClassOf` reads, so `isAssignableTo`, `expandSubClasses`/`includeSubClasses`, edge-endpoint acceptance, disjointness propagation and the `kindWithSubClasses` claim axis all treat the two kinds as substitutable. An IRI on either side stays an inert cross-system reference — it never becomes a kind, but a class reached *through* one still folds together. Restricted to node kinds: an equivalence class that mixes a node kind and an edge kind, or that holds more than one registered edge kind, is refused (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`) |
 | `broader` / `narrower` | Transitive registry introspection, plus kind-taxonomy query expansion with `includeNarrower` (untyped alias — no schema relationship is claimed) |
 | `partOf` / `hasPart` | Transitive registry introspection only |
 | `relatedTo` | Symmetric direct registry introspection through `getRelatedKinds` only |
-| Type-level `sameAs` | Deprecated name for `equivalentTo` (see above); prefer calling `equivalentTo` directly |
-| Type-level `differentFrom` | Deprecated and decorative — never enforced instance identity; migrate to the graph-level TypeGraph Identity Profile |
-| Custom `metaEdge()` properties | Serialized introspection metadata only; custom transitivity, symmetry, inverse, and inference settings are not executed |
+
+`sameAs`, `differentFrom`, and the custom `metaEdge()` factory were removed
+— see [Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()`
+APIs](/schema-evolution#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis)
+for what replaces them and what a document that still persists one does on
+load.
 
 ## Core Meta-Edges
 
 TypeGraph provides a standard set of meta-edges:
 
 ```typescript
-import { subClassOf, broader, narrower, equivalentTo, sameAs, differentFrom, disjointWith, partOf, hasPart, relatedTo, inverseOf, implies } from "@nicia-ai/typegraph";
+import { subClassOf, broader, narrower, equivalentTo, disjointWith, partOf, hasPart, relatedTo, inverseOf, implies } from "@nicia-ai/typegraph";
 ```
 
 ### Subsumption (Type Inheritance)
@@ -79,7 +82,7 @@ subClassOf(Company, Organization);
 schema output to structurally extend the parent's — every property the
 parent requires, the child has with a compatible type; the child may add
 properties (width subtyping) or narrow an optional-in-parent property.
-`equivalentTo`/`sameAs` between two registered kinds check the same contract
+`equivalentTo` between two registered kinds checks the same contract
 in **both** directions. The check runs twice: at **compile time**
 (TypeScript rejects an incompatible pair with a message naming the missing
 or incompatible fields), and at **registry build** for whatever the type
@@ -93,7 +96,7 @@ authored extension, and a deserialized persisted document), throwing a
 | --- | --- |
 | `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE` | a `subClassOf` child's schema does not extend its parent's |
 | `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` | the projected JSON Schema cannot judge the pair (`$ref`, `allOf`, `not`, or an unmodeled keyword) |
-| `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | an `equivalentTo`/`sameAs` pair fails in one direction |
+| `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | an `equivalentTo` pair fails in one direction |
 | `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | the same, but the pair is incomparable |
 
 **Known gap:** the registry check compares kinds' projected JSON Schema, and
@@ -289,21 +292,20 @@ equivalentTo(worksAt, "https://schema.org/worksFor");
 equivalentTo(Person, "https://schema.org/Person");
 ```
 
-**`sameAs`** and **`differentFrom`** are deprecated type-level factories.
-`sameAs` behaves identically to `equivalentTo` in every respect above (the
-registry folds both meta-edges into the same equivalence classes); its left
-parameter stays `NodeType`-only, unwidened. `differentFrom` is decorative. For
-durable individual identity, enable the graph-level TypeGraph Identity Profile
-and use `store.identity`. That ledger deliberately does not provide OWL
-property substitution or automatic graph-wide query expansion.
+**`sameAs`** and **`differentFrom`** — deprecated type-level factories that
+behaved identically to `equivalentTo` and as a decorative no-op relation,
+respectively — were removed. For durable individual identity, enable the
+graph-level TypeGraph Identity Profile and use `store.identity`. That ledger
+deliberately does not provide OWL property substitution or automatic
+graph-wide query expansion. See
+[Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](/schema-evolution#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis)
+for what a document that still persists one of these relations does on load.
 
-**Changing this on a populated graph**: `equivalentTo` and `sameAs` are
-classified exactly like `subClassOf` — an addition is checked against
-existing data (it can propagate a `disjointWith`, and will also merge
-uniqueness components once equivalence folds into subsumption), and a
-removal is checked for live edges relying on it. `differentFrom` is inert —
-it reaches no closure and drives no write-path decision — so it is always
-safe. See
+**Changing this on a populated graph**: `equivalentTo` is classified exactly
+like `subClassOf` — an addition is checked against existing data (it can
+propagate a `disjointWith`, and will also merge uniqueness components once
+equivalence folds into subsumption), and a removal is checked for live edges
+relying on it. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
 
 ### Constraints
@@ -393,6 +395,58 @@ walk existing rows. Once composition's one-whole-per-part constraint is
 enforced, adding a `partOf` to an already-populated graph can surface parts
 that already have more than one live whole; removing one only ever loosens a
 constraint, so it stays safe regardless.
+
+#### Choosing a containment tier
+
+Not every "this belongs to that" relationship is composition. Before reaching
+for `partOf`/`hasPart`, place the relation in exactly one of three tiers:
+
+| tier | what you write | what the runtime guarantees today | planned for tier 1 |
+| --- | --- | --- | --- |
+| 1 — Composition | `partOf(Part, Whole, { via: edge })` | the realizing edge's whole-side cardinality is `"one"`/`"oneActive"`; every endpoint pair the edge admits is a declared composition pair in that orientation; `parts()`/`wholes()` navigation across heterogeneous, mixed-orientation edge kinds; `subgraph({ composition: true })` exports a root plus its parts closure | one whole per part enforced cross-relation at write time; acyclicity checked over the union of realizing edge kinds; deleting a whole deletes its parts leaf-first (cascade) |
+| 2 — Aggregation | `cardinality`, `targetCardinality`, `acyclic` on an edge registration | each rule enforced independently, with no ownership slot, no cascade, no cross-relation constraint | — |
+| 3 — Mereology | an ordinary edge kind + `.recursive()` | transitivity only, no integrity claim | — |
+
+The "planned for tier 1" column is not yet implemented: declaring `partOf`/
+`hasPart` today validates the relation's shape (`via`, `partSide`,
+cardinality, endpoint-pair completeness) but does not yet enforce one whole
+per part, does not yet check acyclicity over the composition union, and does
+not yet cascade a delete from whole to parts. Do not rely on any of the three
+until a release note says otherwise.
+
+**The only tier with a cascade is the only tier with an ownership slot.** A
+part with two owners is not a part. Any relation whose users need shared
+membership, overlapping hierarchies, or re-homing a child when its parent is
+removed is tier 2, not tier 1 — declaring it `partOf` would mean deleting the
+parent deletes children that should have survived.
+
+**Rows retained for external referrers are tier 2, not composition.** A
+"version of X" relation whose parts must stay resolvable by id after the
+whole is deleted — a historical run record, a receipt, an audit snapshot — is
+single-parent and acyclic like composition, but its members must *outlive*
+their parent. That is exactly what composition's cascade refuses to do
+(parts die with the whole), so this pattern is aggregation: a plain edge with
+`cardinality`/`targetCardinality`, no `partOf`/`hasPart`.
+
+A worked, product-shaped version of this distinction: `Artifact ->
+ArtifactVersion -> ArtifactChunk`, `ChangeSet -> ChangeSetItem`, `Skill ->
+SkillVersion`, and `EvalRun -> results` are true composition (exactly one
+parent, parts die with the whole). A folder tree where deleting a folder
+re-homes its children to the deleted folder's parent, or a document whose
+deletion retracts claims but leaves the referenced entity standing on
+remaining support, is aggregation — declaring either `partOf` would be wrong,
+not just imprecise.
+
+#### Upgrade prerequisite (forthcoming): the composition claim will need `typegraph_edge_claims`
+
+Not yet applicable in this release: declaring `partOf`/`hasPart` does not
+check for `typegraph_edge_claims` today. Once the one-whole-per-part
+guarantee above ships, it is expected to ride the same reserved relation edge
+cardinality claims already use, and a deployment initialized before that
+relation existed will need to provision it (under owner credentials — see
+[Backend Setup](/backend-setup)) before declaring the first `partOf`/
+`hasPart`. This section will be updated with the exact error code and
+provisioning step once that lane lands.
 
 ### Edge Relationships
 
@@ -543,56 +597,41 @@ registry.getImplyingEdges("knows"); // ["marriedTo", "bestFriends", "friends"]
 registry.getRelatedKinds("MachineLearning"); // ["DataScience", ...]
 ```
 
-## Custom Meta-Edges
+## Type-Level Annotations
 
-Define domain-specific meta-edges for serialized introspection metadata:
+The custom `metaEdge()` factory was removed — it never made the registry
+compute a custom closure or made the query builder execute custom inference
+in any release; it only carried metadata through serialization. For
+domain-specific, type-level vocabulary the library has no built-in reasoning
+for, attach it as free-form JSON on the graph definition instead:
 
 ```typescript
-import { metaEdge } from "@nicia-ai/typegraph";
-
-// Custom meta-edge for prerequisite relationships
-const prerequisiteOf = metaEdge("prerequisiteOf", {
-  transitive: true,
-  inference: "hierarchy",
-  description: "Learning prerequisite (Calculus prerequisiteOf LinearAlgebra)",
-});
-
-// Custom meta-edge for superseding relationships
-const supersedes = metaEdge("supersedes", {
-  transitive: true,
-  inference: "substitution",
-  description: "Replacement relationship (v2 supersedes v1)",
+const graph = defineGraph({
+  // ...
+  annotations: {
+    prerequisiteOf: {
+      transitive: true,
+      pairs: [["Calculus", "LinearAlgebra"]],
+    },
+    supersedes: {
+      transitive: true,
+      pairs: [["v2", "v1"]],
+    },
+  },
 });
 ```
 
-### Meta-Edge Properties
-
-Each custom meta-edge can carry these properties as metadata. In the current
-release they do **not** make the registry compute a custom closure or make the
-query builder execute custom inference. Only the built-in relations in the
-support matrix have runtime behavior.
-
-| Property     | Type            | Description               |
-| ------------ | --------------- | ------------------------- |
-| `transitive` | `boolean`       | A→B, B→C implies A→C      |
-| `symmetric`  | `boolean`       | A→B implies B→A           |
-| `reflexive`  | `boolean`       | A→A is always true        |
-| `inverse`    | `string`        | Name of inverse meta-edge |
-| `inference`  | `InferenceType` | How this affects queries  |
-
-### Inference Types
-
-For custom meta-edges, `inference` is descriptive metadata for consumers:
-
-| Type             | Description                                  |
-| ---------------- | -------------------------------------------- |
-| `"subsumption"`  | Query for X includes instances of subclasses |
-| `"hierarchy"`    | Enables broader/narrower traversal           |
-| `"substitution"` | Can substitute equivalent types              |
-| `"constraint"`   | Validation rules                             |
-| `"composition"`  | Part-whole navigation                        |
-| `"association"`  | Discovery/recommendation                     |
-| `"none"`         | No automatic inference                       |
+`annotations` (`GraphAnnotations`, a `Record<string, JsonValue>`) travels
+with the graph definition exactly like the core meta-edges do — persisted,
+serialized, and visible through `store.introspect().annotations` — with no
+KindRegistry closure computed over it. Your application interprets the
+vocabulary, the same way `metaEdge()`'s custom properties always required
+application code to interpret them. See
+[examples/08-custom-ontology.ts](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/08-custom-ontology.ts)
+for a complete example, including a transitive-closure walk over an
+annotated relation. See
+[Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](/schema-evolution#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis)
+for the migration from an existing `metaEdge()` declaration.
 
 ## Closure Computation
 
@@ -754,28 +793,6 @@ function equivalentTo(
 ): OntologyRelation;
 ```
 
-#### `sameAs(kindA, kindBOrIri)`
-
-Deprecated type-level alias of `equivalentTo`, including the equivalence with
-external IRIs — the registry folds `sameAs` into the identical mutual-
-subsumption classes. Unlike `equivalentTo`, its left parameter is **not**
-widened: `sameAs` stays `NodeType`-only, since it is scheduled for removal and
-no interop case needs the edge-to-IRI shape on it. Migrate to the graph-level
-TypeGraph Identity Profile for individual identity.
-
-```typescript
-function sameAs(kindA: NodeType, kindBOrIri: NodeType | string): OntologyRelation;
-```
-
-#### `differentFrom(a, b)`
-
-Deprecated decorative type-level relation. Migrate to the graph-level TypeGraph
-Identity Profile for individual identity.
-
-```typescript
-function differentFrom(a: NodeType, b: NodeType): OntologyRelation;
-```
-
 #### `disjointWith(a, b)`
 
 Declares mutual exclusion (types cannot share the same ID).
@@ -849,24 +866,6 @@ Each allowed pair in `edgeA` must be assignable to one allowed pair in `edgeB`
 `ConfigurationError` when the graph is built into a store or committed as a
 schema version if they aren't — see [Edge Relationships](#edge-relationships)
 above.
-
-#### `metaEdge(name, options?)`
-
-Creates a custom meta-edge for domain-specific relationships.
-
-```typescript
-function metaEdge(
-  name: string,
-  options?: {
-    transitive?: boolean;
-    symmetric?: boolean;
-    reflexive?: boolean;
-    inverse?: string;
-    inference?: InferenceType;
-    description?: string;
-  },
-): MetaEdge;
-```
 
 ### Type Registry API
 

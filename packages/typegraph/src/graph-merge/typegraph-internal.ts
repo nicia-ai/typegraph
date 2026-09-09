@@ -64,6 +64,8 @@ export {
   readProposedEdgeAcyclicityViolations,
 } from "../store/acyclicity";
 export { type UniqueIntrospection } from "../store/introspect";
+export { planCompositionCascade } from "../store/operations/composition-cascade";
+export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
@@ -71,6 +73,11 @@ export {
   readRecordedClock,
   readRevisionOrigin,
 } from "../store/recorded-capture";
+export {
+  type GraphWriteLock,
+  lockRecordedGraphWrite,
+  uncapturedGraphWriteLock,
+} from "../store/recorded-capture/clock";
 export {
   storeBackend,
   storeQueryBackend,

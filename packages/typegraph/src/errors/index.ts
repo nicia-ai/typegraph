@@ -1041,6 +1041,58 @@ export class IdentitySeparationViolationError extends TypeGraphError {
   }
 }
 
+export type IdentityReplayErrorDetails =
+  | Readonly<{ code: "IDENTITY_REPLAY_REQUIRES_HISTORY"; graphId: string }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_LIMIT_EXCEEDED";
+      limit: number;
+      resumeFromRecorded: string;
+    }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
+      /**
+       * The caller's OWN `fromRecorded`, present only when the caller
+       * actually supplied one. `requestedTo` is `toRecorded`, always present
+       * (this refusal only fires when a bounded range — `toRecorded` given —
+       * lies entirely below the watermark). Never fabricated from the other:
+       * an open-ended request (no `fromRecorded`) must not read back a
+       * `requestedFrom` it never named.
+       */
+      requestedFrom?: string;
+      requestedTo: string;
+      prunedBefore: string;
+    }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_WALK_INCOMPLETE";
+      ceiling: number;
+    }>;
+
+/**
+ * Thrown by `store.identity.replay` / `transitionsOf` (and
+ * `pruneIdentityTransitions`'s own history precondition) when the transition
+ * log cannot answer a request: history capture is off, the requested range
+ * would return more boundaries than the caller's limit, or the requested
+ * range lies entirely below the retention watermark.
+ */
+export class IdentityReplayError extends TypeGraphError {
+  declare readonly details: IdentityReplayErrorDetails;
+
+  constructor(
+    message: string,
+    details: IdentityReplayErrorDetails,
+    options?: Readonly<{ suggestion?: string }>,
+  ) {
+    super(message, details.code, {
+      details,
+      category: "constraint",
+      ...(options?.suggestion === undefined ?
+        {}
+      : { suggestion: options.suggestion }),
+    });
+    this.name = "IdentityReplayError";
+  }
+}
+
 /**
  * Details for RestrictedDeleteError.
  */
@@ -1073,6 +1125,48 @@ export class RestrictedDeleteError extends TypeGraphError {
       },
     );
     this.name = "RestrictedDeleteError";
+  }
+}
+
+/**
+ * Details for CompositionCycleError.
+ */
+export type CompositionCycleErrorDetails = Readonly<{
+  wholeKind: string;
+  wholeId: string;
+  revisitedKind: string;
+  revisitedId: string;
+}>;
+
+/**
+ * Thrown when a composition parts closure revisits a node already in the
+ * walk — an INSTANCE-level cycle, not a library invariant violation.
+ * Reflexive composition (a kind declaring `partOf`/`hasPart` against
+ * itself) is permitted at the kind level, and nothing yet refuses the
+ * corresponding cycle when the realizing edges are written, so two nodes
+ * (or a longer ring) can end up mutually `partOf` each other. The cascade's
+ * visited set catches this deterministically rather than looping or
+ * silently truncating, but the affected nodes stay undeletable through the
+ * ordinary delete path until the cycle is broken by hand.
+ */
+export class CompositionCycleError extends TypeGraphError {
+  declare readonly details: CompositionCycleErrorDetails;
+
+  constructor(
+    details: CompositionCycleErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Composition parts closure of "${details.wholeKind}/${details.wholeId}" revisited "${details.revisitedKind}/${details.revisitedId}": an instance-level cycle exists among reflexive composition edges.`,
+      "COMPOSITION_CYCLE_DETECTED",
+      {
+        details,
+        category: "constraint",
+        suggestion: `Delete or reassign one of the composition edges that closes this cycle (the "${details.revisitedKind}/${details.revisitedId}" ↔ ancestor link), then retry the delete.`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "CompositionCycleError";
   }
 }
 

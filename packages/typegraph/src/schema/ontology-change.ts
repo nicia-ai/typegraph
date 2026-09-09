@@ -59,6 +59,19 @@
  * A relation whose `from` or `to` names a kind THIS COMMIT REMOVES is always
  * `safe` with no probe — see {@link classifyOntologyChanges}'s removed-kind
  * rule.
+ *
+ * This module has exactly ONE owner for "did the ontology change, and how
+ * severely": the RELATION-level diff above. `SerializedOntology.metaEdges`
+ * is derived state the serializer computes 1:1 from `relations` (one entry
+ * per meta-edge name any relation currently uses) — it is never an
+ * independent classification input. `classifyOntologyChanges` therefore
+ * diffs only `relations`; a meta-edge name disappearing from the catalog is
+ * always the same event as its last relation being removed, which the
+ * relation-level diff has already classified through the severity table
+ * above. An earlier revision diffed the catalog too, unconditionally
+ * `breaking` on any name leaving it — a second, contradicting owner of the
+ * same decision (it disagreed with the relation-level table for every
+ * `safe`/`warning` removal, `sameAs`'s and `differentFrom`'s included).
  */
 import type { EdgeEndpointAllowance } from "../backend/types";
 import {
@@ -151,7 +164,7 @@ export type OntologyDataProbe =
  */
 export type OntologyChange = Readonly<{
   type: ChangeType;
-  entity: "metaEdge" | "relation" | "edgeRegistration";
+  entity: "relation" | "edgeRegistration";
   name: string;
   severity: ChangeSeverity;
   details: string;
@@ -636,31 +649,6 @@ export function classifyOntologyChanges(
   after: OntologySnapshot,
 ): readonly OntologyChange[] {
   const changes: OntologyChange[] = [];
-
-  const metaEdgesBefore = new Set(Object.keys(before.ontology.metaEdges));
-  const metaEdgesAfter = new Set(Object.keys(after.ontology.metaEdges));
-  for (const name of metaEdgesBefore) {
-    if (!metaEdgesAfter.has(name)) {
-      changes.push({
-        type: "removed",
-        entity: "metaEdge",
-        name,
-        severity: "breaking",
-        details: `Meta-edge "${name}" was removed`,
-      });
-    }
-  }
-  for (const name of metaEdgesAfter) {
-    if (!metaEdgesBefore.has(name)) {
-      changes.push({
-        type: "added",
-        entity: "metaEdge",
-        name,
-        severity: "safe",
-        details: `Meta-edge "${name}" was added`,
-      });
-    }
-  }
 
   // Edge-registration `acyclic`, item D.2. Independent of whether any
   // ontology relation changed — an edge kind's acyclicity axiom shares no

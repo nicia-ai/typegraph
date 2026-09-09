@@ -2801,6 +2801,8 @@ export type IdentityTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
 }>;
 
 // @public
@@ -2908,9 +2910,6 @@ export type IndexWhereOperand = Readonly<{
     field: string;
     valueType: ValueType | undefined;
 }>;
-
-// @public
-export type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
 // @public
 export type InListParameterOptions = Readonly<{
@@ -3531,6 +3530,8 @@ export type ResolvedSqlTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
     fulltext: string;
     uniques: string;
     edgeClaims: string;
@@ -3636,11 +3637,6 @@ export type SerializedEdgeDef = Readonly<{
 // @public
 export type SerializedMetaEdge = Readonly<{
     name: string;
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -3780,6 +3776,8 @@ export type SqlTableNames = Readonly<{
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
     identitySeparation?: string | undefined;
+    identityTransitions?: string | undefined;
+    identityTransitionRetention?: string | undefined;
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;
@@ -4325,7 +4323,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "heterogeneousEndpointSetRead";
-        readonly ceiling: 4;
+        readonly ceiling: 5;
     };
     readonly fulltextSearch: {
         readonly kind: "deferred";
