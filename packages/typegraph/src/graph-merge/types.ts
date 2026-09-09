@@ -633,12 +633,13 @@ export type IdentityUnresolvedConflict =
        * source cannot make this a crash.
        */
       source?: MatchSource | undefined;
-    }>
-  | Readonly<{
-      kind: "provenance";
-      canonical: EntityRef;
-      contributions: readonly ProvenanceRecord[];
     }>;
+// No `"provenance"` arm: `onProvenanceConflict` has exactly two dispositions
+// (`"keepBoth"`, which reports nothing, and `"refuse"`, which throws) and no
+// resolving/"flag" disposition that could ever place one on
+// `MergeReport.identityConflicts` or a plan artifact — see
+// `assertIdentityProvenanceAgreement` in merge.ts, the arm's only producer,
+// which builds this shape solely for a THROWN error's `details.conflict`.
 
 /**
  * Visibility into a duplicate-assertion arbitration the merge already applied:

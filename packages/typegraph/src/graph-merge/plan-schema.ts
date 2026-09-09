@@ -196,7 +196,7 @@ export type MergePlanCandidateDiagnostic = Readonly<{
     | "retained"
     | Readonly<{
         kind: "excluded";
-        reason: "diameter" | "baseAmbiguity";
+        reason: "diameter" | "baseAmbiguity" | "separation";
       }>
     | undefined;
 }>;
@@ -566,7 +566,7 @@ const diagnosticsSchema = z
               z
                 .object({
                   kind: z.literal("excluded"),
-                  reason: z.enum(["diameter", "baseAmbiguity"]),
+                  reason: z.enum(["diameter", "baseAmbiguity", "separation"]),
                 })
                 .strict(),
             ])
@@ -642,13 +642,9 @@ const identityUnresolvedConflictSchema = z.discriminatedUnion("kind", [
       source: matchSourceSchema.optional(),
     })
     .strict(),
-  z
-    .object({
-      kind: z.literal("provenance"),
-      canonical: mergePlanEntityRefSchema,
-      contributions: z.array(identityProvenanceRecordSchema),
-    })
-    .strict(),
+  // No `"provenance"` arm: `onProvenanceConflict` has no reporting
+  // disposition that could ever place one on this array (see the matching
+  // note on `IdentityUnresolvedConflict` in types.ts).
 ]);
 
 const mergePlanReviewSchema = z

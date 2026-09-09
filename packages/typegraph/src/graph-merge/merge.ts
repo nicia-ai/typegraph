@@ -570,9 +570,15 @@ function applyIdentitySeparationVeto(
 ): Readonly<{
   edges: readonly CandidateEdge[];
   conflicts: readonly IdentityUnresolvedConflict[];
+  // The edges the veto itself dropped — reported to `candidateDiagnostics`
+  // with `clusterDisposition: { kind: "excluded", reason: "separation" }` the
+  // same way the base and diameter guards report theirs, so the diagnostic
+  // surface never says "retained" about a pair the merge actually refused.
+  vetoedEdges: readonly CandidateEdge[];
 }> {
   const edges: CandidateEdge[] = [];
   const conflicts: IdentityUnresolvedConflict[] = [];
+  const vetoedEdges: CandidateEdge[] = [];
   for (const edge of candidateEdges) {
     if (
       edge.evidence.decision === "definitional" ||
@@ -581,6 +587,7 @@ function applyIdentitySeparationVeto(
       edges.push(edge);
       continue;
     }
+    vetoedEdges.push(edge);
     const [source] = edge.evidence.sources;
     conflicts.push({
       kind: "separation",
@@ -590,7 +597,7 @@ function applyIdentitySeparationVeto(
       ...(source === undefined ? {} : { source }),
     });
   }
-  return { edges, conflicts };
+  return { edges, conflicts, vetoedEdges };
 }
 
 /**
@@ -752,18 +759,28 @@ function partitionIdentityPairingAssertions(
         : undefined
       : "cross-kind-pairing";
     if (unpairable !== undefined) {
-      crossKind.push({
-        kind: "assertion",
-        reason: unpairable,
-        semanticKey: identitySemanticKey(assertion),
-        a: { kind: assertion.a.kind, id: assertion.a.id as NodeId<NodeType> },
-        b: { kind: assertion.b.kind, id: assertion.b.id as NodeId<NodeType> },
-        relation: assertion.relation,
-        assertionIds: [assertion.id],
-        branches: (branchesById.get(assertion.id) ?? []).toSorted(
-          (left, right) => compareStrings(left, right),
-        ),
-      });
+      // An INHERITED `out-of-scope-pairing` assertion — no branch staged it,
+      // it is simply the target's existing ledger between two rows this merge
+      // never restaged — is not a conflict any branch caused. Only a
+      // branch-staged assertion (present in `branchesById`) is reported;
+      // `cross-kind-pairing` stays reported regardless of provenance, since
+      // that shape is a structural limit of per-kind candidate scopes, not a
+      // question of which rows are in scope.
+      const stagedByBranch = branchesById.get(assertion.id);
+      if (unpairable === "cross-kind-pairing" || stagedByBranch !== undefined) {
+        crossKind.push({
+          kind: "assertion",
+          reason: unpairable,
+          semanticKey: identitySemanticKey(assertion),
+          a: { kind: assertion.a.kind, id: assertion.a.id as NodeId<NodeType> },
+          b: { kind: assertion.b.kind, id: assertion.b.id as NodeId<NodeType> },
+          relation: assertion.relation,
+          assertionIds: [assertion.id],
+          branches: (stagedByBranch ?? []).toSorted((left, right) =>
+            compareStrings(left, right),
+          ),
+        });
+      }
       continue;
     }
     const forKind = sameByKind.get(assertion.a.kind);
@@ -1396,6 +1413,7 @@ function buildInternalMergePlan<G extends GraphDef>(
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
   separationFacts: IdentitySeparationFacts,
   identityCandidateConflicts: readonly IdentityUnresolvedConflict[],
+  vetoedEdges: readonly CandidateEdge[],
   preferredBranchId?: BranchId,
 ): MergePlan<G> {
   const identity = planIdentityChanges(
@@ -1536,7 +1554,10 @@ function buildInternalMergePlan<G extends GraphDef>(
   for (const cluster of clusters) {
     assertClusterNotSeparated(cluster.members, separationFacts);
   }
-  const excludedByEndpoints = new Map<string, "diameter" | "baseAmbiguity">();
+  const excludedByEndpoints = new Map<
+    string,
+    "diameter" | "baseAmbiguity" | "separation"
+  >();
   for (const excluded of [
     ...guard.excludedEdges,
     ...diameterGuard.excludedEdges,
@@ -1544,6 +1565,16 @@ function buildInternalMergePlan<G extends GraphDef>(
     excludedByEndpoints.set(
       JSON.stringify([excluded.edge.a, excluded.edge.b]),
       excluded.reason,
+    );
+  }
+  // The separation veto drops a candidate edge before it ever reaches the base
+  // or diameter guards, so it needs its own exclusion reason fed into the same
+  // map — otherwise the diagnostic surface says "retained" about a pair the
+  // merge actually refused for contradicting the identity ledger.
+  for (const edge of vetoedEdges) {
+    excludedByEndpoints.set(
+      JSON.stringify([edge.a, edge.b]),
+      "separation" as const,
     );
   }
   const diagnosticsWithDisposition: CandidateDiagnostic[] =
@@ -2127,7 +2158,27 @@ function buildInternalMergePlan<G extends GraphDef>(
  * contribution. `"refuse"` fails the plan naming the canonical entity and the
  * contributions that disagree, for a caller whose source attribution is a
  * correctness invariant rather than a record.
+ *
+ * "Source" here is the contributing BRANCH, not `ProvenanceRecord.sourceId` —
+ * that field is each member's own fork-local id, which an identity-paired
+ * cluster's distinct members always differ on, so comparing it would refuse
+ * every fusion regardless of whether the attribution actually disagrees. A
+ * single branch asserting `same` over two rows it authored itself is not a
+ * contradiction; two branches independently authoring the paired rows is.
  */
+/**
+ * The `details.conflict` shape a provenance refusal throws. NOT an arm of the
+ * public `IdentityUnresolvedConflict` union (R5): `onProvenanceConflict` has
+ * no resolving disposition that ever places one on `MergeReport
+ * .identityConflicts` or a plan artifact, so this shape is local to the
+ * thrown error alone.
+ */
+type IdentityProvenanceConflictDetails = Readonly<{
+  kind: "provenance";
+  canonical: EntityRef;
+  contributions: readonly ProvenanceRecord[];
+}>;
+
 function assertIdentityProvenanceAgreement(
   policy: "keepBoth" | "refuse",
   survivingEdges: readonly CandidateEdge[],
@@ -2156,7 +2207,14 @@ function assertIdentityProvenanceAgreement(
   for (const [canonical, records] of [...byCanonical].sort(([left], [right]) =>
     compareMergeKeys(left, right),
   )) {
-    const sources = new Set(records.map((record) => record.sourceId));
+    // `sourceId` is the contribution's FORK-LOCAL id (types.ts docblock) —
+    // an identity-paired cluster's two distinct members always differ there,
+    // so comparing it would refuse every fusion regardless of attribution.
+    // The real attribution key is `branchId`: which branch actually
+    // contributed the row. Two members a single branch asserted `same` over
+    // carry no contradiction; two members different branches independently
+    // authored do.
+    const sources = new Set(records.map((record) => record.branchId));
     if (sources.size <= 1) continue;
     throw new IdentityMergeConflictError(
       `Identity-paired entity ${kindOf(canonical)}:${idOf(canonical)} carries contributions from ${sources.size} different sources (${[...sources].toSorted().join(", ")}), which options.identity.onProvenanceConflict: "refuse" does not accept.`,
@@ -2167,10 +2225,7 @@ function assertIdentityProvenanceAgreement(
             kind: "provenance",
             canonical: entityRef(canonical),
             contributions: records,
-          } satisfies Extract<
-            IdentityUnresolvedConflict,
-            Readonly<{ kind: "provenance" }>
-          >,
+          } satisfies IdentityProvenanceConflictDetails,
         },
         suggestion:
           'Reconcile the source attribution of the paired members, or set options.identity.onProvenanceConflict: "keepBoth" to keep every contribution.',
@@ -2202,8 +2257,6 @@ function identityReconciliationSortKey(
   };
 }
 
-const UNKEYED_ENTITY_REF: EntityRef = { kind: "", id: "" as EntityRef["id"] };
-
 function identityUnresolvedConflictSortKey(
   conflict: IdentityUnresolvedConflict,
 ): IdentityReportSortKey {
@@ -2217,13 +2270,6 @@ function identityUnresolvedConflictSortKey(
     }
     case "separation": {
       return { semanticKey: conflict.kind, a: conflict.a, b: conflict.b };
-    }
-    case "provenance": {
-      return {
-        semanticKey: conflict.kind,
-        a: conflict.canonical,
-        b: UNKEYED_ENTITY_REF,
-      };
     }
   }
 }
@@ -3990,6 +4036,7 @@ async function resolveMerge<G extends GraphDef, Output>(
       targetPeers,
       separationFacts,
       identityCandidateConflicts,
+      veto.vetoedEdges,
       preferredBranchId,
     );
 
