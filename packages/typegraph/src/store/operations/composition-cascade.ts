@@ -9,8 +9,12 @@
  * and apply-time orphan checks — reads the closure through this module, never
  * by re-walking composition edges itself.
  */
-import { type EdgeRow, type GraphReadBackend } from "../../backend/types";
-import { CompilerInvariantError } from "../../errors";
+import {
+  type EdgeRow,
+  type GraphReadBackend,
+  isLiveNodeRow,
+} from "../../backend/types";
+import { CompilerInvariantError, CompositionCycleError } from "../../errors";
 import {
   type CompositionPair,
   type CompositionPartSide,
@@ -47,7 +51,12 @@ type CompositionCascadeMember = Readonly<{
 }>;
 
 export type CompositionCascadePlan = Readonly<{
-  /** Parts in LEAF-FIRST order. Empty when the whole declares no parts. */
+  /**
+   * LIVE parts in LEAF-FIRST order. Empty when the whole declares no parts.
+   * A member whose node row is already dead (see {@link liveDiscoveredMembers})
+   * is excluded — it is not something for a caller to retire/purge, nor a
+   * composition orphan for merge to report.
+   */
   members: readonly CompositionCascadeMember[];
   /** Every composition edge id the cascade consumes, including the roots'. */
   consumedEdgeIds: ReadonlySet<string>;
@@ -100,6 +109,19 @@ function wholeSide(partSide: CompositionPartSide): "from" | "to" {
   return partSide === "from" ? "to" : "from";
 }
 
+/** {@link readWholeSideEdges}'s result: the rows, and whether the set-read port answered. */
+type WholeSideEdgesResult = Readonly<{
+  rows: readonly EdgeRow[];
+  /**
+   * Whether `findEdgesByHeterogeneousEndpointSet` answered this round at
+   * all — with rows, or with a caller-trusted empty result. `false` only
+   * when the port is unavailable, or when this round paid the one-time
+   * fallback confirmation itself. The caller uses this to stop asking for
+   * that confirmation once the port has proven itself for this cascade.
+   */
+  setReadAnswered: boolean;
+}>;
+
 /**
  * Reads one round's whole-side composition edges: every live composition
  * edge (of the given kinds) whose WHOLE endpoint is a member of `frontier`.
@@ -107,30 +129,36 @@ function wholeSide(partSide: CompositionPartSide): "from" | "to" {
  * Prefers `findEdgesByHeterogeneousEndpointSet` — the same set read
  * `findConnectedEdgesForNodeBatch` (`node-operations.ts`) uses — split into
  * (at most) two calls, one per orientation, since one call's `side` applies
- * uniformly to every edge kind it names. Falls back to the kind-blind
- * `findEdgesConnectedTo`, filtered to this round's edge kinds and their
- * whole-side orientation, when the set read is unavailable OR comes back
- * with no rows at all: no licensed rows is insufficient evidence that none
- * exist (the same disposition `findConnectedEdgesForNodeBatch` states),
- * never proof a childless round actually is one.
+ * uniformly to every edge kind it names, and always combined into ONE
+ * result before any trust decision: an empty result is judged on the
+ * COMBINED rows across both orientations, never per-orientation, so a
+ * nonempty `from`-side never short-circuits trust of an empty `to`-side (or
+ * vice versa) — the same disposition applies uniformly to both.
  *
- * DELIBERATE, not a missed capability check: every terminal (childless)
- * round on a set-read-capable backend pays the per-frontier-node fallback
- * read once to confirm the empty result, matching the sibling function's
- * disposition rather than introducing a second way to answer "can this
- * backend/graph answer this read with the set port". `findEdgesByHeterogeneousEndpointSet`
- * itself applies no temporal filter beyond `excludeDeleted` (see
- * `buildTemporalConditions`), so it always returns an ended-but-undeleted
- * row exactly as `findEdgesConnectedTo` does — the population decision is
- * `compositionEdgeCounts`' alone, applied to whichever read answered. See
- * `tests/composition-cascade.test.ts`'s direct assertion on the set read.
+ * Falls back to the kind-blind `findEdgesConnectedTo`, filtered to this
+ * round's edge kinds and their whole-side orientation, only when the set
+ * read is unavailable, or when `trustEmptyResult` is `false` AND the set
+ * read came back with no rows at all: no licensed rows is insufficient
+ * evidence that none exist (the same disposition `findConnectedEdgesForNodeBatch`
+ * states) until the caller has confirmed it once for this cascade.
+ * `trustEmptyResult: true` (every round after the first has confirmed the
+ * port) skips that confirmation — an unbounded closure would otherwise pay
+ * one extra per-frontier-node read at EVERY childless round, not just the
+ * first, for evidence the first round already established.
+ * `findEdgesByHeterogeneousEndpointSet` itself applies no temporal filter
+ * beyond `excludeDeleted` (see `buildTemporalConditions`), so it always
+ * returns an ended-but-undeleted row exactly as `findEdgesConnectedTo`
+ * does — the population decision is `compositionEdgeCounts`' alone, applied
+ * to whichever read answered. See `tests/composition-cascade.test.ts`'s
+ * direct assertion on the set read.
  */
 async function readWholeSideEdges(
   ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
   frontier: readonly CascadeNode[],
   edgeKinds: readonly string[],
   backend: GraphReadBackend,
-): Promise<readonly EdgeRow[]> {
+  trustEmptyResult: boolean,
+): Promise<WholeSideEdgesResult> {
   const wholeIsFromEdgeKinds = edgeKinds.filter(
     (edgeKind) => wholeSide(requirePartSide(ctx.registry, edgeKind)) === "from",
   );
@@ -164,8 +192,9 @@ async function readWholeSideEdges(
           excludeDeleted: true,
         }),
     ]);
-    if (fromSideRows.length > 0 || toSideRows.length > 0) {
-      return [...fromSideRows, ...toSideRows];
+    const combined = [...fromSideRows, ...toSideRows];
+    if (combined.length > 0 || trustEmptyResult) {
+      return { rows: combined, setReadAnswered: true };
     }
   }
 
@@ -198,7 +227,10 @@ async function readWholeSideEdges(
       filtered.push(row);
     }
   }
-  return filtered;
+  // The set-read port (if any) is now confirmed for this cascade: this
+  // round paid the fallback and it agreed with the port's empty verdict
+  // (or there was no port to confirm), so future rounds may trust it.
+  return { rows: filtered, setReadAnswered: setRead !== undefined };
 }
 
 function requirePartSide(
@@ -216,6 +248,46 @@ function requirePartSide(
 }
 
 /**
+ * Drops discovered members whose node row is no longer live.
+ *
+ * A composition edge row and its endpoint's node row can go stale relative
+ * to each other: a direct part delete cleans up its OWN composition edges
+ * (see `enforceNodeDeleteBehavior`'s restrict arm, `node-write-pipeline.ts`),
+ * but an ended-but-undeleted `oneActive` reparent or a pre-fix write can
+ * still leave a live composition edge pointing at an already-tombstoned
+ * node. A dead node is not a composition ORPHAN — there is nothing left for
+ * a caller to act on — so this is the ONE place that liveness is checked
+ * before a member is reported: both the runtime cascade (which retires/
+ * purges each `members` entry) and merge's plan/apply-time orphan reports
+ * read the SAME filtered closure, rather than each re-deriving "is this
+ * member actually still there" on its own. (The runtime cascade's own
+ * `target.getNode` preflight per member is therefore a guard against a TRUE
+ * concurrent delete racing the walk itself, not this steady-state gap.)
+ *
+ * One batched read: `discoveryOrder` is already the complete, deduplicated
+ * closure, so a single parallel round of `getNode` calls suffices — no need
+ * to interleave this with the round-by-round edge traversal above, which
+ * must still walk THROUGH a dead member to find any live descendants
+ * beneath it (edge reads are keyed by `(kind, id)`, not by the node's own
+ * liveness).
+ */
+async function liveDiscoveredMembers(
+  ctx: Readonly<{ graphId: string }>,
+  backend: GraphReadBackend,
+  discoveryOrder: readonly CompositionCascadeMember[],
+): Promise<readonly CompositionCascadeMember[]> {
+  const nodeRows = await Promise.all(
+    discoveryOrder.map((member) =>
+      backend.getNode(ctx.graphId, member.kind, member.id),
+    ),
+  );
+  return discoveryOrder.filter((_member, index) => {
+    const row = nodeRows[index];
+    return row !== undefined && isLiveNodeRow(row);
+  });
+}
+
+/**
  * THE parts closure of one whole, under the per-graph write lock.
  *
  * `lock` is compile-time evidence the caller took the per-graph write lock
@@ -229,11 +301,14 @@ function requirePartSide(
  * reflexive composition, so a kind-level closure of one edge kind places no
  * bound on instance depth. The visited set is finite because the graph is; a
  * round that discovers no new member ends the walk normally. A row that
- * resolves to an ALREADY-visited member is a should-be-impossible library
- * invariant violation — the union-acyclicity fence refuses a kind-level
- * cycle at declaration time, so an instance cycle is unreachable — and
- * throws {@link CompilerInvariantError} rather than silently truncating,
- * which would produce a silent orphan.
+ * resolves to an ALREADY-visited member is an INSTANCE-level cycle — reachable
+ * data, not a library invariant violation: reflexive composition is permitted
+ * at the kind level (`isReflexiveCompositionAllowed`, ontology/validation.ts),
+ * and nothing refuses the corresponding instance cycle at write time (that is
+ * the union-acyclicity fence's job, tracked separately, not yet built). The
+ * walk cannot silently truncate a revisit — that would produce a silent
+ * orphan — so it stops and throws the typed, user-facing
+ * {@link CompositionCycleError} instead.
  *
  * Deliberately not `buildReachableCte`: one CTE carries one temporal mode,
  * and a closure spanning a `one` level and an `oneActive` level needs both.
@@ -259,8 +334,16 @@ export async function planCompositionCascade(
   const consumedEdgeIds = new Set<string>();
 
   let frontier: readonly CascadeNode[] = [root];
+  let setReadTrusted = false;
   while (frontier.length > 0) {
-    const rows = await readWholeSideEdges(ctx, frontier, edgeKinds, backend);
+    const { rows, setReadAnswered } = await readWholeSideEdges(
+      ctx,
+      frontier,
+      edgeKinds,
+      backend,
+      setReadTrusted,
+    );
+    setReadTrusted ||= setReadAnswered;
     const nextFrontier: CascadeNode[] = [];
     for (const row of rows) {
       const partSide = requirePartSide(ctx.registry, row.kind);
@@ -287,15 +370,12 @@ export async function planCompositionCascade(
 
       const key = memberKey(part);
       if (visited.has(key)) {
-        throw new CompilerInvariantError(
-          `planCompositionCascade revisited "${part.kind}:${part.id}" while walking the composition parts closure of "${wholeKind}:${wholeId}". Composition cycles are refused at declaration time, so this instance cycle should be unreachable.`,
-          {
-            wholeKind,
-            wholeId,
-            revisitedKind: part.kind,
-            revisitedId: part.id,
-          },
-        );
+        throw new CompositionCycleError({
+          wholeKind,
+          wholeId,
+          revisitedKind: part.kind,
+          revisitedId: part.id,
+        });
       }
       visited.add(key);
       nextFrontier.push(part);
@@ -311,9 +391,10 @@ export async function planCompositionCascade(
     frontier = nextFrontier;
   }
 
+  const liveMembers = await liveDiscoveredMembers(ctx, backend, discoveryOrder);
   return {
     // Leaf-first: the reverse of BFS discovery order.
-    members: discoveryOrder.toReversed(),
+    members: liveMembers.toReversed(),
     consumedEdgeIds,
   };
 }

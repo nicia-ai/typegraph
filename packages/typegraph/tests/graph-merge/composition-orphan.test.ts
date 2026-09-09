@@ -193,6 +193,71 @@ describe.each(backendMatrix())(
       ).resolves.toBeDefined();
     });
 
+    it("does not report an already-dead part (its composition edge survives its endpoint) as an orphan", async () => {
+      cleanups = [];
+      const forkPoint = await makeStore();
+      const whole = await forkPoint.nodes.Whole.create({}, { id: "w1" });
+      const originalPart = await forkPoint.nodes.Part.create({}, { id: "p1" });
+      await forkPoint.edges.holds.create(originalPart, whole, {});
+
+      const branchA = await makeBranchOf(forkPoint, BRANCH_A);
+      await branchA.store.nodes.Whole.delete(whole.id);
+
+      // The target: independently at the same fork-point state, but with a
+      // SECOND part whose node row is already dead while its `holds` edge
+      // is still live — the state EC-R2-1 fixed a direct `restrict` delete
+      // from ever leaving behind, reachable today only from a legacy row or
+      // a write that bypasses the ordinary delete pipeline. Written directly
+      // through the backend seam (never through `store.nodes.Part.delete`,
+      // which cleans up its own composition edges) to construct that state
+      // deliberately.
+      const targetBackend = await makeBackend();
+      const [target] = await createStoreWithSchema(graph, targetBackend, {
+        revisionTracking: true,
+      });
+      const targetWhole = await target.nodes.Whole.create({}, { id: "w1" });
+      const targetOriginalPart = await target.nodes.Part.create(
+        {},
+        { id: "p1" },
+      );
+      await target.edges.holds.create(targetOriginalPart, targetWhole, {});
+      const deadPart = await target.nodes.Part.create({}, { id: "p2" });
+      await target.edges.holds.create(deadPart, targetWhole, {});
+      await targetBackend.deleteNode({
+        graphId: graph.id,
+        kind: "Part",
+        id: deadPart.id,
+      });
+
+      const planResult = await planMergeIncremental<G>({
+        forkPoint,
+        target,
+        branches: [branchA],
+      });
+      expect(isOk(planResult)).toBe(true);
+      if (!isOk(planResult)) throw planResult.error;
+      const artifact = planResult.data;
+
+      // MUTATION: drop `liveDiscoveredMembers`'s filter from
+      // `planCompositionCascade` (return `discoveryOrder` unfiltered) and
+      // this reports `p2` as an orphan instead of an empty array — a dead
+      // node is not a live composition part for a caller to act on.
+      expect(artifact.review.compositionOrphans).toEqual([]);
+
+      const applyResult = await applyMergePlan(target, artifact);
+      expect(isOk(applyResult)).toBe(true);
+
+      await expect(
+        target.nodes.Whole.getById(targetWhole.id),
+      ).resolves.toBeUndefined();
+      await expect(
+        target.nodes.Part.getById(targetOriginalPart.id),
+      ).resolves.toBeUndefined();
+      await expect(
+        target.nodes.Part.getById(deadPart.id),
+      ).resolves.toBeUndefined();
+    });
+
     it("applies a plan that already carries the whole AND its part, deleting exactly those two — no extra cascade", async () => {
       cleanups = [];
       const forkPoint = await makeStore();

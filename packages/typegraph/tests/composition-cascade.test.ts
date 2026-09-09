@@ -217,13 +217,14 @@ describe("planCompositionCascade", () => {
     expect(plan.consumedEdgeIds.size).toBe(2);
   });
 
-  it("throws CompilerInvariantError on an unreachable revisit rather than truncating", async () => {
+  it("throws CompositionCycleError on a revisit rather than truncating", async () => {
     const graph = buildPodcastGraph("cascade-plan-revisit");
     const registry = buildKindRegistry(graph);
-    // A fake backend whose rows admit the SAME (kind, id) member twice —
-    // the shape the real acyclicity fence makes unreachable (composition
-    // cycles are refused at declaration time) — hand-built here to reach the
-    // throw directly rather than depending on an unreachable real fixture.
+    // A fake backend whose rows admit the SAME (kind, id) member twice — an
+    // INSTANCE-level cycle, which reflexive composition permits at the kind
+    // level (nothing yet refuses the corresponding write-time cycle) — hand-
+    // built here to reach the throw directly rather than depending on a real
+    // reflexive fixture.
     const rootToEpisode: EdgeRow = {
       graph_id: "g",
       id: "root-to-episode",
@@ -274,8 +275,8 @@ describe("planCompositionCascade", () => {
       ),
     ).rejects.toThrow(
       matchingObject({
-        name: "CompilerInvariantError",
-        code: "COMPILER_INVARIANT_ERROR",
+        name: "CompositionCycleError",
+        code: "COMPOSITION_CYCLE_DETECTED",
       }),
     );
   });
@@ -455,7 +456,11 @@ describe("composition cascade — delete", () => {
 
     const podcast = await store.nodes.RestrictPodcast.create({});
     const episode = await store.nodes.RestrictEpisode.create({});
-    await store.edges.restrictEpisodeOf.create(episode, podcast, {});
+    const edge = await store.edges.restrictEpisodeOf.create(
+      episode,
+      podcast,
+      {},
+    );
 
     // MUTATION: drop the `!ctx.registry.isCompositionEdge(edge.kind)` filter
     // from `enforceNodeDeleteBehavior`'s restrict arm and this throws
@@ -470,6 +475,14 @@ describe("composition cascade — delete", () => {
     await expect(
       store.nodes.RestrictPodcast.getById(podcast.id),
     ).resolves.toBeDefined();
+    // MUTATION: revert the restrict arm's composition-edge cleanup (return
+    // early once `restrictedEdges.length === 0` instead of deleting
+    // `unconsumedEdges` first) and this resolves to the edge row instead of
+    // `undefined` — the node tombstones while its composition edge survives
+    // pointing at it, the exact state edges cannot be in.
+    await expect(
+      store.edges.restrictEpisodeOf.getById(edge.id),
+    ).resolves.toBeUndefined();
   });
 
   it("cascades a restricting intermediate whole's OWN parts, then does not restrict on its OWN composition edge into its whole", async () => {
@@ -509,7 +522,11 @@ describe("composition cascade — delete", () => {
     const podcast = await store.nodes.Podcast.create({ title: "p" });
     const episode = await store.nodes.Episode.create({ title: "e" });
     const segment = await store.nodes.Segment.create({});
-    await store.edges.episodeOf.create(episode, podcast, {});
+    const episodeOfEdge = await store.edges.episodeOf.create(
+      episode,
+      podcast,
+      {},
+    );
     const segmentOfEdge = await store.edges.segmentOf.create(
       segment,
       episode,
@@ -535,6 +552,14 @@ describe("composition cascade — delete", () => {
     await expect(
       store.nodes.Podcast.getById(podcast.id),
     ).resolves.toBeDefined();
+    // MUTATION: same as the direct-part-delete test above — revert the
+    // restrict arm's composition-edge cleanup and this resolves to the
+    // `episodeOf` edge row instead of `undefined`: Episode's OWN upward
+    // composition edge into ITS whole, excluded from the restrict OBSTACLE
+    // count, must still be removed alongside Episode's tombstone.
+    await expect(
+      store.edges.episodeOf.getById(episodeOfEdge.id),
+    ).resolves.toBeUndefined();
   });
 
   it("cascades three levels of REFLEXIVE composition, terminated by the visited set", async () => {

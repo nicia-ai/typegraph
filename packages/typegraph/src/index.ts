@@ -370,6 +370,7 @@ export {
 export type {
   BaseSchemaMigrationErrorDetails,
   CardinalityErrorDetails,
+  CompositionCycleErrorDetails,
   ContributionRebuildRefusal,
   ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
@@ -416,6 +417,7 @@ export {
   BaseSchemaMigrationError,
   CardinalityError,
   CompilerInvariantError,
+  CompositionCycleError,
   ConfigurationError,
   ContributionRebuildUnsupportedError,
   ContributionUnavailableError,

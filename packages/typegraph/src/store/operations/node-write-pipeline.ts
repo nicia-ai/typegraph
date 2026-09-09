@@ -175,9 +175,9 @@ export type NodeDeletePolicy = Readonly<{
  * constructed — so it is decided statically by
  * `resolveAtomicNodeDeleteBatchExecutor`'s composition guard
  * (`atomic-mutation-program.ts`), which returns no executor for a kind that
- * is a composition whole (`compositionEdgeKindsUnder`) or part
- * (`compositionEdgeKindsOver`) on either side, unconditionally on the caller's
- * policy. Together these are the two EXHAUSTIVE owners of "should this
+ * is a composition whole (`registry.isCompositionWhole`) or part
+ * (`registry.isCompositionPart`) on either side, unconditionally on the
+ * caller's policy. Together these are the two EXHAUSTIVE owners of "should this
  * delete run the portable path": one for policy fields, one for static
  * composition participation. A future third dimension must extend one of
  * these two predicates (or, if neither shape fits, add and name a third
@@ -228,15 +228,22 @@ function nodeSyncContext(
  * composition cascade plans against — see {@link NodeDeletePolicy}.
  *
  * A composition edge is a SEPARATE, unconditional exclusion from the
- * `restrict` count only (composition-contract-design.md's binding ruling: a
- * composition edge is never a restrict obstacle, on either the part end — a
- * part may always be deleted out of its whole — or an intermediate whole's
- * upward edge into ITS OWN whole). This holds whether or not the edge is
- * this delete's own `consumedEdgeIds`, so it is checked independently via
- * `registry.isCompositionEdge` rather than folded into that set. The
- * `cascade` / `disconnect` arm is untouched by this exclusion: a composition
- * edge not already consumed by a policy is still removed alongside the node,
- * exactly as any other cascaded/disconnected edge is.
+ * `restrict` OBSTACLE count only (composition-contract-design.md's binding
+ * ruling: a composition edge is never a restrict obstacle, on either the
+ * part end — a part may always be deleted out of its whole — or an
+ * intermediate whole's upward edge into ITS OWN whole). This holds whether
+ * or not the edge is this delete's own `consumedEdgeIds`, so it is checked
+ * independently via `registry.isCompositionEdge` rather than folded into
+ * that set. Exclusion from the obstacle count is not exclusion from
+ * removal: a `restrict` delete that clears (no non-composition obstacle
+ * remains) still removes every unconsumed composition edge before
+ * returning, through the same {@link deleteEdgesById} owner the
+ * `cascade` / `disconnect` arm uses — otherwise the node would tombstone
+ * while a composition edge still pointed at it, which is the state edges
+ * can never be in (see that arm's own comment). The `cascade` / `disconnect`
+ * arm is untouched by the obstacle exclusion: a composition edge not already
+ * consumed by a policy is still removed alongside the node, exactly as any
+ * other cascaded/disconnected edge is.
  */
 async function enforceNodeDeleteBehavior(
   ctx: NodeWriteContext,
@@ -271,7 +278,24 @@ async function enforceNodeDeleteBehavior(
       const restrictedEdges = unconsumedEdges.filter(
         (edge) => !ctx.registry.isCompositionEdge(edge.kind),
       );
-      if (restrictedEdges.length === 0) return;
+      if (restrictedEdges.length === 0) {
+        // Every unconsumed edge is a composition edge: none of them blocks
+        // the delete, but they are not this delete's `cascade`/`disconnect`
+        // arm's business either (that arm never runs for `restrict`), so
+        // nothing else removes their rows. Leaving them live would point a
+        // composition edge at the node this delete is about to tombstone —
+        // the exact state the comment above the cascade/disconnect arm says
+        // cannot exist. Remove them here through the same owner that arm
+        // uses, so a restrict-behaved delete leaves no dangling composition
+        // edge on either the part or an intermediate whole's upward edge.
+        await deleteEdgesById(
+          ctx,
+          backend,
+          args.mode,
+          unconsumedEdges.map((edge) => edge.id),
+        );
+        return;
+      }
       throw new RestrictedDeleteError({
         nodeKind: args.kind,
         nodeId: args.id,
