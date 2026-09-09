@@ -12,8 +12,15 @@
  * runtime merge logic.
  */
 
+import type { IdentityRelation } from "../identity/types";
 import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
-import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
+import type {
+  CandidateDiagnostics,
+  EntityRef,
+  MatchEvidence,
+  MatchSource,
+} from "./evidence";
+import type { IdentityAssertionConflictPolicy } from "./identity-three-way";
 import type {
   EdgeId,
   GetNodeType,
@@ -331,6 +338,48 @@ export type CandidateDiagnosticsOptions = Readonly<{
 }>;
 
 /**
+ * How the merge folds identity assertions (`store.identity.assertSame` /
+ * `assertDifferent`) into candidate pairing, and how it arbitrates the
+ * identity-assertion conflicts a three-way classification against the staged
+ * base slice cannot resolve by rule alone.
+ *
+ * Every field defaults to today's behavior: `pairing: "off"` recalls no
+ * candidates from identity assertions at all, and `onAssertionConflict:
+ * "refuse"` fails the merge on the same two shapes it always has (branches
+ * asserting opposing relations for one pair, or a retract/reassert race) — a
+ * merge that never sets `identity` behaves byte-for-byte as it does today.
+ */
+export type IdentityReconciliationOptions = Readonly<{
+  /**
+   * `"off"` (default): identity assertions recall no candidates.
+   * `"candidate"`: each `same` assertion emits a scored candidate pair,
+   * subject to the kind's threshold — strong recall, not proof.
+   * `"definitional"`: each `same` assertion forces a fused candidate edge,
+   * merging its endpoints regardless of similarity score.
+   */
+  pairing?: "off" | "candidate" | "definitional";
+  /**
+   * How to arbitrate a `same`/`different` opposing-relations collision or a
+   * retract/reassert race the classifier cannot resolve by rule alone.
+   * `"refuse"` (default) fails the merge, byte-identical to today.
+   * `"assertWins"` / `"retractWins"` resolve a retract/reassert race
+   * specifically (refused as an invalid option against any OTHER conflict
+   * shape, which has no assert/retract axis to decide). `"flag"` keeps base
+   * truth and records an {@link IdentityUnresolvedConflict}. A function
+   * receives the fully-populated conflict and returns the decision itself.
+   */
+  onAssertionConflict?: IdentityAssertionConflictPolicy;
+  /**
+   * How contradictory source attribution across the members of a cluster an
+   * identity assertion FUSED is handled. `"keepBoth"` (default) keeps every
+   * contribution, exactly as the merge always has; `"refuse"` fails the plan
+   * with `GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT`, naming the canonical
+   * entity and the contributions that disagree.
+   */
+  onProvenanceConflict?: "keepBoth" | "refuse";
+}>;
+
+/**
  * Ontology type-reconciliation mode. `"off"` is a no-op (default); `"ontology"`
  * collapses compatible types to the most-specific via the public subClassOf
  * closure (T2a / T10).
@@ -433,6 +482,14 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
    * validation refuses the merge rather than silently changing policy.
    */
   provenanceWeights?: ReadonlyMap<BranchId, number>;
+  /**
+   * Identity-driven candidate pairing and identity-assertion conflict
+   * arbitration. Omitted by default, which reproduces today's behavior
+   * byte-for-byte: no identity-driven pairing, and any identity-assertion
+   * conflict the classifier finds still fails the merge exactly as it always
+   * has. Stating this option on a graph declaring no `identity` is refused.
+   */
+  identity?: IdentityReconciliationOptions;
 }>;
 
 /**
@@ -524,6 +581,105 @@ export type DroppedItem =
   | Readonly<{ kind: "node"; id: NodeId<NodeType>; reason: string }>
   | Readonly<{ kind: "edge"; id: EdgeId; reason: string }>
   | Readonly<{ kind: "identity"; id: string; reason: string }>;
+
+/**
+ * WHY an identity assertion pair could not be arbitrated by rule: the shape of
+ * the disagreement, not the policy consulted about it.
+ *
+ * - `"retract-reassert"` — one branch retracted the pair's committed truth
+ *   while a DIFFERENT branch re-asserted it under a new id without retracting.
+ * - `"opposing-relations"` — branches asserted BOTH `same` and `different` for
+ *   one endpoint pair with overlapping validity windows.
+ * - `"cross-kind-pairing"` — a `same` assertion spans two different merge
+ *   KINDS, so no per-kind candidate scope can express it as a pairing edge.
+ * - `"out-of-scope-pairing"` — a `same` assertion names at least one endpoint
+ *   that is not a staged new node of its kind (a committed target row, or a
+ *   node no branch staged), so no per-kind candidate scope contains it.
+ */
+export type IdentityAssertionConflictReason =
+  | "retract-reassert"
+  | "opposing-relations"
+  | "cross-kind-pairing"
+  | "out-of-scope-pairing";
+
+/**
+ * An identity-adjacent disagreement the merge could not resolve into a single
+ * write, recorded on {@link MergeReport.identityConflicts} instead of silently
+ * dropped. A plan carrying one is still APPLICABLE — `"flag"` means "keep the
+ * base truth, keep the data, tell the caller", exactly the posture `"flag"`
+ * already has for delete/modify ({@link DeleteModifyPolicy}). Only `"refuse"`
+ * fails the plan.
+ */
+export type IdentityUnresolvedConflict =
+  | Readonly<{
+      kind: "assertion";
+      reason: IdentityAssertionConflictReason;
+      semanticKey: string;
+      a: EntityRef;
+      b: EntityRef;
+      relation: IdentityRelation;
+      assertionIds: readonly string[];
+      branches: readonly BranchId[];
+    }>
+  | Readonly<{
+      kind: "separation";
+      a: EntityRef;
+      b: EntityRef;
+      assertionIds: readonly string[];
+      /**
+       * The recall path that proposed the vetoed match. Absent only for a
+       * candidate edge carrying no attribution at all, which no shipped source
+       * produces — modelled as optional rather than asserted so a future
+       * source cannot make this a crash.
+       */
+      source?: MatchSource | undefined;
+    }>;
+// No `"provenance"` arm: `onProvenanceConflict` has exactly two dispositions
+// (`"keepBoth"`, which reports nothing, and `"refuse"`, which throws) and no
+// resolving/"flag" disposition that could ever place one on
+// `MergeReport.identityConflicts` or a plan artifact — see
+// `assertIdentityProvenanceAgreement` in merge.ts, the arm's only producer,
+// which builds this shape solely for a THROWN error's `details.conflict`.
+
+/**
+ * Visibility into a duplicate-assertion arbitration the merge already applied:
+ * two or more branches asserted the SAME semantic identity claim under
+ * DIFFERENT assertion ids, one survivor was chosen, and the rest were dropped
+ * (see {@link DroppedItem}). Recorded on
+ * {@link MergeReport.identityReconciliations} so the choice is visible rather
+ * than only inferable from the drop reasons.
+ */
+export type IdentityReconciliation = Readonly<{
+  semanticKey: string;
+  a: EntityRef;
+  b: EntityRef;
+  relation: IdentityRelation;
+  /**
+   * The assertion id that governs the pair after the merge: the surviving
+   * assertion for a duplicate survivor pick or an assert-shaped policy
+   * resolution, and the ENDED base row's own id when a policy resolved the
+   * conflict by retracting. Absent only when the resolution kept nothing at
+   * all — a callback that retracts an opposing-relations conflict, where no
+   * assertion and no base row is left to name.
+   */
+  survivorAssertionId?: string | undefined;
+  supersededAssertionIds: readonly string[];
+  /**
+   * WHICH rule chose the survivor. `"policy"` means the caller's
+   * `onAssertionConflict` arbitrated a conflict no rule could resolve, and
+   * {@link IdentityReconciliation.policy} names the arm it used.
+   */
+  rule: "earliest-valid-from" | "code-point-id" | "committed-id" | "policy";
+  /**
+   * The `onAssertionConflict` arm that decided, present exactly when `rule` is
+   * `"policy"`: the policy string, or `"callback"` for a function policy
+   * (whose source is never recorded). This is what
+   * `IdentityDecisionProvenance.policy` is built from, so a merge that
+   * arbitrated nothing by policy records no policy string.
+   */
+  policy?: string | undefined;
+  branches: readonly BranchId[];
+}>;
 
 /**
  * The {@link ValidityEndResolution.precedence} of an entry the INCREMENTAL TARGET
@@ -695,4 +851,8 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
    * persistence was off or failed (a failure adds a {@link MergeReport.warnings}).
    */
   provenancePersisted?: Readonly<{ graphId: string; count: number }>;
+  /** Duplicate-assertion survivor picks the three-way classifier resolved. */
+  identityReconciliations: readonly IdentityReconciliation[];
+  /** Identity-assertion conflicts a resolving `onAssertionConflict` kept rather than refused. */
+  identityConflicts: readonly IdentityUnresolvedConflict[];
 }>;

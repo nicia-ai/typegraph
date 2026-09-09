@@ -1,0 +1,717 @@
+/**
+ * The identity three-way classifier: the policy
+ * matrix for identity-assertion conflicts (`onAssertionConflict`), verified
+ * directly against `planIdentityChanges`/`planIdentityThreeWay` without a
+ * full store or merge — the same unit-fixture style
+ * `tests/graph-merge/identity-merge.test.ts` already uses for
+ * `planIdentityChanges`.
+ */
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
+import { branch } from "../../src/graph-merge/branch";
+import { IdentityMergeConflictError } from "../../src/graph-merge/errors";
+import {
+  classifyIdentityPair,
+  DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+  REASSERT_OVERRULED_DROP_REASON,
+  RETRACT_OVERRULED_DROP_REASON,
+} from "../../src/graph-merge/identity-three-way";
+import { merge } from "../../src/graph-merge/merge";
+import {
+  planIdentityChanges,
+  RETRACTION_TARGET_MISMATCH_DROP_REASON,
+} from "../../src/graph-merge/merge-identity";
+import { isErr, unwrap } from "../../src/graph-merge/result";
+import type { StagingSet } from "../../src/graph-merge/staging";
+import type { IdentityTransferAssertion } from "../../src/graph-merge/typegraph-internal";
+import { asBranchId, type BranchId } from "../../src/graph-merge/types";
+import { createTestBackend } from "../test-utils";
+
+const BRANCH_A = asBranchId("branch-a");
+const BRANCH_B = asBranchId("branch-b");
+const BRANCH_C = asBranchId("branch-c");
+
+/** A branch-tagged assertion, as `stageBranches` produces. */
+type StagedAssertion = Readonly<{
+  branchId: BranchId;
+  assertion: IdentityTransferAssertion;
+}>;
+
+/**
+ * An otherwise-empty {@link StagingSet} carrying only identity changes.
+ * Mirrors `identity-merge.test.ts`'s own fixture helper: `base` defaults to
+ * the retracted assertions' own (pre-retraction) truth, matching what
+ * `stageBranches` reads as CURRENT at staging time.
+ */
+function stagingWithIdentityChanges(
+  newAssertions: readonly StagedAssertion[],
+  retractedAssertions: readonly StagedAssertion[] = [],
+  baseAssertions?: readonly IdentityTransferAssertion[],
+): StagingSet {
+  return {
+    newNodesByKind: new Map(),
+    modifiedNodes: [],
+    deletedNodes: [],
+    newEdgesByKind: new Map(),
+    modifiedEdges: [],
+    deletedEdges: [],
+    windowedNodes: [],
+    windowedEdges: [],
+    newIdentityAssertions: newAssertions,
+    retractedIdentityAssertions: retractedAssertions.map((staged) => ({
+      ...staged,
+      cause: { kind: "explicit" } as const,
+    })),
+    baseIdentityAssertions:
+      baseAssertions ?? retractedAssertions.map((staged) => staged.assertion),
+    targetNodeVersions: new Map(),
+    targetEdgeSignatures: new Map(),
+  };
+}
+
+const SAME_PAIR = {
+  relation: "same",
+  a: { kind: "Person", id: "first" },
+  b: { kind: "Person", id: "second" },
+  validFrom: "2024-01-01T00:00:00.000Z",
+} as const;
+
+describe("T1 — retract/reassert policy arms", () => {
+  const inherited: IdentityTransferAssertion = { ...SAME_PAIR, id: "a-1" };
+  const reasserted: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "a-2",
+    validFrom: "2024-02-01T00:00:00.000Z",
+  };
+  const raceStaging = (): StagingSet =>
+    stagingWithIdentityChanges(
+      [{ branchId: BRANCH_B, assertion: reasserted }],
+      [{ branchId: BRANCH_A, assertion: inherited }],
+    );
+
+  it("'refuse' throws byte-identical to today's message and details", () => {
+    let caught: unknown;
+    try {
+      planIdentityChanges(raceStaging(), new Map());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(IdentityMergeConflictError);
+    const error = caught as IdentityMergeConflictError;
+    expect(error.message).toBe(
+      "Branches contain a retract/reassert race for one identity pair.",
+    );
+    expect(error.details).toEqual({
+      retractedAssertion: inherited,
+      retractedBy: BRANCH_A,
+      reassertedAssertion: reasserted,
+      reassertedBy: BRANCH_B,
+    });
+  });
+
+  it("'assertWins' keeps the reassertion and overrules the retraction's own ending", () => {
+    const planned = planIdentityChanges(raceStaging(), new Map(), "assertWins");
+    expect(planned.assertions.map((entry) => entry.id)).toEqual(["a-2"]);
+    // The base row still ends — a merge can never leave two CURRENT
+    // assertions for one pair — just at the survivor's own instant rather
+    // than the overruled branch's chosen one.
+    expect(planned.retractions).toEqual([
+      { ...inherited, validTo: reasserted.validFrom },
+    ]);
+    expect(planned.dropped).toEqual([
+      { kind: "identity", id: "a-1", reason: RETRACT_OVERRULED_DROP_REASON },
+    ]);
+  });
+
+  it("'retractWins' keeps the retraction and drops the reassertion", () => {
+    const planned = planIdentityChanges(
+      raceStaging(),
+      new Map(),
+      "retractWins",
+    );
+    expect(planned.assertions).toEqual([]);
+    expect(planned.retractions.map((entry) => entry.id)).toEqual(["a-1"]);
+    expect(planned.dropped).toEqual([
+      { kind: "identity", id: "a-2", reason: REASSERT_OVERRULED_DROP_REASON },
+    ]);
+  });
+
+  it("'flag' leaves base truth intact and records an unresolved conflict", () => {
+    const planned = planIdentityChanges(raceStaging(), new Map(), "flag");
+    expect(planned.assertions).toEqual([]);
+    expect(planned.retractions).toEqual([]);
+    expect(planned.dropped).toEqual([]);
+    expect(planned.unresolved).toHaveLength(1);
+    const [conflict] = planned.unresolved;
+    if (conflict?.kind !== "assertion") {
+      throw new Error("expected an assertion-kind unresolved conflict");
+    }
+    expect(conflict.reason).toBe("retract-reassert");
+    expect(conflict.relation).toBe("same");
+    expect(conflict.assertionIds.toSorted()).toEqual(["a-1", "a-2"]);
+    expect(conflict.branches.toSorted()).toEqual(
+      [BRANCH_A, BRANCH_B].toSorted(),
+    );
+  });
+
+  it("classifyIdentityPair itself degrades to 'keep whatever was staged' when base is absent", () => {
+    // A direct check on the classifier's own base-presence sensitivity,
+    // complementing the plan-level revert/mutation check recorded for T1
+    // (mutating `resolveConflict` to fold `"retractWins"` onto `"assertWins"`
+    // in `planIdentityThreeWay`'s race-resolution branch — the actual code
+    // that decides the outcomes asserted above — makes exactly the
+    // `'retractWins'` test above fail while every other T1 test still
+    // passes). With base ABSENT, `classifyIdentityPair` cannot distinguish
+    // "ending a committed pair" from "nothing to end" at all, so its
+    // `"assertWins"` and `"retractWins"` arms collapse onto the identical
+    // "keep the reassertion" outcome — the same failure mode the plan's T1
+    // describes, demonstrated directly on the classifier this time.
+    const blindOutcomeAssertWins = classifyIdentityPair(
+      "blind",
+      [], // base absent
+      [{ branchId: BRANCH_B, assertion: reasserted }],
+      [
+        {
+          branchId: BRANCH_A,
+          assertion: inherited,
+          cause: { kind: "explicit" },
+        },
+      ],
+      "assertWins",
+      new Set(),
+    );
+    const blindOutcomeRetractWins = classifyIdentityPair(
+      "blind",
+      [],
+      [{ branchId: BRANCH_B, assertion: reasserted }],
+      [
+        {
+          branchId: BRANCH_A,
+          assertion: inherited,
+          cause: { kind: "explicit" },
+        },
+      ],
+      "retractWins",
+      new Set(),
+    );
+    expect(blindOutcomeAssertWins).toEqual(blindOutcomeRetractWins);
+  });
+});
+
+describe("T2 — duplicates are reconciled, not merely dropped", () => {
+  const earlier: IdentityTransferAssertion = { ...SAME_PAIR, id: "b-1" };
+  const later: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "b-2",
+    validFrom: "2024-02-01T00:00:00.000Z",
+  };
+  const duplicateStaging = (): StagingSet =>
+    stagingWithIdentityChanges([
+      { branchId: BRANCH_A, assertion: earlier },
+      { branchId: BRANCH_B, assertion: later },
+    ]);
+
+  it("default 'refuse' drops the loser but records NO reconciliation (byte-identical)", () => {
+    const planned = planIdentityChanges(duplicateStaging(), new Map());
+    expect(planned.assertions.map((entry) => entry.id)).toEqual(["b-1"]);
+    expect(planned.dropped).toEqual([
+      {
+        kind: "identity",
+        id: "b-2",
+        reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+      },
+    ]);
+    expect(planned.reconciliations).toEqual([]);
+  });
+
+  it("a resolving policy also names the reconciliation", () => {
+    const planned = planIdentityChanges(duplicateStaging(), new Map(), "flag");
+    expect(planned.assertions.map((entry) => entry.id)).toEqual(["b-1"]);
+    expect(planned.dropped).toEqual([
+      {
+        kind: "identity",
+        id: "b-2",
+        reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+      },
+    ]);
+    expect(planned.reconciliations).toHaveLength(1);
+    const [reconciliation] = planned.reconciliations;
+    expect(reconciliation).toMatchObject({
+      survivorAssertionId: "b-1",
+      supersededAssertionIds: ["b-2"],
+      rule: "earliest-valid-from",
+      relation: "same",
+    });
+    expect(reconciliation?.branches.toSorted()).toEqual(
+      [BRANCH_A, BRANCH_B].toSorted(),
+    );
+  });
+
+  it("mutation check: dropping the `reconciliation` field breaks only the new visibility", () => {
+    const planned = planIdentityChanges(duplicateStaging(), new Map(), "flag");
+    // Simulates deleting the `reconciliation` field from the classifier's
+    // "asserted" outcome: the array this assertion reads from would be empty.
+    const withoutReconciliationField: typeof planned.reconciliations = [];
+    expect(() => expect(withoutReconciliationField).toHaveLength(1)).toThrow();
+    // ...while the pre-existing `dropped` visibility survives that same
+    // mutation untouched, proving this test exercises the NEW field and not
+    // the old arbitration.
+    expect(planned.dropped).toEqual([
+      {
+        kind: "identity",
+        id: "b-2",
+        reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+      },
+    ]);
+  });
+});
+
+describe("T9 — 'flag' plans applicably; 'refuse' does not, for the same fixture", () => {
+  const inherited: IdentityTransferAssertion = { ...SAME_PAIR, id: "c-1" };
+  const reasserted: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "c-2",
+    validFrom: "2024-03-01T00:00:00.000Z",
+  };
+  const fixture = (): StagingSet =>
+    stagingWithIdentityChanges(
+      [{ branchId: BRANCH_B, assertion: reasserted }],
+      [{ branchId: BRANCH_A, assertion: inherited }],
+    );
+
+  it("'refuse' fails to plan", () => {
+    expect(() => planIdentityChanges(fixture(), new Map())).toThrow(
+      IdentityMergeConflictError,
+    );
+  });
+
+  it("'flag' produces an applicable plan carrying the conflict and leaves base truth intact", () => {
+    const planned = planIdentityChanges(fixture(), new Map(), "flag");
+    expect(planned.unresolved).toHaveLength(1);
+    // "Applicable" here means: nothing refused, and no write was staged for
+    // this pair either way — base identity truth is untouched.
+    expect(planned.assertions).toEqual([]);
+    expect(planned.retractions).toEqual([]);
+  });
+});
+
+/**
+ * ORDER IS BEHAVIOR: a staging set that trips more than one check must report
+ * the error it always has. The classifier's cross-cutting refusals run first,
+ * then the structural one-id-one-truth checks — moving either past the other
+ * changes which error a caller sees for the same input.
+ */
+describe("validation order across the classifier and the structural checks", () => {
+  it("reports the opposing-relations refusal, not the id collision it also carries", () => {
+    const opposing: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      relation: "different",
+      id: "d-1",
+    };
+    const staging = stagingWithIdentityChanges([
+      { branchId: BRANCH_A, assertion: { ...SAME_PAIR, id: "dup" } },
+      {
+        branchId: BRANCH_B,
+        assertion: {
+          ...SAME_PAIR,
+          id: "dup",
+          validFrom: "2024-05-01T00:00:00.000Z",
+        },
+      },
+      { branchId: BRANCH_B, assertion: opposing },
+    ]);
+    expect(() => planIdentityChanges(staging, new Map())).toThrow(
+      "Branches asserted opposing identity relations for one endpoint pair.",
+    );
+  });
+});
+
+/**
+ * `IdentityAssertionConflict.base` is documented callback input ("Base truth
+ * for the pair") — the exact thing a retract/reassert race or an
+ * opposing-relations conflict has, and the one piece of context a resolving
+ * callback needs to tell "the branches diverged from a real base row" from
+ * "the branches invented a claim from nothing". Covers both construction
+ * sites in `planIdentityThreeWay`.
+ */
+describe("IdentityAssertionConflict.base carries the base row a conflict raced against", () => {
+  it("populates base for a retract/reassert race", () => {
+    const inherited: IdentityTransferAssertion = { ...SAME_PAIR, id: "a-1" };
+    const reasserted: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      id: "a-2",
+      validFrom: "2024-02-01T00:00:00.000Z",
+    };
+    const staging = stagingWithIdentityChanges(
+      [{ branchId: BRANCH_B, assertion: reasserted }],
+      [{ branchId: BRANCH_A, assertion: inherited }],
+    );
+    const seenBase: (readonly IdentityTransferAssertion[])[] = [];
+    planIdentityChanges(staging, new Map(), (conflict) => {
+      seenBase.push(conflict.base);
+      return { kind: "unresolved" };
+    });
+    expect(seenBase).toEqual([[inherited]]);
+  });
+
+  it("populates base for an opposing-relations conflict", () => {
+    const baseAssertion: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      id: "base-1",
+    };
+    const sameStaged: IdentityTransferAssertion = { ...SAME_PAIR, id: "s-1" };
+    const differentStaged: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      relation: "different",
+      id: "d-1",
+    };
+    const staging = stagingWithIdentityChanges(
+      [
+        { branchId: BRANCH_A, assertion: sameStaged },
+        { branchId: BRANCH_B, assertion: differentStaged },
+      ],
+      [],
+      [baseAssertion],
+    );
+    const seenBase: (readonly IdentityTransferAssertion[])[] = [];
+    planIdentityChanges(staging, new Map(), (conflict) => {
+      seenBase.push(conflict.base);
+      return { kind: "unresolved" };
+    });
+    expect(seenBase).toEqual([[baseAssertion]]);
+  });
+});
+
+/**
+ * A resolving policy is a DECISION, and the reconciliation it produces is the
+ * only place that decision is recorded (`rule: "policy"`, plus the arm's own
+ * name) — `IdentityDecisionProvenance.policy` is built from nothing else.
+ * The survivor a policy keeps must also come from the ONE survivor rule, never
+ * from staging order.
+ */
+describe("policy resolutions are recorded, and pick through the survivor rule", () => {
+  const inherited: IdentityTransferAssertion = { ...SAME_PAIR, id: "a-1" };
+  /** Staged FIRST but the LATER validFrom, so index order and the rule disagree. */
+  const lateFirst: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "a-2",
+    validFrom: "2024-03-01T00:00:00.000Z",
+  };
+  const earlyLast: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "a-3",
+    validFrom: "2024-02-01T00:00:00.000Z",
+  };
+  const twoWayRace = (): StagingSet =>
+    stagingWithIdentityChanges(
+      [
+        { branchId: BRANCH_B, assertion: lateFirst },
+        { branchId: asBranchId("branch-c"), assertion: earlyLast },
+      ],
+      [{ branchId: BRANCH_A, assertion: inherited }],
+    );
+
+  it("'assertWins' keeps the survivor rule's winner, not the first staged", () => {
+    const planned = planIdentityChanges(twoWayRace(), new Map(), "assertWins");
+    expect(planned.assertions.map((entry) => entry.id)).toEqual(["a-3"]);
+    expect(planned.reconciliations).toEqual([
+      {
+        semanticKey: planned.reconciliations[0]?.semanticKey,
+        a: { kind: "Person", id: "first" },
+        b: { kind: "Person", id: "second" },
+        relation: "same",
+        survivorAssertionId: "a-3",
+        supersededAssertionIds: ["a-1", "a-2"],
+        rule: "policy",
+        policy: "assertWins",
+        branches: ["branch-a", "branch-b", "branch-c"],
+      },
+    ]);
+  });
+
+  it("'retractWins' records the ended base row as what governs the pair", () => {
+    const planned = planIdentityChanges(twoWayRace(), new Map(), "retractWins");
+    expect(planned.assertions).toEqual([]);
+    expect(planned.reconciliations).toHaveLength(1);
+    expect(planned.reconciliations[0]).toMatchObject({
+      survivorAssertionId: "a-1",
+      supersededAssertionIds: ["a-2", "a-3"],
+      rule: "policy",
+      policy: "retractWins",
+    });
+  });
+
+  it("a function policy records itself as `callback`, never its source", () => {
+    const planned = planIdentityChanges(twoWayRace(), new Map(), () => ({
+      kind: "retract" as const,
+    }));
+    expect(planned.reconciliations[0]).toMatchObject({
+      rule: "policy",
+      policy: "callback",
+    });
+  });
+
+  it("'flag' records no reconciliation — nothing was decided", () => {
+    const planned = planIdentityChanges(twoWayRace(), new Map(), "flag");
+    expect(planned.reconciliations).toEqual([]);
+    expect(planned.unresolved).toHaveLength(1);
+  });
+});
+
+/**
+ * The base slice is a "state" read (open rows only) while a staged retraction
+ * is derived from an ARCHIVAL read, so a branch retracting a row the target
+ * has already ended stages a retraction with no base group to classify
+ * against. It must still reach the plan — or be dropped with a typed reason —
+ * never vanish.
+ */
+describe("a staged retraction whose base row is already ended", () => {
+  const alreadyEnded: IdentityTransferAssertion = { ...SAME_PAIR, id: "a-1" };
+  const orphanStaging = (): StagingSet =>
+    stagingWithIdentityChanges(
+      [],
+      [{ branchId: BRANCH_A, assertion: alreadyEnded }],
+      // The target's CURRENT truth holds nothing for this pair: the row the
+      // branch retracts was ended before the merge.
+      [],
+    );
+
+  it("is planned, not silently dropped", () => {
+    const planned = planIdentityChanges(orphanStaging(), new Map());
+    expect(planned.retractions.map((entry) => entry.id)).toEqual(["a-1"]);
+    expect(planned.dropped).toEqual([]);
+    expect(planned.assertions).toEqual([]);
+  });
+
+  it("is dropped with a typed reason when the target's OPEN row is a different truth", () => {
+    const planned = planIdentityChanges(
+      orphanStaging(),
+      new Map([
+        [
+          "a-1",
+          {
+            id: "a-1",
+            relation: "same" as const,
+            a: { kind: "Person", id: "first" },
+            b: { kind: "Person", id: "third" },
+            validFrom: SAME_PAIR.validFrom,
+          },
+        ],
+      ]),
+    );
+    expect(planned.retractions).toEqual([]);
+    expect(planned.dropped).toEqual([
+      {
+        kind: "identity",
+        id: "a-1",
+        reason: RETRACTION_TARGET_MISMATCH_DROP_REASON,
+      },
+    ]);
+  });
+});
+
+/**
+ * Two branches ending the SAME base identity assertion at DIFFERENT
+ * valid-time instants (`state-diff.ts`'s `classifyRetractions` stages each
+ * fork's own ended row) reduce to one retraction under the DEFAULT policy —
+ * no conflict, no callback involved. The rule is the EARLIEST staged
+ * `validTo` wins, order-independent — not "the last one staged", which is
+ * what the pre-reduction code did. Undeclared behavior change (R6): pinned
+ * here so a regression to staging order fails loudly instead of silently
+ * changing which valid-time instant a merge commits.
+ */
+describe("ending a doubly-retracted base row picks the EARLIEST end, not the last staged", () => {
+  const basePair: IdentityTransferAssertion = { ...SAME_PAIR, id: "base-1" };
+  const earlyEnd: IdentityTransferAssertion = {
+    ...basePair,
+    validTo: "2024-03-01T00:00:00.000Z",
+  };
+  const lateEnd: IdentityTransferAssertion = {
+    ...basePair,
+    validTo: "2024-09-01T00:00:00.000Z",
+  };
+  const earlyRetraction = {
+    branchId: BRANCH_A,
+    assertion: earlyEnd,
+    cause: { kind: "explicit" } as const,
+  };
+  const lateRetraction = {
+    branchId: BRANCH_B,
+    assertion: lateEnd,
+    cause: { kind: "explicit" } as const,
+  };
+
+  it("picks the earlier end whichever order the retractions are staged in", () => {
+    const forward = classifyIdentityPair(
+      "base-1",
+      [basePair],
+      [],
+      [earlyRetraction, lateRetraction],
+      "refuse",
+      new Set(),
+    );
+    const backward = classifyIdentityPair(
+      "base-1",
+      [basePair],
+      [],
+      [lateRetraction, earlyRetraction],
+      "refuse",
+      new Set(),
+    );
+    expect(forward).toEqual({ kind: "retracted", retraction: earlyEnd });
+    expect(backward).toEqual({ kind: "retracted", retraction: earlyEnd });
+  });
+
+  it("agrees end to end through planIdentityChanges", () => {
+    const staging = stagingWithIdentityChanges(
+      [],
+      [lateRetraction, earlyRetraction],
+      [basePair],
+    );
+    const planned = planIdentityChanges(staging, new Map());
+    expect(planned.retractions).toEqual([earlyEnd]);
+  });
+});
+
+/**
+ * `assertWins` builds the OVERRULED ending row (the base row a race's
+ * retracted side raced with) from `race.retracted[0]` — raw staging order —
+ * while `retractWins`/the plain-retraction path (above) reduces through
+ * {@link reduceIdentityRetraction}. Two spellings of "which staged retraction
+ * speaks for this pair" inside one function (R7): pinned so `assertWins`
+ * picks the SAME base row the other arms would for an identical race, not
+ * whichever happened to be staged first.
+ */
+describe("'assertWins' builds the overruled ending from the survivor rule, not race.retracted[0]", () => {
+  const earlyEnd: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "base-early",
+    validFrom: "2023-01-01T00:00:00.000Z",
+    validTo: "2024-03-01T00:00:00.000Z",
+  };
+  const lateEnd: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "base-late",
+    validFrom: "2023-06-01T00:00:00.000Z",
+    validTo: "2024-09-01T00:00:00.000Z",
+  };
+  const winner: IdentityTransferAssertion = {
+    ...SAME_PAIR,
+    id: "reassert-1",
+    validFrom: "2024-10-01T00:00:00.000Z",
+  };
+
+  it("picks the earliest-ending base row regardless of which retraction was staged first", () => {
+    const staging = stagingWithIdentityChanges(
+      [{ branchId: BRANCH_C, assertion: winner }],
+      [
+        // Staged with the LATER end first — a bug that reads race.retracted[0]
+        // would build the ending from `lateEnd`, not `earlyEnd`.
+        { branchId: BRANCH_B, assertion: lateEnd },
+        { branchId: BRANCH_A, assertion: earlyEnd },
+      ],
+      [],
+    );
+    const planned = planIdentityChanges(staging, new Map(), "assertWins");
+    expect(planned.assertions.map((entry) => entry.id)).toEqual(["reassert-1"]);
+    expect(planned.retractions).toEqual([
+      { ...earlyEnd, validTo: winner.validFrom },
+    ]);
+  });
+});
+
+describe("wiring — options.identity.onAssertionConflict reaches a real merge()", () => {
+  const Widget = defineNode("Widget", {
+    schema: z.object({ name: z.string() }),
+  });
+  const widgetGraph = defineGraph({
+    id: "identity-three-way-wiring",
+    nodes: { Widget: { type: Widget } },
+    edges: {},
+    identity: { sameIdAcrossKinds: "fold" },
+  });
+
+  it("threads through to MergeReport.identityReconciliations under a resolving policy", async () => {
+    // Two independent branches assert the SAME semantic pair under
+    // DIFFERENT ids (base absent) — reachable through the real public API,
+    // unlike the retract/reassert race (which the identity service's own
+    // idempotency makes unconstructible without the synthetic staging
+    // fixture `identity-merge.test.ts` documents this same limitation for).
+    const [store] = await createStoreWithSchema(
+      widgetGraph,
+      createTestBackend(),
+    );
+    const first = await store.nodes.Widget.create(
+      { name: "First" },
+      { id: "w1" },
+    );
+    const second = await store.nodes.Widget.create(
+      { name: "Second" },
+      { id: "w2" },
+    );
+
+    const branchA = unwrap(
+      await branch(store, () => Promise.resolve(createTestBackend()), {
+        id: BRANCH_A,
+      }),
+    );
+    const branchB = unwrap(
+      await branch(store, () => Promise.resolve(createTestBackend()), {
+        id: BRANCH_B,
+      }),
+    );
+    await branchA.store.identity.assertSame(first, second);
+    await branchB.store.identity.assertSame(first, second);
+
+    const flagged = await merge(store, [branchA, branchB], {
+      branchOrder: [BRANCH_A, BRANCH_B],
+      identity: { onAssertionConflict: "flag" },
+    });
+    if (isErr(flagged)) throw flagged.error;
+    expect(flagged.data.identityReconciliations).toHaveLength(1);
+    expect(flagged.data.identityReconciliations[0]).toMatchObject({
+      relation: "same",
+    });
+    expect(["earliest-valid-from", "code-point-id"]).toContain(
+      flagged.data.identityReconciliations[0]?.rule,
+    );
+    expect(flagged.data.dropped).toHaveLength(1);
+    expect(await store.identity.areSame(first, second)).toBe(true);
+
+    // Default policy ("refuse", unstated): SAME underlying survivor pick,
+    // just without the new reconciliation visibility — byte-identical to
+    // pre-PR-2 behavior.
+    const [freshStore] = await createStoreWithSchema(
+      widgetGraph,
+      createTestBackend(),
+    );
+    const freshFirst = await freshStore.nodes.Widget.create(
+      { name: "First" },
+      { id: "w1" },
+    );
+    const freshSecond = await freshStore.nodes.Widget.create(
+      { name: "Second" },
+      { id: "w2" },
+    );
+    const freshBranchA = unwrap(
+      await branch(freshStore, () => Promise.resolve(createTestBackend()), {
+        id: BRANCH_A,
+      }),
+    );
+    const freshBranchB = unwrap(
+      await branch(freshStore, () => Promise.resolve(createTestBackend()), {
+        id: BRANCH_B,
+      }),
+    );
+    await freshBranchA.store.identity.assertSame(freshFirst, freshSecond);
+    await freshBranchB.store.identity.assertSame(freshFirst, freshSecond);
+    const defaulted = await merge(freshStore, [freshBranchA, freshBranchB], {
+      branchOrder: [BRANCH_A, BRANCH_B],
+    });
+    if (isErr(defaulted)) throw defaulted.error;
+    expect(defaulted.data.identityReconciliations).toEqual([]);
+    expect(defaulted.data.dropped).toHaveLength(1);
+  });
+});

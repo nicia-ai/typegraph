@@ -23,6 +23,8 @@ export const MERGE_ERROR_CODES = {
   conflict: "GRAPH_MERGE_CONFLICT",
   constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT",
   identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT",
+  identitySeparationConflict: "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT",
+  identityProvenanceConflict: "GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT",
   acyclicityConflict: "GRAPH_MERGE_ACYCLICITY_CONFLICT",
   baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH",
   planCapability: "GRAPH_MERGE_PLAN_CAPABILITY",
@@ -265,15 +267,36 @@ export class MergeCompositionOrphanError extends MergeError {
   }
 }
 
-/** Raised when identity branches contain opposing or retract/reassert truth. */
+/**
+ * The identity dimension of a merge refusal: opposing or retract/reassert
+ * truth, a class-lifted `different` that vetoes a match, or contradictory
+ * provenance across paired members.
+ *
+ * ONE class, three codes. Each of those is a distinct machine-readable
+ * `MERGE_ERROR_CODES` entry so a caller can branch precisely, but they share
+ * this class — and therefore `category: "conflict"` — so every consumer that
+ * already handles an identity merge conflict keeps handling all of them, and
+ * `GRAPH_MERGE_IDENTITY_CONFLICT` keeps every case it raises today.
+ */
 export class IdentityMergeConflictError extends MergeError {
-  override readonly code = MERGE_ERROR_CODES.identityConflict;
+  override readonly code: IdentityMergeConflictCode;
 
-  constructor(message: string, options: MergeErrorOptions = {}) {
+  constructor(
+    message: string,
+    options: MergeErrorOptions &
+      Readonly<{ code?: IdentityMergeConflictCode }> = {},
+  ) {
     super(message, options);
+    this.code = options.code ?? MERGE_ERROR_CODES.identityConflict;
     this.name = "IdentityMergeConflictError";
   }
 }
+
+/** The three codes {@link IdentityMergeConflictError} can carry. */
+export type IdentityMergeConflictCode =
+  | typeof MERGE_ERROR_CODES.identityConflict
+  | typeof MERGE_ERROR_CODES.identitySeparationConflict
+  | typeof MERGE_ERROR_CODES.identityProvenanceConflict;
 
 /** One offending edge named in an {@link AcyclicityMergeConflictError}. */
 export type AcyclicityMergeConflictEdge = Readonly<{

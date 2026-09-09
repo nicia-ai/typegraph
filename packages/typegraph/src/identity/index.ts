@@ -1,4 +1,5 @@
 export { rebuildIdentityClosure } from "./rebuild";
+export type { IdentityDecisionProvenance } from "./transition-log";
 export type {
   IdentityAssertion,
   IdentityAssertionId,

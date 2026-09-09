@@ -2637,6 +2637,16 @@ type IdentityChange = Readonly<{
 }>;
 
 // @public
+type IdentityDecisionProvenance = Readonly<{
+    policy?: string | undefined;
+    branchId?: string | undefined;
+    branchAncestry?: readonly string[] | undefined;
+    mergePlanDigest?: string | undefined;
+    reviewDigest?: string | undefined;
+    sourceId?: string | undefined;
+}>;
+
+// @public
 type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
     assertSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
     assertDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
@@ -5266,7 +5276,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             kind: string;
             id: string;
         }> | undefined;
-    }>[]) => Promise<Readonly<{
+    }>[], decision?: IdentityDecisionProvenance) => Promise<Readonly<{
         created: number;
         retracted: number;
     }>>;

@@ -166,6 +166,7 @@ import {
   validateIdentityForContext,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
+import { type IdentityDecisionProvenance } from "../identity/transition-log";
 import type {
   IdentityFacade,
   IdentityNode,
@@ -1392,8 +1393,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.foldImportedIdentityNodes(target, references),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
-      applyIdentityMergeAtTarget: (target, retractions, assertions) =>
-        this.applyIdentityMergeAtTarget(target, retractions, assertions),
+      applyIdentityMergeAtTarget: (target, retractions, assertions, decision) =>
+        this.applyIdentityMergeAtTarget(
+          target,
+          retractions,
+          assertions,
+          decision,
+        ),
       assertIdentityClassesConsistentAtTarget: (target, seeds) =>
         this.assertIdentityClassesConsistentAtTarget(target, seeds),
     };
@@ -1699,6 +1705,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     target: GraphBackend | TransactionBackend,
     retractions: readonly IdentityTransferAssertion[],
     assertions: readonly IdentityTransferAssertion[],
+    decision?: IdentityDecisionProvenance,
   ): Promise<Readonly<{ created: number; retracted: number }>> {
     if (retractions.length === 0 && assertions.length === 0) {
       return Promise.resolve({ created: 0, retracted: 0 });
@@ -1713,6 +1720,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#identityContext(target),
       retractions,
       assertions,
+      decision,
     );
   }
 
