@@ -620,7 +620,7 @@ registry build (see [Ontology](/ontology#subsumption-type-inheritance)).
 Because of that guarantee, querying `Organization` returns `Company` rows
 by default: `store.query().from("Organization", "o")` is polymorphic, with
 `o`'s `kind` widened to `string` and only `Organization`'s own properties
-statically typed on the alias. Pass `{ includeSubClasses: false }` to get
+statically typed on the alias. Pass `{ expansion: "exact" }` to get
 back the exact-kind reading.
 
 ## Delete Behaviors

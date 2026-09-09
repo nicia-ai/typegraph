@@ -145,7 +145,7 @@ want the exact kind, say so:
 .from("Media", "m")
 
 // Narrow it back to exactly Media rows
-.from("Media", "m", { includeSubClasses: false })
+.from("Media", "m", { expansion: "exact" })
 ```
 
 ### Always Paginate Large Results

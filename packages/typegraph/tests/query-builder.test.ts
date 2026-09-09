@@ -430,14 +430,14 @@ describe("Query Builder - Traversals", () => {
 describe("Query Builder - Subclass Expansion", () => {
   it("expands queries to include subclasses when requested", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
-      .from("Organization", "o", { includeSubClasses: true })
+      .from("Organization", "o", { expansion: "subclasses" })
       .select((context) => context.o);
 
     const ast = query.toAst();
 
     expect(ast.start.kinds).toContain("Organization");
     expect(ast.start.kinds).toContain("Company");
-    expect(ast.start.expansion).toBe("subClasses");
+    expect(ast.start.expansion).toBe("subclasses");
   });
 
   // Q3 (roadmap): a supertype query is polymorphic by default once C ships.
@@ -450,12 +450,12 @@ describe("Query Builder - Subclass Expansion", () => {
 
     expect(ast.start.kinds).toContain("Organization");
     expect(ast.start.kinds).toContain("Company");
-    expect(ast.start.expansion).toBe("subClasses");
+    expect(ast.start.expansion).toBe("subclasses");
   });
 
   it("does not expand subclasses when explicitly narrowed", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
-      .from("Organization", "o", { includeSubClasses: false })
+      .from("Organization", "o", { expansion: "exact" })
       .select((context) => context.o);
 
     const ast = query.toAst();
@@ -552,9 +552,9 @@ describe("Query Compilation to SQL", () => {
     // `IN (...)` filter under the Q3 default — this test is about the
     // single-kind filter shape itself.
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
-      .from("Person", "p", { includeSubClasses: false })
+      .from("Person", "p", { expansion: "exact" })
       .traverse("worksAt", "e")
-      .to("Organization", "o", { includeSubClasses: false })
+      .to("Organization", "o", { expansion: "exact" })
       .select((context) => ({ p: context.p, o: context.o }));
 
     const sqlObject = compileQuery(query.toAst(), graph.id);

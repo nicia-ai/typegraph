@@ -811,7 +811,7 @@ export type VectorSlotDescriptor = Readonly<{
  * fieldPath)` that declares an embedding field, so the compiler's
  * `field.similarTo(...)` CTE can UNION ALL the per-field tables for the
  * kinds in an alias that actually declare the field (only
- * `includeSubClasses` yields more than one).
+ * `expansion: "subclasses"` yields more than one).
  */
 export type VectorSlotMap = ReadonlyMap<string, VectorSlotDescriptor>;
 

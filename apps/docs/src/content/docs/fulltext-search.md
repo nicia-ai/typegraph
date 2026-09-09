@@ -403,7 +403,7 @@ round trip instead of three. The saving scales with per-statement cost:
 decisive on serverless HTTP drivers, Cloudflare D1 / Durable Objects, and
 remote databases; on a local low-latency connection the two paths are
 within a few milliseconds of each other. (Kind expansions via
-`includeSubClasses`, and custom backends without the composed statement,
+`expansion`, and custom backends without the composed statement,
 transparently use a multi-statement path with identical results.)
 
 ```typescript
@@ -471,11 +471,11 @@ for (const hit of hits) {
 | `includeSnippets` | `boolean` | `false` | Return a highlighted `<mark>…</mark>` snippet per hit. Noticeably slower than plain search — request only for final-page results. |
 | `where` | `(accessor) => Predicate` | *(none)* | Property predicate compiled into the search statement's candidate set — the engine ranks only matching rows, so a filter never shrinks results below `limit` when enough matches exist (libSQL DiskANN: bounded by its 4× over-fetch). Same accessor and semantics as `store.nodes.<kind>.find({ where })`. |
 | `offset` | `number` | `0` | Rank-relative pagination: skip the first `offset` ranked hits. |
-| `includeSubClasses` | `boolean` | `false` | Also search `subClassOf` descendant kinds and merge their scores into one ranking. |
+| `expansion` | `\"exact\" \| \"subclasses\"` | `\"exact\"` | `\"subclasses\"` also searches `subClassOf` descendant kinds and merges their scores into one ranking. |
 
-`search()`'s `includeSubClasses` stays **opt-in** and defaults to `false` —
+`search()`'s `expansion` stays **opt-in** and defaults to `"exact"` —
 this is a deliberate asymmetry with the query builder's `from()`/`to()`,
-which default to `includeSubClasses: true`. `search()` is a facade with its
+which default to `expansion: "subclasses"`. `search()` is a facade with its
 own documented option rather than a `from()`/`to()` call, and flipping its
 default in the same release would also change which vector-metric union
 applies (search across multiple kinds must agree on one declared metric; see
@@ -484,7 +484,7 @@ this asymmetry surprises you, that's the intended signal that it's worth
 double-checking whether your search call should opt in explicitly.
 
 The same three options are available on `store.search.vector` and
-`store.search.hybrid` (where `where` and `includeSubClasses` apply to both
+`store.search.hybrid` (where `where` and `expansion` apply to both
 halves). Search always follows current-read semantics: tombstoned nodes and
 nodes outside their validity window never rank.
 

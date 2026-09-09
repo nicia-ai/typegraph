@@ -563,7 +563,7 @@ async function canRead(userId: string, contentId: string): Promise<boolean> {
     .from("User", "u")
     .whereNode("u", (u) => u.id.eq(userId))
     .traverse("hasPermission", "p")
-    .to("Content", "c", { includeSubClasses: true })
+    .to("Content", "c", { expansion: "subclasses" })
     .whereNode("c", (c) => c.id.eq(contentId))
     .first();
 
@@ -579,7 +579,7 @@ async function canRead(userId: string, contentId: string): Promise<boolean> {
     .from("Folder", "f")
     .traverse("contains", "e")
     .recursive()
-    .to("Content", "c", { includeSubClasses: true })
+    .to("Content", "c", { expansion: "subclasses" })
     .whereNode("c", (c) => c.id.eq(contentId))
     .select((ctx) => ctx.f.id)
     .execute();

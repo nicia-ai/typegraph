@@ -7,7 +7,7 @@
  *   subsumption, so a `to: [Media]` edge accepts every subclass
  *   instance (subclasses are also listed in the declaration purely
  *   for TypeScript's benefit — see the edge definition below)
- * - Query expansion with includeSubClasses — and what it excludes
+ * - Query expansion with expansion: "subclasses" — and what it excludes
  * - Inspecting the hierarchy through the registry
  *
  * Run with:
@@ -240,12 +240,12 @@ export async function main(): Promise<void> {
 
     // Querying at the top of the hierarchy answers "what has Alice
     // watched?" without caring about concrete kinds.
-    console.log("Query: All Media Alice watched (includeSubClasses: true)");
+    console.log('Query: All Media Alice watched (expansion: "subclasses")');
     const allWatched = await store
       .query()
       .from("Person", "p")
       .traverse("watched", "w")
-      .to("Media", "m", { includeSubClasses: true })
+      .to("Media", "m", { expansion: "subclasses" })
       .select((ctx) => ({
         person: ctx.p.name,
         title: ctx.m.title,
@@ -264,12 +264,12 @@ export async function main(): Promise<void> {
     // Expansion follows the hierarchy, so it also excludes: a Movie
     // query pulls in Documentary but NOT TVShow, which sits on the
     // other branch under Media.
-    console.log("\nQuery: All Movies Alice watched (includeSubClasses: true)");
+    console.log('\nQuery: All Movies Alice watched (expansion: "subclasses")');
     const moviesWatched = await store
       .query()
       .from("Person", "p")
       .traverse("watched", "w")
-      .to("Movie", "m", { includeSubClasses: true })
+      .to("Movie", "m", { expansion: "subclasses" })
       .select((ctx) => ({
         person: ctx.p.name,
         title: ctx.m.title,
@@ -286,12 +286,12 @@ export async function main(): Promise<void> {
     );
 
     // Without subclass expansion
-    console.log("\nQuery: Only exact Movie type (includeSubClasses: false)");
+    console.log('\nQuery: Only exact Movie type (expansion: "exact")');
     const exactMovies = await store
       .query()
       .from("Person", "p")
       .traverse("watched", "w")
-      .to("Movie", "m", { includeSubClasses: false })
+      .to("Movie", "m", { expansion: "exact" })
       .select((ctx) => ({
         person: ctx.p.name,
         title: ctx.m.title,

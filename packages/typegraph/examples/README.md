@@ -34,7 +34,7 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 
 | Example | Description |
 |---------|-------------|
-| [03-subclass-hierarchy.ts](./03-subclass-hierarchy.ts) | Type hierarchies with `subClassOf`: shared base schemas, polymorphic edge endpoints, `includeSubClasses` query expansion (and what it excludes), and registry introspection |
+| [03-subclass-hierarchy.ts](./03-subclass-hierarchy.ts) | Type hierarchies with `subClassOf`: shared base schemas, polymorphic edge endpoints, `expansion: "subclasses"` query expansion (and what it excludes), and registry introspection |
 | [04-disjoint-constraints.ts](./04-disjoint-constraints.ts) | Mutual exclusion with `disjointWith` |
 | [05-edge-implications.ts](./05-edge-implications.ts) | Edge hierarchies with `implies` |
 | [06-inverse-edges.ts](./06-inverse-edges.ts) | Bidirectional relationships with `inverseOf` |

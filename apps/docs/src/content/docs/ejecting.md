@@ -169,7 +169,7 @@ code. The database stores raw data without semantic constraints.
 
 After ejecting:
 
-- You lose automatic subclass queries (`includeSubClasses`)
+- You lose automatic subclass queries (the `expansion` option)
 - You lose edge validation (ensuring valid from/to kinds)
 - You keep all your data exactly as stored
 

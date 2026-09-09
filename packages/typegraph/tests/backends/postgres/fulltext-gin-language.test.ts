@@ -229,7 +229,7 @@ describe("fulltext GIN index usage (constant declared language)", () => {
     // what the default now produces.
     const single = store
       .query()
-      .from("GinArticle", "d", { includeSubClasses: false })
+      .from("GinArticle", "d", { expansion: "exact" })
       .whereNode("d", (document) => document.$fulltext.matches("signal", 10))
       .select((sel) => ({ id: sel.d.id }))
       .toSQL();
@@ -240,7 +240,7 @@ describe("fulltext GIN index usage (constant declared language)", () => {
     // to the per-row column — a constant would mis-parse one kind.
     const mixed = store
       .query()
-      .from("GinArticle", "d", { includeSubClasses: true })
+      .from("GinArticle", "d", { expansion: "subclasses" })
       .whereNode("d", (document) => document.$fulltext.matches("signal", 10))
       .select((sel) => ({ id: sel.d.id }))
       .toSQL();

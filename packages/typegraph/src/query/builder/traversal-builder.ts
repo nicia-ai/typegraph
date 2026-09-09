@@ -497,6 +497,7 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
+    options?: { expansion?: undefined },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<AliasNodeType<G, K & string>, Optional>>,
@@ -508,7 +509,7 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: false; includeNarrower?: false },
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"], Optional>>,
@@ -520,7 +521,7 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: true; includeNarrower?: false },
+    options: { expansion: "subclasses" },
   ): QueryBuilder<
     G,
     Aliases &
@@ -536,7 +537,7 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeNarrower: true; includeSubClasses?: false },
+    options: { expansion: "narrower" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
@@ -560,7 +561,7 @@ export class TraversalBuilder<
 
     const expansion = resolveAliasExpansion(
       options,
-      this.#config.defaultIncludeSubClasses,
+      this.#config.defaultExpansion,
     );
     const kinds = expandKindsForAxis(expansion, kind, this.#config.registry);
     if (expansion === "narrower") {
@@ -587,7 +588,7 @@ export class TraversalBuilder<
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: false; includeNarrower?: false },
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
@@ -599,7 +600,7 @@ export class TraversalBuilder<
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: true; includeNarrower?: false },
+    options?: { expansion?: "subclasses" },
   ): QueryBuilder<
     G,
     Aliases &
@@ -615,7 +616,7 @@ export class TraversalBuilder<
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeNarrower: true; includeSubClasses?: false },
+    options: { expansion: "narrower" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
@@ -650,7 +651,7 @@ export class TraversalBuilder<
 
     const expansion = resolveAliasExpansion(
       options,
-      this.#config.defaultIncludeSubClasses,
+      this.#config.defaultExpansion,
     );
     const kinds = expandKindsForAxis(
       expansion,
@@ -678,7 +679,7 @@ export class TraversalBuilder<
 
   /**
    * C.3 endpoint admission for a `to()`/`toDynamic()` alias expanded through
-   * `includeNarrower`. `broader`/`narrower` is NOT an assignability axis —
+   * `expansion: "narrower"`. `broader`/`narrower` is NOT an assignability axis —
    * unlike subclass expansion, a narrower kind is not automatically admitted
    * by `expandEdgeEndpointAllowance` — so each expanded kind is checked
    * individually through the existing `#assertValidEndpoint` owner, and a
@@ -699,7 +700,7 @@ export class TraversalBuilder<
       } catch (error) {
         if (!(error instanceof EndpointError)) throw error;
         throw new ConfigurationError(
-          `includeNarrower expansion of "${rootKind}" includes "${kind}", ` +
+          `expansion: "narrower" on "${rootKind}" includes "${kind}", ` +
             `which is not an admitted endpoint of edge "${edgeKind}".`,
           {
             code: "ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED",

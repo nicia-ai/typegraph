@@ -195,7 +195,7 @@ function createQueryBuilderWithContext<
     registry,
     schemaIntrospector,
     defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
-    defaultIncludeSubClasses: options?.defaultIncludeSubClasses ?? true,
+    defaultExpansion: options?.defaultExpansion ?? "subclasses",
     identityEnabled:
       options?.identityEnabled ?? registry.identity !== undefined,
     identitySameIdAcrossKinds:

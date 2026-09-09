@@ -568,13 +568,13 @@ describe(".matches() with polymorphic alias", () => {
       body: "casual take",
     });
 
-    // includeSubClasses expands "Content" to ["Content", "Article", "BlogPost"].
+    // expansion: "subclasses" expands "Content" to ["Content", "Article", "BlogPost"].
     // The polymorphic accessor types lose individual field typing; the
     // runtime introspector still recognizes title as searchable across
     // all three kinds and emits a node_kind IN (...) filter.
     const results = await store
       .query()
-      .from("Content", "d", { includeSubClasses: true })
+      .from("Content", "d", { expansion: "subclasses" })
       .whereNode("d", (d) =>
         (d as unknown as { $fulltext: FulltextAccessor }).$fulltext.matches(
           "renewable",
@@ -626,7 +626,7 @@ describe(".matches() with polymorphic alias", () => {
     expect(() =>
       mixedStore
         .query()
-        .from("Media", "m", { includeSubClasses: true })
+        .from("Media", "m", { expansion: "subclasses" })
         .whereNode("m", (m) =>
           (m as unknown as { $fulltext: FulltextAccessor }).$fulltext.matches(
             "searchable",
@@ -766,7 +766,7 @@ describe(".matches() with polymorphic alias", () => {
 
     const results = await store
       .query()
-      .from("Content", "d", { includeSubClasses: true })
+      .from("Content", "d", { expansion: "subclasses" })
       .whereNode("d", (d) =>
         (d as unknown as { $fulltext: FulltextAccessor }).$fulltext.matches(
           "quantum",
@@ -815,7 +815,7 @@ describe(".matches() with polymorphic alias", () => {
       buildKindRegistry(VectorPolyGraph),
     );
     const ast = polyQuery
-      .from("PolyVector", "v", { includeSubClasses: true })
+      .from("PolyVector", "v", { expansion: "subclasses" })
       .whereNode("v", (v) =>
         (v as unknown as PropsAccessor<typeof PolyChild>).embedding.similarTo(
           queryEmbedding,

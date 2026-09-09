@@ -1,12 +1,14 @@
 /**
  * The one owner of "which expansion axis does this alias use" (Q3, C.3).
  *
- * An alias carries EXACTLY ONE expansion axis:
+ * An alias carries EXACTLY ONE expansion axis, and states it as one option
+ * value rather than as a set of booleans a caller could combine into a
+ * contradiction:
  *
  * - `"exact"` — only the named kind.
- * - `"subClasses"` — the kind and every `subClassOf`/`equivalentTo`
- *   descendant (`registry.expandSubClasses`). The store-wide default once
- *   C ships (roadmap Q3): a supertype query is polymorphic unless narrowed.
+ * - `"subclasses"` — the kind and every `subClassOf`/`equivalentTo`
+ *   descendant (`registry.expandSubClasses`). The store-wide default
+ *   (roadmap Q3): a supertype query is polymorphic unless narrowed.
  * - `"narrower"` — the kind and every `broader`/`narrower` descendant
  *   (`registry.expandNarrower`, C.3). No schema relationship is claimed, so
  *   the alias type is untyped.
@@ -17,56 +19,59 @@
 import { ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 
-export type AliasExpansionAxis = "exact" | "subClasses" | "narrower";
-
-export type AliasExpansionOptions = Readonly<{
-  includeSubClasses?: boolean;
-  includeNarrower?: boolean;
-}>;
+export type AliasExpansionAxis = "exact" | "subclasses" | "narrower";
 
 /**
- * Resolves the expansion axis for one alias.
+ * Every axis a STORE-WIDE default may name. `"narrower"` is excluded on
+ * purpose: an alias declared with no options is typed as its declared kind
+ * (or the polymorphic widening of it), and a `broader`/`narrower` expansion
+ * claims no schema relationship at all — defaulting a whole store onto that
+ * axis would hand every untyped-by-default alias rows of kinds its type
+ * never promised.
+ */
+export type DefaultAliasExpansionAxis = Exclude<AliasExpansionAxis, "narrower">;
+
+export type AliasExpansionOptions = Readonly<{
+  /**
+   * The alias's expansion axis. Omitted (or `undefined`) takes the store
+   * default — `"subclasses"` unless the store overrides it through
+   * `queryDefaults.expansion`.
+   */
+  expansion?: AliasExpansionAxis | undefined;
+}>;
+
+const ALIAS_EXPANSION_AXES: readonly AliasExpansionAxis[] = [
+  "exact",
+  "subclasses",
+  "narrower",
+];
+
+/**
+ * Resolves the expansion axis for one alias: the stated `expansion`, or the
+ * store default when the option is absent or explicitly `undefined` (an
+ * unstated option, not a stated one — ordinary option forwarding).
  *
- * | `includeSubClasses` | `includeNarrower` | axis |
- * | --- | --- | --- |
- * | absent | absent / `false` | store default (`true` ⇒ `"subClasses"`, `false` ⇒ `"exact"`) |
- * | `true` | absent / `false` | `"subClasses"` |
- * | `false` | absent / `false` | `"exact"` |
- * | absent / `false` | `true` | `"narrower"` |
- * | `true` | `true` | refused — `ConfigurationError`, `QUERY_ALIAS_EXPANSION_CONFLICT` |
- *
- * An explicit `includeNarrower: true` replaces the subclass DEFAULT — a
- * default is not a stated value — so only two explicit `true`s collide.
- *
- * @throws ConfigurationError when both `includeSubClasses: true` and
- *   `includeNarrower: true` are stated on the same alias.
+ * @throws ConfigurationError (`QUERY_ALIAS_EXPANSION_INVALID`) when
+ *   `expansion` names something outside the axis set. Unreachable through
+ *   the typed overloads; reachable from JavaScript, and silently expanding
+ *   to the wrong kind list would be worse than a refusal.
  */
 export function resolveAliasExpansion(
   options: AliasExpansionOptions | undefined,
-  storeDefaultIncludeSubClasses: boolean,
+  storeDefaultExpansion: DefaultAliasExpansionAxis,
 ): AliasExpansionAxis {
-  const includeSubClasses = options?.includeSubClasses;
-  const includeNarrower = options?.includeNarrower ?? false;
-
-  if (includeSubClasses === true && includeNarrower) {
+  const expansion = options?.expansion;
+  if (expansion === undefined) return storeDefaultExpansion;
+  if (!ALIAS_EXPANSION_AXES.includes(expansion)) {
     throw new ConfigurationError(
-      "includeSubClasses and includeNarrower cannot both be requested for the same alias.",
+      `Unknown alias expansion "${expansion}".`,
+      { code: "QUERY_ALIAS_EXPANSION_INVALID", expansion },
       {
-        code: "QUERY_ALIAS_EXPANSION_CONFLICT",
-        includeSubClasses,
-        includeNarrower,
-      },
-      {
-        suggestion:
-          "Choose one expansion axis: includeSubClasses for a subtype hierarchy (subClassOf/equivalentTo), or includeNarrower for a broader/narrower kind taxonomy.",
+        suggestion: `Pass one of ${ALIAS_EXPANSION_AXES.map((axis) => `"${axis}"`).join(", ")}.`,
       },
     );
   }
-
-  if (includeNarrower) return "narrower";
-  if (includeSubClasses === false) return "exact";
-  if (includeSubClasses === true) return "subClasses";
-  return storeDefaultIncludeSubClasses ? "subClasses" : "exact";
+  return expansion;
 }
 
 /**
@@ -96,7 +101,7 @@ export function expandKindsForAxis(
     case "exact": {
       return [kind];
     }
-    case "subClasses": {
+    case "subclasses": {
       return registry.expandSubClasses(kind);
     }
     case "narrower": {
@@ -104,7 +109,7 @@ export function expandKindsForAxis(
       for (const narrowerKind of kinds) {
         if (registry.hasNodeType(narrowerKind)) continue;
         throw new ConfigurationError(
-          `includeNarrower expansion of "${kind}" includes "${narrowerKind}", which is not a registered node kind.`,
+          `expansion: "narrower" on "${kind}" includes "${narrowerKind}", which is not a registered node kind.`,
           {
             code: "ONTOLOGY_NARROWER_KIND_NOT_REGISTERED",
             rootKind: kind,

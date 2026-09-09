@@ -73,7 +73,7 @@ const subClassOfMetaEdge = createMetaEdge(
  *
  * A hierarchy that is a taxonomy rather than a subtype relationship — the
  * child does not extend the parent's schema — should use `broader(child,
- * parent)` instead; see `includeNarrower` for kind-level taxonomy queries.
+ * parent)` instead; see `expansion: "narrower"` for kind-level taxonomy queries.
  */
 export function subClassOf<C extends NodeType, P extends NodeType>(
   child: C,

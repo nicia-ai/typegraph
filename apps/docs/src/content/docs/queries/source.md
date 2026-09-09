@@ -26,8 +26,7 @@ const results = await store
 |-----------|------|-------------|
 | `kind` | `string` | The node kind to query (must exist in your graph definition) |
 | `alias` | `string` | A unique identifier for referencing this node in the query |
-| `options.includeSubClasses` | `boolean` | Include nodes of subclass kinds (default: `true`) |
-| `options.includeNarrower` | `boolean` | Include nodes of `broader`/`narrower` descendant kinds instead of `subClassOf` descendants (default: `false`; mutually exclusive with `includeSubClasses`) |
+| `options.expansion` | `"exact" \| "subclasses" \| "narrower"` | The alias's expansion axis. `"subclasses"` (the default) includes nodes of subclass kinds; `"exact"` is the named kind alone; `"narrower"` follows `broader`/`narrower` descendants instead |
 
 ## Aliases
 
@@ -84,12 +83,12 @@ const allMedia = await store
 // Query only exact Media nodes
 const exactMedia = await store
   .query()
-  .from("Media", "m", { includeSubClasses: false })
+  .from("Media", "m", { expansion: "exact" })
   .select((ctx) => ctx.m)
   .execute();
 ```
 
-By default (`includeSubClasses` absent, or explicitly `true`):
+By default (`expansion` absent, or explicitly `"subclasses"`):
 
 - Results include nodes of the specified kind AND all subclass kinds — AND any
   kind declared `equivalentTo` the specified kind (or one of its subclasses),
@@ -121,15 +120,15 @@ returns, but `evolve()` still returns `Store<G>` with the same compile-time
 row may now come back as the extension's `Podcast` subclass. Passing that
 row's `id` to `store.nodes.Media.update(...)` would then typecheck and
 silently match nothing. Use `fromDynamic()` (always polymorphically typed) or
-`{ includeSubClasses: false }` for a kind a runtime extension subclasses.
+`{ expansion: "exact" }` for a kind a runtime extension subclasses.
 
-Pass `{ includeSubClasses: false }` to narrow one alias back to the exact
-kind, or set `queryDefaults.includeSubClasses: false` on `createStore(...)` to
+Pass `{ expansion: "exact" }` to narrow one alias back to the exact
+kind, or set `queryDefaults.expansion: "exact"` on `createStore(...)` to
 restore the exact-kind behavior everywhere. `search()` and the collection
 APIs (`find`, `count`, `updateWhere`, `compareAndSet`) are unaffected by this
 default and stay exact-kind.
 
-### `includeNarrower` — kind-level taxonomies
+### `expansion: "narrower"` — kind-level taxonomies
 
 `broader`/`narrower` model a hierarchy that is **not** a subtype relationship
 — no schema contract is claimed, so the alias type stays untyped (`NodeAlias`,
@@ -142,16 +141,22 @@ with `.recursive()` (see [Ontology](/ontology)).
 // ontology: [broader(Podcast, Media), broader(Video, Media)]
 const rows = await store
   .query()
-  .from("Media", "m", { includeNarrower: true })
+  .from("Media", "m", { expansion: "narrower" })
   .select((ctx) => ctx.m)
   .execute();
 ```
 
-`includeSubClasses` and `includeNarrower` are mutually exclusive on one
-alias — passing both `true` is refused (`QUERY_ALIAS_EXPANSION_CONFLICT`)
-rather than silently unioned. An expansion naming a kind that is not
-registered, or (on `to()`/`toDynamic()`) that the traversed edge does not
-admit as an endpoint, is refused too, rather than silently narrowed.
+One alias carries exactly one axis, because `expansion` is one option with
+one value — a contradiction like "subclasses and narrower" is not
+expressible. An expansion naming a kind that is not registered, or (on
+`to()`/`toDynamic()`) that the traversed edge does not admit as an endpoint,
+is refused rather than silently narrowed; so is an `expansion` value outside
+the three axes (`QUERY_ALIAS_EXPANSION_INVALID`), which only a JavaScript
+caller can reach.
+
+Omitting `options` entirely, passing `{}`, or passing an explicit `undefined`
+all mean the same thing — take the store default — so an options bag can be
+forwarded through your own helper without special-casing the empty case.
 
 ## Runtime-declared kinds
 

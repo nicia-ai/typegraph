@@ -810,7 +810,7 @@ describe("QueryProfiler", () => {
       expect(emailRec).toBeUndefined();
     });
 
-    it("attributes includeSubClasses filters to matching kinds", async () => {
+    it("attributes subclass-expansion filters to matching kinds", async () => {
       const industryPointer = jsonPointer(["industry"]);
       const profiler = new QueryProfiler({ minFrequencyForRecommendation: 1 });
       const profiledStore = profiler.attachToStore(store);
@@ -823,7 +823,7 @@ describe("QueryProfiler", () => {
       // outside the alias's statically-known shape.
       await profiledStore
         .query()
-        .from("Organization", "o", { includeSubClasses: true })
+        .from("Organization", "o", { expansion: "subclasses" })
         .whereNode("o", ((accessor: {
           industry: { eq: (value: string) => unknown };
         }) => accessor.industry.eq("Tech")) as never)
@@ -1310,10 +1310,10 @@ describe("AST Extractor", () => {
     expect(ageAccess).toBeDefined();
   });
 
-  it("includes expanded kinds for includeSubClasses aliases", () => {
+  it("includes expanded kinds for subclass-expanded aliases", () => {
     const namePointer = jsonPointer(["name"]);
     const builder = store.query().from("Organization", "o", {
-      includeSubClasses: true,
+      expansion: "subclasses",
     });
     const query = builder
       .whereNode("o", (o) => requireDefined(o.name).eq("Acme"))

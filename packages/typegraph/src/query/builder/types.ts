@@ -49,7 +49,10 @@ import type {
   SimilarToOptions,
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
-import { type AliasExpansionAxis } from "./alias-expansion";
+import {
+  type AliasExpansionAxis,
+  type DefaultAliasExpansionAxis,
+} from "./alias-expansion";
 import {
   type DynamicEdgeAccessor,
   type DynamicNodeAccessor,
@@ -219,7 +222,7 @@ type SubsumptionAffected<G extends GraphDef, K extends string> =
 
 /**
  * The alias type a `from(kind, alias)` call with NO explicit
- * `includeSubClasses` resolves to, under the Q3 polymorphic-by-default
+ * `expansion` resolves to, under the Q3 polymorphic-by-default
  * axis. `PolymorphicNodeType` only when `K` is actually
  * {@link SubsumptionAffected} — a compile-time subtype guarantee (C.1/C.2)
  * covers the kind's PROPERTIES, never its `kind` discriminant or `NodeId`
@@ -238,7 +241,7 @@ type SubsumptionAffected<G extends GraphDef, K extends string> =
  * runtime, which would let a subtype id round-trip through
  * `store.nodes.<K>.update()` typechecked and silently match nothing. Use
  * `fromDynamic()` (always `PolymorphicNodeType`-typed, §1.4 of the typed-
- * subsumption plan) or `{ includeSubClasses: false }` for a kind a runtime
+ * subsumption plan) or `{ expansion: "exact" }` for a kind a runtime
  * extension subclasses.
  */
 export type AliasNodeType<G extends GraphDef, K extends string> =
@@ -732,11 +735,11 @@ export type QueryBuilderConfig = Readonly<{
   defaultTraversalExpansion: TraversalExpansion;
   /**
    * Store-level default for the `from`/`to`/`fromDynamic`/`toDynamic`
-   * subclass-expansion axis when an alias states no `includeSubClasses`
-   * (roadmap Q3). `true` (the default everywhere a store doesn't override
-   * it) makes a supertype query polymorphic.
+   * expansion axis when an alias states no `expansion` (roadmap Q3).
+   * `"subclasses"` (the default everywhere a store doesn't override it)
+   * makes a supertype query polymorphic.
    */
-  defaultIncludeSubClasses: boolean;
+  defaultExpansion: DefaultAliasExpansionAxis;
   /** Whether this builder's graph enables Operational Identity. */
   identityEnabled: boolean;
   /** Equal-id behavior used by historical identity traversal compilation. */
@@ -794,14 +797,13 @@ export type CreateQueryBuilderOptions = Readonly<{
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
   /**
-   * Default subclass-expansion axis for `from`/`to`/`fromDynamic`/
-   * `toDynamic` when an alias states no `includeSubClasses` (default:
-   * `true`, roadmap Q3). A store-issued builder threads its own
-   * `queryDefaults.includeSubClasses`; a standalone `createQueryBuilder`
-   * defaults to `true` too, so a store-less builder and a store-issued one
-   * agree.
+   * Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an
+   * alias states no `expansion` (default: `"subclasses"`, roadmap Q3). A
+   * store-issued builder threads its own `queryDefaults.expansion`; a
+   * standalone `createQueryBuilder` defaults to `"subclasses"` too, so a
+   * store-less builder and a store-issued one agree.
    */
-  defaultIncludeSubClasses?: boolean;
+  defaultExpansion?: DefaultAliasExpansionAxis;
   /**
    * Overrides whether a builder may compile identity-aware traversals
    * (`traverse(..., { includeIdentityMembers: true })`).

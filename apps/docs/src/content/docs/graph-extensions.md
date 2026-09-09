@@ -354,7 +354,7 @@ polymorphic through an extension's `subClassOf` still types `from(kind,
 alias)` as the narrow, exact kind — even though a row may come back as the
 extension's subclass at runtime. See [Query Source ▸ Subclass
 Expansion](/queries/source#subclass-expansion) for the `fromDynamic()` /
-`includeSubClasses: false` workaround.
+`expansion: "exact"` workaround.
 
 ## `store.evolve(extension, options?)`
 

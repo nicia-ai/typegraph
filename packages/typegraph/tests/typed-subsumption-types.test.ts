@@ -235,12 +235,12 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
     expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
   });
 
-  it("includeSubClasses: false keeps kind literal even on an affected alias", () => {
+  it('expansion: "exact" keeps kind literal even on an affected alias', () => {
     const query = createQueryBuilder<typeof affectedGraph>(
       affectedGraph.id,
       affectedRegistry,
     )
-      .from("MediaAliasTest", "m", { includeSubClasses: false })
+      .from("MediaAliasTest", "m", { expansion: "exact" })
       .select((ctx) => ctx.m);
     expect(query).toBeDefined();
     type Row = Awaited<ReturnType<typeof query.execute>>[number];
@@ -271,20 +271,43 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
     expect(query).toBeDefined();
   });
 
-  it("refuses includeSubClasses + includeNarrower together, at compile time and at runtime", () => {
+  it("accepts an empty options object and an explicit undefined, typed like no options at all", () => {
+    // R-S1: ordinary option forwarding. A caller threading an options bag
+    // it did not populate must not have to drop the argument entirely.
     const builder = createQueryBuilder<typeof affectedGraph>(
       affectedGraph.id,
       affectedRegistry,
     );
-    const conflictingOptions = {
-      includeSubClasses: true,
-      includeNarrower: true,
-    } as const;
+    const emptyOptions = builder
+      .from("MediaAliasTest", "m", {})
+      .select((ctx) => ctx.m);
+    const undefinedOptions = builder
+      .from("MediaAliasTest", "m", undefined)
+      .select((ctx) => ctx.m);
+    expect(emptyOptions).toBeDefined();
+    expect(undefinedOptions).toBeDefined();
 
-    expect(() => {
-      // @ts-expect-error - includeSubClasses and includeNarrower are mutually exclusive
-      builder.from("MediaAliasTest", "m", conflictingOptions);
-    }).toThrow("cannot both be requested");
+    type EmptyRow = Awaited<ReturnType<typeof emptyOptions.execute>>[number];
+    type UndefinedRow = Awaited<
+      ReturnType<typeof undefinedOptions.execute>
+    >[number];
+    expectTypeOf<EmptyRow["kind"]>().toEqualTypeOf<string>();
+    expectTypeOf<UndefinedRow["kind"]>().toEqualTypeOf<string>();
+  });
+
+  it("refuses an expansion axis outside the option's domain", () => {
+    const builder = createQueryBuilder<typeof affectedGraph>(
+      affectedGraph.id,
+      affectedRegistry,
+    );
+    expect(() =>
+      // Unreachable through the typed overloads; a JavaScript caller can
+      // still get here, and expanding to the wrong kind list silently
+      // would be worse than a refusal.
+      builder.from("MediaAliasTest", "m", {
+        expansion: "subClasses",
+      } as never),
+    ).toThrow("Unknown alias expansion");
   });
 });
 

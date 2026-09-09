@@ -431,10 +431,10 @@ export async function main() {
     console.log("\n=== Queries Shaped by the Ontology ===\n");
 
     // Subsumption expansion: one query over the whole publication hierarchy.
-    console.log("All publications (from 'Publication', includeSubClasses):");
+    console.log("All publications (from 'Publication', expansion: subclasses):");
     const publications = await store
       .query()
-      .from("Publication", "pub", { includeSubClasses: true })
+      .from("Publication", "pub", { expansion: "subclasses" })
       .select((ctx) => ({ title: ctx.pub.title, kind: ctx.pub.kind }))
       .execute();
     for (const row of publications) {
@@ -442,14 +442,14 @@ export async function main() {
     }
 
     // Bound topic filter: only papers tagged with the Deep Learning field.
-    // `includeSubClasses` widens the target alias to the base kind, so we
+    // `expansion: "subclasses"` widens the target alias to the base kind, so we
     // bind on `kind` (always statically typed) rather than a schema field.
     console.log(`\nPapers about ${DEEP_LEARNING_NAME}:`);
     const dlPapers = await store
       .query()
       .from("Paper", "p")
       .traverse("about", "a")
-      .to("Topic", "t", { includeSubClasses: true })
+      .to("Topic", "t", { expansion: "subclasses" })
       .whereNode("t", (topic) => topic.kind.eq(DeepLearning.kind))
       .select((ctx) => ({ title: ctx.p.title, topic: ctx.t.name }))
       .execute();
@@ -462,9 +462,9 @@ export async function main() {
     console.log("\nPublications about AI or any narrower field:");
     const aiPublications = await store
       .query()
-      .from("Publication", "pub", { includeSubClasses: true })
+      .from("Publication", "pub", { expansion: "subclasses" })
       .traverse("about", "a")
-      .to("Topic", "t", { includeSubClasses: true })
+      .to("Topic", "t", { expansion: "subclasses" })
       .whereNode("t", (topic) => topic.kind.in([...aiOrNarrower]))
       .select((ctx) => ({ title: ctx.pub.title, field: ctx.t.name }))
       .execute();
@@ -480,7 +480,7 @@ export async function main() {
       .from("Paper", "p")
       .whereNode("p", ({ title }) => title.eq(ATTENTION_PAPER_TITLE))
       .traverse("cites", "c", { expand: "none" })
-      .to("Publication", "cited", { includeSubClasses: true })
+      .to("Publication", "cited", { expansion: "subclasses" })
       .select((ctx) => ({ title: ctx.cited.title }))
       .execute();
     console.log(`  Explicit cites edges: ${explicitCites.length}`);
@@ -489,7 +489,7 @@ export async function main() {
       .from("Paper", "p")
       .whereNode("p", ({ title }) => title.eq(ATTENTION_PAPER_TITLE))
       .traverse("cites", "c", { expand: "implying" })
-      .to("Publication", "cited", { includeSubClasses: true })
+      .to("Publication", "cited", { expansion: "subclasses" })
       .select((ctx) => ({ title: ctx.cited.title }))
       .execute();
     for (const row of impliedCites) {
@@ -506,7 +506,7 @@ export async function main() {
       .from("Paper", "s")
       .whereNode("s", ({ title }) => title.eq(SEQ2SEQ_PAPER_TITLE))
       .traverse("citedBy", "cb", { expand: "all" })
-      .to("Publication", "citing", { includeSubClasses: true })
+      .to("Publication", "citing", { expansion: "subclasses" })
       .select((ctx) => ({ title: ctx.citing.title }))
       .execute();
     for (const row of citingPublications) {
