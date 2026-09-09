@@ -662,6 +662,14 @@ type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = 
 // @public
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
+// @public (undocumented)
+const ENGINE_REVISION_BRAND: unique symbol;
+
+// @public
+type EngineRevision = string & Readonly<{
+    [ENGINE_REVISION_BRAND]: "EngineRevision";
+}>;
+
 // @public
 export function ensureSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: SchemaManagerOptions & {
     preloaded?: Readonly<{
@@ -669,6 +677,12 @@ export function ensureSchema<G extends GraphDef>(backend: GraphBackend, graph: G
         storedSchema: SerializedSchema | undefined;
     }>;
 }): Promise<SchemaValidationResult>;
+
+// @public
+type EntityKey = Readonly<{
+    kind: string;
+    id: string;
+}>;
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
@@ -1128,6 +1142,7 @@ type GraphBackend = Readonly<{
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
     catalog?: BackendCatalogProbes | undefined;
+    lineage?: LineageMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -1682,6 +1697,27 @@ type KindRemovalRow = Readonly<{
     lastAttemptedAt: string;
     lastError: string | undefined;
 }>;
+
+// @public
+type LineageBackend = Pick<GraphBackend, "lineage">;
+
+// @public
+type LineageDelta = Readonly<{
+    kind: "keys";
+    nodes: readonly EntityKey[];
+    edges: readonly EntityKey[];
+}> | Readonly<{
+    kind: "unbounded";
+}>;
+
+// @public
+type LineageMembers = Readonly<{
+    revision: (this: void, session: LineageSession) => Promise<EngineRevision>;
+    changesSince: (this: void, session: LineageSession, revision: EngineRevision, graphId: string) => Promise<LineageDelta>;
+}>;
+
+// @public
+type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 export function loadActiveSchemaWithBootstrap(backend: GraphBackend, graphId: string): Promise<SchemaVersionRow | undefined>;
@@ -2405,7 +2441,7 @@ type TableState = Readonly<{
 type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
 
 // @public
-type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 type TransactionOptions = Readonly<{

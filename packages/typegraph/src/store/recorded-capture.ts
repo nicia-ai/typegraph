@@ -73,11 +73,13 @@ import {
 export {
   advanceRevisionClock,
   ensureRevisionOrigin,
+  ensureRevisionOriginsRelation,
   lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
+  resetRevisionOrigin,
 } from "./recorded-capture/clock";
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
 export {
@@ -88,6 +90,12 @@ export {
   throwRevisionTrackingUnsafeSqlAccess,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
+export {
+  encodeRecordedLineageRevision,
+  mintsOriginNamespacedAnchor,
+  recordedRelationsLineage,
+  resolveLineage,
+} from "./recorded-capture/lineage";
 export {
   RECORDED_EDGE_COLUMNS,
   RECORDED_NODE_COLUMNS,

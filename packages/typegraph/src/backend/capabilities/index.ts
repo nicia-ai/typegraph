@@ -110,6 +110,14 @@ export {
 } from "./catalog";
 export { resolveBackendFulltext } from "./fulltext";
 export {
+  type EngineRevision,
+  type EntityKey,
+  type LineageDelta,
+  type LineageMembers,
+  type LineageSession,
+  requireLineage,
+} from "./lineage";
+export {
   batchPointReadVerdict,
   type BundleVerdictOf,
   type CapabilityExtraSpec,

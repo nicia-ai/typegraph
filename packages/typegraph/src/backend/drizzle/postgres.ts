@@ -63,6 +63,9 @@ import {
   ConfigurationError,
   StaleVersionError,
 } from "../../errors";
+import {
+  sinceIndexAdoptionDdl,
+} from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -161,6 +164,7 @@ import {
   type InsertNodeParams,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
+  type LineageMembers,
   type LockSchemaVersionForWriteParams,
   type ManagedNodeCreatePlan,
   type NormalizedColumnKind,
@@ -1530,6 +1534,13 @@ export function buildPostgresEngineProfile(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
+    sinceIndexDdl: sinceIndexAdoptionDdl({
+      recordedNodes: getTableName(tables.recordedNodes),
+      recordedEdges: getTableName(tables.recordedEdges),
+      recordedIdentityAssertions: getTableName(
+        tables.recordedIdentityAssertions,
+      ),
+    }),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
@@ -1806,6 +1817,7 @@ export function buildPostgresEngineProfile(
               iterativeScanProbe,
               schemaVersionsTable: tables.schemaVersions,
               fenceTarget,
+              lineage: provisioning.lineage,
               isFirstParty,
             });
           try {
@@ -1853,6 +1865,7 @@ export function buildPostgresEngineProfile(
         iterativeScanProbe,
         schemaVersionsTable: tables.schemaVersions,
         fenceTarget,
+        lineage: provisioning.lineage,
         isFirstParty: txIsFirstParty,
       });
       const gatedBackend = carryAtomicMutationSessionRegistration(
@@ -2490,6 +2503,16 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    * builds its own probes bound to the transaction's own session.
    */
   catalog?: BackendCatalogProbes | undefined;
+  /**
+   * The root backend's own `lineage` bag, threaded through so a
+   * transaction-scoped call exposes the SAME object — see
+   * `EngineProvisioning.lineage`. Unlike `catalog`, there is nothing to
+   * rebuild when this is omitted: a profile-supplied `lineage` is a
+   * read-only bag of engine-wide queries bound to nothing session-specific,
+   * so a transaction-scoped call with no `lineage` passed through simply
+   * carries none, matching the root.
+   */
+  lineage?: LineageMembers | undefined;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -2517,6 +2540,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
    * caller's, not one TypeGraph has audited.
    */
   isFirstParty: boolean;
+  /** The root backend's own `lineage` bag. See {@link CreatePostgresOperationBackendOptions}. */
+  lineage?: LineageMembers | undefined;
 }>;
 
 function createPostgresOperationBackend(
@@ -2538,6 +2563,7 @@ function createPostgresOperationBackend(
     fenceTarget,
     transactionScoped,
     catalog,
+    lineage,
   } = options;
   // Route through the execution adapter so driver-specific result shapes
   // (`{rows}` for node-postgres / neon-serverless; bare array for
@@ -3212,7 +3238,12 @@ function createPostgresOperationBackend(
   // call, which shares no bag of its own — this builds a fresh one bound to
   // THIS call's own `db`/`executionAdapter` (the pinned transaction client),
   // so every catalog probe on a transaction-scoped backend runs on the
-  // transaction's own session.
+  // transaction's own session. `lineage`, unlike `catalog`, has no
+  // transaction-scoped fallback to build: it is simply carried through
+  // (`options.lineage`, the SAME object exposed as `backend.lineage`) so a
+  // profile-supplied lineage capability reaches a `transaction()` handle
+  // exactly as `catalog` does, and stays absent when the profile declares
+  // none.
   return {
     ...operations,
     ...vectorEmbeddingMethods,
@@ -3224,6 +3255,7 @@ function createPostgresOperationBackend(
         operationStrategy,
         transactionScoped,
       ),
+    ...(lineage === undefined ? {} : { lineage }),
   };
 }
 
@@ -3332,6 +3364,7 @@ function createTransactionBackend(
     schemaVersionsTable: options.schemaVersionsTable,
     fenceTarget: options.fenceTarget,
     transactionScoped: true,
+    lineage: options.lineage,
   });
   const backend =
     options.isFirstParty ?

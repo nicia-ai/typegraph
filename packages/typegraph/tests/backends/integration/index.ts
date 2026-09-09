@@ -39,6 +39,7 @@ export { registerIdentitySeparationIntegrationTests } from "./identity-separatio
 export { registerImportUniquenessIntegrationTests } from "./import-uniqueness";
 export { registerLateMaterializationIntegrationTests } from "./late-materialization";
 export { registerLegacyClaimAxisIntegrationTests } from "./legacy-claim-axis";
+export { registerLineageConformanceIntegrationTests } from "./lineage-conformance";
 export { registerMigrateSchemaKindIntegrationTests } from "./migrate-schema-kinds";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";

@@ -8,12 +8,20 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { deriveBackend } from "../../src/backend/derive-backend";
+import type {
+  EngineRevision,
+  LineageDelta,
+  LineageMembers,
+} from "../../src/backend/types";
+import { computeBaseVersion } from "../../src/graph-merge/base-version";
 import { branch } from "../../src/graph-merge/branch";
 import { unwrap } from "../../src/graph-merge/result";
 import type { StagingSet } from "../../src/graph-merge/staging";
-import { stageBranches } from "../../src/graph-merge/staging";
+import { branchPruneTo, stageBranches } from "../../src/graph-merge/staging";
 import type { BranchId, GraphBranch } from "../../src/graph-merge/types";
-import { backendMatrix } from "./test-utils";
+import { asBranchId } from "../../src/graph-merge/types";
+import { backendMatrix, createSqliteMergeBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -251,5 +259,120 @@ describe.each(backendMatrix())("staging [$name]", (entry) => {
     expect(staging.newEdgesByKind.size).toBe(0);
     expect(staging.modifiedEdges).toHaveLength(0);
     expect(staging.deletedEdges).toHaveLength(0);
+  });
+});
+
+/** A `lineage` whose `revision()` succeeds but whose `changesSince` rejects. */
+function changesSinceRejectingLineage(
+  revision: EngineRevision,
+  error: Error,
+): LineageMembers {
+  return {
+    revision: () => Promise.resolve(revision),
+    changesSince: () => Promise.reject(error),
+  };
+}
+
+describe("branchPruneTo: falls back to the full diff when a lineage call rejects", () => {
+  let cleanups: (() => Promise<void>)[];
+
+  beforeEach(() => {
+    cleanups = [];
+  });
+
+  afterEach(async () => {
+    for (const cleanup of cleanups) {
+      await cleanup();
+    }
+  });
+
+  it("returns undefined (no pruning) when the fork's own changesSince rejects", async () => {
+    const { backend: baseBackend, cleanup: baseCleanup } =
+      createSqliteMergeBackend();
+    cleanups.push(baseCleanup);
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+    await baseStore.nodes.Person.create({ name: "Alice" });
+    // Plain backend, no revision tracking: `base` is content-fingerprint
+    // anchored, so `lineageDeltaSinceAnchor` never touches a `lineage` at
+    // all — this isolates the failure to the FORK side.
+    const base = await computeBaseVersion(baseStore);
+
+    const { backend: forkBackendRaw, cleanup: forkCleanup } =
+      createSqliteMergeBackend();
+    cleanups.push(forkCleanup);
+    const failure = new Error("engine changesSince boom");
+    const [forkStore] = await createStoreWithSchema(
+      graph,
+      deriveBackend(forkBackendRaw, {
+        lineage: changesSinceRejectingLineage(
+          "fork-r0" as EngineRevision,
+          failure,
+        ),
+      }),
+    );
+
+    const forkBranch: GraphBranch<G> = {
+      id: asBranchId("rejecting-fork"),
+      base,
+      store: forkStore,
+      close: (): Promise<void> => Promise.resolve(),
+      forkRevision: "fork-r0" as EngineRevision,
+    };
+
+    await expect(branchPruneTo(baseStore, forkBranch)).resolves.toBeUndefined();
+  });
+
+  it("returns undefined (no pruning) when the base's own changesSince rejects", async () => {
+    const { backend: baseBackendRaw, cleanup: baseCleanup } =
+      createSqliteMergeBackend();
+    cleanups.push(baseCleanup);
+    const failure = new Error("engine changesSince boom");
+    const [baseStore] = await createStoreWithSchema(
+      graph,
+      deriveBackend(baseBackendRaw, {
+        lineage: changesSinceRejectingLineage(
+          "base-r0" as EngineRevision,
+          failure,
+        ),
+      }),
+    );
+    await baseStore.nodes.Person.create({ name: "Alice" });
+    // No revision tracking + a real backend lineage: `base` is
+    // engine-anchored, so `lineageDeltaSinceAnchor` DOES call `changesSince`
+    // on this same lineage below.
+    const base = await computeBaseVersion(baseStore);
+    // The engine anchor embeds the store's durable per-graph origin ahead
+    // of the scripted revision (`engine:<origin>:<revision>` —
+    // `base-version.ts`'s `engineComponent`), so this asserts on the
+    // revision suffix rather than a literal substring.
+    expect(base).toMatch(/\0engine:[^:]+:base-r0$/);
+
+    const { backend: forkBackendRaw, cleanup: forkCleanup } =
+      createSqliteMergeBackend();
+    cleanups.push(forkCleanup);
+    const workingForkDelta: LineageDelta = {
+      kind: "keys",
+      nodes: [],
+      edges: [],
+    };
+    const [forkStore] = await createStoreWithSchema(
+      graph,
+      deriveBackend(forkBackendRaw, {
+        lineage: {
+          revision: () => Promise.resolve("fork-r0" as EngineRevision),
+          changesSince: () => Promise.resolve(workingForkDelta),
+        },
+      }),
+    );
+
+    const forkBranch: GraphBranch<G> = {
+      id: asBranchId("rejecting-base"),
+      base,
+      store: forkStore,
+      close: (): Promise<void> => Promise.resolve(),
+      forkRevision: "fork-r0" as EngineRevision,
+    };
+
+    await expect(branchPruneTo(baseStore, forkBranch)).resolves.toBeUndefined();
   });
 });

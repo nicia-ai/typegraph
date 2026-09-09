@@ -37,6 +37,7 @@ import {
   sharesSerializedTransactionResource,
 } from "../src/backend/transaction-resource";
 import {
+  type EngineRevision,
   type GraphBackend,
   SQLITE_CAPABILITIES,
   type TransactionBackend,
@@ -130,6 +131,25 @@ describe("recordedTableDdl", () => {
 
     expect(derived.recordedTableDdl).toBeInstanceOf(Function);
     expect(projected.recordedTableDdl).toBeInstanceOf(Function);
+  });
+});
+
+describe("lineage", () => {
+  it("carries an optional lineage member through a derivation and a GraphBackend projection", () => {
+    // No bundled backend implements `lineage` yet, so this fixture overlays
+    // one directly onto a real backend the same way a future engine profile
+    // would, and asserts the derivation seam does not drop it.
+    const lineage: NonNullable<GraphBackend["lineage"]> = {
+      revision: () => Promise.resolve("r1" as EngineRevision),
+      changesSince: () => Promise.resolve({ kind: "unbounded" as const }),
+    };
+    const backend = deriveBackend(createTestBackend(), { lineage });
+
+    const derived = deriveBackend(backend, {});
+    const projected = projectGraphBackend(backend);
+
+    expect(derived.lineage).toBe(lineage);
+    expect(projected.lineage).toBe(lineage);
   });
 });
 

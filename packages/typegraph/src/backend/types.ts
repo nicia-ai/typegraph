@@ -291,6 +291,7 @@ export type {
 } from "./capabilities/write-fence";
 
 import { type BackendCatalogProbes } from "./capabilities/catalog";
+import { type LineageMembers } from "./capabilities/lineage";
 
 export type {
   BackendCatalogProbes,
@@ -300,6 +301,13 @@ export type {
   NormalizedColumnKind,
   TableState,
 } from "./capabilities/catalog";
+export type {
+  EngineRevision,
+  EntityKey,
+  LineageDelta,
+  LineageMembers,
+  LineageSession,
+} from "./capabilities/lineage";
 
 /**
  * Backend capabilities that vary by dialect.
@@ -2984,6 +2992,20 @@ export type GraphBackend = Readonly<{
    */
   catalog?: BackendCatalogProbes | undefined;
 
+  /**
+   * The engine's whole-database revision and the per-graph change delta
+   * since an earlier one. Present only when a backend's engine declares it
+   * (`EngineProvisioning.lineage`) — absent by default on a custom backend
+   * that supplies none, and absent on both bundled Drizzle profiles
+   * regardless of `history`. A history-enabled store never populates this
+   * member itself: it always resolves its lineage from its own recorded
+   * relations instead (`resolveLineage` in
+   * `store/recorded-capture/lineage.ts`), never from this member. Every
+   * consumer falls back to a full comparison when this is absent — see
+   * `requireLineage` in `backend/capabilities/lineage.ts`.
+   */
+  lineage?: LineageMembers | undefined;
+
   // === Contribution Materialization (#135 — durable strategy-owned
   // storage marker, sibling of the index status table) ===
 
@@ -3645,6 +3667,9 @@ export type IndexMaterializationBackend = Pick<
 /** The optional catalog-introspection surface. See {@link BackendCatalogProbes}. */
 export type CatalogBackend = Pick<GraphBackend, "catalog">;
 
+/** The optional engine-lineage surface. See {@link LineageMembers}. */
+export type LineageBackend = Pick<GraphBackend, "lineage">;
+
 export type ContributionMaterializationBackend = Pick<
   GraphBackend,
   | "ensureContributionMaterializationsTable"
@@ -3742,6 +3767,7 @@ export type TransactionBackend = Readonly<
     FulltextOperationBackend &
     IndexMaterializationBackend &
     CatalogBackend &
+    LineageBackend &
     ContributionMaterializationBackend &
     RemovalMaterializationBackend &
     GraphLifecycleBackend &

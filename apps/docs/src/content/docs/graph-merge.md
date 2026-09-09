@@ -1007,11 +1007,16 @@ const store = await openProvenanceStore(backend, targetGraphId);
 ## Snapshot vs incremental
 
 A branch is forked from a `base@V` — a token combining the base's schema hash
-with either its durable revision anchor (`revisionTracking: true` / `history:
-true`) or the compatibility fingerprint of live content. A revision anchor is
-namespaced by a durable per-graph origin, so it is not transferable between
-independently created stores. The two merge entry points differ in how they treat
-that token.
+with an anchor chosen by one precedence: the store's durable revision anchor
+when `revisionTracking: true` or `history: true` is on; otherwise an **engine
+anchor** when the backend itself declares a `lineage` capability (see
+[Lineage and pruned diffs](#lineage-and-pruned-diffs) below); otherwise the
+compatibility fingerprint of live content. Both the revision anchor and the
+engine anchor are namespaced by the SAME durable per-graph origin, so neither
+is transferable between independently created stores, and `Store.clear()`
+rotates that origin — a branch forked before a clear can never match the
+same store again, even once it is repopulated to look the same. The two
+merge entry points differ in how they treat that token.
 
 **`merge()` is a snapshot merge.** Every branch must have forked from the
 target's *current* `base@V`. If the target advanced since the branch was taken,
@@ -1056,6 +1061,153 @@ transaction-capable target backend. Managed targets also acquire the
 schema-version write fence; raw targets remain outside schema fencing. On
 PostgreSQL, serialization failures from either the target-content guard or the
 schema fence are retried automatically around the complete commit.
+
+### Lineage and pruned diffs
+
+A backend may declare a `lineage` capability: an opaque, whole-database
+`revision(session)` it can report and compare, plus `changesSince(session,
+revision, graphId)`, which names every node and edge of one graph that
+changed (inserted, updated, deleted, or resurrected) after that revision — or
+admits `{ kind: "unbounded" }` when it cannot bound the answer (an
+unrecognized revision, or history older than what it retains). Neither
+bundled backend implements this itself; when a store has `history: true`, it
+derives one from its own recorded relations instead, and `resolveLineage(store)`
+is the one place that picks between the two — the backend's own `lineage`
+first, else the store's recorded-relations one, else nothing. A `lineage`
+source is consulted only to avoid rework; it never changes what a merge
+decides.
+
+`revision()` reports `<origin>:<clock>`, never the bare clock value alone:
+the durable, random per-graph revision-origin nonce
+(`typegraph_revision_origins`) plus the recorded-time clock. Two
+independently created stores that share a `graphId`, or the SAME store
+across a `Store.clear()` boundary, can mint numerically comparable clock
+values, and the origin is what keeps `changesSince` from mistaking one for
+the other — a revision whose origin no longer matches the graph's LIVE
+origin row is `unbounded`, regardless of what its numeric clock value is.
+
+The recorded-relations derivation's delta is trustworthy only when EVERY
+writer to the graph goes through a store that captures history — a precondition
+it can partially, but not fully, enforce itself. `changesSince` proves
+completeness directly rather than inferring it from a high-water mark: every
+integer revision between the requested one and the graph's current clock
+must carry direct evidence — a `recorded_from` or a non-sentinel
+`recorded_to` — in one of the three recorded relations (nodes, edges,
+identity assertions). This catches an incomplete record wherever the hole
+falls, including a `revisionTracking`-only `Store` (no `history`) that
+advanced the shared clock without inserting a row and was later FOLLOWED by
+a capturing commit — a later capturing commit cannot retroactively supply
+the missing evidence, so the gap is caught regardless of what comes after
+it. What it CANNOT detect: a non-capturing writer bypassing every `Store`
+entirely (a raw `GraphBackend` write, or an engine-side mutation outside
+TypeGraph), which leaves no evidence to be short of. Route every writer
+through a capturing `Store` if a `"keys"` delta from this source must be
+exhaustive.
+
+`session` is the connection the caller's decision is bound to — a
+session-less bag could never be pinned to anything, so this one always
+carries one. A caller planning outside any transaction (`branch()`'s
+fork-revision capture, the pruning below) passes the root backend it holds;
+a caller re-validating an anchor from inside an open commit transaction
+passes that transaction's own handle, so the read observes the transaction's
+snapshot rather than a separate connection's possibly stale view — see the
+engine anchor's re-validation just below for the concrete case.
+
+**The engine anchor.** When a store has no revision tracking but its backend
+declares `lineage`, `base@V`'s anchor is `engine:<origin>:<revision>` — the
+SAME durable per-graph revision-origin nonce the revision anchor carries
+(`typegraph_revision_origins`, ensured at mint time on the store's own
+backend), paired with the engine's own whole-database revision at fork time.
+(A capturing store never reaches this form: `history: true` also turns
+revision tracking on, so the per-graph revision anchor wins first — the
+recorded-relations lineage can back an engine anchor only for a caller that
+builds one by hand.) The origin exists because the engine's revision is NOT
+per-graph: two independent databases whose engines both happen to report the
+same bare revision string (a fresh counter starting at "r1", say) would
+otherwise mint indistinguishable anchors, letting a branch forked from one
+database satisfy the merge precondition of a completely unrelated one.
+Re-validating an engine anchor checks the origin FIRST — the live
+`typegraph_revision_origins` row for this graph, via the same
+`revisionOriginMatch` predicate the revision anchor's own guard uses — and
+raises `BaseVersionMismatchError` ("forked from a different store") on a
+mismatch before ever consulting `changesSince`. Once the origin matches, the
+guard still cannot stop at a raw revision inequality the way a revision
+anchor does, because the engine's revision is whole-database: a commit to a
+completely unrelated graph on the same engine also bumps it. So a bare
+revision mismatch calls `changesSince(session, anchored, graphId)` — an
+empty `keys` delta means nothing in *this* graph moved and the merge
+proceeds as unchanged; a non-empty delta, or `unbounded`, is a real
+divergence and raises `BaseVersionMismatchError` with
+`details: { expectedRevision, liveRevision, changedKeys? }`. This
+re-validation runs strictly INSIDE the target's own open commit transaction
+(no advisory lock pins an engine-anchored store's write path the way a
+revision-anchored one is pinned), and it passes that PINNED TRANSACTION
+HANDLE as `session` — never the root backend. A `lineage` threaded through
+`EngineProvisioning.lineage` reaches every transaction handle a profile
+builds, so this is the ordinary path; a `lineage` reachable only through a
+`deriveBackend` overlay applied to the already-built root object never
+reaches a transaction handle that way, and this re-validation then refuses
+the commit with a `LINEAGE_UNAVAILABLE` `ConfigurationError` rather than
+silently falling back to a different connection's answer. One known gap:
+`changesSince` names only node and edge keys, so a commit that changes
+nothing but a graph's current identity assertions is invisible to an
+engine-anchored guard and is tolerated as unchanged — the content-fingerprint
+fallback does not share this gap (its fingerprint folds identity assertions
+in), and neither does a revision anchor (any store write advances its shared
+clock).
+
+**`Store.clear()` rotates the origin.** Both origin-namespaced anchor forms
+share one `typegraph_revision_origins` row per graph, and `clear()` deletes
+and re-mints it — inside the same transaction as the rest of the clear — for
+any store able to mint EITHER form: one with `revisionTracking` or `history`
+enabled (the revision anchor), and, separately, an engine-anchored store
+whose backend declares `lineage` directly with tracking off. Without this, a
+graph cleared and repopulated to look the same — the same revision COUNT for
+a tracked store, or a coincidentally-matching engine revision for an
+engine-anchored one — would mint a `base@V` byte-identical to one minted
+before the clear (origin unchanged), and a branch forked before the clear
+would merge as if the clear had never happened. A branch forked from a store
+before it was cleared therefore always fails the `base@V` precondition
+against that store once cleared, even after it is repopulated to look the
+same — re-branch from the post-clear store instead.
+
+The origin row is also read fresh on every mint (`computeBaseVersion`,
+`Store.revisionOriginNow()`), never cached on a `Store` instance. Two live
+`Store` objects can legitimately observe the same graph — nothing requires
+that only one `Store` ever exists per database — and only one of them runs
+`clear()` at a time; a stale per-instance cache on the other would keep
+minting anchors from the origin that existed before the clear, so a branch
+it forks would fail every merge at commit until that `Store` happened to be
+recreated. Reading fresh means a second `Store` over a graph another `Store`
+just cleared sees the rotation immediately, with nothing to recreate.
+
+**Pruning the diff.** `branch()` also records a `forkRevision` on the
+returned `GraphBranch` — the fork's own `lineage.revision(session)`, read
+right after the working copy is created and before any write reaches it,
+with the working copy's own root backend as the session (this runs strictly
+outside any transaction). For the recorded-relations source this is
+origin-bearing like any other reading, so clearing and repopulating the
+FORK itself to the same revision count `forkRevision` held is caught the
+same way a cleared BASE store already is — there is no separate guard for
+the fork side to add, because the token itself now carries the check. When
+staging a branch for merge, its diff against the base is restricted to the
+union of two deltas: what changed on the *fork* since `forkRevision`, and
+what changed on the *base* since the anchor in its own `base@V` — instead of
+enumerating every live row on both sides. A key absent from both deltas
+cannot have changed since the fork point, so narrowing the read to their
+union cannot miss anything the full diff would have found; it only fetches
+fewer rows to compare. Pruning is a pure optimization with one rule:
+whenever either side cannot supply a bounded delta, the merge falls back to
+comparing every live row, exactly as it always has. That covers no
+`forkRevision` (a hand-built branch, or one whose store resolved no
+`lineage`); either side's `changesSince` answering `unbounded` or
+REJECTING (a transient engine error never fails a merge the full diff would
+have completed); and the base's own anchor failing to resolve against the
+base store's lineage at all — an origin mismatch between a revision-anchored
+`base` and the base store's live revision row, a revision anchor minted
+before the base store's first tracked write, or an engine anchor whose store
+now resolves no `lineage`. Nothing about *what* a merge decides depends on
+whether its diff was pruned.
 
 ## Working copies
 

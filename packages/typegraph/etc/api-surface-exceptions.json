@@ -598,5 +598,117 @@
     "kind": "required-member-added",
     "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have — CoordinatePinnedView's constructor, createStore's overloads, rebuildIdentityClosure, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate workingCopyOptions.",
     "issue": "#632"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRevision",
+    "member": "[ENGINE_REVISION_BRAND]",
+    "kind": "required-member-added",
+    "reason": "EngineRevision is the opaque token backend.lineage.revision()/changesSince() exchange; no code ever hand-constructs one, matching NodeId/RecordedInstant's own established brand pattern. LineageMembers.changesSince declares revision as a parameter, and lineage is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and its required brand becomes a false-positive breaking change.",
+    "issue": "#622"
   }
 ]

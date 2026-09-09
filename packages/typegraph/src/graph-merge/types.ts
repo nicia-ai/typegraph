@@ -16,6 +16,7 @@ import type { IngestionImportTarget } from "../interchange/ingestion-import-targ
 import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
 import type {
   EdgeId,
+  EngineRevision,
   GetNodeType,
   GraphDef,
   IdentityAssertionWriteFacade,
@@ -87,12 +88,23 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
    * concurrent calls onto one release of the working copy's backend and make
    * a completed release final, so a backend whose own `close` is not
    * idempotent is still released exactly once; a release that FAILED is
-   * retried by the next call rather than cached. `branch()` sets this; a hand-built `GraphBranch` (the merge
-   * primitive's own committed-target stand-in, `tests/`-only fixtures) must
-   * supply one too — a no-op when the object does not own a disposable
+   * retried by the next call rather than cached. `branch()` sets this; a
+   * hand-built `GraphBranch` (the merge primitive's own committed-target
+   * stand-in, `tests/`-only fixtures) must supply one too — a no-op when the object does not own a disposable
    * backend at all.
    */
   close: () => Promise<void>;
+  /**
+   * The engine revision the working copy's `lineage` source reported right
+   * after `branch()` cloned it, before any write — the baseline `state-diff.ts`'s
+   * `diffAgainstBase` and `staging.ts`'s `stageBranches` measure this branch's
+   * OWN changes against when pruning the merge diff (see `LineageDelta`). The
+   * key is PRESENT only when a lineage source answered at fork time; it is
+   * ABSENT both when the working copy resolved no `lineage` at all (no backend
+   * `lineage`, no `history: true` capture) and on a hand-built branch object —
+   * either way, the merge always diffs this branch in full.
+   */
+  forkRevision?: EngineRevision | undefined;
 }>;
 
 declare const INGESTION_BRANCH_BRAND: unique symbol;

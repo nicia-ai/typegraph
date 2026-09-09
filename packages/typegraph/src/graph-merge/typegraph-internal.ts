@@ -1,3 +1,8 @@
+export { requireLineage } from "../backend/capabilities/lineage";
+export {
+  batchPointReadVerdict,
+  recordedRevisionOriginsVerdict,
+} from "../backend/capabilities/resolve";
 export { runRetriedUnit } from "../backend/capabilities/retried-unit";
 export {
   requireFenceLockTables,
@@ -13,7 +18,12 @@ export {
   snapshotExportContention,
 } from "../backend/transaction-resource";
 export type {
+  EngineRevision,
+  EntityKey,
   GraphBackend,
+  LineageDelta,
+  LineageMembers,
+  LineageSession,
   NodeRow,
   TransactionBackend,
   TransactionOptions,
@@ -49,6 +59,8 @@ export {
   META_EDGE_EQUIVALENT_TO,
   META_EDGE_SAME_AS,
 } from "../ontology/constants";
+export { getEdgeRowsByIds } from "../store/edge-fetch";
+export { getNodeRowsByIds } from "../store/node-fetch";
 // The provenance ownership probe needs graph-scoped raw SQL to look for rows
 // under a graph id whose schema was never registered.
 export {
@@ -66,9 +78,13 @@ export {
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
+  encodeRecordedLineageRevision,
+  ensureRevisionOrigin,
   forceRecordedGraphRevision,
   readRecordedClock,
   readRevisionOrigin,
+  recordedRelationsLineage,
+  resolveLineage,
 } from "../store/recorded-capture";
 export {
   storeBackend,

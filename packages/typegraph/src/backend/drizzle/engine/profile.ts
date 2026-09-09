@@ -27,6 +27,7 @@ import type {
   AdapterBackend,
   BackendCapabilities,
   BackendCatalogProbes,
+  LineageMembers,
   TransactionBackend,
 } from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
@@ -81,6 +82,16 @@ export type EngineProvisioning = Readonly<{
    * like any other optional `GraphBackend` member.
    */
   catalog?: BackendCatalogProbes;
+  /**
+   * The engine-revision and change-delta surface `createSqlBackend`
+   * forwards onto the assembled backend's `lineage` member unchanged.
+   * Optional: a profile that omits it produces a backend with no
+   * `lineage`, exactly like any other optional `GraphBackend` member —
+   * neither bundled Drizzle profile supplies one today, so a store's own
+   * recorded-relations lineage (when history is on) is what backs the
+   * capability instead.
+   */
+  lineage?: LineageMembers;
 }>;
 
 /**
