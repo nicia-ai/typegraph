@@ -37,7 +37,6 @@
  * `IdentitySeparationViolationError` — an `IDENTITY_`-coded refusal — is
  * translated here like any other applier refusal.
  */
-import { identityAssertionSemanticKey } from "../identity/assertion-key";
 import {
   identityReferenceKey,
   normalizeIdentityPair,
@@ -51,6 +50,11 @@ import {
   IdentityMergeConflictError,
   MergeError,
 } from "./errors";
+import {
+  compareIdentitySurvivors,
+  identityDedupeKey,
+  identitySemanticKey,
+} from "./identity-three-way";
 import {
   compareMergeKeys,
   compareStrings,
@@ -105,28 +109,6 @@ function endpointTuple(
 
 function identityEndpointKey(assertion: IdentityTransferAssertion): string {
   return encodeTupleKey(endpointTuple(assertion));
-}
-
-function identitySemanticKey(assertion: IdentityTransferAssertion): string {
-  return identityAssertionSemanticKey(
-    assertion.relation,
-    assertion.a,
-    assertion.b,
-  );
-}
-
-function identityDedupeKey(assertion: IdentityTransferAssertion): string {
-  const semantic = identitySemanticKey(assertion);
-  if (assertion.validTo === undefined) return semantic;
-  return encodeTupleKey([semantic, assertion.validFrom, assertion.validTo]);
-}
-
-function compareIdentitySurvivors(
-  left: IdentityTransferAssertion,
-  right: IdentityTransferAssertion,
-): number {
-  const byValidity = compareCodePoints(left.validFrom, right.validFrom);
-  return byValidity === 0 ? compareCodePoints(left.id, right.id) : byValidity;
 }
 
 /**
