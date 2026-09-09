@@ -392,3 +392,81 @@ export async function readEdgeAcyclicityViolations(
   }
   return violations;
 }
+
+/**
+ * The plan-time preview (ruling D-4): every violation a caller-proposed edge
+ * set would create if it were added to the relation's CURRENT live
+ * population. This is what lets the graph-merge planner ask "would this
+ * resolved plan's edge writes close a cycle" and surface a typed conflict
+ * for review, without ever writing anything.
+ *
+ * Read-only and lock-free like {@link readEdgeAcyclicityViolations} — this is
+ * a PREVIEW, not a write gate, and takes no `lock` for the same reason that
+ * function does not: it decides nothing on its own. It runs before any
+ * per-graph write lock exists (a merge plan does no write to fence), and its
+ * answer is inherently racy against a concurrent writer of the SAME relation
+ * — which is fine, because the actual write path
+ * ({@link assertEdgeRelationsAcyclic}) re-verifies under the per-graph write
+ * lock at commit/apply time regardless, and remains the sole authority.
+ *
+ * Shares `runAcyclicityProbe` (and so `buildEdgeAcyclicityProbe`'s seed-hop
+ * branch, D-4) with the write path and the audit reader, so a write-path
+ * refusal, a live-graph audit, and a plan-time preview can never disagree
+ * about what counts as a cycle. A self-loop among `proposed` is reported
+ * directly, mirroring {@link assertEdgeRelationsAcyclic}'s immediate refusal,
+ * without a round trip.
+ */
+export async function readProposedEdgeAcyclicityViolations(
+  ctx: AcyclicityAuditContext,
+  graph: GraphDef,
+  proposed: readonly ProposedRelationEdge[],
+): Promise<readonly EdgeAcyclicityViolation[]> {
+  const proposedByRelation = new Map<
+    string,
+    Readonly<{ relation: AcyclicEdgeRelation; edges: ProposedRelationEdge[] }>
+  >();
+  const selfLoopIdsByRelation = new Map<string, string[]>();
+  for (const edge of proposed) {
+    const relation = acyclicRelationForEdgeKind(graph, edge.edgeKind);
+    if (relation === undefined) continue;
+    if (edge.fromKind === edge.toKind && edge.fromId === edge.toId) {
+      const selfLoopIds = selfLoopIdsByRelation.get(relation.name) ?? [];
+      selfLoopIds.push(edge.edgeId);
+      selfLoopIdsByRelation.set(relation.name, selfLoopIds);
+      continue;
+    }
+    const entry = proposedByRelation.get(relation.name) ?? {
+      relation,
+      edges: [],
+    };
+    entry.edges.push(edge);
+    proposedByRelation.set(relation.name, entry);
+  }
+
+  const violations: EdgeAcyclicityViolation[] = [];
+  const relationNames = new Set([
+    ...proposedByRelation.keys(),
+    ...selfLoopIdsByRelation.keys(),
+  ]);
+  for (const relationName of [...relationNames].toSorted(compareStrings)) {
+    const selfLoopIds = selfLoopIdsByRelation.get(relationName) ?? [];
+    const grouped = proposedByRelation.get(relationName);
+    const probedIds =
+      grouped === undefined ?
+        []
+      : await runAcyclicityProbe(ctx, grouped.relation, {
+          kind: "proposed",
+          edges: grouped.edges,
+        });
+    const edgeIds = [...new Set([...selfLoopIds, ...probedIds])].toSorted(
+      compareStrings,
+    );
+    if (edgeIds.length === 0) continue;
+    violations.push({
+      family: "edgeAcyclicity",
+      relation: relationName,
+      edgeIds,
+    });
+  }
+  return violations;
+}

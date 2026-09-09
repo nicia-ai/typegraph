@@ -204,10 +204,10 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/recursive-cte.ts",
-    line: "return sql`WITH RECURSIVE ${seedCte}, ${ancestry} ${limited}`;",
+    line: "return sql`WITH RECURSIVE ${seedCte}, candidates(from_kind, from_id, to_kind, to_id) AS (${candidatesCte}), ${ancestry} ${limited}`;",
     site: "G",
     reason:
-      "buildEdgeAcyclicityProbe (item D.2) runs the exhaustive, set-semantics reachability walk an `acyclic: true` edge kind's write path and audit both probe.",
+      "buildEdgeAcyclicityProbe (item D.2) runs the exhaustive, set-semantics reachability walk an `acyclic: true` edge kind's write path and audit both probe; the D-4 seed-hop folds the live-edge and proposed-seed sources into the `candidates` CTE ancestry joins once.",
   },
 ];
 

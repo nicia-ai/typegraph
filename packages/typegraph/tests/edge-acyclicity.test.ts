@@ -199,8 +199,17 @@ describe("buildEdgeAcyclicityProbe: compiled-SQL pin", () => {
     });
     const rendered = renderSqlite(fragment).sql;
 
-    expect(rendered).not.toContain("UNION ALL");
-    expect(rendered).toMatch(/\bUNION\b/);
+    // The `ancestry` accumulator itself is UNION, never UNION ALL — that is
+    // what makes an unbounded recursion terminate with no depth bound.
+    // `UNION ALL` legitimately appears in the preceding `candidates` CTE
+    // (D-4's seed hop, see recursive-cte.ts), which is a source `ancestry`
+    // joins against and not part of the `(origin_key, node_kind, node_id)`
+    // accumulator that needs deduplicating.
+    const ancestryTerm = rendered.slice(
+      rendered.indexOf("ancestry(origin_key"),
+    );
+    expect(ancestryTerm).not.toContain("UNION ALL");
+    expect(ancestryTerm).toMatch(/\bUNION\b/);
     // No depth column and no depth predicate: MAX_EXPLICIT_RECURSIVE_DEPTH
     // does not apply to this probe.
     expect(rendered).not.toMatch(/\bdepth\b/i);
@@ -487,10 +496,18 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
     expect(rendered).toContain("VALUES");
   });
 
-  it("compiles the CASE-oriented seed and OR-joined recursive term for the relation-wide (audit) seed (pin)", () => {
+  it("compiles the CASE-oriented seed/candidates source for the relation-wide (audit) seed (pin)", () => {
     const rendered = renderSqlite(seedFragment({ kind: "relation" })).sql;
     expect(rendered).toMatch(/CASE WHEN/i);
-    expect(rendered).toMatch(/\bOR\b/);
+    // Orientation is normalized ONCE, in the `candidates` source (see
+    // buildAcyclicityCandidates's docblock): the `ancestry` recursive step
+    // itself is always a plain equality join against `candidates`, even for
+    // a mixed-orientation relation, so the OR-joined recursive term this pin
+    // used to check for no longer exists.
+    const ancestryTerm = rendered.slice(
+      rendered.indexOf("ancestry(origin_key"),
+    );
+    expect(ancestryTerm).not.toMatch(/\bOR\b/);
   });
 
   it("walks the reversed member in its TRUE relation direction, not its stored (from, to) direction", async () => {
@@ -558,5 +575,160 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
     expect(violations).toHaveLength(1);
     expect(violations[0]?.relation).toBe("mixed-orientation");
     expect(violations[0]?.edgeIds).toContain("e-reversed");
+  });
+});
+
+// ============================================================
+// D-4 (reaffirmed 2026-09-08): a cycle formed ENTIRELY from proposed rows,
+// with nothing live yet — the case `buildAcyclicityRecursiveTerm`'s old
+// live-edges-only walk could never see. `assertEdgeRelationsAcyclic` is the
+// write-path predicate; `readProposedEdgeAcyclicityViolations` is the
+// lock-free preview the graph-merge planner uses for the SAME question
+// before any write happens (`src/graph-merge/merge.ts`).
+//
+// Mutation check (recorded in the lane's load-bearing log): reverting
+// `buildAcyclicityCandidates` to omit the seed source when
+// `seed.kind === "proposed"` (i.e. `ancestry` walks only live edges, as
+// before this change) makes BOTH tests below fail — `assertEdgeRelationsAcyclic`
+// resolves instead of throwing, and `readProposedEdgeAcyclicityViolations`
+// returns `[]` instead of the violation.
+// ============================================================
+
+async function seedThreeNodes(
+  backend: GraphBackend,
+): Promise<Readonly<{ a: string; b: string; c: string }>> {
+  const store = createStore(graph, backend);
+  const a = await store.nodes.Task.create({ name: "a" });
+  const b = await store.nodes.Task.create({ name: "b" });
+  const c = await store.nodes.Task.create({ name: "c" });
+  return { a: a.id, b: b.id, c: c.id };
+}
+
+function threeEdgeCycle(nodes: Readonly<{ a: string; b: string; c: string }>) {
+  return [
+    {
+      edgeId: "ab",
+      edgeKind: "dependsOn",
+      fromKind: "Task",
+      fromId: nodes.a,
+      toKind: "Task",
+      toId: nodes.b,
+    },
+    {
+      edgeId: "bc",
+      edgeKind: "dependsOn",
+      fromKind: "Task",
+      fromId: nodes.b,
+      toKind: "Task",
+      toId: nodes.c,
+    },
+    {
+      edgeId: "ca",
+      edgeKind: "dependsOn",
+      fromKind: "Task",
+      fromId: nodes.c,
+      toKind: "Task",
+      toId: nodes.a,
+    },
+  ];
+}
+
+describe("D-4: seed-hop — a cycle formed entirely from proposed rows, no live edges", () => {
+  it("assertEdgeRelationsAcyclic refuses a three-edge cycle proposed in ONE call, no live edges", async () => {
+    const backend = createTestBackend();
+    const nodes = await seedThreeNodes(backend);
+
+    await expect(
+      assertEdgeRelationsAcyclic(
+        {
+          graphId: graph.id,
+          graph,
+          schema: createSqlSchema(backend.tableNames),
+          dialect: getDialect(backend.dialect),
+          target: backend,
+          lock: uncapturedGraphWriteLock(),
+          operation: "test",
+        },
+        threeEdgeCycle(nodes),
+      ),
+    ).rejects.toThrow(expect.objectContaining({ name: "EdgeAcyclicityError" }));
+  });
+
+  it("does NOT refuse three proposed edges that do not close a cycle", async () => {
+    const backend = createTestBackend();
+    const nodes = await seedThreeNodes(backend);
+    const chain = threeEdgeCycle(nodes).slice(0, 2); // a->b, b->c only
+
+    await expect(
+      assertEdgeRelationsAcyclic(
+        {
+          graphId: graph.id,
+          graph,
+          schema: createSqlSchema(backend.tableNames),
+          dialect: getDialect(backend.dialect),
+          target: backend,
+          lock: uncapturedGraphWriteLock(),
+          operation: "test",
+        },
+        chain,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("readProposedEdgeAcyclicityViolations reports the same cycle with no lock (the graph-merge plan-time preview)", async () => {
+    const backend = createTestBackend();
+    const nodes = await seedThreeNodes(backend);
+
+    const violations =
+      await acyclicityModule.readProposedEdgeAcyclicityViolations(
+        {
+          graphId: graph.id,
+          schema: createSqlSchema(backend.tableNames),
+          dialect: getDialect(backend.dialect),
+          target: backend,
+          operation: "test",
+        },
+        graph,
+        threeEdgeCycle(nodes),
+      );
+
+    expect(violations).toEqual([
+      {
+        family: "edgeAcyclicity",
+        relation: "dependsOn",
+        edgeIds: ["ab", "bc", "ca"],
+      },
+    ]);
+  });
+
+  it("readProposedEdgeAcyclicityViolations reports a proposed self-loop directly, with no probe", async () => {
+    const backend = createTestBackend();
+    const nodes = await seedThreeNodes(backend);
+
+    const violations =
+      await acyclicityModule.readProposedEdgeAcyclicityViolations(
+        {
+          graphId: graph.id,
+          schema: createSqlSchema(backend.tableNames),
+          dialect: getDialect(backend.dialect),
+          target: backend,
+          operation: "test",
+        },
+        graph,
+        [
+          {
+            edgeId: "self",
+            edgeKind: "dependsOn",
+            fromKind: "Task",
+            fromId: nodes.a,
+            toKind: "Task",
+            toId: nodes.a,
+          },
+        ],
+      );
+
+    expect(violations).toEqual([
+      { family: "edgeAcyclicity", relation: "dependsOn", edgeIds: ["self"] },
+    ]);
   });
 });

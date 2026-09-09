@@ -330,12 +330,16 @@ function buildAcyclicitySeed(
   return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (SELECT e.id, ${fromKindColumn}, ${fromIdColumn}, ${toKindColumn}, ${toIdColumn} FROM ${schema.edgesTable} e WHERE e.graph_id = ${graphId} AND ${edgeKindFilter} AND e.deleted_at IS NULL)`;
 }
 
-/** The `ancestry` recursive term, oriented so every member walks part->whole. */
-function buildAcyclicityRecursiveTerm(
+/**
+ * The relation's live edges, reoriented so every row reads part->whole
+ * regardless of which member direction produced it: `(from_kind, from_id,
+ * to_kind, to_id)`. This is one of the (up to two) sources `ancestry` hops
+ * through — see {@link buildAcyclicityCandidates}.
+ */
+function buildLiveEdgeCandidates(
   members: readonly AcyclicRelationMember[],
   graphId: string,
   schema: SqlSchema,
-  forceWorktableOuterJoinOrder: boolean,
 ): SqlFragment {
   const { forward, reversed, all } = kindKeys(members);
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);
@@ -346,32 +350,80 @@ function buildAcyclicityRecursiveTerm(
   ];
 
   // The common case, and the only one D.2 itself ever produces: every member
-  // forward. One equality-only join on `(from_kind, from_id)` — covered by
-  // `typegraph_edges_from_idx` in that leading order — with no CASE and no
-  // OR, so this shape is byte-identical to what the benchmark's index-only
-  // scan assumption (§7.6) requires.
+  // forward. No CASE and no OR, so this shape is byte-identical to what the
+  // benchmark's index-only scan assumption (§7.6) requires.
   if (reversed.length === 0) {
-    const joinPredicate = sql`e.from_kind = a.node_kind AND e.from_id = a.node_id`;
-    if (forceWorktableOuterJoinOrder) {
-      return sql`SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...commonWhere, joinPredicate], sql` AND `)}`;
-    }
-    return sql`SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(commonWhere, sql` AND `)}`;
+    return sql`SELECT e.from_kind, e.from_id, e.to_kind, e.to_id FROM ${schema.edgesTable} e WHERE ${sql.join(commonWhere, sql` AND `)}`;
   }
 
   // A relation composed of both part->whole and whole->part realizing edges
   // (item E). Each member still seeks its OWN natural endpoint column; the
-  // OR only chooses which equality applies per row, the same device
-  // `buildBidirectionalBranch` already uses for two traversal directions in
-  // one recursive term.
+  // CASE only chooses which pair of columns is the "part" and which is the
+  // "whole" per row.
   const forwardFilter = compileKindFilter(sql.raw("e.kind"), forward);
-  const reversedFilter = compileKindFilter(sql.raw("e.kind"), reversed);
-  const joinPredicate = sql`((${forwardFilter} AND e.from_kind = a.node_kind AND e.from_id = a.node_id) OR (${reversedFilter} AND e.to_kind = a.node_kind AND e.to_id = a.node_id))`;
-  const projectedKind = sql`CASE WHEN ${forwardFilter} THEN e.to_kind ELSE e.from_kind END`;
-  const projectedId = sql`CASE WHEN ${forwardFilter} THEN e.to_id ELSE e.from_id END`;
+  const fromKindColumn = sql`CASE WHEN ${forwardFilter} THEN e.from_kind ELSE e.to_kind END`;
+  const fromIdColumn = sql`CASE WHEN ${forwardFilter} THEN e.from_id ELSE e.to_id END`;
+  const toKindColumn = sql`CASE WHEN ${forwardFilter} THEN e.to_kind ELSE e.from_kind END`;
+  const toIdColumn = sql`CASE WHEN ${forwardFilter} THEN e.to_id ELSE e.from_id END`;
+  return sql`SELECT ${fromKindColumn}, ${fromIdColumn}, ${toKindColumn}, ${toIdColumn} FROM ${schema.edgesTable} e WHERE ${sql.join(commonWhere, sql` AND `)}`;
+}
+
+/**
+ * Every edge `ancestry` is allowed to hop through, oriented part->whole:
+ * live rows in the relation's edges, and — for the `"proposed"` seed form
+ * only (D-4) — the writer's OWN not-yet-committed batch, via `seed`.
+ *
+ * A cycle formed ENTIRELY from rows in one proposed batch (three branch
+ * edges a->b, b->c, c->a with nothing live) has no live edge to walk, so
+ * `ancestry` must also be able to reach through `seed` directly. That
+ * cannot be a second `UNION`-ed recursive term next to the live-edge hop:
+ * both PostgreSQL and SQLite refuse a recursive term that references the
+ * recursive relation (`ancestry`) more than once (verified empirically —
+ * PostgreSQL: `recursive reference to query "ancestry" must not appear more
+ * than once`), so the two hops cannot be two arms of a `UNION` each
+ * self-joining `ancestry`. They must instead be two arms of the table
+ * `ancestry` joins against ONCE — the same device `buildBidirectionalBranch`
+ * uses for two traversal directions in one recursive term. This also lets a
+ * single path interleave live and proposed edges (an existing edge, then a
+ * proposed one, then another existing edge), which two separate recursive
+ * terms could not express without an explicit second round of interleaving.
+ *
+ * `UNION ALL`, not `UNION`: `candidates` is a source `ancestry` joins
+ * against, not itself part of the `(origin_key, node_kind, node_id)`
+ * accumulator that needs deduplicating — a duplicate candidate row costs an
+ * extra join, never a wrong answer.
+ *
+ * For the `"relation"` (audit) seed form, `seed` in this context IS the
+ * relation's live edges — the same rows `buildLiveEdgeCandidates` already
+ * reads from `edgesTable`. Adding it a second time would only duplicate
+ * work, so `candidates` is just the live-edge source there, unchanged from
+ * before this seed-hop was added.
+ */
+function buildAcyclicityCandidates(
+  members: readonly AcyclicRelationMember[],
+  graphId: string,
+  schema: SqlSchema,
+  seed: AcyclicityProbeSeed,
+): SqlFragment {
+  const liveEdges = buildLiveEdgeCandidates(members, graphId, schema);
+  if (seed.kind !== "proposed") return liveEdges;
+  return sql`${liveEdges} UNION ALL SELECT from_kind, from_id, to_kind, to_id FROM seed`;
+}
+
+/**
+ * The `ancestry` recursive term: one hop through `candidates`, the ONLY
+ * reference to the recursive relation this term may make (see
+ * {@link buildAcyclicityCandidates}'s docblock for why the live-edge and
+ * seed hops are folded into one join rather than two recursive terms).
+ */
+function buildAcyclicityAncestryStep(
+  forceWorktableOuterJoinOrder: boolean,
+): SqlFragment {
+  const joinPredicate = sql`c.from_kind = a.node_kind AND c.from_id = a.node_id`;
   if (forceWorktableOuterJoinOrder) {
-    return sql`SELECT a.origin_key, ${projectedKind}, ${projectedId} FROM ancestry a CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...commonWhere, joinPredicate], sql` AND `)}`;
+    return sql`SELECT a.origin_key, c.to_kind, c.to_id FROM ancestry a CROSS JOIN candidates c WHERE ${joinPredicate}`;
   }
-  return sql`SELECT a.origin_key, ${projectedKind}, ${projectedId} FROM ancestry a JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(commonWhere, sql` AND `)}`;
+  return sql`SELECT a.origin_key, c.to_kind, c.to_id FROM ancestry a JOIN candidates c ON ${joinPredicate}`;
 }
 
 /**
@@ -388,6 +440,13 @@ function buildAcyclicityRecursiveTerm(
  * `(origin_key, node_kind, node_id)` is what makes an unbounded recursion
  * terminate on a finite graph with no path tracking and no depth bound —
  * `MAX_EXPLICIT_RECURSIVE_DEPTH` does not apply to this probe.
+ *
+ * For the `"proposed"` seed form, `ancestry` hops through TWO sources folded
+ * into one `candidates` CTE — the relation's live edges AND the writer's own
+ * not-yet-committed batch (D-4) — so a cycle closed entirely by rows in the
+ * same batch is found even though none of them are live yet. See
+ * {@link buildAcyclicityCandidates}'s docblock for why this is one joined
+ * source rather than a second recursive term.
  *
  * Every literal seed column is `CAST(... AS TEXT)`: PostgreSQL cannot infer
  * the type of a bare bound parameter in a `SELECT` list with no surrounding
@@ -412,15 +471,18 @@ export function buildEdgeAcyclicityProbe(
     options.graphId,
     options.schema,
   );
-  const recursiveTerm = buildAcyclicityRecursiveTerm(
+  const candidatesCte = buildAcyclicityCandidates(
     options.members,
     options.graphId,
     options.schema,
+    options.seed,
+  );
+  const ancestryStep = buildAcyclicityAncestryStep(
     options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
   );
 
   const anchor = sql`SELECT s.origin_key, s.to_kind, s.to_id FROM seed s`;
-  const ancestry = sql`ancestry(origin_key, node_kind, node_id) AS (${anchor} UNION ${recursiveTerm})`;
+  const ancestry = sql`ancestry(origin_key, node_kind, node_id) AS (${anchor} UNION ${ancestryStep})`;
 
   const closingSelect = sql`SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id`;
   // A single-edge proposed seed stops at the first witness: both engines
@@ -432,5 +494,5 @@ export function buildEdgeAcyclicityProbe(
       sql`${closingSelect} LIMIT 1`
     : closingSelect;
 
-  return sql`WITH RECURSIVE ${seedCte}, ${ancestry} ${limited}`;
+  return sql`WITH RECURSIVE ${seedCte}, candidates(from_kind, from_id, to_kind, to_id) AS (${candidatesCte}), ${ancestry} ${limited}`;
 }
