@@ -23,10 +23,11 @@ import {
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
+import type { GraphBackend } from "../src/backend/types";
 import { rowPropsToObject } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { CompilerInvariantError, DatabaseOperationError } from "../src/errors";
-import { disjointWith } from "../src/ontology";
+import { disjointWith, partOf } from "../src/ontology";
 import { buildKindRegistry } from "../src/registry";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
 import {
@@ -1004,5 +1005,112 @@ describe("atomic resolved update batches", () => {
     await expect(
       transactionlessStore.nodes.Person.getByIds(nodes.map((node) => node.id)),
     ).resolves.toEqual(nodes);
+  });
+});
+
+function markedAtomicMutationSetBackend(): GraphBackend {
+  const backend = {
+    capabilities: { execution: { atomicBatch: "root" } },
+  } as GraphBackend;
+  markBundledRootAtomicMutationPrograms(backend, {
+    mutateNodes: Object.assign(
+      () => Promise.resolve({ created: [], updated: [] }),
+      { maxEntries: 512 },
+    ),
+  });
+  return backend;
+}
+
+describe("resolveAtomicNodeResolvedMutationSetExecutor: composition gate (item E.2)", () => {
+  const ArmPart = defineNode("ArmPart", { schema: z.object({}) });
+  const ArmWhole = defineNode("ArmWhole", { schema: z.object({}) });
+  const armPartOf = defineEdge("armPartOf", { schema: z.object({}) });
+
+  const requiredGraph = defineGraph({
+    id: "atomic-resolved-mutation-set-composition-required",
+    nodes: { ArmPart: { type: ArmPart }, ArmWhole: { type: ArmWhole } },
+    edges: {
+      armPartOf: {
+        type: armPartOf,
+        from: [ArmPart],
+        to: [ArmWhole],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      partOf(ArmPart, ArmWhole, { via: armPartOf, existence: "required" }),
+    ],
+  });
+  const optionalGraph = defineGraph({
+    id: "atomic-resolved-mutation-set-composition-optional",
+    nodes: requiredGraph.nodes,
+    edges: requiredGraph.edges,
+    ontology: [partOf(ArmPart, ArmWhole, { via: armPartOf })],
+  });
+
+  it("declines a required-existence create even with no `partOf`", () => {
+    const backend = markedAtomicMutationSetBackend();
+    expect(
+      resolveAtomicNodeResolvedMutationSetExecutor({
+        backend,
+        graph: requiredGraph,
+        registry: buildKindRegistry(requiredGraph),
+        kind: "ArmPart",
+        creates: [{ kind: "ArmPart", id: "part-1", props: {} }],
+        updateCount: 0,
+        identityEnabled: false,
+        schemaVersion: 1,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("declines an optional-existence create that states `partOf`", () => {
+    const backend = markedAtomicMutationSetBackend();
+    expect(
+      resolveAtomicNodeResolvedMutationSetExecutor({
+        backend,
+        graph: optionalGraph,
+        registry: buildKindRegistry(optionalGraph),
+        kind: "ArmPart",
+        creates: [
+          {
+            kind: "ArmPart",
+            id: "part-1",
+            props: {},
+            partOf: { kind: "ArmWhole", id: "whole-1" },
+          },
+        ],
+        updateCount: 0,
+        identityEnabled: false,
+        schemaVersion: 1,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeUndefined();
+  });
+  // MUTATION CHECK (both cases above): delete the
+  // `item.partOf !== undefined || ... === "required"` guard in
+  // `resolveAtomicNodeResolvedMutationSetExecutor`
+  // (src/store/operations/atomic-mutation-program.ts). Both assertions then
+  // fail (`toBeDefined()` instead).
+
+  it("accepts an optional-existence create with no `partOf`", () => {
+    const backend = markedAtomicMutationSetBackend();
+    expect(
+      resolveAtomicNodeResolvedMutationSetExecutor({
+        backend,
+        graph: optionalGraph,
+        registry: buildKindRegistry(optionalGraph),
+        kind: "ArmPart",
+        creates: [{ kind: "ArmPart", id: "part-1", props: {} }],
+        updateCount: 0,
+        identityEnabled: false,
+        schemaVersion: 1,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeDefined();
   });
 });

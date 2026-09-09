@@ -216,17 +216,31 @@ export type MergePlanTypeReconciliation = Readonly<{
 }>;
 
 /**
- * A live composition part of a whole the plan deletes, which the plan does
- * NOT itself delete — a part attached on the target after the branch point
- * (or independently of it), found by re-reading the parts closure
- * (`planCompositionCascade`) against every planned node deletion. Surfaced
- * here so a dry run reports it; apply re-verifies the same finding under the
- * write lock and refuses with `MergeCompositionOrphanError` when it recurs.
+ * A live, required-existence composition part this merge would leave with no
+ * whole. Two independent causes, both surfaced through the SAME shape and
+ * the SAME `MergeCompositionOrphanError` — a caller distinguishes them only
+ * by `cause`, never by a second error class:
+ *
+ * - `"deleted"` (E-c's original arm): a whole the plan deletes has a live
+ *   part the plan does NOT itself delete — attached on the target after the
+ *   branch point, or independently of it — found by re-reading the parts
+ *   closure (`planCompositionCascade`) against every planned node deletion.
+ *   `whole` is that about-to-be-deleted whole.
+ * - `"unattached"` (item E.2): a required-existence part THIS
+ *   MERGE WRITES resolves, after canonicalization, to no live whole at
+ *   all — its composition edge was dropped or collapsed while both
+ *   endpoints survive. There is no whole to name, so `whole` is absent.
+ *
+ * Surfaced here so a dry run reports it; apply re-verifies the same finding
+ * under the write lock and refuses with `MergeCompositionOrphanError` when
+ * it recurs.
  */
 export type MergePlanCompositionOrphan = Readonly<{
   part: MergePlanEntityRef;
-  whole: MergePlanEntityRef;
+  /** Present for `cause: "deleted"`; absent for `cause: "unattached"` — there is no whole to name. */
+  whole?: MergePlanEntityRef;
   viaEdgeKind: string;
+  cause: "deleted" | "unattached";
 }>;
 
 export type MergePlanReview = Readonly<{
@@ -737,8 +751,9 @@ const mergePlanReviewSchema = z
       z
         .object({
           part: mergePlanEntityRefSchema,
-          whole: mergePlanEntityRefSchema,
+          whole: mergePlanEntityRefSchema.optional(),
           viaEdgeKind: nonEmptyStringSchema,
+          cause: z.enum(["deleted", "unattached"]),
         })
         .strict(),
     ),

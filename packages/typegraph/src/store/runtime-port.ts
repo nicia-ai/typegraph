@@ -330,6 +330,23 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     >,
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
+  /**
+   * Item E.2: detaches a node import purges AFTER `foldImportedIdentityNodes`
+   * already folded it into identity for this attempt's batch — see
+   * `assertImportedRequiredPartsAttached` (`src/interchange/import.ts`).
+   */
+  detachDeletedImportedIdentityNode: (
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
+    reference: Readonly<{ kind: string; id: string }>,
+  ) => Promise<void>;
   importIdentityAssertionsAtTarget: (
     target: Readonly<
       BackendIdentity &

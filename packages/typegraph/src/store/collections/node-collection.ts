@@ -49,6 +49,7 @@ import {
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeCollection,
+  type NodeCreateOptions,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
   type QueryOptions,
@@ -322,22 +323,15 @@ export type NodeCollectionConfig = Readonly<{
 function buildCreateInput(
   kind: string,
   props: Record<string, unknown>,
-  options?: Readonly<{
-    id?: string;
-    validFrom?: string | null;
-    validTo?: string;
-  }>,
+  options?: NodeCreateOptions,
 ): CreateNodeInput {
-  const input: {
-    kind: string;
-    id?: string;
-    props: Record<string, unknown>;
-    validFrom?: string | null;
-    validTo?: string;
+  const input: { kind: string; props: Record<string, unknown> } & {
+    -readonly [K in keyof NodeCreateOptions]: NodeCreateOptions[K];
   } = { kind, props };
   if (options?.id !== undefined) input.id = options.id;
   if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.partOf !== undefined) input.partOf = options.partOf;
   return input;
 }
 
@@ -391,12 +385,8 @@ function buildUpsertUpdateInput(
 
 function mapBulkNodeInputs(
   kind: string,
-  items: readonly Readonly<{
-    props: Record<string, unknown>;
-    id?: string;
-    validFrom?: string | null;
-    validTo?: string;
-  }>[],
+  items: readonly (Readonly<{ props: Record<string, unknown> }> &
+    NodeCreateOptions)[],
 ): CreateNodeInput[] {
   return items.map((item) => buildCreateInput(kind, item.props, item));
 }
@@ -441,22 +431,14 @@ export function createNodeCollection<
   return {
     async create(
       props: z.input<N["schema"]>,
-      options?: Readonly<{
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-      }>,
+      options?: NodeCreateOptions,
     ): Promise<Node<N>> {
       return this.createFromRecord(props, options);
     },
 
     async createFromRecord(
       data: Record<string, unknown>,
-      options?: Readonly<{
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-      }>,
+      options?: NodeCreateOptions,
     ): Promise<Node<N>> {
       const result = await executeNodeCreate(
         buildCreateInput(kind, data, options),
@@ -834,12 +816,8 @@ export function createNodeCollection<
     },
 
     async bulkCreate(
-      items: readonly Readonly<{
-        props: z.input<N["schema"]>;
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-      }>[],
+      items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
+        NodeCreateOptions)[],
     ): Promise<Node<N>[]> {
       const batchInputs = mapBulkNodeInputs(kind, items);
       const results = await executeNodeCreateBatch(batchInputs, backend);

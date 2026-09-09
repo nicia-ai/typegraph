@@ -24,6 +24,7 @@ import { type NamedOntologyRelation } from "../ontology/validation";
 import { compareCodePoints } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
 import {
+  type CompositionExistence,
   type CompositionPair,
   type CompositionPartSide,
   type CompositionRelation,
@@ -592,6 +593,22 @@ export class KindRegistry {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Item E.2. THE answer to "must a node of this kind have a whole" — total
+   * over every concrete node kind, because `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED`
+   * refuses any graph where that would be ambiguous. Returns `"optional"` for
+   * a kind that declares no part side at all. Every E.2 decision reads this
+   * one function.
+   */
+  compositionExistence(concretePartKind: string): CompositionExistence {
+    for (const pair of this.#composition.pairs) {
+      if (this.isAssignableTo(concretePartKind, pair.partKind)) {
+        return pair.existence;
+      }
+    }
+    return "optional";
   }
 
   // === Edge Relationship Methods ===

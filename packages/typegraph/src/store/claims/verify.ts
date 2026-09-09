@@ -33,6 +33,7 @@ import type {
   EdgeCardinalityDeclaration,
   EdgeEndpointAllowance,
   GraphBackend,
+  GraphReadBackend,
   MisassignedEdgeEndpointRow,
   ReadConstraintFenceViolationsParams,
 } from "../../backend/types";
@@ -51,6 +52,10 @@ import {
   type EdgeAcyclicityViolation,
   readEdgeAcyclicityViolations,
 } from "../acyclicity";
+import {
+  readCompositionUnattachedParts,
+  requiredCompositionPartKinds,
+} from "../operations/composition-create";
 import {
   type ClaimOwner,
   type ClaimTarget,
@@ -103,6 +108,20 @@ export type ConstraintFenceViolation =
       family: "composition";
       target: ClaimTarget;
       edgeIds: readonly string[];
+    }>
+  | Readonly<{
+      /**
+       * Item E.2: one or more LIVE nodes of a required-existence composition
+       * part kind currently have no live whole. Its own family — the same
+       * reason E-b's `composition` splits off `edgeCardinality`: a caller
+       * branching on `family` should not have to inspect the target to tell
+       * "two wholes" (`composition`) from "no whole" (this). There is no
+       * `ClaimTarget` and no `edgeIds`: the violation is the ABSENCE of an
+       * edge row, not a contended one.
+       */
+      family: "compositionExistence";
+      partKind: string;
+      parts: readonly Readonly<{ kind: string; id: string }>[];
     }>
   | Readonly<{
       family: "edgeEndpointAssignability";
@@ -393,12 +412,13 @@ function edgeEndpointViolations(
 }
 
 /**
- * The family order for the two members with no `target`: after every
+ * The family order for the members with no `target`: after every
  * claim-backed family, in this fixed order between themselves.
  */
 const UNTARGETED_FAMILY_ORDER = [
   "edgeEndpointAssignability",
   "edgeAcyclicity",
+  "compositionExistence",
 ] as const;
 
 /** Narrows to the two claim-backed families, both of which carry `target`. */
@@ -431,15 +451,19 @@ function compareConstraintFenceViolations(
   if (leftUntargetedRank !== rightUntargetedRank) {
     return leftUntargetedRank - rightUntargetedRank;
   }
-  return (
-      left.family === "edgeEndpointAssignability" &&
-        right.family === "edgeEndpointAssignability"
-    ) ?
-      compareStrings(left.edgeKind, right.edgeKind)
-    : compareStrings(
-        (left as EdgeAcyclicityViolation).relation,
-        (right as EdgeAcyclicityViolation).relation,
-      );
+  if (
+    left.family === "edgeEndpointAssignability" &&
+    right.family === left.family
+  ) {
+    return compareStrings(left.edgeKind, right.edgeKind);
+  }
+  if (left.family === "compositionExistence" && right.family === left.family) {
+    return compareStrings(left.partKind, right.partKind);
+  }
+  return compareStrings(
+    (left as EdgeAcyclicityViolation).relation,
+    (right as EdgeAcyclicityViolation).relation,
+  );
 }
 
 /** The declarations the audit reads, one list per family. */
@@ -602,21 +626,60 @@ export async function verifyConstraintFences(
     context.graph,
     context.registry,
   );
-  if (acyclicRelations.length === 0) return claimBacked;
+  const acyclicity =
+    acyclicRelations.length === 0 ?
+      []
+    : await readEdgeAcyclicityViolations(
+        {
+          graphId: context.graphId,
+          registry: context.registry,
+          schema: createSqlSchema(context.backend.tableNames),
+          dialect: getDialect(context.backend.dialect),
+          target: context.backend,
+          operation: "verifyConstraintFences",
+        },
+        acyclicRelations,
+      );
 
-  const acyclicity = await readEdgeAcyclicityViolations(
-    {
-      graphId: context.graphId,
-      registry: context.registry,
-      schema: createSqlSchema(context.backend.tableNames),
-      dialect: getDialect(context.backend.dialect),
-      target: context.backend,
-      operation: "verifyConstraintFences",
-    },
-    acyclicRelations,
+  // Item E.2, graph-wide (not delta-scoped: this is a live-graph audit, not
+  // a commit preflight).
+  const compositionExistence = await compositionExistenceViolations(
+    context.registry,
+    context.backend,
+    context.graphId,
+    requiredCompositionPartKinds(context.registry),
   );
 
-  return [...claimBacked, ...acyclicity].toSorted(
+  return [...claimBacked, ...acyclicity, ...compositionExistence].toSorted(
     compareConstraintFenceViolations,
   );
+}
+
+/**
+ * Groups {@link readCompositionUnattachedParts}' flat result into one
+ * `compositionExistence` violation per part kind — mirroring
+ * `disjointnessViolations`'/`edgeCardinalityViolations`' own per-axis
+ * grouping below, so this family folds through the same shape.
+ */
+async function compositionExistenceViolations(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  partKinds: readonly string[],
+): Promise<readonly ConstraintFenceViolation[]> {
+  if (partKinds.length === 0) return [];
+  const unattached = await readCompositionUnattachedParts(
+    registry,
+    backend,
+    graphId,
+    partKinds,
+  );
+  const byPartKind = groupBy(unattached, (part) => part.kind);
+  return [...byPartKind.entries()]
+    .map(([partKind, parts]) => ({
+      family: "compositionExistence" as const,
+      partKind,
+      parts,
+    }))
+    .toSorted((left, right) => compareStrings(left.partKind, right.partKind));
 }

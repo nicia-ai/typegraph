@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 import type { MergePlanCompositionOrphan } from "./plan-schema";
 import type { TypeGraphErrorOptions } from "./typegraph-internal";
 import { TransactionConflictError, TypeGraphError } from "./typegraph-internal";
@@ -237,18 +238,24 @@ export function translateMergeCommitError(error: unknown): unknown {
  * pointing at a whole that no longer exists.
  *
  * `planMerge`/`planMergeIncremental` surface the SAME finding, computed by the
- * same `planCompositionCascade` owner against the target's state at plan
- * time, as `MergePlanReview.compositionOrphans` — a best-effort, racy dry-run
- * report. This error is the authoritative one: it is thrown from inside the
- * apply transaction, under the per-graph write lock, so it cannot miss an
- * orphan the plan-time report's unlocked read raced past.
+ * same `planCompositionCascade` / `unattachedRequiredPartOrphansAmong` owners
+ * against the target's state at plan time, as
+ * `MergePlanReview.compositionOrphans` — a best-effort, racy dry-run report.
+ * This error is the authoritative one: it is thrown from inside the apply
+ * transaction, under the per-graph write lock, so it cannot miss an orphan
+ * the plan-time report's unlocked read raced past.
  *
  * `details` is typed as {@link MergePlanCompositionOrphan} — the SAME shape
- * `assertNoCompositionOrphans` (`merge.ts`) passes straight into this
- * constructor — rather than a second, structurally-identical type. Two names
- * for one finding is exactly the kind of drift a future field (say, the
- * realizing edge id) could silently introduce between the dry-run report and
- * the apply-time refusal.
+ * `assertNoCompositionOrphans`/`assertNoUnattachedRequiredParts` (`merge.ts`)
+ * pass straight into this constructor — rather than a second,
+ * structurally-identical type. Two names for one finding is exactly the kind
+ * of drift a future field (say, the realizing edge id) could silently
+ * introduce between the dry-run report and the apply-time refusal.
+ *
+ * `details.cause` picks the message: `"deleted"` names the whole this plan
+ * would delete; `"unattached"` (item E.2) has no whole to name at all — the
+ * part's composition edge was dropped or collapsed by canonicalization while
+ * the part itself survives.
  */
 export class MergeCompositionOrphanError extends MergeError {
   protected static override readonly errorCategory = "constraint";
@@ -256,15 +263,33 @@ export class MergeCompositionOrphanError extends MergeError {
   declare readonly details: MergePlanCompositionOrphan;
 
   constructor(details: MergePlanCompositionOrphan) {
-    super(
-      `Applying this merge plan would delete whole "${details.whole.kind}:${details.whole.id}" ` +
-        `while its part "${details.part.kind}:${details.part.id}" (via "${details.viaEdgeKind}") ` +
-        "is not itself among the plan's node deletions. Recompute the merge plan against the " +
-        "target's current state, or delete the orphaned part in the branch before merging.",
-      { details },
-    );
+    super(compositionOrphanMessage(details), { details });
     this.name = "MergeCompositionOrphanError";
   }
+}
+
+/** The two `MergeCompositionOrphanError` messages, one per `cause`. */
+function compositionOrphanMessage(details: MergePlanCompositionOrphan): string {
+  if (details.cause === "unattached") {
+    return (
+      `Applying this merge plan would leave part "${details.part.kind}:${details.part.id}" ` +
+      `(via "${details.viaEdgeKind}") with no live whole — this composition pair requires one ` +
+      '(`existence: "required"`). Recompute the merge plan against the target\'s current ' +
+      "state, or attach the part to a whole in the branch before merging."
+    );
+  }
+  // `cause: "deleted"` always carries `whole` — the only producer,
+  // `compositionOrphansAmong` (`merge.ts`), sets both together.
+  const whole = requireDefined(
+    details.whole,
+    'MergePlanCompositionOrphan.whole for cause "deleted"',
+  );
+  return (
+    `Applying this merge plan would delete whole "${whole.kind}:${whole.id}" ` +
+    `while its part "${details.part.kind}:${details.part.id}" (via "${details.viaEdgeKind}") ` +
+    "is not itself among the plan's node deletions. Recompute the merge plan against the " +
+    "target's current state, or delete the orphaned part in the branch before merging."
+  );
 }
 
 /**

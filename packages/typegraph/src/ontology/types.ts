@@ -1,5 +1,8 @@
 import { type AnyEdgeType, type NodeProps, type NodeType } from "../core/types";
-import { type CompositionPartSide } from "../registry/composition-relation";
+import {
+  type CompositionExistence,
+  type CompositionPartSide,
+} from "../registry/composition-relation";
 
 // ============================================================
 // Brand Key
@@ -68,6 +71,8 @@ export type OntologyRelation = Readonly<{
   via?: string;
   /** R5's orientation. Meaningful only alongside `via`. */
   partSide?: CompositionPartSide;
+  /** Item E.2: whether the part must have a live whole. Meaningful only alongside `via`. */
+  existence?: CompositionExistence;
 }>;
 
 // ============================================================

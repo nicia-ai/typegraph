@@ -176,6 +176,7 @@ describe("`partSide` round-trips across representations (E-a-4)", () => {
         viaEdgeKind: "parentSection",
         partSide: "from",
         population: "one",
+        existence: "optional",
       },
     ]);
   });
@@ -219,7 +220,62 @@ describe("`partSide` round-trips across representations (E-a-4)", () => {
         viaEdgeKind: "parentSection",
         partSide: "from",
         population: "one",
+        existence: "optional",
       },
     ]);
   });
+});
+
+describe('item E.2: an explicit `existence: "optional"` hashes identically to omitting it', () => {
+  it("matches the schema hash of an otherwise-identical graph that never states existence", async () => {
+    const Part = defineNode("ExPart", { schema: emptySchema });
+    const Whole = defineNode("ExWhole", { schema: emptySchema });
+    const via = defineEdge("exPartOf", { schema: emptySchema });
+
+    const withoutExistence = defineGraph({
+      id: "composition-existence-hash",
+      nodes: { ExPart: { type: Part }, ExWhole: { type: Whole } },
+      edges: {
+        exPartOf: {
+          type: via,
+          from: [Part],
+          to: [Whole],
+          cardinality: "one",
+        },
+      },
+      ontology: [partOf(Part, Whole, { via })],
+    });
+    const withExplicitOptional = defineGraph({
+      id: "composition-existence-hash",
+      nodes: { ExPart: { type: Part }, ExWhole: { type: Whole } },
+      edges: {
+        exPartOf: {
+          type: via,
+          from: [Part],
+          to: [Whole],
+          cardinality: "one",
+        },
+      },
+      ontology: [partOf(Part, Whole, { via, existence: "optional" })],
+    });
+
+    const { computeSchemaHash, serializeSchema } =
+      await import("../src/schema/serializer");
+    const hashWithout = await computeSchemaHash(
+      serializeSchema(withoutExistence, 1),
+    );
+    const hashWithExplicit = await computeSchemaHash(
+      serializeSchema(withExplicitOptional, 1),
+    );
+    expect(hashWithExplicit).toEqual(hashWithout);
+
+    // The serialized relation itself carries no `existence` key either way.
+    const serialized = serializeSchema(withExplicitOptional, 1);
+    expect(serialized.ontology.relations[0]).not.toHaveProperty("existence");
+  });
+  // MUTATION CHECK: in `compositionRelationFields`
+  // (src/registry/composition-relation.ts), emit `existence` unconditionally
+  // whenever it is present (drop the `=== "optional"` branch of the guard).
+  // The two hashes then differ and the first assertion fails; the property
+  // check on the serialized relation fails too.
 });

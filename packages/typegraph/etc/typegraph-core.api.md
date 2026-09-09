@@ -50,6 +50,9 @@ export type Collation = "binary" | "caseInsensitive";
 export function compareRecordedInstants(left: RecordedInstant, right: RecordedInstant): -1 | 0 | 1;
 
 // @public
+type CompositionExistence = "optional" | "required";
+
+// @public
 type CompositionPartSide = "from" | "to";
 
 // @public
@@ -322,6 +325,7 @@ type ExtensionOntologyRelation = Readonly<{
     to: string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public
@@ -667,6 +671,7 @@ type OntologyRelation = Readonly<{
     to: NodeType | AnyEdgeType | string;
     via?: string;
     partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
 }>;
 
 // @public

@@ -2200,6 +2200,16 @@ it finds violations that predate the claim tables; it writes nothing, and it
 repairs nothing — choosing which claimant keeps the axis is a data-loss decision
 that stays with you.
 
+A fifth family, `compositionExistence`, reports every LIVE node of an
+`existence: "required"` composition part kind with no live whole
+(`partKind`, and the offending `parts`). Unlike the other four, it is a
+portable scan (`findNodesByKind` paged, each row checked through the same
+part-liveness predicate the write-path detach refusal reads) rather than a
+`readConstraintFenceViolations` backend member — this runs only at an
+explicit diagnostic call and at schema-tightening-commit time, never on a
+write's hot path, so there is no per-dialect SQL for a custom backend to
+implement for this family.
+
 A custom backend implementing `readConstraintFenceViolations` may receive an
 `edgeEndpointAllowances` declaration (one entry per edge kind, each the
 concrete `(fromKind, toKind)` pairs the ontology still admits) and must answer

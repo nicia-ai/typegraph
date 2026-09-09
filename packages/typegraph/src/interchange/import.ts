@@ -88,6 +88,7 @@ import {
 import {
   CardinalityError,
   CompositionError,
+  CompositionExistenceError,
   ConfigurationError,
   DatabaseOperationError,
   DisjointError,
@@ -134,6 +135,7 @@ import {
   edgeMatchIdentityUpdateRefusal,
   resolveEdgeMatchIdentityStorage,
 } from "../store/edge-match-key";
+import { findLiveCompositionWhole } from "../store/operations/composition-create";
 import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
 import {
   createNodeBatchValidationSeams,
@@ -408,6 +410,16 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   lock: GraphWriteLock,
 ): Promise<ImportAttemptState> {
   const { result, errors, importedNodeIds } = createImportAttemptState();
+  // Item E.2. Every required-existence part THIS import creates, keyed by
+  // `makeNodeKey`, removed as soon as the SAME batch's composition edge for
+  // it is accepted (`processEdgeSlice`'s `record`). Frame-scoped, like
+  // `pendingMatchIdentityOwners`: nodes are written before any edge is even
+  // seen (`processNodes` then `processEdges`), so "the edge in the same
+  // batch" can only be decided once the whole edge set is known.
+  const pendingRequiredParts = new Map<
+    string,
+    Readonly<{ kind: string; id: string }>
+  >();
   let nextEdgeSavepointId = 0;
   const frame: ImportWriteFrame = {
     session,
@@ -434,6 +446,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     result,
     errors,
     importedNodeIds,
+    pendingRequiredParts,
   );
   await inputs.runtime.foldImportedIdentityNodes(
     target,
@@ -452,6 +465,24 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     result,
     errors,
     importedNodeIds,
+    pendingRequiredParts,
+  );
+  // Item E.2. What remains in `pendingRequiredParts` after every edge in the
+  // payload is seen is either attached on the TARGET from before this
+  // import, or genuinely orphaned. Runs AFTER `foldImportedIdentityNodes`
+  // above (which needs the full node batch, before edges can clear any
+  // pending part) — a part purged here undoes that fold itself, through
+  // `runtime.detachDeletedImportedIdentityNode`, rather than
+  // never having been folded in the first place.
+  await assertImportedRequiredPartsAttached(
+    frame,
+    inputs.graphId,
+    inputs.registry,
+    inputs.runtime,
+    pendingRequiredParts,
+    result,
+    importedNodeIds,
+    errors,
   );
   if (inputs.data.identity !== undefined) {
     await importIdentitySection(
@@ -1388,6 +1419,7 @@ async function processNodes(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
+  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
 ): Promise<void> {
   const batchSize = options.batchSize;
 
@@ -1403,6 +1435,7 @@ async function processNodes(
       result,
       errors,
       importedNodeIds,
+      pendingRequiredParts,
     );
   }
 }
@@ -1475,9 +1508,22 @@ async function processNodeSlice(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
+  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
 ): Promise<void> {
   const record = (node: InterchangeNode, outcome: ProcessResult): void => {
     recordNodeOutcome(node, outcome, result, errors, importedNodeIds);
+    // Item E.2: a freshly created required-existence part owes a
+    // composition edge before this import commits — tracked here, cleared
+    // by `clearAttachedRequiredPart` the moment the edge for it lands.
+    if (
+      outcome.status === "created" &&
+      registry.compositionExistence(node.kind) === "required"
+    ) {
+      pendingRequiredParts.set(makeNodeKey(node.kind, node.id), {
+        kind: node.kind,
+        id: node.id,
+      });
+    }
   };
 
   // Pass 1 (synchronous): kind + property + validity validation, and
@@ -1817,6 +1863,7 @@ function isDeclaredConstraintRefusal(
   | DisjointError
   | CardinalityError
   | CompositionError
+  | CompositionExistenceError
   | EdgeMatchIdentityConflictError
   | EdgeAcyclicityError {
   return (
@@ -1824,6 +1871,7 @@ function isDeclaredConstraintRefusal(
     error instanceof DisjointError ||
     error instanceof CardinalityError ||
     error instanceof CompositionError ||
+    error instanceof CompositionExistenceError ||
     error instanceof EdgeMatchIdentityConflictError ||
     error instanceof EdgeAcyclicityError
   );
@@ -2501,6 +2549,7 @@ async function processEdges(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
+  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
 ): Promise<void> {
   const batchSize = options.batchSize;
   // A slice flush makes its accepted keys visible to later database reads, but
@@ -2523,7 +2572,132 @@ async function processEdges(
       errors,
       importedNodeIds,
       pendingMatchIdentityOwners,
+      pendingRequiredParts,
     );
+  }
+}
+
+/**
+ * Item E.2. Removes `key` from `pendingRequiredParts` when the just-accepted
+ * write attaches its part: a fresh composition edge create (`processEdgeSlice`)
+ * naming a pending required part on either endpoint. The ONE place both
+ * directions of "this write closed the gap" are decided, so the two callers
+ * (single-item accept, batch accept — see the two `record` sites below)
+ * cannot drift on which endpoint is the part.
+ */
+function clearAttachedRequiredPart(
+  registry: KindRegistry,
+  edge: InterchangeEdge,
+  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
+): void {
+  const partSide = registry.compositionPartSide(edge.kind);
+  if (partSide === undefined) return;
+  const part = partSide === "from" ? edge.from : edge.to;
+  pendingRequiredParts.delete(makeNodeKey(part.kind, part.id));
+}
+
+/**
+ * Item E.2. What remains in `pendingRequiredParts` after every node AND
+ * every edge in the payload has been processed: for each, whether the
+ * target ALREADY carried a live whole for it before this import (via
+ * {@link findLiveCompositionWhole} — the same predicate the write-path
+ * detach refusal reads) decides accept vs. refuse.
+ *
+ * A refused part's node row is removed in the SAME transaction — `no orphan
+ * node row survives` is the whole point of this assertion — through the
+ * session's ordinary hard-delete step (the row was created THIS import, so
+ * `session.purgeNode`'s uniqueness release and embedding cleanup are exactly
+ * what an ordinary `hardDelete` would run). Its delete-behavior enforcement
+ * is explicitly turned OFF (`enforceDeleteBehavior: false`): the part row
+ * AND every edge touching it (e.g. an ordinary, non-composition edge this
+ * same import also created) were all born this import, so there is no
+ * pre-existing reference for `restrict` to protect — `hardDeleteNode`
+ * (`src/backend/drizzle/operation-backend-core.ts`) unconditionally deletes
+ * every edge connected to the node before deleting the node row itself,
+ * `restrict` or not, so nothing is left dangling. Passing the default
+ * policy here would let a part's ordinary edge (not the composition edge
+ * that makes it a part) throw `RestrictedDeleteError` PAST this function —
+ * an uncaught throw inside the same transaction as every other accepted
+ * row, aborting the whole import instead of refusing this one row.
+ *
+ * This runs AFTER `foldImportedIdentityNodes` already folded
+ * the batch's new node references into identity (the fold needs the
+ * complete node batch, and `pendingRequiredParts` is not fully resolved
+ * until every edge is processed too, so neither can move ahead of the
+ * other) — a purged part's identity membership is undone here, through
+ * `runtime.detachDeletedImportedIdentityNode`, the same
+ * `identity.detachDeleted(..., "hard")` `executeNodeHardDelete`
+ * (`src/store/operations/node-operations.ts`) issues for an ordinary hard
+ * delete. That call, too, is inside the `try`: an identity-layer failure
+ * on an already-purged row must not abort every other accepted row either.
+ * One per-row `ImportError` is recorded for each refusal, or — on the
+ * unexpected path — for whatever the purge/detach itself failed with; the
+ * rest of the import's accepted rows are unaffected (the catch-per-row
+ * contract holds).
+ */
+async function assertImportedRequiredPartsAttached<G extends GraphDef>(
+  frame: ImportWriteFrame,
+  graphId: string,
+  registry: KindRegistry,
+  runtime: ReturnType<typeof storeRuntime<G>>,
+  pendingRequiredParts: ReadonlyMap<
+    string,
+    Readonly<{ kind: string; id: string }>
+  >,
+  result: ImportResult,
+  importedNodeIds: Set<string>,
+  errors: ImportError[],
+): Promise<void> {
+  for (const part of pendingRequiredParts.values()) {
+    const whole = await findLiveCompositionWhole(
+      registry,
+      frame.target,
+      graphId,
+      part.kind,
+      part.id,
+    );
+    if (whole !== undefined) continue;
+
+    const registration = frame.graph.nodes[part.kind];
+    if (registration === undefined) continue;
+    try {
+      await frame.session.purgeNode(
+        {
+          kind: part.kind,
+          id: part.id,
+          schema: registration.type.schema,
+          onDelete: registration.onDelete,
+        },
+        { enforceDeleteBehavior: false },
+      );
+      await runtime.detachDeletedImportedIdentityNode(frame.target, {
+        kind: part.kind,
+        id: part.id,
+      });
+    } catch (error: unknown) {
+      errors.push({
+        entityType: "node",
+        kind: part.kind,
+        id: part.id,
+        error:
+          error instanceof Error ?
+            error.message
+          : `Failed to purge unattached required-existence part: ${String(error)}`,
+      });
+      continue;
+    }
+    result.nodes.created--;
+    importedNodeIds.delete(makeNodeKey(part.kind, part.id));
+    errors.push({
+      entityType: "node",
+      kind: part.kind,
+      id: part.id,
+      error: new CompositionExistenceError({
+        partKind: part.kind,
+        partId: part.id,
+        situation: "create",
+      }).message,
+    });
   }
 }
 
@@ -2772,9 +2946,16 @@ async function processEdgeSlice(
   errors: ImportError[],
   importedNodeIds: Set<string>,
   pendingMatchIdentityOwners: Set<string>,
+  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
 ): Promise<void> {
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
+    // Item E.2: a composition edge accepted this import closes the gap for
+    // whichever endpoint is its part, when that part is itself pending from
+    // `processNodes` (same batch) — see `clearAttachedRequiredPart`.
+    if (outcome.status === "created" && registry.isCompositionEdge(edge.kind)) {
+      clearAttachedRequiredPart(registry, edge, pendingRequiredParts);
+    }
   };
 
   // The store's own in-batch cardinality accounting, constructed once per
