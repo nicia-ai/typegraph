@@ -653,6 +653,45 @@ relation existed raises `ConfigurationError` (`EDGE_CLAIM_RELATION_MISSING`)
 on the first `partOf`/`hasPart` write and must be migrated under owner
 credentials before declaring one.
 
+### `CompositionExistenceError`
+
+Thrown when a write would leave an `existence: "required"` composition part
+with no live whole: a bare create with no `partOf`, a detach (ending,
+soft-deleting, or hard-deleting the composition edge) of a live part, or a
+`getOrCreateByConstraint` call stating `partOf` against a node that already
+exists.
+
+```typescript
+// Segment partOf Episode (via segmentOf, existence: "required"):
+try {
+  await store.nodes.Segment.create({ text: "..." });
+} catch (error) {
+  if (error instanceof CompositionExistenceError) {
+    console.log(error.details);
+    // { partKind: "Segment", situation: "create" }
+  }
+}
+```
+
+`details.situation` distinguishes the three shapes: `"create"` (no `partId`
+yet — deciding the refusal is what keeps the row from ever being written),
+`"detach"` (carries `edgeKind`/`edgeId`, the composition edge the caller
+tried to end), and `"existing"` (a `getOrCreateByConstraint` call whose
+`partOf` resolved to `"found"`/`"updated"` — carries `currentWhole` when the
+node has a live one to name).
+
+Pass `partOf: { kind, id }` naming a live, declared whole to fix a create
+refusal; soft-delete or hard-delete the part itself (which frees its edge —
+a retired part is not orphaned by losing it) to fix a detach refusal; use an
+explicit edge create/update to reparent instead of
+`getOrCreateByConstraint`'s `partOf`.
+
+A `partOf` naming a whole kind with no declared composition pair to the
+part's kind raises `ConfigurationError` (`details.code:
+"COMPOSITION_WHOLE_NOT_DECLARED"`), not `CompositionExistenceError` — the
+option is accepted-shaped but the pair itself does not exist, regardless of
+whether the part kind's existence is `"required"` or `"optional"`.
+
 ### `UniquenessError`
 
 Thrown when a uniqueness constraint is violated.
@@ -1686,6 +1725,7 @@ try {
 | `EDGE_ACYCLICITY_ERROR` | `EdgeAcyclicityError` | constraint | A write would give a declared-acyclic edge relation a cycle |
 | `EDGE_ACYCLICITY_INDETERMINATE` | `EdgeAcyclicityIndeterminateError` | system | The engine cut an acyclicity search short before it could prove or refute a cycle |
 | `COMPOSITION_WHOLE_OCCUPIED` | `CompositionError` | constraint | A `partOf`/`hasPart` write would give a part a second whole |
+| `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A write would leave an `existence: "required"` composition part with no live whole |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |

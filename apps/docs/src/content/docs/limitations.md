@@ -262,6 +262,35 @@ deleting any node in such a cycle throws `CompositionCycleError` (see
 by hand (delete or reassign one of the composition edges that closes it)
 before the affected nodes can be deleted.
 
+## Composition Existence (`existence: "required"`)
+
+- **No type-level narrowing of `partOf`'s whole kind.** `NodeCreateOptions.partOf`
+  is structurally typed `{ kind: string; id: string }` and checked against the
+  declared composition pairs at runtime (`ConfigurationError`,
+  `COMPOSITION_WHOLE_NOT_DECLARED`, for an undeclared pair) — not narrowed to a
+  union of the kinds a part is actually declared under. `OntologyRelation.from`/
+  `to` are not carried into `GraphDef`'s type parameters, so this would need a
+  separate, larger change to the ontology's compile-time representation.
+- **Trusted import refuses every declared composition pair, required or
+  optional** (`composition_unsupported`), not just required ones: it writes rows
+  without the store's validation, so it cannot honor either the one-whole claim
+  or the existence guarantee. There is no separate
+  `composition_existence_unsupported` reason — a graph with ANY `partOf`/
+  `hasPart` pair cannot use trusted import at all.
+- **Fused/read-free programs decline a required-existence kind or a stated
+  `partOf`.** The three node-create fused resolvers
+  (`resolveAtomicNodeBatchExecutor`, `resolveAtomicNodeReplacementBatchProgram`,
+  `resolveAtomicNodeResolvedMutationSetExecutor`) and the fused edge-delete-batch
+  resolver (`resolveAtomicEdgeDeleteBatchExecutor`, for a required-existence
+  composition edge kind) all return `undefined` in that case, so a
+  required-existence bulk create or delete always takes the portable path —
+  slower, never silently incomplete.
+- **No backfill tool.** Changing an existing pair's `existence` in place is a
+  schema-tightening commit like any other: it is refused for a dirty graph (a
+  live required part with no live whole) and ships no repair step.
+  `store.verifyConstraintFences()` reports the same finding on an already-live
+  graph but does not fix it.
+
 ## Connection Management
 
 Managed Store factories own their local SQLite or PGlite connection, and their

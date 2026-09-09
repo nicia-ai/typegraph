@@ -389,6 +389,48 @@ const parentSection = defineEdge("parentSection");
 partOf(Section, Section, { via: parentSection, partSide: "from" });
 ```
 
+#### `existence`: a part that cannot exist without a whole
+
+`existence: "required"` on a `partOf`/`hasPart` pair says a part of that kind
+can never exist without a live whole — the default, `"optional"`, is every
+declaration written before this option existed.
+
+```typescript
+partOf(Segment, Episode, { via: segmentOf, existence: "required" });
+```
+
+Three refusals follow from that one declaration:
+
+- **A bare create is refused.** `store.nodes.Segment.create({...})` with no
+  `partOf` throws `CompositionExistenceError`
+  (`COMPOSITION_WHOLE_REQUIRED`) before any row is written. Pass `partOf: {
+  kind, id }` naming the whole; the node and its composition edge are written
+  in the same transaction — a lost composition claim or a dead/missing whole
+  aborts the create too.
+- **Detaching a live part is refused.** Ending, soft-deleting, or
+  hard-deleting the composition edge of a LIVE required part throws the same
+  error with `situation: "detach"`. A part that is already retired (soft- or
+  hard-deleted) is not orphaned by losing its edge, so that case is allowed —
+  deleting the part itself (which frees its edge) or reparenting it are the
+  ways out.
+- **`partOf` on `getOrCreateByConstraint` only applies to a genuinely new (or
+  resurrected) node.** Stating it against a call that resolves to `"found"`
+  or `"updated"` is refused, naming the node's current whole when it has one:
+  an accepted option is never silently dropped.
+
+`existence: "required"` is about detachment and bare creation, not about
+deleting the *whole* — deleting a whole still cascades to its required parts
+(see the cascade note above), rather than refusing.
+
+`partOf` (and the equivalent option on `bulkCreate`'s per-item `partOf`) is
+also accepted as a convenience on an `existence: "optional"` pair — the same
+one write, never required for one.
+
+Composition existence is a create/detach-time write-path guarantee, not a
+retroactive repair: `store.verifyConstraintFences()` reports a live required
+part with no live whole (data written before the declaration, or by trusted
+import — see below) but does not fix it.
+
 **Changing this on a populated graph**: the schema change itself auto-migrates
 unconditionally either way — declaring or dropping `partOf`/`hasPart` does not
 walk existing rows. Once composition's one-whole-per-part constraint is
