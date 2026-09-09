@@ -1044,7 +1044,7 @@ export function planIdentityThreeWay(
       );
     }
     // The same survivor rule the `retract` decision above uses for its base
-    // row, not raw staging order (R7): a race whose base row two branches
+    // row, not raw staging order: a race whose base row two branches
     // retracted must pick the SAME base row here, under `assertWins`, that
     // `retractWins`/the plain-retraction path would pick for the identical
     // fixture — only the ending instant differs (the winner's own start).

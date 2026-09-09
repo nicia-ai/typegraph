@@ -2148,6 +2148,18 @@ function buildInternalMergePlan<G extends GraphDef>(
 }
 
 /**
+ * The `details.conflict` shape a provenance refusal throws. NOT an arm of the
+ * public `IdentityUnresolvedConflict` union: `onProvenanceConflict` has no
+ * resolving disposition that ever places one on `MergeReport.identityConflicts`
+ * or a plan artifact, so this shape is local to the thrown error alone.
+ */
+type IdentityProvenanceConflictDetails = Readonly<{
+  kind: "provenance";
+  canonical: EntityRef;
+  contributions: readonly ProvenanceRecord[];
+}>;
+
+/**
  * `onProvenanceConflict` — how a cluster that an identity assertion FUSED
  * handles contradictory source attribution across its members.
  *
@@ -2166,19 +2178,6 @@ function buildInternalMergePlan<G extends GraphDef>(
  * single branch asserting `same` over two rows it authored itself is not a
  * contradiction; two branches independently authoring the paired rows is.
  */
-/**
- * The `details.conflict` shape a provenance refusal throws. NOT an arm of the
- * public `IdentityUnresolvedConflict` union (R5): `onProvenanceConflict` has
- * no resolving disposition that ever places one on `MergeReport
- * .identityConflicts` or a plan artifact, so this shape is local to the
- * thrown error alone.
- */
-type IdentityProvenanceConflictDetails = Readonly<{
-  kind: "provenance";
-  canonical: EntityRef;
-  contributions: readonly ProvenanceRecord[];
-}>;
-
 function assertIdentityProvenanceAgreement(
   policy: "keepBoth" | "refuse",
   survivingEdges: readonly CandidateEdge[],
