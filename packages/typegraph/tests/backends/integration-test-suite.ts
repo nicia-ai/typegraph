@@ -73,6 +73,7 @@ import {
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
   registerIdentityIntegrationTests,
+  registerIdentityReplayIntegrationTests,
   registerIdentitySeparationIntegrationTests,
   registerImportTargetCardinalityIntegrationTests,
   registerImportUniquenessIntegrationTests,
@@ -378,6 +379,7 @@ export function createIntegrationTestSuite<
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);
     registerIdentityImportIntegrationTests(context);
+    registerIdentityReplayIntegrationTests(context);
     registerHistoricalIdentityTraversalTests(context);
     registerCurrentIdentityTraversalTests(context);
     registerIdentitySeparationIntegrationTests(context);

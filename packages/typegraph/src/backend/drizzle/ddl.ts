@@ -128,9 +128,7 @@ function generateSqliteEdgeMatchIdentityColumnDDL(
   return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${quoteDdlIdentifier(column)} TEXT${pairCheck};`;
 }
 
-function generateSqliteEdgeMatchIdentityIndexDDL(
-  tableName: string,
-): string {
+function generateSqliteEdgeMatchIdentityIndexDDL(tableName: string): string {
   return `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteDdlIdentifier(edgeMatchIdentityUniqueIndexName(tableName))} ON ${quoteDdlIdentifier(tableName)} (${quoteDdlIdentifier("graph_id")}, ${quoteDdlIdentifier("kind")}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN)}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN)});`;
 }
 

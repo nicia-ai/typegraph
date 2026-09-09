@@ -1145,6 +1145,46 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transitions" (
+  "graph_id" TEXT NOT NULL,
+  "transition_id" TEXT NOT NULL,
+  "recorded_revision" BIGINT NOT NULL,
+  "recorded_at" TIMESTAMPTZ NOT NULL,
+  "valid_at" TIMESTAMPTZ NOT NULL,
+  "cause" TEXT NOT NULL,
+  "class_kind" TEXT NOT NULL,
+  "class_id" TEXT NOT NULL,
+  "prior_class_kind" TEXT,
+  "prior_class_id" TEXT,
+  "assertion_ids" JSONB NOT NULL,
+  "decision" JSONB,
+  "tx_id" TEXT,
+  PRIMARY KEY ("graph_id", "transition_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_class_idx" ON "typegraph_identity_transitions" ("graph_id", "class_kind", "class_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_revision_idx" ON "typegraph_identity_transitions" ("graph_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_prior_class_idx" ON "typegraph_identity_transitions" ("graph_id", "prior_class_kind", "prior_class_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
+  "graph_id" TEXT NOT NULL,
+  "pruned_before_revision" BIGINT NOT NULL,
+  "pruned_at" TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_node_uniques" (
   "graph_id" TEXT NOT NULL,
   "node_kind" TEXT NOT NULL,
@@ -2436,6 +2476,46 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   },
   {
     "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transitions" (
+  "graph_id" TEXT NOT NULL,
+  "transition_id" TEXT NOT NULL,
+  "recorded_revision" BIGINT NOT NULL,
+  "recorded_at" TIMESTAMPTZ NOT NULL,
+  "valid_at" TIMESTAMPTZ NOT NULL,
+  "cause" TEXT NOT NULL,
+  "class_kind" TEXT NOT NULL,
+  "class_id" TEXT NOT NULL,
+  "prior_class_kind" TEXT,
+  "prior_class_id" TEXT,
+  "assertion_ids" JSONB NOT NULL,
+  "decision" JSONB,
+  "tx_id" TEXT,
+  PRIMARY KEY ("graph_id", "transition_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_class_idx" ON "typegraph_identity_transitions" ("graph_id", "class_kind", "class_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_revision_idx" ON "typegraph_identity_transitions" ("graph_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_prior_class_idx" ON "typegraph_identity_transitions" ("graph_id", "prior_class_kind", "prior_class_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
+  "graph_id" TEXT NOT NULL,
+  "pruned_before_revision" BIGINT NOT NULL,
+  "pruned_at" TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_node_uniques" (
   "graph_id" TEXT NOT NULL,
   "node_kind" TEXT NOT NULL,
@@ -3330,6 +3410,46 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_separation_high_idx" ON "typegraph_identity_separation" ("graph_id", "class_key_high");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transitions" (
+  "graph_id" TEXT NOT NULL,
+  "transition_id" TEXT NOT NULL,
+  "recorded_revision" INTEGER NOT NULL,
+  "recorded_at" TEXT NOT NULL,
+  "valid_at" TEXT NOT NULL,
+  "cause" TEXT NOT NULL,
+  "class_kind" TEXT NOT NULL,
+  "class_id" TEXT NOT NULL,
+  "prior_class_kind" TEXT,
+  "prior_class_id" TEXT,
+  "assertion_ids" TEXT NOT NULL,
+  "decision" TEXT,
+  "tx_id" TEXT,
+  PRIMARY KEY ("graph_id", "transition_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_class_idx" ON "typegraph_identity_transitions" ("graph_id", "class_kind", "class_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_revision_idx" ON "typegraph_identity_transitions" ("graph_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_prior_class_idx" ON "typegraph_identity_transitions" ("graph_id", "prior_class_kind", "prior_class_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
+  "graph_id" TEXT NOT NULL,
+  "pruned_before_revision" INTEGER NOT NULL,
+  "pruned_at" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
   },
   {
     "params": [],
@@ -4465,6 +4585,46 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_separation_high_idx" ON "typegraph_identity_separation" ("graph_id", "class_key_high");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transitions" (
+  "graph_id" TEXT NOT NULL,
+  "transition_id" TEXT NOT NULL,
+  "recorded_revision" INTEGER NOT NULL,
+  "recorded_at" TEXT NOT NULL,
+  "valid_at" TEXT NOT NULL,
+  "cause" TEXT NOT NULL,
+  "class_kind" TEXT NOT NULL,
+  "class_id" TEXT NOT NULL,
+  "prior_class_kind" TEXT,
+  "prior_class_id" TEXT,
+  "assertion_ids" TEXT NOT NULL,
+  "decision" TEXT,
+  "tx_id" TEXT,
+  PRIMARY KEY ("graph_id", "transition_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_class_idx" ON "typegraph_identity_transitions" ("graph_id", "class_kind", "class_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_revision_idx" ON "typegraph_identity_transitions" ("graph_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_prior_class_idx" ON "typegraph_identity_transitions" ("graph_id", "prior_class_kind", "prior_class_id", "recorded_revision");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
+  "graph_id" TEXT NOT NULL,
+  "pruned_before_revision" INTEGER NOT NULL,
+  "pruned_at" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
   },
   {
     "params": [],

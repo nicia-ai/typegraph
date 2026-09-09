@@ -1066,6 +1066,10 @@ export function buildPostgresEngineProfile(
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
     identitySeparation: getTableName(tables.identitySeparation),
+    identityTransitions: getTableName(tables.identityTransitions),
+    identityTransitionRetention: getTableName(
+      tables.identityTransitionRetention,
+    ),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
@@ -1585,6 +1589,13 @@ export function buildPostgresEngineProfile(
         ),
       }),
     ],
+    identityTransitionsTableDdl: [
+      generatePgCreateTableSQL(tables.identityTransitions),
+      ...generatePgCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generatePgCreateTableSQL(
+      tables.identityTransitionRetention,
+    ),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
@@ -3014,9 +3025,7 @@ function createPostgresOperationBackend(
    */
   const schemaFenceFusionPlan = resolveWriteFencePlan(fenceTarget);
   const schemaFenceInsertLockClause: SQL =
-    schemaFenceFusionPlan.kind === "lock" ?
-      sql.raw("FOR SHARE")
-    : sql.raw("");
+    schemaFenceFusionPlan.kind === "lock" ? sql.raw("FOR SHARE") : sql.raw("");
 
   const commonOperationMembers = createCommonOperationBackend(
     buildCommonOperationOptions({
@@ -3045,8 +3054,10 @@ function createPostgresOperationBackend(
         atomicProgramsAtTransactionScope: true,
         nodeProjectionInsertFusion: true,
         dynamicEdgeConvergence: true,
-        ...(schemaFenceFusionPlan.kind === "lock" &&
-        fenceTarget.fenceSql !== undefined ?
+        ...((
+          schemaFenceFusionPlan.kind === "lock" &&
+          fenceTarget.fenceSql !== undefined
+        ) ?
           { fenceSql: fenceTarget.fenceSql }
         : {}),
         async beforeNodeProjectionInsert(params, plan): Promise<void> {

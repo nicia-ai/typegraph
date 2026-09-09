@@ -706,12 +706,15 @@ type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = 
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
-export function ensureSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: SchemaManagerOptions & {
+export function ensureSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: SchemaManagerOptions & EnsureSchemaPreloadedOptions): Promise<SchemaValidationResult>;
+
+// @public
+type EnsureSchemaPreloadedOptions = Readonly<{
     preloaded?: Readonly<{
         activeRow: SchemaVersionRow | undefined;
         storedSchema: SerializedSchema | undefined;
     }>;
-}): Promise<SchemaValidationResult>;
+}>;
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
@@ -1403,6 +1406,8 @@ type IdentityTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
 }>;
 
 // @public
@@ -2160,6 +2165,8 @@ type ResolvedSqlTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
     fulltext: string;
     uniques: string;
     edgeClaims: string;
@@ -2434,6 +2441,10 @@ abstract class SqlSchema implements SqlSchemaFields {
     // (undocumented)
     abstract readonly identitySeparationTable: SqlFragment;
     // (undocumented)
+    abstract readonly identityTransitionRetentionTable: SqlFragment;
+    // (undocumented)
+    abstract readonly identityTransitionsTable: SqlFragment;
+    // (undocumented)
     abstract readonly nodesTable: SqlFragment;
     // (undocumented)
     abstract readonly recordedClockTable: SqlFragment;
@@ -2462,6 +2473,8 @@ type SqlSchemaFields = Readonly<{
     recordedIdentityAssertionsTable: SqlFragment;
     identityClosureTable: SqlFragment;
     identitySeparationTable: SqlFragment;
+    identityTransitionsTable: SqlFragment;
+    identityTransitionRetentionTable: SqlFragment;
     fulltextTable: SqlFragment;
 }>;
 
@@ -2477,6 +2490,8 @@ type SqlTableNames = Readonly<{
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
     identitySeparation?: string | undefined;
+    identityTransitions?: string | undefined;
+    identityTransitionRetention?: string | undefined;
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;

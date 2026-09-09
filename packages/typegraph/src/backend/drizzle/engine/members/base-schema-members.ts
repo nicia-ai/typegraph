@@ -90,6 +90,25 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * are only exercised by offline `adopt()`.
    */
   sinceIndexDdl: readonly string[];
+  /**
+   * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
+   * statements for the identity transition log, the version-4 adoption
+   * step — rendered once by the caller from its own dialect's DDL
+   * generators, the same way `fencesTableDdl` is. A brand-new relation
+   * needs no ALTER-shaped migration, so this step's `bootstrap` is
+   * `"covered-by-generated-ddl"`; `adopt()` still ensures it for the
+   * OFFLINE adoption path, which never calls `generateDdl()`. Scoped to
+   * exactly this relation (not the identity-enablement `ensureIdentityTables`
+   * port) because the transition log, like `fences`, is a DEPLOYMENT-wide
+   * relation: a database that predates this release owes it regardless of
+   * whether any graph in it has Operational Identity enabled.
+   */
+  identityTransitionsTableDdl: readonly string[];
+  /**
+   * Idempotent `CREATE TABLE ...` for the transition log's per-graph
+   * retention watermark, the version-4 adoption step's other half.
+   */
+  identityTransitionRetentionTableDdl: string;
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -103,8 +122,9 @@ export type BaseSchemaMembers = Readonly<{
  * Builds the base-schema member group. Moved out of the two dialect files
  * unchanged: version 1 (the graph-templates table plus edge-match-identity
  * adoption, run before bootstrap's generated DDL), version 2 (the fence
- * rows table) and version 3 (the recorded-relations' and recorded
- * identity-assertions relation's `since_idx` indexes) all follow the same
+ * rows table), version 3 (the recorded-relations' and recorded
+ * identity-assertions relation's `since_idx` indexes), and version 4 (the
+ * identity transition log plus its retention watermark) all follow the same
  * prepare/adopt-before/adopt-after bootstrap sequencing.
  */
 export function createBaseSchemaMembers(
@@ -121,6 +141,8 @@ export function createBaseSchemaMembers(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl,
     sinceIndexDdl,
+    identityTransitionsTableDdl,
+    identityTransitionRetentionTableDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -157,6 +179,16 @@ export function createBaseSchemaMembers(
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },
+      {
+        version: 4,
+        async adopt(): Promise<void> {
+          for (const ddl of identityTransitionsTableDdl) {
+            await ensureTable(ddl);
+          }
+          await ensureTable(identityTransitionRetentionTableDdl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
     ],
   });
 
@@ -167,9 +199,7 @@ export function createBaseSchemaMembers(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
-      await baseSchemaLifecycle.adoptBeforeBootstrap(
-        startingBaseSchemaVersion,
-      );
+      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
       const statements = generateDdl();
       for (const statement of statements) {
         await ensureTable(statement);

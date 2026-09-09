@@ -16,23 +16,8 @@ import { SQL } from 'drizzle-orm';
 
 // @public
 type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
-    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
-    adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
-        waitBudgetMs: number;
-    }>) => Promise<AdoptedSchemaWriteTransaction>;
-}>;
-
-// @public
-export type AdoptedSchemaWriteTransaction = Readonly<{
-    backend: SchemaWriteTransactionBackend & Readonly<{
-        commitSchemaVersion: GraphBackend["commitSchemaVersion"];
-        ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
-            onDrift?: "throw" | "skip";
-        }>) => Promise<void>;
-    }>;
-    activeSchema: SchemaVersionRow | undefined;
 }>;
 
 // @public (undocumented)
@@ -176,7 +161,6 @@ type BackendCapabilities = Readonly<{
         unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
     }>;
     windowFunctions: boolean;
-    orderedAggregates?: boolean;
     clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
@@ -189,6 +173,7 @@ type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
+    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public
@@ -428,7 +413,6 @@ type CommonOperationStrategy = Readonly<{
     buildAssertAtomicNodeProjectionEvidence: (timestamp: string, evidence: readonly AtomicContributionEvidence[]) => SQL;
     buildReadAtomicNodeMutationPostimages: (graphId: string, kind: string, ids: readonly string[], schemaFence: SchemaWriteFenceParams) => SQL;
     buildUpdateNodeSet: (params: CompareAndSetNodeParams | UpdateNodeSetParams, timestamp: string) => SQL;
-    buildResolvedNodeUpdateBatch: (params: ResolvedNodeUpdateBatchParams, timestamp: string) => SQL;
     buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
     buildAtomicNodeDeleteBatchWithSchemaFence: (input: AtomicNodeDeleteBatchInput, timestamp: string, schemaLockClause: SQL) => SQL;
     buildSchemaFenceProbe: (params: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
@@ -440,9 +424,9 @@ type CommonOperationStrategy = Readonly<{
     buildAtomicConvergeEdges?: (params: AtomicConvergeEdgesParams) => SQL;
     buildAtomicConvergeEdgesTombstoneRefusal?: (params: Omit<AtomicConvergeEdgesParams, "timestamp">) => SQL;
     buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (params: InsertEdgeParams, claim: ClaimEdgeCardinalityParams, timestamp: string) => SQL;
-    buildDeleteStaleAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => readonly SQL[];
-    buildAcquireAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => readonly SQL[];
-    buildAssertAtomicEdgeClaimsOwned: (entries: readonly ClaimEdgeCardinalityParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => readonly SQL[];
+    buildDeleteStaleAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
+    buildAcquireAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
+    buildAssertAtomicEdgeClaimsOwned: (entries: readonly ClaimEdgeCardinalityParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
     buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
     buildInsertEdgesBatch: (params: readonly InsertEdgeParams[], timestamp: string) => SQL;
     buildInsertEdgesBatchReturning: (params: readonly InsertEdgeParams[], timestamp: string) => SQL;
@@ -683,9 +667,6 @@ type ContributionRepopulationStats = Readonly<{
 export type ContributionRuntime = Omit<CreateContributionMembersDeps, "dialect" | "fulltextStrategy" | "vectorStrategy" | "fenceTarget" | "ensureTable" | "execute" | "operationStrategy" | "schemaWriteTransaction">;
 
 // @public
-type ContributionScope = "deployment" | "graph";
-
-// @public
 type ConvergeEdgeCreateParams = Readonly<{
     params: InsertEdgeParams;
     match: EdgeConvergenceMatch;
@@ -748,7 +729,8 @@ type CreateBaseSchemaMembersDeps = Readonly<{
     ensureGraphTemplatesTable: () => Promise<void>;
     fencesTableDdl: string;
     ensureEdgeMatchIdentityStorage: () => Promise<void>;
-    sinceIndexDdl: readonly string[];
+    identityTransitionsTableDdl: readonly string[];
+    identityTransitionRetentionTableDdl: string;
 }>;
 
 // @public (undocumented)
@@ -2753,6 +2735,292 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
                 enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly identityTransitions: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            transitionId: drizzle_orm_pg_core.PgColumn<{
+                name: "transition_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedRevision: drizzle_orm_pg_core.PgColumn<{
+                name: "recorded_revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "recorded_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validAt: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            cause: drizzle_orm_pg_core.PgColumn<{
+                name: "cause";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            classKind: drizzle_orm_pg_core.PgColumn<{
+                name: "class_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            classId: drizzle_orm_pg_core.PgColumn<{
+                name: "class_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            priorClassKind: drizzle_orm_pg_core.PgColumn<{
+                name: "prior_class_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            priorClassId: drizzle_orm_pg_core.PgColumn<{
+                name: "prior_class_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            assertionIds: drizzle_orm_pg_core.PgColumn<{
+                name: "assertion_ids";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            decision: drizzle_orm_pg_core.PgColumn<{
+                name: "decision";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            txId: drizzle_orm_pg_core.PgColumn<{
+                name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly identityTransitionRetention: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            prunedBeforeRevision: drizzle_orm_pg_core.PgColumn<{
+                name: "pruned_before_revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            prunedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "pruned_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
@@ -6046,6 +6314,320 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
         };
         dialect: "sqlite";
     }>;
+    readonly identityTransitions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            transitionId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "transition_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            recordedRevision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            cause: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "cause";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            classKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "class_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            classId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "class_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            priorClassKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "prior_class_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            priorClassId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "prior_class_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            assertionIds: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "assertion_ids";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            decision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "decision";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            txId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly identityTransitionRetention: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            prunedBeforeRevision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "pruned_before_revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            prunedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "pruned_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
     readonly uniques: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
         name: string;
         schema: undefined;
@@ -7379,9 +7961,6 @@ type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 // @public (undocumented)
 const ENGINE_ASSEMBLY_BRAND: unique symbol;
 
-// @public (undocumented)
-const ENGINE_REVISION_BRAND: unique symbol;
-
 // @public
 export type EngineAssembly<TTx> = Readonly<{
     readonly [ENGINE_ASSEMBLY_BRAND]: (transaction: TTx) => TTx;
@@ -7394,35 +7973,10 @@ export type EngineProvisioning = Readonly<{
     generateDdl: () => readonly string[];
     ensureIndexMaterializationColumns?: (tableName: string) => Promise<void>;
     catalog?: BackendCatalogProbes;
-    lineage?: LineageMembers;
-    recordedTime?: EngineRecordedTimeMembers;
-}>;
-
-// @public
-type EngineRecordedRevision = Readonly<{
-    revision: string;
-    recordedAt: string;
-}>;
-
-// @public
-type EngineRecordedTimeMembers = Readonly<{
-    source: (this: void, table: RecordedSourceTable, revision: EngineRecordedRevision) => SqlFragment;
-    revisionNow: (this: void, session: RecordedTimeSession) => Promise<EngineRecordedRevision>;
-}>;
-
-// @public
-type EngineRevision = string & Readonly<{
-    [ENGINE_REVISION_BRAND]: "EngineRevision";
 }>;
 
 // @public
 export type EngineTableNames = ResolvedSqlTableNames;
-
-// @public
-type EntityKey = Readonly<{
-    kind: string;
-    id: string;
-}>;
 
 // @public (undocumented)
 type ExecutableSql = SQL | SqlFragment;
@@ -7756,9 +8310,7 @@ type GraphBackend = Readonly<{
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
-    upsertHeterogeneousNodes?: (this: void, params: HeterogeneousNodeUpsertParams) => Promise<readonly NodeRow[]>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
-    updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
     compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
@@ -7860,8 +8412,6 @@ type GraphBackend = Readonly<{
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
     catalog?: BackendCatalogProbes | undefined;
-    lineage?: LineageMembers | undefined;
-    recordedTime?: EngineRecordedTimeMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -8029,20 +8579,6 @@ type HardDeleteUniquesByNodeIdsParams = Readonly<{
 }>;
 
 // @public
-type HeterogeneousNodeUpsertEntry = Readonly<{
-    kind: string;
-    id: string;
-    props: Readonly<Record<string, unknown>>;
-    updateProps: Readonly<Record<string, unknown>>;
-}>;
-
-// @public
-type HeterogeneousNodeUpsertParams = Readonly<{
-    entries: readonly HeterogeneousNodeUpsertEntry[];
-    schemaFence: SchemaWriteFenceParams;
-}>;
-
-// @public
 type HybridSearchParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -8094,6 +8630,8 @@ type IdentityTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
 }>;
 
 // @public
@@ -8345,27 +8883,6 @@ type KindRemovalRowAccess = Readonly<{
 // @public
 export type KindRemovalRuntime = Omit<CreateKindRemovalMembersDeps, "ensureTable">;
 
-// @public
-type LineageBackend = Pick<GraphBackend, "lineage">;
-
-// @public
-type LineageDelta = Readonly<{
-    kind: "keys";
-    nodes: readonly EntityKey[];
-    edges: readonly EntityKey[];
-}> | Readonly<{
-    kind: "unbounded";
-}>;
-
-// @public
-type LineageMembers = Readonly<{
-    revision: (this: void, session: LineageSession) => Promise<EngineRevision>;
-    changesSince: (this: void, session: LineageSession, revision: EngineRevision, graphId: string) => Promise<LineageDelta>;
-}>;
-
-// @public
-type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
-
 // @public (undocumented)
 type LockSchemaVersionForWriteParams = Readonly<{
     graphId: string;
@@ -8439,23 +8956,13 @@ type NodeCreateCommandResult = Readonly<{
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";
     kind: string;
     keySystemColumns?: readonly SystemColumnName[];
-    keys?: readonly (Readonly<{
-        type: "field";
-        pointer: JsonPointer;
-        valueType: ValueType | undefined;
-        direction: "asc" | "desc";
-    }> | Readonly<{
-        type: "system";
-        column: "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
-        direction: "asc" | "desc";
-    }>)[];
 }>;
 
 // @public (undocumented)
@@ -8539,7 +9046,6 @@ type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
 
 // @public
 type PostgresBackendOptions = Readonly<{
-    schemaProvisioning?: SchemaProvisioning;
     tables?: PostgresTables;
     fulltext?: FulltextStrategy | false;
     vector?: VectorStrategy | false;
@@ -8561,6 +9067,8 @@ type PostgresTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
     uniques: string;
     edgeClaims: string;
     baseSchemaVersions: string;
@@ -8690,20 +9198,11 @@ type RecordedRelationDdl = Readonly<{
 }>;
 
 // @public
-type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
-
-// @public
 type RecordedTableNames = Readonly<{
     recordedClock: string;
     recordedEdges: string;
     recordedNodes: string;
 }>;
-
-// @public
-type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
-
-// @public
-type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 type RecordIndexMaterializationParams = Readonly<{
@@ -8757,23 +9256,8 @@ type ReleaseIndexMaterializationClaimParams = Readonly<{
 // @public (undocumented)
 type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
 
-// @public
-type ResolvedNodeUpdateBatchEntry = Readonly<{
-    graphId: string;
-    kind: string;
-    id: string;
-    props: Readonly<Record<string, unknown>>;
-    expectedVersion: number;
-}>;
-
-// @public
-type ResolvedNodeUpdateBatchParams = Readonly<{
-    entries: readonly ResolvedNodeUpdateBatchEntry[];
-}>;
-
 // @public (undocumented)
 type ResolvedSqlTableNames = Readonly<{
-    schemaVersions?: string;
     nodes: string;
     edges: string;
     recordedNodes: string;
@@ -8784,6 +9268,8 @@ type ResolvedSqlTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
     fulltext: string;
     uniques: string;
     edgeClaims: string;
@@ -8805,9 +9291,6 @@ type SchemaKindEmptinessProbe = Readonly<{
     kind: string;
     rows: "nonDeleted" | "all";
 }>;
-
-// @public
-export type SchemaProvisioning = "dml-only" | "transactional";
 
 // @public (undocumented)
 type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
@@ -8973,7 +9456,6 @@ export type SqlEngineProfile<TTx> = Readonly<{
     fulltext: FulltextStrategy | undefined;
     vector: VectorStrategy | undefined;
     declaredCapabilities: BackendCapabilities;
-    schemaProvisioning: SchemaProvisioning;
     resourceAudit: BackendResourceAudit;
     autocommit: Readonly<{
         singleStatementDurable: boolean;
@@ -9022,7 +9504,6 @@ const SqlIntentBrand: unique symbol;
 
 // @public
 type SqliteBackendOptions = Readonly<{
-    schemaProvisioning?: SchemaProvisioning;
     tables?: SqliteTables;
     executionProfile?: SqliteExecutionProfileHints;
     fulltext?: FulltextStrategy | false;
@@ -9049,6 +9530,8 @@ type SqliteTableNames = Readonly<{
     recordedIdentityAssertions: string;
     identityClosure: string;
     identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
     uniques: string;
     edgeClaims: string;
     baseSchemaVersions: string;
@@ -9082,7 +9565,6 @@ type SqlPlaceholderChunk = Readonly<{
 
 // @public
 type SqlTableNames = Readonly<{
-    schemaVersions?: string | undefined;
     nodes: string;
     edges: string;
     recordedNodes?: string | undefined;
@@ -9093,6 +9575,8 @@ type SqlTableNames = Readonly<{
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
     identitySeparation?: string | undefined;
+    identityTransitions?: string | undefined;
+    identityTransitionRetention?: string | undefined;
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;
@@ -9113,7 +9597,6 @@ type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "
 
 // @public
 type TableContribution = Readonly<{
-    scope?: ContributionScope;
     logicalName: string;
     owner: string;
     tableName: string;
@@ -9135,7 +9618,7 @@ type TargetCardinality = Exclude<Cardinality, "unique">;
 type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
 
 // @public
-type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & RecordedTimeBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 type TransactionOptions = Readonly<{
