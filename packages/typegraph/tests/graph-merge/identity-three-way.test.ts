@@ -1,5 +1,5 @@
 /**
- * The identity three-way classifier (design §4.2 / plan-G2 §1): the policy
+ * The identity three-way classifier: the policy
  * matrix for identity-assertion conflicts (`onAssertionConflict`), verified
  * directly against `planIdentityChanges`/`planIdentityThreeWay` without a
  * full store or merge — the same unit-fixture style
