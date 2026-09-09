@@ -16,6 +16,32 @@ const __identityAssertionId: unique symbol;
 const __nodeId: unique symbol;
 
 // @public
+export type AcyclicityMergeConflictDetails = Readonly<{
+    relation: string;
+    edges: readonly AcyclicityMergeConflictEdge[];
+    [key: string]: unknown;
+}>;
+
+// @public
+export type AcyclicityMergeConflictEdge = Readonly<{
+    edgeId: string;
+    edgeKind: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
+export class AcyclicityMergeConflictError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_ACYCLICITY_CONFLICT";
+    // (undocumented)
+    readonly details: AcyclicityMergeConflictDetails;
+}
+
+// @public
 type AggregateComparisonPredicate = Readonly<{
     __type: "aggregate_comparison";
     op: ComparisonOp;
@@ -3739,6 +3765,7 @@ export const MERGE_ERROR_CODES: {
     readonly conflict: "GRAPH_MERGE_CONFLICT";
     readonly constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
     readonly identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT";
+    readonly acyclicityConflict: "GRAPH_MERGE_ACYCLICITY_CONFLICT";
     readonly baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH";
     readonly planCapability: "GRAPH_MERGE_PLAN_CAPABILITY";
     readonly planInvalid: "GRAPH_MERGE_PLAN_INVALID";

@@ -22,6 +22,7 @@ export const MERGE_ERROR_CODES = {
   conflict: "GRAPH_MERGE_CONFLICT",
   constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT",
   identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT",
+  acyclicityConflict: "GRAPH_MERGE_ACYCLICITY_CONFLICT",
   baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH",
   planCapability: "GRAPH_MERGE_PLAN_CAPABILITY",
   planInvalid: "GRAPH_MERGE_PLAN_INVALID",
@@ -231,6 +232,45 @@ export class IdentityMergeConflictError extends MergeError {
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "IdentityMergeConflictError";
+  }
+}
+
+/** One offending edge named in an {@link AcyclicityMergeConflictError}. */
+export type AcyclicityMergeConflictEdge = Readonly<{
+  edgeId: string;
+  edgeKind: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
+/** `details` carried by {@link AcyclicityMergeConflictError}. */
+export type AcyclicityMergeConflictDetails = Readonly<{
+  /** The declared acyclic relation the resolved plan would close a cycle in. */
+  relation: string;
+  /** Every edge of `relation` the plan-time probe found on the cycle. */
+  edges: readonly AcyclicityMergeConflictEdge[];
+  [key: string]: unknown;
+}>;
+
+/**
+ * Raised at PLAN time (ruling D-4) when the resolved merge plan's projected
+ * edge writes — after canonicalization and repointing, layered onto the
+ * target's current live edges — would close a cycle in a declared-acyclic
+ * relation. Reviewable, like {@link IdentityMergeConflictError}: the plan is
+ * not applied, and the target is untouched. Apply-time re-verification (a
+ * cycle that only appears due to a write that lands between planning and
+ * commit) remains a refusal, not a conflict — see `EdgeAcyclicityError` via
+ * {@link MergeConstraintConflictError}.
+ */
+export class AcyclicityMergeConflictError extends MergeError {
+  override readonly code = MERGE_ERROR_CODES.acyclicityConflict;
+  declare readonly details: AcyclicityMergeConflictDetails;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "AcyclicityMergeConflictError";
   }
 }
 
