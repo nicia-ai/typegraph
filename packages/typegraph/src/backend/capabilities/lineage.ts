@@ -3,11 +3,22 @@
  * revision an engine can report and compare, plus the delta of one graph's
  * rows that changed since an earlier revision.
  *
- * This is a query surface only — nothing here writes a graph row, a
- * sidecar row, or a status row. A caller uses it to avoid a full-graph scan
- * when it already holds an earlier revision it trusts: `changesSince`
- * either names exactly what changed or admits it cannot and asks the
- * caller to fall back to scanning everything.
+ * This is a query surface over GRAPH state: neither member writes a graph
+ * row, a sidecar row keyed to graph content, or a status row, and an
+ * engine's own `lineage` (a backend that declares one directly) writes
+ * nothing at all — a caller uses it to avoid a full-graph scan when it
+ * already holds an earlier revision it trusts, and `changesSince` either
+ * names exactly what changed or admits it cannot and asks the caller to
+ * fall back to scanning everything. The one carve-out is the bundled
+ * recorded-relations derivation's `revision()`
+ * (`recordedRelationsLineage`, `store/recorded-capture/lineage.ts`): its
+ * FIRST call for a graph mints that graph's durable revision-origin row
+ * (`typegraph_revision_origins`) if none exists yet, deliberately off the
+ * `session` argument and onto the store's own backend, because the token it
+ * returns must stay comparable across a `Store.clear()` boundary — see that
+ * module's own doc for why the mint cannot go through `session` and why
+ * `LineageMembers`'s general "read on the session you are given" rule
+ * (below) does not reach this one graph-identity row.
  */
 import { ConfigurationError } from "../../errors";
 import { type GraphBackend, type TransactionBackend } from "../types";
@@ -88,7 +99,11 @@ export type LineageDelta =
  * ignores-the-session case). A `session` is always either the backend that
  * declared this `lineage` or a `transaction()` handle it built, so an
  * implementation can freely call `session.execute`/`session.executeRaw`
- * without opening anything of its own.
+ * without opening anything of its own. The one documented exception is the
+ * origin half of the bundled recorded-relations `revision()` (see the file
+ * doc above): a graph-identity row that must be ensured and minted off
+ * `session` regardless of which one is passed, not a fact this transaction's
+ * snapshot could answer differently anyway.
  */
 export type LineageMembers = Readonly<{
   /** The engine's current committed revision of the whole database, read on `session`. */

@@ -20,6 +20,13 @@ the same graph, and only one of them runs `clear()` at a time; the removed cache
 OTHER instance keep minting anchors from its pre-clear origin until it happened to be recreated,
 so every merge into it failed at commit for no reason visible to the caller.
 
+This closes the BASE-side half of the epoch gap; the FORK side had an equivalent one of its own —
+`recordedRelationsLineage`'s `revision()` used to report the bare recorded-clock value with no
+origin, so `GraphBranch.forkRevision` carried nothing to catch a cleared-and-repopulated FORK
+either. That half is closed the same way, by embedding the origin directly in the bundled
+`EngineRevision` token every `revision()`/`changesSince()` call now compares — see the
+`lineage`-capability changeset for the token format.
+
 ## Breaking
 
 - A branch forked from a store BEFORE `Store.clear()` now correctly fails `merge()`'s `base@V`

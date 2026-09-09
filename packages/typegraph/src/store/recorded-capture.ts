@@ -91,6 +91,7 @@ export {
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
 export {
+  encodeRecordedLineageRevision,
   mintsOriginNamespacedAnchor,
   recordedRelationsLineage,
   resolveLineage,

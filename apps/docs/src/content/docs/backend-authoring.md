@@ -403,10 +403,11 @@ through `resolveLineage`, the same path a real caller takes, and is the case
 the bundled recorded-relations derivation passes: after N writes,
 `changesSince(r0)` is exactly the touched keys, `changesSince(rN)` is empty, a
 hard delete after a revision reports the deleted key once, and an unrecognized
-revision is `unbounded`. "lineage: pre-capture gap detection" is
-TypeGraph-specific — it exercises `recordedRelationsLineage` directly and has
-no equivalent for an engine-native `lineage`; an engine profile's own suite
-should run against the conformance describe only and skip the other.
+revision is `unbounded`. "lineage: capture-completeness evidence" is
+TypeGraph-specific — it exercises `recordedRelationsLineage` directly (the
+per-revision evidence a bare engine revision has no equivalent gap for); an
+engine profile's own suite should run against the conformance describe only
+and skip the other.
 
 ## Refusals you may meet
 

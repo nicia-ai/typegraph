@@ -32,6 +32,8 @@ export const PGLITE_TEST_FILES = [
   "tests/graph-templates.test.ts",
   "tests/guarded-edge-cardinality-claim.test.ts",
   "tests/import-edge-match-identity-atomicity.test.ts",
+  "tests/lineage-fork-clear-epoch.test.ts",
+  "tests/lineage-interleaved-writer-pglite.test.ts",
   "tests/lineage-recorded-relations.test.ts",
   "tests/lineage-transaction-threading.test.ts",
   "tests/lock-fence-plan.test.ts",

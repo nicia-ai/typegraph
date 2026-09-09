@@ -385,8 +385,8 @@ export function generateSystemIndexDDL(
  * (`recordedNodes`, `recordedEdges`, declared in
  * {@link SYSTEM_INDEX_DECLARATIONS} and managed by `materializeIndexes`),
  * plus the recorded identity-assertions relation's own `since_idx`, which
- * `earliestRecordedFrom`'s per-graph `MIN(recorded_from)` floor folds into
- * the same scan but which is NOT a {@link SystemIndexTable} — like that
+ * `changesSince`'s per-revision completeness scan folds into the same
+ * three-relation scan but which is NOT a {@link SystemIndexTable} — like that
  * relation's other three indexes (`entity_idx`/`a_idx`/`b_idx`), it is
  * structural, hand-declared with the table rather than run through
  * `materializeIndexes`' lazy backfill, and this function follows the same

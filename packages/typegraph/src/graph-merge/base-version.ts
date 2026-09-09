@@ -90,6 +90,7 @@ import type {
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
 import {
+  encodeRecordedLineageRevision,
   ensureRevisionOrigin,
   readRevisionOrigin,
   recordedRelationsLineage,
@@ -637,16 +638,20 @@ export function schemaActiveVersionOf(
  *
  * The revision-anchor branch re-checks `assertTargetUnchanged`'s FIRST guard
  * before trusting the numeric revision at all: `revisionOriginOf(base)`
- * against `baseStore`'s LIVE origin row. A recorded-relations `changesSince`
- * compares its `sinceRevision` argument as a bare number against the
- * `recorded_from`/`recorded_to` columns (see `recordedRelationsLineage`'s own
- * module doc, "Token identity is scoped to one store, not one `graphId`") —
- * it has no way to tell a genuine anchor from a numerically coincidental one
- * minted by a DIFFERENT revision-tracked store sharing this `graphId` (a
- * clone, or a store whose origin row was reset). An origin mismatch answers
- * `undefined` here, the same fallback-to-full-diff outcome as any other
- * unanswerable case, rather than feeding `changesSince` a comparison it
- * cannot make meaningful.
+ * against `baseStore`'s LIVE origin row. This early check is no longer the
+ * ONLY thing standing between a numerically coincidental anchor and
+ * `changesSince` — the bundled `EngineRevision` `recordedRelationsLineage`
+ * mints also embeds this same origin, and `changesSince` re-verifies it on
+ * whatever session it is given (see that module's own doc, "Token identity
+ * is scoped to one graph, not one physical store") — but it stays: it is
+ * the cheap early exit that avoids a wasted `changesSince` round trip when
+ * the branch clearly forked from an unrelated store, and it is what lets
+ * this function reuse `originMatch.liveOrigin` below rather than reading
+ * the origin a second time. `encodeRecordedLineageRevision` re-derives the
+ * SAME bundled grammar `revision()` mints from the token's already-parsed
+ * origin and revision components, rather than asking `recordedRelationsLineage`
+ * for a fresh reading — `base`'s revision anchor is a specific PAST
+ * revision, not "now".
  *
  * A revision-anchored `base` minted before `baseStore` ever advanced its
  * clock parses to `revisionAnchorOf(base) === undefined` (the "initial"
@@ -669,10 +674,12 @@ export async function lineageDeltaSinceAnchor<G extends GraphDef>(
       baseStore.graphId,
       base,
     );
-    if (!originMatch.matches) return undefined;
+    if (!originMatch.matches || originMatch.liveOrigin === undefined) {
+      return undefined;
+    }
     return recordedRelationsLineage(baseStore).changesSince(
       storeBackend(baseStore),
-      revisionAnchor as EngineRevision,
+      encodeRecordedLineageRevision(originMatch.liveOrigin, revisionAnchor),
       baseStore.graphId,
     );
   }

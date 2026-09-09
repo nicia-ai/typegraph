@@ -9,7 +9,7 @@
  * portable to a future engine-native `lineage` (`backend/capabilities/
  * lineage.ts`) — it drives every case through `resolveLineage`, which an
  * engine-backed store would resolve to that engine's own `lineage` member.
- * The "lineage: pre-capture gap detection" describe is TypeGraph-specific:
+ * The "lineage: capture-completeness evidence" describe is TypeGraph-specific:
  * it exercises `recordedRelationsLineage` directly and depends on the
  * TypeGraph-only distinction between `revisionTracking` and `history`, which
  * has no equivalent for an engine that mints its own revisions — an
@@ -30,12 +30,10 @@ import {
   type EntityKey,
   type GraphBackend,
 } from "../../../src/backend/types";
+import { createRecordedInstant } from "../../../src/core/temporal";
 import {
-  asRecordedInstant,
-  createRecordedInstant,
-  recordedInstantRevision,
-} from "../../../src/core/temporal";
-import {
+  encodeRecordedLineageRevision,
+  readRevisionOrigin,
   recordedRelationsLineage,
   resolveLineage,
 } from "../../../src/store/recorded-capture";
@@ -66,10 +64,10 @@ const gapGraph = defineGraph({
 /**
  * Identity-enabled twin of {@link gapGraph}, for the case whose earliest
  * CAPTURED commit is an identity assertion rather than a node or edge
- * write — `earliestRecordedFrom`'s identity-assertions arm is what keeps
- * that case from looking like a pre-capture gap. `"ignore"` is enough:
- * this graph never folds same-id nodes across kinds, it only needs
- * `store.identity` to exist.
+ * write — `changesSince`'s completeness scan folding the identity-assertions
+ * relation into its evidence query is what keeps that case from looking
+ * like a gap. `"ignore"` is enough: this graph never folds same-id nodes
+ * across kinds, it only needs `store.identity` to exist.
  */
 const identityGapGraph = defineGraph({
   id: "lineage_identity_gap",
@@ -219,15 +217,53 @@ export function registerLineageConformanceIntegrationTests(
       if (lineage === undefined) throw new Error("expected a resolved lineage");
 
       await store.nodes.LineagePerson.create({ name: "Frank" });
-      const currentRevision = await lineage.revision(backend);
-      const futureRevision = createRecordedInstant(
-        recordedInstantRevision(asRecordedInstant(currentRevision)) + 1000,
-        "2099-01-01T00:00:00.000Z",
+      // Mint the origin (via a real `revision()` read) before fabricating a
+      // revision that carries it but is newer than anything the clock has
+      // reached — `EngineRevision` is opaque, so this builds a well-formed
+      // token through the SAME grammar `revision()` uses rather than
+      // decoding one.
+      await lineage.revision(backend);
+      const origin = await readRevisionOrigin(
+        backend,
+        store.revisionSchema,
+        store.graphId,
+      );
+      if (origin === undefined) throw new Error("expected a minted origin");
+      const futureRevision = encodeRecordedLineageRevision(
+        origin,
+        createRecordedInstant(1_000_000, "2099-01-01T00:00:00.000Z"),
       );
 
       const delta = await lineage.changesSince(
         backend,
-        futureRevision as unknown as EngineRevision,
+        futureRevision,
+        store.graphId,
+      );
+      expect(delta).toEqual({ kind: "unbounded" });
+    });
+
+    it("reports unbounded for a well-formed revision whose origin does not match this graph's live origin", async () => {
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(lineageGraph, backend, {
+        history: true,
+      });
+      const lineage = resolveLineage(store);
+      if (lineage === undefined) throw new Error("expected a resolved lineage");
+
+      await store.nodes.LineagePerson.create({ name: "Alice" });
+      // Mint this graph's real origin (via revision()), then fabricate a
+      // revision that carries a DIFFERENT one — the shape a numerically
+      // coincidental revision from an unrelated database, or one minted
+      // before a `Store.clear()` rotated the origin, would take.
+      await lineage.revision(backend);
+      const foreignRevision = encodeRecordedLineageRevision(
+        "a-different-store-entirely",
+        undefined,
+      );
+
+      const delta = await lineage.changesSince(
+        backend,
+        foreignRevision,
         store.graphId,
       );
       expect(delta).toEqual({ kind: "unbounded" });
@@ -275,123 +311,72 @@ export function registerLineageConformanceIntegrationTests(
     });
   });
 
-  describe("lineage: pre-capture gap detection", () => {
-    it("reports unbounded for a revision predating capture when the origin row corroborates the gap", async () => {
+  describe("lineage: capture-completeness evidence", () => {
+    it("reports unbounded when an interleaved non-capturing writer leaves a revision with no recorded evidence", async () => {
       const backend = context.getStore().backend;
-      const [trackingStore] = await createStoreWithSchema(gapGraph, backend, {
-        revisionTracking: true,
-      });
-      await trackingStore.nodes.LineagePerson.create({ name: "Untracked one" });
-      const earlyRevision = await trackingStore.revisionNow();
-      if (earlyRevision === undefined) {
-        throw new Error("expected the clock to have advanced");
-      }
-      await trackingStore.nodes.LineagePerson.create({ name: "Untracked two" });
-      // Mints the durable revision-origin row this graph's clock has never
-      // otherwise needed — the signal `changesSince` corroborates the gap
-      // with (see lineage.ts's module doc).
-      await trackingStore.revisionOriginNow();
-
       const [historyStore] = await createStoreWithSchema(gapGraph, backend, {
         history: true,
       });
+      const lineage = recordedRelationsLineage(historyStore);
+      // Read BEFORE either writer touches the graph — mints the origin and
+      // anchors on the genesis revision.
+      const earlyRevision = await lineage.revision(backend);
+
+      // A SECOND store over the SAME backend and graph, revision-tracking
+      // only (no history): its write advances the shared clock without
+      // ever inserting a recorded row.
+      const [trackingStore] = await createStoreWithSchema(gapGraph, backend, {
+        revisionTracking: true,
+      });
+      await trackingStore.nodes.LineagePerson.create({ name: "Untracked" });
+
+      // A LATER capturing commit on the SAME graph. Per-revision evidence
+      // (see `lineage.ts`'s module doc) catches the gap regardless of this
+      // later commit's own evidence — a ceiling-only check would not.
       await historyStore.nodes.LineagePerson.create({ name: "Captured" });
 
-      const lineage = recordedRelationsLineage(historyStore);
       const delta = await lineage.changesSince(
         backend,
-        earlyRevision as unknown as EngineRevision,
+        earlyRevision,
         historyStore.graphId,
       );
       expect(delta).toEqual({ kind: "unbounded" });
     });
 
-    it("falls through to the ordinary predicate for the same gap when nothing corroborates it", async () => {
-      const backend = context.getStore().backend;
-      const [trackingStore] = await createStoreWithSchema(gapGraph, backend, {
-        revisionTracking: true,
-      });
-      await trackingStore.nodes.LineagePerson.create({ name: "Untracked one" });
-      const earlyRevision = await trackingStore.revisionNow();
-      if (earlyRevision === undefined) {
-        throw new Error("expected the clock to have advanced");
-      }
-      await trackingStore.nodes.LineagePerson.create({ name: "Untracked two" });
-      // Deliberately never calls revisionOriginNow() — the origin row this
-      // module's gap detection looks for is absent, so the gap is
-      // undetectable and changesSince must fail open rather than guess.
-
-      const [historyStore] = await createStoreWithSchema(gapGraph, backend, {
-        history: true,
-      });
-      const captured = await historyStore.nodes.LineagePerson.create({
-        name: "Captured",
-      });
-
-      const lineage = recordedRelationsLineage(historyStore);
-      const delta = await lineage.changesSince(
-        backend,
-        earlyRevision as unknown as EngineRevision,
-        historyStore.graphId,
-      );
-      if (delta.kind !== "keys") {
-        throw new Error(
-          "expected the undetectable gap to fall through to keys",
-        );
-      }
-      expect(delta.nodes).toEqual([{ kind: "LineagePerson", id: captured.id }]);
-    });
-
     it("does not report unbounded when the earliest captured commit is an identity assertion, not a node or edge write", async () => {
       const backend = context.getStore().backend;
-      const [trackingStore] = await createStoreWithSchema(
-        identityGapGraph,
-        backend,
-        { revisionTracking: true },
-      );
-      const first = await trackingStore.nodes.LineagePerson.create({
-        name: "Untracked first",
-      });
-      const second = await trackingStore.nodes.LineagePerson.create({
-        name: "Untracked second",
-      });
-      // Read right at the untracked/captured boundary — after BOTH
-      // pre-capture writes, so nothing between this revision and the first
-      // captured commit below is missing a recorded row. A revision read
-      // any earlier (see the two cases above) predates `second`'s own
-      // untracked write and IS a genuine gap.
-      const boundaryRevision = await trackingStore.revisionNow();
-      if (boundaryRevision === undefined) {
-        throw new Error("expected the clock to have advanced");
-      }
-      await trackingStore.revisionOriginNow();
-
       const [historyStore] = await createStoreWithSchema(
         identityGapGraph,
         backend,
         { history: true },
       );
-      // The first commit this graph ever captures touches ONLY the
-      // identity-assertions relation: `first`/`second` already exist from
-      // the untracked phase above, so this assertion inserts no node or
-      // edge row. Without `earliestRecordedFrom` folding the identity
-      // table into its floor, this revision would look like a gap (the
-      // recorded nodes/edges tables' own earliest row is the LATER
-      // "Captured" write below).
+      const lineage = recordedRelationsLineage(historyStore);
+      const first = await historyStore.nodes.LineagePerson.create({
+        name: "First",
+      });
+      const second = await historyStore.nodes.LineagePerson.create({
+        name: "Second",
+      });
+      const boundaryRevision = await lineage.revision(backend);
+
+      // The next commit this graph captures touches ONLY the
+      // identity-assertions relation — no node or edge row. Without the
+      // completeness evidence query folding that relation into its scan,
+      // this revision would look like a gap (the recorded nodes/edges
+      // tables' own evidence is the LATER "Captured" write below).
       await historyStore.identity.assertSame(first, second);
       const captured = await historyStore.nodes.LineagePerson.create({
         name: "Captured",
       });
 
-      const lineage = recordedRelationsLineage(historyStore);
       const delta = await lineage.changesSince(
         backend,
-        boundaryRevision as unknown as EngineRevision,
+        boundaryRevision,
         historyStore.graphId,
       );
       if (delta.kind !== "keys") {
         throw new Error(
-          "expected the identity-assertion floor to keep this revision in bounds, not report unbounded",
+          "expected the identity-assertion evidence to keep this revision in bounds, not report unbounded",
         );
       }
       expect(delta.nodes).toEqual([{ kind: "LineagePerson", id: captured.id }]);

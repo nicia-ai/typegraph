@@ -1077,20 +1077,32 @@ first, else the store's recorded-relations one, else nothing. A `lineage`
 source is consulted only to avoid rework; it never changes what a merge
 decides.
 
+`revision()` reports `<origin>:<clock>`, never the bare clock value alone:
+the durable, random per-graph revision-origin nonce
+(`typegraph_revision_origins`) plus the recorded-time clock. Two
+independently created stores that share a `graphId`, or the SAME store
+across a `Store.clear()` boundary, can mint numerically comparable clock
+values, and the origin is what keeps `changesSince` from mistaking one for
+the other — a revision whose origin no longer matches the graph's LIVE
+origin row is `unbounded`, regardless of what its numeric clock value is.
+
 The recorded-relations derivation's delta is trustworthy only when EVERY
 writer to the graph goes through a store that captures history — a precondition
-it can partially, but not fully, enforce itself. It detects (and reports
-`unbounded` for) two shapes of an incomplete record: a requested revision
-older than what capture has ever seen (a `revisionTracking`-only store that
-wrote before `history` was ever turned on), and this graph's clock having
-advanced past the latest revision either recorded column carries evidence
-for — the signal that some OTHER writer sharing the clock (a second `Store`
-with `revisionTracking: true` and no `history`) advanced it without
-capturing anything. What it CANNOT detect: a non-capturing writer whose every
-write happens to be followed by a capturing one before anyone asks
-`changesSince` — the evidence gap closes again with no signal left behind.
-Route every writer through a capturing `Store` if a `"keys"` delta from this
-source must be exhaustive.
+it can partially, but not fully, enforce itself. `changesSince` proves
+completeness directly rather than inferring it from a high-water mark: every
+integer revision between the requested one and the graph's current clock
+must carry direct evidence — a `recorded_from` or a non-sentinel
+`recorded_to` — in one of the three recorded relations (nodes, edges,
+identity assertions). This catches an incomplete record wherever the hole
+falls, including a `revisionTracking`-only `Store` (no `history`) that
+advanced the shared clock without inserting a row and was later FOLLOWED by
+a capturing commit — a later capturing commit cannot retroactively supply
+the missing evidence, so the gap is caught regardless of what comes after
+it. What it CANNOT detect: a non-capturing writer bypassing every `Store`
+entirely (a raw `GraphBackend` write, or an engine-side mutation outside
+TypeGraph), which leaves no evidence to be short of. Route every writer
+through a capturing `Store` if a `"keys"` delta from this source must be
+exhaustive.
 
 `session` is the connection the caller's decision is bound to — a
 session-less bag could never be pinned to anything, so this one always
@@ -1173,7 +1185,11 @@ just cleared sees the rotation immediately, with nothing to recreate.
 returned `GraphBranch` — the fork's own `lineage.revision(session)`, read
 right after the working copy is created and before any write reaches it,
 with the working copy's own root backend as the session (this runs strictly
-outside any transaction). When
+outside any transaction). For the recorded-relations source this is
+origin-bearing like any other reading, so clearing and repopulating the
+FORK itself to the same revision count `forkRevision` held is caught the
+same way a cleared BASE store already is — there is no separate guard for
+the fork side to add, because the token itself now carries the check. When
 staging a branch for merge, its diff against the base is restricted to the
 union of two deltas: what changed on the *fork* since `forkRevision`, and
 what changed on the *base* since the anchor in its own `base@V` — instead of

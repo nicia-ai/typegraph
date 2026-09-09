@@ -78,6 +78,7 @@ export {
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
+  encodeRecordedLineageRevision,
   ensureRevisionOrigin,
   forceRecordedGraphRevision,
   readRecordedClock,
