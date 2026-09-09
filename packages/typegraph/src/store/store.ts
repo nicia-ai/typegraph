@@ -1391,6 +1391,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.lockIdentityImportTarget(target),
       foldImportedIdentityNodes: (target, references) =>
         this.foldImportedIdentityNodes(target, references),
+      detachDeletedImportedIdentityNode: (target, reference) =>
+        this.detachDeletedImportedIdentityNode(target, reference),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
       applyIdentityMergeAtTarget: (target, retractions, assertions, decision) =>
@@ -1651,6 +1653,32 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       target,
       references,
       "fold",
+    );
+  }
+
+  /**
+   * @internal Item E2-7. Detaches a node import purges after folding it into
+   * identity — a required composition part `assertImportedRequiredPartsAttached`
+   * (`src/interchange/import.ts`) refuses AFTER `foldImportedIdentityNodes`
+   * already ran for this attempt's batch. Always `"hard"`: the row this
+   * reaches was created and purged within the SAME import, exactly the
+   * `executeNodeHardDelete` shape (`src/store/operations/node-operations.ts`)
+   * `identity.detachDeleted` already serves for the ordinary write path.
+   */
+  detachDeletedImportedIdentityNode(
+    target: IdentityTarget,
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<void> {
+    if (this.#graph.identity === undefined) return Promise.resolve();
+    return detachIdentityForNode(
+      {
+        graphId: this.graphId,
+        sameIdAcrossKinds: this.#graph.identity.sameIdAcrossKinds,
+        schema: this.#sqlSchema(),
+      },
+      target,
+      reference,
+      "hard",
     );
   }
 

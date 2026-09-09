@@ -469,12 +469,16 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   );
   // Item E.2. What remains in `pendingRequiredParts` after every edge in the
   // payload is seen is either attached on the TARGET from before this
-  // import, or genuinely orphaned. Runs before any identity import, since a
-  // removed node row must not be folded into identity.
+  // import, or genuinely orphaned. Runs AFTER `foldImportedIdentityNodes`
+  // above (which needs the full node batch, before edges can clear any
+  // pending part) — see ruling E2-7: a part purged here undoes that fold
+  // itself, through `runtime.detachDeletedImportedIdentityNode`, rather than
+  // never having been folded in the first place.
   await assertImportedRequiredPartsAttached(
     frame,
     inputs.graphId,
     inputs.registry,
+    inputs.runtime,
     pendingRequiredParts,
     result,
     importedNodeIds,
@@ -2604,14 +2608,23 @@ function clearAttachedRequiredPart(
  * session's ordinary hard-delete step (the row was created THIS import, so
  * `session.purgeNode`'s delete-behavior enforcement, uniqueness release, and
  * embedding cleanup are exactly what an ordinary `hardDelete` would run).
- * One per-row `ImportError` is recorded for each; the rest of the import's
- * accepted rows are unaffected (the catch-per-row contract holds — this is
- * not a thrown abort).
+ * Ruling E2-7: this runs AFTER `foldImportedIdentityNodes` already folded
+ * the batch's new node references into identity (the fold needs the
+ * complete node batch, and `pendingRequiredParts` is not fully resolved
+ * until every edge is processed too, so neither can move ahead of the
+ * other) — a purged part's identity membership is undone here, through
+ * `runtime.detachDeletedImportedIdentityNode`, the same
+ * `identity.detachDeleted(..., "hard")` `executeNodeHardDelete`
+ * (`src/store/operations/node-operations.ts`) issues for an ordinary hard
+ * delete. One per-row `ImportError` is recorded for each refusal; the rest
+ * of the import's accepted rows are unaffected (the catch-per-row contract
+ * holds — this is not a thrown abort).
  */
-async function assertImportedRequiredPartsAttached(
+async function assertImportedRequiredPartsAttached<G extends GraphDef>(
   frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
+  runtime: ReturnType<typeof storeRuntime<G>>,
   pendingRequiredParts: ReadonlyMap<
     string,
     Readonly<{ kind: string; id: string }>
@@ -2637,6 +2650,10 @@ async function assertImportedRequiredPartsAttached(
       id: part.id,
       schema: registration.type.schema,
       onDelete: registration.onDelete,
+    });
+    await runtime.detachDeletedImportedIdentityNode(frame.target, {
+      kind: part.kind,
+      id: part.id,
     });
     result.nodes.created--;
     importedNodeIds.delete(makeNodeKey(part.kind, part.id));

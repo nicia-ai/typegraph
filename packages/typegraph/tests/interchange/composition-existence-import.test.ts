@@ -28,6 +28,7 @@ import {
   type GraphData,
   importGraph,
 } from "../../src/interchange";
+import { storeRuntime } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 
 const CeiSegment = defineNode("CeiSegment", { schema: z.object({}) });
@@ -56,6 +57,34 @@ function buildGraph() {
         existence: "required",
       }),
     ],
+  });
+}
+
+const CeiOther = defineNode("CeiOther", { schema: z.object({}) });
+
+function buildIdentityEnabledGraph() {
+  return defineGraph({
+    id: "composition-existence-import-identity",
+    nodes: {
+      CeiSegment: { type: CeiSegment },
+      CeiEpisode: { type: CeiEpisode },
+      CeiOther: { type: CeiOther },
+    },
+    edges: {
+      ceiSegmentOf: {
+        type: ceiSegmentOf,
+        from: [CeiSegment],
+        to: [CeiEpisode],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      partOf(CeiSegment, CeiEpisode, {
+        via: ceiSegmentOf,
+        existence: "required",
+      }),
+    ],
+    identity: { sameIdAcrossKinds: "fold" },
   });
 }
 
@@ -177,4 +206,55 @@ describe("validating import: required composition existence", () => {
   // `runImportWritePlanAttempt` (src/interchange/import.ts) — `seg-orphan`
   // then commits as a live, unattached required part, and the last
   // assertion above (`toBeUndefined()`) fails.
+
+  it("item E2-7: a purged required part leaves no identity membership behind on an identity-enabled store", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        buildIdentityEnabledGraph(),
+        backend,
+      );
+      // A materialized 2-member identity class needs a LIVE peer of another
+      // kind sharing the same id (`hasMaterializedIdentityClass`'s
+      // docblock: a singleton writes no closure row at all) — otherwise the
+      // fold this test is about leaves nothing on disk to dangle.
+      await store.nodes.CeiOther.create({}, { id: "shared-id" });
+
+      // `foldImportedIdentityNodes` folds this node into identity — pairing
+      // it with `CeiOther/shared-id` into one 2-member class — BEFORE
+      // `assertImportedRequiredPartsAttached` gets a chance to refuse it
+      // (the fold needs the complete node batch; the refusal needs every
+      // edge processed too — neither can move ahead of the other). The
+      // refusal must undo the fold it inherited, not just the row.
+      const result = await importGraph(
+        store,
+        payload({
+          nodes: [{ kind: "CeiSegment", id: "shared-id", properties: {} }],
+          edges: [],
+        }),
+        { onConflict: "error", batchSize: 100 },
+      );
+
+      expect(result.errors).toHaveLength(1);
+      expect(
+        await store.nodes.CeiSegment.getById("shared-id" as never),
+      ).toBeUndefined();
+      expect(
+        await store.nodes.CeiOther.getById("shared-id" as never),
+      ).toBeDefined();
+
+      // A dangling identity membership for the purged row would disagree
+      // with the closure `validateIdentity()` recomputes from live rows —
+      // it must resolve clean, not throw IDENTITY_SCHEMA_CONTRADICTION.
+      await expect(
+        storeRuntime(store).validateIdentity(),
+      ).resolves.toBeUndefined();
+    } finally {
+      await backend.close();
+    }
+  });
+  // MUTATION CHECK: remove the
+  // `runtime.detachDeletedImportedIdentityNode(frame.target, ...)` call from
+  // `assertImportedRequiredPartsAttached` (src/interchange/import.ts). The
+  // `validateIdentity()` assertion above then rejects instead of resolving.
 });
