@@ -1128,20 +1128,6 @@ export const core: {
         }>;
         __metaEdge: true;
     }>;
-    readonly sameAsMetaEdge: Readonly<{
-        name: "sameAs";
-        properties: Readonly<{
-            description: string | undefined;
-        }>;
-        __metaEdge: true;
-    }>;
-    readonly differentFromMetaEdge: Readonly<{
-        name: "differentFrom";
-        properties: Readonly<{
-            description: string | undefined;
-        }>;
-        __metaEdge: true;
-    }>;
     readonly disjointWithMetaEdge: Readonly<{
         name: "disjointWith";
         properties: Readonly<{

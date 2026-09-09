@@ -225,9 +225,9 @@ describe("serializeSchema", () => {
 
     const serialized = serializeSchema(graph, 1);
 
-    expect(Object.keys(serialized.ontology.metaEdges.subClassOf ?? {})).toEqual(
-      ["name", "description"],
-    );
+    expect(
+      Object.keys(serialized.ontology.metaEdges["subClassOf"] ?? {}),
+    ).toEqual(["name", "description"]);
   });
 
   it("serializes uniqueness constraints", () => {
