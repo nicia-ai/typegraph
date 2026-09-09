@@ -832,6 +832,21 @@ export type CompositionCycleErrorDetails = Readonly<{
 }>;
 
 // @public
+export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
+    from?: keyof Aliases & string;
+    maxHops?: number;
+    depth?: string;
+    path?: string;
+}>;
+
+// @public
+type CompositionNavigationResult<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState, NA extends string, O> = QueryBuilder<G, Aliases & Record<NA, NodeAlias<DynamicNodeType>>, EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>, RecursiveAliases & BuildRecursiveAliases<O extends {
+    depth: infer D extends string;
+} ? D : false, O extends {
+    path: infer P extends string;
+} ? P : false, NA>, CoordinateState>;
+
+// @public
 export type CompositionOptions = Readonly<{
     via: AnyEdgeType;
     partSide?: CompositionPartSide;
@@ -5784,6 +5799,7 @@ export class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAl
         from?: keyof Aliases & string;
     } & IdentityTraversalOption<G>): TraversalBuilder<G, Aliases, EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>, true>>, string, EA, TraversalDirection_2, true, false, false, RecursiveAliases, CoordinateState, DynamicEdgeTypeFor<T>>;
     orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(alias: A, field: string, direction?: SortDirection): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
+    parts<NA extends string, const O extends CompositionNavigationOptions<Aliases> = Record<string, never>>(nodeAlias: UniqueAlias<NA, Aliases>, options?: O): CompositionNavigationResult<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState, NA, O>;
     pipe<OutAliases extends AliasMap, OutEdgeAliases extends EdgeAliasMap = EdgeAliases, OutRecAliases extends RecursiveAliasMap = RecursiveAliases>(fragment: (builder: QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>) => QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases, CoordinateState>): QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases, CoordinateState>;
     select<R>(selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R>;
     // (undocumented)
@@ -5805,6 +5821,7 @@ export class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAl
     } & IdentityTraversalOption<G>): TraversalBuilder<G, Aliases, EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>>>, string, EA, TraversalDirection_2, false, false, false, RecursiveAliases, CoordinateState, DynamicEdgeTypeFor<T>>;
     whereEdge<EA extends keyof EdgeAliases & string>(alias: EA, predicateFunction: (edge: EdgeAccessor<EdgeAliases[EA]["type"]>) => Predicate): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     whereNode<A extends keyof Aliases & string>(alias: A, predicateFunction: (n: NodeAccessor<Aliases[A]["type"]>) => Predicate): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
+    wholes<NA extends string, const O extends CompositionNavigationOptions<Aliases> = Record<string, never>>(nodeAlias: UniqueAlias<NA, Aliases>, options?: O): CompositionNavigationResult<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState, NA, O>;
 }
 
 // @public
@@ -7624,6 +7641,7 @@ export type SubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK exte
     excludeRoot?: boolean;
     direction?: "out" | "both";
     cyclePolicy?: RecursiveCyclePolicy;
+    composition?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
     recordedAsOf?: never;
@@ -7894,6 +7912,7 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
         includeNarrower: true;
         includeSubClasses?: false;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
+    toKindSet<A extends string>(kinds: readonly string[], alias: A): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
     whereEdge(alias: EA, predicateFunction: (edge: EdgeAccessor<ET>) => Predicate): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, DC, PC, RecAliases, CoordinateState, ET>;
 }
 
