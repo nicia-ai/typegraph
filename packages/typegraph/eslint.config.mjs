@@ -969,6 +969,7 @@ const LINT_BLOCKS = [
     files: [
       "src/backend/capabilities/catalog.ts",
       "src/backend/capabilities/lineage.ts",
+      "src/backend/capabilities/recorded-time.ts",
       "src/backend/types.ts",
       "src/query/dialect/fulltext-strategy.ts",
       "src/query/dialect/types.ts",

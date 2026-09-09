@@ -934,5 +934,341 @@
     "kind": "required-member-added",
     "reason": "RecordedInstantParts is the value RecordedReadSource.source/.predicate receive as their `revision` argument, never something a caller constructs: every real caller reads it from an already-resolved recorded coordinate the query compiler builds internally, so implementing RecordedReadSource.source/.predicate only requires reading `.revision`/`.recordedAt` off the value passed in, not authoring one, matching the EngineRevision/FenceStatements precedent above.",
     "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "recordedTimeOwnership",
+    "kind": "member-removed",
+    "reason": "capabilities.recordedTimeOwnership is removed: ownership is now derived from whether the backend declares GraphBackend.recordedTime (see resolveRecordedTimeOwnership), per the 2026-09-07 derived-ownership ruling — there is no longer a separate declared flag to keep in sync with the member.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "revision",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EngineRecordedRevision",
+    "member": "recordedAt",
+    "kind": "required-member-added",
+    "reason": "EngineRecordedRevision is the revision/timestamp pair EngineRecordedTimeMembers.source and revisionNow exchange; no code ever hand-constructs one outside a recordedTime implementation. EngineRecordedTimeMembers.source declares it as a parameter, and recordedTime is a brand-new optional GraphBackend member, but the checker's brand-new-callable gating (existingCallableKeys/calleeExisted) only recognizes interface method-signature syntax, not the arrow-typed property style BackendCatalogProbes/LineageMembers/EngineRecordedTimeMembers use for `this: void` receiver-free members, so the parameter is walked as though the member were pre-existing and EngineRecordedRevision's required members become a false-positive breaking change, matching the EngineRevision/RecordedInstantParts precedent above.",
+    "issue": "#622"
   }
 ]

@@ -19,6 +19,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "capabilities",
   "catalog",
   "lineage",
+  "recordedTime",
   "checkUnique",
   "checkUniqueBatch",
   // The edge cardinality fence. Both members write only the claim relation —

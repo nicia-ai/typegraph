@@ -51,12 +51,13 @@
  * a future `cas-serialized` arm is OQ3's named seam behind the exhaustive
  * `WriteFencePlan` union switch, not pre-built here.
  *
- * **WS9 (engine-native recorded time).** `capabilities.recordedTimeOwnership:
- * "engine-native"` passes the fence gate (it is orthogonal to locking) and
- * today hits `refuseEngineNativeRecordedTimeNotYetImplemented`'s interim
- * refusal at construction whenever `history` / `revisionTracking` allocates
- * the TypeGraph-owned clock; WS9 lifts that interim refusal with its read
- * path.
+ * **WS9 (engine-native recorded time).** A backend earns `"engine-native"`
+ * ownership by declaring `recordedTime` (`EngineRecordedTimeMembers`,
+ * `./recorded-time.ts`) — there is no separate flag to set alongside it, and
+ * `resolveRecordedTimeOwnership` is the one place that reads the member to
+ * derive the ownership. `createSqlBackend` refuses a profile that declares
+ * `recordedTime` without also declaring `lineage`: engine-native history
+ * keeps no recorded relations to derive a change delta from.
  */
 export {
   batchPointReadMembers,
@@ -117,6 +118,12 @@ export {
   type LineageSession,
   requireLineage,
 } from "./lineage";
+export {
+  type EngineRecordedRevision,
+  type EngineRecordedTimeMembers,
+  type RecordedTimeSession,
+  requireRecordedTime,
+} from "./recorded-time";
 export {
   batchPointReadVerdict,
   type BundleVerdictOf,

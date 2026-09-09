@@ -1434,7 +1434,6 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
 | `recursiveTraversal?.{supported,reason}`                                   | Whether the engine can compute a bounded transitive closure of a relation in one round trip — a recursive CTE, or a graph-native expansion operator. **Absent means supported** |
 | `writeFence?.{mechanism,drain}`                                            | How this engine excludes concurrent writers, and how far a caller can drain a table lock — see [Write fence declaration](#write-fence-declaration-writefence) |
-| `recordedTimeOwnership?`                                                  | Who allocates recorded-time revisions — see [Recorded-time ownership](#recorded-time-ownership-recordedtimeownership) |
 
 The former top-level `capabilities.transactions` override is not interpreted
 as an alias. Bundled factories refuse it with `LEGACY_CAPABILITY_OVERRIDE`,
@@ -1827,21 +1826,6 @@ for the same purpose — that declaration means the *engine* serializes writers 
 a deployment convention is not a construction. `createPostgresBackend` refuses that particular
 claim outright for this reason.
 
-### Recorded-time ownership (recordedTimeOwnership)
-
-`capabilities.recordedTimeOwnership` names who allocates recorded-time revisions. Absent means
-`"typegraph-relations"` — today's behavior for every existing backend: TypeGraph owns a clock
-row and performs the read/advance/write that the write fence serializes.
-
-Declaring `"engine-native"` together with `history: true` or `revisionTracking: true` is refused
-at construction with `ConfigurationError` details code
-`ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` — the engine-native read/write path does not exist
-yet, so admitting the declaration would move the refusal from construction to mid-flush instead.
-This refusal is independent of the write-fence plan above: it fires whether the same backend is
-fenced or unfenced, because it is about the missing read/write path, not about locking. Declaring
-`"engine-native"` **without** `history` / `revisionTracking` constructs without incident — the
-declaration has no consumer to refuse until one exists.
-
 ### Capability bundles
 
 A **capability bundle** groups a set of `GraphBackend` members that one operation family needs
@@ -2209,7 +2193,6 @@ TypeGraph choosing separate query semantics per backend:
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |
 | Write fence (`capabilities.writeFence`)           | ✓ `engine-serialized` (single writer slot)        | ✓ `lock` (advisory + table locks)          | Identical guarantee, different mechanism. A custom backend that declares no `writeFence` resolves `unfenced` and is refused at construction for Operational Identity or TypeGraph-owned recorded-clock allocation |
-| Recorded-time ownership (`capabilities.recordedTimeOwnership`) | `"typegraph-relations"` (default)          | `"typegraph-relations"` (default)          | Both bundled backends own the clock today. `"engine-native"` is refused at construction as an interim measure whenever it is combined with `history`/`revisionTracking`, on either dialect |
 | Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |
 | Engine-native lineage (`backend.lineage`)               | ✗ (recorded-relations lineage via `history`)      | ✗ (recorded-relations lineage via `history`) | Neither bundled profile declares its own `lineage`. `resolveLineage` derives it from the store's recorded relations whenever `history: true` is on, identically on both dialects, so a graph-merge diff against such a store is pruned the same way regardless of backend. Without `history`, no lineage source resolves and the diff is full; the anchor is the durable revision anchor when `revisionTracking: true`, otherwise the compatibility content fingerprint |
 

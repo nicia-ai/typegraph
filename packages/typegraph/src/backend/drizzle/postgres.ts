@@ -158,6 +158,7 @@ import {
   type ClaimIndexMaterializationParams,
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
+  type EngineRecordedTimeMembers,
   type HybridSearchParams,
   type HybridSearchRow,
   type IndexState,
@@ -1818,6 +1819,7 @@ export function buildPostgresEngineProfile(
               schemaVersionsTable: tables.schemaVersions,
               fenceTarget,
               lineage: provisioning.lineage,
+              recordedTime: provisioning.recordedTime,
               isFirstParty,
             });
           try {
@@ -1866,6 +1868,7 @@ export function buildPostgresEngineProfile(
         schemaVersionsTable: tables.schemaVersions,
         fenceTarget,
         lineage: provisioning.lineage,
+        recordedTime: provisioning.recordedTime,
         isFirstParty: txIsFirstParty,
       });
       const gatedBackend = carryAtomicMutationSessionRegistration(
@@ -2513,6 +2516,16 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    * carries none, matching the root.
    */
   lineage?: LineageMembers | undefined;
+  /**
+   * The root backend's own `recordedTime` bag, threaded through so a
+   * transaction-scoped call exposes the SAME object — see
+   * `EngineProvisioning.recordedTime`. Like `lineage`, there is nothing to
+   * rebuild when this is omitted: a profile-supplied `recordedTime` is a
+   * read-only source function and revision-clock read bound to nothing
+   * session-specific, so a transaction-scoped call with no `recordedTime`
+   * passed through simply carries none, matching the root.
+   */
+  recordedTime?: EngineRecordedTimeMembers | undefined;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -2542,6 +2555,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   isFirstParty: boolean;
   /** The root backend's own `lineage` bag. See {@link CreatePostgresOperationBackendOptions}. */
   lineage?: LineageMembers | undefined;
+  /** The root backend's own `recordedTime` bag. See {@link CreatePostgresOperationBackendOptions}. */
+  recordedTime?: EngineRecordedTimeMembers | undefined;
 }>;
 
 function createPostgresOperationBackend(
@@ -2564,6 +2579,7 @@ function createPostgresOperationBackend(
     transactionScoped,
     catalog,
     lineage,
+    recordedTime,
   } = options;
   // Route through the execution adapter so driver-specific result shapes
   // (`{rows}` for node-postgres / neon-serverless; bare array for
@@ -3238,12 +3254,12 @@ function createPostgresOperationBackend(
   // call, which shares no bag of its own — this builds a fresh one bound to
   // THIS call's own `db`/`executionAdapter` (the pinned transaction client),
   // so every catalog probe on a transaction-scoped backend runs on the
-  // transaction's own session. `lineage`, unlike `catalog`, has no
-  // transaction-scoped fallback to build: it is simply carried through
-  // (`options.lineage`, the SAME object exposed as `backend.lineage`) so a
-  // profile-supplied lineage capability reaches a `transaction()` handle
-  // exactly as `catalog` does, and stays absent when the profile declares
-  // none.
+  // transaction's own session. `lineage` and `recordedTime`, unlike
+  // `catalog`, have no transaction-scoped fallback to build: each is simply
+  // carried through (`options.lineage`/`options.recordedTime`, the SAME
+  // objects exposed as `backend.lineage`/`backend.recordedTime`) so a
+  // profile-supplied capability reaches a `transaction()` handle exactly as
+  // `catalog` does, and stays absent when the profile declares none.
   return {
     ...operations,
     ...vectorEmbeddingMethods,
@@ -3256,6 +3272,7 @@ function createPostgresOperationBackend(
         transactionScoped,
       ),
     ...(lineage === undefined ? {} : { lineage }),
+    ...(recordedTime === undefined ? {} : { recordedTime }),
   };
 }
 
@@ -3365,6 +3382,7 @@ function createTransactionBackend(
     fenceTarget: options.fenceTarget,
     transactionScoped: true,
     lineage: options.lineage,
+    recordedTime: options.recordedTime,
   });
   const backend =
     options.isFirstParty ?

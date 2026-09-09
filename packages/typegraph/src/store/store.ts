@@ -27,10 +27,6 @@ import {
   CONTRIBUTION_HEALTH,
 } from "../backend/capabilities/bundle-registry";
 import {
-  refuseEngineNativeRecordedTimeNotYetImplemented,
-  resolveRecordedTimeOwnership,
-} from "../backend/capabilities/recorded-time-ownership";
-import {
   batchPointReadVerdict,
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
@@ -1153,16 +1149,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#revisionTrackingEnabled =
       this.#captureEnabled || options?.revisionTracking === true;
     if (this.#revisionTrackingEnabled) {
-      // Keyed on clock OWNERSHIP, not on the option name (ruling F3): the
-      // resource `lockRecordedClock` fences is the TypeGraph-owned clock row,
-      // which `history` and `revisionTracking` both reach.
-      const ownership = resolveRecordedTimeOwnership(backend.capabilities);
-      if (ownership === "engine-native") {
-        // NOT conditional on the fence plan: this refusal is about the
-        // missing engine-native read/write path (§5.3.1), not about locking —
-        // a separately-named gate below handles the fence (R-2).
-        refuseEngineNativeRecordedTimeNotYetImplemented();
-      }
+      // Keyed on the resource `lockRecordedClock` fences (ruling F3): the
+      // TypeGraph-owned clock row, which `history` and `revisionTracking`
+      // both reach. This construction path always allocates that clock —
+      // `resolveRecordedTimeOwnership` (`backend/capabilities/
+      // recorded-time-ownership.ts`) is not yet consulted here, so a
+      // backend that declares `recordedTime` gets no different treatment at
+      // this site.
       const clockFencePlan = resolveWriteFencePlan(backend);
       if (clockFencePlan.kind === "unfenced") {
         refuseUnfencedClockAllocation(backend.dialect);

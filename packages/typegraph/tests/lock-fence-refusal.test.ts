@@ -14,14 +14,6 @@
  *  (a) `history: true` on an `unfenced` backend refuses at `createStore`,
  *      zero statements.
  *  (b) an identity graph on an `unfenced` backend refuses, zero statements.
- *  (c) `history: true` on a backend declaring `recordedTimeOwnership:
- *      "engine-native"` refuses with the INTERIM error (a version-free
- *      message naming the missing engine-native path), on both an unfenced
- *      AND a fenced engine-native backend (the interim gate is not the fence
- *      gate wearing a different hat) — plus an R-2 exemption sub-row: an
- *      unfenced engine-native backend constructed WITHOUT
- *      `history`/`revisionTracking` succeeds. A pilot-freeze row (§B11)
- *      additionally asserts the message names no release version.
  *  (d) an undeclared non-factory backend refuses (a) and (b) via M-5's
  *      `unfenced` default.
  *  (e) the refusal message contains the LITERAL declaration line for the
@@ -39,7 +31,6 @@ import { z } from "zod";
 
 import { createStore, defineGraph, defineNode } from "../src";
 import { writeFenceDeclarationLine } from "../src/backend/capabilities/write-fence";
-import { TypeGraphError } from "../src/errors";
 import {
   cloneWorkingCopyStrategy,
   computeBaseVersion,
@@ -92,61 +83,6 @@ describe("T16 — (b) identity graph on unfenced refuses, zero statements", () =
       writeFenceRefusal("IDENTITY_REQUIRES_WRITE_FENCE"),
     );
     expect(logged.statements).toHaveLength(0);
-  });
-});
-
-describe("T16 — (c) engine-native interim refusal", () => {
-  it("unfenced engine-native + history: refuses with the interim error, zero statements", () => {
-    const logged = unfencedLoggedBackend(
-      createLoggedSqliteBackend({ recordedTimeOwnership: "engine-native" }),
-    );
-    logged.reset();
-    expect(() =>
-      createStore(plainGraph, logged.backend, { history: true }),
-    ).toThrow(writeFenceRefusal("ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED"));
-    expect(logged.statements).toHaveLength(0);
-  });
-
-  it("fenced engine-native + history: STILL refuses with the interim error (not the fence gate wearing a different hat)", async () => {
-    const logged = await createLoggedPostgresBackend({
-      recordedTimeOwnership: "engine-native",
-    });
-    try {
-      expect(() =>
-        createStore(plainGraph, logged.backend, { history: true }),
-      ).toThrow(
-        writeFenceRefusal("ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED"),
-      );
-    } finally {
-      await logged.close();
-    }
-  });
-
-  it("R-2 exemption: unfenced engine-native WITHOUT history/revisionTracking constructs successfully", () => {
-    const logged = unfencedLoggedBackend(
-      createLoggedSqliteBackend({ recordedTimeOwnership: "engine-native" }),
-    );
-    expect(() => createStore(plainGraph, logged.backend)).not.toThrow();
-  });
-
-  it("the engine-native interim refusal names no release version", () => {
-    const logged = unfencedLoggedBackend(
-      createLoggedSqliteBackend({ recordedTimeOwnership: "engine-native" }),
-    );
-    let caught: unknown;
-    try {
-      createStore(plainGraph, logged.backend, { history: true });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(TypeGraphError);
-    const error = caught as TypeGraphError;
-    expect(error.details["code"]).toBe(
-      "ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED",
-    );
-    expect(error.message).toContain("without `history`");
-    expect(error.message).toContain('"typegraph-relations"');
-    expect(error.message).not.toMatch(/\b0\.\d+(\.\d+)?\b/);
   });
 });
 

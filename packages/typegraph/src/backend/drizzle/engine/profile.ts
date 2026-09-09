@@ -27,6 +27,7 @@ import type {
   AdapterBackend,
   BackendCapabilities,
   BackendCatalogProbes,
+  EngineRecordedTimeMembers,
   LineageMembers,
   TransactionBackend,
 } from "../../types";
@@ -92,6 +93,18 @@ export type EngineProvisioning = Readonly<{
    * capability instead.
    */
   lineage?: LineageMembers;
+  /**
+   * The engine-native recorded-time source and revision clock
+   * `createSqlBackend` forwards onto the assembled backend's
+   * `recordedTime` member unchanged. Optional: a profile that omits it
+   * produces a backend with no `recordedTime`, exactly like any other
+   * optional `GraphBackend` member — neither bundled Drizzle profile
+   * supplies one today, so `history`/`revisionTracking` always allocate
+   * TypeGraph's own recorded clock and relations instead. A profile that
+   * declares this must also declare `lineage`; `createSqlBackend` refuses
+   * one that declares only `recordedTime`.
+   */
+  recordedTime?: EngineRecordedTimeMembers;
 }>;
 
 /**

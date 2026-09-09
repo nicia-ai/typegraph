@@ -210,6 +210,7 @@ const PROVISIONING_MEMBERS = [
   "bootstrapTables",
   "catalog",
   "lineage",
+  "recordedTime",
   "ensureExtension",
   "ensureTrigramExtension",
   "ensureFulltextTable",
