@@ -385,7 +385,7 @@ import {
   executeSubgraph,
   type InternalSubgraphOptions,
   type SubgraphOptions,
-  type SubgraphProject,
+  type SubgraphProjectFor,
   type SubgraphResult,
   type SubgraphResultEdgeKinds,
 } from "./subgraph";
@@ -791,7 +791,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   subgraph: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
@@ -3388,7 +3388,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async subgraph<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
@@ -3421,7 +3421,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   subgraphAtCoordinate<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,

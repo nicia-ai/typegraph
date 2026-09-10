@@ -2608,7 +2608,11 @@ union: every key the traversal can produce is reachable through
 `adjacency` / `reverseAdjacency`, and no key outside the graph's own edges
 ever appears. With `composition` absent or `false`, the key type is the
 `edges` list you named, exactly as before. (A `composition` whose value is
-only known to be a `boolean` widens too — the conservative reading.)
+only known to be a `boolean` widens too — the conservative reading.) The
+matching `project.edges` keys widen with it, so a `composition: true` call can
+shrink the payload of the composition edges it receives; without
+`composition: true`, projecting an edge kind outside `edges` stays a
+compile-time error.
 
 #### Subgraph Projection
 

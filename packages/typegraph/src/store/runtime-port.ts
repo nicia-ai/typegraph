@@ -37,7 +37,7 @@ import { type InternalGraphAlgorithms } from "./algorithms";
 import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import {
   type InternalSubgraphOptions,
-  type SubgraphProject,
+  type SubgraphProjectFor,
   type SubgraphResult,
   type SubgraphResultEdgeKinds,
 } from "./subgraph";
@@ -149,7 +149,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   subgraphAtCoordinate: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
     const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,

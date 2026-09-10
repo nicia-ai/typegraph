@@ -26,6 +26,7 @@ import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { ValidationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
+import { type SubgraphResult } from "../src/store/subgraph";
 import { requireDefined } from "../src/utils/presence";
 import {
   collectAllEdges,
@@ -226,6 +227,45 @@ function subgraphWithUnknownComposition(composition: boolean) {
     composition,
   });
 }
+
+// A `composition: true` call receives composition edge rows, so it must be
+// able to project them: the option that widened the result's edge-key type
+// widens the matching projection input through the same owner
+// (`SubgraphProjectFor`).
+function subgraphProjectingCompositionEdges() {
+  return compositionStore.subgraph(compositionRootId, {
+    edges: ["mentions"],
+    composition: true,
+    project: { edges: { part_of_whole: ["meta"] } },
+  });
+}
+
+function subgraphProjectingAnUntraversedEdge() {
+  return compositionStore.subgraph(compositionRootId, {
+    edges: ["mentions"],
+    // @ts-expect-error - without `composition: true` the traversal never
+    // produces `part_of_whole` rows, so projecting that kind stays refused.
+    project: { edges: { part_of_whole: ["meta"] } },
+  });
+}
+
+/** A projection over the edge kinds the result carries is a valid `P`. */
+type ProjectedCompositionSubgraph = SubgraphResult<
+  typeof compositionGraph,
+  "CompositionWhole",
+  "mentions" | "part_of_whole",
+  { edges: { part_of_whole: readonly ["meta"] } }
+>;
+
+type NonProjectionSubgraphResult = SubgraphResult<
+  typeof compositionGraph,
+  "CompositionWhole",
+  "mentions",
+  // @ts-expect-error - the fourth argument is a projection for this graph, not
+  // an arbitrary object; without the constraint the selection silently
+  // resolves to `undefined` and every row comes back fully hydrated.
+  { nonsense: true }
+>;
 
 // ============================================================
 // Tests
@@ -859,6 +899,30 @@ describe("store.subgraph()", () => {
         AdjacencyKeyOf<Awaited<ReturnType<typeof subgraphWithCompositionTrue>>>
       >().toEqualTypeOf<"mentions" | "part_of_whole">();
       void subgraphWithCompositionTrue;
+      expect(compositionGraph.id).toBe("subgraph_composition_typing");
+    });
+
+    it("widens the matching projection input, not only the result", () => {
+      // Compiling IS the assertion: `project.edges.part_of_whole` is outside
+      // the declared `edges` list, and is admissible only because
+      // `composition: true` widened the projection's key set too.
+      expectTypeOf<
+        AdjacencyKeyOf<
+          Awaited<ReturnType<typeof subgraphProjectingCompositionEdges>>
+        >
+      >().toEqualTypeOf<"mentions" | "part_of_whole">();
+      void subgraphProjectingCompositionEdges;
+      void subgraphProjectingAnUntraversedEdge;
+      expect(compositionGraph.id).toBe("subgraph_composition_typing");
+    });
+
+    it("keeps SubgraphResult's projection argument constrained", () => {
+      expectTypeOf<
+        ProjectedCompositionSubgraph["root"]
+      >().not.toEqualTypeOf<never>();
+      expectTypeOf<
+        NonProjectionSubgraphResult["root"]
+      >().not.toEqualTypeOf<never>();
       expect(compositionGraph.id).toBe("subgraph_composition_typing");
     });
 

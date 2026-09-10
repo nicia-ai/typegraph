@@ -309,7 +309,7 @@ export type SubgraphOptions<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
   C extends boolean | undefined = undefined,
 > = Readonly<{
   /** Edge kinds to follow during traversal. Edges not listed are not traversed. */
@@ -390,7 +390,7 @@ export type InternalSubgraphOptions<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
   C extends boolean | undefined = undefined,
 > = Omit<SubgraphOptions<G, EK, NK, P, C>, "recordedAsOf"> &
   Readonly<{
@@ -440,11 +440,36 @@ export type SubgraphResultEdgeKinds<
   C extends boolean | undefined,
 > = true extends C ? EdgeKinds<G> : EK;
 
+/**
+ * The projection a `subgraph(...)` call may state, keyed by the edge kinds its
+ * RESULT carries ({@link SubgraphResultEdgeKinds}) rather than by the declared
+ * `edges` list. A `composition: true` call receives composition edge rows, and
+ * the executor builds its edge projection plan from that same widened kind
+ * list, so constraining the input by the narrow list alone would leave a
+ * caller unable to shrink the payload of rows it is already being handed.
+ * Without `composition: true` the two lists are identical, so a projection
+ * naming a kind outside `edges` stays a compile-time error.
+ */
+export type SubgraphProjectFor<
+  G extends GraphDef,
+  NK extends NodeKinds<G>,
+  EK extends EdgeKinds<G>,
+  C extends boolean | undefined,
+> = SubgraphProject<G, NK, SubgraphResultEdgeKinds<G, EK, C>>;
+
+/**
+ * The result of a `subgraph(...)` read. `EK` is the edge-kind union the result
+ * CARRIES ({@link SubgraphResultEdgeKinds} of the call's declared `edges`), so
+ * `P` is constrained by the projection over that same union — the one
+ * {@link SubgraphProjectFor} admits at the call site. A fourth argument that
+ * is not a projection at all is refused here rather than silently yielding
+ * `undefined` selections and fully hydrated rows.
+ */
 export type SubgraphResult<
   G extends GraphDef,
   NK extends NodeKinds<G> = NodeKinds<G>,
   EK extends EdgeKinds<G> = EdgeKinds<G>,
-  P = undefined,
+  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
 > = Readonly<{
   /** The root node, or undefined if the root was not found or excluded. */
   root: SubgraphNodeResult<G, NK, P> | undefined;
@@ -515,7 +540,7 @@ export async function executeSubgraph<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
   C extends boolean | undefined = undefined,
 >(params: {
   graph: G;
