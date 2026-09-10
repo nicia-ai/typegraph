@@ -471,7 +471,7 @@ for (const hit of hits) {
 | `includeSnippets` | `boolean` | `false` | Return a highlighted `<mark>…</mark>` snippet per hit. Noticeably slower than plain search — request only for final-page results. |
 | `where` | `(accessor) => Predicate` | *(none)* | Property predicate compiled into the search statement's candidate set — the engine ranks only matching rows, so a filter never shrinks results below `limit` when enough matches exist (libSQL DiskANN: bounded by its 4× over-fetch). Same accessor and semantics as `store.nodes.<kind>.find({ where })`. |
 | `offset` | `number` | `0` | Rank-relative pagination: skip the first `offset` ranked hits. |
-| `expansion` | `\"exact\" \| \"subclasses\"` | `\"exact\"` | `\"subclasses\"` also searches `subClassOf` descendant kinds and merges their scores into one ranking. |
+| `expansion` | `"exact" \| "subclasses"` | `"exact"` | `"subclasses"` also searches `subClassOf` descendant kinds and merges their scores into one ranking. |
 
 `search()`'s `expansion` stays **opt-in** and defaults to `"exact"` —
 this is a deliberate asymmetry with the query builder's `from()`/`to()`,

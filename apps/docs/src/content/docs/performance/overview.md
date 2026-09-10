@@ -807,8 +807,8 @@ properly configured indexes.
 
 A query against a kind with `subClassOf` descendants returns their rows too
 by default. Unless you specifically need to query across the hierarchy, pass
-`{ expansion: "exact" }` (or set `queryDefaults.expansion:
-false` on the store). Being specific about the node kind allows the SQL
+`{ expansion: "exact" }` (or set `queryDefaults.expansion: "exact"` on the
+store). Being specific about the node kind allows the SQL
 engine to use more restrictive index scans.
 
 ### Use cursor pagination

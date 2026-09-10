@@ -557,7 +557,7 @@ never costs you results: you get `limit` hits whenever `limit` matching
 nodes exist (on libSQL DiskANN, subject to the over-fetch bound above).
 
 `expansion` on the facade stays **opt-in** and defaults to
-`false` — a deliberate asymmetry with the query builder's `from()`/`to()`,
+`"exact"` — a deliberate asymmetry with the query builder's `from()`/`to()`,
 which default to `expansion: "subclasses"`. Searching across kinds also
 requires every expanded kind to share one declared metric (see below), so
 flipping the facade's default would need its own migration knob; see
