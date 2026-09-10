@@ -2953,6 +2953,7 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
       ctx.graphId,
       partId,
       request,
+      lock,
     ),
   );
 }
@@ -4354,20 +4355,39 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
      * Item E.2. Present only from the get-or-create entries' existing-row
      * leg (`executeNodeGetOrCreateByConstraint` and its bulk twin): the
      * stated `partOf` is decided and written in the SAME transaction as this
-     * property update, so the two halves of one call commit together.
+     * property update, so the two halves of one call commit together —
+     * EXCEPT for three refusals named below, which commit the property
+     * update alone when this call runs nested inside an enclosing
+     * `store.transaction(...)`.
      *
-     * The fenced incumbent DECISION runs before the update's first statement,
-     * so the refusals it owns (a different incumbent whole, the same whole
-     * through a different realizing edge, a `props` value the live edge
-     * disagrees with) leave nothing written at all — the only guarantee that
-     * survives a caller catching the refusal inside an enclosing
-     * `store.transaction(...)`, which has no nested frame to roll back. The
-     * refusals the attach WRITE raises (a lost composition claim, a dead or
-     * missing whole, cardinality, acyclicity) necessarily follow the update —
-     * on the resurrection leg the part is still a tombstone until the update
-     * restores it — and abort it by aborting this frame's transaction. A
-     * refused property update (a unique conflict, a validation error) leaves
-     * the attachment and its history untouched.
+     * The fenced incumbent DECISION runs before the update's first
+     * statement, and now also covers the WHOLE endpoint's liveness
+     * (`decideCompositionAttachmentUnderFence`'s own `assertEndpointRowLive`
+     * call, `composition-create.ts`). So every refusal it owns — a
+     * different incumbent whole, the same whole through a different
+     * realizing edge, a `props` value the live edge disagrees with, or a
+     * dead/missing whole — leaves nothing written at all. That is the only
+     * guarantee that survives a caller catching the refusal inside an
+     * enclosing `store.transaction(...)`: that leg runs ON the caller's
+     * transaction, which has no nested frame of its own to roll back, so
+     * this frame's own abort rolls back nothing beyond this frame's own
+     * (empty, at that point) statements.
+     *
+     * Three refusals the attach WRITE itself still raises — a lost
+     * composition claim, cardinality, acyclicity — necessarily follow the
+     * update: on the resurrection leg the part row is still a tombstone
+     * until the update restores it, so a read for any of these three taken
+     * before the update would refuse every resurrection. When one of them
+     * fires, this frame's OWN transaction aborts, which is sufficient only
+     * when this frame is the outermost transaction; a caller that opened an
+     * enclosing `store.transaction(...)` and catches the refusal there
+     * still observes the property update committed with the part unattached
+     * (there is no savepoint on this nested write path). Callers relying on
+     * atomicity across one of these three refusals must not catch it inside
+     * an enclosing transaction.
+     *
+     * A refused property update (a unique conflict, a validation error)
+     * leaves the attachment and its history untouched, in every case.
      */
     compositionAttachment?: CompositionAttachmentRequest;
   }>,
@@ -4410,16 +4430,21 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
       // DECIDE before the update's first statement. Every refusal the fenced
       // incumbent decision can reach — a different whole, the same whole
       // through a different realizing edge, a stated `props` that disagrees
-      // with the one the live edge holds — therefore refuses with nothing
+      // with the one the live edge holds, OR a dead/missing WHOLE
+      // (`decideCompositionAttachmentUnderFence`'s own `assertEndpointRowLive`
+      // call, `composition-create.ts`) — therefore refuses with nothing
       // written at all, which is the only thing that holds when the caller
-      // catches the refusal inside an enclosing `store.transaction(...)`: that
-      // leg runs ON the caller's transaction, so there is no nested frame to
-      // roll back. The refusals the ATTACH WRITE itself raises (a dead or
-      // missing whole, cardinality, acyclicity, a lost composition claim)
-      // cannot be hoisted with it: on the resurrection leg the part row is
-      // still a tombstone until the update below restores it, so an endpoint
-      // read taken here would refuse every resurrection. Those rely on this
-      // frame's own transaction aborting, as they did before.
+      // catches the refusal inside an enclosing `store.transaction(...)`:
+      // that leg runs ON the caller's transaction, so there is no nested
+      // frame to roll back. The refusals the ATTACH WRITE itself still owns
+      // (cardinality, acyclicity, a lost composition claim) cannot be
+      // hoisted with it: on the resurrection leg the part row is still a
+      // tombstone until the update below restores it, so THOSE checks rely
+      // on this frame's own transaction aborting, as they did before — a
+      // caller catching one of those three inside an enclosing
+      // `store.transaction(...)` still sees the property update committed
+      // with no attachment. See the option docblock above for the complete,
+      // per-refusal breakdown.
       const decided =
         compositionAttachment === undefined ? undefined : (
           await decideCompositionAttachmentUnderFence(
@@ -4428,6 +4453,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
             ctx.graphId,
             input.id,
             compositionAttachment,
+            lock,
           )
         );
       const node = await performNodeUpdateWithResurrectionRecovery(

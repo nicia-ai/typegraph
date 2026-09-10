@@ -23,6 +23,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EndpointNotFoundError,
   partOf,
   UniquenessError,
 } from "../src";
@@ -324,6 +325,56 @@ describe("a refused attachment and the property update it came with", () => {
     expect(edges).toHaveLength(1);
     expect(requireDefined(edges[0]).toId).toBe(wholeA.id);
     expect(requireDefined(edges[0]).meta.validTo).toBeUndefined();
+  });
+
+  /**
+   * The same precedence question as the previous test, for the refusal a
+   * DEAD whole raises rather than a conflicting incumbent: both must precede
+   * the property update, because both are now decided inside
+   * `decideCompositionAttachmentUnderFence` before it returns.
+   */
+  it("leaves an unattached part unattached when the requested whole is dead and the caller catches it inside a transaction", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      buildGraph("af_refuse_dead_whole_before_update"),
+      backend,
+    );
+
+    const whole = await store.nodes.AfWhole.create({});
+    const part = await store.nodes.AfPart.create({
+      slug: "unattached",
+      code: "original",
+    });
+    await store.nodes.AfWhole.delete(whole.id);
+
+    // MUTATION CHECK: delete the whole-liveness read in
+    // `decideCompositionAttachmentUnderFence`
+    // (src/store/operations/composition-create.ts) — i.e. revert to letting
+    // `attachCompositionCreateEdge`'s own `assertLiveEdgeEndpoints` be the
+    // only place a dead whole is caught. The refusal then follows
+    // `performNodeUpdateWithResurrectionRecovery` instead of preceding it,
+    // and `code` below reads "mutated".
+    await store.transaction(async (tx) => {
+      const refusal = await tx.nodes.AfPart.getOrCreateByConstraint(
+        "af_part_slug",
+        { slug: "unattached", code: "mutated" },
+        {
+          ifExists: "update",
+          partOf: { kind: "AfWhole", id: whole.id },
+        },
+      ).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(EndpointNotFoundError);
+      expect((refusal as EndpointNotFoundError).details.endpoint).toBe("to");
+    });
+
+    const reread = requireDefined(await store.nodes.AfPart.getById(part.id));
+    expect(reread.code).toBe("original");
+
+    const edges = await store.edges.afPartOf.find(
+      {},
+      { temporalMode: "includeEnded" },
+    );
+    expect(edges).toEqual([]);
   });
 });
 

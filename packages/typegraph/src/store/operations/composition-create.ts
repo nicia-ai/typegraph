@@ -38,9 +38,14 @@
 import {
   type EdgeRow,
   type GraphReadBackend,
+  type NodeRow,
   rowPropsToObject,
 } from "../../backend/types";
-import { CompositionExistenceError, ConfigurationError } from "../../errors";
+import {
+  CompositionExistenceError,
+  ConfigurationError,
+  EndpointNotFoundError,
+} from "../../errors";
 import { validateEdgeProps } from "../../errors/validation";
 import { type CompositionPair } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
@@ -788,6 +793,36 @@ export type FencedCompositionAttachment = Readonly<{
 }>;
 
 /**
+ * THE single owner of "does this edge endpoint row exist and count as live" —
+ * shared by two questions asked at two different times against the two
+ * different rows one composition attachment touches:
+ *
+ * - `assertLiveEdgeEndpoints` (`edge-operations.ts`) calls this for BOTH
+ *   endpoints, at WRITE time, inside `attachCompositionCreateEdge`'s ordinary
+ *   edge-create pipeline — the only place the PART endpoint is ever checked,
+ *   since a resurrection leg's part row is still a tombstone until the
+ *   property update earlier in the same frame restores it.
+ * - {@link decideCompositionAttachmentUnderFence} calls this for the WHOLE
+ *   endpoint only, at DECIDE time, before that same frame's first statement —
+ *   see that function's docblock for why only the whole can be hoisted.
+ *
+ * One spelling of the liveness verdict keeps the two calls from ever judging
+ * "is this row live" differently, the way a second copy of a decision drifts
+ * per this codebase's Contract Discipline rule.
+ */
+export function assertEndpointRowLive(
+  edgeKind: string,
+  endpoint: "from" | "to",
+  nodeKind: string,
+  nodeId: string,
+  row: NodeRow | undefined,
+): void {
+  if (row === undefined || row.deleted_at !== undefined) {
+    throw new EndpointNotFoundError({ edgeKind, endpoint, nodeKind, nodeId });
+  }
+}
+
+/**
  * THE fenced DECIDE half of an attachment: re-read the incumbent on the
  * frame's own transaction target — under the per-graph write lock the caller
  * already holds — and judge it ({@link decideCompositionIncumbent}).
@@ -801,9 +836,25 @@ export type FencedCompositionAttachment = Readonly<{
  * there is no nested frame to roll back — from committing an update whose
  * attachment never applied.
  *
+ * That is why this function, not the write half, also owns the WHOLE
+ * endpoint's liveness read: when the disposition is going to attach a new
+ * edge (`"attach"` or `"replace"`), a dead or missing whole is refused HERE,
+ * via {@link assertEndpointRowLive}, before returning — not left to
+ * `attachCompositionCreateEdge`'s `assertLiveEdgeEndpoints` call, which on
+ * the get-or-create leg runs only after the property update. The PART
+ * endpoint is deliberately NOT read here: on the resurrection leg the part
+ * row is still a tombstone until the update that runs after this decide
+ * restores it, so a part-liveness read taken here would refuse every
+ * resurrection. `assertLiveEdgeEndpoints` keeps owning that side, at write
+ * time. A `"satisfied"` disposition writes nothing, so it owes no fresh
+ * liveness read.
+ *
  * `target` is the frame's own transaction target, which is the only reason
  * the verdict can be trusted: a verdict from a lock-free read is exactly what
- * would let a refusing caller perform a silent move.
+ * would let a refusing caller perform a silent move. `lock: GraphWriteLock`
+ * is compile-time evidence this read (like the incumbent re-read beside it)
+ * cannot precede the per-graph write lock — the same device
+ * `assertCompositionExistencePreserved` uses.
  */
 export async function decideCompositionAttachmentUnderFence(
   registry: KindRegistry,
@@ -811,7 +862,9 @@ export async function decideCompositionAttachmentUnderFence(
   graphId: string,
   partId: string,
   request: CompositionAttachmentRequest,
+  lock: GraphWriteLock,
 ): Promise<FencedCompositionAttachment> {
+  void lock;
   const incumbent = await findLiveCompositionAttachment(
     registry,
     target,
@@ -819,14 +872,32 @@ export async function decideCompositionAttachmentUnderFence(
     request.work.partKind,
     partId,
   );
+  const disposition = decideCompositionIncumbent(
+    registry,
+    partId,
+    request,
+    incumbent,
+  );
+  if (disposition === "attach" || disposition === "replace") {
+    const { pair } = request.work;
+    const { attachment } = request;
+    const wholeSide = pair.partSide === "from" ? "to" : "from";
+    const wholeRow = await target.getNode(
+      graphId,
+      attachment.kind,
+      attachment.id,
+    );
+    assertEndpointRowLive(
+      pair.viaEdgeKind,
+      wholeSide,
+      attachment.kind,
+      attachment.id,
+      wholeRow,
+    );
+  }
   return {
     request,
-    disposition: decideCompositionIncumbent(
-      registry,
-      partId,
-      request,
-      incumbent,
-    ),
+    disposition,
     ...(incumbent === undefined ? {} : { incumbent }),
   };
 }

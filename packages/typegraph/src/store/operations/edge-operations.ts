@@ -119,7 +119,6 @@ import {
   DatabaseOperationError,
   EdgeMatchIdentityConflictError,
   EdgeNotFoundError,
-  EndpointNotFoundError,
   KindNotFoundError,
   ValidationError,
 } from "../../errors";
@@ -224,7 +223,10 @@ import {
   canFuseSchemaFenceInFirstWrite,
   isAutocommitSingleStatementWrite,
 } from "./autocommit-single-statement";
-import { assertCompositionExistencePreserved } from "./composition-create";
+import {
+  assertCompositionExistencePreserved,
+  assertEndpointRowLive,
+} from "./composition-create";
 import { createEdgeBatchValidationBackend } from "./edge-batch-validation";
 import {
   assertEdgeIdentityMatches,
@@ -571,24 +573,6 @@ async function assertLiveEdgeEndpoints<G extends GraphDef>(
 
   const toNode = await backend.getNode(ctx.graphId, toKind, toId);
   assertEndpointRowLive(edgeKindName, "to", toKind, toId, toNode);
-}
-
-/** The single owner of an edge endpoint row's live/refusal verdict. */
-function assertEndpointRowLive(
-  edgeKind: string,
-  endpoint: "from" | "to",
-  nodeKind: string,
-  nodeId: string,
-  row: Awaited<ReturnType<GraphBackend["getNode"]>>,
-): void {
-  if (!row || row.deleted_at) {
-    throw new EndpointNotFoundError({
-      edgeKind,
-      endpoint,
-      nodeKind,
-      nodeId,
-    });
-  }
 }
 
 // ============================================================
