@@ -33,6 +33,7 @@ import {
 import {
   type AliasExpansionAxis,
   assertPermittedExpansionAxis,
+  expandKindsForAxis,
 } from "../query/builder/alias-expansion";
 import { type QueryBuilder } from "../query/builder/query-builder";
 import { type NodeAccessor } from "../query/builder/types";
@@ -328,24 +329,22 @@ function buildKindCandidates(
  * owner, so a stated axis `search()` cannot honor — `"narrower"`, or a
  * misspelling a JavaScript caller reached — is named rather than coerced to
  * `"exact"`. The query builder refuses the identical value; one predicate,
- * one owner.
+ * one owner. The axis-to-kind-list mapping itself is likewise the shared
+ * owner's (`expandKindsForAxis`), not re-spelled here.
  */
 function resolveSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
-  expansion: SearchExpansionAxis | undefined,
+  axis: SearchExpansionAxis = "exact",
 ): readonly string[] {
-  if (expansion !== undefined) {
-    assertPermittedExpansionAxis(expansion, SEARCH_EXPANSION_AXES, "search");
-  }
-  if (expansion !== "subclasses") return [nodeKind];
-  if (ctx.createQuery === undefined) {
+  assertPermittedExpansionAxis(axis, SEARCH_EXPANSION_AXES, "search");
+  if (axis === "subclasses" && ctx.createQuery === undefined) {
     throw new ConfigurationError(
       'search with expansion: "subclasses" requires a query-capable store',
       { capability: "search", graphId: ctx.graphId },
     );
   }
-  return ctx.registry.expandSubClasses(nodeKind);
+  return expandKindsForAxis(axis, nodeKind, ctx.registry);
 }
 
 function assertSearchOffset(offset: number | undefined, label: string): void {
