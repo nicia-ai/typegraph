@@ -24,14 +24,16 @@
  * "at most one whole" claim, unchanged by this lane.
  *
  * Alongside them, the DISPOSITION owner every attachment against an
- * already-existing row runs through: {@link resolveCompositionAttachment} ->
- * {@link compositionAttachmentRequest} builds the request read-free, and
- * {@link decideCompositionIncumbent} turns the incumbent a fenced frame
- * re-read under the lock (`applyCompositionAttachmentUnderFence`,
- * `node-operations.ts`) into one of "satisfied", "attach" or "replace", or
- * refuses. The pair of functions is here rather than beside the write plan
- * because the decision is pure: the write plan owns the lock and the
- * statements, this module owns what they mean.
+ * already-existing row runs through:
+ * {@link resolveCompositionAttachmentRequest} builds the request read-free,
+ * and {@link decideCompositionAttachmentUnderFence} re-reads the incumbent on
+ * the frame's own fenced target and answers with the decision itself —
+ * "satisfied", "attach" or "replace" — or refuses. The write half of that
+ * decision (`applyCompositionAttachmentDecision`, `node-operations.ts`) takes
+ * the answer as a parameter, which is what lets a frame that owes other
+ * statements decide BEFORE its first one. These functions are here rather than
+ * beside the write plan because the decision is pure: the write plan owns the
+ * lock and the statements, this module owns what they mean.
  */
 import {
   type EdgeRow,
@@ -108,7 +110,7 @@ export type CompositionCreateWork = Readonly<{
  *
  * Pure and synchronous — no I/O and no claim.
  */
-export function resolveCompositionAttachment(
+function resolveCompositionAttachment(
   registry: KindRegistry,
   partKind: string,
   attachment: CompositionAttachment,
@@ -439,37 +441,44 @@ export async function findLiveCompositionAttachment(
 }
 
 /**
- * THE one place stated `partOf.props` are checked against an attachment that
- * is ALREADY satisfied (same whole, same realizing edge) — reached from
- * {@link decideCompositionIncumbent}'s satisfied arm, which is every
- * surface's no-write return (`reparent`'s no-op and the get-or-create
- * postcondition's idempotent hit both resolve there). That arm performs no
- * edge write, so without this call `props` would be neither applied nor
- * refused nor even validated — an accepted option silently dropped, the same
- * shape `situation: "existing"` refuses one dimension over (a differing
- * whole, or a differing realizing edge).
- *
- * `props` omitted: nothing stated, nothing to check. `props` stated: run
- * through {@link validateEdgeProps} against `pair.viaEdgeKind`'s own schema
- * — the same owner `validateAndPrepareEdgeCreate` calls for a fresh attach,
- * so an invalid value is refused here exactly as it would be on create,
- * never silently accepted because this call happens not to write. A valid
- * value that is canonically (`canonicalEqual`, key order aside) identical to
- * the edge's live stored props makes the resolve genuinely idempotent and is
- * allowed; a valid value that DIFFERS is refused with
- * `CompositionExistenceError` (`situation: "props"`) naming both — this call
- * resolves an attachment, it does not rewrite the realizing edge's
- * properties (`store.edges.<via>.update(...)` does that).
+ * Whether a stated `partOf.props` is already what the satisfied incumbent
+ * edge holds — the decision itself, not a boolean a caller re-derives the
+ * comparison from, so both consumers read the same verdict:
+ * {@link assertSatisfiedPartOfPropsHonored} (which turns a disagreement into
+ * the refusal) and the lock-free pre-check that decides whether an
+ * already-satisfied get-or-create can stay read-only
+ * ({@link incumbentSatisfiesRequestedAttachment}).
  */
-function assertSatisfiedPartOfPropsHonored(
+type SatisfiedPartOfPropsVerdict =
+  | Readonly<{ honored: true }>
+  | Readonly<{
+      honored: false;
+      currentProps: Record<string, unknown>;
+      requestedProps: Record<string, unknown>;
+    }>;
+
+/**
+ * THE one place stated `partOf.props` are compared against an attachment that
+ * is ALREADY satisfied (same whole, same realizing edge).
+ *
+ * `props` omitted: nothing stated, nothing to compare — honored. `props`
+ * stated: run through {@link validateEdgeProps} against `pair.viaEdgeKind`'s
+ * own schema — the same owner `validateAndPrepareEdgeCreate` calls for a
+ * fresh attach, so an invalid value is refused here exactly as it would be on
+ * create, never silently accepted because the caller happens not to write.
+ * (That refusal is a property of the caller's own input, not of the row, which
+ * is why the lock-free pre-check may reach it too.) A valid value that is
+ * canonically (`canonicalEqual`, key order aside) identical to the edge's live
+ * stored props is honored; a valid value that DIFFERS is not, and the
+ * verdict carries both sides for the refusal to name.
+ */
+function judgeSatisfiedPartOfProps(
   registry: KindRegistry,
-  partKind: string,
-  partId: string,
   attachment: CompositionAttachment,
   pair: CompositionPair,
-  currentEdge: Pick<EdgeRow, "id" | "kind" | "props">,
-): void {
-  if (attachment.props === undefined) return;
+  currentEdge: Pick<EdgeRow, "props">,
+): SatisfiedPartOfPropsVerdict {
+  if (attachment.props === undefined) return { honored: true };
   const edgeType = requireDefined(
     registry.getEdgeType(pair.viaEdgeKind),
     `getEdgeType(${pair.viaEdgeKind}) is undefined for a resolved composition pair's own realizing edge kind`,
@@ -479,15 +488,52 @@ function assertSatisfiedPartOfPropsHonored(
     operation: "create",
   });
   const storedProps = rowPropsToObject(currentEdge.props);
-  if (canonicalEqual(validatedProps, storedProps)) return;
+  return canonicalEqual(validatedProps, storedProps) ?
+      { honored: true }
+    : {
+        honored: false,
+        currentProps: storedProps,
+        requestedProps: validatedProps,
+      };
+}
+
+/**
+ * The refusal {@link decideCompositionIncumbent}'s satisfied arm owes — every
+ * surface's no-write return (`reparent`'s no-op and the get-or-create
+ * postcondition's idempotent hit both resolve there). That arm performs no
+ * edge write, so without this call `props` would be neither applied nor
+ * refused nor even validated — an accepted option silently dropped, the same
+ * shape `situation: "existing"` refuses one dimension over (a differing
+ * whole, or a differing realizing edge).
+ *
+ * A disagreeing value refuses with `CompositionExistenceError`
+ * (`situation: "props"`) naming both: this call resolves an attachment, it
+ * does not rewrite the realizing edge's properties
+ * (`store.edges.<via>.update(...)` does that).
+ */
+function assertSatisfiedPartOfPropsHonored(
+  registry: KindRegistry,
+  partKind: string,
+  partId: string,
+  attachment: CompositionAttachment,
+  pair: CompositionPair,
+  currentEdge: Pick<EdgeRow, "id" | "kind" | "props">,
+): void {
+  const verdict = judgeSatisfiedPartOfProps(
+    registry,
+    attachment,
+    pair,
+    currentEdge,
+  );
+  if (verdict.honored) return;
   throw new CompositionExistenceError({
     partKind,
     partId,
     situation: "props",
     edgeKind: currentEdge.kind,
     edgeId: currentEdge.id,
-    currentProps: storedProps,
-    requestedProps: validatedProps,
+    currentProps: verdict.currentProps,
+    requestedProps: verdict.requestedProps,
   });
 }
 
@@ -535,7 +581,7 @@ export type CompositionAttachmentRequest = Readonly<{
  * of {@link CompositionAttachmentRequest}, so no call site can assemble a
  * request whose `work` and `attachment` describe different wholes.
  */
-export function compositionAttachmentRequest(
+function compositionAttachmentRequest(
   work: CompositionCreateWork,
   attachment: CompositionAttachment,
   onIncumbent: CompositionIncumbentDisposition,
@@ -544,19 +590,66 @@ export function compositionAttachmentRequest(
 }
 
 /**
+ * THE resolution of one caller-stated `partOf` into the request a fenced
+ * attachment frame runs: `resolveCompositionCreate`'s read-free refusals (an
+ * undeclared pair, an unknown or ambiguous `via`, a required part with no
+ * `partOf`) followed by {@link compositionAttachmentRequest}'s single
+ * construction. `undefined` means this frame owes no attachment at all.
+ *
+ * Every surface that attaches a part against a row that ALREADY exists comes
+ * through here — `nodes.<Kind>.reparent(...)` with `"replace"`, every
+ * get-or-create leg with `"refuse"` — so no surface resolves a pair a caller
+ * above it already resolved, and the `work`/`attachment` pairing stays the one
+ * thing {@link compositionAttachmentRequest} builds.
+ */
+export function resolveCompositionAttachmentRequest(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id: string }>,
+  partOf: CompositionAttachment,
+  onIncumbent: CompositionIncumbentDisposition,
+): CompositionAttachmentRequest;
+export function resolveCompositionAttachmentRequest(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id: string }>,
+  partOf: CompositionAttachment | undefined,
+  onIncumbent: CompositionIncumbentDisposition,
+): CompositionAttachmentRequest | undefined;
+export function resolveCompositionAttachmentRequest(
+  registry: KindRegistry,
+  part: Readonly<{ kind: string; id: string }>,
+  partOf: CompositionAttachment | undefined,
+  onIncumbent: CompositionIncumbentDisposition,
+): CompositionAttachmentRequest | undefined {
+  const work = resolveCompositionCreate(registry, {
+    kind: part.kind,
+    id: part.id,
+    ...(partOf === undefined ? {} : { partOf }),
+  });
+  if (work === undefined) return undefined;
+  return compositionAttachmentRequest(
+    work,
+    requireDefined(
+      partOf,
+      "resolveCompositionCreate returned composition work for a call that stated no partOf",
+    ),
+    onIncumbent,
+  );
+}
+
+/**
  * Whether `current` IS the requested attachment: the same whole, held
  * through the resolved pair's realizing edge. Compared against the RESOLVED
  * `pair.viaEdgeKind` rather than against `attachment.via`, so an omitted
  * `via` means "the one declared pair", never "any realizing edge will do".
  *
- * THE predicate behind both the fenced verdict
- * ({@link decideCompositionIncumbent}) and the lock-free pre-check that lets
- * an already-satisfied get-or-create stay read-only
- * (`applyExistingPartOfPostcondition`, `node-operations.ts`) — one spelling,
- * so the cheap skip and the authoritative verdict can never disagree about
- * what "already holds" means.
+ * The whole/via half of {@link incumbentSatisfiesRequestedAttachment}, which
+ * is what both the fenced verdict ({@link decideCompositionIncumbent}) and the
+ * lock-free pre-check that lets an already-satisfied get-or-create stay
+ * read-only (`applyExistingPartOfPostcondition`, `node-operations.ts`) read —
+ * one spelling, so the cheap skip and the authoritative verdict can never
+ * disagree about what "already holds" means.
  */
-export function incumbentHoldsRequestedAttachment(
+function incumbentHoldsRequestedAttachment(
   request: CompositionAttachmentRequest,
   current: Readonly<{
     edge: Pick<EdgeRow, "kind">;
@@ -568,6 +661,47 @@ export function incumbentHoldsRequestedAttachment(
     current.whole.kind === attachment.kind &&
     current.whole.id === attachment.id &&
     current.edge.kind === work.pair.viaEdgeKind
+  );
+}
+
+/**
+ * Whether this incumbent leaves the request with NOTHING to write: it is the
+ * requested attachment ({@link incumbentHoldsRequestedAttachment}) AND the
+ * realizing edge already carries the stated `props`
+ * ({@link judgeSatisfiedPartOfProps}) — the two conjuncts
+ * {@link decideCompositionIncumbent}'s satisfied arm is built from, in one
+ * predicate so the cheap skip and the authoritative verdict cannot disagree
+ * about what "nothing to do" means.
+ *
+ * Read twice, against the same row: once lock-free, to let an already-resolved
+ * get-or-create return without opening a write transaction at all
+ * (`applyExistingPartOfPostcondition`, `node-operations.ts` — including the
+ * idempotent ingest that restates the props every time, which would otherwise
+ * take the per-graph write fence for a no-op), and once under the fence, where
+ * the verdict is authoritative. Only the SKIP is ever taken from the lock-free
+ * read: anything else escalates to the fence, which is the one allowed to
+ * refuse or write.
+ *
+ * A `props` value that does not validate against the realizing edge's schema
+ * refuses from either read — that refusal reads the caller's input, never the
+ * row, so it cannot be stale.
+ */
+export function incumbentSatisfiesRequestedAttachment(
+  registry: KindRegistry,
+  request: CompositionAttachmentRequest,
+  current: Readonly<{
+    edge: Pick<EdgeRow, "kind" | "props">;
+    whole: CompositionWholeRef;
+  }>,
+): boolean {
+  return (
+    incumbentHoldsRequestedAttachment(request, current) &&
+    judgeSatisfiedPartOfProps(
+      registry,
+      request.attachment,
+      request.work.pair,
+      current.edge,
+    ).honored
   );
 }
 
@@ -593,7 +727,7 @@ export function incumbentHoldsRequestedAttachment(
  * Pure and synchronous: the read that produced `current` is the caller's, so
  * this decision can be reached only from inside the fence that read it.
  */
-export function decideCompositionIncumbent(
+function decideCompositionIncumbent(
   registry: KindRegistry,
   partId: string,
   request: CompositionAttachmentRequest,
@@ -634,6 +768,67 @@ export function decideCompositionIncumbent(
     requestedWhole: { kind: attachment.kind, id: attachment.id },
     requestedVia: work.pair.viaEdgeKind,
   });
+}
+
+/**
+ * One fenced attachment's DECISION: the disposition
+ * {@link decideCompositionIncumbent} reached, plus the incumbent it was
+ * reached from, so the write half never re-reads the row the verdict was
+ * judged against.
+ *
+ * The decision itself travels, not a flag a caller re-derives it from: a
+ * frame that holds one of these cannot spell a second, drifting version of
+ * "what does this incumbent mean".
+ */
+export type FencedCompositionAttachment = Readonly<{
+  request: CompositionAttachmentRequest;
+  disposition: "satisfied" | "attach" | "replace";
+  /** The incumbent the disposition was judged against; absent when none. */
+  incumbent?: Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }>;
+}>;
+
+/**
+ * THE fenced DECIDE half of an attachment: re-read the incumbent on the
+ * frame's own transaction target — under the per-graph write lock the caller
+ * already holds — and judge it ({@link decideCompositionIncumbent}).
+ *
+ * Separated from the write half so a frame that owes OTHER statements can
+ * run every decision this one can reach before its first statement: the
+ * get-or-create `ifExists: "update"` / resurrection leg decides here, then
+ * updates properties, then applies the decision. A refusal this function
+ * raises therefore precedes the property update, which is what keeps a
+ * caller that catches it inside an enclosing `store.transaction(...)` — where
+ * there is no nested frame to roll back — from committing an update whose
+ * attachment never applied.
+ *
+ * `target` is the frame's own transaction target, which is the only reason
+ * the verdict can be trusted: a verdict from a lock-free read is exactly what
+ * would let a refusing caller perform a silent move.
+ */
+export async function decideCompositionAttachmentUnderFence(
+  registry: KindRegistry,
+  target: GraphReadBackend,
+  graphId: string,
+  partId: string,
+  request: CompositionAttachmentRequest,
+): Promise<FencedCompositionAttachment> {
+  const incumbent = await findLiveCompositionAttachment(
+    registry,
+    target,
+    graphId,
+    request.work.partKind,
+    partId,
+  );
+  return {
+    request,
+    disposition: decideCompositionIncumbent(
+      registry,
+      partId,
+      request,
+      incumbent,
+    ),
+    ...(incumbent === undefined ? {} : { incumbent }),
+  };
 }
 
 /**

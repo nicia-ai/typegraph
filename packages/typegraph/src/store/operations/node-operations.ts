@@ -243,14 +243,14 @@ import {
   assertCompositionExistencePreserved,
   buildCompositionCreateEdgeInput,
   type CompositionAttachmentRequest,
-  compositionAttachmentRequest,
   type CompositionCreateWork,
   type CompositionIncumbentDisposition,
-  decideCompositionIncumbent,
+  decideCompositionAttachmentUnderFence,
   edgeCurrentlyAttachesPart,
+  type FencedCompositionAttachment,
   findLiveCompositionAttachment,
-  incumbentHoldsRequestedAttachment,
-  resolveCompositionAttachment,
+  incumbentSatisfiesRequestedAttachment,
+  resolveCompositionAttachmentRequest,
   resolveCompositionCreate,
 } from "./composition-create";
 import {
@@ -2783,9 +2783,9 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
 
 /**
  * THE write every attachment surface performs once it holds the per-graph
- * fence: re-read the incumbent UNDER THE LOCK, decide its disposition
- * (`decideCompositionIncumbent`, `composition-create.ts`), then write at most
- * one retire and one attach. Returns whether it wrote.
+ * fence and a fenced DECISION to apply (`decideCompositionAttachmentUnderFence`,
+ * `composition-create.ts`): write at most one retire and one attach. Returns
+ * whether it wrote.
  *
  * One owner, reached by every surface that can attach a part to a whole
  * against a row that already exists — `reparent`
@@ -2794,10 +2794,16 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
  * ({@link applyExistingPartOfPostcondition}) and the get-or-create
  * update/resurrection leg ({@link executeNodeUpsertUpdate}), both
  * `onIncumbent: "refuse"`. The disposition is the ONLY dimension that
- * differs, and it is applied to the incumbent this function read itself: a
- * verdict from a lock-free read is never what decides the write, which is
- * what keeps two racing callers requesting different wholes from ending in a
- * silent move (one wins, one refuses).
+ * differs, and it is applied to the incumbent the DECIDE half read on this
+ * same frame's target: a verdict from a lock-free read is never what decides
+ * the write, which is what keeps two racing callers requesting different
+ * wholes from ending in a silent move (one wins, one refuses).
+ *
+ * Taking the decision as a parameter rather than reaching for it is what lets
+ * a frame that owes other statements decide FIRST
+ * ({@link executeNodeUpsertUpdate} decides, updates properties, then applies),
+ * so every refusal the decision can reach precedes that frame's first
+ * statement.
  *
  * How the incumbent retires follows the population declared on the INCUMBENT
  * row's own pair, resolved through the realizing edge that actually holds
@@ -2824,29 +2830,17 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
  * non-monotonic one — issue #242's failure mode), and neither is fenceable:
  * each write is legal at the instant it samples.
  */
-async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
+async function applyCompositionAttachmentDecision<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: WriteSession,
   target: WriteTarget,
   lock: GraphWriteLock,
   partId: string,
-  request: CompositionAttachmentRequest,
+  decided: FencedCompositionAttachment,
 ): Promise<boolean> {
+  const { request, disposition } = decided;
   const { work } = request;
   const partKind = work.partKind;
-  const current = await findLiveCompositionAttachment(
-    ctx.registry,
-    target,
-    ctx.graphId,
-    partKind,
-    partId,
-  );
-  const disposition = decideCompositionIncumbent(
-    ctx.registry,
-    partId,
-    request,
-    current,
-  );
   if (disposition === "satisfied") return false;
 
   if (disposition === "attach") {
@@ -2870,7 +2864,7 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
   // its place. ONE clock read for ONE move — the instant the incumbent window
   // ends is the instant the new attachment begins.
   const incumbent = requireDefined(
-    current,
+    decided.incumbent,
     'decideCompositionIncumbent answered "replace" with no incumbent read',
   );
   const moveInstant = nowIso();
@@ -2934,6 +2928,36 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
 }
 
 /**
+ * The fenced attachment in one call — decide, then apply — for a frame whose
+ * only statements are the attachment's own ({@link executeNodeReparent}'s
+ * write plan). A frame that owes other statements calls the two halves
+ * separately so its refusals come first ({@link executeNodeUpsertUpdate}).
+ */
+async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: WriteSession,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  partId: string,
+  request: CompositionAttachmentRequest,
+): Promise<boolean> {
+  return applyCompositionAttachmentDecision(
+    ctx,
+    session,
+    target,
+    lock,
+    partId,
+    await decideCompositionAttachmentUnderFence(
+      ctx.registry,
+      target,
+      ctx.graphId,
+      partId,
+      request,
+    ),
+  );
+}
+
+/**
  * THE `partOf` POSTCONDITION a `getOrCreateByConstraint` call owes for a
  * match that resolved to `"found"`: when this returns, the resolved node
  * holds exactly the stated attachment.
@@ -2944,8 +2968,8 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
  * whether the constraint matched an existing node or created one.
  *
  * Every verdict and every write comes from the fenced re-read
- * ({@link applyCompositionAttachmentUnderFence} under
- * {@link executeNodeReparent}'s write plan, `onIncumbent: "refuse"`): an
+ * ({@link applyCompositionAttachmentUnderFence} inside
+ * {@link runCompositionAttachmentWritePlan}, `onIncumbent: "refuse"`): an
  * already-held attachment is satisfied (idempotent, stated `props`
  * honored), no live whole has the attachment written now — so an optional
  * part found unattached is attached rather than told to attach itself, and a
@@ -2960,9 +2984,17 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
  * instead of opening a write transaction to discover it has nothing to do.
  * It can therefore skip work but never decide it — a stale "no incumbent"
  * verdict acted on directly is exactly how a refusing caller would perform
- * the silent move this disposition exists to prevent. A stated `props` is
- * deliberately outside its skip condition: comparing them is a refusal
- * decision, so it belongs to the fenced read that can be trusted.
+ * the silent move this disposition exists to prevent.
+ *
+ * The skip reads the SAME conjunction the fenced verdict's satisfied arm does
+ * (`incumbentSatisfiesRequestedAttachment`), stated `props` included: the
+ * whole and the realizing edge come off the row this read returned, so
+ * trusting those two and not the third would be inconsistent, and a restated
+ * `partOf.props` — what an idempotent ingest passes every time — would
+ * otherwise take the per-graph write fence on every call for a verdict of
+ * "nothing to do" (graph-wide serialization on Postgres, for a no-op). A
+ * DISAGREEMENT is never decided here: it escalates to the fence, which owns
+ * the `situation: "props"` refusal.
  */
 async function applyExistingPartOfPostcondition<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -2980,36 +3012,34 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
   );
   if (
     current !== undefined &&
-    request.attachment.props === undefined &&
-    incumbentHoldsRequestedAttachment(request, current)
+    incumbentSatisfiesRequestedAttachment(ctx.registry, request, current)
   ) {
     return;
   }
 
-  await executeNodeReparent(
+  await runCompositionAttachmentWritePlan(
     ctx,
     concreteKind,
     concreteId,
-    request.attachment,
+    request,
     backend,
-    { onIncumbent: request.onIncumbent },
   );
 }
 
 /**
- * The ONE resolution every `getOrCreateByConstraint` leg's `partOf` goes
- * through, for a match that resolved to an EXISTING row (found, updated, or
- * resurrected): `resolveCompositionCreate` — the same read-free owner every
- * create path uses, so a `partOf` naming an undeclared or ambiguous pair
- * refuses before any row is read — wrapped with
- * `onIncumbent: "refuse"`. A lookup resolves an attachment; it never moves a
- * part.
+ * What `onIncumbent` every `getOrCreateByConstraint` leg's `partOf` states,
+ * for a match that resolved to an EXISTING row (found, updated, or
+ * resurrected): `"refuse"`. A lookup resolves an attachment; it never moves a
+ * part. The resolution itself is `resolveCompositionAttachmentRequest`'s
+ * (`composition-create.ts`), the one owner every attachment surface shares,
+ * so a `partOf` naming an undeclared or ambiguous pair refuses before any row
+ * is read.
  *
  * `undefined` means this leg owes no attachment at all. Resolving against a
  * resurrection's TOMBSTONE kind/id (never the requested `kind`: a subclass
  * scope can resurrect under a sibling/parent kind) is the caller's to pass;
- * a required-existence kind resurrected with no `partOf` refuses here, as it
- * would on a fresh create.
+ * a required-existence kind resurrected with no `partOf` refuses in that
+ * owner, as it would on a fresh create.
  */
 function resolveGetOrCreateAttachmentRequest<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -3017,18 +3047,10 @@ function resolveGetOrCreateAttachmentRequest<G extends GraphDef>(
   concreteId: string,
   partOf: CompositionAttachment | undefined,
 ): CompositionAttachmentRequest | undefined {
-  const work = resolveCompositionCreate(ctx.registry, {
-    kind: concreteKind,
-    id: concreteId,
-    ...(partOf === undefined ? {} : { partOf }),
-  });
-  if (work === undefined) return undefined;
-  return compositionAttachmentRequest(
-    work,
-    requireDefined(
-      partOf,
-      "resolveCompositionCreate returned composition work for a call that stated no partOf",
-    ),
+  return resolveCompositionAttachmentRequest(
+    ctx.registry,
+    { kind: concreteKind, id: concreteId },
+    partOf,
     "refuse",
   );
 }
@@ -3137,19 +3159,40 @@ export async function executeNodeReparent<G extends GraphDef>(
       },
     );
   }
-  // Synchronous and read-free: an undeclared pair, an unknown `via`, and an
-  // ambiguous omitted `via` all refuse before any row is read or locked.
-  const request = compositionAttachmentRequest(
-    {
-      pair: resolveCompositionAttachment(ctx.registry, kind, attachment),
-      whole: { kind: attachment.kind, id: attachment.id },
-      partKind: kind,
-      props: attachment.props ?? {},
-    },
-    attachment,
-    options.onIncumbent,
+  await runCompositionAttachmentWritePlan(
+    ctx,
+    kind,
+    id,
+    // Synchronous and read-free: an undeclared pair, an unknown `via`, and an
+    // ambiguous omitted `via` all refuse before any row is read or locked.
+    resolveCompositionAttachmentRequest(
+      ctx.registry,
+      { kind, id },
+      attachment,
+      options.onIncumbent,
+    ),
+    backend,
   );
+}
 
+/**
+ * THE write plan one attachment runs when it is the frame's ONLY work:
+ * `reparent`'s own surface ({@link executeNodeReparent}) and the
+ * get-or-create `partOf` postcondition
+ * ({@link applyExistingPartOfPostcondition}) both reach it with a request
+ * their caller already resolved, so neither re-resolves the pair the other
+ * one just decided. The get-or-create `ifExists: "update"` / resurrection leg
+ * does NOT come here: it owes a property update in the same transaction, so
+ * it runs the two halves of the attachment around that update itself
+ * ({@link executeNodeUpsertUpdate}).
+ */
+async function runCompositionAttachmentWritePlan<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  id: string,
+  request: CompositionAttachmentRequest,
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
   const gate = await backend.getNode(ctx.graphId, kind, id);
   if (!gate || !isLiveNodeRow(gate)) throw new NodeNotFoundError(kind, id);
 
@@ -4311,11 +4354,20 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
      * Item E.2. Present only from the get-or-create entries' existing-row
      * leg (`executeNodeGetOrCreateByConstraint` and its bulk twin): the
      * stated `partOf` is decided and written in the SAME transaction as this
-     * property update, so the two halves of one call commit together. A lost
-     * composition claim, a dead or missing whole, or an incumbent whole this
-     * request refuses all abort the property update too; a refused property
-     * update (a unique conflict, a validation error) leaves the attachment
-     * and its history untouched.
+     * property update, so the two halves of one call commit together.
+     *
+     * The fenced incumbent DECISION runs before the update's first statement,
+     * so the refusals it owns (a different incumbent whole, the same whole
+     * through a different realizing edge, a `props` value the live edge
+     * disagrees with) leave nothing written at all — the only guarantee that
+     * survives a caller catching the refusal inside an enclosing
+     * `store.transaction(...)`, which has no nested frame to roll back. The
+     * refusals the attach WRITE raises (a lost composition claim, a dead or
+     * missing whole, cardinality, acyclicity) necessarily follow the update —
+     * on the resurrection leg the part is still a tombstone until the update
+     * restores it — and abort it by aborting this frame's transaction. A
+     * refused property update (a unique conflict, a validation error) leaves
+     * the attachment and its history untouched.
      */
     compositionAttachment?: CompositionAttachmentRequest;
   }>,
@@ -4355,6 +4407,29 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           validTo,
         );
       }
+      // DECIDE before the update's first statement. Every refusal the fenced
+      // incumbent decision can reach — a different whole, the same whole
+      // through a different realizing edge, a stated `props` that disagrees
+      // with the one the live edge holds — therefore refuses with nothing
+      // written at all, which is the only thing that holds when the caller
+      // catches the refusal inside an enclosing `store.transaction(...)`: that
+      // leg runs ON the caller's transaction, so there is no nested frame to
+      // roll back. The refusals the ATTACH WRITE itself raises (a dead or
+      // missing whole, cardinality, acyclicity, a lost composition claim)
+      // cannot be hoisted with it: on the resurrection leg the part row is
+      // still a tombstone until the update below restores it, so an endpoint
+      // read taken here would refuse every resurrection. Those rely on this
+      // frame's own transaction aborting, as they did before.
+      const decided =
+        compositionAttachment === undefined ? undefined : (
+          await decideCompositionAttachmentUnderFence(
+            ctx.registry,
+            target,
+            ctx.graphId,
+            input.id,
+            compositionAttachment,
+          )
+        );
       const node = await performNodeUpdateWithResurrectionRecovery(
         ctx,
         input,
@@ -4369,14 +4444,14 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           "restore",
         );
       }
-      if (compositionAttachment !== undefined) {
-        await applyCompositionAttachmentUnderFence(
+      if (decided !== undefined) {
+        await applyCompositionAttachmentDecision(
           ctx,
           session,
           target,
           lock,
           input.id,
-          compositionAttachment,
+          decided,
         );
       }
       return node;

@@ -289,7 +289,7 @@ export function registerCompositionAttachmentIntegrationTests(
       );
 
       // MUTATION CHECK: skip the retire (drop the `if (disposition ===
-      // "replace")` block in `applyCompositionAttachmentUnderFence`,
+      // "replace")` block in `applyCompositionAttachmentDecision`,
       // src/store/operations/node-operations.ts)
       // — the attach then loses the composition claim and this rejects with
       // COMPOSITION_WHOLE_OCCUPIED instead of moving the chapter.
@@ -717,7 +717,8 @@ export function registerCompositionAttachmentIntegrationTests(
       // read — move `resolveGetOrCreateAttachmentRequest`'s call
       // (src/store/operations/node-operations.ts) below the satisfied arm, or
       // drop the `resolveCompositionAttachment` call out of
-      // `resolveCompositionCreate` — this call then returns
+      // `resolveCompositionCreate` (src/store/operations/composition-create.ts)
+      // — this call then returns
       // `{ action: "found" }` with no error, while the same `partOf` on a
       // create refuses.
       await expect(

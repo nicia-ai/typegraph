@@ -30,6 +30,8 @@ import { deriveBackend } from "../src/backend/derive-backend";
 import {
   type FindEdgesConnectedToParams,
   type GraphBackend,
+  type TransactionBackend,
+  type TransactionOptions,
 } from "../src/backend/types";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
@@ -55,7 +57,13 @@ const AF_CODE_UNIQUE = {
   scope: "kind",
   collation: "binary",
 } as const;
-const afPartOf = defineEdge("afPartOf", { schema: z.object({}) });
+/**
+ * The realizing edge carries one optional property, so a caller can restate
+ * `partOf.props` the way an idempotent ingest does.
+ */
+const afPartOf = defineEdge("afPartOf", {
+  schema: z.object({ rank: z.number().optional() }),
+});
 
 function buildGraph(id: string) {
   return defineGraph({
@@ -255,5 +263,161 @@ describe("get-or-create's partOf postcondition under the fence", () => {
     // And the property the call tried to write never landed either.
     const reread = requireDefined(await store.nodes.AfPart.getById(keeper.id));
     expect(reread.code).toBe("free");
+  });
+});
+
+describe("a refused attachment and the property update it came with", () => {
+  /**
+   * The refusal the FENCED incumbent decision raises must precede the
+   * property update's first statement, not follow it. A caller that catches
+   * the refusal inside an enclosing `store.transaction(...)` is the case that
+   * can tell the two orders apart: the get-or-create leg runs on the
+   * caller's transaction (`resolveWriteTransactionMode` answers `"existing"`),
+   * so there is no nested frame to roll back and whatever statements already
+   * ran stay committed with the enclosing transaction.
+   */
+  it("leaves the property update unapplied when the fenced attachment refuses and the caller catches it inside a transaction", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      buildGraph("af_refuse_before_update"),
+      backend,
+    );
+
+    const wholeA = await store.nodes.AfWhole.create({});
+    const wholeB = await store.nodes.AfWhole.create({});
+    const part = await store.nodes.AfPart.create({
+      slug: "owned",
+      code: "original",
+    });
+    await store.nodes.AfPart.reparent(part.id, {
+      kind: "AfWhole",
+      id: wholeA.id,
+    });
+
+    // MUTATION CHECK: move the `decideCompositionAttachmentUnderFence` call
+    // in `executeNodeUpsertUpdate` back below
+    // `performNodeUpdateWithResurrectionRecovery`
+    // (src/store/operations/node-operations.ts). The refused attachment then
+    // follows the update, and `code` below reads "mutated".
+    await store.transaction(async (tx) => {
+      const refusal = await tx.nodes.AfPart.getOrCreateByConstraint(
+        "af_part_slug",
+        { slug: "owned", code: "mutated" },
+        {
+          ifExists: "update",
+          partOf: { kind: "AfWhole", id: wholeB.id },
+        },
+      ).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(CompositionExistenceError);
+      expect((refusal as CompositionExistenceError).details.situation).toBe(
+        "existing",
+      );
+    });
+
+    const reread = requireDefined(await store.nodes.AfPart.getById(part.id));
+    expect(reread.code).toBe("original");
+
+    const edges = await store.edges.afPartOf.find(
+      {},
+      { temporalMode: "includeEnded" },
+    );
+    expect(edges).toHaveLength(1);
+    expect(requireDefined(edges[0]).toId).toBe(wholeA.id);
+    expect(requireDefined(edges[0]).meta.validTo).toBeUndefined();
+  });
+});
+
+/**
+ * Counts the write transactions a call opens. The per-graph write fence is
+ * taken inside one (`BEGIN IMMEDIATE` on SQLite, a session advisory lock on
+ * Postgres), so "no transaction" is the only observable proof that an
+ * already-satisfied resolve stayed read-only.
+ */
+function transactionCountingBackend(
+  base: GraphBackend,
+  counter: { transactions: number },
+): GraphBackend {
+  return deriveBackend(base, {
+    transaction: async <T>(
+      fn: (tx: TransactionBackend) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      counter.transactions += 1;
+      return base.transaction(fn, options);
+    },
+  });
+}
+
+describe("an already-satisfied partOf resolve", () => {
+  /**
+   * W2's "the already-satisfied, no-update path stays read-only" must not
+   * depend on whether the caller restated the realizing edge's props: an
+   * idempotent ingest that passes `partOf: { ..., props }` every time would
+   * otherwise take the per-graph write fence on every call for a verdict of
+   * "nothing to do" — graph-wide serialization on Postgres, for a no-op.
+   */
+  it("opens no write transaction when the stated partOf props already AGREE with the live edge", async () => {
+    const counter = { transactions: 0 };
+    const backend = transactionCountingBackend(createTestBackend(), counter);
+    const [store] = await createStoreWithSchema(
+      buildGraph("af_satisfied_props_readonly"),
+      backend,
+    );
+
+    const whole = await store.nodes.AfWhole.create({});
+    await store.nodes.AfPart.create({ slug: "ingested", code: "c1" });
+    await store.nodes.AfPart.getOrCreateByConstraint(
+      "af_part_slug",
+      { slug: "ingested", code: "c1" },
+      { partOf: { kind: "AfWhole", id: whole.id, props: { rank: 3 } } },
+    );
+
+    counter.transactions = 0;
+    // MUTATION CHECK: narrow the pre-check's skip back to
+    // `request.attachment.props === undefined`
+    // (`applyExistingPartOfPostcondition`,
+    // src/store/operations/node-operations.ts) and this restate opens one
+    // write transaction to discover it has nothing to write.
+    const again = await store.nodes.AfPart.getOrCreateByConstraint(
+      "af_part_slug",
+      { slug: "ingested", code: "c1" },
+      { partOf: { kind: "AfWhole", id: whole.id, props: { rank: 3 } } },
+    );
+    expect(again.action).toBe("found");
+    expect(counter.transactions).toBe(0);
+  });
+
+  /**
+   * The other half of the same skip: props that DISAGREE are never decided
+   * from the lock-free read. The call escalates to the fence, which is what
+   * refuses.
+   */
+  it("still refuses through the fence when the stated partOf props DIFFER", async () => {
+    const counter = { transactions: 0 };
+    const backend = transactionCountingBackend(createTestBackend(), counter);
+    const [store] = await createStoreWithSchema(
+      buildGraph("af_satisfied_props_differ"),
+      backend,
+    );
+
+    const whole = await store.nodes.AfWhole.create({});
+    await store.nodes.AfPart.create({ slug: "ingested", code: "c1" });
+    await store.nodes.AfPart.getOrCreateByConstraint(
+      "af_part_slug",
+      { slug: "ingested", code: "c1" },
+      { partOf: { kind: "AfWhole", id: whole.id, props: { rank: 3 } } },
+    );
+
+    counter.transactions = 0;
+    const refusal = await store.nodes.AfPart.getOrCreateByConstraint(
+      "af_part_slug",
+      { slug: "ingested", code: "c1" },
+      { partOf: { kind: "AfWhole", id: whole.id, props: { rank: 9 } } },
+    ).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(CompositionExistenceError);
+    expect((refusal as CompositionExistenceError).details.situation).toBe(
+      "props",
+    );
+    expect(counter.transactions).toBeGreaterThan(0);
   });
 });
