@@ -886,7 +886,7 @@ export class CompositionExistenceError extends TypeGraphError {
 export type CompositionExistenceErrorDetails = Readonly<{
     partKind: string;
     partId?: string;
-    situation: "create" | "detach" | "existing";
+    situation: "create" | "detach" | "existing" | "props";
     edgeKind?: string;
     edgeId?: string;
     currentWhole?: Readonly<{
@@ -899,6 +899,8 @@ export type CompositionExistenceErrorDetails = Readonly<{
         id: string;
     }>;
     requestedVia?: string;
+    currentProps?: Record<string, unknown>;
+    requestedProps?: Record<string, unknown>;
 }>;
 
 // @public

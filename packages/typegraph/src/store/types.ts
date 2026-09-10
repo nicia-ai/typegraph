@@ -183,10 +183,17 @@ export type CompositionWholeRef = CompositionNodeRef;
  * naming an edge kind that realizes no declared pair between the two is
  * refused too (`COMPOSITION_VIA_NOT_DECLARED`). `props` are the realizing
  * edge's own properties, validated against that edge kind's schema exactly
- * as `store.edges.<via>.create(...)` would validate them.
+ * as `store.edges.<via>.create(...)` would validate them — on EVERY call
+ * that states them, including `getOrCreateByConstraint` / `reparent` calls
+ * that resolve to an attachment already holding: those write no edge, but
+ * still validate stated `props` and refuse (`CompositionExistenceError`,
+ * `situation: "props"`) a valid value that differs from the edge's live
+ * stored props, rather than silently ignoring it.
  *
  * `resolveCompositionAttachment` (`src/store/operations/composition-create.ts`)
- * is the one owner of both refusals.
+ * is the one owner of both `via` refusals;
+ * `assertSatisfiedPartOfPropsHonored` (same file) is the one owner of the
+ * already-satisfied `props` check.
  */
 export type CompositionAttachment = CompositionNodeRef &
   Readonly<{
@@ -843,13 +850,20 @@ export type NodeGetOrCreateByConstraintOptions = Readonly<{
    * On `"created"` / `"resurrected"` it is applied exactly as a plain
    * create's `partOf` is. On `"found"` / `"updated"` it is CHECKED: a node
    * whose live whole, and whose realizing edge kind, already equal the
-   * resolved attachment satisfies it and the call is idempotent; a node with
-   * a DIFFERENT live whole, or the same whole through another realizing
-   * edge, refuses with `CompositionExistenceError`
-   * (`situation: "existing"`) naming both sides; a node with no live whole
-   * has the attachment written now, whatever the pair's declared
-   * `existence` (a REQUIRED part found unattached is repaired on the same
-   * terms — see `applyExistingPartOfPostcondition`).
+   * resolved attachment satisfies it; a node with a DIFFERENT live whole, or
+   * the same whole through another realizing edge, refuses with
+   * `CompositionExistenceError` (`situation: "existing"`) naming both sides;
+   * a node with no live whole has the attachment written now, whatever the
+   * pair's declared `existence` (a REQUIRED part found unattached is
+   * repaired on the same terms — see `applyExistingPartOfPostcondition`).
+   *
+   * A satisfied match writes no edge, so stated `props` are never applied to
+   * it — but they are still validated, and still honored as a postcondition:
+   * omitted, or valid and canonically equal to the edge's live stored props,
+   * the call is idempotent; valid but DIFFERENT refuses with
+   * `CompositionExistenceError` (`situation: "props"`) naming both, rather
+   * than silently keeping the stored value. Update the realizing edge
+   * directly (`store.edges.<via>.update(...)`) to actually change it.
    *
    * An attachment this graph cannot resolve at all — an undeclared whole
    * kind, an unknown `via`, an omitted `via` where the part declares more
@@ -1126,8 +1140,13 @@ export type NodeCollection<
    * has its window ended at the move instant, leaving the previous
    * membership readable as valid-time history.
    *
-   * Reparenting to the whole the part already holds is a no-op (no write, no
-   * history), not a refusal. Refuses with `ConfigurationError`
+   * Reparenting to the whole the part already holds (through the same
+   * realizing edge) is a no-op (no write, no history), not a refusal — but a
+   * stated `attachment.props` is still validated and still honored as a
+   * postcondition on that no-op: omitted, or valid and canonically equal to
+   * the edge's live stored props, the no-op stands; valid but DIFFERENT
+   * refuses with `CompositionExistenceError` (`situation: "props"`) rather
+   * than silently keeping the stored value. Refuses with `ConfigurationError`
    * (`COMPOSITION_NOT_A_PART`) on a kind that declares no `partOf`/`hasPart`
    * pair at all, (`COMPOSITION_WHOLE_NOT_DECLARED`) on an undeclared target
    * pair, and (`COMPOSITION_VIA_AMBIGUOUS` / `COMPOSITION_VIA_NOT_DECLARED`)

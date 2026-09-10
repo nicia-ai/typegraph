@@ -241,6 +241,7 @@ import {
 } from "./composition-cascade";
 import {
   assertCompositionExistencePreserved,
+  assertSatisfiedPartOfPropsHonored,
   buildCompositionCreateEdgeInput,
   type CompositionCreateWork,
   edgeCurrentlyAttachesPart,
@@ -2790,7 +2791,12 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
  *
  * - it already holds this whole through the resolved pair's realizing edge:
  *   satisfied, no write — which is what makes a repeated get-or-create with
- *   the same `partOf` idempotent rather than a refusal;
+ *   the same `partOf` idempotent rather than a refusal. Stated `props` are
+ *   still checked on this arm ({@link assertSatisfiedPartOfPropsHonored}): a
+ *   schema-invalid value refuses exactly as a fresh attach would, and a
+ *   valid value that differs from the edge's live stored props refuses with
+ *   `situation: "props"` rather than being silently dropped — a satisfied
+ *   match writes no edge, so it never applies a changed `props`;
  * - it holds NO live whole: the attachment is written now, through
  *   {@link executeNodeReparent} (whose no-current-attachment arm is exactly
  *   this write, under the same fence and the same final-state validation) —
@@ -2841,7 +2847,17 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
     current.whole.kind === attachment.kind &&
     current.whole.id === attachment.id;
   const viaMatches = current.edge.kind === pair.viaEdgeKind;
-  if (wholeMatches && viaMatches) return;
+  if (wholeMatches && viaMatches) {
+    assertSatisfiedPartOfPropsHonored(
+      ctx.registry,
+      concreteKind,
+      concreteId,
+      attachment,
+      pair,
+      current.edge,
+    );
+    return;
+  }
 
   throw new CompositionExistenceError({
     partKind: concreteKind,
@@ -2911,15 +2927,25 @@ function createInputWithPartOf(
  * readable as valid-time history.
  *
  * The move instant is read ONCE and is both the incumbent window's `validTo`
- * and the new edge's `validFrom`, so the two halves of the move abut in valid
- * time: no `store.asOf(t)` coordinate shows the part with zero wholes, and
- * none shows it with two. A second clock read would open the first gap on any
- * clock and the second on a non-monotonic one (issue #242's failure mode),
- * and neither is fenceable — each write is legal at the instant it samples.
+ * and the new edge's `validFrom`. For a `oneActive` pair this makes the two
+ * halves of the move abut in valid time: no `store.asOf(t)` coordinate shows
+ * the part with zero wholes, and none shows it with two. A `one` pair instead
+ * DELETES the incumbent row (see above), so that guarantee does not apply to
+ * it — a `one` move removes the previous membership from valid-time reads
+ * entirely, at every coordinate before the move, which is what deleting a
+ * `one` binding means. Either way a second clock read would open a real gap
+ * (the first on any clock, the second on a non-monotonic one — issue #242's
+ * failure mode), and neither is fenceable: each write is legal at the instant
+ * it samples.
  *
- * Attaching to the whole the part already holds is accepted as a NO-OP (no
- * write, no history), not refused: reparent states a destination, and a
- * caller converging on one should not have to first ask where the part is.
+ * Attaching to the whole the part already holds (through the same realizing
+ * edge) is accepted as a NO-OP (no write, no history), not refused: reparent
+ * states a destination, and a caller converging on one should not have to
+ * first ask where the part is. A stated `attachment.props` is still checked
+ * on this no-op ({@link assertSatisfiedPartOfPropsHonored}) — schema-invalid
+ * refuses as it would on a fresh attach, and valid-but-different from the
+ * edge's live stored props refuses with `situation: "props"` rather than
+ * being silently kept, since no write happens here to apply it.
  */
 export async function executeNodeReparent<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -2981,6 +3007,14 @@ export async function executeNodeReparent<G extends GraphDef>(
         current.whole.id === attachment.id &&
         current.edge.kind === pair.viaEdgeKind
       ) {
+        assertSatisfiedPartOfPropsHonored(
+          ctx.registry,
+          kind,
+          id,
+          attachment,
+          pair,
+          current.edge,
+        );
         return false;
       }
 
@@ -2999,15 +3033,27 @@ export async function executeNodeReparent<G extends GraphDef>(
         // attachment — not `compositionPopulation(kind)`, which re-derives it
         // from the part kind and agrees only because
         // `ONTOLOGY_COMPOSITION_POPULATION_MIXED` forbids a part kind's pairs
-        // from disagreeing. Same reasoning as the cascade's pair lookup.
-        const incumbentPair = requireDefined(
-          ctx.registry.compositionPairVia(
-            kind,
-            current.whole.kind,
-            current.edge.kind,
-          ),
-          `compositionPairVia(${kind}, ${current.whole.kind}, ${current.edge.kind}) is undefined for the edge kind that currently realizes this part's attachment`,
+        // from disagreeing. Same reasoning as the cascade's pair lookup, and
+        // the same should-be-impossible invariant: a live row's edge kind is
+        // always one `ONTOLOGY_COMPOSITION_VIA_MIXED` already made a declared
+        // pair between `kind` and `current.whole.kind`, so this is unreachable
+        // on a registry-legal graph — see `planCompositionCascade`'s identical
+        // lookup (`composition-cascade.ts`) for the full argument.
+        const incumbentPair = ctx.registry.compositionPairVia(
+          kind,
+          current.whole.kind,
+          current.edge.kind,
         );
+        if (incumbentPair === undefined) {
+          throw new CompilerInvariantError(
+            `executeNodeReparent read composition edge "${current.edge.kind}" between "${kind}" and "${current.whole.kind}", but the registry declares no composition pair between them realized by that edge kind.`,
+            {
+              edgeKind: current.edge.kind,
+              partKind: kind,
+              wholeKind: current.whole.kind,
+            },
+          );
+        }
         if (incumbentPair.population === "oneActive") {
           await endCompositionEdgeWindow(
             ctx,
@@ -3019,12 +3065,18 @@ export async function executeNodeReparent<G extends GraphDef>(
             lock,
           );
         } else {
-          // Through the same owner every other retire path goes through, with
-          // the reparent's `reattachedPart` evidence, so a rule added to
-          // `assertCompositionExistencePreserved` later applies to a
-          // `population: "one"` move too. `endCompositionEdgeWindow` reaches
-          // it via `performEdgeUpdateConverging`; a direct `retireEdge` has no
-          // other way in.
+          // Through the same owner every other retire path goes through,
+          // with the reparent's `reattachedPart` evidence — though for THIS
+          // arm the exemption's own match is unconditional: the edge retired
+          // here is always the part's own current edge, so
+          // `reattached.kind === part.kind && reattached.id === part.id` is
+          // true on every call, and the function returns before any rule in
+          // its body runs (`composition-create.ts`'s `reattachedPart` early
+          // return). Kept anyway so a rule added ABOVE that early return
+          // applies to a `population: "one"` move too, without a second call
+          // site to remember — the same reason the `oneActive` arm reaches it
+          // via `endCompositionEdgeWindow` -> `performEdgeUpdateConverging`; a
+          // direct `retireEdge` has no other way in.
           await assertCompositionExistencePreserved(
             {
               graphId: ctx.graphId,

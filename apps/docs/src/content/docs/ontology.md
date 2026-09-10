@@ -461,20 +461,24 @@ acyclicity over the composition union, and a required part never left
 detached. The part keeps its id, its properties, and every descendant beneath
 it.
 
-The move is ONE instant: the same timestamp ends the old window and opens the
-new one, so no `store.asOf(t)` coordinate shows the part with zero wholes (or
-with two). How the old attachment is retired follows the population declared
-on the **incumbent** row's own pair, so the row keeps its meaning:
+The move is ONE instant — the same timestamp ends the old window and opens
+the new one — but what that buys a reader depends on the incumbent row's own
+population, which is also what decides how the old attachment is retired:
 
-| population | retire | why |
+| population | retire | valid-time read at any instant before the move |
 | --- | --- | --- |
-| `"one"` | the composition edge is deleted | a `"one"` binding persists for the row's whole life, ended or not, so an ended row would still read as an attachment |
-| `"oneActive"` | the window is ended at the move instant | the previous membership stays readable as valid-time history |
+| `"one"` | the composition edge is deleted | the attachment is gone from every `store.asOf(t)` read, at every coordinate — a `"one"` binding persists for the row's whole life, ended or not, so an ended row would still read as an attachment |
+| `"oneActive"` | the window is ended at the move instant | the previous membership stays readable as valid-time history; because the same instant ends the old window and opens the new one, no `store.asOf(t)` coordinate shows the part with zero wholes or with two |
 
 Reparenting to the whole the part already holds (through the same `via`, when
 one is stated) is accepted as a **no-op** — no write, no history — so a
-caller converging on a destination need not first ask where the part is. A
-kind that declares no `partOf`/`hasPart` pair at all raises
+caller converging on a destination need not first ask where the part is.
+Stated `props` are still checked on that no-op: valid and canonically equal
+to the realizing edge's live stored props, the no-op stands; valid but
+different raises `CompositionExistenceError` (`situation: "props"`) rather
+than being silently dropped, since the no-op performs no write to apply it —
+`store.edges.<via>.update(...)` changes the edge directly. A kind that
+declares no `partOf`/`hasPart` pair at all raises
 `ConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
 part raises `NodeNotFoundError`.
 
@@ -508,10 +512,13 @@ Three refusals follow from that one declaration:
   returns, the resolved node holds exactly the stated attachment. On
   `"created"`/`"resurrected"` it is applied as a plain create's `partOf` is;
   on `"found"`/`"updated"` it is checked — a node that already holds this
-  whole through the resolved pair's realizing edge satisfies it and the call
-  is idempotent, a node with no live whole has the attachment written now
-  (required or optional alike), and a node with a **different** live whole, or
-  the same whole through another realizing edge, is refused with
+  whole through the resolved pair's realizing edge satisfies it (idempotent
+  when stated `props` are omitted, or valid and canonically equal to the
+  edge's live stored props — a valid but DIFFERENT `props` refuses with
+  `situation: "props"` instead of being silently kept, since a satisfied
+  match writes no edge), a node with no live whole has the attachment written
+  now (required or optional alike), and a node with a **different** live
+  whole, or the same whole through another realizing edge, is refused with
   `CompositionExistenceError` (`situation: "existing"`) naming both sides.
   Moving a part is [`reparent`](#reparent-moving-a-part-to-a-new-whole)'s
   decision, never a side effect of a lookup. The attachment is resolved

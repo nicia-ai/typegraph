@@ -23,10 +23,16 @@
  * (`src/store/claims/composition-claims.ts`) remains the one owner of R4's
  * "at most one whole" claim, unchanged by this lane.
  */
-import { type EdgeRow, type GraphReadBackend } from "../../backend/types";
+import {
+  type EdgeRow,
+  type GraphReadBackend,
+  rowPropsToObject,
+} from "../../backend/types";
 import { CompositionExistenceError, ConfigurationError } from "../../errors";
+import { validateEdgeProps } from "../../errors/validation";
 import { type CompositionPair } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { canonicalEqual } from "../../schema/canonical";
 import { requireDefined } from "../../utils/presence";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
@@ -420,6 +426,58 @@ export async function findLiveCompositionAttachment(
     return { edge, whole };
   }
   return undefined;
+}
+
+/**
+ * THE one place stated `partOf.props` are checked against an attachment that
+ * is ALREADY satisfied (same whole, same realizing edge) — reached by both
+ * no-write arms: `applyExistingPartOfPostcondition`'s satisfied return and
+ * `executeNodeReparent`'s no-op return (`node-operations.ts`). Neither arm
+ * performs any edge write, so without this call `props` would be neither
+ * applied nor refused nor even validated — an accepted option silently
+ * dropped, the same shape `situation: "existing"` refuses one dimension
+ * over (a differing whole, or a differing realizing edge).
+ *
+ * `props` omitted: nothing stated, nothing to check. `props` stated: run
+ * through {@link validateEdgeProps} against `pair.viaEdgeKind`'s own schema
+ * — the same owner `validateAndPrepareEdgeCreate` calls for a fresh attach,
+ * so an invalid value is refused here exactly as it would be on create,
+ * never silently accepted because this call happens not to write. A valid
+ * value that is canonically (`canonicalEqual`, key order aside) identical to
+ * the edge's live stored props makes the resolve genuinely idempotent and is
+ * allowed; a valid value that DIFFERS is refused with
+ * `CompositionExistenceError` (`situation: "props"`) naming both — this call
+ * resolves an attachment, it does not rewrite the realizing edge's
+ * properties (`store.edges.<via>.update(...)` does that).
+ */
+export function assertSatisfiedPartOfPropsHonored(
+  registry: KindRegistry,
+  partKind: string,
+  partId: string,
+  attachment: CompositionAttachment,
+  pair: CompositionPair,
+  currentEdge: Pick<EdgeRow, "id" | "kind" | "props">,
+): void {
+  if (attachment.props === undefined) return;
+  const edgeType = requireDefined(
+    registry.getEdgeType(pair.viaEdgeKind),
+    `getEdgeType(${pair.viaEdgeKind}) is undefined for a resolved composition pair's own realizing edge kind`,
+  );
+  const validatedProps = validateEdgeProps(edgeType.schema, attachment.props, {
+    kind: pair.viaEdgeKind,
+    operation: "create",
+  });
+  const storedProps = rowPropsToObject(currentEdge.props);
+  if (canonicalEqual(validatedProps, storedProps)) return;
+  throw new CompositionExistenceError({
+    partKind,
+    partId,
+    situation: "props",
+    edgeKind: currentEdge.kind,
+    edgeId: currentEdge.id,
+    currentProps: storedProps,
+    requestedProps: validatedProps,
+  });
 }
 
 /**

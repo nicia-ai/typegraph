@@ -1241,26 +1241,39 @@ export class CompositionError extends TypeGraphError {
  * toward that whole kind still names that pair's edge here. `currentVia` is
  * absent when the contradiction is a differing whole rather than a differing
  * realizing edge only.
+ *
+ * `currentProps`/`requestedProps` are present only on `situation: "props"` —
+ * a `getOrCreateByConstraint` or `reparent` call whose attachment is already
+ * satisfied (same whole, same realizing edge — named by `edgeKind`/`edgeId`)
+ * but whose stated `partOf.props` are schema-valid and canonically DIFFERENT
+ * from the edge's live stored props. Neither call writes on an
+ * already-satisfied attachment, so a valid-but-different `props` is an
+ * accepted option this API cannot honor — it is refused rather than silently
+ * dropped, exactly like a differing whole or realizing edge.
  */
 export type CompositionExistenceErrorDetails = Readonly<{
   partKind: string;
   partId?: string;
-  situation: "create" | "detach" | "existing";
+  situation: "create" | "detach" | "existing" | "props";
   edgeKind?: string;
   edgeId?: string;
   currentWhole?: Readonly<{ kind: string; id: string }>;
   currentVia?: string;
   requestedWhole?: Readonly<{ kind: string; id: string }>;
   requestedVia?: string;
+  currentProps?: Record<string, unknown>;
+  requestedProps?: Record<string, unknown>;
 }>;
 
 /**
  * Thrown when a write would leave a required-existence composition part
  * (`existence: "required"`) with no live whole (a bare create with no
  * `partOf`, or a detach that would orphan a currently-live part), or when a
- * `getOrCreateByConstraint` call stating `partOf` resolves to an already-
- * existing node (`"found"`/`"updated"`) — an accepted option this API
- * cannot honor without silently dropping it.
+ * `getOrCreateByConstraint`/`reparent` call stating `partOf` resolves to an
+ * attachment that already holds — a different whole, the same whole through
+ * a different realizing edge, or the same whole and edge with different
+ * `props` (`"found"`/`"updated"`/reparent's no-op) — an accepted option this
+ * API cannot honor without silently dropping it.
  *
  * Its own class rather than a `CompositionError` code: `CompositionError` is
  * R4's "at most one whole" refusal; this is R-E.2's "at least one whole while
@@ -1305,6 +1318,11 @@ export class CompositionExistenceError extends TypeGraphError {
               }`;
           return `Cannot apply \`partOf\` to ${partLabel}: the node already exists with ${held}, not ${asked}.`;
         }
+        case "props": {
+          return `Cannot apply \`partOf.props\` to ${partLabel}: it already holds this whole via "${details.edgeKind}"${
+            details.edgeId === undefined ? "" : ` (edge ${details.edgeId})`
+          } with different properties.`;
+        }
       }
     })();
     super(message, "COMPOSITION_WHOLE_REQUIRED", {
@@ -1315,6 +1333,8 @@ export class CompositionExistenceError extends TypeGraphError {
           `Pass \`partOf: { kind, id }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`
         : details.situation === "detach" ?
           `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { kind, id, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`
+        : details.situation === "props" ?
+          `Call \`store.edges.${details.edgeKind}.update(${details.edgeId === undefined ? "edgeId" : JSON.stringify(details.edgeId)}, props)\` to change the realizing edge's own properties directly — \`partOf\` on an already-satisfied attachment only asserts placement, it never rewrites the edge.`
         : `Call \`store.nodes.<Kind>.reparent(id, { kind, id, via? })\` to MOVE the part to the requested whole; getOrCreateByConstraint's \`partOf\` asserts an attachment, it never re-homes one.`,
       cause: options?.cause,
     });

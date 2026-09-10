@@ -34,6 +34,7 @@ import {
   hasPart,
   NodeNotFoundError,
   partOf,
+  ValidationError,
 } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
@@ -770,20 +771,14 @@ export function registerCompositionAttachmentIntegrationTests(
         kind: "CaBook" as const,
         id: book.id,
         via: "caChapterOf",
-        props: { order: 9 },
+        props: { order: 1 },
       };
-      // Item "a" already holds this exact attachment; item "b" exists with
-      // NO whole at all. One batch, two different dispositions.
+      // Item "a" already holds this exact attachment — same via, same
+      // props; item "b" exists with NO whole at all. One batch, two
+      // different dispositions.
       const attached = await store.nodes.CaChapter.create(
         { slug: "a" },
-        {
-          partOf: {
-            kind: "CaBook",
-            id: book.id,
-            via: "caChapterOf",
-            props: { order: 1 },
-          },
-        },
+        { partOf: attachment },
       );
       const bare = await store.nodes.CaChapter.create({ slug: "b" });
       expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
@@ -801,14 +796,140 @@ export function registerCompositionAttachmentIntegrationTests(
 
       const edges = await store.edges.caChapterOf.find({});
       expect(edges).toHaveLength(2);
-      // The idempotent hit wrote nothing: "a" keeps the props it was
-      // attached with, while "b"'s brand-new edge carries the batch's.
+      // "a"'s satisfied hit is genuinely idempotent — the batch's stated
+      // props are the same value it already held — and "b"'s brand-new
+      // edge is written fresh with the same props.
       expect(
         requireDefined(edges.find((edge) => edge.fromId === attached.id)).order,
       ).toBe(1);
       expect(
         requireDefined(edges.find((edge) => edge.fromId === bare.id)).order,
-      ).toBe(9);
+      ).toBe(1);
+    });
+
+    it("getOrCreateByConstraint refuses a satisfied match's DIFFERENT props rather than silently keeping the stored value", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "a" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      // MUTATION CHECK: remove the `assertSatisfiedPartOfPropsHonored` call
+      // from `applyExistingPartOfPostcondition`'s satisfied arm
+      // (node-operations.ts) — this then resolves `"found"` with the edge
+      // silently left at `order: 1`, and the assertions below fail.
+      const error = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "a" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 2 },
+          },
+        },
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(CompositionExistenceError);
+      expect((error as CompositionExistenceError).details).toEqual(
+        matchingObject({
+          situation: "props",
+          edgeKind: "caChapterOf",
+          currentProps: matchingObject({ order: 1 }),
+          requestedProps: matchingObject({ order: 2 }),
+        }),
+      );
+
+      // The refusal did not partially apply the stated props.
+      const chapterEdges = await store.edges.caChapterOf.find({});
+      const edge = requireDefined(
+        chapterEdges.find((candidate) => candidate.fromId === chapter.id),
+      );
+      expect(edge.order).toBe(1);
+    });
+
+    it("getOrCreateByConstraint validates a satisfied match's props against the edge schema even though it writes nothing", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      await store.nodes.CaChapter.create(
+        { slug: "a" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      // MUTATION CHECK: same call site as above — without the validation
+      // step this resolves `"found"` instead of throwing `ValidationError`.
+      const error = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "a" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: "not-a-number" },
+          },
+        },
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(ValidationError);
+    });
+
+    it("reparent's no-op arm honors stated props the same way: refuses a valid but DIFFERENT value", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const chapter = await store.nodes.CaChapter.create(
+        { slug: "a" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      // MUTATION CHECK: remove the `assertSatisfiedPartOfPropsHonored` call
+      // from `executeNodeReparent`'s no-op arm (node-operations.ts) — this
+      // then resolves as a silent no-op leaving the edge at `order: 1`.
+      const error = await store.nodes.CaChapter.reparent(chapter.id, {
+        kind: "CaBook",
+        id: book.id,
+        via: "caChapterOf",
+        props: { order: 2 },
+      }).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(CompositionExistenceError);
+      expect((error as CompositionExistenceError).details).toEqual(
+        matchingObject({
+          situation: "props",
+          edgeKind: "caChapterOf",
+          currentProps: matchingObject({ order: 1 }),
+          requestedProps: matchingObject({ order: 2 }),
+        }),
+      );
+
+      const chapterEdges = await store.edges.caChapterOf.find({});
+      const edge = requireDefined(
+        chapterEdges.find((candidate) => candidate.fromId === chapter.id),
+      );
+      expect(edge.order).toBe(1);
     });
 
     it("bulkGetOrCreateByConstraint refuses the whole batch when ONE item's found node holds a different whole", async () => {
@@ -832,6 +953,10 @@ export function registerCompositionAttachmentIntegrationTests(
         { partOf: { kind: "CaAnthology", id: anthology.id } },
       );
 
+      // Same props "a" already holds (order: 1): the batch's mismatch is
+      // "b"'s whole alone, isolating `situation: "existing"` from the
+      // `situation: "props"` refusal covered separately above.
+      //
       // MUTATION CHECK: as in the previous case — with the bulk
       // postcondition call sites disabled this batch resolves silently to
       // two `"found"` results and leaves "b" hanging off the anthology.
@@ -843,7 +968,7 @@ export function registerCompositionAttachmentIntegrationTests(
             kind: "CaBook",
             id: book.id,
             via: "caChapterOf",
-            props: { order: 9 },
+            props: { order: 1 },
           },
         },
       ).catch((error_: unknown) => error_);

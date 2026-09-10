@@ -735,14 +735,18 @@ try {
 }
 ```
 
-`details.situation` distinguishes the three shapes: `"create"` (no `partId`
+`details.situation` distinguishes the four shapes: `"create"` (no `partId`
 yet — deciding the refusal is what keeps the row from ever being written),
 `"detach"` (carries `edgeKind`/`edgeId`, the composition edge the caller
-tried to end), and `"existing"` (a `getOrCreateByConstraint` call whose
-`partOf` postcondition the already-existing node contradicts — carries
+tried to end), `"existing"` (a `getOrCreateByConstraint` call whose `partOf`
+postcondition the already-existing node contradicts — carries
 `currentWhole`/`currentVia` and `requestedWhole`/`requestedVia`, so the move
-the caller would have to make is visible in the error). `requestedVia` is the
-RESOLVED realizing edge of the pair the call's `partOf` names, so it is
+the caller would have to make is visible in the error), and `"props"` (a
+`getOrCreateByConstraint` or `reparent` call resolving to an attachment that
+already holds — same whole, same realizing edge — whose stated `props` are
+schema-valid but canonically different from the edge's live stored props —
+carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`). `requestedVia`
+is the RESOLVED realizing edge of the pair the call's `partOf` names, so it is
 present even when the call omitted `via`.
 
 Pass `partOf: { kind, id, via? }` naming a live, declared whole to fix a
@@ -750,12 +754,13 @@ create refusal; soft-delete or hard-delete the part itself (which frees its
 edge — a retired part is not orphaned by losing it) to fix a detach refusal;
 call [`store.nodes.<Kind>.reparent(id, attachment)`](/ontology#reparent-moving-a-part-to-a-new-whole)
 to fix an `"existing"` refusal, which is the operation that actually moves a
-part.
+part; call `store.edges.<via>.update(edgeId, props)` to fix a `"props"`
+refusal, which changes the realizing edge's own properties directly.
 
-An `"existing"` refusal fires only for a CONTRADICTION. A
-`getOrCreateByConstraint` whose `partOf` matches the node's live whole
-succeeds and is idempotent, and one whose node has no live whole writes the
-attachment — see
+An `"existing"` or `"props"` refusal fires only for a CONTRADICTION. A
+`getOrCreateByConstraint` (or `reparent`) call whose `partOf` matches the
+node's live whole, realizing edge, and (when stated) props succeeds and is
+idempotent, and one whose node has no live whole writes the attachment — see
 [`partOf` is a postcondition](/ontology#existence-a-part-that-cannot-exist-without-a-whole).
 
 A `partOf` the graph cannot resolve raises `ConfigurationError` rather than
