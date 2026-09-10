@@ -491,12 +491,20 @@ export class TraversalBuilder<
    * - "out" direction: kind must be in the edge's "to" array
    * - "in" direction: kind must be in the edge's "from" array
    *
+   * The alias's expansion axis is the same one option `from()` states,
+   * resolved through the same owner (`./alias-expansion.ts`): `expansion`,
+   * taking the store default when the option is omitted, `{}`, or an
+   * explicit `undefined`, and accepting a forwarded bag whose axis is not
+   * one literal (the axis-unknown overload). A `"narrower"` expansion
+   * additionally admits each expanded kind as an endpoint of this edge.
+   *
    * @param kind - The target node kind
    * @param alias - A unique alias for this node (compile-time error if duplicate)
    */
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
+    options?: { expansion?: undefined },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<AliasNodeType<G, K & string>, Optional>>,
@@ -508,7 +516,7 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: false; includeNarrower?: false },
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"], Optional>>,
@@ -520,7 +528,7 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: true; includeNarrower?: false },
+    options: { expansion: "subclasses" },
   ): QueryBuilder<
     G,
     Aliases &
@@ -533,10 +541,19 @@ export class TraversalBuilder<
     CoordinateState
   >;
 
+  /**
+   * The axis-unknown overload, which covers two call shapes with one rule:
+   * a `"narrower"` expansion (no schema relationship is claimed, so no
+   * per-kind type can be promised) and a forwarded options bag whose axis is
+   * not one literal — the option type itself, or a wrapper's
+   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
+   * alias takes the conservative untyped form; state a literal axis at the
+   * call site to keep the precise alias type.
+   */
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeNarrower: true; includeSubClasses?: false },
+    options: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
@@ -560,7 +577,7 @@ export class TraversalBuilder<
 
     const expansion = resolveAliasExpansion(
       options,
-      this.#config.defaultIncludeSubClasses,
+      this.#config.defaultExpansion,
     );
     const kinds = expandKindsForAxis(expansion, kind, this.#config.registry);
     if (expansion === "narrower") {
@@ -583,11 +600,16 @@ export class TraversalBuilder<
   /**
    * Runtime-kind sibling of `to`; accepts a kind name or Store-issued token.
    * Throws `KindNotFoundError` if the kind is not registered.
+   *
+   * Like `fromDynamic`, the runtime kind may not appear in `G["ontology"]`,
+   * so any axis other than `"exact"` widens to {@link PolymorphicNodeType}.
+   * Omitting the option, passing `{}`, and passing an explicit `undefined`
+   * all take the store default.
    */
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: false; includeNarrower?: false },
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
@@ -599,7 +621,7 @@ export class TraversalBuilder<
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: true; includeNarrower?: false },
+    options?: { expansion?: "subclasses" | undefined },
   ): QueryBuilder<
     G,
     Aliases &
@@ -612,10 +634,19 @@ export class TraversalBuilder<
     CoordinateState
   >;
 
+  /**
+   * The axis-unknown overload, which covers two call shapes with one rule:
+   * a `"narrower"` expansion (no schema relationship is claimed, so no
+   * per-kind type can be promised) and a forwarded options bag whose axis is
+   * not one literal — the option type itself, or a wrapper's
+   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
+   * alias takes the conservative untyped form; state a literal axis at the
+   * call site to keep the precise alias type.
+   */
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeNarrower: true; includeSubClasses?: false },
+    options: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
@@ -650,7 +681,7 @@ export class TraversalBuilder<
 
     const expansion = resolveAliasExpansion(
       options,
-      this.#config.defaultIncludeSubClasses,
+      this.#config.defaultExpansion,
     );
     const kinds = expandKindsForAxis(
       expansion,
@@ -678,7 +709,7 @@ export class TraversalBuilder<
 
   /**
    * C.3 endpoint admission for a `to()`/`toDynamic()` alias expanded through
-   * `includeNarrower`. `broader`/`narrower` is NOT an assignability axis —
+   * `expansion: "narrower"`. `broader`/`narrower` is NOT an assignability axis —
    * unlike subclass expansion, a narrower kind is not automatically admitted
    * by `expandEdgeEndpointAllowance` — so each expanded kind is checked
    * individually through the existing `#assertValidEndpoint` owner, and a
@@ -699,7 +730,7 @@ export class TraversalBuilder<
       } catch (error) {
         if (!(error instanceof EndpointError)) throw error;
         throw new ConfigurationError(
-          `includeNarrower expansion of "${rootKind}" includes "${kind}", ` +
+          `expansion: "narrower" on "${rootKind}" includes "${kind}", ` +
             `which is not an admitted endpoint of edge "${edgeKind}".`,
           {
             code: "ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED",

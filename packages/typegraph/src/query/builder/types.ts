@@ -46,7 +46,10 @@ import type {
   SimilarToOptions,
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
-import { type AliasExpansionAxis } from "./alias-expansion";
+import {
+  type AliasExpansionAxis,
+  type DefaultAliasExpansionAxis,
+} from "./alias-expansion";
 import {
   type DynamicEdgeAccessor,
   type DynamicNodeAccessor,
@@ -153,6 +156,75 @@ type OntologyTypeErased<G extends GraphDef> =
   number extends G["ontology"]["length"] ? true : false;
 
 /**
+ * True when an ontology endpoint carries no `kind` literal for
+ * {@link SubsumptionAffected}'s `Extract` to match or rule out. An endpoint
+ * is one of three things:
+ *
+ * - a `NodeType`/`AnyEdgeType` with a LITERAL `kind` — decidable: the
+ *   `Extract` either matches this kind or proves the relation does not name
+ *   it.
+ * - an IRI `string` — never a registered node kind, so the `{ kind: K }`
+ *   arms rule it out soundly. A second kind co-registered on the same IRI
+ *   carries its OWN literal endpoint and widens through that element.
+ * - anything whose `kind` is the general `string` — a kind literal an
+ *   annotation ERASED. Nothing can be ruled out.
+ */
+type EndpointKindErased<Endpoint> =
+  Endpoint extends string ? false
+  : Endpoint extends { kind: infer Kind extends string } ?
+    string extends Kind ?
+      true
+    : false
+  : true;
+
+/**
+ * The endpoints {@link SubsumptionAffected}'s `Extract` reads a `kind`
+ * literal off, for an element whose meta-edge name is `Name` — the `Extract`
+ * arms spelled as endpoint positions, so the two cannot drift: a
+ * `subClassOf` is matched on its `to` alone (the supertype; which subtype
+ * declares itself under `K` never changes whether `K` is affected), an
+ * `equivalentTo`/`sameAs` on both sides. `never` for a name that is none of
+ * the three, whose endpoints the `Extract` never reads.
+ */
+type MatchedEndpoints<Name extends string, From, To> =
+  | ([Extract<Name, "subClassOf">] extends [never] ? never : To)
+  | ([Extract<Name, "equivalentTo" | "sameAs">] extends [never] ? never
+    : From | To);
+
+/**
+ * True for an ontology-tuple element whose literals are too weak for
+ * {@link SubsumptionAffected}'s `Extract` to rule it out — the conservative
+ * arm's per-element test.
+ *
+ * An element is undecidable when its `metaEdge.name` is the general `string`
+ * (the degenerate case: a caller's `const relation: OntologyRelation =
+ * subClassOf(Child, Parent)` annotation erases the name along with
+ * everything else), or when the name can be a subsumption name while a
+ * {@link MatchedEndpoints} position has lost its kind literal — what a
+ * caller helper annotated `(child: NodeType, parent: NodeType) =>
+ * TypedOntologyRelation<"subClassOf", NodeType, NodeType>` produces. Both
+ * are assignable to `OntologyRelation` and neither is mutually assignable
+ * WITH it, so an assignability test sees only the first.
+ *
+ * Distributes over the element union, so `true extends
+ * SubsumptionLiteralsErased<...>` is "at least one element is undecidable".
+ */
+type SubsumptionLiteralsErased<Relation> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      string extends Name ? true
+      : true extends EndpointKindErased<MatchedEndpoints<Name, From, To>> ? true
+      : false
+    : true
+  : never;
+
+/**
  * Whether kind `K` in graph `G` participates in a `subClassOf`/`equivalentTo`
  * relation that could hand a polymorphic-default query a row of a DIFFERENT
  * concrete kind: `K` is a `subClassOf` target, or `K` is either side of an
@@ -162,24 +234,32 @@ type OntologyTypeErased<G extends GraphDef> =
  * transitive-closure type engine. `false` (a graph with `ontology: []`, or a
  * kind no relation touches) costs zero type churn.
  *
- * **An {@link OntologyTypeErased} ontology widens conservatively.** Once the
- * tuple has lost its fixed length, every element has necessarily widened to
- * the untyped `OntologyRelation` shape too (a tuple can only lose its length
- * by losing the literal types that made each position distinct), so no
- * per-element `Extract` can rule out a `subClassOf` targeting `K` — without
- * this arm the check would silently answer `false`, an unsound
- * under-widening. This is deliberately scored on the WHOLE array's
- * tuple-ness, not on whether any individual union member happens to be a
- * bare `OntologyRelation`: `broader`, `disjointWith`, `inverseOf` and every
- * other non-C.1 meta-edge helper are typed to return plain `OntologyRelation`
- * by design, so a real tuple that legitimately mixes a typed `subClassOf`
- * with one of those untouched relations (`ontology: [subClassOf(Child,
- * Parent), inverseOf(knows, knows)]`) must NOT trip this arm — the tuple's
- * length is still the literal `2`, and the precise `Extract` test below
- * still finds `subClassOf`'s `to: { kind: K }` literal on its own element.
+ * The `Extract` reads the IRI-routed `equivalentTo(Kind, iri)` form too:
+ * every meta-edge factory returns a `TypedOntologyRelation` carrying
+ * its meta-edge name literal, the IRI overload included
+ * (`from: Kind, to: string`), so a kind whose only equivalence is to an
+ * external vocabulary term still widens — the registry folds an IRI-routed
+ * equivalence class into `subClassAncestors`/`subClassDescendants` exactly
+ * like a two-kind one, so rows of the co-registered kind really can come
+ * back.
+ *
+ * **Two arms widen conservatively rather than answer `false`.** An
+ * {@link OntologyTypeErased} ontology has lost its tuple length, so no
+ * per-element `Extract` can rule out a `subClassOf` targeting `K`; and a
+ * single {@link SubsumptionLiteralsErased} element has lost the very
+ * literals the `Extract` matches on — its own annotation erased either the
+ * meta-edge name or the endpoint kind the match reads. Either arm answering
+ * `false` would be an unsound under-widening: the alias would stay narrow
+ * while the runtime alias is genuinely polymorphic.
+ *
+ * The two arms are conservative, not exhaustive: an element that keeps every
+ * literal the `Extract` reads is decided by the `Extract`, and that decision
+ * is sound for the relations the ontology DECLARES. A relation added at
+ * runtime is a separate, documented limitation — see {@link AliasNodeType}.
  */
 type SubsumptionAffected<G extends GraphDef, K extends string> =
   OntologyTypeErased<G> extends true ? true
+  : true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true
   : [
     Extract<
       G["ontology"][number],
@@ -193,7 +273,7 @@ type SubsumptionAffected<G extends GraphDef, K extends string> =
 
 /**
  * The alias type a `from(kind, alias)` call with NO explicit
- * `includeSubClasses` resolves to, under the Q3 polymorphic-by-default
+ * `expansion` resolves to, under the Q3 polymorphic-by-default
  * axis. `PolymorphicNodeType` only when `K` is actually
  * {@link SubsumptionAffected} — a compile-time subtype guarantee (C.1/C.2)
  * covers the kind's PROPERTIES, never its `kind` discriminant or `NodeId`
@@ -212,7 +292,7 @@ type SubsumptionAffected<G extends GraphDef, K extends string> =
  * runtime, which would let a subtype id round-trip through
  * `store.nodes.<K>.update()` typechecked and silently match nothing. Use
  * `fromDynamic()` (always `PolymorphicNodeType`-typed, §1.4 of the typed-
- * subsumption plan) or `{ includeSubClasses: false }` for a kind a runtime
+ * subsumption plan) or `{ expansion: "exact" }` for a kind a runtime
  * extension subclasses.
  */
 export type AliasNodeType<G extends GraphDef, K extends string> =
@@ -706,11 +786,11 @@ export type QueryBuilderConfig = Readonly<{
   defaultTraversalExpansion: TraversalExpansion;
   /**
    * Store-level default for the `from`/`to`/`fromDynamic`/`toDynamic`
-   * subclass-expansion axis when an alias states no `includeSubClasses`
-   * (roadmap Q3). `true` (the default everywhere a store doesn't override
-   * it) makes a supertype query polymorphic.
+   * expansion axis when an alias states no `expansion` (roadmap Q3).
+   * `"subclasses"` (the default everywhere a store doesn't override it)
+   * makes a supertype query polymorphic.
    */
-  defaultIncludeSubClasses: boolean;
+  defaultExpansion: DefaultAliasExpansionAxis;
   /** Whether this builder's graph enables Operational Identity. */
   identityEnabled: boolean;
   /** Equal-id behavior used by historical identity traversal compilation. */
@@ -768,14 +848,16 @@ export type CreateQueryBuilderOptions = Readonly<{
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
   /**
-   * Default subclass-expansion axis for `from`/`to`/`fromDynamic`/
-   * `toDynamic` when an alias states no `includeSubClasses` (default:
-   * `true`, roadmap Q3). A store-issued builder threads its own
-   * `queryDefaults.includeSubClasses`; a standalone `createQueryBuilder`
-   * defaults to `true` too, so a store-less builder and a store-issued one
-   * agree.
+   * Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an
+   * alias states no `expansion` (default: `"subclasses"`, roadmap Q3). A
+   * store-issued builder threads its own `queryDefaults.expansion`; a
+   * standalone `createQueryBuilder` defaults to `"subclasses"` too, so a
+   * store-less builder and a store-issued one agree.
+   *
+   * Spelled `| undefined` so a stated `undefined` forwards from a caller's
+   * own options bag, the same way the per-alias `expansion` option does.
    */
-  defaultIncludeSubClasses?: boolean;
+  defaultExpansion?: DefaultAliasExpansionAxis | undefined;
   /**
    * Overrides whether a builder may compile identity-aware traversals
    * (`traverse(..., { includeIdentityMembers: true })`).

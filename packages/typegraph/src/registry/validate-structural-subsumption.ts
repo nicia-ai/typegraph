@@ -24,7 +24,7 @@
  *
  * This is exactly the set `isAssignableTo` answers `true` for, and
  * `isAssignableTo` is what the write path, edge endpoints,
- * `expandSubClasses`, `includeSubClasses`, and the `kindWithSubClasses`
+ * `expandSubClasses`, the `expansion` option, and the `kindWithSubClasses`
  * claim axis all consume — binding the guarantee to the CLOSURE rather than
  * to the declaration syntax is what makes it load-bearing:
  * `isAssignableTo(A, B)` must imply every A row satisfies B's schema.

@@ -753,6 +753,76 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // new top-level type beyond the two already-public seam types
 // (`EngineRecordedTimeMembers`/`EngineRecordedRevision`, added in the prior
 // commit) referencing `RecordedInstantParts`'s new shape indirectly.
+//
+// Typed ontology relations and the one expansion option batch. Two source
+// changes move this ledger, and both move it for the same mechanical reason:
+// a type a PUBLIC signature now names, that no entrypoint exports.
+//
+// `.` moves +11 (424 → 435), from twelve newly rendered declarations:
+//  - the eight meta-edge name constants the newly typed factories name in
+//    their return types (`META_EDGE_BROADER`, `META_EDGE_DISJOINT_WITH`,
+//    `META_EDGE_HAS_PART`, `META_EDGE_IMPLIES`, `META_EDGE_INVERSE_OF`,
+//    `META_EDGE_NARROWER`, `META_EDGE_PART_OF`, `META_EDGE_RELATED_TO`).
+//    `broader`/`narrower`/`relatedTo`/`disjointWith`/`partOf`/`hasPart`/
+//    `inverseOf`/`implies` each return `TypedOntologyRelation<typeof
+//    META_EDGE_X, …>` now instead of a bare `OntologyRelation`, which is
+//    exactly how `META_EDGE_EQUIVALENT_TO` and `META_EDGE_SUB_CLASS_OF`
+//    became debt here when `equivalentTo`/`subClassOf` were typed — same
+//    category, same accepted cost, eight more of it.
+//  - `BareOntologyRelation` (the conservative-widening arm of
+//    `SubsumptionAffected`) and `DefaultAliasExpansionAxis` /
+//    `SearchExpansionAxis` (the store-default and search-facade spellings of
+//    the one `expansion` option), each named by a public type —
+//    `CreateQueryBuilderOptions`/`BaseStoreOptions` and
+//    `SearchScopeOptions` respectively. `AliasExpansionAxis` was already
+//    debt here for the same reason.
+// `SubgraphResultEdgeKinds` is the twelfth declaration and is NOT debt at
+// `.`: the root barrel exports it deliberately (`src/index.ts`), because a
+// caller that stores a `subgraph({ composition })` result needs to be able
+// to name that result's edge-key type.
+//
+// The six entrypoints that mirror `.`'s Store surface through a narrow
+// barrel (`./graph-merge`, `./interchange`, `./postgres/pglite`,
+// `./profiler`, `./provenance`, `./sqlite/local`) move +4 apiece, and by the
+// same four names every time: `BareOntologyRelation`,
+// `DefaultAliasExpansionAxis`, `SearchExpansionAxis` and
+// `SubgraphResultEdgeKinds` — the fourth because none of those barrels
+// re-exports it, the same "has no business re-exporting" reasoning the
+// `IdentityDecisionProvenance` ruling above already applies. They do NOT
+// move for the eight meta-edge constants: the ontology factories are
+// exported from the root barrel alone, so no narrow barrel renders them.
+//
+// Gate: exactly seven entrypoints move; `.` by +11 with the twelve names
+// above (eleven of them forgotten); the six narrow barrels by exactly +4
+// with those four names; no other entrypoint moves, and no backend-adapter
+// entrypoint moves at all (none of them renders `QueryBuilder`,
+// `BaseStoreOptions` or `SubgraphOptions`).
+//
+// Expansion-forwarding and projection-key review batch. The SAME seven
+// entrypoints move again, +4 apiece (`.` 435 → 439; `./graph-merge` 778 →
+// 782; `./interchange` 763 → 767; `./postgres/pglite` and `./sqlite/local`
+// 760 → 764; `./profiler` 765 → 769; `./provenance` 771 → 775) — five new
+// declarations minus one retired, everywhere:
+//  - `EndpointKindErased`, `MatchedEndpoints` and
+//    `SubsumptionLiteralsErased` replace `BareOntologyRelation` as
+//    `SubsumptionAffected`'s conservative arm. The arm now tests for the
+//    ERASED kind literals rather than assignability from `OntologyRelation`,
+//    which needs the endpoint-position and per-endpoint helpers alongside the
+//    per-element one (net +2 for the three-for-one swap).
+//  - `AliasExpansionOptions`, because `from`/`to`/`fromDynamic`/`toDynamic`
+//    now each declare an overload taking the option owner's own bag so a
+//    caller's options can be forwarded; the type it names,
+//    `AliasExpansionAxis`, was already debt here.
+//  - `SubgraphProjectFor`, the projection-over-the-result's-edge-kinds
+//    constraint every `subgraph` signature and option bag now takes. It is
+//    treated exactly like `SubgraphProject`, which the same signatures
+//    already rendered as debt: a constraint type, not a value a caller
+//    constructs.
+// Gate: exactly those seven entrypoints move, each by exactly +4 and by the
+// same five-in/one-out name set; no other entrypoint moves (no adapter
+// entrypoint renders `QueryBuilder`, `BaseStoreOptions` or
+// `SubgraphOptions`), and `SubgraphResultEdgeKinds` stays absent from `.`'s
+// forgotten set because the root barrel still exports it.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Roadmap F (meta-edge removal): removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
@@ -785,8 +855,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `.` (see `src/index.ts`), so neither registers as forgotten here — the
   // debt is back to its pre-E.2 baseline for this entrypoint specifically.
   ".": {
-    count: 424,
-    sha256: "a5d2d44cf18ca608b48f114342524f52b5f72042d0d051c75823c03995a92275",
+    count: 436,
+    sha256: "779ffa9919885f5cd060863d8693f7895921f05f5ab1b30207de6d30c084d811",
   },
   "./adapters/drizzle/engine": {
     count: 338,
@@ -843,28 +913,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 775,
-    sha256: "9ef27cba14b673e7dedba18628834b363af387d1a7e83ae401e6caf34b57556e",
+    count: 782,
+    sha256: "279c8abb9e345ab17298f3fe9b8bb4d2a0022d3dfbc1afdaa755b34cc11b8e7f",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 760,
-    sha256: "f42d54bd8616a1db700f08c75372bc1599320c7dc0e86ae211a1205567e2587b",
+    count: 767,
+    sha256: "a6b1861ffab15d2ef4be9a6369ec6b941981f40c784e20b5c32e1348a3c84462",
   },
   "./postgres/pglite": {
-    count: 757,
-    sha256: "14007c138d3075a97b151b829f018fd2950fcc00993b4431cf1048ea3e6f6eea",
+    count: 764,
+    sha256: "9644c6d6d4c9fbbabaacb7603e50650240254fba2a815beefbab4e66521c4882",
   },
   "./profiler": {
-    count: 762,
-    sha256: "3d9a67c3b66f380a5aea8d9665637cd6cf05a99f1c3609b1b78bdfe2679603dd",
+    count: 769,
+    sha256: "6917d4e017cd88a64a762664a71c65775e77493c153ae54b376f7c73ac6b8031",
   },
   "./provenance": {
-    count: 768,
-    sha256: "a093df3338fc755a61c6bf927c8902121e7c92aead8840b370d25711ed1bfa15",
+    count: 775,
+    sha256: "bbbeacc0764a2642db9ad64c9f2bfe7ff2fdb83b34450fba3ec8c2fcc3ee82c5",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -880,8 +950,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "ff190fe91f16dd83780cc450653f95fae7b2bcf2653620dbd2719ab62b8547be",
   },
   "./sqlite/local": {
-    count: 757,
-    sha256: "14007c138d3075a97b151b829f018fd2950fcc00993b4431cf1048ea3e6f6eea",
+    count: 764,
+    sha256: "9644c6d6d4c9fbbabaacb7603e50650240254fba2a815beefbab4e66521c4882",
   },
 };
 

@@ -369,7 +369,7 @@ export type PredicateExpression =
  */
 type QueryStart = Readonly<{
   alias: string;
-  kinds: readonly string[]; // Expanded per `expansion` (subClasses/narrower)
+  kinds: readonly string[]; // Expanded per `expansion` (subclasses/narrower)
   /**
    * Which expansion axis produced `kinds` — see
    * `src/query/builder/alias-expansion.ts`. A `boolean` cannot describe a

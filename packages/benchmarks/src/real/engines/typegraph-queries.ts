@@ -112,7 +112,7 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
 
   // Reply-chain root walk: replyOf is polymorphic (Comment -> Post | Comment),
   // so the recursive traversal targets the `Message` ontological supertype
-  // via includeSubClasses and returns the WHOLE ancestor chain with depth;
+  // via expansion: "subclasses" and returns the WHOLE ancestor chain with depth;
   // the root is the max-depth row (a Post, since Post has no outgoing
   // replyOf edge and the walk cannot continue past it).
   const replyOfAncestors = store
@@ -126,7 +126,7 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
       cyclePolicy: "prevent",
       depth: "d",
     })
-    .to("Message", "root", { includeSubClasses: true })
+    .to("Message", "root", { expansion: "subclasses" })
     .select((ctx) => ({ id: ctx.root.id, depth: ctx.d }))
     .prepare();
 

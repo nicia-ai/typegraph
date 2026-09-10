@@ -372,12 +372,20 @@ export class QueryBuilder<
   /**
    * Starts a query from a node kind.
    *
-   * Subclass expansion defaults to `true` (roadmap Q3) — a supertype query
-   * is polymorphic unless narrowed. `includeSubClasses: false` restores the
-   * exact-kind reading; `includeNarrower: true` expands through
-   * `broader`/`narrower` instead (C.3, untyped alias — no schema
-   * relationship is claimed). The two are mutually exclusive on one alias
-   * (`ConfigurationError`, `QUERY_ALIAS_EXPANSION_CONFLICT`).
+   * The alias's expansion axis is one option, `expansion` (default
+   * `"subclasses"`, roadmap Q3 — a supertype query is polymorphic unless
+   * narrowed). `"exact"` restores the exact-kind reading; `"narrower"`
+   * expands through `broader`/`narrower` instead (C.3, untyped alias — no
+   * schema relationship is claimed). Omitting the option, passing `{}`, or
+   * passing an explicit `undefined` all take the store default — which is
+   * why the default overload's parameter spells `expansion?: undefined`
+   * rather than a bare optional (`exactOptionalPropertyTypes` rejects a
+   * stated `undefined` against a bare optional) and why it cannot spell the
+   * whole `AliasExpansionAxis` union (it would then also capture the
+   * `"exact"` and `"subclasses"` calls the overloads below type). A bag that
+   * can carry an axis the call site does not pin — `AliasExpansionOptions`
+   * itself, or a wrapper's `{ expansion?: "exact" }` — goes to the
+   * axis-unknown overload, which types the alias conservatively.
    *
    * @param kind - The node kind to start from
    * @param alias - A unique alias for this node (compile-time error if duplicate)
@@ -385,6 +393,7 @@ export class QueryBuilder<
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
+    options?: { expansion?: undefined },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<AliasNodeType<G, K>>>,
@@ -396,7 +405,7 @@ export class QueryBuilder<
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: false; includeNarrower?: false },
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"]>>,
@@ -408,7 +417,7 @@ export class QueryBuilder<
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: true; includeNarrower?: false },
+    options: { expansion: "subclasses" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>>>,
@@ -417,10 +426,19 @@ export class QueryBuilder<
     CoordinateState
   >;
 
+  /**
+   * The axis-unknown overload, which covers two call shapes with one rule:
+   * a `"narrower"` expansion (no schema relationship is claimed, so no
+   * per-kind type can be promised) and a forwarded options bag whose axis is
+   * not one literal — the option type itself, or a wrapper's
+   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
+   * alias takes the conservative untyped form; state a literal axis at the
+   * call site to keep the precise alias type.
+   */
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeNarrower: true; includeSubClasses?: false },
+    options: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias>,
@@ -445,7 +463,7 @@ export class QueryBuilder<
 
     const expansion = resolveAliasExpansion(
       options,
-      this.#config.defaultIncludeSubClasses,
+      this.#config.defaultExpansion,
     );
     const kinds = expandKindsForAxis(expansion, kind, this.#config.registry);
 
@@ -468,11 +486,14 @@ export class QueryBuilder<
    * The runtime kind may not appear in `G["ontology"]` at all, so — unlike
    * `from()` — this always widens to {@link PolymorphicNodeType} whenever the
    * axis is not `"exact"`, rather than computing `SubsumptionAffected`.
+   * `expansion: "narrower"` types the alias as an untyped {@link NodeAlias},
+   * the same way `from()` does. Omitting the option, passing `{}`, and
+   * passing an explicit `undefined` all take the store default.
    */
   fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: false; includeNarrower?: false },
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>>>,
@@ -484,7 +505,7 @@ export class QueryBuilder<
   fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: true; includeNarrower?: false },
+    options?: { expansion?: "subclasses" | undefined },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>>>,
@@ -493,10 +514,19 @@ export class QueryBuilder<
     CoordinateState
   >;
 
+  /**
+   * The axis-unknown overload, which covers two call shapes with one rule:
+   * a `"narrower"` expansion (no schema relationship is claimed, so no
+   * per-kind type can be promised) and a forwarded options bag whose axis is
+   * not one literal — the option type itself, or a wrapper's
+   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
+   * alias takes the conservative untyped form; state a literal axis at the
+   * call site to keep the precise alias type.
+   */
   fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeNarrower: true; includeSubClasses?: false },
+    options: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias>,
@@ -530,7 +560,7 @@ export class QueryBuilder<
 
     const expansion = resolveAliasExpansion(
       options,
-      this.#config.defaultIncludeSubClasses,
+      this.#config.defaultExpansion,
     );
     const kinds = expandKindsForAxis(
       expansion,
@@ -942,7 +972,7 @@ export class QueryBuilder<
     // Edge-endpoint validation accepts any subclass of a declared endpoint
     // (`isAssignableToAny`), so a live row's actual kind can be an
     // undeclared subclass of a declared target kind — expand through the
-    // same subclass closure `to(kind, alias, { includeSubClasses: true })`
+    // same subclass closure `to(kind, alias, { expansion: "subclasses" })`
     // applies, or a real row is silently dropped from the result instead of
     // refused or returned (Ed-02).
     const targetKinds = new Set<string>();

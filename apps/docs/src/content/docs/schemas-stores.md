@@ -545,7 +545,7 @@ function createStore<G extends GraphDef>(
 | `recordedRead` | `ExternalRecordedReadSource` | Bind an already-populated recorded relation for `store.asOfRecorded(T)` reads without enabling TypeGraph-managed capture. Must be created with `recordedRelation({ schema })` using a `createSqlSchema(...)` schema; the store validates those factory descriptors at runtime. Use `history: true` when TypeGraph should capture writes and advance `store.recordedNow()`. |
 | `schema` | `SqlSchema` | Custom table name configuration created with `createSqlSchema(...)` |
 | `queryDefaults.traversalExpansion` | `TraversalExpansion` | Default ontology expansion mode for traversals (default: `"inverse"`) |
-| `queryDefaults.includeSubClasses` | `boolean` | Default subclass-expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an alias states no `includeSubClasses` (default: `true` — a supertype query is polymorphic by default; see [Ontology](/ontology#subsumption-type-inheritance)). `search()` and the collection APIs are unaffected and stay exact-kind. |
+| `queryDefaults.expansion` | `"exact" \| "subclasses"` | Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an alias states no `expansion` (default: `"subclasses"` — a supertype query is polymorphic by default; see [Ontology](/ontology#subsumption-type-inheritance)). `"narrower"` is not a store-wide default. `search()` and the collection APIs are unaffected and stay exact-kind. |
 | `autoRefreshStatistics` | `false \| number` | Row threshold at which a single autocommit `bulkCreate`/`bulkInsert` triggers an automatic planner-statistics refresh (default: `1000`); `false` disables. See [Refreshing planner statistics](/backend-setup#refreshing-planner-statistics-after-bulk-loads). |
 | `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById` or endpoint get-or-create update whose validated props and requested window already equal the existing live row; bulk forms behave identically (default: `false`). Node `getOrCreateByConstraint` updates are not coalesced; use `upsertById` for replay projectors that must avoid unchanged node history churn. For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options), [`getOrCreateByEndpoints`](#getorcreatebyendpointsfrom-to-props-options), and [Materializing external event logs](/materializing-event-logs). |
 
@@ -577,7 +577,7 @@ Restore the pre-Q3 exact-kind query behavior everywhere:
 
 ```typescript
 const store = createStore(graph, backend, {
-  queryDefaults: { includeSubClasses: false },
+  queryDefaults: { expansion: "exact" },
 });
 ```
 
@@ -2601,9 +2601,18 @@ honor the option meaningfully and throws `ConfigurationError`
 (`COMPOSITION_NO_PARTS_DECLARED`) rather than silently running as if
 `composition` were absent.
 
-Composition edges added this way are not necessarily members of the
-compile-time `edges` list, so list them there too if you want typed access
-to their rows in `adjacency` / `reverseAdjacency`.
+Which composition edge kinds join depends on the ROOT's runtime kind, so
+the exact set is not knowable at compile time. `composition: true`
+therefore widens the result's edge-key type to the graph's whole edge-kind
+union: every key the traversal can produce is reachable through
+`adjacency` / `reverseAdjacency`, and no key outside the graph's own edges
+ever appears. With `composition` absent or `false`, the key type is the
+`edges` list you named, exactly as before. (A `composition` whose value is
+only known to be a `boolean` widens too — the conservative reading.) The
+matching `project.edges` keys widen with it, so a `composition: true` call can
+shrink the payload of the composition edges it receives; without
+`composition: true`, projecting an edge kind outside `edges` stays a
+compile-time error.
 
 #### Subgraph Projection
 

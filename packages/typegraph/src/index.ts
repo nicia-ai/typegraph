@@ -702,6 +702,7 @@ export type {
   SubgraphNodeResult,
   SubgraphOptions,
   SubgraphResult,
+  SubgraphResultEdgeKinds,
   SubsetEdge,
   SubsetNode,
 } from "./store/subgraph";
@@ -885,6 +886,10 @@ export {
   sum,
   UnionableQuery,
 } from "./query";
+
+// The one expansion axis a `from`/`to` alias, a store-wide default, and
+// `search()` state (the default and search forms exclude `"narrower"`).
+export type { AliasExpansionAxis, DefaultAliasExpansionAxis } from "./query";
 
 // Fragment composition types
 export type {

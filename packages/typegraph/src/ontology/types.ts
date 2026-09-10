@@ -111,15 +111,36 @@ export function getTypeName(
  * A structurally validated ontology relation. Assignable to
  * {@link OntologyRelation} unchanged (so it slots into a
  * `defineGraph({ ontology: [...] })` array with no cast), but retains the
- * `From`/`To` kind literals so `G["ontology"]` — and therefore the
- * polymorphic-alias computation in `src/query/builder/types.ts` — can see
- * which node kinds a relation actually connects.
+ * meta-edge NAME literal and the `From`/`To` kind literals so
+ * `G["ontology"]` — and therefore the polymorphic-alias computation in
+ * `src/query/builder/types.ts` — can see which relation connects which
+ * kinds.
+ *
+ * EVERY meta-edge factory in `core-meta-edges.ts` returns this, including
+ * the IRI-routed `equivalentTo(Kind, iri)` overload (typed
+ * `from: Kind, to: string`) and the composition factories. A bare
+ * {@link OntologyRelation} element in a graph's ontology tuple is therefore
+ * only reachable through a caller's own annotation, and
+ * `SubsumptionAffected` (`src/query/builder/types.ts`) widens
+ * conservatively when it sees one — it can no longer distinguish "a
+ * relation that provably does not touch this kind" from "a factory whose
+ * result was never typed".
  */
 export type TypedOntologyRelation<
   M extends string,
   From extends NodeType | AnyEdgeType | string,
   To extends NodeType | AnyEdgeType | string,
-> = Readonly<{ metaEdge: MetaEdge<M>; from: From; to: To }>;
+> = Readonly<{
+  metaEdge: MetaEdge<M>;
+  from: From;
+  to: To;
+  /** See {@link OntologyRelation.via} — carried so a typed composition relation is still an `OntologyRelation`. */
+  via?: string;
+  /** See {@link OntologyRelation.partSide}. */
+  partSide?: CompositionPartSide;
+  /** See {@link OntologyRelation.existence}. */
+  existence?: CompositionExistence;
+}>;
 
 /**
  * `keyof T`, with any generic index-signature key (`[x: string]: ...`)

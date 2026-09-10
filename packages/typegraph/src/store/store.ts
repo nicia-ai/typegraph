@@ -204,6 +204,10 @@ import {
   type QueryCoordinateState,
 } from "../query/builder";
 import {
+  DEFAULT_ALIAS_EXPANSION_AXIS,
+  type DefaultAliasExpansionAxis,
+} from "../query/builder/alias-expansion";
+import {
   createEngineRecordedReadBinding,
   createRecordedReadBinding,
   createSqlSchema,
@@ -381,8 +385,9 @@ import {
   executeSubgraph,
   type InternalSubgraphOptions,
   type SubgraphOptions,
-  type SubgraphProject,
+  type SubgraphProjectFor,
   type SubgraphResult,
+  type SubgraphResultEdgeKinds,
 } from "./subgraph";
 import {
   createTransactionReceiptRecorder,
@@ -786,11 +791,12 @@ type StoreCore<G extends GraphDef> = Readonly<{
   subgraph: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ) => Promise<SubgraphResult<G, NK, EK, P>>;
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
   clear: () => Promise<void>;
   refreshStatistics: () => Promise<void>;
   materializeIndexes: (
@@ -1131,7 +1137,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #schemaMetadata: StoreSchemaMetadata;
   readonly #runtimeKindOwner = Object.freeze({});
   readonly #defaultTraversalExpansion: TraversalExpansion;
-  readonly #defaultIncludeSubClasses: boolean;
+  readonly #defaultExpansion: DefaultAliasExpansionAxis;
   // Stored verbatim so `evolve()` can construct the next Store with
   // identical options. Reconstructing from the individual private
   // fields would silently drop any future StoreOptions field a
@@ -1319,8 +1325,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#hooks = options?.hooks ?? {};
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
-    this.#defaultIncludeSubClasses =
-      options?.queryDefaults?.includeSubClasses ?? true;
+    this.#defaultExpansion =
+      options?.queryDefaults?.expansion ?? DEFAULT_ALIAS_EXPANSION_AXIS;
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
@@ -3382,11 +3388,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async subgraph<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     // The public surface is valid-time only (`recordedAsOf` is typed `never`).
     // Guard JS callers who bypass the type so a leaked recorded pin can't
     // silently switch this read onto the recorded relation; recorded subgraph
@@ -3414,11 +3421,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   subgraphAtCoordinate<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: InternalSubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    options: InternalSubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     const coordinate = resolveReadCoordinate(
       options.temporalMode ?? this.#graph.defaults.temporalMode,
       options.asOf,
@@ -6461,7 +6469,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         backend: queryBackend,
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
-        defaultIncludeSubClasses: this.#defaultIncludeSubClasses,
+        defaultExpansion: this.#defaultExpansion,
         runtimeKindTokenResolver: (token, entity) =>
           this.#resolveRuntimeKindToken(token, entity),
         ...(this.#schema !== undefined && { schema: this.#schema }),

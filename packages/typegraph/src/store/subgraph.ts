@@ -309,7 +309,8 @@ export type SubgraphOptions<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends boolean | undefined = undefined,
 > = Readonly<{
   /** Edge kinds to follow during traversal. Edges not listed are not traversed. */
   edges: readonly EK[];
@@ -347,11 +348,15 @@ export type SubgraphOptions<
    * silently running as if the option were absent.
    *
    * Composition edge kinds added this way are not necessarily members of
-   * the compile-time `edges` list, so their rows in `adjacency` /
-   * `reverseAdjacency` are reachable at runtime but outside the typed `EK`
-   * union unless also listed explicitly in `edges`.
+   * the compile-time `edges` list, and which ones join depends on the ROOT's
+   * runtime kind — so passing `true` widens the result's edge-key type to
+   * the graph's whole edge-kind union (see
+   * {@link SubgraphResultEdgeKinds}). That is conservative on purpose: an
+   * `adjacency` key the traversal can actually produce must be reachable
+   * through the result type, and the exact set is not knowable at compile
+   * time.
    */
-  composition?: boolean;
+  composition?: C;
   /**
    * Temporal mode applied to both nodes and edges along the traversal and in
    * the hydrated result. Defaults to `graph.defaults.temporalMode`.
@@ -385,8 +390,9 @@ export type InternalSubgraphOptions<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
-> = Omit<SubgraphOptions<G, EK, NK, P>, "recordedAsOf"> &
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends boolean | undefined = undefined,
+> = Omit<SubgraphOptions<G, EK, NK, P, C>, "recordedAsOf"> &
   Readonly<{
     recordedAsOf?: RecordedInstant;
   }>;
@@ -413,6 +419,52 @@ export type SubgraphEdgeResult<
   [Kind in EK]: SubgraphEdgeResultForKind<G, Kind, P>;
 }[EK];
 
+/**
+ * The edge-key union a `subgraph(...)` result exposes in `adjacency` /
+ * `reverseAdjacency`: the declared `edges` list, widened to the graph's
+ * WHOLE edge-kind union when the call passed `composition: true`.
+ *
+ * `composition: true` adds `registry.compositionEdgeKindsUnder(rootKind)` to
+ * the traversal — a set that depends on the root row's runtime kind, not on
+ * anything the call site states — so the exact addition is not knowable at
+ * compile time. Widening to every declared edge kind is the conservative
+ * reading: every key the traversal can produce is in the result type, and no
+ * key outside the graph's own edges ever appears. A `composition` that is
+ * absent or `false` leaves the existing `edges`-list typing exactly as it
+ * was. `true extends C` is the test, not `C extends true`, so an unresolved
+ * `boolean` — a flag that MIGHT be `true` at runtime — widens as well.
+ */
+export type SubgraphResultEdgeKinds<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  C extends boolean | undefined,
+> = true extends C ? EdgeKinds<G> : EK;
+
+/**
+ * The projection a `subgraph(...)` call may state, keyed by the edge kinds its
+ * RESULT carries ({@link SubgraphResultEdgeKinds}) rather than by the declared
+ * `edges` list. A `composition: true` call receives composition edge rows, and
+ * the executor builds its edge projection plan from that same widened kind
+ * list, so constraining the input by the narrow list alone would leave a
+ * caller unable to shrink the payload of rows it is already being handed.
+ * Without `composition: true` the two lists are identical, so a projection
+ * naming a kind outside `edges` stays a compile-time error.
+ */
+export type SubgraphProjectFor<
+  G extends GraphDef,
+  NK extends NodeKinds<G>,
+  EK extends EdgeKinds<G>,
+  C extends boolean | undefined,
+> = SubgraphProject<G, NK, SubgraphResultEdgeKinds<G, EK, C>>;
+
+/**
+ * The result of a `subgraph(...)` read. `EK` is the edge-kind union the result
+ * CARRIES ({@link SubgraphResultEdgeKinds} of the call's declared `edges`), so
+ * `P` is constrained by the projection over that same union — the one
+ * {@link SubgraphProjectFor} admits at the call site. A fourth argument that
+ * is not a projection at all is refused here rather than silently yielding
+ * `undefined` selections and fully hydrated rows.
+ */
 export type SubgraphResult<
   G extends GraphDef,
   NK extends NodeKinds<G> = NodeKinds<G>,
@@ -488,7 +540,8 @@ export async function executeSubgraph<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends boolean | undefined = undefined,
 >(params: {
   graph: G;
   graphId: string;
@@ -498,8 +551,8 @@ export async function executeSubgraph<
   schema: SqlSchema | undefined;
   recordedReadBinding: RecordedReadBinding | undefined;
   registry: KindRegistry;
-  options: InternalSubgraphOptions<G, EK, NK, P>;
-}): Promise<SubgraphResult<G, NK, EK, P>> {
+  options: InternalSubgraphOptions<G, EK, NK, P, C>;
+}): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
   const { options } = params;
   const { valid: coordinate } = resolveReadCoordinate(
     options.temporalMode ?? params.graph.defaults.temporalMode,
@@ -768,7 +821,7 @@ export async function executeSubgraph<
     nodes: nodesMap,
     adjacency,
     reverseAdjacency,
-  } as unknown as SubgraphResult<G, NK, EK, P>;
+  } as unknown as SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>;
 }
 
 // ============================================================

@@ -460,7 +460,7 @@ describe("Query Execution (SQLite)", () => {
         .from("Person", "p")
         .whereNode("p", (p) => p.id.eq("collision-person"))
         .traverse("worksAt", "e")
-        .to("Organization", "o", { includeSubClasses: true })
+        .to("Organization", "o", { expansion: "subclasses" })
         .select((context) => ({
           id: context.o.id,
           kind: context.o.kind,
@@ -481,7 +481,7 @@ describe("Query Execution (SQLite)", () => {
         .from("Person", "p")
         .whereNode("p", (p) => p.id.eq("collision-person"))
         .optionalTraverse("worksAt", "e")
-        .to("Organization", "o", { includeSubClasses: true })
+        .to("Organization", "o", { expansion: "subclasses" })
         .groupByNode("p")
         .aggregate({
           orgCount: count("o"),
@@ -975,7 +975,7 @@ describe("Query Execution (SQLite)", () => {
         .whereNode("p", (p) => p.id.eq("recursive-collision-person"))
         .traverse("worksAt", "e")
         .recursive({ maxHops: 1 })
-        .to("Organization", "o", { includeSubClasses: true })
+        .to("Organization", "o", { expansion: "subclasses" })
         .select((context) => ({
           id: context.o.id,
           kind: context.o.kind,
