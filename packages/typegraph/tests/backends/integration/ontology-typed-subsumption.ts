@@ -281,15 +281,6 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       ]);
     });
 
-    it("refuses an unknown expansion axis identically on both engines", async () => {
-      const store = await context.createStore(narrowerGraph);
-      expect(() =>
-        store.query().from("TsRootConcept", "c", {
-          expansion: "subClasses",
-        } as never),
-      ).toThrow(ConfigurationError);
-    });
-
     it("refuses a narrower expansion naming an unregistered kind, identically on both engines", async () => {
       // `broader`/`narrower` accept any NodeType, registered or not — the
       // concept node is never added to `unregisteredNarrowerGraph.nodes`.

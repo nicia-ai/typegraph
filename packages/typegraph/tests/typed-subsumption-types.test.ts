@@ -25,6 +25,7 @@ import {
   type Store,
   subClassOf,
 } from "../src";
+import { ConfigurationError } from "../src/errors";
 import type {
   IncompatibleKeys,
   OntologyRelation,
@@ -469,18 +470,30 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
   });
 
   it("refuses an expansion axis outside the option's domain", () => {
+    // Unreachable through the typed overloads; a JavaScript caller can still
+    // get here, and expanding to the wrong kind list silently would be worse
+    // than a refusal. Decided in `resolveAliasExpansion` before any SQL is
+    // emitted, so this belongs here and not in the cross-backend suite — the
+    // two dialects cannot disagree about it.
     const builder = createQueryBuilder<typeof affectedGraph>(
       affectedGraph.id,
       affectedRegistry,
     );
-    expect(() =>
-      // Unreachable through the typed overloads; a JavaScript caller can
-      // still get here, and expanding to the wrong kind list silently
-      // would be worse than a refusal.
+    let caught: unknown;
+    try {
       builder.from("MediaAliasTest", "m", {
         expansion: "subClasses",
-      } as never),
-    ).toThrow("Unknown alias expansion");
+      } as never);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    expect((caught as ConfigurationError).details["code"]).toBe(
+      "QUERY_ALIAS_EXPANSION_INVALID",
+    );
+    expect((caught as ConfigurationError).message).toContain(
+      'Unknown alias expansion "subClasses"',
+    );
   });
 });
 
