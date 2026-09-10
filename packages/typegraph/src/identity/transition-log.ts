@@ -490,6 +490,39 @@ export type IdentityTransitionCursor = Readonly<{
   transitionId: string;
 }>;
 
+/**
+ * One owner for the `(recorded_revision, transition_id)` keyset predicate
+ * both transition-log readers page by: `readIdentityTransitions` (replay's
+ * fixed-point walk) and `readIdentityTransitionPageForInterchange` (archival
+ * export). `transitionIdKey` is the tie-break column wrapped in the same
+ * `binaryText` collation-safety seam both callers' `ORDER BY` uses — left
+ * bare, `>`/`ORDER BY` on that column would compare under the column's
+ * collation, which is locale-dependent on PostgreSQL and could disagree with
+ * each other on some inputs. `cursorFilter` is the empty fragment when
+ * `after` is `undefined`.
+ */
+function identityTransitionCursorSeam(
+  target: IdentityTarget,
+  after: IdentityTransitionCursor | undefined,
+): Readonly<{ transitionIdKey: SqlFragment; cursorFilter: SqlFragment }> {
+  const transitionIdKey = getDialect(target.dialect).binaryText(
+    sql`transition_id`,
+  );
+  const cursorFilter =
+    after === undefined ?
+      sql``
+    : sql`
+      AND (
+        recorded_revision > ${after.recordedRevision}
+        OR (
+          recorded_revision = ${after.recordedRevision}
+          AND ${transitionIdKey} > ${after.transitionId}
+        )
+      )
+    `;
+  return { transitionIdKey, cursorFilter };
+}
+
 export type IdentityTransitionReadScope = Readonly<{
   classRefs: readonly PlainNodeRef[];
   limit: number;
@@ -593,21 +626,10 @@ export async function readIdentityTransitions(
     ),
     sql` OR `,
   );
-  const transitionIdKey = getDialect(target.dialect).binaryText(
-    sql`transition_id`,
+  const { transitionIdKey, cursorFilter } = identityTransitionCursorSeam(
+    target,
+    scope.after,
   );
-  const cursorFilter =
-    scope.after === undefined ?
-      sql``
-    : sql`
-      AND (
-        recorded_revision > ${scope.after.recordedRevision}
-        OR (
-          recorded_revision = ${scope.after.recordedRevision}
-          AND ${transitionIdKey} > ${scope.after.transitionId}
-        )
-      )
-    `;
   const rows = await target.execute<RawIdentityTransitionRow>(
     asCompiledRowsSql(sql`
       SELECT ${IDENTITY_TRANSITION_COLUMNS}
@@ -656,21 +678,10 @@ export async function readIdentityTransitionPageForInterchange(
     limit: number;
   }>,
 ): Promise<IdentityTransitionPage> {
-  const transitionIdKey = getDialect(target.dialect).binaryText(
-    sql`transition_id`,
+  const { transitionIdKey, cursorFilter } = identityTransitionCursorSeam(
+    target,
+    options.after,
   );
-  const cursorFilter =
-    options.after === undefined ?
-      sql``
-    : sql`
-      AND (
-        recorded_revision > ${options.after.recordedRevision}
-        OR (
-          recorded_revision = ${options.after.recordedRevision}
-          AND ${transitionIdKey} > ${options.after.transitionId}
-        )
-      )
-    `;
   const rows = await target.execute<RawIdentityTransitionRow>(
     asCompiledRowsSql(sql`
       SELECT ${IDENTITY_TRANSITION_COLUMNS}
