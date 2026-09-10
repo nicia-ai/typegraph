@@ -1709,6 +1709,8 @@ class KindRegistry {
     compositionEdgeKindsOver(partKind: string): readonly string[];
     compositionEdgeKindsUnder(wholeKind: string): readonly string[];
     compositionExistence(concretePartKind: string): CompositionExistence;
+    compositionPairsBetween(partKind: string, wholeKind: string): readonly CompositionPair[];
+    compositionPairVia(partKind: string, wholeKind: string, viaEdgeKind: string): CompositionPair | undefined;
     compositionPartKindsUnder(wholeKind: string): readonly string[];
     compositionPartSide(edgeKind: string): CompositionPartSide | undefined;
     compositionPopulation(concretePartKind: string): "one" | "oneActive" | undefined;
@@ -1733,7 +1735,6 @@ class KindRegistry {
     expandNarrower(kind: string): readonly string[];
     expandSubClasses(kind: string): readonly string[];
     getAncestors(kind: string): ReadonlySet<string>;
-    getCompositionEdge(partKind: string, wholeKind: string): CompositionPair | undefined;
     getDescendants(kind: string): ReadonlySet<string>;
     getDisjointKinds(kind: string): readonly string[];
     getEdgeType(name: string): AnyEdgeType | undefined;

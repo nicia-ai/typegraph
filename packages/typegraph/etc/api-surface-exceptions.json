@@ -209,6 +209,46 @@
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "PessimisticLockCapabilities",
     "member": "advisoryLocks",
     "kind": "member-removed",
@@ -238,6 +278,46 @@
     "kind": "member-removed",
     "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
     "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
@@ -270,6 +350,46 @@
     "kind": "member-removed",
     "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
     "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
@@ -302,6 +422,46 @@
     "kind": "member-removed",
     "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
     "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
@@ -334,6 +494,46 @@
     "kind": "member-removed",
     "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
     "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
@@ -398,6 +598,46 @@
     "kind": "member-removed",
     "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
     "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
@@ -430,6 +670,46 @@
     "kind": "member-removed",
     "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
     "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph.api.md",
@@ -2074,14 +2354,6 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -2713,6 +2985,14 @@
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "TransactionRuntime",
     "member": "deleteNodeWithPolicy",
     "kind": "required-member-added",
@@ -3082,14 +3362,6 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -3550,6 +3822,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
@@ -3922,14 +4202,6 @@
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -4390,6 +4662,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
@@ -4762,14 +5042,6 @@
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -5230,6 +5502,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
@@ -5602,14 +5882,6 @@
   {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -6070,6 +6342,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
@@ -6882,14 +7162,6 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -7353,6 +7625,14 @@
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "TransactionRuntime",
     "member": "deleteNodeWithPolicy",
     "kind": "required-member-added",
@@ -7747,14 +8027,6 @@
     "entrypoint": "typegraph.api.md",
     "declaration": "KindRegistry",
     "member": "compositionWholeKindsOver",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
     "issue": "#641"
@@ -8270,6 +8542,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph.api.md",

@@ -44,6 +44,7 @@ import {
 } from "../resolved-mutation-set";
 import { type NodeRow } from "../row-mappers";
 import {
+  type CompositionAttachment,
   type CreateNodeInput,
   type GetOrCreateAction,
   type Node,
@@ -268,6 +269,12 @@ export type NodeCollectionConfig = Readonly<{
   ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
+  executeReparent: (
+    kind: string,
+    id: string,
+    attachment: CompositionAttachment,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeDelete: (
     kind: string,
     id: string,
@@ -416,6 +423,7 @@ export function createNodeCollection<
     executeResolvedMutationSet: executeNodeResolvedMutationSet,
     prepareReplacement,
     executeReplacementBatch: executeNodeReplacementBatch,
+    executeReparent: executeNodeReparent,
     executeDelete: executeNodeDelete,
     executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
@@ -627,6 +635,13 @@ export function createNodeCollection<
       );
       await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
       return result;
+    },
+
+    async reparent(
+      id: NodeId<N>,
+      attachment: CompositionAttachment,
+    ): Promise<void> {
+      await executeNodeReparent(kind, id, attachment, backend);
     },
 
     async delete(id: NodeId<N>): Promise<void> {

@@ -690,11 +690,17 @@ try {
     //   wholeId: "<anthology-id>", edgeKind: "includedIn",
     //   incumbentEdgeId: "<the chapterOf edge's id>" }
     console.log(error.suggestion);
-    // "Detach the part from its current whole before attaching it to a new
-    //  one, or reparent it through an update instead of a second create."
+    // "Call `store.nodes.<PartKind>.reparent(partId, { kind, id, via? })` to
+    //  move the part — it retires the incumbent attachment and creates the
+    //  new one in one transaction. ..."
   }
 }
 ```
+
+Moving a part is [`reparent`](/ontology#reparent-moving-a-part-to-a-new-whole)'s
+job: it retires the incumbent attachment and creates the new one in one
+transaction, which is the only order in which both R4 and
+`existence: "required"` hold.
 
 `details.incumbentEdgeId` names the edge that already holds the axis — the
 one fact the claim statement's own result reports. It never names the
@@ -729,24 +735,47 @@ try {
 }
 ```
 
-`details.situation` distinguishes the three shapes: `"create"` (no `partId`
+`details.situation` distinguishes the four shapes: `"create"` (no `partId`
 yet — deciding the refusal is what keeps the row from ever being written),
 `"detach"` (carries `edgeKind`/`edgeId`, the composition edge the caller
-tried to end), and `"existing"` (a `getOrCreateByConstraint` call whose
-`partOf` resolved to `"found"`/`"updated"` — carries `currentWhole` when the
-node has a live one to name).
+tried to end), `"existing"` (a `getOrCreateByConstraint` call whose `partOf`
+postcondition the already-existing node contradicts — carries
+`currentWhole`/`currentVia` and `requestedWhole`/`requestedVia`, so the move
+the caller would have to make is visible in the error), and `"props"` (a
+`getOrCreateByConstraint` or `reparent` call resolving to an attachment that
+already holds — same whole, same realizing edge — whose stated `props` are
+schema-valid but canonically different from the edge's live stored props —
+carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`). `requestedVia`
+is the RESOLVED realizing edge of the pair the call's `partOf` names, so it is
+present even when the call omitted `via`.
 
-Pass `partOf: { kind, id }` naming a live, declared whole to fix a create
-refusal; soft-delete or hard-delete the part itself (which frees its edge —
-a retired part is not orphaned by losing it) to fix a detach refusal; use an
-explicit edge create/update to reparent instead of
-`getOrCreateByConstraint`'s `partOf`.
+Pass `partOf: { kind, id, via? }` naming a live, declared whole to fix a
+create refusal; soft-delete or hard-delete the part itself (which frees its
+edge — a retired part is not orphaned by losing it) to fix a detach refusal;
+call [`store.nodes.<Kind>.reparent(id, attachment)`](/ontology#reparent-moving-a-part-to-a-new-whole)
+to fix an `"existing"` refusal, which is the operation that actually moves a
+part; call `store.edges.<via>.update(edgeId, props)` to fix a `"props"`
+refusal, which changes the realizing edge's own properties directly.
 
-A `partOf` naming a whole kind with no declared composition pair to the
-part's kind raises `ConfigurationError` (`details.code:
-"COMPOSITION_WHOLE_NOT_DECLARED"`), not `CompositionExistenceError` — the
-option is accepted-shaped but the pair itself does not exist, regardless of
-whether the part kind's existence is `"required"` or `"optional"`.
+An `"existing"` or `"props"` refusal fires only for a CONTRADICTION. A
+`getOrCreateByConstraint` (or `reparent`) call whose `partOf` matches the
+node's live whole, realizing edge, and (when stated) props succeeds and is
+idempotent, and one whose node has no live whole writes the attachment — see
+[`partOf` is a postcondition](/ontology#existence-a-part-that-cannot-exist-without-a-whole).
+
+A `partOf` the graph cannot resolve raises `ConfigurationError` rather than
+`CompositionExistenceError` — the option is accepted-shaped but names no
+declared pair, regardless of the part kind's `existence` and regardless of
+whether the call created the node or found it (the attachment is resolved
+before the match is even read, so the refusal cannot depend on what the
+constraint matched):
+
+| `details.code` | when |
+| --- | --- |
+| `COMPOSITION_WHOLE_NOT_DECLARED` | no composition pair is declared between the part's kind and `partOf.kind` |
+| `COMPOSITION_VIA_NOT_DECLARED` | `via` names an edge kind that realizes no declared pair between the two kinds |
+| `COMPOSITION_VIA_AMBIGUOUS` | `via` was omitted while more than one pair is declared between the two kinds |
+| `COMPOSITION_NOT_A_PART` | `reparent` was called on a kind that declares no `partOf`/`hasPart` pair at all |
 
 ### `UniquenessError`
 
@@ -874,12 +903,16 @@ try {
 ### `CompositionCycleError`
 
 Thrown when the composition parts closure of a whole revisits a node already
-in the walk — an instance-level cycle among reflexive composition edges (a
-kind declared `partOf`/`hasPart` against itself, such as `Section partOf
-Section`). Reflexive composition is permitted at the kind level; nothing yet
-refuses the corresponding write-time cycle, so two or more nodes can end up
-mutually `partOf` each other. Deleting any node in the cycle throws this
-error instead of looping or silently truncating the closure.
+in the walk — an instance-level cycle among composition edges (for example a
+`Section partOf Section` ring). Reflexive composition is permitted at the
+kind level, and the store refuses the corresponding **instance** cycle at
+write time: every realizing edge kind belongs to the oriented composition
+union, probed for acyclicity on each composition edge write
+([`EdgeAcyclicityError`](#edgeacyclicityerror)). A ring therefore only
+reaches this walk through rows that bypassed that fence — written before the
+`partOf`/`hasPart` pair was declared, by trusted import, or by direct SQL.
+Deleting any node in the cycle throws this error instead of looping or
+silently truncating the closure.
 
 ```typescript
 try {
@@ -1831,7 +1864,7 @@ try {
 | `KIND_NOT_FOUND` | `KindNotFoundError` | user | Unknown node/edge type |
 | `ENDPOINT_NOT_FOUND` | `EndpointNotFoundError` | user | Edge endpoint node doesn't exist |
 | `RESTRICTED_DELETE` | `RestrictedDeleteError` | constraint | Delete blocked by existing edges |
-| `COMPOSITION_CYCLE_DETECTED` | `CompositionCycleError` | constraint | An instance-level cycle exists among reflexive composition edges |
+| `COMPOSITION_CYCLE_DETECTED` | `CompositionCycleError` | constraint | An instance-level composition cycle survives from rows that bypassed the write-time acyclicity fence |
 | `CONFIGURATION_ERROR` | `ConfigurationError` | system | Invalid configuration |
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |

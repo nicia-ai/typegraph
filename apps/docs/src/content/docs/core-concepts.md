@@ -549,9 +549,10 @@ relation is a real whole/part relationship. That's a separate declaration,
 which edge kind *realizes* containment and requires that edge to declare
 `cardinality`/`targetCardinality: "one"` or `"oneActive"` on the whole side.
 Ownership (one whole per part, enforced cross-relation) and cascade (deleting
-a whole deletes its parts) are the guarantees this declaration is *for* — see
-the [containment tiers](/ontology#choosing-a-containment-tier) table for
-which of them are enforced today versus still forthcoming.
+a whole deletes its parts) are the guarantees this declaration is *for*, and
+both are enforced — see the
+[containment tiers](/ontology#choosing-a-containment-tier) table for the
+complete list.
 
 ### Edge Operations
 

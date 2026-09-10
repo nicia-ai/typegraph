@@ -97,7 +97,10 @@ import {
   memoizeAcquiredRecordedGraphWriteLock,
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
-import { type OperationHookContext } from "../types";
+import {
+  type OperationHookContext,
+  type OperationOutcomeFacts,
+} from "../types";
 
 /**
  * The slice of an operation context {@link runInWriteTransaction} needs: the
@@ -817,6 +820,7 @@ export type HookedWriteOperationContext = WriteTransactionContext &
       ctx: OperationHookContext,
       fn: () => Promise<T>,
       didWrite?: (result: T) => boolean,
+      operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
     ) => Promise<T>;
   }>;
 
@@ -841,10 +845,12 @@ export function runHookedWriteOperation<T>(
     transactionMode: WriteTransactionMode,
   ) => Promise<T>,
   options?: WriteTransactionOptions<T>,
+  operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
 ): Promise<T> {
   return ctx.withOperationHooks(
     opContext,
     () => runInWriteTransaction(ctx, backend, body, options),
     options?.didWrite,
+    operationFacts,
   );
 }

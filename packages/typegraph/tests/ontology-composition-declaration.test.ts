@@ -242,9 +242,9 @@ describe("composition registration checks (buildKindRegistry)", () => {
       ontology: [partOf(Engine, Car, { via: installedIn, partSide: "from" })],
     });
     const registry = buildKindRegistry(graph);
-    expect(registry.getCompositionEdge("Engine", "Car")).toEqual(
+    expect(registry.compositionPairsBetween("Engine", "Car")).toEqual([
       matchingObject({ partSide: "from", population: "one" }),
-    );
+    ]);
   });
 
   it("ONTOLOGY_COMPOSITION_CARDINALITY: via declares no constraining cardinality", () => {
@@ -283,9 +283,9 @@ describe("composition registration checks (buildKindRegistry)", () => {
     const registry = buildKindRegistry(graph);
     expect(registry.compositionPartSide("hasWheel")).toBe("to");
     expect(registry.compositionPopulation("Wheel")).toBe("one");
-    expect(registry.getCompositionEdge("Wheel", "Bicycle")).toEqual(
+    expect(registry.compositionPairsBetween("Wheel", "Bicycle")).toEqual([
       matchingObject({ viaEdgeKind: "hasWheel", partSide: "to" }),
-    );
+    ]);
   });
 
   it("ONTOLOGY_COMPOSITION_VIA_MIXED: the via edge admits a pair no relation declares", () => {
@@ -640,10 +640,10 @@ describe("composition readers resolve subclasses of a declared part kind", () =>
     expect(registry.compositionPopulation("Sub")).toBe("one");
   });
 
-  it("getCompositionEdge resolves the subclass part kind", () => {
-    expect(registry.getCompositionEdge("Sub", "Whole")).toEqual(
+  it("compositionPairsBetween resolves the subclass part kind", () => {
+    expect(registry.compositionPairsBetween("Sub", "Whole")).toEqual([
       matchingObject({ viaEdgeKind: "partOfWhole", population: "one" }),
-    );
+    ]);
   });
 
   it("compositionEdgeKindsOver resolves the subclass part kind", () => {
@@ -685,10 +685,10 @@ describe("composition readers resolve subclasses of a declared whole kind", () =
   });
   const registry = buildKindRegistry(graph);
 
-  it("getCompositionEdge resolves the subclass whole kind", () => {
-    expect(registry.getCompositionEdge("Part", "SubWhole")).toEqual(
+  it("compositionPairsBetween resolves the subclass whole kind", () => {
+    expect(registry.compositionPairsBetween("Part", "SubWhole")).toEqual([
       matchingObject({ viaEdgeKind: "partOfBaseWhole", population: "one" }),
-    );
+    ]);
   });
 
   it("compositionEdgeKindsUnder resolves the subclass whole kind", () => {

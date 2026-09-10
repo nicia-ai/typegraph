@@ -22,6 +22,7 @@ import {
 import { type KindRegistry } from "../../registry/kind-registry";
 import { edgeCardinalitySpec } from "../claims/edge-claims";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import { type CompositionNodeRef } from "../types";
 
 /**
  * One node the cascade will delete, with the composition edge that binds it.
@@ -42,7 +43,7 @@ type CompositionCascadeMember = Readonly<{
    * which for a depth >= 2 member is an intermediate part, not the cascade's
    * root. Consumers that need "which composition pair realizes this
    * membership" read `viaEdgeKind`/`whole` off the member rather than
-   * re-deriving it via `registry.getCompositionEdge(member.kind, root.kind)`
+   * re-deriving it via `registry.compositionPairsBetween(member.kind, root.kind)`
    * — that re-derivation is wrong past depth 1 (the root is not necessarily
    * the immediate whole) and is exactly the kind of second spelling this
    * module exists to avoid.
@@ -66,6 +67,22 @@ const EMPTY_COMPOSITION_CASCADE_PLAN: CompositionCascadePlan = {
   members: [],
   consumedEdgeIds: new Set(),
 };
+
+/**
+ * The plan's members as bare `{ kind, id }` refs, leaf-first — what a whole's
+ * delete reports to its operation hook and to the transaction receipt
+ * (`cascadedParts`).
+ *
+ * A projection of the plan the cascade ALREADY computes, not a second walk:
+ * the exposure and the deletions are the same list by construction, so a
+ * consumer invalidating a cache from `cascadedParts` can never be told about
+ * a part the cascade did not delete (or miss one it did).
+ */
+export function cascadedPartReferences(
+  plan: CompositionCascadePlan,
+): readonly CompositionNodeRef[] {
+  return plan.members.map((member) => ({ kind: member.kind, id: member.id }));
+}
 
 /**
  * Whether one composition edge row still counts as a live membership under
@@ -304,14 +321,14 @@ async function liveDiscoveredMembers(
  * reflexive composition, so a kind-level closure of one edge kind places no
  * bound on instance depth. The visited set is finite because the graph is; a
  * round that discovers no new member ends the walk normally. A row that
- * resolves to an ALREADY-visited member is an INSTANCE-level cycle — reachable
- * data, not a library invariant violation: reflexive composition is permitted
- * at the kind level (`isReflexiveCompositionAllowed`, ontology/validation.ts),
- * and nothing refuses the corresponding instance cycle at write time (that is
- * the union-acyclicity fence's job, tracked separately, not yet built). The
- * walk cannot silently truncate a revisit — that would produce a silent
- * orphan — so it stops and throws the typed, user-facing
- * {@link CompositionCycleError} instead.
+ * resolves to an ALREADY-visited member is an INSTANCE-level cycle. The
+ * write path refuses one: every composition-realizing edge kind belongs to
+ * the oriented composition union (`compositionAcyclicRelation`,
+ * `src/store/acyclicity.ts`), probed at write time, so a cycle can only
+ * reach this walk through rows written before the relation was declared, by
+ * trusted import, or by direct SQL. The walk cannot silently truncate a
+ * revisit — that would produce a silent orphan — so it stops and throws the
+ * typed, user-facing {@link CompositionCycleError} instead.
  *
  * Deliberately not `buildReachableCte`: one CTE carries one temporal mode,
  * and a closure spanning a `one` level and an `oneActive` level needs both.
@@ -358,10 +375,27 @@ export async function planCompositionCascade(
         partSide === "from" ?
           { kind: row.to_kind, id: row.to_id }
         : { kind: row.from_kind, id: row.from_id };
-      const pair = ctx.registry.getCompositionEdge(part.kind, wholeOfRow.kind);
+      // By `row.kind`, not "the first declared pair between these two
+      // kinds": two realizing edges may hold the same (part, whole) pair
+      // (E-a-2), and the pair this row is judged under must be the one the
+      // row itself realizes. NOT a population fix — population cannot differ
+      // between two pairs applicable to one concrete part kind
+      // (`ONTOLOGY_COMPOSITION_POPULATION_MIXED` refuses that ontology) — so
+      // the verdict below is the same either way today. It is the INVARIANT
+      // below that the by-`via` lookup keeps honest: the "no declared pair"
+      // throw is reachable only from a row no declared pair admits, which
+      // `ONTOLOGY_COMPOSITION_VIA_MIXED` already rules out at registry-build
+      // time (every endpoint pair a composition edge kind admits must itself
+      // be a declared pair) — which is exactly what makes it a
+      // should-be-impossible invariant rather than a user-facing refusal.
+      const pair = ctx.registry.compositionPairVia(
+        part.kind,
+        wholeOfRow.kind,
+        row.kind,
+      );
       if (pair === undefined) {
         throw new CompilerInvariantError(
-          `planCompositionCascade read composition edge "${row.kind}" between "${part.kind}" and "${wholeOfRow.kind}", but the registry declares no composition pair for that combination.`,
+          `planCompositionCascade read composition edge "${row.kind}" between "${part.kind}" and "${wholeOfRow.kind}", but the registry declares no composition pair between them realized by that edge kind.`,
           {
             edgeKind: row.kind,
             partKind: part.kind,

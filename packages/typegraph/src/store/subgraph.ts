@@ -314,7 +314,11 @@ export type SubgraphOptions<
 > = Readonly<{
   /** Edge kinds to follow during traversal. Edges not listed are not traversed. */
   edges: readonly EK[];
-  /** Maximum traversal depth from root (default: 10). */
+  /**
+   * Maximum traversal depth from root for the `edges` list above (default:
+   * 10). It does NOT bound the `composition` closure: that returns the
+   * complete owned unit at any depth — see {@link SubgraphOptions.composition}.
+   */
   maxDepth?: number;
   /**
    * Node kinds to include in the result. Nodes of other kinds are still
@@ -355,6 +359,12 @@ export type SubgraphOptions<
    * `adjacency` key the traversal can actually produce must be reachable
    * through the result type, and the exact set is not knowable at compile
    * time.
+   *
+   * The closure is COMPLETE: it is bounded by its own visited set, never by
+   * `maxDepth`. A part tree deeper than the default depth still comes back
+   * whole, because a whole plus a truncated prefix of its parts is not an
+   * owned unit. `maxDepth` (and `cyclePolicy`) bound the explicit `edges`
+   * traversal alone.
    */
   composition?: C;
   /**
@@ -676,6 +686,29 @@ export async function executeSubgraph<
    * subtree — R4 (one whole per part) makes the upward walk deterministic,
    * which is exactly what lets the downward re-descent pick up siblings
    * undetected.
+   *
+   * `composition: true` means "the COMPLETE owned unit", so this closure is
+   * bounded by its VISITED SET, never by `maxDepth`: a whole plus a
+   * truncated prefix of its parts is not an export unit — reloading it would
+   * silently drop the tail of every deep subtree, and a required part cut
+   * off from its whole cannot even be recreated. `maxDepth` continues to
+   * bound the caller's own `edges` traversal (a genuine breadth choice over
+   * arbitrary relationships) and nothing else. Composition depth is not a
+   * caller's choice either way: it is however deep the part tree the caller
+   * already wrote happens to be.
+   *
+   * Termination is structural rather than numeric. `cyclePolicy: "prevent"`
+   * is fixed here — not inherited from `ctx.cyclePolicy` — so the recursive
+   * term carries the path check that makes the visited set the bound; the
+   * caller's cycle policy, like `maxDepth`, governs the explicit `edges`
+   * traversal alone. `MAX_EXPLICIT_RECURSIVE_DEPTH` remains as the engine's
+   * own runaway guard, the same ceiling every explicit traversal is capped
+   * at — and the one caveat on "complete": a part chain longer than that
+   * ceiling is TRUNCATED here, not refused, so the owned unit of a tree
+   * deeper than 1000 hops is still short its tail. Documented in
+   * `ontology.md` rather than silently assumed unreachable; raising it to a
+   * typed refusal needs the ceiling to be observable in the CTE's own result,
+   * which no dialect reports today.
    */
   function buildSubgraphCompositionReachableCte(
     edgeKindsForTraversal: readonly string[],
@@ -691,8 +724,8 @@ export async function executeSubgraph<
       sourceId: ctx.rootId,
       outEdgeKinds,
       inEdgeKinds,
-      maxHops: ctx.maxDepth,
-      cyclePolicy: ctx.cyclePolicy,
+      maxHops: MAX_EXPLICIT_RECURSIVE_DEPTH,
+      cyclePolicy: "prevent",
       includePath: false,
       temporalMode: ctx.temporalMode,
       ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),

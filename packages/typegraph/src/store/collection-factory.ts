@@ -24,6 +24,7 @@ import {
 import type { ResolvedMutationSetAttempt } from "./resolved-mutation-set";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
+  type CompositionAttachment,
   type CreateEdgeInput,
   type CreateNodeInput,
   type Edge,
@@ -109,6 +110,12 @@ export type NodeOperations = Readonly<{
    * the other preconditions.
    */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
+  executeReparent: (
+    kind: string,
+    id: string,
+    attachment: CompositionAttachment,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeDelete: (
     kind: string,
     id: string,

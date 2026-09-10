@@ -13,6 +13,7 @@ export { registerClaimCompensationIntegrationTests } from "./claim-compensation"
 export { registerClaimLookupPreferenceIntegrationTests } from "./claim-lookup-preference";
 export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identity";
 export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
+export { registerCompositionAttachmentIntegrationTests } from "./composition-attachment";
 export { registerCompositionExistenceIntegrationTests } from "./composition-existence";
 export { registerCompositionFenceIntegrationTests } from "./composition-fence";
 export { registerCompositionNavigationIntegrationTests } from "./composition-navigation";
