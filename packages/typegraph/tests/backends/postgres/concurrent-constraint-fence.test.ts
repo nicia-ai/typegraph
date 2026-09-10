@@ -18,6 +18,10 @@
  *   rows that can never collide.
  * - **Disjointness**: a predicate over `(graph_id, id)` ACROSS kinds, while the
  *   nodes primary key is `(graph_id, kind, id)`.
+ * - **A composition `partOf` postcondition**: `getOrCreateByConstraint`
+ *   decides what an incumbent whole MEANS from a read, and two callers naming
+ *   different wholes for one already-existing part each read "no whole yet".
+ *   The refusal is the application's, not a key's.
  *
  * SQLite has always been safe here (`BEGIN IMMEDIATE` admits one writer at a
  * time) and PostgreSQL was safe only with history or revision tracking on,
@@ -54,12 +58,14 @@ import { z } from "zod";
 
 import {
   CardinalityError,
+  CompositionExistenceError,
   createStore,
   defineEdge,
   defineGraph,
   defineNode,
   DisjointError,
   disjointWith,
+  partOf,
   subClassOf,
   UniquenessError,
 } from "../../../src";
@@ -94,10 +100,24 @@ const Contractor = defineNode("Contractor", {
   schema: z.object({ name: z.string(), email: z.string() }),
 });
 
+/** A composition whole, and the part that holds at most one of them (R4). */
+const Shelf = defineNode("Shelf", { schema: z.object({}) });
+const Book = defineNode("Book", { schema: z.object({ slug: z.string() }) });
+
+/** The key two racing `getOrCreateByConstraint` calls match the same part on. */
+const BOOK_SLUG_UNIQUE = {
+  name: "book_slug",
+  fields: ["slug"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+
 /** Cardinality `many`: only `getOrCreateByEndpoints` convergence is at stake. */
 const knows = defineEdge("knows", { schema: z.object({ since: z.string() }) });
 /** Cardinality `one`: an application count probe with no key behind it. */
 const reportsTo = defineEdge("reportsTo", { schema: z.object({}) });
+/** The realizing edge of the `partOf(Book, Shelf)` pair. */
+const shelvedIn = defineEdge("shelvedIn", { schema: z.object({}) });
 
 /**
  * Declared on every kind in the hierarchy, which is what makes the probe span
@@ -118,6 +138,8 @@ const graph = defineGraph({
     Worker: { type: Worker, unique: [STAFF_EMAIL_UNIQUE] },
     Employee: { type: Employee, unique: [STAFF_EMAIL_UNIQUE] },
     Contractor: { type: Contractor, unique: [STAFF_EMAIL_UNIQUE] },
+    Shelf: { type: Shelf },
+    Book: { type: Book, unique: [BOOK_SLUG_UNIQUE] },
   },
   edges: {
     knows: { type: knows, from: [Person], to: [Person] },
@@ -127,11 +149,18 @@ const graph = defineGraph({
       to: [Person],
       cardinality: "one",
     },
+    shelvedIn: {
+      type: shelvedIn,
+      from: [Book],
+      to: [Shelf],
+      cardinality: "one",
+    },
   },
   ontology: [
     subClassOf(Employee, Worker),
     subClassOf(Contractor, Worker),
     disjointWith(Person, Company),
+    partOf(Book, Shelf, { via: shelvedIn }),
   ],
 });
 
@@ -204,8 +233,11 @@ afterAll(async () => {
 
 beforeEach(async () => {
   if (firstPool === undefined) return;
+  // `typegraph_edge_claims` included: the cardinality-`one` and composition
+  // cases both reserve a claim row, and a row left behind would refuse the
+  // same write on the next run against this persistent per-suite database.
   await firstPool.query(
-    "TRUNCATE typegraph_node_uniques, typegraph_edges, typegraph_nodes",
+    "TRUNCATE typegraph_node_uniques, typegraph_edge_claims, typegraph_edges, typegraph_nodes",
   );
 });
 
@@ -433,6 +465,76 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const people = await storeA.nodes.Person.find();
         const companies = await storeA.nodes.Company.find();
         expect(people.length + companies.length).toBe(1);
+      },
+    );
+
+    it(
+      "admits exactly one of two concurrent partOf postconditions naming DIFFERENT wholes",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        // The composition counterpart of the cases above, and the half the
+        // in-process simulation (`tests/composition-attachment-fence.test.ts`)
+        // cannot reach: that file forces the interleaving by running the
+        // competing write inside the loser's own read, on one connection. Here
+        // two independent connections overlap naturally, which is the only way
+        // to see what the engine actually admits.
+        //
+        // Both callers match the SAME already-existing, UNATTACHED part, so
+        // neither creates a row and each one's lookup can legitimately observe
+        // "no whole yet". Nothing in the schema can refuse the second: the
+        // decision is "what does the incumbent whole mean", which only a
+        // verdict re-read under the per-graph fence can answer.
+        const live = requirePostgres();
+        const setup = createStore(graph, createPostgresBackend(live.first));
+        const shelfA = await setup.nodes.Shelf.create({}, { id: "shelf-a" });
+        const shelfB = await setup.nodes.Shelf.create({}, { id: "shelf-b" });
+        await setup.nodes.Book.create({ slug: "contested" }, { id: "book" });
+
+        const storeA = createStore(graph, createPostgresBackend(live.first));
+        const storeB = createStore(graph, createPostgresBackend(live.second));
+
+        const { fulfilled, rejected } = partitionSettled(
+          await Promise.allSettled([
+            storeA.nodes.Book.getOrCreateByConstraint(
+              "book_slug",
+              { slug: "contested" },
+              { partOf: { kind: "Shelf", id: shelfA.id } },
+            ),
+            storeB.nodes.Book.getOrCreateByConstraint(
+              "book_slug",
+              { slug: "contested" },
+              { partOf: { kind: "Shelf", id: shelfB.id } },
+            ),
+          ]),
+        );
+
+        // One attachment, one refusal — never two attachments, and never a
+        // silent move that leaves the loser reporting success.
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        expect(rejected[0]).toBeInstanceOf(CompositionExistenceError);
+        const details = (rejected[0] as CompositionExistenceError).details;
+        expect(details.situation).toBe("existing");
+        expect(details.requestedVia).toBe("shelvedIn");
+
+        // The part holds the winner's whole, through exactly one edge, with no
+        // retired window: a move would leave two rows, one of them ended.
+        const edges = await setup.edges.shelvedIn.find(
+          {},
+          { temporalMode: "includeEnded" },
+        );
+        expect(edges).toHaveLength(1);
+        const held = edges[0];
+        if (held === undefined) throw new Error("Expected one shelvedIn edge");
+        expect(held.meta.validTo).toBeUndefined();
+        expect([shelfA.id, shelfB.id]).toContain(held.toId);
+        // Whichever side won, the refusal named the OTHER shelf as requested
+        // and the held one as current.
+        expect(details.currentWhole).toEqual({
+          kind: "Shelf",
+          id: held.toId,
+        });
+        expect(details.requestedWhole?.id).not.toBe(held.toId);
       },
     );
 
