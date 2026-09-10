@@ -797,6 +797,32 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // with those four names; no other entrypoint moves, and no backend-adapter
 // entrypoint moves at all (none of them renders `QueryBuilder`,
 // `BaseStoreOptions` or `SubgraphOptions`).
+//
+// Expansion-forwarding and projection-key review batch. The SAME seven
+// entrypoints move again, +4 apiece (`.` 435 → 439; `./graph-merge` 778 →
+// 782; `./interchange` 763 → 767; `./postgres/pglite` and `./sqlite/local`
+// 760 → 764; `./profiler` 765 → 769; `./provenance` 771 → 775) — five new
+// declarations minus one retired, everywhere:
+//  - `EndpointKindErased`, `MatchedEndpoints` and
+//    `SubsumptionLiteralsErased` replace `BareOntologyRelation` as
+//    `SubsumptionAffected`'s conservative arm. The arm now tests for the
+//    ERASED kind literals rather than assignability from `OntologyRelation`,
+//    which needs the endpoint-position and per-endpoint helpers alongside the
+//    per-element one (net +2 for the three-for-one swap).
+//  - `AliasExpansionOptions`, because `from`/`to`/`fromDynamic`/`toDynamic`
+//    now each declare an overload taking the option owner's own bag so a
+//    caller's options can be forwarded; the type it names,
+//    `AliasExpansionAxis`, was already debt here.
+//  - `SubgraphProjectFor`, the projection-over-the-result's-edge-kinds
+//    constraint every `subgraph` signature and option bag now takes. It is
+//    treated exactly like `SubgraphProject`, which the same signatures
+//    already rendered as debt: a constraint type, not a value a caller
+//    constructs.
+// Gate: exactly those seven entrypoints move, each by exactly +4 and by the
+// same five-in/one-out name set; no other entrypoint moves (no adapter
+// entrypoint renders `QueryBuilder`, `BaseStoreOptions` or
+// `SubgraphOptions`), and `SubgraphResultEdgeKinds` stays absent from `.`'s
+// forgotten set because the root barrel still exports it.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Roadmap F (meta-edge removal): removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
@@ -829,8 +855,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `.` (see `src/index.ts`), so neither registers as forgotten here — the
   // debt is back to its pre-E.2 baseline for this entrypoint specifically.
   ".": {
-    count: 435,
-    sha256: "c9636cd0a6984c9bae272c7c53b5f7406505953f91c370a145c5acffd4030ab1",
+    count: 439,
+    sha256: "8deaa943b075b337e1ef3d4b440fdbc9dcc7c3b4cab60e5b26fe22f59f84d9f8",
   },
   "./adapters/drizzle/engine": {
     count: 338,

@@ -117,6 +117,11 @@ export type AlgorithmCyclePolicy = RecursiveCyclePolicy;
 // @public (undocumented)
 type AliasExpansionAxis = "exact" | "subclasses" | "narrower";
 
+// @public (undocumented)
+type AliasExpansionOptions = Readonly<{
+    expansion?: AliasExpansionAxis | undefined;
+}>;
+
 // @public
 export type AliasMap = Readonly<Record<string, NodeAlias<NodeType, boolean>>>;
 
@@ -266,11 +271,6 @@ type BackendValidityEndMutation = Readonly<{
     clearValidTo: true;
 }>;
 
-// @public
-type BareOntologyRelation<Relation> = Relation extends unknown ? [
-OntologyRelation
-] extends [Relation] ? true : false : never;
-
 // @public (undocumented)
 type BaseFieldAccessor = Readonly<{
     eq: (value: unknown) => Predicate;
@@ -306,7 +306,7 @@ export type BaseStoreOptions = Readonly<{
     schema?: SqlSchema;
     queryDefaults?: Readonly<{
         traversalExpansion?: TraversalExpansion;
-        expansion?: DefaultAliasExpansionAxis;
+        expansion?: DefaultAliasExpansionAxis | undefined;
     }>;
 }>;
 
@@ -1164,7 +1164,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     shortestPath(from: NodeIdentifier, to: NodeIdentifier, options: StoreViewShortestPathOptions<G>): Promise<ShortestPathResult | undefined>;
     // (undocumented)
     protected readonly store: Store<G>;
-    subgraph<const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined, const C extends boolean | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: StoreViewSubgraphOptions<G, EK, NK, P, C>): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    subgraph<const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends boolean | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: StoreViewSubgraphOptions<G, EK, NK, P, C>): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
     weaklyConnectedComponents(options: StoreViewWeaklyConnectedComponentsOptions<G>): Promise<readonly WeaklyConnectedComponentMembership[]>;
     weightedShortestPath(from: NodeIdentifier, to: NodeIdentifier, options: StoreViewWeightedShortestPathOptions<G>): Promise<WeightedShortestPathResult | undefined>;
 }
@@ -1377,7 +1377,7 @@ type CreateQueryBuilderOptions = Readonly<{
     dialect?: SqlDialect;
     schema?: SqlSchema;
     defaultTraversalExpansion?: TraversalExpansion;
-    defaultExpansion?: DefaultAliasExpansionAxis;
+    defaultExpansion?: DefaultAliasExpansionAxis | undefined;
     identityEnabled?: boolean;
     identitySameIdAcrossKinds?: "fold" | "ignore";
 }>;
@@ -2516,6 +2516,11 @@ export type EndpointErrorDetails = Readonly<{
 
 // @public
 export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
+
+// @public
+type EndpointKindErased<Endpoint> = Endpoint extends string ? false : Endpoint extends {
+    kind: infer Kind extends string;
+} ? string extends Kind ? true : false : true;
 
 // @public
 export class EndpointNotFoundError extends TypeGraphError {
@@ -4466,7 +4471,7 @@ type InternalReachableOptions<G extends GraphDef> = InternalBaseTraversalOptions
 type InternalShortestPathOptions<G extends GraphDef> = InternalBaseTraversalOptions<G>;
 
 // @public
-type InternalSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProject<G, NK, EK> | undefined = undefined, C extends boolean | undefined = undefined> = Omit<SubgraphOptions<G, EK, NK, P, C>, "recordedAsOf"> & Readonly<{
+type InternalSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends boolean | undefined = undefined> = Omit<SubgraphOptions<G, EK, NK, P, C>, "recordedAsOf"> & Readonly<{
     recordedAsOf?: RecordedInstant;
 }>;
 
@@ -4922,6 +4927,9 @@ export type ManagedNodeCreatePlan = Readonly<{
 type MapRowToMeta<R extends Readonly<Record<string, unknown>>, M extends Readonly<Record<string, string>>> = Readonly<{
     [SnakeKey in keyof M as M[SnakeKey] & string]: SnakeKey extends keyof R ? R[SnakeKey] : never;
 }>;
+
+// @public
+type MatchedEndpoints<Name extends string, From, To> = ([Extract<Name, "subClassOf">] extends [never] ? never : To) | ([Extract<Name, "equivalentTo" | "sameAs">] extends [never] ? never : From | To);
 
 // @public
 type MatchesOptions = Readonly<{
@@ -5999,10 +6007,7 @@ export class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAl
     from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "subclasses";
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
-    // (undocumented)
-    from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
-        expansion: "narrower";
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
     fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "exact";
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
@@ -6010,10 +6015,7 @@ export class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAl
     fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: "subclasses" | undefined;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
-    // (undocumented)
-    fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
-        expansion: "narrower";
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
     fuseWith(options: HybridFusionOptions): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     groupBy<A extends keyof Aliases & string>(alias: A, field: string): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     groupByNode<A extends keyof Aliases & string>(alias: A): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
@@ -7319,7 +7321,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     ]>(...queries: Queries) => Promise<BatchResults<Queries>>;
     bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
-    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined, const C extends boolean | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends boolean | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
     clear: () => Promise<void>;
     refreshStatistics: () => Promise<void>;
     materializeIndexes: (options?: MaterializeIndexesOptions) => Promise<MaterializeIndexesResult>;
@@ -7446,7 +7448,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     recordedEdgeGetById: <E extends AnyEdgeType>(kind: string, id: EdgeId<E>, coordinate: ReadCoordinate) => Promise<Edge<E> | undefined>;
     recordedEdgeGetByIds: <E extends AnyEdgeType>(kind: string, ids: readonly EdgeId<E>[], coordinate: ReadCoordinate) => Promise<readonly (Edge<E> | undefined)[]>;
     recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
-    subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined, const C extends boolean | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends boolean | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
     identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     identityContext: () => IdentityServiceContext<G>;
@@ -7819,7 +7821,7 @@ export type StoreViewReachableOptions<G extends GraphDef> = Omit<ReachableOption
 export type StoreViewShortestPathOptions<G extends GraphDef> = Omit<ShortestPathOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public
-export type StoreViewSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProject<G, NK, EK> | undefined = undefined, C extends boolean | undefined = undefined> = Omit<SubgraphOptions<G, EK, NK, P, C>, "temporalMode" | "asOf" | "recordedAsOf">;
+export type StoreViewSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends boolean | undefined = undefined> = Omit<SubgraphOptions<G, EK, NK, P, C>, "temporalMode" | "asOf" | "recordedAsOf">;
 
 // @public
 export type StoreViewWeaklyConnectedComponentsOptions<G extends GraphDef> = Omit<WeaklyConnectedComponentsOptions<G>, keyof TemporalAlgorithmOptions>;
@@ -7907,7 +7909,7 @@ export type SubgraphNodeResult<G extends GraphDef, NK extends NodeKinds<G> = Nod
 type SubgraphNodeResultForKind<G extends GraphDef, Kind extends NodeKinds<G>, P> = ProjectionSelection<P, "nodes", Kind> extends readonly string[] ? ProjectedNodeResult<G["nodes"][Kind]["type"], ProjectionSelection<P, "nodes", Kind>> : Node<G["nodes"][Kind]["type"]>;
 
 // @public (undocumented)
-export type SubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProject<G, NK, EK> | undefined = undefined, C extends boolean | undefined = undefined> = Readonly<{
+export type SubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends boolean | undefined = undefined> = Readonly<{
     edges: readonly EK[];
     maxDepth?: number;
     includeKinds?: readonly NK[];
@@ -7927,8 +7929,11 @@ type SubgraphProject<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>,
     edges?: SubgraphEdgeProjectionMap<G, EK>;
 }>;
 
-// @public (undocumented)
-export type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, EK extends EdgeKinds<G> = EdgeKinds<G>, P = undefined> = Readonly<{
+// @public
+type SubgraphProjectFor<G extends GraphDef, NK extends NodeKinds<G>, EK extends EdgeKinds<G>, C extends boolean | undefined> = SubgraphProject<G, NK, SubgraphResultEdgeKinds<G, EK, C>>;
+
+// @public
+export type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, EK extends EdgeKinds<G> = EdgeKinds<G>, P extends SubgraphProject<G, NK, EK> | undefined = undefined> = Readonly<{
     root: SubgraphNodeResult<G, NK, P> | undefined;
     nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK, P>>;
     adjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK, P>[]>>;
@@ -7949,7 +7954,7 @@ export type SubsetNode<G extends GraphDef, K extends NodeKinds<G>> = {
 }[K];
 
 // @public
-type SubsumptionAffected<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? true : true extends BareOntologyRelation<G["ontology"][number]> ? true : [
+type SubsumptionAffected<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? true : true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true : [
 Extract<G["ontology"][number], {
     metaEdge: {
         name: "subClassOf";
@@ -7973,6 +7978,15 @@ Extract<G["ontology"][number], {
     };
 }>
 ] extends [never] ? false : true;
+
+// @public
+type SubsumptionLiteralsErased<Relation> = Relation extends unknown ? Relation extends ({
+    metaEdge: {
+        name: infer Name extends string;
+    };
+    from: infer From;
+    to: infer To;
+}) ? string extends Name ? true : true extends EndpointKindErased<MatchedEndpoints<Name, From, To>> ? true : false : true : never;
 
 // @public
 export function sum(alias: string, field: string): AggregateExpr;
@@ -8169,10 +8183,7 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
     to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "subclasses";
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
-    // (undocumented)
-    to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
-        expansion: "narrower";
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
+    to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "exact";
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor$1<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
@@ -8180,10 +8191,7 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: "subclasses" | undefined;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
-    // (undocumented)
-    toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
-        expansion: "narrower";
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
+    toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
     toKindSet<A extends string>(kinds: readonly string[], alias: A): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
     whereEdge(alias: EA, predicateFunction: (edge: EdgeAccessor<ET>) => Predicate): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, DC, PC, RecAliases, CoordinateState, ET>;
 }
