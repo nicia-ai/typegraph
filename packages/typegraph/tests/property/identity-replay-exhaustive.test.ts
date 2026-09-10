@@ -404,7 +404,7 @@ describe("identity replay exhaustiveness property", () => {
           // revision touched by any OTHER row is not, and the positive check
           // below independently confirms `window-end` still fires when it
           // must — closing the gap a blanket exemption would leave for L2.
-          const transitions = await identityTransitionsOf(ctx, seed, {
+          const { transitions } = await identityTransitionsOf(ctx, seed, {
             limit: 2000,
           });
           const selfReferentialRevisions = new Set(

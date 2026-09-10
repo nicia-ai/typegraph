@@ -293,11 +293,19 @@ fold, a delete or restore, a validity-window end, a kind drop, a schema
 transition, or a reconciliation decision made by a governed graph merge:
 
 ```typescript
-const transitions = await store.identity.transitionsOf(alice);
+const { transitions } = await store.identity.transitionsOf(alice);
 for (const transition of transitions) {
   console.log(transition.cause, transition.recorded, transition.assertionIds);
 }
 ```
+
+A transition that an archival restore brought into this graph — rather than
+this graph's own history capture recording it — carries `restored`, whose
+`at` is the destination's wall clock at restore time. That is the marker
+`replay` itself uses to leave the row out of `steps`, made public so an audit
+view can label an imported explanation instead of inferring it from a
+revision comparison (see [Archival transitions and the retention
+watermark](#archival-transitions-and-the-retention-watermark)).
 
 | Cause | Fires when |
 | --- | --- |
@@ -328,12 +336,46 @@ for (const step of steps) {
 }
 ```
 
-`options.fromRecorded` / `toRecorded` bound the range by recorded instant;
-`options.limit` (default 200, maximum 2000) caps the number of boundaries a
-single call returns, throwing `IDENTITY_REPLAY_LIMIT_EXCEEDED` with a
-`resumeFromRecorded` cursor when there are more. Both `replay` and
-`transitionsOf` throw `IDENTITY_REPLAY_REQUIRES_HISTORY` on a store opened
-without `history: true` — there is nothing for them to annotate.
+`options.fromRecorded` / `toRecorded` bound the range by recorded instant.
+Bounding the ANSWER never bounds the LINEAGE SEARCH: discovery always walks
+the whole log, because the note that names an earlier class canonical
+routinely sits above the requested window (the walk starts at the node's
+current canonical and hops backwards). A window that returned nothing would
+otherwise be indistinguishable from a lineage that genuinely had no
+transitions in it.
+
+`options.limit` (default 200, an integer from 1 to 2000 — anything else is a
+`ValidationError`) caps the number of BOUNDARIES one page returns. Both
+`replay` and `transitionsOf` page rather than refuse: a capped result carries
+`nextFrom`, the recorded instant of the first boundary it stopped short of,
+and passing that back as `fromRecorded` reads the next page. They page on
+identical boundaries, so a `replay` page and a `transitionsOf` page taken
+with the same options always stop at the same boundary — though `steps` can
+be shorter than `transitions` on that page (see below): `nextFrom` names
+where the page stopped, not how many revisions it covered.
+
+`nextFrom` addresses the transition log only. When the boundary it names
+holds a restored row (see [Archival transitions and the retention
+watermark](#archival-transitions-and-the-retention-watermark)), the revision
+it names was minted by the *source* graph's clock, not this graph's — pass it
+only as the next call's `fromRecorded`, and never to `store.asOfRecorded`,
+which anchors a historical read on this graph's own recorded axis.
+
+```typescript
+let cursor: RecordedInstant | undefined;
+do {
+  const page = await store.identity.transitionsOf(alice, {
+    limit: 50,
+    ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+  });
+  render(page.transitions);
+  cursor = page.nextFrom;
+} while (cursor !== undefined);
+```
+
+Both `replay` and `transitionsOf` throw `IDENTITY_REPLAY_REQUIRES_HISTORY` on
+a store opened without `history: true` — there is nothing for them to
+annotate.
 
 `replay` and `transitionsOf` live on `store.identity` and `tx.identity`
 only, never on a coordinate-pinned read lens (`store.asOf(t).identity`,
@@ -356,6 +398,11 @@ await store.transaction(async (tx) => {
 });
 await store.identity.transitionsOf(alice); // now includes it, post-commit
 ```
+
+Restored transitions are never `steps`, but they are always
+`transitions` — see [Archival transitions and the retention
+watermark](#archival-transitions-and-the-retention-watermark) for the marker
+that tells them apart.
 
 ### Retention
 
@@ -549,9 +596,15 @@ so nothing was silently dropped, but it also could not throw. Open the
 restore target with `history: true` if it needs to accept archival exports
 from a history-enabled source.
 
-Every restored row is also marked as such internally, regardless of what the
-source graph thought of it: a restore always inserts rows this graph did not
-record itself. `replay` uses that marker — never a comparison against
+Every restored row is also marked as such, regardless of what the source
+graph thought of it: a restore always inserts rows this graph did not record
+itself. The marker is public — `transitionsOf` returns it as
+`transition.restored.at`, the destination's wall clock at restore time — so
+an audit view can label an imported explanation. It is a wall clock and not a
+`RecordedInstant` because a restore records history without reliving it: it
+never advances the destination's own recorded revision counter, so there is
+no revision on this graph's axis to pair the timestamp with. `replay` uses
+that same marker — never a comparison against
 `recordedRevision` — to decide whether a row may be paired with a
 reconstructed before/after snapshot, because a restored row's revision is
 minted by the *source* graph's own clock and interleaves arbitrarily with

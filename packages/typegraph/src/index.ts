@@ -137,6 +137,7 @@ export {
   // `StoreRuntime.readIdentityTransitionPageAtTarget` /
   // `importIdentityTransitionsAtTarget`, named so the port is implementable.
   type IdentityTransitionCursor,
+  type IdentityTransitionHistory,
   type IdentityTransitionTransfer,
   type IdentityValidityWindow,
   type IdentityWriteSummary,

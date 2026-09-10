@@ -1044,11 +1044,6 @@ export class IdentitySeparationViolationError extends TypeGraphError {
 export type IdentityReplayErrorDetails =
   | Readonly<{ code: "IDENTITY_REPLAY_REQUIRES_HISTORY"; graphId: string }>
   | Readonly<{
-      code: "IDENTITY_REPLAY_LIMIT_EXCEEDED";
-      limit: number;
-      resumeFromRecorded: string;
-    }>
-  | Readonly<{
       code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
       /**
        * The caller's OWN `fromRecorded`, present only when the caller
@@ -1071,8 +1066,10 @@ export type IdentityReplayErrorDetails =
  * Thrown by `store.identity.replay` / `transitionsOf` (and
  * `pruneIdentityTransitions`'s own history precondition) when the transition
  * log cannot answer a request: history capture is off, the requested range
- * would return more boundaries than the caller's limit, or the requested
- * range lies entirely below the retention watermark.
+ * lies entirely below the retention watermark, or the lineage walk's own
+ * internal read ceiling was reached before the seed set converged. A range
+ * with more boundaries than the caller's `limit` is NOT a refusal — it pages,
+ * through the `nextFrom` cursor on the result.
  */
 export class IdentityReplayError extends TypeGraphError {
   declare readonly details: IdentityReplayErrorDetails;

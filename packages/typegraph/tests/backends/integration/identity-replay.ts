@@ -118,5 +118,68 @@ export function registerIdentityReplayIntegrationTests(
         liveMembers.map((ref) => ref.id).toSorted(),
       );
     });
+
+    // Discovery-vs-window and boundary paging on EVERY backend: both moved
+    // out of the reader's SQL (which no longer takes revision bounds at all)
+    // and into `replay.ts`, so the shared suite is where the two dialects are
+    // pinned to the same answer rather than each certifying its own.
+    it("discovers lineage outside the requested window, and pages by boundary through nextFrom", async () => {
+      const store = await provisionIdentityReplayStore(context);
+      const a = { kind: "Person" as const, id: "page-a" };
+      const b = { kind: "Person" as const, id: "page-b" };
+      const c = { kind: "Person" as const, id: "page-c" };
+      await store.nodes.Person.create({}, { id: a.id });
+      await store.nodes.Person.create({}, { id: b.id });
+      await store.nodes.Person.create({}, { id: c.id });
+
+      const firstMerge = await store.identity.assertSame(b, c);
+      const throughFirstMerge = requireDefined(await store.recordedNow());
+      await store.identity.assertSame(a, b);
+      // Four boundaries, not two: a page size of 1 has to be cut three times
+      // for reassembly to be able to catch a cursor that skips one.
+      await store.identity.retractAssertion(firstMerge.assertion.id);
+      await store.identity.assertSame(b, c);
+
+      // `a` is the class canonical now, and no note at or below the first
+      // merge names it — only an unbounded walk can reach that boundary.
+      const windowed = await store.identity.transitionsOf(b, {
+        toRecorded: throughFirstMerge,
+      });
+      expect(windowed.transitions.length).toBeGreaterThan(0);
+
+      const whole = await store.identity.transitionsOf(a);
+      expect(whole.nextFrom).toBeUndefined();
+      const boundaries = new Set(
+        whole.transitions.map((transition) => transition.recorded),
+      );
+      expect(boundaries.size).toBeGreaterThan(2);
+
+      // Reassembly, not merely "the second page differs from the first": a
+      // cursor that skipped a boundary, or a page that came back empty,
+      // satisfies "differs" and fails here. This is also the one place a
+      // dialect-decoded `recorded_at` (PostgreSQL hands back a timestamptz,
+      // SQLite a text column) round-trips back in through `fromRecorded`.
+      const paged: string[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page <= boundaries.size; page += 1) {
+        const result = await store.identity.transitionsOf(a, {
+          limit: 1,
+          ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+        });
+        expect(
+          new Set(result.transitions.map((transition) => transition.recorded))
+            .size,
+        ).toBe(1);
+        paged.push(
+          ...result.transitions.map((transition) => transition.transitionId),
+        );
+        cursor = result.nextFrom;
+        if (cursor === undefined) break;
+      }
+      expect(cursor).toBeUndefined();
+      expect(paged).toEqual(
+        whole.transitions.map((transition) => transition.transitionId),
+      );
+    });
   });
 }

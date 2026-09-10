@@ -484,11 +484,58 @@ export function toTransitionTransfer(
   };
 }
 
+/** A (recorded revision, transition id) keyset cursor, ordering ties by the transition id. */
+export type IdentityTransitionCursor = Readonly<{
+  recordedRevision: number;
+  transitionId: string;
+}>;
+
+/**
+ * One owner for the `(recorded_revision, transition_id)` keyset predicate
+ * both transition-log readers page by: `readIdentityTransitions` (replay's
+ * fixed-point walk) and `readIdentityTransitionPageForInterchange` (archival
+ * export). `transitionIdKey` is the tie-break column wrapped in the same
+ * `binaryText` collation-safety seam both callers' `ORDER BY` uses — left
+ * bare, `>`/`ORDER BY` on that column would compare under the column's
+ * collation, which is locale-dependent on PostgreSQL and could disagree with
+ * each other on some inputs. `cursorFilter` is the empty fragment when
+ * `after` is `undefined`.
+ */
+function identityTransitionCursorSeam(
+  target: IdentityTarget,
+  after: IdentityTransitionCursor | undefined,
+): Readonly<{ transitionIdKey: SqlFragment; cursorFilter: SqlFragment }> {
+  const transitionIdKey = getDialect(target.dialect).binaryText(
+    sql`transition_id`,
+  );
+  const cursorFilter =
+    after === undefined ?
+      sql``
+    : sql`
+      AND (
+        recorded_revision > ${after.recordedRevision}
+        OR (
+          recorded_revision = ${after.recordedRevision}
+          AND ${transitionIdKey} > ${after.transitionId}
+        )
+      )
+    `;
+  return { transitionIdKey, cursorFilter };
+}
+
 export type IdentityTransitionReadScope = Readonly<{
   classRefs: readonly PlainNodeRef[];
-  fromRevision?: number | undefined;
-  toRevision?: number | undefined;
   limit: number;
+  /**
+   * Keyset-pages the read strictly past this cursor, ordered the same way
+   * the result is (`recorded_revision` then `transition_id`) — pass the
+   * cursor built from the previous page's LAST row to read the next `limit`
+   * rows. `undefined` (the default) reads from the start. This is how
+   * `walkClassLineage`'s fixed-point walk (replay.ts) reads one round to
+   * exhaustion without a fixed per-round ceiling: it keeps requesting pages
+   * until a page comes back shorter than `limit`.
+   */
+  after?: IdentityTransitionCursor | undefined;
 }>;
 
 /**
@@ -506,15 +553,34 @@ export type IdentityTransitionReadScope = Readonly<{
  * future reader that does must not assume this ordering reflects buffering
  * order.
  *
+ * TAKES NO RECORDED-REVISION BOUNDS, on purpose. Its one caller is replay's
+ * fixed-point lineage walk, whose seed set has to reach every class name the
+ * node ever carried — and the note that teaches the walk a name routinely
+ * sits ABOVE the window the caller asked about, because the walk starts at
+ * the node's CURRENT canonical and hops backwards through `priorClass`. A
+ * bounded read cut exactly those hops. The caller's `fromRecorded` /
+ * `toRecorded` are applied once, to the converged lineage, by `replay.ts`.
+ *
  * `scope.classRefs` is chunked through the shared bind-budget helper (each
  * reference costs four bind parameters: kind+id in the forward match, kind+id
  * in the reverse match) exactly as every other identity OR-list is
  * (`deleteAssertionsTouchingKinds`, `loadCurrentStructuralClasses`) — a wide
  * lineage must hit a typed refusal, never the driver's own opaque
  * bind-variable-limit error. Each chunk is read with the full `scope.limit`
- * and the merged, deduplicated rows are re-sorted and re-truncated to that
- * same limit, so chunking never changes the result a single unchunked query
- * would have returned.
+ * (past `scope.after`, when given) and the merged, deduplicated rows are
+ * re-sorted and re-truncated to that same limit, so chunking never changes
+ * the result a single unchunked query would have returned.
+ *
+ * `scope.after` keyset-pages the result past a prior page's last row: the
+ * caller (`walkClassLineage`, replay.ts) reads one fixed-point round to
+ * exhaustion by re-issuing this call with `after` set to the previous page's
+ * last row until a page comes back shorter than `scope.limit`, rather than
+ * capping the round at a fixed row ceiling. The tie-break column
+ * (`transition_id`) goes through the same `binaryText` collation-safety seam
+ * `readIdentityTransitionPageForInterchange` uses, for the same reason: left
+ * bare, `>` on that column would compare under the column's collation, which
+ * is locale-dependent on PostgreSQL and would disagree with the ORDER BY's
+ * own comparison of the same rows on some inputs.
  */
 export async function readIdentityTransitions(
   target: IdentityTarget,
@@ -524,7 +590,7 @@ export async function readIdentityTransitions(
 ): Promise<readonly IdentityTransitionRow[]> {
   if (scope.classRefs.length === 0) return [];
   const chunkSize = identityChunkSize(target, {
-    fixedParameters: 4,
+    fixedParameters: scope.after === undefined ? 4 : 6,
     maxItems: MAX_REFERENCE_CHUNK_SIZE,
     parametersPerItem: 4,
   });
@@ -560,34 +626,23 @@ export async function readIdentityTransitions(
     ),
     sql` OR `,
   );
-  const fromFilter =
-    scope.fromRevision === undefined ?
-      sql``
-    : sql`AND recorded_revision >= ${scope.fromRevision}`;
-  const toFilter =
-    scope.toRevision === undefined ?
-      sql``
-    : sql`AND recorded_revision <= ${scope.toRevision}`;
+  const { transitionIdKey, cursorFilter } = identityTransitionCursorSeam(
+    target,
+    scope.after,
+  );
   const rows = await target.execute<RawIdentityTransitionRow>(
     asCompiledRowsSql(sql`
       SELECT ${IDENTITY_TRANSITION_COLUMNS}
       FROM ${schema.identityTransitionsTable}
       WHERE graph_id = ${graphId}
         AND (${classMatches} OR ${priorMatches})
-        ${fromFilter}
-        ${toFilter}
-      ORDER BY recorded_revision ASC, transition_id ASC
+        ${cursorFilter}
+      ORDER BY recorded_revision ASC, ${transitionIdKey} ASC
       LIMIT ${scope.limit}
     `),
   );
   return rows.map((row) => normalizeIdentityTransitionRow(row));
 }
-
-/** A (recorded revision, transition id) keyset cursor, ordering ties by the transition id. */
-export type IdentityTransitionCursor = Readonly<{
-  recordedRevision: number;
-  transitionId: string;
-}>;
 
 export type IdentityTransitionPage = Readonly<{
   transitions: readonly IdentityTransitionRow[];
@@ -623,21 +678,10 @@ export async function readIdentityTransitionPageForInterchange(
     limit: number;
   }>,
 ): Promise<IdentityTransitionPage> {
-  const transitionIdKey = getDialect(target.dialect).binaryText(
-    sql`transition_id`,
+  const { transitionIdKey, cursorFilter } = identityTransitionCursorSeam(
+    target,
+    options.after,
   );
-  const cursorFilter =
-    options.after === undefined ?
-      sql``
-    : sql`
-      AND (
-        recorded_revision > ${options.after.recordedRevision}
-        OR (
-          recorded_revision = ${options.after.recordedRevision}
-          AND ${transitionIdKey} > ${options.after.transitionId}
-        )
-      )
-    `;
   const rows = await target.execute<RawIdentityTransitionRow>(
     asCompiledRowsSql(sql`
       SELECT ${IDENTITY_TRANSITION_COLUMNS}

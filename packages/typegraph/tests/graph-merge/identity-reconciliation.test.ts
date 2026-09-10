@@ -117,7 +117,7 @@ describe.each(backendMatrix())(
       expect(applied.data.merged.identity.asserted).toBe(1);
 
       const ctx = storeRuntime(target).identityContext();
-      const transitions = await identityTransitionsOf(ctx, {
+      const { transitions } = await identityTransitionsOf(ctx, {
         kind: "Person",
         id: "ada",
       });
@@ -185,7 +185,7 @@ describe.each(backendMatrix())(
         }
 
         const ctx = storeRuntime(target).identityContext();
-        const transitions = await identityTransitionsOf(ctx, {
+        const { transitions } = await identityTransitionsOf(ctx, {
           kind: "Person",
           id: "ada",
         });
@@ -263,7 +263,7 @@ describe.each(backendMatrix())(
       ]);
 
       const ctx = storeRuntime(target).identityContext();
-      const transitions = await identityTransitionsOf(ctx, {
+      const { transitions } = await identityTransitionsOf(ctx, {
         kind: "Person",
         id: "ada",
       });

@@ -48,7 +48,7 @@ describe("identity transition log on PGlite (PostgreSQL dialect)", () => {
       );
 
       const ctx = storeRuntime(store).identityContext();
-      const transitions = await identityTransitionsOf(ctx, {
+      const { transitions } = await identityTransitionsOf(ctx, {
         kind: "Person",
         id: alice.id,
       });

@@ -14,7 +14,7 @@ import {
 import {
   type IdentityReplay,
   type IdentityReplayOptions,
-  type IdentityTransition,
+  type IdentityTransitionHistory,
 } from "./replay";
 
 /**
@@ -197,8 +197,11 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
     /**
      * Every transition (assertion, retraction, fold, deletion, restore,
      * window end, kind drop, or reconciliation decision) that changed
-     * `ref`'s identity class, ascending by recorded revision. Requires the
-     * store to be opened with `history: true`.
+     * `ref`'s identity class, ascending by recorded revision, in pages of at
+     * most `options.limit` boundaries (default 200, maximum 2000). A capped
+     * page carries `nextFrom`, the recorded instant of the first boundary it
+     * stopped short of: pass it back as `options.fromRecorded` for the next
+     * page. Requires the store to be opened with `history: true`.
      *
      * On `tx.identity` specifically: reads the transition log itself, which
      * — unlike every other read on this facade — is NOT read-your-writes
@@ -215,12 +218,14 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
     transitionsOf: (
       ref: IdentityNodeRefInput<G>,
       options?: IdentityReplayOptions,
-    ) => Promise<readonly IdentityTransition<G>[]>;
+    ) => Promise<IdentityTransitionHistory<G>>;
     /**
      * Pairs every transition touching `ref`'s identity class lineage with the
      * class membership immediately before and after it, reconstructed through
-     * the same historical reader `asOf` / `asOfRecorded` reads use. Requires
-     * the store to be opened with `history: true`.
+     * the same historical reader `asOf` / `asOfRecorded` reads use. Pages by
+     * boundary exactly as {@link IdentityFacade.transitionsOf} does, through
+     * the same `nextFrom` cursor. Requires the store to be opened with
+     * `history: true`.
      *
      * On `tx.identity`: carries the same pending-notes caveat as
      * {@link IdentityFacade.transitionsOf} — a transition noted earlier in
