@@ -198,17 +198,19 @@ export function buildContendedCompositionEdgeRowAudit(
       sql` AND ${qualified(PEER, edges.validTo)} IS NULL`
     : sql.empty();
 
-  // The composition overload of `claimHolderTerms` (R8): with `partIdentity`
-  // supplied, it needs nothing beyond the axis ref and `scope` — no
-  // fabricated `edgeKind`/`fromKind`/`fromId`/`toKind`/`toId` for a caller
-  // to invent or a reader to check is unread.
+  // The composition overload of `claimHolderTerms`: given a part identity in
+  // place of a claim value source, it needs nothing beyond the axis ref and
+  // `scope` — no fabricated `edgeKind`/`fromKind`/`fromId`/`toKind`/`toId`
+  // for a caller to invent or a reader to check is unread.
   const peerHolderTerms = claimHolderTerms(
     PEER,
     edges,
     { ...ref, scope: { kind: "composition", holders } },
     {
-      kind: qualified(relation, outerPartKindColumn),
-      id: qualified(relation, outerPartIdColumn),
+      part: {
+        kind: qualified(relation, outerPartKindColumn),
+        id: qualified(relation, outerPartIdColumn),
+      },
     },
   );
 

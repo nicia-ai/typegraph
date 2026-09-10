@@ -443,9 +443,10 @@ export function registerCompositionFenceIntegrationTests(
       expect(await store.edges.cfChapterOf.findFrom(chapter)).toHaveLength(1);
       expect(await store.edges.cfIncludedIn.findFrom(chapter)).toHaveLength(0);
     });
-    // MUTATION CHECK: revert `claimHolderTerms(edgesName, edges, params)` in
-    // `buildTakeOverEdgeClaim` (src/backend/drizzle/operations/edge-claims.ts)
-    // back to the inline `edges.kind = params.edgeKind` +
+    // MUTATION CHECK: revert the `claimHolderTerms` call inside
+    // `recordedClaimHolderIsLivePredicate`, which `buildTakeOverEdgeClaim`
+    // reads (src/backend/drizzle/operations/edge-claims.ts), back to the
+    // inline `edges.kind = values.edgeKind` +
     // `endpointTerms(...)` spelling. The takeover's liveness sub-select then
     // filters on the WRITING edge's own kind (`cfIncludedIn`) instead of
     // every composition holder kind, finds no live `cfIncludedIn` row at the

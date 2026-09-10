@@ -88,20 +88,20 @@ describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
           )[0],
         );
         const statements = [
-          buildDeleteStaleAtomicEdgeClaims(
+          ...buildDeleteStaleAtomicEdgeClaims(
             tables,
             [claim],
             schemaFence,
             drizzleSql`FOR SHARE`,
           ),
-          buildAcquireAtomicEdgeClaims(
+          ...buildAcquireAtomicEdgeClaims(
             tables,
             [claim],
             timestamp,
             schemaFence,
             drizzleSql`FOR SHARE`,
           ),
-          buildAssertAtomicEdgeClaimsOwned(
+          ...buildAssertAtomicEdgeClaimsOwned(
             tables,
             [claim],
             timestamp,

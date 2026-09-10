@@ -417,23 +417,28 @@ export type CommonOperationStrategy = Readonly<{
     claim: ClaimEdgeCardinalityParams,
     timestamp: string,
   ) => SQL;
+  /**
+   * One statement per cardinality group in the chunk — see
+   * `buildDeleteStaleAtomicEdgeClaims`. A chunk of one edge kind, the ordinary
+   * case, renders exactly one.
+   */
   buildDeleteStaleAtomicEdgeClaims: (
     entries: readonly ClaimEdgeCardinalityParams[],
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
-  ) => SQL;
+  ) => readonly SQL[];
   buildAcquireAtomicEdgeClaims: (
     entries: readonly ClaimEdgeCardinalityParams[],
     timestamp: string,
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
-  ) => SQL;
+  ) => readonly SQL[];
   buildAssertAtomicEdgeClaimsOwned: (
     entries: readonly ClaimEdgeCardinalityParams[],
     timestamp: string,
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
-  ) => SQL;
+  ) => readonly SQL[];
   buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgesBatch: (
     params: readonly InsertEdgeParams[],
