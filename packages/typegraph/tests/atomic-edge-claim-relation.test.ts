@@ -238,6 +238,35 @@ describe.each(DIALECTS)(
           }).toEqual({ keyedOnTarget, activeOnly });
         },
       );
+
+      /**
+       * A composition group's holder predicate is the oriented two-arm OR, the
+       * one `claimHolderTerms` renders for every layer, and it is rendered ONCE
+       * for the group rather than per row — the whole point of carrying the
+       * scope in the group key instead of in a guard column.
+       */
+      it("renders the composition scope's oriented arms once per group", () => {
+        const [statement] = build([
+          claim(0, "one", COMPOSITION_SCOPE),
+          claim(1, "one", COMPOSITION_SCOPE),
+        ]);
+        if (statement === undefined) throw new Error("no statement");
+        const { sql: statementSql, params } = render(dialect, statement);
+        expect({
+          fromArm: statementSql.includes(
+            '"from_kind" = "proposed"."from_kind"',
+          ),
+          toArm: statementSql.includes('"to_kind" = "proposed"."from_kind"'),
+          armPairs: statementSql.match(/"kind" IN \(/g)?.length ?? 0,
+          holderKinds: params.filter((parameter) => parameter === "includedIn")
+            .length,
+        }).toEqual({
+          fromArm: true,
+          toArm: true,
+          armPairs: 2,
+          holderKinds: 1,
+        });
+      });
     });
   },
 );
