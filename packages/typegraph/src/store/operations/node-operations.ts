@@ -6217,8 +6217,9 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     // row's own write plan (`"resurrected"`/`"updated"`,
     // `resolveGetOrCreateAttachmentRequest`'s fenced request), or ran
     // `applyExistingPartOfPostcondition` against it (`"found"`), which
-    // returned only once the node provably held the stated attachment. Re-checking the same node once per
-    // duplicate would re-read the same rows for the same verdict.
+    // returned only once the node provably held the stated attachment.
+    // Re-checking the same node once per duplicate would re-read the same
+    // rows for the same verdict.
     for (const { index, sourceIndex } of duplicateOf) {
       const sourceResult = requireDefined(results[sourceIndex]);
       results[index] = { node: sourceResult.node, action: "found" };
