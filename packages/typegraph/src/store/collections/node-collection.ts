@@ -507,7 +507,7 @@ export function createNodeCollection<
       // candidate subquery widens to, so a subclass id this pin would let
       // through is filtered there anyway (tests/polymorphic-default.test.ts).
       const candidateIds = createQuery()
-        .fromDynamic(kind, rootAlias, { includeSubClasses: false })
+        .fromDynamic(kind, rootAlias, { expansion: "exact" })
         .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
         .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
         .compile();
@@ -603,7 +603,7 @@ export function createNodeCollection<
       // compareAndSet's root pin above: the outer `WHERE nodes.kind = <kind>`
       // in `executeNodeSetUpdate` re-filters this candidate set regardless.
       let base = createQuery()
-        .fromDynamic(kind, rootAlias, { includeSubClasses: false })
+        .fromDynamic(kind, rootAlias, { expansion: "exact" })
         .temporal("asOf", readInstant);
       const where = params.where;
       if (where !== undefined) {
@@ -618,7 +618,7 @@ export function createNodeCollection<
         // projects `rootAlias`'s id, still re-filtered by the outer
         // `WHERE nodes.kind = <kind>` in `executeNodeSetUpdate`.
         const relationRoot = createQuery()
-          .fromDynamic(kind, rootAlias, { includeSubClasses: false })
+          .fromDynamic(kind, rootAlias, { expansion: "exact" })
           .temporal("asOf", readInstant);
         let traversal = relationRoot.traverseDynamic(
           relation.edgeKind,
@@ -639,7 +639,7 @@ export function createNodeCollection<
         // satisfy an `exists` check the caller declared against the exact
         // parent kind (tests/polymorphic-default.test.ts, mutation-checked).
         let related = traversal.toDynamic(relation.relatedKind, relatedAlias, {
-          includeSubClasses: false,
+          expansion: "exact",
         });
         if (relation.whereRelated !== undefined) {
           related = related.whereNode(relatedAlias, relation.whereRelated);
@@ -737,7 +737,7 @@ export function createNodeCollection<
         // this branch must return the identical row set (see the comment
         // there), not a polymorphic-by-default one.
         let query = createQuery()
-          .from(kind, "_n", { includeSubClasses: false })
+          .from(kind, "_n", { expansion: "exact" })
           .temporal(asOf === undefined ? temporalMode : "asOf", asOf)
           .whereNode("_n", filter.where as never)
           .select((ctx: Record<string, unknown>) => ctx["_n"]);

@@ -55,9 +55,9 @@ const LeafConcept = defineNode("TsLeafConcept", {
 // type itself carries endpoints.
 //
 // Two edges, deliberately different admitted `to` sets: `tsConceptLink`
-// admits every concept kind (the includeNarrower SUCCESS case),
+// admits every concept kind (the narrower-expansion SUCCESS case),
 // `tsConceptLinkNarrow` admits only the root (the endpoint-refused case) —
-// `includeNarrower` is not an assignability axis, so admission must be
+// `expansion: "narrower"` is not an assignability axis, so admission must be
 // declared explicitly per kind, unlike `subClassOf` expansion.
 const conceptLink = defineEdge("tsConceptLink", {
   schema: z.object({}),
@@ -133,14 +133,14 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
 
       const exact = await store
         .query()
-        .from("TsMedia", "m", { includeSubClasses: false })
+        .from("TsMedia", "m", { expansion: "exact" })
         .select((ctx) => ctx.m)
         .execute();
       expect(exact.map((row) => row.kind)).toEqual(["TsMedia"]);
     });
 
     // Mutation-checked: flipping the store's default
-    // `queryDefaults.includeSubClasses` from `true` to `false` drops the
+    // `queryDefaults.expansion` from `"subclasses"` to `"exact"` drops the
     // `TsPodcast` row and fails this assertion on BOTH engines; restored.
     it("returns identical row ordering under an explicit orderBy on both engines", async () => {
       const store = await context.createStore(subsumptionGraph);
@@ -169,14 +169,14 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
     // nodeKind, ... })` already scopes the physical search to the exact
     // kind regardless of what the candidate subquery's `from()` widens to
     // (src/store/search.ts's module docblock), so dropping its
-    // `{ includeSubClasses: false }` pin leaves that assertion green on
+    // `{ expansion: "exact" }` pin leaves that assertion green on
     // BOTH engines — same defense-in-depth shape the SQLite-only pin in
     // tests/polymorphic-default.test.ts documents. This is cross-backend
     // PARITY coverage (AGENTS.md "Backend parity" §2: the candidate
     // subquery composes with FTS5 on SQLite and tsvector on PostgreSQL, so
     // only running the case on both engines can prove they agree), not an
     // independent load-bearing guard.
-    it("fulltext search's candidate subquery stays exact-kind by default and expands with includeSubClasses, on both engines", async (ctx) => {
+    it(`fulltext search's candidate subquery stays exact-kind by default and expands with expansion: "subclasses", on both engines`, async (ctx) => {
       const store = await context.createStore(searchGraph);
       if (store.backend.capabilities.fulltext?.supported !== true) {
         ctx.skip();
@@ -201,7 +201,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       const expanded = await store.search.fulltext("TsSearchMedia", {
         query: "unique_ts_fulltext_marker",
         limit: 10,
-        includeSubClasses: true,
+        expansion: "subclasses",
       });
       expect(expanded.map((result) => result.node.kind).toSorted()).toEqual([
         "TsSearchMedia",
@@ -236,7 +236,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
     });
   });
 
-  describe("C.3 — includeNarrower over a kind taxonomy", () => {
+  describe("C.3 — narrower expansion over a kind taxonomy", () => {
     it("from() expands through a three-level broader/narrower chain", async () => {
       const store = await context.createStore(narrowerGraph);
       await store.nodes.TsRootConcept.create({ name: "root" });
@@ -245,7 +245,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
 
       const rows = await store
         .query()
-        .from("TsRootConcept", "c", { includeNarrower: true })
+        .from("TsRootConcept", "c", { expansion: "narrower" })
         .select((ctx) => ctx.c)
         .execute();
 
@@ -270,7 +270,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
         .from("TsRootConcept", "root")
         .whereNode("root", (accessor) => accessor.id.eq(root.id))
         .traverse("tsConceptLink", "e")
-        .to("TsRootConcept", "target", { includeNarrower: true })
+        .to("TsRootConcept", "target", { expansion: "narrower" })
         .select((ctx) => ctx.target)
         .execute();
 
@@ -281,17 +281,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       ]);
     });
 
-    it("refuses includeNarrower + includeSubClasses on one alias identically on both engines", async () => {
-      const store = await context.createStore(narrowerGraph);
-      expect(() =>
-        store.query().from("TsRootConcept", "c", {
-          includeSubClasses: true,
-          includeNarrower: true,
-        } as never),
-      ).toThrow(ConfigurationError);
-    });
-
-    it("refuses an includeNarrower expansion naming an unregistered kind, identically on both engines", async () => {
+    it("refuses a narrower expansion naming an unregistered kind, identically on both engines", async () => {
       // `broader`/`narrower` accept any NodeType, registered or not — the
       // concept node is never added to `unregisteredNarrowerGraph.nodes`.
       const UnregisteredLeaf = defineNode("TsUnregisteredLeaf", {
@@ -307,7 +297,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
 
       let caught: unknown;
       try {
-        store.query().from("TsRootConcept", "c", { includeNarrower: true });
+        store.query().from("TsRootConcept", "c", { expansion: "narrower" });
       } catch (error) {
         caught = error;
       }
@@ -317,9 +307,9 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       );
     });
 
-    it("refuses an includeNarrower expansion whose kinds are not admitted edge endpoints, identically on both engines", async () => {
+    it("refuses a narrower expansion whose kinds are not admitted edge endpoints, identically on both engines", async () => {
       // tsConceptLinkNarrow admits ONLY TsRootConcept as a `to` endpoint —
-      // includeNarrower's expansion (Mid, Leaf) is not an assignability
+      // the narrower expansion (Mid, Leaf) is not an assignability
       // axis, so those two kinds are never automatically admitted the way
       // subClassOf descendants are.
       const store = await context.createStore(narrowerGraph);
@@ -332,7 +322,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
           .from("TsRootConcept", "root")
           .whereNode("root", (accessor) => accessor.id.eq(root.id))
           .traverse("tsConceptLinkNarrow", "e")
-          .to("TsRootConcept", "target", { includeNarrower: true });
+          .to("TsRootConcept", "target", { expansion: "narrower" });
       } catch (error) {
         caught = error;
       }

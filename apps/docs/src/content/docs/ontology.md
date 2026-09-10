@@ -45,12 +45,12 @@ properties between types, or automatically expand every query.
 
 | Relation / feature | Runtime contract |
 | --- | --- |
-| `subClassOf` | Transitive registry closure, write-path endpoint assignability, and node-query expansion with `includeSubClasses` (default: `true`). The closure now also includes every `equivalentTo` class — two equivalent kinds are mutual subclasses of each other. The child's schema output must structurally extend the parent's — checked at compile time and refused at registry build otherwise |
+| `subClassOf` | Transitive registry closure, write-path endpoint assignability, and node-query expansion with `expansion: "subclasses"` (the default). The closure now also includes every `equivalentTo` class — two equivalent kinds are mutual subclasses of each other. The child's schema output must structurally extend the parent's — checked at compile time and refused at registry build otherwise |
 | `disjointWith` | Same-ID collision enforcement, propagated through interleaved `subClassOf` and `equivalentTo` closure |
 | `implies` | Transitive registry closure and opt-in traversal expansion with `expand: "implying"`; endpoints are validated |
 | `inverseOf` | Single inverse partner, endpoint reversal validation, and traversal expansion with `expand: "inverse"` (the default store setting) |
-| `equivalentTo` | Between two registered kinds, MUTUAL SUBSUMPTION: folded into the same closure `subClassOf` reads, so `isAssignableTo`, `expandSubClasses`/`includeSubClasses`, edge-endpoint acceptance, disjointness propagation and the `kindWithSubClasses` claim axis all treat the two kinds as substitutable. An IRI on either side stays an inert cross-system reference — it never becomes a kind, but a class reached *through* one still folds together. Restricted to node kinds: an equivalence class that mixes a node kind and an edge kind, or that holds more than one registered edge kind, is refused (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`) |
-| `broader` / `narrower` | Transitive registry introspection, plus kind-taxonomy query expansion with `includeNarrower` (untyped alias — no schema relationship is claimed) |
+| `equivalentTo` | Between two registered kinds, MUTUAL SUBSUMPTION: folded into the same closure `subClassOf` reads, so `isAssignableTo`, `expandSubClasses` / the `expansion` option, edge-endpoint acceptance, disjointness propagation and the `kindWithSubClasses` claim axis all treat the two kinds as substitutable. An IRI on either side stays an inert cross-system reference — it never becomes a kind, but a class reached *through* one still folds together. Restricted to node kinds: an equivalence class that mixes a node kind and an edge kind, or that holds more than one registered edge kind, is refused (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`) |
+| `broader` / `narrower` | Transitive registry introspection, plus kind-taxonomy query expansion with `expansion: "narrower"` (untyped alias — no schema relationship is claimed) |
 | `partOf` / `hasPart` | Transitive registry introspection only |
 | `relatedTo` | Symmetric direct registry introspection through `getRelatedKinds` only |
 
@@ -113,7 +113,7 @@ If your hierarchy is a **taxonomy** rather than a genuine subtype
 relationship — the child doesn't actually extend the parent's schema —
 declare `broader(child, parent)` instead; see
 [Hierarchical (Concept Hierarchy)](#hierarchical-concept-hierarchy) below and
-`includeNarrower` in [Source](/queries/source#includenarrower--kind-level-taxonomies).
+`expansion: "narrower"` in [Source](/queries/source#expansion-narrower--kind-level-taxonomies).
 
 **Query behavior — polymorphic by default:**
 
@@ -133,7 +133,7 @@ const allMedia = await store
 // Narrowed: returns only nodes with kind="Media"
 const mediaOnly = await store
   .query()
-  .from("Media", "m", { includeSubClasses: false })
+  .from("Media", "m", { expansion: "exact" })
   .select((ctx) => ctx.m)
   .execute();
 ```
@@ -147,7 +147,7 @@ the alias, since that is all the contract guarantees. `search()` and the
 collection APIs (`find`, `count`, `updateWhere`, `compareAndSet`) are
 unaffected and stay exact-kind. See
 [Subclass queries are polymorphic](/queries/source) for the full option and
-`queryDefaults.includeSubClasses` in [Schemas & Stores](/schemas-stores) for
+`queryDefaults.expansion` in [Schemas & Stores](/schemas-stores) for
 the store-wide migration knob.
 
 **Changing this on a populated graph**: adding a `subClassOf` relation is
@@ -179,7 +179,7 @@ const narrowerTopics = registry.expandNarrower("Technology");
 // ["ArtificialIntelligence", "MachineLearning", "DeepLearning", ...]
 ```
 
-A query can expand through this same closure with `includeNarrower: true` on
+A query can expand through this same closure with `expansion: "narrower"` on
 `from()`/`to()`/`fromDynamic()`/`toDynamic()` — since no schema relationship
 is claimed, the resulting alias is untyped (no static property access; use
 `fromDynamic()`'s `.field(name)` discriminator). This is the small,
@@ -232,7 +232,7 @@ registry.expandSubClasses("Company"); // ["Company", "Corporation"]
 ```
 
 That substitutability reaches every consumer of the subsumption closure:
-`includeSubClasses: true` on a `Company`-scoped query or `search()` call also
+`expansion: "subclasses"` on a `Company`-scoped query or `search()` call also
 returns `Corporation` rows, an edge endpoint declared `to: [Company]` accepts
 a `Corporation` node, and disjointness declared against `Company` propagates
 to `Corporation` too. A `kindWithSubClasses` uniqueness constraint fences
@@ -728,7 +728,7 @@ broader(MachineLearning, ArtificialIntelligence);
 
 If you already have a `subClassOf` that models a taxonomy rather than a
 subtype relationship, the fix is `broader(child, parent)` plus
-`includeNarrower: true` on the queries that relied on the old expansion.
+`expansion: "narrower"` on the queries that relied on the old expansion.
 
 ### Use Disjoint Constraints
 
@@ -818,7 +818,10 @@ function subClassOf<C extends NodeType, P extends NodeType>(
 Declares hierarchical relationship (narrower concept to broader concept).
 
 ```typescript
-function broader(narrower: NodeType, broader: NodeType): OntologyRelation;
+function broader<N extends NodeType, B extends NodeType>(
+  narrower: N,
+  broader: B,
+): TypedOntologyRelation<"broader", N, B>;
 ```
 
 #### `narrower(broader, narrower)`
@@ -826,7 +829,10 @@ function broader(narrower: NodeType, broader: NodeType): OntologyRelation;
 Declares hierarchical relationship (broader concept to narrower concept).
 
 ```typescript
-function narrower(broader: NodeType, narrower: NodeType): OntologyRelation;
+function narrower<B extends NodeType, N extends NodeType>(
+  broader: B,
+  narrower: N,
+): TypedOntologyRelation<"narrower", B, N>;
 ```
 
 #### `equivalentTo(kindA, kindBOrIri)`
@@ -841,10 +847,18 @@ node kinds, `equivalentTo` carries the same structural contract as
 `subClassOf`, checked in **both** directions.
 
 ```typescript
-function equivalentTo(
-  kindA: NodeType | AnyEdgeType,
-  kindBOrIri: NodeType | string
-): OntologyRelation;
+function equivalentTo<A extends NodeType, B extends NodeType>(
+  kindA: A,
+  kindB: B & EquivalentToCheck<A, B>,
+): TypedOntologyRelation<"equivalentTo", A, B>;
+function equivalentTo<A extends NodeType | AnyEdgeType>(
+  kindA: A,
+  iri: string,
+): TypedOntologyRelation<"equivalentTo", A, string>;
+function equivalentTo<A extends AnyEdgeType, B extends NodeType>(
+  kindA: A,
+  kindB: B,
+): TypedOntologyRelation<"equivalentTo", A, B>;
 ```
 
 #### `disjointWith(a, b)`
@@ -852,7 +866,10 @@ function equivalentTo(
 Declares mutual exclusion (types cannot share the same ID).
 
 ```typescript
-function disjointWith(a: NodeType, b: NodeType): OntologyRelation;
+function disjointWith<A extends NodeType, B extends NodeType>(
+  a: A,
+  b: B,
+): TypedOntologyRelation<"disjointWith", A, B>;
 ```
 
 #### `partOf(part, whole, options)`
@@ -870,11 +887,11 @@ type CompositionOptions = {
   partSide?: CompositionPartSide;
 };
 
-function partOf(
-  part: NodeType,
-  whole: NodeType,
+function partOf<Part extends NodeType, Whole extends NodeType>(
+  part: Part,
+  whole: Whole,
   options: CompositionOptions,
-): OntologyRelation;
+): TypedOntologyRelation<"partOf", Part, Whole>;
 ```
 
 #### `hasPart(whole, part, options)`
@@ -883,11 +900,11 @@ Declares a compositional relationship (whole to part) — the mirror of
 `partOf`. Declaring both directions for the same pair is redundant; pick one.
 
 ```typescript
-function hasPart(
-  whole: NodeType,
-  part: NodeType,
+function hasPart<Whole extends NodeType, Part extends NodeType>(
+  whole: Whole,
+  part: Part,
   options: CompositionOptions,
-): OntologyRelation;
+): TypedOntologyRelation<"hasPart", Whole, Part>;
 ```
 
 #### `relatedTo(a, b)`
@@ -896,7 +913,10 @@ Declares a symmetric association available through
 `registry.getRelatedKinds(kind)`. It has no query behavior.
 
 ```typescript
-function relatedTo(a: NodeType, b: NodeType): OntologyRelation;
+function relatedTo<A extends NodeType, B extends NodeType>(
+  a: A,
+  b: B,
+): TypedOntologyRelation<"relatedTo", A, B>;
 ```
 
 #### `inverseOf(edgeA, edgeB)`
@@ -904,7 +924,10 @@ function relatedTo(a: NodeType, b: NodeType): OntologyRelation;
 Declares edge types as inverses of each other.
 
 ```typescript
-function inverseOf(edgeA: AnyEdgeType, edgeB: AnyEdgeType): OntologyRelation;
+function inverseOf<A extends AnyEdgeType, B extends AnyEdgeType>(
+  edgeA: A,
+  edgeB: B,
+): TypedOntologyRelation<"inverseOf", A, B>;
 ```
 
 #### `implies(edgeA, edgeB)`
@@ -912,7 +935,10 @@ function inverseOf(edgeA: AnyEdgeType, edgeB: AnyEdgeType): OntologyRelation;
 Declares that one edge type implies another exists.
 
 ```typescript
-function implies(edgeA: AnyEdgeType, edgeB: AnyEdgeType): OntologyRelation;
+function implies<A extends AnyEdgeType, B extends AnyEdgeType>(
+  edgeA: A,
+  edgeB: B,
+): TypedOntologyRelation<"implies", A, B>;
 ```
 
 Each allowed pair in `edgeA` must be assignable to one allowed pair in `edgeB`

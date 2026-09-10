@@ -1,7 +1,7 @@
 /**
  * Q3 — subclass expansion is the query default.
  *
- * `from`/`to`/`fromDynamic`/`toDynamic` default to `includeSubClasses: true`
+ * `from`/`to`/`fromDynamic`/`toDynamic` default to `expansion: "subclasses"`
  * (a supertype query is polymorphic unless narrowed). Seven internal call
  * sites are pinned to `false` so they stay exact-kind under the new
  * default: `store.search()`'s candidate subquery, and five collection
@@ -32,6 +32,7 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
 import { searchable } from "../src/core/searchable";
+import { ConfigurationError } from "../src/errors";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 import { createInitializedStore, createTestBackend } from "./test-utils";
@@ -52,7 +53,7 @@ function buildGraph(id: string) {
   });
 }
 
-describe("Q3 — from()/to() default to includeSubClasses: true", () => {
+describe('Q3 — from()/to() default to expansion: "subclasses"', () => {
   it("store.query().from('Media', 'm') returns Podcast rows by default", async () => {
     const backend = createTestBackend();
     const store = await createInitializedStore(
@@ -77,7 +78,7 @@ describe("Q3 — from()/to() default to includeSubClasses: true", () => {
     ]);
   });
 
-  it("{ includeSubClasses: false } restores exact-kind behavior on from()", async () => {
+  it('{ expansion: "exact" } restores exact-kind behavior on from()', async () => {
     const backend = createTestBackend();
     const store = await createInitializedStore(
       buildGraph("q3_default_off_per_call"),
@@ -91,18 +92,18 @@ describe("Q3 — from()/to() default to includeSubClasses: true", () => {
 
     const rows = await store
       .query()
-      .from("Media", "m", { includeSubClasses: false })
+      .from("Media", "m", { expansion: "exact" })
       .select((ctx) => ctx.m)
       .execute();
 
     expect(rows.map((row) => row.kind)).toEqual(["Media"]);
   });
 
-  it("createStore(..., { queryDefaults: { includeSubClasses: false } }) restores exact-kind everywhere", async () => {
+  it('createStore(..., { queryDefaults: { expansion: "exact" } }) restores exact-kind everywhere', async () => {
     const backend = createTestBackend();
     const graph = buildGraph("q3_store_default_off");
     const [store] = await createStoreWithSchema(graph, backend, {
-      queryDefaults: { includeSubClasses: false },
+      queryDefaults: { expansion: "exact" },
     });
     await store.nodes.Media.create({ title: "plain media" });
     await store.nodes.Podcast.create({
@@ -124,9 +125,9 @@ describe("Q3 pin — store.search() candidate subquery stays exact-kind (defense
   // NOT mutation-checked: `backend.fulltextSearch({ nodeKind: kind, ... })`
   // already scopes the physical search to the exact kind regardless of what
   // the candidate subquery's `from()` widens to, so dropping the
-  // `{ includeSubClasses: false }` pin at src/store/search.ts leaves this
+  // `{ expansion: "exact" }` pin at src/store/search.ts leaves this
   // test green. See the module docblock above.
-  it("a fulltext search with no includeSubClasses does not return subclass rows", async () => {
+  it("a fulltext search with no expansion option does not return subclass rows", async () => {
     const SearchableMedia = defineNode("SearchMedia", {
       schema: z.object({ title: searchable({ language: "english" }) }),
     });
@@ -166,7 +167,7 @@ describe("Q3 pin — store.search() candidate subquery stays exact-kind (defense
     expect(results.map((result) => result.node.kind)).toEqual(["SearchMedia"]);
   });
 
-  it("includeSubClasses: true on search() itself does return subclass rows once each", async () => {
+  it('expansion: "subclasses" on search() itself does return subclass rows once each', async () => {
     const SearchableMedia2 = defineNode("SearchMedia2", {
       schema: z.object({ title: searchable({ language: "english" }) }),
     });
@@ -198,7 +199,7 @@ describe("Q3 pin — store.search() candidate subquery stays exact-kind (defense
     const results = await store.search.fulltext("SearchMedia2", {
       query: "unique_pin_marker2",
       limit: 10,
-      includeSubClasses: true,
+      expansion: "subclasses",
     });
 
     expect(results.map((result) => result.node.kind).toSorted()).toEqual([
@@ -206,13 +207,62 @@ describe("Q3 pin — store.search() candidate subquery stays exact-kind (defense
       "SearchPodcast2",
     ]);
   });
+
+  it("refuses an expansion axis the facade does not offer instead of searching exact-kind", async () => {
+    // `"narrower"` is a real member of the shared axis vocabulary that this
+    // facade does not offer, and the builder refuses the identical value —
+    // so coercing it to `"exact"` here would silently hand back a different
+    // row set than the option asked for. Reachable from JavaScript, and from
+    // a typed caller that casts.
+    const SearchableMedia3 = defineNode("SearchMedia3", {
+      schema: z.object({ title: searchable({ language: "english" }) }),
+    });
+    const graph = defineGraph({
+      id: "q3_search_refusal",
+      nodes: { SearchMedia3: { type: SearchableMedia3 } },
+      edges: {},
+      ontology: [],
+    });
+    const backend = createTestBackend();
+    const store = await createInitializedStore(graph, backend);
+    await store.nodes.SearchMedia3.create({
+      title: "unique_pin_marker3 media",
+    });
+
+    for (const axis of ["narrower", "subClasses"]) {
+      let caught: unknown;
+      try {
+        await store.search.fulltext("SearchMedia3", {
+          query: "unique_pin_marker3",
+          limit: 10,
+          expansion: axis as never,
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught, `expansion: "${axis}" must be refused`).toBeInstanceOf(
+        ConfigurationError,
+      );
+      expect((caught as ConfigurationError).details["code"]).toBe(
+        "QUERY_ALIAS_EXPANSION_INVALID",
+      );
+      expect((caught as ConfigurationError).message).toContain(axis);
+    }
+
+    // The builder's refusal of the same value, for the same vocabulary.
+    expect(() =>
+      store
+        .query()
+        .from("SearchMedia3", "m", { expansion: "narrower2" as never }),
+    ).toThrow(ConfigurationError);
+  });
 });
 
 describe("Q3 pin — collection APIs stay exact-kind", () => {
   // Load-bearing: `nodes.Media.find()`'s no-`where` branch goes straight to
   // the exact-kind backend find path, and this pin is what keeps
   // `find({ where })` returning the identical row set. Mutation-checked:
-  // dropping `{ includeSubClasses: false }` at node-collection.ts's `find`
+  // dropping `{ expansion: "exact" }` at node-collection.ts's `find`
   // makes `findWhere` also return the `Podcast` row, failing this test.
   it("nodes.Media.find({ where }) and find() return the same row set", async () => {
     const backend = createTestBackend();
@@ -290,7 +340,7 @@ describe("Q3 pin — updateWhere()'s exists-leg RELATED-kind toDynamic (load-bea
   // `WHERE nodes.kind = params.kind` fence: the related node's kind gates
   // whether the `exists` predicate is satisfied at all, and only the
   // ROOT node's id is projected as a candidate. Dropping
-  // `{ includeSubClasses: false }` on the `exists` leg's `toDynamic(relation.relatedKind, ...)`
+  // `{ expansion: "exact" }` on the `exists` leg's `toDynamic(relation.relatedKind, ...)`
   // (node-collection.ts) genuinely changes the result: an `exists` check
   // against `Tag` would then also be satisfied by a `SpecialTag`-only
   // related row. Mutation-checked.

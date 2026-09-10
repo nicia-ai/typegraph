@@ -45,6 +45,7 @@ import type {
   DynamicNodeType,
   InitialQueryBuilder,
 } from "../query/builder";
+import type { DefaultAliasExpansionAxis } from "../query/builder/alias-expansion";
 import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
 import type {
   BatchableQuery,
@@ -605,15 +606,20 @@ export type BaseStoreOptions = Readonly<{
     /** Default traversal ontology expansion mode (default: "inverse"). */
     traversalExpansion?: TraversalExpansion;
     /**
-     * Default subclass-expansion axis for `from`/`to`/`fromDynamic`/
-     * `toDynamic` when an alias states no `includeSubClasses` (default:
-     * `true`, roadmap Q3 — a supertype query is polymorphic by default).
-     * Pass `false` to restore the pre-Q3 exact-kind behavior everywhere.
+     * Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when
+     * an alias states no `expansion` (default: `"subclasses"`, roadmap Q3 —
+     * a supertype query is polymorphic by default). Pass `"exact"` to
+     * restore the pre-Q3 exact-kind behavior everywhere. `"narrower"` is not
+     * a store-wide default (see {@link DefaultAliasExpansionAxis}).
      * `search()` and the collection APIs (`find`, `count`, `updateWhere`,
      * `compareAndSet`) are unaffected — they stay exact-kind regardless of
      * this setting.
+     *
+     * Spelled `| undefined` so a stated `undefined` forwards from a caller's
+     * own options bag under `exactOptionalPropertyTypes`, the same way the
+     * per-alias `expansion` option does.
      */
-    includeSubClasses?: boolean;
+    expansion?: DefaultAliasExpansionAxis | undefined;
   }>;
 }>;
 

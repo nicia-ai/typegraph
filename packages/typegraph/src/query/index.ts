@@ -131,6 +131,10 @@ export type {
   PreparedBindings,
   PreparedParameterDeclaration,
 } from "./builder/prepared-bindings";
+export {
+  type AliasExpansionAxis,
+  type DefaultAliasExpansionAxis,
+} from "./builder/alias-expansion";
 export { PreparedQuery } from "./builder/prepared-query";
 export {
   ExecutableRelationQuery,
