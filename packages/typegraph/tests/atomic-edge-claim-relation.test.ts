@@ -321,7 +321,8 @@ describe.each(DIALECTS)(
           ),
           toArm: statementSql.includes('"to_kind" = "proposed"."from_kind"'),
           armPairs: statementSql.match(/"kind" IN \(/g)?.length ?? 0,
-          holderKinds: params.filter((param) => param === "includedIn").length,
+          holderKinds: params.filter((parameter) => parameter === "includedIn")
+            .length,
         }).toEqual({
           fromArm: true,
           toArm: true,
