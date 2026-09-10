@@ -5789,30 +5789,20 @@ type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, 
 type SubgraphResultEdgeKinds<G extends GraphDef, EK extends EdgeKinds<G>, C extends boolean | undefined> = true extends C ? EdgeKinds<G> : EK;
 
 // @public
-type SubsumptionAffected<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? true : true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true : [
-Extract<G["ontology"][number], {
+type SubsumptionAffected<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? true : true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true : true extends SubsumptionElementNamesKind<G["ontology"][number], K> ? true : false;
+
+// @public
+type SubsumptionElementNamesKind<Relation, K extends string> = Relation extends unknown ? Relation extends ({
     metaEdge: {
-        name: "subClassOf";
+        name: infer Name extends string;
     };
-    to: {
-        kind: K;
-    };
-} | {
-    metaEdge: {
-        name: "equivalentTo" | "sameAs";
-    };
-    from: {
-        kind: K;
-    };
-} | {
-    metaEdge: {
-        name: "equivalentTo" | "sameAs";
-    };
-    to: {
-        kind: K;
-    };
-}>
-] extends [never] ? false : true;
+    from: infer From;
+    to: infer To;
+}) ? [
+Extract<Extract<MatchedEndpoints<Name, From, To>, {
+    kind: string;
+}>["kind"], K>
+] extends [never] ? false : true : false : never;
 
 // @public
 type SubsumptionLiteralsErased<Relation> = Relation extends unknown ? Relation extends ({

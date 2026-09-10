@@ -157,17 +157,20 @@ type OntologyTypeErased<G extends GraphDef> =
 
 /**
  * True when an ontology endpoint carries no `kind` literal for
- * {@link SubsumptionAffected}'s `Extract` to match or rule out. An endpoint
- * is one of three things:
+ * {@link SubsumptionElementNamesKind}'s `Extract` to match or rule out. An
+ * endpoint is one of three things:
  *
  * - a `NodeType`/`AnyEdgeType` with a LITERAL `kind` — decidable: the
- *   `Extract` either matches this kind or proves the relation does not name
+ *   `Extract` either matches this kind or proves the endpoint does not name
  *   it.
  * - an IRI `string` — never a registered node kind, so the `{ kind: K }`
- *   arms rule it out soundly. A second kind co-registered on the same IRI
- *   carries its OWN literal endpoint and widens through that element.
+ *   `Extract` rules it out soundly. A second kind co-registered on the same
+ *   IRI carries its OWN literal endpoint and widens through that element.
  * - anything whose `kind` is the general `string` — a kind literal an
  *   annotation ERASED. Nothing can be ruled out.
+ *
+ * Distributes over an endpoint UNION (`typeof Audio | typeof Video`), so a
+ * union is erased exactly when one of its members is.
  */
 type EndpointKindErased<Endpoint> =
   Endpoint extends string ? false
@@ -178,13 +181,17 @@ type EndpointKindErased<Endpoint> =
   : true;
 
 /**
- * The endpoints {@link SubsumptionAffected}'s `Extract` reads a `kind`
- * literal off, for an element whose meta-edge name is `Name` — the `Extract`
- * arms spelled as endpoint positions, so the two cannot drift: a
- * `subClassOf` is matched on its `to` alone (the supertype; which subtype
- * declares itself under `K` never changes whether `K` is affected), an
- * `equivalentTo`/`sameAs` on both sides. `never` for a name that is none of
- * the three, whose endpoints the `Extract` never reads.
+ * The endpoint positions that decide whether an ontology element affects a
+ * kind, for an element whose meta-edge name is `Name`: a `subClassOf` is
+ * decided by its `to` alone (the supertype; which subtype declares itself
+ * under `K` never changes whether `K` is affected), an
+ * `equivalentTo`/`sameAs` by both sides. `never` for a name that is none of
+ * the three: no endpoint of such a relation can affect any kind.
+ *
+ * The SOLE owner of that position mapping: both per-element tests —
+ * {@link SubsumptionLiteralsErased} (can this element be decided at all?)
+ * and {@link SubsumptionElementNamesKind} (does it name `K`?) — read their
+ * endpoints from here, so the two cannot drift.
  */
 type MatchedEndpoints<Name extends string, From, To> =
   | ([Extract<Name, "subClassOf">] extends [never] ? never : To)
@@ -193,7 +200,7 @@ type MatchedEndpoints<Name extends string, From, To> =
 
 /**
  * True for an ontology-tuple element whose literals are too weak for
- * {@link SubsumptionAffected}'s `Extract` to rule it out — the conservative
+ * {@link SubsumptionElementNamesKind} to rule it out — the conservative
  * arm's per-element test.
  *
  * An element is undecidable when its `metaEdge.name` is the general `string`
@@ -225,14 +232,68 @@ type SubsumptionLiteralsErased<Relation> =
   : never;
 
 /**
+ * True for an ontology-tuple element that NAMES kind `K` at one of the
+ * endpoint positions {@link MatchedEndpoints} selects — the decided arm's
+ * per-element test.
+ *
+ * The match reduces the element's selected endpoints to the set of kind
+ * LITERALS they can hold and asks whether `K` is one of them, rather than
+ * asking whether the element is assignable to a single-kind shape. That is
+ * what makes an endpoint kind UNION decidable, in both shapes a caller can
+ * write it:
+ *
+ * - a union of endpoint TYPES, from a helper that declares a subclass of
+ *   either media root (`(root: typeof Audio | typeof Video) =>
+ *   subClassOf(Episode, root)`), leaving `to` as `Audio | Video`. The
+ *   endpoint filter distributes over it.
+ * - a union inside ONE endpoint's `kind`, from a helper annotated
+ *   `NodeType<"Audio" | "Video">`, leaving `to` as a single object typed
+ *   `{ kind: "Audio" | "Video" }`. The indexed access collects it.
+ *
+ * An `Extract` over the element itself — `Extract<Element, { to: { kind:
+ * "Audio" } }>` — matches NEITHER shape for EITHER kind, because neither
+ * `{ to: Audio | Video }` nor `{ to: { kind: "Audio" | "Video" } }` is
+ * assignable to a single-kind shape. Both roots would then keep an exact
+ * alias while either one really can return the subclass's rows: an unsound
+ * under-widening, not the conservative over-widening the erased arms above
+ * deliberately take.
+ *
+ * Distributes over the element union, so `true extends
+ * SubsumptionElementNamesKind<...>` is "at least one element names `K`".
+ * Endpoints the position mapping does not select (`never`) contribute no
+ * kinds, and an IRI `string` endpoint carries no `kind` at all, so the
+ * endpoint filter drops it — exactly the soundness
+ * {@link EndpointKindErased} describes.
+ */
+type SubsumptionElementNamesKind<Relation, K extends string> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      [
+        Extract<
+          Extract<MatchedEndpoints<Name, From, To>, { kind: string }>["kind"],
+          K
+        >,
+      ] extends [never] ?
+        false
+      : true
+    : false
+  : never;
+
+/**
  * Whether kind `K` in graph `G` participates in a `subClassOf`/`equivalentTo`
  * relation that could hand a polymorphic-default query a row of a DIFFERENT
  * concrete kind: `K` is a `subClassOf` target, or `K` is either side of an
  * `equivalentTo`/`sameAs` pair. Direct participation is enough — a kind with
  * a transitive descendant necessarily has a direct one — so this is a single
- * non-recursive `Extract` over `G["ontology"]`, computable with no
- * transitive-closure type engine. `false` (a graph with `ontology: []`, or a
- * kind no relation touches) costs zero type churn.
+ * non-recursive per-element `Extract` over `G["ontology"]`, computable with
+ * no transitive-closure type engine. `false` (a graph with `ontology: []`, or
+ * a kind no relation touches) costs zero type churn.
  *
  * The `Extract` reads the IRI-routed `equivalentTo(Kind, iri)` form too:
  * every meta-edge factory returns a `TypedOntologyRelation` carrying
@@ -253,23 +314,18 @@ type SubsumptionLiteralsErased<Relation> =
  * while the runtime alias is genuinely polymorphic.
  *
  * The two arms are conservative, not exhaustive: an element that keeps every
- * literal the `Extract` reads is decided by the `Extract`, and that decision
- * is sound for the relations the ontology DECLARES. A relation added at
- * runtime is a separate, documented limitation — see {@link AliasNodeType}.
+ * literal the `Extract` reads is decided by {@link
+ * SubsumptionElementNamesKind}, and that decision is sound for the relations
+ * the ontology DECLARES — including one whose endpoint is a UNION of node
+ * types, which that helper distributes over so every kind the union can
+ * hold is decided. A relation added at runtime is a separate, documented
+ * limitation — see {@link AliasNodeType}.
  */
 type SubsumptionAffected<G extends GraphDef, K extends string> =
   OntologyTypeErased<G> extends true ? true
   : true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true
-  : [
-    Extract<
-      G["ontology"][number],
-      | { metaEdge: { name: "subClassOf" }; to: { kind: K } }
-      | { metaEdge: { name: "equivalentTo" | "sameAs" }; from: { kind: K } }
-      | { metaEdge: { name: "equivalentTo" | "sameAs" }; to: { kind: K } }
-    >,
-  ] extends [never] ?
-    false
-  : true;
+  : true extends SubsumptionElementNamesKind<G["ontology"][number], K> ? true
+  : false;
 
 /**
  * The alias type a `from(kind, alias)` call with NO explicit

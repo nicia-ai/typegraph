@@ -13,6 +13,7 @@ import {
   type NodeType,
   type OntologyRelation,
   type Store,
+  subClassOf,
 } from "..";
 
 const Person = defineNode("Person", {
@@ -212,3 +213,129 @@ declare const annotatedRow: Awaited<
   ReturnType<(typeof annotatedQuery)["execute"]>
 >[number];
 expectType<string>(annotatedRow.kind);
+
+// An endpoint that is a UNION of node types — a caller helper declaring a
+// subclass of either media root — widens every kind the union can hold. The
+// relation keeps both its meta-edge name literal and its literal endpoint
+// kinds, so neither conservative arm fires; only distributing over the
+// endpoint union decides the two roots, and a kind no endpoint names stays
+// exact.
+const UnionAudio = defineNode("UnionAudio", {
+  schema: z.object({ title: z.string() }),
+});
+const UnionVideo = defineNode("UnionVideo", {
+  schema: z.object({ title: z.string() }),
+});
+const UnionEpisode = defineNode("UnionEpisode", {
+  schema: z.object({ title: z.string(), durationSeconds: z.number() }),
+});
+const UnionUnrelated = defineNode("UnionUnrelated", {
+  schema: z.object({ name: z.string() }),
+});
+
+function declareEpisodeOf(root: typeof UnionAudio | typeof UnionVideo) {
+  return subClassOf(UnionEpisode, root);
+}
+
+const unionEndpointGraph = defineGraph({
+  id: "r2_union_endpoint",
+  nodes: {
+    UnionAudio: { type: UnionAudio },
+    UnionVideo: { type: UnionVideo },
+    UnionEpisode: { type: UnionEpisode },
+    UnionUnrelated: { type: UnionUnrelated },
+  },
+  edges: {},
+  ontology: [declareEpisodeOf(UnionAudio)],
+});
+
+declare const unionEndpointStore: Store<typeof unionEndpointGraph>;
+const unionAudioQuery = unionEndpointStore
+  .query()
+  .from("UnionAudio", "a")
+  .select((ctx) => ctx.a);
+declare const unionAudioRow: Awaited<
+  ReturnType<(typeof unionAudioQuery)["execute"]>
+>[number];
+expectType<string>(unionAudioRow.kind);
+
+const unionVideoQuery = unionEndpointStore
+  .query()
+  .from("UnionVideo", "v")
+  .select((ctx) => ctx.v);
+declare const unionVideoRow: Awaited<
+  ReturnType<(typeof unionVideoQuery)["execute"]>
+>[number];
+expectType<string>(unionVideoRow.kind);
+
+const unionUnrelatedQuery = unionEndpointStore
+  .query()
+  .from("UnionUnrelated", "u")
+  .select((ctx) => ctx.u);
+declare const unionUnrelatedRow: Awaited<
+  ReturnType<(typeof unionUnrelatedQuery)["execute"]>
+>[number];
+expectType<"UnionUnrelated">(unionUnrelatedRow.kind);
+
+// The second shape the same union takes: a kind-literal union inside ONE
+// endpoint object (`NodeType<"LiteralAudio" | "LiteralVideo">`), rather than a
+// union of endpoint types. Both kinds widen; a kind the union cannot hold does
+// not.
+const LiteralAudio = defineNode("LiteralAudio", {
+  schema: z.object({ title: z.string() }),
+});
+const LiteralVideo = defineNode("LiteralVideo", {
+  schema: z.object({ title: z.string() }),
+});
+const LiteralEpisode = defineNode("LiteralEpisode", {
+  schema: z.object({ title: z.string(), durationSeconds: z.number() }),
+});
+const LiteralUnrelated = defineNode("LiteralUnrelated", {
+  schema: z.object({ name: z.string() }),
+});
+
+function declareEpisodeUnderEither(
+  root: NodeType<"LiteralAudio" | "LiteralVideo">,
+) {
+  return subClassOf(LiteralEpisode, root);
+}
+
+const literalUnionGraph = defineGraph({
+  id: "r2_union_endpoint_kind_literal",
+  nodes: {
+    LiteralAudio: { type: LiteralAudio },
+    LiteralVideo: { type: LiteralVideo },
+    LiteralEpisode: { type: LiteralEpisode },
+    LiteralUnrelated: { type: LiteralUnrelated },
+  },
+  edges: {},
+  ontology: [declareEpisodeUnderEither(LiteralAudio)],
+});
+
+declare const literalUnionStore: Store<typeof literalUnionGraph>;
+const literalAudioQuery = literalUnionStore
+  .query()
+  .from("LiteralAudio", "a")
+  .select((ctx) => ctx.a);
+declare const literalAudioRow: Awaited<
+  ReturnType<(typeof literalAudioQuery)["execute"]>
+>[number];
+expectType<string>(literalAudioRow.kind);
+
+const literalVideoQuery = literalUnionStore
+  .query()
+  .from("LiteralVideo", "v")
+  .select((ctx) => ctx.v);
+declare const literalVideoRow: Awaited<
+  ReturnType<(typeof literalVideoQuery)["execute"]>
+>[number];
+expectType<string>(literalVideoRow.kind);
+
+const literalUnrelatedQuery = literalUnionStore
+  .query()
+  .from("LiteralUnrelated", "u")
+  .select((ctx) => ctx.u);
+declare const literalUnrelatedRow: Awaited<
+  ReturnType<(typeof literalUnrelatedQuery)["execute"]>
+>[number];
+expectType<"LiteralUnrelated">(literalUnrelatedRow.kind);

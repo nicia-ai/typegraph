@@ -111,6 +111,16 @@ then widens every kind in the graph conservatively rather than risk typing a
 polymorphic alias as exact. Let the relation types be inferred, or annotate
 with `typeof` the factory call, if you want the narrow types back.
 
+**An endpoint declared as a union of kinds widens every kind the union can
+hold.** A helper that declares a subclass of either media root —
+`(root: typeof Audio | typeof Video) => subClassOf(Episode, root)`, or the
+same helper annotated `NodeType<"Audio" | "Video">` — keeps its meta-edge name
+and its endpoint kind literals, so nothing is erased, but its declared type no
+longer says which root the call passed. Both `Audio` and `Video` therefore get
+the polymorphic alias type, while a kind the union cannot hold stays exact.
+Pass the root directly (`subClassOf(Episode, Audio)`) if you want only the
+root you named to widen.
+
 **Limitation — `evolve()`-declared subsumption isn't visible to the alias
 type.** The `kind`/`NodeId` widening above is computed from your
 compile-time graph definition. A `subClassOf` an [extension](/graph-extensions)
