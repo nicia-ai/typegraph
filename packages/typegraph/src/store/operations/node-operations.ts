@@ -241,11 +241,15 @@ import {
 } from "./composition-cascade";
 import {
   assertCompositionExistencePreserved,
-  assertSatisfiedPartOfPropsHonored,
   buildCompositionCreateEdgeInput,
+  type CompositionAttachmentRequest,
+  compositionAttachmentRequest,
   type CompositionCreateWork,
+  type CompositionIncumbentDisposition,
+  decideCompositionIncumbent,
   edgeCurrentlyAttachesPart,
   findLiveCompositionAttachment,
+  incumbentHoldsRequestedAttachment,
   resolveCompositionAttachment,
   resolveCompositionCreate,
 } from "./composition-create";
@@ -2771,59 +2775,195 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
 }
 
 /**
+ * THE write every attachment surface performs once it holds the per-graph
+ * fence: re-read the incumbent UNDER THE LOCK, decide its disposition
+ * (`decideCompositionIncumbent`, `composition-create.ts`), then write at most
+ * one retire and one attach. Returns whether it wrote.
+ *
+ * One owner, reached by every surface that can attach a part to a whole
+ * against a row that already exists — `reparent`
+ * ({@link executeNodeReparent}, `onIncumbent: "replace"`), the
+ * get-or-create `partOf` postcondition
+ * ({@link applyExistingPartOfPostcondition}) and the get-or-create
+ * update/resurrection leg ({@link executeNodeUpsertUpdate}), both
+ * `onIncumbent: "refuse"`. The disposition is the ONLY dimension that
+ * differs, and it is applied to the incumbent this function read itself: a
+ * verdict from a lock-free read is never what decides the write, which is
+ * what keeps two racing callers requesting different wholes from ending in a
+ * silent move (one wins, one refuses).
+ *
+ * How the incumbent retires follows the population declared on the INCUMBENT
+ * row's own pair, resolved through the realizing edge that actually holds
+ * the attachment — not `compositionPopulation(partKind)`, which re-derives
+ * it from the part kind and agrees only because
+ * `ONTOLOGY_COMPOSITION_POPULATION_MIXED` forbids a part kind's pairs from
+ * disagreeing. Same reasoning (and the same should-be-impossible invariant)
+ * as the cascade's pair lookup: a live row's edge kind is always one
+ * `ONTOLOGY_COMPOSITION_VIA_MIXED` already made a declared pair between the
+ * part and its whole, so the `CompilerInvariantError` below is unreachable on
+ * a registry-legal graph — see `planCompositionCascade`'s identical lookup
+ * (`composition-cascade.ts`) for the full argument. A
+ * `population: "one"` edge is DELETED (a `one` binding persists for the
+ * row's whole life, ended or not, so an ended row would still read as an
+ * attachment), while a `population: "oneActive"` edge has its window ENDED
+ * at the move instant, leaving the previous membership readable as
+ * valid-time history.
+ *
+ * The move instant is read ONCE and is both the incumbent window's `validTo`
+ * and the new edge's `validFrom`. For a `oneActive` pair this makes the two
+ * halves of the move abut in valid time: no `store.asOf(t)` coordinate shows
+ * the part with zero wholes, and none shows it with two. A second clock read
+ * would open a real gap (the first on any clock, the second on a
+ * non-monotonic one — issue #242's failure mode), and neither is fenceable:
+ * each write is legal at the instant it samples.
+ */
+async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: WriteSession,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  partId: string,
+  request: CompositionAttachmentRequest,
+): Promise<boolean> {
+  const { work } = request;
+  const partKind = work.partKind;
+  const current = await findLiveCompositionAttachment(
+    ctx.registry,
+    target,
+    ctx.graphId,
+    partKind,
+    partId,
+  );
+  const disposition = decideCompositionIncumbent(
+    ctx.registry,
+    partId,
+    request,
+    current,
+  );
+  if (disposition === "satisfied") return false;
+
+  if (disposition === "attach") {
+    // A fresh attachment states no window of its own: the realizing edge's
+    // lower bound is the insert's own default, exactly as it is for every
+    // other create path. Only a MOVE needs an explicit instant (below), and
+    // only because the two halves have to abut.
+    await attachCompositionCreateEdge(
+      ctx,
+      session,
+      target,
+      lock,
+      work,
+      partId,
+      {},
+    );
+    return true;
+  }
+
+  // `"replace"`: the incumbent is retired and the requested attachment takes
+  // its place. ONE clock read for ONE move — the instant the incumbent window
+  // ends is the instant the new attachment begins.
+  const incumbent = requireDefined(
+    current,
+    'decideCompositionIncumbent answered "replace" with no incumbent read',
+  );
+  const moveInstant = nowIso();
+  const incumbentPair = ctx.registry.compositionPairVia(
+    partKind,
+    incumbent.whole.kind,
+    incumbent.edge.kind,
+  );
+  if (incumbentPair === undefined) {
+    throw new CompilerInvariantError(
+      `A composition attachment read composition edge "${incumbent.edge.kind}" between "${partKind}" and "${incumbent.whole.kind}", but the registry declares no composition pair between them realized by that edge kind.`,
+      {
+        edgeKind: incumbent.edge.kind,
+        partKind,
+        wholeKind: incumbent.whole.kind,
+      },
+    );
+  }
+  if (incumbentPair.population === "oneActive") {
+    await endCompositionEdgeWindow(
+      ctx,
+      incumbent.edge,
+      { kind: partKind, id: partId },
+      moveInstant,
+      session,
+      target,
+      lock,
+    );
+  } else {
+    // Through the same owner every other retire path goes through, with the
+    // move's `reattachedPart` evidence — though for THIS arm the exemption's
+    // own match is unconditional: the edge retired here is always the part's
+    // own current edge, so `reattached.kind === part.kind && reattached.id ===
+    // part.id` is true on every call, and the function returns before any rule
+    // in its body runs (`composition-create.ts`'s `reattachedPart` early
+    // return). Kept anyway so a rule added ABOVE that early return applies to
+    // a `population: "one"` move too, without a second call site to remember —
+    // the same reason the `oneActive` arm reaches it via
+    // `endCompositionEdgeWindow` -> `performEdgeUpdateConverging`; a direct
+    // `retireEdge` has no other way in.
+    await assertCompositionExistencePreserved(
+      {
+        graphId: ctx.graphId,
+        registry: ctx.registry,
+        lock,
+        reattachedPart: { kind: partKind, id: partId },
+      },
+      incumbent.edge,
+      target,
+    );
+    await session.retireEdge({
+      id: incumbent.edge.id,
+      kind: incumbent.edge.kind,
+    });
+  }
+
+  await attachCompositionCreateEdge(ctx, session, target, lock, work, partId, {
+    validFrom: moveInstant,
+  });
+  return true;
+}
+
+/**
  * THE `partOf` POSTCONDITION a `getOrCreateByConstraint` call owes for a
- * match that resolved to `"found"` or `"updated"`: when this returns, the
- * resolved node holds exactly the stated attachment.
+ * match that resolved to `"found"`: when this returns, the resolved node
+ * holds exactly the stated attachment.
  *
- * The attachment is RESOLVED first, unconditionally
- * ({@link resolveCompositionAttachment}), before the live attachment is even
- * read: an undeclared whole kind, an unknown `via`, and an ambiguous omitted
- * `via` are configuration defects of the CALL, and a call that states one
- * must refuse identically whether the constraint matched an existing node or
- * created one. Resolving first is also what lets the dispositions below
- * compare the incumbent row against the resolved pair's realizing edge
- * rather than against `attachment.via` — so "via omitted" means "the one
- * declared pair", never "any realizing edge will do".
+ * The attachment is RESOLVED before this is reached
+ * (`resolveGetOrCreateAttachmentRequest`), so an undeclared whole kind, an
+ * unknown `via`, and an ambiguous omitted `via` are refused identically
+ * whether the constraint matched an existing node or created one.
  *
- * Three dispositions, decided from the node's LIVE attachment
- * (`findLiveCompositionAttachment` — the same reader `reparent` and the
- * `situation: "existing"` diagnostic use):
+ * Every verdict and every write comes from the fenced re-read
+ * ({@link applyCompositionAttachmentUnderFence} under
+ * {@link executeNodeReparent}'s write plan, `onIncumbent: "refuse"`): an
+ * already-held attachment is satisfied (idempotent, stated `props`
+ * honored), no live whole has the attachment written now — so an optional
+ * part found unattached is attached rather than told to attach itself, and a
+ * REQUIRED part found unattached (only reachable through rows written
+ * outside the store's write path) is repaired on the same terms — and a
+ * DIFFERENT whole, or the same whole through a different realizing edge, is
+ * refused with `CompositionExistenceError` (`situation: "existing"`). Moving
+ * a part is `reparent`'s decision, never a side effect of a lookup.
  *
- * - it already holds this whole through the resolved pair's realizing edge:
- *   satisfied, no write — which is what makes a repeated get-or-create with
- *   the same `partOf` idempotent rather than a refusal. Stated `props` are
- *   still checked on this arm ({@link assertSatisfiedPartOfPropsHonored}): a
- *   schema-invalid value refuses exactly as a fresh attach would, and a
- *   valid value that differs from the edge's live stored props refuses with
- *   `situation: "props"` rather than being silently dropped — a satisfied
- *   match writes no edge, so it never applies a changed `props`;
- * - it holds NO live whole: the attachment is written now, through
- *   {@link executeNodeReparent} (whose no-current-attachment arm is exactly
- *   this write, under the same fence and the same final-state validation) —
- *   so an optional part found unattached is attached rather than told to
- *   attach itself, and a REQUIRED part found unattached (only reachable
- *   through rows written outside the store's write path) is repaired on the
- *   same terms;
- * - it holds a DIFFERENT whole, or the same whole through a different
- *   realizing edge: refused with `CompositionExistenceError`
- *   (`situation: "existing"`) naming both sides. Moving a part is
- *   `reparent`'s decision, never a side effect of a lookup.
- *
- * Shared by the single-item and bulk entries so neither re-spells it.
+ * The lock-free read below is a PRE-CHECK and nothing more: its only effect
+ * is to let the overwhelmingly common already-satisfied call stay read-only
+ * instead of opening a write transaction to discover it has nothing to do.
+ * It can therefore skip work but never decide it — a stale "no incumbent"
+ * verdict acted on directly is exactly how a refusing caller would perform
+ * the silent move this disposition exists to prevent. A stated `props` is
+ * deliberately outside its skip condition: comparing them is a refusal
+ * decision, so it belongs to the fenced read that can be trusted.
  */
 async function applyExistingPartOfPostcondition<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   backend: GraphBackend | TransactionBackend,
   concreteKind: string,
   concreteId: string,
-  attachment: CompositionAttachment,
+  request: CompositionAttachmentRequest,
 ): Promise<void> {
-  const pair = resolveCompositionAttachment(
-    ctx.registry,
-    concreteKind,
-    attachment,
-  );
-
   const current = await findLiveCompositionAttachment(
     ctx.registry,
     backend,
@@ -2831,43 +2971,59 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
     concreteKind,
     concreteId,
   );
-
-  if (current === undefined) {
-    await executeNodeReparent(
-      ctx,
-      concreteKind,
-      concreteId,
-      attachment,
-      backend,
-    );
+  if (
+    current !== undefined &&
+    request.attachment.props === undefined &&
+    incumbentHoldsRequestedAttachment(request, current)
+  ) {
     return;
   }
 
-  const wholeMatches =
-    current.whole.kind === attachment.kind &&
-    current.whole.id === attachment.id;
-  const viaMatches = current.edge.kind === pair.viaEdgeKind;
-  if (wholeMatches && viaMatches) {
-    assertSatisfiedPartOfPropsHonored(
-      ctx.registry,
-      concreteKind,
-      concreteId,
-      attachment,
-      pair,
-      current.edge,
-    );
-    return;
-  }
+  await executeNodeReparent(
+    ctx,
+    concreteKind,
+    concreteId,
+    request.attachment,
+    backend,
+    { onIncumbent: request.onIncumbent },
+  );
+}
 
-  throw new CompositionExistenceError({
-    partKind: concreteKind,
-    partId: concreteId,
-    situation: "existing",
-    currentWhole: current.whole,
-    ...(wholeMatches ? { currentVia: current.edge.kind } : {}),
-    requestedWhole: { kind: attachment.kind, id: attachment.id },
-    requestedVia: pair.viaEdgeKind,
+/**
+ * The ONE resolution every `getOrCreateByConstraint` leg's `partOf` goes
+ * through, for a match that resolved to an EXISTING row (found, updated, or
+ * resurrected): `resolveCompositionCreate` — the same read-free owner every
+ * create path uses, so a `partOf` naming an undeclared or ambiguous pair
+ * refuses before any row is read — wrapped with
+ * `onIncumbent: "refuse"`. A lookup resolves an attachment; it never moves a
+ * part.
+ *
+ * `undefined` means this leg owes no attachment at all. Resolving against a
+ * resurrection's TOMBSTONE kind/id (never the requested `kind`: a subclass
+ * scope can resurrect under a sibling/parent kind) is the caller's to pass;
+ * a required-existence kind resurrected with no `partOf` refuses here, as it
+ * would on a fresh create.
+ */
+function resolveGetOrCreateAttachmentRequest<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  concreteKind: string,
+  concreteId: string,
+  partOf: CompositionAttachment | undefined,
+): CompositionAttachmentRequest | undefined {
+  const work = resolveCompositionCreate(ctx.registry, {
+    kind: concreteKind,
+    id: concreteId,
+    ...(partOf === undefined ? {} : { partOf }),
   });
+  if (work === undefined) return undefined;
+  return compositionAttachmentRequest(
+    work,
+    requireDefined(
+      partOf,
+      "resolveCompositionCreate returned composition work for a call that stated no partOf",
+    ),
+    "refuse",
+  );
 }
 
 /**
@@ -2942,10 +3098,20 @@ function createInputWithPartOf(
  * edge) is accepted as a NO-OP (no write, no history), not refused: reparent
  * states a destination, and a caller converging on one should not have to
  * first ask where the part is. A stated `attachment.props` is still checked
- * on this no-op ({@link assertSatisfiedPartOfPropsHonored}) — schema-invalid
+ * on this no-op (`assertSatisfiedPartOfPropsHonored`) — schema-invalid
  * refuses as it would on a fresh attach, and valid-but-different from the
  * edge's live stored props refuses with `situation: "props"` rather than
  * being silently kept, since no write happens here to apply it.
+ *
+ * `onIncumbent` is stated by the CALLER, never defaulted: this is also the
+ * write plan the get-or-create `partOf` postcondition runs
+ * ({@link applyExistingPartOfPostcondition}), and the only difference between
+ * "move this part" and "make sure this part holds this whole" is what a
+ * DIFFERENT incumbent means — `"replace"` for `nodes.<Kind>.reparent(...)`,
+ * `"refuse"` for a lookup. Everything else (the fence, the locked re-read,
+ * the single move instant, the retire's population rule, the final-state
+ * validation) is one owner:
+ * {@link applyCompositionAttachmentUnderFence}.
  */
 export async function executeNodeReparent<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -2953,6 +3119,7 @@ export async function executeNodeReparent<G extends GraphDef>(
   id: string,
   attachment: CompositionAttachment,
   backend: GraphBackend | TransactionBackend,
+  options: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
 ): Promise<void> {
   if (!ctx.registry.isCompositionPart(kind)) {
     throw new ConfigurationError(
@@ -2965,13 +3132,16 @@ export async function executeNodeReparent<G extends GraphDef>(
   }
   // Synchronous and read-free: an undeclared pair, an unknown `via`, and an
   // ambiguous omitted `via` all refuse before any row is read or locked.
-  const pair = resolveCompositionAttachment(ctx.registry, kind, attachment);
-  const work: CompositionCreateWork = {
-    pair,
-    whole: { kind: attachment.kind, id: attachment.id },
-    partKind: kind,
-    props: attachment.props ?? {},
-  };
+  const request = compositionAttachmentRequest(
+    {
+      pair: resolveCompositionAttachment(ctx.registry, kind, attachment),
+      whole: { kind: attachment.kind, id: attachment.id },
+      partKind: kind,
+      props: attachment.props ?? {},
+    },
+    attachment,
+    options.onIncumbent,
+  );
 
   const gate = await backend.getNode(ctx.graphId, kind, id);
   if (!gate || !isLiveNodeRow(gate)) throw new NodeNotFoundError(kind, id);
@@ -2986,7 +3156,7 @@ export async function executeNodeReparent<G extends GraphDef>(
     // helper). The probe is the composition edge's own — a backend that
     // cannot hold the fence refuses the move rather than retiring an
     // attachment it cannot replace.
-    mixedWritePlan(compositionEdgeConstraintFence(ctx, work), false),
+    mixedWritePlan(compositionEdgeConstraintFence(ctx, request.work), false),
     backend,
     async (session, target, _overlaidSession, lock) => {
       // Re-read under the lock: the gate above is lock-free, and a
@@ -2995,109 +3165,14 @@ export async function executeNodeReparent<G extends GraphDef>(
       const part = await target.getNode(ctx.graphId, kind, id);
       if (!part || !isLiveNodeRow(part)) throw new NodeNotFoundError(kind, id);
 
-      const current = await findLiveCompositionAttachment(
-        ctx.registry,
+      return applyCompositionAttachmentUnderFence(
+        ctx,
+        session,
         target,
-        ctx.graphId,
-        kind,
+        lock,
         id,
+        request,
       );
-      if (
-        current?.whole.kind === attachment.kind &&
-        current.whole.id === attachment.id &&
-        current.edge.kind === pair.viaEdgeKind
-      ) {
-        assertSatisfiedPartOfPropsHonored(
-          ctx.registry,
-          kind,
-          id,
-          attachment,
-          pair,
-          current.edge,
-        );
-        return false;
-      }
-
-      // ONE clock read for ONE move. The instant the incumbent window ends is
-      // the instant the new attachment begins, so valid time has no interval
-      // in which the part holds zero wholes (which `existence: "required"`
-      // forbids) and none in which it holds two (which R4 forbids). Two
-      // independent reads would produce the first on any clock and the second
-      // on a non-monotonic one, and no fence catches either: each write is
-      // legal at the instant it samples.
-      const moveInstant = nowIso();
-
-      if (current !== undefined) {
-        // The population that governs how this ROW retires is the incumbent
-        // pair's own, read through the realizing edge that actually holds the
-        // attachment — not `compositionPopulation(kind)`, which re-derives it
-        // from the part kind and agrees only because
-        // `ONTOLOGY_COMPOSITION_POPULATION_MIXED` forbids a part kind's pairs
-        // from disagreeing. Same reasoning as the cascade's pair lookup, and
-        // the same should-be-impossible invariant: a live row's edge kind is
-        // always one `ONTOLOGY_COMPOSITION_VIA_MIXED` already made a declared
-        // pair between `kind` and `current.whole.kind`, so this is unreachable
-        // on a registry-legal graph — see `planCompositionCascade`'s identical
-        // lookup (`composition-cascade.ts`) for the full argument.
-        const incumbentPair = ctx.registry.compositionPairVia(
-          kind,
-          current.whole.kind,
-          current.edge.kind,
-        );
-        if (incumbentPair === undefined) {
-          throw new CompilerInvariantError(
-            `executeNodeReparent read composition edge "${current.edge.kind}" between "${kind}" and "${current.whole.kind}", but the registry declares no composition pair between them realized by that edge kind.`,
-            {
-              edgeKind: current.edge.kind,
-              partKind: kind,
-              wholeKind: current.whole.kind,
-            },
-          );
-        }
-        if (incumbentPair.population === "oneActive") {
-          await endCompositionEdgeWindow(
-            ctx,
-            current.edge,
-            { kind, id },
-            moveInstant,
-            session,
-            target,
-            lock,
-          );
-        } else {
-          // Through the same owner every other retire path goes through,
-          // with the reparent's `reattachedPart` evidence — though for THIS
-          // arm the exemption's own match is unconditional: the edge retired
-          // here is always the part's own current edge, so
-          // `reattached.kind === part.kind && reattached.id === part.id` is
-          // true on every call, and the function returns before any rule in
-          // its body runs (`composition-create.ts`'s `reattachedPart` early
-          // return). Kept anyway so a rule added ABOVE that early return
-          // applies to a `population: "one"` move too, without a second call
-          // site to remember — the same reason the `oneActive` arm reaches it
-          // via `endCompositionEdgeWindow` -> `performEdgeUpdateConverging`; a
-          // direct `retireEdge` has no other way in.
-          await assertCompositionExistencePreserved(
-            {
-              graphId: ctx.graphId,
-              registry: ctx.registry,
-              lock,
-              reattachedPart: { kind, id },
-            },
-            current.edge,
-            target,
-          );
-          await session.retireEdge({
-            id: current.edge.id,
-            kind: current.edge.kind,
-          });
-        }
-      }
-
-      await attachCompositionCreateEdge(ctx, session, target, lock, work, id, {
-        validFrom: moveInstant,
-      });
-      return true;
     },
     { didWrite: booleanWriteResultChanges },
   );
@@ -4226,27 +4301,31 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   options?: Readonly<{
     clearDeleted?: boolean;
     /**
-     * Item E.2. Present only from `executeNodeGetOrCreateByConstraint`'s
-     * resurrection leg: `partOf` restores the whole alone (Q2), in the SAME
-     * transaction as the resurrecting write, so a lost composition claim or
-     * a dead/missing whole aborts the resurrection too.
+     * Item E.2. Present only from the get-or-create entries' existing-row
+     * leg (`executeNodeGetOrCreateByConstraint` and its bulk twin): the
+     * stated `partOf` is decided and written in the SAME transaction as this
+     * property update, so the two halves of one call commit together. A lost
+     * composition claim, a dead or missing whole, or an incumbent whole this
+     * request refuses all abort the property update too; a refused property
+     * update (a unique conflict, a validation error) leaves the attachment
+     * and its history untouched.
      */
-    compositionWork?: CompositionCreateWork;
+    compositionAttachment?: CompositionAttachmentRequest;
   }>,
 ): Promise<Node> {
   if (input.clearValidTo === true) {
     assertClearValidToSupported(backend, "node");
   }
-  const compositionWork = options?.compositionWork;
+  const compositionAttachment = options?.compositionAttachment;
   return runWritePlan(
     nodeWritePlanContext(ctx),
     // `mixedWritePlan` unconditionally — see `executeNodeCreateInternal`'s
     // identical note: `entity` only widens the STATIC session type, with no
-    // runtime effect on a call that carries no `compositionWork`.
+    // runtime effect on a call that carries no `compositionAttachment`.
     mixedWritePlan(
       nodeFencesConstraintProbe(ctx, input.kind, "update") ??
-        (compositionWork === undefined ? undefined : (
-          compositionEdgeConstraintFence(ctx, compositionWork)
+        (compositionAttachment === undefined ? undefined : (
+          compositionEdgeConstraintFence(ctx, compositionAttachment.work)
         )),
       // Conditional for the same reason as {@link executeNodeUpdate}: a
       // resurrecting upsert folds, and stating a validity end reads the
@@ -4283,14 +4362,16 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           "restore",
         );
       }
-      await attachCompositionCreateEdge(
-        ctx,
-        session,
-        target,
-        lock,
-        compositionWork,
-        input.id,
-      );
+      if (compositionAttachment !== undefined) {
+        await applyCompositionAttachmentUnderFence(
+          ctx,
+          session,
+          target,
+          lock,
+          input.id,
+          compositionAttachment,
+        );
+      }
       return node;
     },
     { didWrite: writeResultAlwaysChanges },
@@ -5170,25 +5251,23 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
 
     if (isSoftDeleted || ifExists === "update") {
       const concreteKind = existingUniqueRow.concrete_kind;
-      if (!isSoftDeleted && partOf !== undefined) {
-        await applyExistingPartOfPostcondition(
-          ctx,
-          backend,
-          concreteKind,
-          existingRow.id,
-          partOf,
-        );
-      }
-      // Resurrection restores the whole alone (Q2): resolved against the
-      // TOMBSTONE's own kind/id, never against `kind` as requested (a
-      // subclass scope can resurrect under a sibling/parent kind).
-      const compositionWork =
-        isSoftDeleted ?
-          resolveCompositionCreate(ctx.registry, {
-            kind: concreteKind,
-            id: existingRow.id,
-            ...(partOf === undefined ? {} : { partOf }),
-          })
+      // ONE write plan for this leg: the attachment and the property update
+      // land in the SAME transaction, so an update this row refuses (a unique
+      // conflict, a validation error) leaves ownership and history untouched
+      // instead of committing a move whose reason never applied. Resolved
+      // against the EXISTING row's own kind/id, never against `kind` as
+      // requested — a subclass scope can match (and resurrect) under a
+      // sibling/parent kind — and resolved unconditionally on the
+      // resurrection leg, which restores the whole alone (Q2) and owes the
+      // same required-existence refusal a fresh create owes.
+      const compositionAttachment =
+        isSoftDeleted || partOf !== undefined ?
+          resolveGetOrCreateAttachmentRequest(
+            ctx,
+            concreteKind,
+            existingRow.id,
+            partOf,
+          )
         : undefined;
       const node = await executeNodeUpsertUpdate(
         ctx,
@@ -5200,20 +5279,30 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
         backend,
         {
           clearDeleted: isSoftDeleted,
-          ...(compositionWork === undefined ? {} : { compositionWork }),
+          ...(compositionAttachment === undefined ?
+            {}
+          : { compositionAttachment }),
         },
       );
       return { node, action: isSoftDeleted ? "resurrected" : "updated" };
     }
 
     if (partOf !== undefined) {
-      await applyExistingPartOfPostcondition(
+      const request = resolveGetOrCreateAttachmentRequest(
         ctx,
-        backend,
         existingUniqueRow.concrete_kind,
         existingRow.id,
         partOf,
       );
+      if (request !== undefined) {
+        await applyExistingPartOfPostcondition(
+          ctx,
+          backend,
+          existingUniqueRow.concrete_kind,
+          existingRow.id,
+          request,
+        );
+      }
     }
 
     return { node: rowToNode(existingRow), action: "found" };
@@ -5959,24 +6048,16 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       const isSoftDeleted = existingRow.deleted_at !== undefined;
 
       if (isSoftDeleted || ifExists === "update") {
-        if (!isSoftDeleted && partOf !== undefined) {
-          await applyExistingPartOfPostcondition(
-            ctx,
-            backend,
-            concreteKind,
-            existingRow.id,
-            partOf,
-          );
-        }
-        // Resurrection restores the whole alone (Q2) — see the single-item
-        // path's identical reasoning.
-        const compositionWork =
-          isSoftDeleted ?
-            resolveCompositionCreate(ctx.registry, {
-              kind: concreteKind,
-              id: existingRow.id,
-              ...(partOf === undefined ? {} : { partOf }),
-            })
+        // One write plan per item, attachment and property update together —
+        // see the single-item path's identical reasoning.
+        const compositionAttachment =
+          isSoftDeleted || partOf !== undefined ?
+            resolveGetOrCreateAttachmentRequest(
+              ctx,
+              concreteKind,
+              existingRow.id,
+              partOf,
+            )
           : undefined;
         const node = await executeNodeUpsertUpdate(
           ctx,
@@ -5988,7 +6069,9 @@ export async function executeNodeBulkGetOrCreateByConstraint<
           backend,
           {
             clearDeleted: isSoftDeleted,
-            ...(compositionWork === undefined ? {} : { compositionWork }),
+            ...(compositionAttachment === undefined ?
+              {}
+            : { compositionAttachment }),
           },
         );
         results[index] = {
@@ -5997,13 +6080,21 @@ export async function executeNodeBulkGetOrCreateByConstraint<
         };
       } else {
         if (partOf !== undefined) {
-          await applyExistingPartOfPostcondition(
+          const request = resolveGetOrCreateAttachmentRequest(
             ctx,
-            backend,
             concreteKind,
             existingRow.id,
             partOf,
           );
+          if (request !== undefined) {
+            await applyExistingPartOfPostcondition(
+              ctx,
+              backend,
+              concreteKind,
+              existingRow.id,
+              request,
+            );
+          }
         }
         results[index] = { node: rowToNode(existingRow), action: "found" };
       }
@@ -6014,10 +6105,11 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     // No `partOf` postcondition call belongs here. A duplicate resolves to
     // the SAME node as its source, and the source already had the
     // postcondition discharged: steps 4/5 either wrote the attachment with
-    // the row (`"created"`/`"resurrected"`, `resolveCompositionCreate`'s
-    // work), or ran `applyExistingPartOfPostcondition` against it
-    // (`"found"`/`"updated"`), which returned only once the node provably
-    // held the stated attachment. Re-checking the same node once per
+    // the row (`"created"`, `resolveCompositionCreate`'s work), inside the
+    // row's own write plan (`"resurrected"`/`"updated"`,
+    // `resolveGetOrCreateAttachmentRequest`'s fenced request), or ran
+    // `applyExistingPartOfPostcondition` against it (`"found"`), which
+    // returned only once the node provably held the stated attachment. Re-checking the same node once per
     // duplicate would re-read the same rows for the same verdict.
     for (const { index, sourceIndex } of duplicateOf) {
       const sourceResult = requireDefined(results[sourceIndex]);

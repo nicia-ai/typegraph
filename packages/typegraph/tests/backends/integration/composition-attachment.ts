@@ -288,8 +288,9 @@ export function registerCompositionAttachmentIntegrationTests(
         { partOf: { kind: "CaChapter", id: chapter.id } },
       );
 
-      // MUTATION CHECK: skip the retire (drop the `if (current !== undefined)`
-      // block in `executeNodeReparent`, src/store/operations/node-operations.ts)
+      // MUTATION CHECK: skip the retire (drop the `if (disposition ===
+      // "replace")` block in `applyCompositionAttachmentUnderFence`,
+      // src/store/operations/node-operations.ts)
       // — the attach then loses the composition claim and this rejects with
       // COMPOSITION_WHOLE_OCCUPIED instead of moving the chapter.
       await store.nodes.CaChapter.reparent(chapter.id, {
@@ -574,8 +575,8 @@ export function registerCompositionAttachmentIntegrationTests(
 
       // MUTATION CHECK: restore the unconditional refusal (throw
       // `CompositionExistenceError` whenever `partOf` is stated against a
-      // found/updated node, `applyExistingPartOfPostcondition` in
-      // src/store/operations/node-operations.ts) — this second call then
+      // found/updated node — `decideCompositionIncumbent`'s satisfied arm,
+      // src/store/operations/composition-create.ts) — this second call then
       // rejects instead of returning `"found"`.
       const second = await store.nodes.CaChapter.getOrCreateByConstraint(
         "ca_chapter_slug",
@@ -640,10 +641,11 @@ export function registerCompositionAttachmentIntegrationTests(
         },
       );
 
-      // MUTATION CHECK: drop the `viaMatches` conjunct from
-      // `applyExistingPartOfPostcondition` — the call then reports success
-      // while the node hangs off `caChapterOf`, not the `caDraftChapterOf`
-      // the caller asked for.
+      // MUTATION CHECK: drop the realizing-edge conjunct from
+      // `incumbentHoldsRequestedAttachment`
+      // (src/store/operations/composition-create.ts) — the call then reports
+      // success while the node hangs off `caChapterOf`, not the
+      // `caDraftChapterOf` the caller asked for.
       const error = await store.nodes.CaChapter.getOrCreateByConstraint(
         "ca_chapter_slug",
         { slug: "one" },
@@ -711,12 +713,13 @@ export function registerCompositionAttachmentIntegrationTests(
         },
       );
 
-      // MUTATION CHECK: move the `resolveCompositionAttachment` call in
-      // `applyExistingPartOfPostcondition`
-      // (src/store/operations/node-operations.ts) back below the
-      // satisfied/contradiction arms (resolve only on the no-whole arm) —
-      // this call then returns `{ action: "found" }` with no error, while the
-      // same `partOf` on a create refuses.
+      // MUTATION CHECK: resolve the attachment only after the incumbent is
+      // read — move `resolveGetOrCreateAttachmentRequest`'s call
+      // (src/store/operations/node-operations.ts) below the satisfied arm, or
+      // drop the `resolveCompositionAttachment` call out of
+      // `resolveCompositionCreate` — this call then returns
+      // `{ action: "found" }` with no error, while the same `partOf` on a
+      // create refuses.
       await expect(
         store.nodes.CaChapter.getOrCreateByConstraint(
           "ca_chapter_slug",
@@ -783,9 +786,11 @@ export function registerCompositionAttachmentIntegrationTests(
       const bare = await store.nodes.CaChapter.create({ slug: "b" });
       expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
 
-      // MUTATION CHECK: disable either `applyExistingPartOfPostcondition`
-      // call site in `executeNodeBulkGetOrCreateByConstraint`
-      // (src/store/operations/node-operations.ts) — item "b" then comes back
+      // MUTATION CHECK: stop resolving the attachment on the bulk entry's
+      // existing-row legs (drop either
+      // `resolveGetOrCreateAttachmentRequest` call in
+      // `executeNodeBulkGetOrCreateByConstraint`,
+      // src/store/operations/node-operations.ts) — item "b" then comes back
       // `"found"` with no edge written, and the edge count below stays 1.
       const results = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
         "ca_chapter_slug",
@@ -823,9 +828,12 @@ export function registerCompositionAttachmentIntegrationTests(
       );
 
       // MUTATION CHECK: remove the `assertSatisfiedPartOfPropsHonored` call
-      // from `applyExistingPartOfPostcondition`'s satisfied arm
-      // (node-operations.ts) — this then resolves `"found"` with the edge
-      // silently left at `order: 1`, and the assertions below fail.
+      // from `decideCompositionIncumbent`'s satisfied arm
+      // (src/store/operations/composition-create.ts) — this then resolves
+      // `"found"` with the edge silently left at `order: 1`, and the
+      // assertions below fail. Widening the lock-free pre-check in
+      // `applyExistingPartOfPostcondition` (node-operations.ts) to skip the
+      // fence when `props` are stated does the same.
       const error = await store.nodes.CaChapter.getOrCreateByConstraint(
         "ca_chapter_slug",
         { slug: "a" },
@@ -906,8 +914,9 @@ export function registerCompositionAttachmentIntegrationTests(
       );
 
       // MUTATION CHECK: remove the `assertSatisfiedPartOfPropsHonored` call
-      // from `executeNodeReparent`'s no-op arm (node-operations.ts) — this
-      // then resolves as a silent no-op leaving the edge at `order: 1`.
+      // from `decideCompositionIncumbent`'s satisfied arm
+      // (src/store/operations/composition-create.ts) — reparent's no-op arm
+      // then resolves silently, leaving the edge at `order: 1`.
       const error = await store.nodes.CaChapter.reparent(chapter.id, {
         kind: "CaBook",
         id: book.id,

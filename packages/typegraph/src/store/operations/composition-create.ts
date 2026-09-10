@@ -22,6 +22,16 @@
  * Neither function issues a claim: `edgeInsertClaims`
  * (`src/store/claims/composition-claims.ts`) remains the one owner of R4's
  * "at most one whole" claim, unchanged by this lane.
+ *
+ * Alongside them, the DISPOSITION owner every attachment against an
+ * already-existing row runs through: {@link resolveCompositionAttachment} ->
+ * {@link compositionAttachmentRequest} builds the request read-free, and
+ * {@link decideCompositionIncumbent} turns the incumbent a fenced frame
+ * re-read under the lock (`applyCompositionAttachmentUnderFence`,
+ * `node-operations.ts`) into one of "satisfied", "attach" or "replace", or
+ * refuses. The pair of functions is here rather than beside the write plan
+ * because the decision is pure: the write plan owns the lock and the
+ * statements, this module owns what they mean.
  */
 import {
   type EdgeRow,
@@ -430,13 +440,14 @@ export async function findLiveCompositionAttachment(
 
 /**
  * THE one place stated `partOf.props` are checked against an attachment that
- * is ALREADY satisfied (same whole, same realizing edge) — reached by both
- * no-write arms: `applyExistingPartOfPostcondition`'s satisfied return and
- * `executeNodeReparent`'s no-op return (`node-operations.ts`). Neither arm
- * performs any edge write, so without this call `props` would be neither
- * applied nor refused nor even validated — an accepted option silently
- * dropped, the same shape `situation: "existing"` refuses one dimension
- * over (a differing whole, or a differing realizing edge).
+ * is ALREADY satisfied (same whole, same realizing edge) — reached from
+ * {@link decideCompositionIncumbent}'s satisfied arm, which is every
+ * surface's no-write return (`reparent`'s no-op and the get-or-create
+ * postcondition's idempotent hit both resolve there). That arm performs no
+ * edge write, so without this call `props` would be neither applied nor
+ * refused nor even validated — an accepted option silently dropped, the same
+ * shape `situation: "existing"` refuses one dimension over (a differing
+ * whole, or a differing realizing edge).
  *
  * `props` omitted: nothing stated, nothing to check. `props` stated: run
  * through {@link validateEdgeProps} against `pair.viaEdgeKind`'s own schema
@@ -450,7 +461,7 @@ export async function findLiveCompositionAttachment(
  * resolves an attachment, it does not rewrite the realizing edge's
  * properties (`store.edges.<via>.update(...)` does that).
  */
-export function assertSatisfiedPartOfPropsHonored(
+function assertSatisfiedPartOfPropsHonored(
   registry: KindRegistry,
   partKind: string,
   partId: string,
@@ -477,6 +488,151 @@ export function assertSatisfiedPartOfPropsHonored(
     edgeId: currentEdge.id,
     currentProps: storedProps,
     requestedProps: validatedProps,
+  });
+}
+
+/**
+ * What a fenced attachment does with an incumbent whole it finds under the
+ * per-graph write lock — the ONE dimension that separates "move this part"
+ * from "make sure this part holds this whole":
+ *
+ * - `"replace"` — `nodes.<Kind>.reparent(...)`: retire the incumbent
+ *   attachment and write the requested one. Moving a part is what the caller
+ *   asked for.
+ * - `"refuse"` — every get-or-create path: an incumbent that is NOT the
+ *   requested attachment raises `CompositionExistenceError`
+ *   (`situation: "existing"`). A lookup never moves a part as a side effect,
+ *   so two racing callers that each ask for a different whole end with
+ *   exactly one attachment and one refusal.
+ *
+ * Stated as a disposition the write plan carries rather than as two
+ * code paths, because the verdict is only sound once the incumbent has been
+ * re-read under the lock: a lock-free read can be stale by the time the
+ * frame writes, and acting on its verdict is exactly how a refusing caller
+ * used to perform a silent move.
+ */
+export type CompositionIncumbentDisposition = "replace" | "refuse";
+
+/**
+ * One resolved attachment a write frame owes: the caller's stated
+ * `partOf` verbatim (needed to tell "no `props` stated" from `props: {}`),
+ * the resolved {@link CompositionCreateWork} the attach is built from, and
+ * what to do about an incumbent ({@link CompositionIncumbentDisposition}).
+ *
+ * Built BEFORE any row is read — `resolveCompositionAttachment`'s and
+ * `resolveCompositionCreate`'s refusals are synchronous and read-free — so a
+ * configuration defect of the call refuses without locking anything.
+ */
+export type CompositionAttachmentRequest = Readonly<{
+  attachment: CompositionAttachment;
+  work: CompositionCreateWork;
+  onIncumbent: CompositionIncumbentDisposition;
+}>;
+
+/**
+ * Pairs a resolved {@link CompositionCreateWork} with the attachment it came
+ * from and the disposition the calling surface declares. The one constructor
+ * of {@link CompositionAttachmentRequest}, so no call site can assemble a
+ * request whose `work` and `attachment` describe different wholes.
+ */
+export function compositionAttachmentRequest(
+  work: CompositionCreateWork,
+  attachment: CompositionAttachment,
+  onIncumbent: CompositionIncumbentDisposition,
+): CompositionAttachmentRequest {
+  return { attachment, work, onIncumbent };
+}
+
+/**
+ * Whether `current` IS the requested attachment: the same whole, held
+ * through the resolved pair's realizing edge. Compared against the RESOLVED
+ * `pair.viaEdgeKind` rather than against `attachment.via`, so an omitted
+ * `via` means "the one declared pair", never "any realizing edge will do".
+ *
+ * THE predicate behind both the fenced verdict
+ * ({@link decideCompositionIncumbent}) and the lock-free pre-check that lets
+ * an already-satisfied get-or-create stay read-only
+ * (`applyExistingPartOfPostcondition`, `node-operations.ts`) — one spelling,
+ * so the cheap skip and the authoritative verdict can never disagree about
+ * what "already holds" means.
+ */
+export function incumbentHoldsRequestedAttachment(
+  request: CompositionAttachmentRequest,
+  current: Readonly<{
+    edge: Pick<EdgeRow, "kind">;
+    whole: CompositionWholeRef;
+  }>,
+): boolean {
+  const { attachment, work } = request;
+  return (
+    current.whole.kind === attachment.kind &&
+    current.whole.id === attachment.id &&
+    current.edge.kind === work.pair.viaEdgeKind
+  );
+}
+
+/**
+ * What one fenced attachment frame does, decided from the incumbent the
+ * frame re-read UNDER THE LOCK:
+ *
+ * - `"satisfied"` — the part already holds exactly this attachment. No write
+ *   at all, which is what makes a repeated get-or-create (and a `reparent`
+ *   to the whole the part already holds) idempotent rather than a refusal.
+ *   A stated `props` is still honored here
+ *   ({@link assertSatisfiedPartOfPropsHonored}): this arm writes no edge, so
+ *   a differing value is refused rather than silently dropped.
+ * - `"attach"` — the part holds no live whole: write the attachment.
+ * - `"replace"` — a DIFFERENT incumbent under `onIncumbent: "replace"`:
+ *   retire it, then write the requested attachment.
+ *
+ * A different incumbent under `onIncumbent: "refuse"` throws
+ * `CompositionExistenceError` (`situation: "existing"`) naming both sides —
+ * the held whole (and realizing edge, when only the edge differs) and the
+ * requested one.
+ *
+ * Pure and synchronous: the read that produced `current` is the caller's, so
+ * this decision can be reached only from inside the fence that read it.
+ */
+export function decideCompositionIncumbent(
+  registry: KindRegistry,
+  partId: string,
+  request: CompositionAttachmentRequest,
+  current:
+    | Readonly<{
+        edge: Pick<EdgeRow, "id" | "kind" | "props">;
+        whole: CompositionWholeRef;
+      }>
+    | undefined,
+): "satisfied" | "attach" | "replace" {
+  if (current === undefined) return "attach";
+
+  const { attachment, work, onIncumbent } = request;
+  const partKind = work.partKind;
+  if (incumbentHoldsRequestedAttachment(request, current)) {
+    assertSatisfiedPartOfPropsHonored(
+      registry,
+      partKind,
+      partId,
+      attachment,
+      work.pair,
+      current.edge,
+    );
+    return "satisfied";
+  }
+
+  if (onIncumbent === "replace") return "replace";
+
+  const wholeMatches =
+    current.whole.kind === attachment.kind &&
+    current.whole.id === attachment.id;
+  throw new CompositionExistenceError({
+    partKind,
+    partId,
+    situation: "existing",
+    currentWhole: current.whole,
+    ...(wholeMatches ? { currentVia: current.edge.kind } : {}),
+    requestedWhole: { kind: attachment.kind, id: attachment.id },
+    requestedVia: work.pair.viaEdgeKind,
   });
 }
 

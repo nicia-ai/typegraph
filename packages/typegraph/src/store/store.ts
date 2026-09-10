@@ -2592,8 +2592,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           nodeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
+      // `nodes.<Kind>.reparent(...)` is THE surface that moves a part, so it
+      // is the one that states `onIncumbent: "replace"`; every get-or-create
+      // path reaches the same write plan with `"refuse"`.
       executeReparent: (kind, id, attachment, backend) =>
-        executeNodeReparent(ctx, kind, id, attachment, backend),
+        executeNodeReparent(ctx, kind, id, attachment, backend, {
+          onIncumbent: "replace",
+        }),
       executeDelete: (kind, id, backend) =>
         executeNodeDelete(ctx, kind, id, backend),
       executeDeleteBatch: (kind, ids, backend) =>
