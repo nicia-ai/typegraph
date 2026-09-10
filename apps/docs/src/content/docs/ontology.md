@@ -594,9 +594,13 @@ Tier 1 is enforced, in full, at write time:
   There is no depth ceiling on that closure and no partial answer: it is a
   set-semantics recursion bounded by its own visited set, the same way the
   acyclicity probe is exhaustive, so a part chain of any length comes back
-  whole. `maxDepth` and `cyclePolicy` continue to bound the `edges` traversal
-  a caller lists alongside it, and the engine's 1000-hop ceiling on an
-  explicit traversal applies to that list alone.
+  whole. An engine that cuts the closure statement short (a
+  `statement_timeout`, a cancelled query) REFUSES with a `ConfigurationError`
+  (`COMPOSITION_UNIT_INDETERMINATE`) naming the root, rather than handing back
+  the rows it managed to reach — the same treatment the acyclicity probe gives
+  a cut-short search. `maxDepth` and `cyclePolicy` continue to bound the
+  `edges` traversal a caller lists alongside it, and the engine's 1000-hop
+  ceiling on an explicit traversal applies to that list alone.
 
 The composition claim rides `typegraph_edge_claims`, the same relation edge
 cardinality claims use. A deployment initialized before that relation existed

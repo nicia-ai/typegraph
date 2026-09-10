@@ -4252,7 +4252,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * CONTEXT the collection's operations were bound to
    * (`NodeOperationContext.recordCascadedParts`). Wrapping alone would count a
    * measured delete in the scope's write counters while leaving the parts it
-   * cascaded out of that scope's receipt.
+   * cascaded out of that scope's receipt. `TRANSACTION_RUNTIME`'s internal
+   * delete port is rebound to the scope's context for the same reason — it
+   * reaches `executeNodeDelete` directly, so inheriting the outer port would
+   * reopen exactly that hole for the one caller that uses it.
    */
   #attachMeasure(
     context: AdapterTransactionContext<G, TNativeTransaction>,
@@ -4279,18 +4282,45 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       }
       const scopedNodes = nodes;
       const scopedEdges = edges;
-      const scoped = this.#attachMeasure(
-        overlayPropertyDescriptors(context, {
-          nodes: scopedNodes,
-          edges: scopedEdges,
-          ...(identity === undefined ? {} : { identity }),
-          ...this.#edgeCollectionAccess(scopedEdges),
-          getNodeCollection: <const K extends string>(kind: K) =>
-            this.#resolveDynamicNodeCollection(scopedNodes, kind),
-        }),
-        buildSurface,
-        chain,
-      );
+      // The internal delete port travels with the surface too. It runs
+      // `executeNodeDelete` against a node operation context directly, so a
+      // scope that inherited the OUTER context's port would report the
+      // delete's write in this scope (the collection wrappers see the
+      // intent) while its composition `cascadedParts` reached the enclosing
+      // receipts alone. Rebuilt here from the scope's own surface, for the
+      // same reason the collections are: attribution follows the context the
+      // write ran through.
+      const outerRuntime = context[TRANSACTION_RUNTIME];
+      const scopedContext = overlayPropertyDescriptors(context, {
+        nodes: scopedNodes,
+        edges: scopedEdges,
+        ...(identity === undefined ? {} : { identity }),
+        ...this.#edgeCollectionAccess(scopedEdges),
+        getNodeCollection: <const K extends string>(kind: K) =>
+          this.#resolveDynamicNodeCollection(scopedNodes, kind),
+        [TRANSACTION_RUNTIME]: {
+          ...outerRuntime,
+          deleteNodeWithPolicy: (
+            work: Readonly<{ kind: string; id: string }>,
+            policy?: NodeDeletePolicy,
+          ) =>
+            executeNodeDelete(
+              surface.nodeOperationContext,
+              work.kind,
+              work.id,
+              outerRuntime.backend,
+              policy,
+            ),
+        },
+      });
+      // Non-enumerable, matching the outer context's own definition, so the
+      // symbol port never leaks into a caller's spread of `tx`.
+      Object.defineProperty(scopedContext, TRANSACTION_RUNTIME, {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+      });
+      const scoped = this.#attachMeasure(scopedContext, buildSurface, chain);
       const result = await fn(scoped);
       return { result, receipt: scopeRecorder.snapshot() };
     };

@@ -15,13 +15,17 @@ import { z } from "zod";
 
 import {
   asNodeId,
+  ConfigurationError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   partOf,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
+import { type GraphBackend } from "../src/backend/types";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../src/query/compiler/recursive";
+import { type CompiledRowsSql } from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -50,6 +54,31 @@ function buildGraph(id: string) {
     ontology: [
       partOf(SdFolder, SdFolder, { via: sdParentFolder, partSide: "from" }),
     ],
+  });
+}
+
+/**
+ * An engine that stopped the statement, in the shape
+ * `isStatementCutShortError` classifies structurally (never by message):
+ * SQLite's `SQLITE_INTERRUPT`, which is how a statement timeout is delivered
+ * on this engine.
+ */
+function interruptingBackend(
+  base: GraphBackend,
+  shouldInterrupt: (text: string) => boolean,
+): GraphBackend {
+  return deriveBackend(base, {
+    execute: async <T>(compiled: CompiledRowsSql): Promise<readonly T[]> => {
+      const text = compiled.chunks
+        .map((chunk) => (chunk.kind === "text" ? chunk.value : ""))
+        .join("");
+      if (shouldInterrupt(text)) {
+        throw Object.assign(new Error("interrupted"), {
+          code: "SQLITE_INTERRUPT",
+        });
+      }
+      return base.execute<T>(compiled);
+    },
   });
 }
 
@@ -104,5 +133,43 @@ describe("subgraph({ composition: true }) completeness", () => {
     // The deepest leaf — the first row a hop ceiling drops — is present.
     const depths = [...unit.nodes.values()].map((node) => node.depth);
     expect(Math.max(...depths)).toBe(CHAIN_LENGTH - 1);
+  });
+
+  it("refuses with a typed error when the engine cuts the closure statement short", async () => {
+    const base = createTestBackend();
+    // Only the composition closure's own statement is interrupted. Its
+    // frontier is exactly `(id, kind)` — the set-semantics shape that makes it
+    // exhaustive — where the caller's `edges` traversal carries `depth` and
+    // `path` columns, so the column list tells the two apart.
+    const backend = interruptingBackend(base, (text) =>
+      text.includes("RECURSIVE reachable(id, kind)"),
+    );
+    const [store] = await createStoreWithSchema(
+      buildGraph("sd_cut_short"),
+      backend,
+    );
+
+    const parent = await store.nodes.SdFolder.create({ depth: 0 });
+    await store.nodes.SdFolder.create(
+      { depth: 1 },
+      { partOf: { kind: "SdFolder", id: parent.id } },
+    );
+
+    // MUTATION CHECK: drop the `isStatementCutShortError` arm from
+    // `fetchCompositionClosureIds` (src/store/subgraph.ts) — the caller then
+    // gets the raw driver error, indistinguishable from a transport failure,
+    // and the "delivered or refused, never partial" promise has no refusal
+    // behind it.
+    const refusal = await store
+      .subgraph(parent.id, { edges: [], composition: true })
+      .catch((error: unknown) => error);
+
+    expect(refusal).toBeInstanceOf(ConfigurationError);
+    const details = (refusal as ConfigurationError).details;
+    expect(details["code"]).toBe("COMPOSITION_UNIT_INDETERMINATE");
+    expect(details["rootId"]).toBe(parent.id);
+    expect((refusal as ConfigurationError).cause).toMatchObject({
+      code: "SQLITE_INTERRUPT",
+    });
   });
 });

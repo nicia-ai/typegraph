@@ -44,6 +44,7 @@ import {
   planCompositionCascade,
 } from "../src/store/operations/composition-cascade";
 import { uncapturedGraphWriteLock } from "../src/store/recorded-capture/clock";
+import { transactionDeleteNodeWithPolicy } from "../src/store/runtime-port";
 import { type OperationHookContext } from "../src/store/types";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, matchingObject } from "./test-utils";
@@ -1152,6 +1153,42 @@ describe("composition cascade — cascadedParts exposure", () => {
     expect(receipt.cascadedParts).toEqual([
       { kind: "Episode", id: measuredEpisode.id },
       { kind: "Episode", id: outerEpisode.id },
+    ]);
+  });
+
+  it("populates a measured scope's receipt for a delete issued through the transaction's internal delete port", async () => {
+    const graph = buildPodcastGraph("cascade-receipt-exposure-runtime-port");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const podcast = await store.nodes.Podcast.create({ title: "Ported" });
+    const episode = await store.nodes.Episode.create({ title: "Pilot" });
+    await store.edges.episodeOf.create(episode, podcast, {});
+
+    // `TRANSACTION_RUNTIME`'s delete port is how a caller already inside a
+    // transaction reaches a non-default `NodeDeletePolicy` (merge apply is the
+    // one today). It carries its own node operation context, so a scope that
+    // rebuilds the write surface but inherits the OUTER port runs the delete
+    // against the outer context — right counters, no cascade.
+    //
+    // MUTATION: drop the `[TRANSACTION_RUNTIME]` overlay from `#attachMeasure`
+    // (src/store/store.ts) so the scoped context keeps the outer port — the
+    // scope's `cascadedParts` then comes back `[]` while the outer receipt
+    // still lists the episode.
+    const { receipt, result } = await store.transactionWithReceipt((tx) =>
+      tx.measure((scoped) =>
+        transactionDeleteNodeWithPolicy(scoped, {
+          kind: "Podcast",
+          id: podcast.id,
+        }),
+      ),
+    );
+
+    expect(result.receipt.cascadedParts).toEqual([
+      { kind: "Episode", id: episode.id },
+    ]);
+    expect(receipt.cascadedParts).toEqual([
+      { kind: "Episode", id: episode.id },
     ]);
   });
 
