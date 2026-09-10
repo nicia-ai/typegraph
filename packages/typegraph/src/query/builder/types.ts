@@ -21,10 +21,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import {
-  type OntologyRelation,
-  type PolymorphicNodeType,
-} from "../../ontology/types";
+import { type PolymorphicNodeType } from "../../ontology/types";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
   type AggregateOrderSpec,
@@ -159,23 +156,72 @@ type OntologyTypeErased<G extends GraphDef> =
   number extends G["ontology"]["length"] ? true : false;
 
 /**
- * True for an ontology-tuple element that is EXACTLY the untyped
- * {@link OntologyRelation} — mutually assignable with it, rather than one of
- * the `TypedOntologyRelation`s (`src/ontology/types.ts`) every meta-edge
- * factory returns.
- * The only way to produce one now is a caller's own annotation
- * (`const relation: OntologyRelation = subClassOf(Child, Parent)`), which
- * erases exactly the `metaEdge.name` / `to.kind` literals
- * {@link SubsumptionAffected}'s `Extract` reads.
+ * True when an ontology endpoint carries no `kind` literal for
+ * {@link SubsumptionAffected}'s `Extract` to match or rule out. An endpoint
+ * is one of three things:
  *
- * Distributes over the element union, so `true extends
- * BareOntologyRelation<...>` is "at least one element is bare".
+ * - a `NodeType`/`AnyEdgeType` with a LITERAL `kind` — decidable: the
+ *   `Extract` either matches this kind or proves the relation does not name
+ *   it.
+ * - an IRI `string` — never a registered node kind, so the `{ kind: K }`
+ *   arms rule it out soundly. A second kind co-registered on the same IRI
+ *   carries its OWN literal endpoint and widens through that element.
+ * - anything whose `kind` is the general `string` — a kind literal an
+ *   annotation ERASED. Nothing can be ruled out.
  */
-type BareOntologyRelation<Relation> =
-  Relation extends unknown ?
-    [OntologyRelation] extends [Relation] ?
+type EndpointKindErased<Endpoint> =
+  Endpoint extends string ? false
+  : Endpoint extends { kind: infer Kind extends string } ?
+    string extends Kind ?
       true
     : false
+  : true;
+
+/**
+ * The endpoints {@link SubsumptionAffected}'s `Extract` reads a `kind`
+ * literal off, for an element whose meta-edge name is `Name` — the `Extract`
+ * arms spelled as endpoint positions, so the two cannot drift: a
+ * `subClassOf` is matched on its `to` alone (the supertype; which subtype
+ * declares itself under `K` never changes whether `K` is affected), an
+ * `equivalentTo`/`sameAs` on both sides. `never` for a name that is none of
+ * the three, whose endpoints the `Extract` never reads.
+ */
+type MatchedEndpoints<Name extends string, From, To> =
+  | ([Extract<Name, "subClassOf">] extends [never] ? never : To)
+  | ([Extract<Name, "equivalentTo" | "sameAs">] extends [never] ? never
+    : From | To);
+
+/**
+ * True for an ontology-tuple element whose literals are too weak for
+ * {@link SubsumptionAffected}'s `Extract` to rule it out — the conservative
+ * arm's per-element test.
+ *
+ * An element is undecidable when its `metaEdge.name` is the general `string`
+ * (the degenerate case: a caller's `const relation: OntologyRelation =
+ * subClassOf(Child, Parent)` annotation erases the name along with
+ * everything else), or when the name can be a subsumption name while a
+ * {@link MatchedEndpoints} position has lost its kind literal — what a
+ * caller helper annotated `(child: NodeType, parent: NodeType) =>
+ * TypedOntologyRelation<"subClassOf", NodeType, NodeType>` produces. Both
+ * are assignable to `OntologyRelation` and neither is mutually assignable
+ * WITH it, so an assignability test sees only the first.
+ *
+ * Distributes over the element union, so `true extends
+ * SubsumptionLiteralsErased<...>` is "at least one element is undecidable".
+ */
+type SubsumptionLiteralsErased<Relation> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      string extends Name ? true
+      : true extends EndpointKindErased<MatchedEndpoints<Name, From, To>> ? true
+      : false
+    : true
   : never;
 
 /**
@@ -200,15 +246,20 @@ type BareOntologyRelation<Relation> =
  * **Two arms widen conservatively rather than answer `false`.** An
  * {@link OntologyTypeErased} ontology has lost its tuple length, so no
  * per-element `Extract` can rule out a `subClassOf` targeting `K`; and a
- * single {@link BareOntologyRelation} element — reachable only through a
- * caller's own `OntologyRelation` annotation, since every factory is typed
- * — has lost the very literals the `Extract` matches on. Either arm
- * answering `false` would be an unsound under-widening: the alias would
- * stay narrow while the runtime alias is genuinely polymorphic.
+ * single {@link SubsumptionLiteralsErased} element has lost the very
+ * literals the `Extract` matches on — its own annotation erased either the
+ * meta-edge name or the endpoint kind the match reads. Either arm answering
+ * `false` would be an unsound under-widening: the alias would stay narrow
+ * while the runtime alias is genuinely polymorphic.
+ *
+ * The two arms are conservative, not exhaustive: an element that keeps every
+ * literal the `Extract` reads is decided by the `Extract`, and that decision
+ * is sound for the relations the ontology DECLARES. A relation added at
+ * runtime is a separate, documented limitation — see {@link AliasNodeType}.
  */
 type SubsumptionAffected<G extends GraphDef, K extends string> =
   OntologyTypeErased<G> extends true ? true
-  : true extends BareOntologyRelation<G["ontology"][number]> ? true
+  : true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true
   : [
     Extract<
       G["ontology"][number],

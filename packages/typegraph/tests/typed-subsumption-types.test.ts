@@ -19,6 +19,7 @@ import {
   defineGraph,
   defineNode,
   equivalentTo,
+  type NodeType,
   relatedTo,
   type Store,
   subClassOf,
@@ -27,6 +28,7 @@ import type {
   IncompatibleKeys,
   OntologyRelation,
   StructuralSubtypeMismatch,
+  TypedOntologyRelation,
 } from "../src/ontology/types";
 import { buildKindRegistry } from "../src/registry/builders";
 
@@ -65,6 +67,15 @@ const RequiredWidget = defineNode("RequiredWidget", {
 const OptionalWidget = defineNode("OptionalWidget", {
   schema: z.object({ label: z.string().optional() }),
 });
+
+/**
+ * A caller's own taxonomy helper, annotated with bare `NodeType` endpoints:
+ * the shape that keeps the `subClassOf` meta-edge name literal and loses the
+ * endpoint kind literals.
+ */
+function declareTaxonomy(child: NodeType, parent: NodeType) {
+  return subClassOf(child, parent);
+}
 
 describe("C.1 — subClassOf structural contract", () => {
   it("compiles when the child's schema extends the parent's", () => {
@@ -535,5 +546,92 @@ describe("R2 — typed relations and conservative widening", () => {
     expect(query).toBeDefined();
     type Row = Awaited<ReturnType<typeof query.execute>>[number];
     expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
+  });
+  it("widens every kind when a subClassOf's endpoint kind literals are erased", () => {
+    const ErasedMedia = defineNode("ErasedMedia", {
+      schema: z.object({ title: z.string() }),
+    });
+    const ErasedPodcast = defineNode("ErasedPodcast", {
+      schema: z.object({ title: z.string(), rssUrl: z.string() }),
+    });
+    // `declareTaxonomy` states only `NodeType` for its endpoints. The
+    // meta-edge NAME literal survives — `MetaEdge<"subClassOf">` is not
+    // mutually assignable with `MetaEdge<string>`, so a bare-relation test
+    // cannot see this — and the tuple keeps its literal length `1`, so
+    // `OntologyTypeErased` cannot either. What is gone is `to.kind`: the
+    // exact literal the `Extract` matches on.
+    const erasedGraph = defineGraph({
+      id: "r2_erased_endpoint_kinds",
+      nodes: {
+        ErasedMedia: { type: ErasedMedia },
+        ErasedPodcast: { type: ErasedPodcast },
+      },
+      edges: {},
+      ontology: [declareTaxonomy(ErasedPodcast, ErasedMedia)],
+    });
+    const erasedRegistry = buildKindRegistry(erasedGraph);
+    // The runtime premise: the relation is a real `subClassOf`, so a
+    // supertype query genuinely comes back with subtype rows.
+    expect(erasedRegistry.expandSubClasses("ErasedMedia")).toContain(
+      "ErasedPodcast",
+    );
+    const query = createQueryBuilder<typeof erasedGraph>(
+      erasedGraph.id,
+      erasedRegistry,
+    )
+      .from("ErasedMedia", "m")
+      .select((ctx) => ctx.m);
+    expect(query).toBeDefined();
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<string>();
+  });
+
+  it("keeps an unnamed kind exact when only the subClassOf child is erased", () => {
+    // Precision half of the same arm: the `Extract` reads a `subClassOf`'s
+    // `to`, never its `from`, so an erased CHILD leaves the decision intact.
+    // The supertype this relation names widens; a kind it does not name
+    // stays exact instead of the whole graph widening.
+    const ChildErasedMedia = defineNode("ChildErasedMedia", {
+      schema: z.object({ title: z.string() }),
+    });
+    const ChildErasedPodcast = defineNode("ChildErasedPodcast", {
+      schema: z.object({ title: z.string(), rssUrl: z.string() }),
+    });
+    const ChildErasedPerson = defineNode("ChildErasedPerson", {
+      schema: z.object({ name: z.string() }),
+    });
+    const childErased: TypedOntologyRelation<
+      "subClassOf",
+      NodeType,
+      typeof ChildErasedMedia
+    > = subClassOf(ChildErasedPodcast, ChildErasedMedia);
+    const childErasedGraph = defineGraph({
+      id: "r2_erased_child_kind",
+      nodes: {
+        ChildErasedMedia: { type: ChildErasedMedia },
+        ChildErasedPodcast: { type: ChildErasedPodcast },
+        ChildErasedPerson: { type: ChildErasedPerson },
+      },
+      edges: {},
+      ontology: [childErased],
+    });
+    const childErasedRegistry = buildKindRegistry(childErasedGraph);
+    const builder = () =>
+      createQueryBuilder<typeof childErasedGraph>(
+        childErasedGraph.id,
+        childErasedRegistry,
+      );
+    const namedQuery = builder()
+      .from("ChildErasedMedia", "m")
+      .select((ctx) => ctx.m);
+    expect(namedQuery).toBeDefined();
+    type NamedRow = Awaited<ReturnType<typeof namedQuery.execute>>[number];
+    expectTypeOf<NamedRow["kind"]>().toEqualTypeOf<string>();
+    const unnamedQuery = builder()
+      .from("ChildErasedPerson", "p")
+      .select((ctx) => ctx.p);
+    expect(unnamedQuery).toBeDefined();
+    type UnnamedRow = Awaited<ReturnType<typeof unnamedQuery.execute>>[number];
+    expectTypeOf<UnnamedRow["kind"]>().toEqualTypeOf<"ChildErasedPerson">();
   });
 });
