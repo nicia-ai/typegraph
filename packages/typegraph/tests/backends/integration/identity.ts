@@ -852,7 +852,8 @@ export function registerIdentityIntegrationTests(
       // `transitionsOf` answers fully (restore is complete); none of the
       // RESTORED transitions may surface as a `replay` step — that would
       // pair a foreign transition with a fabricated before/after.
-      const targetTransitions = await target.identity.transitionsOf(a);
+      const { transitions: targetTransitions } =
+        await target.identity.transitionsOf(a);
       expect(targetTransitions.length).toBeGreaterThanOrEqual(
         sourceTransitions.length,
       );
@@ -875,7 +876,7 @@ export function registerIdentityIntegrationTests(
       });
       expect(secondImport.success).toBe(true);
       expect(secondImport.errors).toEqual([]);
-      const targetTransitionsAfterSecond =
+      const { transitions: targetTransitionsAfterSecond } =
         await target.identity.transitionsOf(a);
       expect(targetTransitionsAfterSecond.length).toBe(
         targetTransitions.length,

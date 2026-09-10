@@ -6,6 +6,7 @@ export {
   type IdentityReplayOptions,
   type IdentityReplayStep,
   type IdentityTransition,
+  type IdentityTransitionHistory,
 } from "./replay";
 export {
   type IdentityDecisionProvenance,

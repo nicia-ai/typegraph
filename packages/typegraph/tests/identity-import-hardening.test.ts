@@ -420,7 +420,8 @@ describe("archival identity import window bounds", () => {
     await source.identity.retractAssertion(first.assertion.id);
     await source.identity.assertSame(alice, bob);
 
-    const sourceTransitions = await source.identity.transitionsOf(alice);
+    const { transitions: sourceTransitions } =
+      await source.identity.transitionsOf(alice);
     expect(sourceTransitions.length).toBeGreaterThanOrEqual(3);
     expect(sourceTransitions.map((transition) => transition.cause)).toEqual(
       expect.arrayContaining(["assert", "retract"]),
@@ -452,7 +453,8 @@ describe("archival identity import window bounds", () => {
     // merge on the target, and that generates its own new "assert" note on
     // top of the transplanted explanatory history, exactly as any other
     // identity-affecting write would.
-    const targetTransitions = await target.identity.transitionsOf(alice);
+    const { transitions: targetTransitions } =
+      await target.identity.transitionsOf(alice);
     expect(targetTransitions.length).toBeGreaterThanOrEqual(
       sourceTransitions.length,
     );
@@ -461,7 +463,28 @@ describe("archival identity import window bounds", () => {
     );
     for (const sourceTransition of sourceTransitions) {
       expect(targetTransitionIds.has(sourceTransition.transitionId)).toBe(true);
+      // Load-bearing (R-S4): the restore marker is PUBLIC on the transition,
+      // so an audit surface can tell an imported explanation (excluded from
+      // `replay`'s steps) from a locally replayable event without inferring
+      // it from a revision comparison — the inference the marker exists to
+      // replace. Mutation check: drop the `restored` spread from
+      // `publicTransition` (src/identity/replay.ts) and this expectation
+      // fails on the first restored id.
+      const restoredHere = targetTransitions.find(
+        (transition) =>
+          transition.transitionId === sourceTransition.transitionId,
+      );
+      expect(restoredHere?.restored?.at).toEqual(expect.any(String));
+      // ...and the SOURCE's own copy of the identical row is not marked:
+      // the marker names where the row was inserted, never what it explains.
+      expect(sourceTransition.restored).toBeUndefined();
     }
+    // The target's own post-restore note (the import's genuine merge) is
+    // native, so `restored` distinguishes rather than blanketing everything.
+    const nativeTargetTransitions = targetTransitions.filter(
+      (transition) => transition.restored === undefined,
+    );
+    expect(nativeTargetTransitions.length).toBeGreaterThan(0);
 
     // `replay`, by contrast, reports the seam honestly rather than silently
     // claiming a complete history: the restore set the watermark to the
@@ -688,7 +711,8 @@ describe("archival identity import window bounds", () => {
 
     const alice = { kind: "Person" as const, id: "alice" };
     // `transitionsOf` (unaffected by the watermark) still answers fully.
-    const targetTransitions = await target.identity.transitionsOf(alice);
+    const { transitions: targetTransitions } =
+      await target.identity.transitionsOf(alice);
     expect(targetTransitions.length).toBeGreaterThanOrEqual(
       sourceTransitions.length,
     );
@@ -761,7 +785,8 @@ describe("archival identity import window bounds", () => {
     // `transitionsOf` still answers fully — the restore itself is complete.
     // (Archival mode ALSO imports the current assertion as live truth, which
     // notes one native transition of its own, so this is `>=`, not `==`.)
-    const targetTransitions = await target.identity.transitionsOf(alice);
+    const { transitions: targetTransitions } =
+      await target.identity.transitionsOf(alice);
     expect(targetTransitions.length).toBeGreaterThanOrEqual(
       sourceTransitions.length,
     );
@@ -882,7 +907,8 @@ describe("archival identity import window bounds", () => {
     });
     expect(firstImport.success).toBe(true);
     const alice = { kind: "Person" as const, id: "alice" };
-    const transitionsAfterFirst = await target.identity.transitionsOf(alice);
+    const { transitions: transitionsAfterFirst } =
+      await target.identity.transitionsOf(alice);
 
     const secondImport = await importGraph(target, archive, {
       onConflict: "skip",
@@ -890,7 +916,8 @@ describe("archival identity import window bounds", () => {
     expect(secondImport.success).toBe(true);
     expect(secondImport.errors).toEqual([]);
     // Verbatim restore of the SAME rows: re-importing must not duplicate them.
-    const transitionsAfterSecond = await target.identity.transitionsOf(alice);
+    const { transitions: transitionsAfterSecond } =
+      await target.identity.transitionsOf(alice);
     expect(transitionsAfterSecond.length).toBe(transitionsAfterFirst.length);
   });
 
@@ -990,7 +1017,8 @@ describe("archival identity import window bounds", () => {
       { id: "bob" },
     );
     await source.identity.assertSame(alice, bob);
-    const sourceTransitions = await source.identity.transitionsOf(alice);
+    const { transitions: sourceTransitions } =
+      await source.identity.transitionsOf(alice);
     expect(sourceTransitions.length).toBeGreaterThan(0);
 
     const chunks: GraphInterchangeChunk[] = [];
@@ -1014,7 +1042,7 @@ describe("archival identity import window bounds", () => {
     expect(result.errors).toEqual([]);
     expect(result.success).toBe(true);
 
-    const targetStreamedTransitions =
+    const { transitions: targetStreamedTransitions } =
       await target.identity.transitionsOf(alice);
     const targetTransitionIds = new Set(
       targetStreamedTransitions.map((transition) => transition.transitionId),

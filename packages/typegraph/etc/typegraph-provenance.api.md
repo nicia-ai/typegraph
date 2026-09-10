@@ -2718,7 +2718,7 @@ type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
     retractSameAssertion: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertion<G> | undefined>;
     retractDifferentAssertion: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertion<G> | undefined>;
     bulkRetractAssertions: (ids: readonly IdentityAssertionId[]) => Promise<readonly IdentityAssertion<G>[]>;
-    transitionsOf: (ref: IdentityNodeRefInput<G>, options?: IdentityReplayOptions) => Promise<readonly IdentityTransition<G>[]>;
+    transitionsOf: (ref: IdentityNodeRefInput<G>, options?: IdentityReplayOptions) => Promise<IdentityTransitionHistory<G>>;
     replay: (ref: IdentityNodeRefInput<G>, options?: IdentityReplayOptions) => Promise<IdentityReplay<G>>;
 }>;
 
@@ -2756,6 +2756,7 @@ type IdentityRelation = "same" | "different";
 type IdentityReplay<G extends GraphDef> = Readonly<{
     steps: readonly IdentityReplayStep<G>[];
     truncatedBefore?: RecordedInstant | undefined;
+    nextFrom?: RecordedInstant | undefined;
 }>;
 
 // @public (undocumented)
@@ -2765,7 +2766,7 @@ type IdentityReplayOptions = Readonly<{
     limit?: number | undefined;
 }>;
 
-// @public (undocumented)
+// @public
 type IdentityReplayStep<G extends GraphDef> = Readonly<{
     transition: IdentityTransition<G>;
     before: readonly IdentityNodeReference<G>[];
@@ -2807,6 +2808,9 @@ type IdentityTransition<G extends GraphDef> = Readonly<{
     priorClass?: IdentityNodeReference<G> | undefined;
     assertionIds: readonly IdentityAssertionId[];
     decision?: IdentityDecisionProvenance | undefined;
+    restored?: Readonly<{
+        at: string;
+    }> | undefined;
 }>;
 
 // @public
@@ -2816,6 +2820,12 @@ type IdentityTransitionCause = "assert" | "retract" | "fold" | "detach" | "resto
 type IdentityTransitionCursor = Readonly<{
     recordedRevision: number;
     transitionId: string;
+}>;
+
+// @public
+type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
+    transitions: readonly IdentityTransition<G>[];
+    nextFrom?: RecordedInstant | undefined;
 }>;
 
 // @public
