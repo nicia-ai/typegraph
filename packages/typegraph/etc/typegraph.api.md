@@ -4027,7 +4027,7 @@ export type IdentityReplayOptions = Readonly<{
     limit?: number | undefined;
 }>;
 
-// @public (undocumented)
+// @public
 export type IdentityReplayStep<G extends GraphDef> = Readonly<{
     transition: IdentityTransition<G>;
     before: readonly IdentityNodeReference<G>[];
