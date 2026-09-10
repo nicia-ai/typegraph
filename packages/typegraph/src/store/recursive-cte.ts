@@ -68,20 +68,44 @@ type PreparedReachableCte = Readonly<{
 }>;
 
 /**
- * Everything a reachable-CTE's base case and recursive WHERE clauses need
- * that does not depend on direction: temporal filters, the recorded-schema
- * swap, path/cycle tracking, and the edge-kind filter (evaluated against
- * whatever superset of kinds the caller's shape requires). Shared by
- * {@link buildReachableCte} (one uniform direction) and
- * {@link buildDirectedReachableCte} (two edge-kind-scoped directions), so
- * the temporal/path/cycle machinery cannot drift between them.
+ * {@link ReachableCteCore} minus the three members that only a HOP-BOUNDED
+ * walk can state: an exhaustive walk has no depth ceiling to cap, no path to
+ * emit, and no cycle policy to apply (its visited set subsumes all three).
+ * Stating the absence structurally keeps an exhaustive caller from being
+ * asked for a `maxHops` that would be silently ignored.
  */
-function prepareReachableCte(
-  options: ReachableCteCore,
+type ReachableCteFiltersCore = Omit<
+  ReachableCteCore,
+  "maxHops" | "cyclePolicy" | "includePath"
+>;
+
+type ReachableCteFilters = Readonly<{
+  edgeKindFilter: SqlFragment;
+  nodeTemporalFilter: SqlFragment;
+  edgeTemporalFilter: SqlFragment;
+  schema: SqlSchema;
+  forceWorktableOuterJoinOrder: boolean;
+}>;
+
+/**
+ * Everything a reachable-CTE's base case and recursive WHERE clauses need
+ * that does not depend on direction OR on how the walk is bounded: the
+ * edge-kind filter (evaluated against whatever superset of kinds the caller's
+ * shape requires), both temporal filters, the recorded-schema swap, and the
+ * dialect's worktable join-order fact.
+ *
+ * Shared by the hop-bounded preparation ({@link prepareReachableCte}, used by
+ * {@link buildReachableCte}) and by the
+ * exhaustive, set-semantics one
+ * ({@link prepareExhaustiveReachableCte}, used by
+ * {@link buildExhaustiveDirectedReachableCte}), so no traversal can differ
+ * from another in WHICH rows it is allowed to see — only in how it terminates.
+ */
+function prepareReachableFilters(
+  options: ReachableCteFiltersCore,
   edgeKindsForFilter: readonly string[],
-): PreparedReachableCte {
+): ReachableCteFilters {
   assertRecursiveTraversal(options.recursiveTraversal, options.operation);
-  const trackPath = options.cyclePolicy === "prevent" || options.includePath;
   const edgeKindFilter = compileKindFilter(
     sql.raw("e.kind"),
     edgeKindsForFilter,
@@ -114,6 +138,31 @@ function prepareReachableCte(
     "recorded-recursive-cte",
   );
 
+  return {
+    edgeKindFilter,
+    nodeTemporalFilter,
+    edgeTemporalFilter,
+    schema,
+    forceWorktableOuterJoinOrder:
+      options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
+  };
+}
+
+/**
+ * The HOP-BOUNDED preparation: a `depth` column capped at `maxHops`, plus the
+ * path tracking `cyclePolicy: "prevent"` / `includePath` ask for. Termination
+ * is numeric, which is what lets the recursive term be `UNION ALL` (one row
+ * per distinct path) and what makes `includePath`/cycle prevention
+ * expressible at all.
+ */
+function prepareReachableCte(
+  options: ReachableCteCore,
+  edgeKindsForFilter: readonly string[],
+): PreparedReachableCte {
+  const filters = prepareReachableFilters(options, edgeKindsForFilter);
+  const { edgeKindFilter, nodeTemporalFilter, edgeTemporalFilter, schema } =
+    filters;
+  const trackPath = options.cyclePolicy === "prevent" || options.includePath;
   const initialPath =
     trackPath ? options.dialect.initializePath(sql.raw("n.id")) : undefined;
   const pathExtension =
@@ -154,8 +203,39 @@ function prepareReachableCte(
     baseCase,
     recursiveColumns,
     recursiveWhere,
-    forceWorktableOuterJoinOrder:
-      options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
+    forceWorktableOuterJoinOrder: filters.forceWorktableOuterJoinOrder,
+    schema,
+  };
+}
+
+/**
+ * The EXHAUSTIVE preparation: `(id, kind)` and nothing else — no `depth`, no
+ * `path` — so the recursive term can be `UNION` and the visited set itself is
+ * the bound. This is the same device item D.2's acyclicity probe uses
+ * ({@link buildEdgeAcyclicityProbe}): set semantics on the frontier's full
+ * column list is what makes an unbounded recursion terminate on a finite
+ * graph with no depth ceiling and no cycle check, and it is why a `depth`
+ * column must NOT be added back here — a per-path depth would make the same
+ * node distinct once per path length and turn the fixpoint into an open walk.
+ */
+function prepareExhaustiveReachableCte(
+  options: ReachableCteFiltersCore,
+  edgeKindsForFilter: readonly string[],
+): PreparedReachableCte {
+  const filters = prepareReachableFilters(options, edgeKindsForFilter);
+  const { edgeKindFilter, nodeTemporalFilter, edgeTemporalFilter, schema } =
+    filters;
+
+  return {
+    baseCase: sql`SELECT n.id, n.kind FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND ${nodeTemporalFilter}`,
+    recursiveColumns: [sql`n.id`, sql`n.kind`],
+    recursiveWhere: [
+      sql`e.graph_id = ${options.graphId}`,
+      edgeKindFilter,
+      edgeTemporalFilter,
+      nodeTemporalFilter,
+    ],
+    forceWorktableOuterJoinOrder: filters.forceWorktableOuterJoinOrder,
     schema,
   };
 }
@@ -176,7 +256,7 @@ export function buildReachableCte(
   return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;
 }
 
-type BuildDirectedReachableCteOptions = ReachableCteCore &
+type BuildExhaustiveDirectedReachableCteOptions = ReachableCteFiltersCore &
   Readonly<{
     /** Edge kinds walked in the "out" direction (`e.from_id = r.id`). */
     outEdgeKinds: readonly string[];
@@ -186,27 +266,40 @@ type BuildDirectedReachableCteOptions = ReachableCteCore &
 
 /**
  * A reachable CTE whose recursive term walks two edge-kind groups in two
- * different, fixed directions — every hop tries both groups against the
- * current frontier row, unioned within the SAME recursive term via an OR on
- * the join condition, never as two separate recursive terms (PostgreSQL
- * refuses more than one self-reference in a recursive CTE, even split
- * across `UNION ALL` branches).
+ * different, FIXED directions, bounded by its visited set rather than by a hop
+ * ceiling. Every hop tries both groups against the current frontier row,
+ * unioned within the SAME recursive term via an OR on the join condition,
+ * never as two separate recursive terms (PostgreSQL refuses more than one
+ * self-reference in a recursive CTE, even split across `UNION` branches).
  *
- * This is what lets a composition closure cross a relation that mixes
- * `part -> whole` and `whole -> part` (`has_*`) realizing edges across
- * levels of the same tree, without walking `direction: "both"` — which
- * would also climb from a mid-tree root to its ancestors and re-descend
- * into siblings (Ed-01). A uniform `edgeKinds`+`direction` traversal
- * ({@link buildReachableCte}) cannot express "these kinds forward, those
- * kinds reversed" in one term; this function is the composition-specific
- * generalization of `buildReachableCte`'s `"both"` case, scoped to two
- * caller-chosen edge-kind groups instead of one edge-kind set walked both
- * ways.
+ * Two fixed directions are what let a composition closure cross a relation
+ * that mixes `part -> whole` and `whole -> part` (`has_*`) realizing edges
+ * across levels of the same tree, without walking `direction: "both"` — which
+ * would also climb from a mid-tree root to its ancestors and re-descend into
+ * siblings (Ed-01). A uniform `edgeKinds`+`direction` traversal
+ * ({@link buildReachableCte}) cannot express "these kinds forward, those kinds
+ * reversed" in one term.
+ *
+ * `UNION`, never `UNION ALL`, over a frontier of exactly `(id, kind)` — the
+ * device item D.2's acyclicity probe uses
+ * ({@link buildEdgeAcyclicityProbe}): set semantics on the frontier's whole
+ * column list makes the recursion reach a fixpoint on any finite graph, so
+ * there is no depth ceiling to exceed and no cycle check to carry. A cyclic
+ * relation terminates too (a revisited node adds no new row), which is what
+ * lets the caller drop `cyclePolicy` rather than choose one.
+ *
+ * Exists for the one reader whose correctness IS completeness:
+ * `subgraph({ composition: true })` returns a whole plus its owned unit, and
+ * a truncated prefix of a part tree is not an export unit — reloading it
+ * would silently drop the tail of every deep subtree, and a required part cut
+ * off from its whole cannot even be recreated. Every other traversal is a
+ * breadth CHOICE the caller states in hops, and keeps
+ * {@link buildReachableCte}.
  */
-export function buildDirectedReachableCte(
-  options: BuildDirectedReachableCteOptions,
+export function buildExhaustiveDirectedReachableCte(
+  options: BuildExhaustiveDirectedReachableCteOptions,
 ): SqlFragment {
-  const prepared = prepareReachableCte(options, [
+  const prepared = prepareExhaustiveReachableCte(options, [
     ...options.outEdgeKinds,
     ...options.inEdgeKinds,
   ]);
@@ -220,7 +313,10 @@ export function buildDirectedReachableCte(
     schema: prepared.schema,
   });
 
-  return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;
+  // The explicit `(id, kind)` column list is what the `UNION` dedupes on, and
+  // it names the columns `included_ids` reads back (the same device
+  // `ancestry(origin_key, node_kind, node_id)` uses in the acyclicity probe).
+  return sql`WITH RECURSIVE reachable(id, kind) AS (${prepared.baseCase} UNION ${recursiveCase})`;
 }
 
 type CompileRecursiveBranchOptions = Readonly<{

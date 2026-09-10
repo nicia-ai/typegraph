@@ -591,8 +591,12 @@ Tier 1 is enforced, in full, at write time:
   mixed-orientation edge kinds, and `subgraph({ composition: true })` returns
   the complete owned unit — a root plus its entire parts closure, at whatever
   depth the part tree happens to be rather than at the caller's `maxDepth`.
-  The engine's own runaway ceiling on a recursive traversal (1000 hops) still
-  applies: a part chain longer than that is truncated, not refused.
+  There is no depth ceiling on that closure and no partial answer: it is a
+  set-semantics recursion bounded by its own visited set, the same way the
+  acyclicity probe is exhaustive, so a part chain of any length comes back
+  whole. `maxDepth` and `cyclePolicy` continue to bound the `edges` traversal
+  a caller lists alongside it, and the engine's 1000-hop ceiling on an
+  explicit traversal applies to that list alone.
 
 The composition claim rides `typegraph_edge_claims`, the same relation edge
 cardinality claims use. A deployment initialized before that relation existed

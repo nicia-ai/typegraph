@@ -53,7 +53,10 @@ import type { KindRegistry } from "../registry/kind-registry";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
 import { hasOwnKey } from "../utils/object";
-import { buildDirectedReachableCte, buildReachableCte } from "./recursive-cte";
+import {
+  buildExhaustiveDirectedReachableCte,
+  buildReachableCte,
+} from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
 import {
   type EdgeRow,
@@ -697,18 +700,17 @@ export async function executeSubgraph<
    * caller's choice either way: it is however deep the part tree the caller
    * already wrote happens to be.
    *
-   * Termination is structural rather than numeric. `cyclePolicy: "prevent"`
-   * is fixed here — not inherited from `ctx.cyclePolicy` — so the recursive
-   * term carries the path check that makes the visited set the bound; the
-   * caller's cycle policy, like `maxDepth`, governs the explicit `edges`
-   * traversal alone. `MAX_EXPLICIT_RECURSIVE_DEPTH` remains as the engine's
-   * own runaway guard, the same ceiling every explicit traversal is capped
-   * at — and the one caveat on "complete": a part chain longer than that
-   * ceiling is TRUNCATED here, not refused, so the owned unit of a tree
-   * deeper than 1000 hops is still short its tail. Documented in
-   * `ontology.md` rather than silently assumed unreachable; raising it to a
-   * typed refusal needs the ceiling to be observable in the CTE's own result,
-   * which no dialect reports today.
+   * Termination is structural rather than numeric, and there is NO hop
+   * ceiling: the closure is `buildExhaustiveDirectedReachableCte`, whose
+   * recursive term is `UNION` over a `(id, kind)` frontier, so it reaches a
+   * fixpoint on any finite graph exactly the way item D.2's acyclicity probe
+   * does. `MAX_EXPLICIT_RECURSIVE_DEPTH` — the ceiling every explicit
+   * traversal is capped at, and the one caveat this closure used to carry —
+   * does not apply: a part chain of any depth comes back whole, rather than
+   * silently losing its tail past 1000 hops. The caller's `cyclePolicy`, like
+   * `maxDepth`, governs the explicit `edges` traversal alone; this closure
+   * needs neither, since a revisited node adds no new row to a set-semantics
+   * recursion.
    */
   function buildSubgraphCompositionReachableCte(
     edgeKindsForTraversal: readonly string[],
@@ -719,14 +721,11 @@ export async function executeSubgraph<
         edgeKindsForTraversal,
         "parts",
       );
-    return buildDirectedReachableCte({
+    return buildExhaustiveDirectedReachableCte({
       graphId: ctx.graphId,
       sourceId: ctx.rootId,
       outEdgeKinds,
       inEdgeKinds,
-      maxHops: MAX_EXPLICIT_RECURSIVE_DEPTH,
-      cyclePolicy: "prevent",
-      includePath: false,
       temporalMode: ctx.temporalMode,
       ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
       ...(ctx.recordedAsOf !== undefined && {
