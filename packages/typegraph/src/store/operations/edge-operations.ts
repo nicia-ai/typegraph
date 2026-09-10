@@ -332,7 +332,14 @@ function getEdgeRegistration<G extends GraphDef>(graph: G, kind: string) {
   return registration;
 }
 
-type EdgeCreatePrepared = Readonly<{
+/**
+ * One edge create after every read it owes has passed and before its insert
+ * runs: the row params and the declarations that decide its claims. Held
+ * across other statements by a frame that sequences its reads first (the
+ * get-or-create update leg, `node-operations.ts`) and consumed only by
+ * {@link edgeInsertWork}.
+ */
+export type EdgeCreatePrepared = Readonly<{
   insertParams: InsertEdgeParams;
   declarations: EdgeCardinalityDeclarations;
 }>;

@@ -798,13 +798,14 @@ export type FencedCompositionAttachment = Readonly<{
  * different rows one composition attachment touches:
  *
  * - `assertLiveEdgeEndpoints` (`edge-operations.ts`) calls this for BOTH
- *   endpoints, at WRITE time, inside `attachCompositionCreateEdge`'s ordinary
- *   edge-create pipeline — the only place the PART endpoint is ever checked,
- *   since a resurrection leg's part row is still a tombstone until the
- *   property update earlier in the same frame restores it.
+ *   endpoints inside the ordinary edge-create preparation every composition
+ *   edge goes through (`prepareCompositionCreateEdge`, `node-operations.ts`)
+ *   — the only place the PART endpoint is checked. The get-or-create
+ *   resurrection leg skips that read, since its part row is still a
+ *   tombstone until the property update later in the same frame restores it.
  * - {@link decideCompositionAttachmentUnderFence} calls this for the WHOLE
- *   endpoint only, at DECIDE time, before that same frame's first statement —
- *   see that function's docblock for why only the whole can be hoisted.
+ *   endpoint, at DECIDE time, so the resurrection leg still refuses a dead
+ *   whole before its first statement — see that function's docblock.
  *
  * One spelling of the liveness verdict keeps the two calls from ever judging
  * "is this row live" differently, the way a second copy of a decision drifts
@@ -829,25 +830,23 @@ export function assertEndpointRowLive(
  *
  * Separated from the write half so a frame that owes OTHER statements can
  * run every decision this one can reach before its first statement: the
- * get-or-create `ifExists: "update"` / resurrection leg decides here, then
- * updates properties, then applies the decision. A refusal this function
- * raises therefore precedes the property update, which is what keeps a
- * caller that catches it inside an enclosing `store.transaction(...)` — where
- * there is no nested frame to roll back — from committing an update whose
- * attachment never applied.
+ * get-or-create `ifExists: "update"` / resurrection leg decides here,
+ * prepares the edge's own reads, then updates properties, then inserts. A
+ * refusal this function raises therefore precedes the property update, which
+ * is what keeps a caller that catches it inside an enclosing
+ * `store.transaction(...)` — where there is no nested frame to roll back —
+ * from committing an update whose attachment never applied.
  *
- * That is why this function, not the write half, also owns the WHOLE
- * endpoint's liveness read: when the disposition is going to attach a new
- * edge (`"attach"` or `"replace"`), a dead or missing whole is refused HERE,
- * via {@link assertEndpointRowLive}, before returning — not left to
- * `attachCompositionCreateEdge`'s `assertLiveEdgeEndpoints` call, which on
- * the get-or-create leg runs only after the property update. The PART
- * endpoint is deliberately NOT read here: on the resurrection leg the part
- * row is still a tombstone until the update that runs after this decide
- * restores it, so a part-liveness read taken here would refuse every
- * resurrection. `assertLiveEdgeEndpoints` keeps owning that side, at write
- * time. A `"satisfied"` disposition writes nothing, so it owes no fresh
- * liveness read.
+ * That is why this function also owns the WHOLE endpoint's liveness read:
+ * when the disposition is going to attach a new edge (`"attach"` or
+ * `"replace"`), a dead or missing whole is refused HERE, via
+ * {@link assertEndpointRowLive}, before returning. The PART endpoint is
+ * deliberately NOT read here: on the resurrection leg the part row is still
+ * a tombstone until the update restores it, so a part-liveness read taken
+ * here would refuse every resurrection; the edge preparation reads it on the
+ * legs where it is live, and the restoring update is the proof on the leg
+ * where it is not. A `"satisfied"` disposition writes nothing, so it owes no
+ * fresh liveness read.
  *
  * `target` is the frame's own transaction target, which is the only reason
  * the verdict can be trusted: a verdict from a lock-free read is exactly what

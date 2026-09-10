@@ -255,6 +255,7 @@ import {
 } from "./composition-create";
 import {
   edgeCardinalityDeclarations,
+  type EdgeCreatePrepared,
   edgeInsertWork,
   endCompositionEdgeWindow,
   validateAndPrepareEdgeCreate,
@@ -2615,7 +2616,39 @@ async function batchCheckUniqueAcrossKinds(
  * `undefined` (the ordinary, no-`partOf` create), so every call site can
  * call it unconditionally.
  *
- * Item E.2: a required-existence part must never be BORN unattached.
+ * The two halves — {@link prepareCompositionCreateEdge} (every read) and
+ * {@link insertPreparedCompositionEdge} (the one statement) — are also
+ * callable separately, for a frame that must run the reads before OTHER
+ * statements of its own ({@link executeNodeUpsertUpdate}).
+ */
+async function attachCompositionCreateEdge<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: WriteSession,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  work: CompositionCreateWork | undefined,
+  partId: string,
+  temporal: Readonly<{ validFrom?: string | null; validTo?: string }> = {},
+): Promise<void> {
+  if (work === undefined) return;
+  const prepared = await prepareCompositionCreateEdge(
+    ctx,
+    target,
+    lock,
+    work,
+    partId,
+    temporal,
+    { validateEndpoints: true },
+  );
+  await insertPreparedCompositionEdge(ctx, session, prepared);
+}
+
+/**
+ * Item E.2. The READ half of {@link attachCompositionCreateEdge}: every
+ * refusal the composition edge can reach before its insert, with no
+ * statement issued.
+ *
+ * A required-existence part must never be BORN unattached.
  * `resolveCompositionCreate` already refuses a bare create with no `partOf`
  * for that reason, but the node's own validity window (`temporal`, forwarded
  * verbatim onto the composition edge) can still make the edge it DOES
@@ -2628,17 +2661,23 @@ async function batchCheckUniqueAcrossKinds(
  * `assertCompositionExistencePreserved`/`findLiveCompositionWhole`/the
  * constraint-fence audit all read — rather than a second, drift-prone
  * spelling of "does this edge attach".
+ *
+ * `validateEndpoints: false` is for the one caller whose PART row is a
+ * tombstone at read time and is restored by a later statement of the same
+ * frame (the get-or-create resurrection leg): that caller has already
+ * refused a dead whole through `decideCompositionAttachmentUnderFence`'s
+ * own `assertEndpointRowLive` call, and the restoring update is itself the
+ * proof the part is live before the insert runs.
  */
-async function attachCompositionCreateEdge<G extends GraphDef>(
+async function prepareCompositionCreateEdge<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  session: WriteSession,
   target: WriteTarget,
   lock: GraphWriteLock,
-  work: CompositionCreateWork | undefined,
+  work: CompositionCreateWork,
   partId: string,
-  temporal: Readonly<{ validFrom?: string | null; validTo?: string }> = {},
-): Promise<void> {
-  if (work === undefined) return;
+  temporal: Readonly<{ validFrom?: string | null; validTo?: string }>,
+  options: Readonly<{ validateEndpoints: boolean }>,
+): Promise<EdgeCreatePrepared> {
   if (
     ctx.registry.compositionExistence(work.partKind) === "required" &&
     !edgeCurrentlyAttachesPart(ctx.registry, work.partKind, {
@@ -2654,19 +2693,24 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
     });
   }
   const edgeInput = buildCompositionCreateEdgeInput(work, partId, temporal);
-  const preparedEdge = await validateAndPrepareEdgeCreate(
-    ctx,
-    edgeInput,
-    generateId(),
-    target,
-    {
-      validateEndpoints: true,
-      validateCardinality: true,
-      validateAcyclicity: true,
-      lock,
-    },
-  );
-  await session.createEdgeNoReturn(edgeInsertWork(ctx, preparedEdge));
+  return validateAndPrepareEdgeCreate(ctx, edgeInput, generateId(), target, {
+    validateEndpoints: options.validateEndpoints,
+    validateCardinality: true,
+    validateAcyclicity: true,
+    lock,
+  });
+}
+
+/**
+ * Item E.2. The WRITE half of {@link attachCompositionCreateEdge}: the one
+ * insert statement, carrying the claims the prepared declarations decide.
+ */
+async function insertPreparedCompositionEdge<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: WriteSession,
+  prepared: EdgeCreatePrepared,
+): Promise<void> {
+  await session.createEdgeNoReturn(edgeInsertWork(ctx, prepared));
 }
 
 /**
@@ -2800,10 +2844,11 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
  * wholes from ending in a silent move (one wins, one refuses).
  *
  * Taking the decision as a parameter rather than reaching for it is what lets
- * a frame that owes other statements decide FIRST
- * ({@link executeNodeUpsertUpdate} decides, updates properties, then applies),
- * so every refusal the decision can reach precedes that frame's first
- * statement.
+ * a frame that owes other statements sequence its reads first: the
+ * get-or-create update leg ({@link executeNodeUpsertUpdate}) decides, then
+ * prepares the edge ({@link prepareCompositionAttachmentDecision}), updates
+ * properties, and only then inserts — it never reaches this function, whose
+ * `"replace"` arm is `reparent`'s alone.
  *
  * How the incumbent retires follows the population declared on the INCUMBENT
  * row's own pair, resolved through the realizing edge that actually holds
@@ -2925,6 +2970,60 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
     validFrom: moveInstant,
   });
   return true;
+}
+
+/**
+ * The READ half of applying a get-or-create leg's fenced decision, run
+ * BEFORE that frame's property update so every refusal the attachment can
+ * reach — a dead or missing part on the update leg, cardinality, acyclicity,
+ * the required-existence rule — precedes the update's first statement. The
+ * one statement left after the update is {@link insertPreparedCompositionEdge}.
+ *
+ * `"satisfied"` prepares nothing (the arm writes nothing). `"replace"` is
+ * unreachable here: a get-or-create request is resolved with
+ * `onIncumbent: "refuse"` (`resolveGetOrCreateAttachmentRequest`), so
+ * `decideCompositionIncumbent` refuses a different incumbent instead of
+ * answering `"replace"` — and a replace COULD not be prepared ahead of its
+ * retirement anyway, since the incumbent still counts against the part's
+ * cardinality until it is retired. Reaching it is therefore an invariant
+ * failure, not a supported path.
+ *
+ * `partRowRestoredByUpdate` names the resurrection leg: the part row is a
+ * tombstone until the update restores it, so the endpoint read is skipped
+ * there (the whole was already refused-or-passed at decide time, and the
+ * restoring update is the part's own liveness proof). On the update leg the
+ * part row is re-read under the fence like any other edge create's endpoint.
+ */
+async function prepareCompositionAttachmentDecision<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  partId: string,
+  decided: FencedCompositionAttachment,
+  options: Readonly<{ partRowRestoredByUpdate: boolean }>,
+): Promise<EdgeCreatePrepared | undefined> {
+  switch (decided.disposition) {
+    case "satisfied": {
+      return undefined;
+    }
+    case "attach": {
+      return prepareCompositionCreateEdge(
+        ctx,
+        target,
+        lock,
+        decided.request.work,
+        partId,
+        {},
+        { validateEndpoints: !options.partRowRestoredByUpdate },
+      );
+    }
+    case "replace": {
+      throw new CompilerInvariantError(
+        `A get-or-create attachment for "${decided.request.work.partKind}" "${partId}" decided "replace", but its request is resolved with onIncumbent "refuse" and can only be satisfied, attached, or refused.`,
+        { partKind: decided.request.work.partKind, partId },
+      );
+    }
+  }
 }
 
 /**
@@ -4355,39 +4454,31 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
      * Item E.2. Present only from the get-or-create entries' existing-row
      * leg (`executeNodeGetOrCreateByConstraint` and its bulk twin): the
      * stated `partOf` is decided and written in the SAME transaction as this
-     * property update, so the two halves of one call commit together —
-     * EXCEPT for three refusals named below, which commit the property
-     * update alone when this call runs nested inside an enclosing
-     * `store.transaction(...)`.
+     * property update, so the two halves of one call commit together.
      *
-     * The fenced incumbent DECISION runs before the update's first
-     * statement, and now also covers the WHOLE endpoint's liveness
-     * (`decideCompositionAttachmentUnderFence`'s own `assertEndpointRowLive`
-     * call, `composition-create.ts`). So every refusal it owns — a
-     * different incumbent whole, the same whole through a different
-     * realizing edge, a `props` value the live edge disagrees with, or a
-     * dead/missing whole — leaves nothing written at all. That is the only
-     * guarantee that survives a caller catching the refusal inside an
-     * enclosing `store.transaction(...)`: that leg runs ON the caller's
-     * transaction, which has no nested frame of its own to roll back, so
-     * this frame's own abort rolls back nothing beyond this frame's own
-     * (empty, at that point) statements.
-     *
-     * Three refusals the attach WRITE itself still raises — a lost
-     * composition claim, cardinality, acyclicity — necessarily follow the
-     * update: on the resurrection leg the part row is still a tombstone
-     * until the update restores it, so a read for any of these three taken
-     * before the update would refuse every resurrection. When one of them
-     * fires, this frame's OWN transaction aborts, which is sufficient only
-     * when this frame is the outermost transaction; a caller that opened an
-     * enclosing `store.transaction(...)` and catches the refusal there
-     * still observes the property update committed with the part unattached
-     * (there is no savepoint on this nested write path). Callers relying on
-     * atomicity across one of these three refusals must not catch it inside
-     * an enclosing transaction.
+     * The frame is sequenced reads-then-writes so that ordering holds even
+     * for a caller that catches a refusal inside an enclosing
+     * `store.transaction(...)`: that leg runs ON the caller's transaction,
+     * which has no nested frame of its own to roll back, so any statement
+     * already issued stays committed with it. Every read the attachment
+     * owes therefore precedes the update's first statement — the fenced
+     * incumbent decision and the whole's liveness
+     * (`decideCompositionAttachmentUnderFence`), then the edge's own
+     * preparation (`prepareCompositionAttachmentDecision`: the part's
+     * liveness on the update leg, cardinality, acyclicity, the
+     * required-existence rule). A refusal from any of them leaves nothing
+     * written at all. After the update, the only attachment statement left
+     * is the edge insert itself; its claim rows are the database backstop
+     * for verdicts the fenced reads already reached, and no writer that
+     * holds the fence can contradict them.
      *
      * A refused property update (a unique conflict, a validation error)
-     * leaves the attachment and its history untouched, in every case.
+     * leaves the attachment and its history untouched, in every case: the
+     * insert never runs.
+     *
+     * The request is resolved with `onIncumbent: "refuse"`
+     * (`resolveGetOrCreateAttachmentRequest`), so this leg attaches or is
+     * satisfied — a move is `reparent`'s decision, never a lookup's.
      */
     compositionAttachment?: CompositionAttachmentRequest;
   }>,
@@ -4427,24 +4518,8 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           validTo,
         );
       }
-      // DECIDE before the update's first statement. Every refusal the fenced
-      // incumbent decision can reach — a different whole, the same whole
-      // through a different realizing edge, a stated `props` that disagrees
-      // with the one the live edge holds, OR a dead/missing WHOLE
-      // (`decideCompositionAttachmentUnderFence`'s own `assertEndpointRowLive`
-      // call, `composition-create.ts`) — therefore refuses with nothing
-      // written at all, which is the only thing that holds when the caller
-      // catches the refusal inside an enclosing `store.transaction(...)`:
-      // that leg runs ON the caller's transaction, so there is no nested
-      // frame to roll back. The refusals the ATTACH WRITE itself still owns
-      // (cardinality, acyclicity, a lost composition claim) cannot be
-      // hoisted with it: on the resurrection leg the part row is still a
-      // tombstone until the update below restores it, so THOSE checks rely
-      // on this frame's own transaction aborting, as they did before — a
-      // caller catching one of those three inside an enclosing
-      // `store.transaction(...)` still sees the property update committed
-      // with no attachment. See the option docblock above for the complete,
-      // per-refusal breakdown.
+      // Reads first, then writes — see the `compositionAttachment` option's
+      // docblock for why the order is load-bearing on the nested leg.
       const decided =
         compositionAttachment === undefined ? undefined : (
           await decideCompositionAttachmentUnderFence(
@@ -4454,6 +4529,17 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
             input.id,
             compositionAttachment,
             lock,
+          )
+        );
+      const preparedAttachment =
+        decided === undefined ? undefined : (
+          await prepareCompositionAttachmentDecision(
+            ctx,
+            target,
+            lock,
+            input.id,
+            decided,
+            { partRowRestoredByUpdate: options?.clearDeleted === true },
           )
         );
       const node = await performNodeUpdateWithResurrectionRecovery(
@@ -4470,15 +4556,8 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           "restore",
         );
       }
-      if (decided !== undefined) {
-        await applyCompositionAttachmentDecision(
-          ctx,
-          session,
-          target,
-          lock,
-          input.id,
-          decided,
-        );
+      if (preparedAttachment !== undefined) {
+        await insertPreparedCompositionEdge(ctx, session, preparedAttachment);
       }
       return node;
     },

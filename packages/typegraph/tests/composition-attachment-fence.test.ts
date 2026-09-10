@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  CardinalityError,
   CompositionExistenceError,
   createStoreWithSchema,
   defineEdge,
@@ -83,6 +84,32 @@ function buildGraph(id: string) {
     },
     // `existence: "optional"` (the default): the part can exist unattached,
     // which is the state a get-or-create postcondition repairs.
+    ontology: [partOf(AfPart, AfWhole, { via: afPartOf })],
+  });
+}
+
+/**
+ * The same shape with `targetCardinality: "one"` on the realizing edge: a
+ * whole holds at most one part, so attaching a second is a refusal the
+ * edge's own PREPARATION raises (a cardinality read), not the incumbent
+ * decision — the class of refusal that used to follow the property update.
+ */
+function buildSinglePartWholeGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: {
+      AfWhole: { type: AfWhole },
+      AfPart: { type: AfPart, unique: [AF_SLUG_UNIQUE, AF_CODE_UNIQUE] },
+    },
+    edges: {
+      afPartOf: {
+        type: afPartOf,
+        from: [AfPart],
+        to: [AfWhole],
+        cardinality: "one",
+        targetCardinality: "one",
+      },
+    },
     ontology: [partOf(AfPart, AfWhole, { via: afPartOf })],
   });
 }
@@ -375,6 +402,57 @@ describe("a refused attachment and the property update it came with", () => {
       { temporalMode: "includeEnded" },
     );
     expect(edges).toEqual([]);
+  });
+
+  /**
+   * The refusals the realizing edge's own preparation owns — here a
+   * cardinality read against a whole that already holds its one part — must
+   * precede the property update as well: the get-or-create leg prepares the
+   * edge before the update and issues only the insert after it.
+   */
+  it("leaves the property update unapplied when the edge's own cardinality read refuses and the caller catches it inside a transaction", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      buildSinglePartWholeGraph("af_refuse_cardinality_before_update"),
+      backend,
+    );
+
+    const whole = await store.nodes.AfWhole.create({});
+    const occupant = await store.nodes.AfPart.create(
+      { slug: "occupant", code: "occupant" },
+      { partOf: { kind: "AfWhole", id: whole.id } },
+    );
+    const part = await store.nodes.AfPart.create({
+      slug: "second",
+      code: "original",
+    });
+
+    // MUTATION CHECK: in `executeNodeUpsertUpdate`
+    // (src/store/operations/node-operations.ts), move the
+    // `prepareCompositionAttachmentDecision` call below
+    // `performNodeUpdateWithResurrectionRecovery`. The cardinality refusal
+    // then follows the update, and `code` below reads "mutated".
+    await store.transaction(async (tx) => {
+      const refusal = await tx.nodes.AfPart.getOrCreateByConstraint(
+        "af_part_slug",
+        { slug: "second", code: "mutated" },
+        {
+          ifExists: "update",
+          partOf: { kind: "AfWhole", id: whole.id },
+        },
+      ).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(CardinalityError);
+    });
+
+    const reread = requireDefined(await store.nodes.AfPart.getById(part.id));
+    expect(reread.code).toBe("original");
+
+    const edges = await store.edges.afPartOf.find(
+      {},
+      { temporalMode: "includeEnded" },
+    );
+    expect(edges).toHaveLength(1);
+    expect(requireDefined(edges[0]).fromId).toBe(occupant.id);
   });
 });
 
