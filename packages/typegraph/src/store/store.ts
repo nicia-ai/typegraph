@@ -4229,50 +4229,67 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /**
    * Decorates a receipt-enabled transaction `context` with `measure`.
-   * Attribution is structural: `measure` wraps the context's *own* (already
-   * outer-recording) collections a second time with a fresh scope recorder, so a
-   * write through the scoped context counts in the scope and — via the inner
-   * wrapper it delegates to — the outer receipt, while a write through the outer
-   * `context` never reaches the scope recorder. This makes overlapping/concurrent
-   * measures safe by construction (each holds its own scope recorder) and lets
-   * scopes nest: the scoped context is itself decorated, so `scoped.measure(...)`
-   * chains one more wrapper. The scoped context's dynamic collection lookups resolve
-   * against the scope-wrapped map too, so dynamic-kind writes are attributed like
-   * `scoped.nodes.<Kind>`. The scope receipt's `recorded` is always undefined —
-   * the recorded instant is a whole-transaction flush concern.
+   *
+   * Attribution is structural: a scope is one more RECORDER, and the scoped
+   * context's write surface is rebuilt against the whole recorder CHAIN (every
+   * recorder already covering `context`, plus the scope's), then wrapped once
+   * per recorder in it. A write through the scoped context therefore counts in
+   * the scope and in every receipt enclosing it, while a write through the
+   * outer `context` never reaches the scope recorder. Overlapping and
+   * concurrent measures are safe by construction — each holds its own
+   * recorder, and no dynamic "currently measuring" state exists to leak
+   * between them — and scopes nest: the scoped context is itself decorated, so
+   * `scoped.measure(...)` extends the chain by one. The scoped context's
+   * dynamic collection lookups resolve against the scope's own map too, so
+   * dynamic-kind writes are attributed like `scoped.nodes.<Kind>`. The scope
+   * receipt's `recorded` is always undefined — the recorded instant is a
+   * whole-transaction flush concern.
+   *
+   * Rebuilding the surface rather than wrapping the outer collections a second
+   * time is what carries the chain to facts a collection wrapper cannot see
+   * from outside: a node delete's composition `cascadedParts` exist only
+   * inside the operation, and reach their receipts through the OPERATION
+   * CONTEXT the collection's operations were bound to
+   * (`NodeOperationContext.recordCascadedParts`). Wrapping alone would count a
+   * measured delete in the scope's write counters while leaving the parts it
+   * cascaded out of that scope's receipt.
    */
   #attachMeasure(
     context: AdapterTransactionContext<G, TNativeTransaction>,
+    buildSurface: (
+      recorders: readonly TransactionReceiptRecorder[],
+    ) => TransactionWriteSurface<G>,
+    recorders: readonly TransactionReceiptRecorder[],
   ): MeasurableAdapterTransactionContext<G, TNativeTransaction> {
     const measure: ScopedMeasure<
       MeasurableAdapterTransactionContext<G, TNativeTransaction>
     > = async (fn) => {
       const scopeRecorder = createTransactionReceiptRecorder();
-      const { nodes, edges } = wrapTransactionCollections(
-        context.nodes,
-        context.edges,
-        scopeRecorder,
-      );
-      const identity =
-        this.#graph.identity === undefined ?
-          undefined
-        : wrapTransactionIdentity(
-            (
-              context as unknown as TransactionContext<G> & {
-                identity: IdentityFacade<G>;
-              }
-            ).identity,
-            scopeRecorder,
+      const chain = [...recorders, scopeRecorder];
+      const surface = buildSurface(chain);
+      let nodes = surface.nodes;
+      let edges = surface.edges;
+      let identity = surface.identity;
+      for (const recorder of chain) {
+        ({ nodes, edges } = wrapTransactionCollections(nodes, edges, recorder));
+        identity =
+          identity === undefined ? undefined : (
+            wrapTransactionIdentity(identity, recorder)
           );
+      }
+      const scopedNodes = nodes;
+      const scopedEdges = edges;
       const scoped = this.#attachMeasure(
         overlayPropertyDescriptors(context, {
-          nodes,
-          edges,
+          nodes: scopedNodes,
+          edges: scopedEdges,
           ...(identity === undefined ? {} : { identity }),
-          ...this.#edgeCollectionAccess(edges),
+          ...this.#edgeCollectionAccess(scopedEdges),
           getNodeCollection: <const K extends string>(kind: K) =>
-            this.#resolveDynamicNodeCollection(nodes, kind),
+            this.#resolveDynamicNodeCollection(scopedNodes, kind),
         }),
+        buildSurface,
+        chain,
       );
       const result = await fn(scoped);
       return { result, receipt: scopeRecorder.snapshot() };
@@ -4303,26 +4320,64 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
-    const txNodeOperationContext = this.#createNodeOperationContext(
-      runHooks,
-      runBulkHooks,
-      attempt,
-      receiptRecorder,
+    // THE one builder of this transaction's write surface, parameterized by
+    // the receipt chain the surface's writes belong to: the transaction itself
+    // builds one with its own recorder (or none, untracked), and every
+    // `tx.measure(...)` scope builds another with the scope's recorder added
+    // (`#attachMeasure`). One builder is why a scoped write reaches the same
+    // operations — and therefore the same composition cascade reporting — as
+    // an unscoped one.
+    const buildSurface = (
+      receiptRecorders: readonly TransactionReceiptRecorder[],
+    ): TransactionWriteSurface<G> => {
+      const nodeOperationContext = this.#createNodeOperationContext(
+        runHooks,
+        runBulkHooks,
+        attempt,
+        receiptRecorders,
+      );
+      const nodeOperations: NodeOperations = {
+        ...this.#buildNodeOperations(nodeOperationContext),
+        createQuery: () =>
+          this.#createQueryForBackend(txBackend, undefined, attempt),
+        maybeRefreshStatisticsAfterBulk: undefined,
+      };
+      const edgeOperations: EdgeOperations = {
+        ...this.#buildEdgeOperations(
+          this.#createEdgeOperationContext(runHooks, attempt),
+        ),
+        createQuery: () =>
+          this.#createQueryForBackend(txBackend, undefined, attempt),
+        maybeRefreshStatisticsAfterBulk: undefined,
+      };
+      return {
+        nodeOperationContext,
+        nodes: createNodeCollectionsProxy(
+          this.#graph,
+          this.graphId,
+          this.#registry,
+          txBackend,
+          this.#batchPointRead,
+          nodeOperations,
+        ),
+        edges: createEdgeCollectionsProxy(
+          this.#graph,
+          this.graphId,
+          this.#registry,
+          txBackend,
+          this.#batchPointRead,
+          edgeOperations,
+        ),
+        ...(this.#graph.identity === undefined ?
+          {}
+        : { identity: createIdentityFacade(this.#identityContext(txBackend)) }),
+      };
+    };
+
+    const outerSurface = buildSurface(
+      receiptRecorder === undefined ? [] : [receiptRecorder],
     );
-    const txNodeOperations: NodeOperations = {
-      ...this.#buildNodeOperations(txNodeOperationContext),
-      createQuery: () =>
-        this.#createQueryForBackend(txBackend, undefined, attempt),
-      maybeRefreshStatisticsAfterBulk: undefined,
-    };
-    const txEdgeOperations: EdgeOperations = {
-      ...this.#buildEdgeOperations(
-        this.#createEdgeOperationContext(runHooks, attempt),
-      ),
-      createQuery: () =>
-        this.#createQueryForBackend(txBackend, undefined, attempt),
-      maybeRefreshStatisticsAfterBulk: undefined,
-    };
+    const txNodeOperationContext = outerSurface.nodeOperationContext;
 
     const runNodeOperationHooks = <T>(
       operation: "create" | "update" | "delete",
@@ -4335,23 +4390,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         fn,
       );
 
-    let nodes = createNodeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      txBackend,
-      this.#batchPointRead,
-      txNodeOperations,
-    );
-
-    let edges = createEdgeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      txBackend,
-      this.#batchPointRead,
-      txEdgeOperations,
-    );
+    let nodes = outerSurface.nodes;
+    let edges = outerSurface.edges;
 
     if (receiptRecorder !== undefined) {
       ({ nodes, edges } = wrapTransactionCollections(
@@ -4361,10 +4401,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ));
     }
 
-    const identity =
-      this.#graph.identity === undefined ?
-        undefined
-      : createIdentityFacade(this.#identityContext(txBackend));
+    const identity = outerSurface.identity;
     const receiptIdentity =
       identity === undefined || receiptRecorder === undefined ?
         identity
@@ -4434,7 +4471,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // to scope; the plain `transaction()` path stays free of a `measure` the
     // caller has no receiver for.
     return receiptRecorder === undefined ? withSql : (
-        this.#attachMeasure(withSql)
+        this.#attachMeasure(withSql, buildSurface, [receiptRecorder])
       );
   }
 
@@ -6092,11 +6129,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     ) => this.#withBulkOperationHooks(ctx, fn);
   }
 
+  /**
+   * `receiptRecorders` is the CHAIN of receipts a write through the
+   * collections built from this context belongs to: the enclosing
+   * transaction's recorder, plus one per `tx.measure(...)` scope the
+   * collections were built for (see {@link #attachMeasure}). Empty outside a
+   * receipt-tracked transaction, which is what leaves `recordCascadedParts`
+   * absent there.
+   */
   #createNodeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
     runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
     attempt = 1,
-    receiptRecorder?: TransactionReceiptRecorder,
+    receiptRecorders: readonly TransactionReceiptRecorder[] = [],
   ): NodeOperationContext<G> {
     const identityConfig = this.#graph.identity;
     return {
@@ -6170,12 +6215,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       withOperationHooks: runHooks,
       // Present only inside a receipt-tracked transaction; its absence is
       // why a top-level delete records nothing (there is no receipt to
-      // record into).
-      ...(receiptRecorder === undefined ?
+      // record into). Fans out to the whole chain: a delete issued through a
+      // `tx.measure(...)` scope's collections populates that scope's receipt
+      // AND every receipt enclosing it, while one issued through the outer
+      // context reaches only the recorders that context was built with.
+      ...(receiptRecorders.length === 0 ?
         {}
       : {
           recordCascadedParts: (parts: readonly CompositionNodeRef[]) => {
-            receiptRecorder.recordCascadedParts(parts);
+            for (const recorder of receiptRecorders) {
+              recorder.recordCascadedParts(parts);
+            }
           },
         }),
       createBulkOperationContext: (operation, kind) => ({
@@ -6753,6 +6803,24 @@ export type MeasurableAdapterHistoryTransactionContext<
       MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>
     >;
   }>;
+
+/**
+ * One transaction write surface, built for one receipt chain: the node/edge
+ * collection maps and the identity facade a caller writes through, UNWRAPPED
+ * (the receipt counters' wrapping is applied per recorder by the builder's
+ * caller), plus the node operation context those collections are bound to.
+ *
+ * The context travels with the surface because it is what carries facts no
+ * collection wrapper can observe — a node delete's composition
+ * `cascadedParts` — to the receipts the surface belongs to, and because
+ * `TRANSACTION_RUNTIME`'s delete port must run against the same one.
+ */
+type TransactionWriteSurface<G extends GraphDef> = Readonly<{
+  nodeOperationContext: NodeOperationContext<G>;
+  nodes: GraphNodeCollections<G>;
+  edges: GraphEdgeCollections<G>;
+  identity?: IdentityFacade<G>;
+}>;
 
 export type AdapterRecordedReadStore<
   G extends GraphDef,

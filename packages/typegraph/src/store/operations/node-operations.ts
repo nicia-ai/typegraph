@@ -336,12 +336,19 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
   ) => Promise<T>;
   /**
-   * Reports the composition parts one node delete's cascade removed to this
-   * transaction's receipt (`TransactionReceipt.cascadedParts`). Present only
-   * inside a receipt-tracked transaction — a top-level delete has no receipt
-   * to record into, which is why its absence is the off switch rather than a
-   * wiring bug. The SAME refs the delete's `onOperationEnd` context carries,
-   * from the same cascade plan, so the hook and the receipt cannot disagree.
+   * Reports the composition parts one node delete's cascade removed to every
+   * receipt that covers this operation (`TransactionReceipt.cascadedParts`):
+   * the enclosing transaction's, plus each `tx.measure(...)` scope the write
+   * was actually issued through. Present only inside a receipt-tracked
+   * transaction — a top-level delete has no receipt to record into, which is
+   * why its absence is the off switch rather than a wiring bug.
+   *
+   * Which receipts those are is decided where the collections are built
+   * (`store.ts`), not here: a scoped context's collections are bound to an
+   * operation context carrying the scope's recorder alongside the outer ones,
+   * so attribution is structural, exactly as the write COUNTERS' is. The SAME
+   * refs the delete's `onOperationEnd` context carries, from the same cascade
+   * plan, so the hook and every receipt agree.
    */
   recordCascadedParts?: (parts: readonly CompositionNodeRef[]) => void;
   createBulkOperationContext: (

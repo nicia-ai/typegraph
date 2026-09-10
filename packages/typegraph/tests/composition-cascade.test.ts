@@ -1109,6 +1109,80 @@ describe("composition cascade — cascadedParts exposure", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("populates a tx.measure scope's receipt AND the outer one, attributed to the context the delete ran through", async () => {
+    const graph = buildPodcastGraph("cascade-receipt-exposure-measured");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const measured = await store.nodes.Podcast.create({ title: "Measured" });
+    const measuredEpisode = await store.nodes.Episode.create({
+      title: "In scope",
+    });
+    await store.edges.episodeOf.create(measuredEpisode, measured, {});
+
+    const outer = await store.nodes.Podcast.create({ title: "Outer" });
+    const outerEpisode = await store.nodes.Episode.create({
+      title: "Out of scope",
+    });
+    await store.edges.episodeOf.create(outerEpisode, outer, {});
+
+    // MUTATION: build the measured scope by wrapping the outer context's
+    // collections a second time instead of rebuilding the write surface
+    // against the recorder chain (`#attachMeasure`, src/store/store.ts) — the
+    // scope's write COUNTERS still come out right, while the delete's
+    // cascade reaches the transaction's recorder alone and
+    // `scope.receipt.cascadedParts` comes back `[]`.
+    const { receipt, result } = await store.transactionWithReceipt(
+      async (tx) => {
+        const scope = await tx.measure(async (scoped) => {
+          await scoped.nodes.Podcast.delete(measured.id);
+        });
+        // Issued through the OUTER context while no scope is open: attribution
+        // is by context, so this cascade belongs to the transaction alone.
+        await tx.nodes.Podcast.delete(outer.id);
+        return scope;
+      },
+    );
+
+    expect(result.receipt.cascadedParts).toEqual([
+      { kind: "Episode", id: measuredEpisode.id },
+    ]);
+    expect(result.receipt.writes.nodes).toEqual({ Podcast: 1 });
+    // The outer receipt sees both cascades, in the order they ran.
+    expect(receipt.cascadedParts).toEqual([
+      { kind: "Episode", id: measuredEpisode.id },
+      { kind: "Episode", id: outerEpisode.id },
+    ]);
+  });
+
+  it("leaves a measured scope's cascadedParts empty when the delete runs outside it", async () => {
+    const graph = buildPodcastGraph("cascade-receipt-exposure-unmeasured");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const podcast = await store.nodes.Podcast.create({ title: "Outer only" });
+    const episode = await store.nodes.Episode.create({ title: "Pilot" });
+    await store.edges.episodeOf.create(episode, podcast, {});
+
+    // MUTATION: attribute the cascade by TIMING rather than by context (for
+    // example, push the scope recorder onto a "currently measuring" stack for
+    // the duration of the callback) — this delete, issued through `tx` while
+    // the scope is open, then leaks into the scope's receipt.
+    const { receipt, result } = await store.transactionWithReceipt(
+      async (tx) => {
+        const scope = await tx.measure(async () => {
+          await tx.nodes.Podcast.delete(podcast.id);
+        });
+        return scope;
+      },
+    );
+
+    expect(result.receipt.cascadedParts).toEqual([]);
+    expect(receipt.cascadedParts).toEqual([
+      { kind: "Episode", id: episode.id },
+    ]);
+  });
+
   it("leaves cascadedParts empty on a transaction that deletes no composition whole", async () => {
     const graph = buildPodcastGraph("cascade-receipt-exposure-none");
     const backend = createTestBackend();
