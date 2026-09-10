@@ -454,6 +454,52 @@ describe("a refused attachment and the property update it came with", () => {
     expect(edges).toHaveLength(1);
     expect(requireDefined(edges[0]).fromId).toBe(occupant.id);
   });
+
+  /**
+   * `reparent`'s replace arm owes the same order: the replacement is prepared
+   * (cardinality at the new whole, acyclicity, edge props) BEFORE the
+   * incumbent is retired, so a refusal leaves the part attached where it was
+   * — a caller catching the refusal inside an enclosing transaction has no
+   * nested frame that would roll the retirement back.
+   */
+  it("leaves the incumbent attachment in place when a reparent's replacement refuses and the caller catches it inside a transaction", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      buildSinglePartWholeGraph("af_reparent_refuse_before_retire"),
+      backend,
+    );
+
+    const wholeA = await store.nodes.AfWhole.create({});
+    const wholeB = await store.nodes.AfWhole.create({});
+    const part = await store.nodes.AfPart.create(
+      { slug: "moving", code: "moving" },
+      { partOf: { kind: "AfWhole", id: wholeA.id } },
+    );
+    await store.nodes.AfPart.create(
+      { slug: "occupant", code: "occupant" },
+      { partOf: { kind: "AfWhole", id: wholeB.id } },
+    );
+
+    // MUTATION CHECK: in `applyCompositionAttachmentDecision`
+    // (src/store/operations/node-operations.ts), move the
+    // `prepareCompositionCreateEdge` call below the incumbent's retirement.
+    // The cardinality refusal then follows the retirement, and the part below
+    // is left with no live attachment.
+    await store.transaction(async (tx) => {
+      const refusal = await tx.nodes.AfPart.reparent(part.id, {
+        kind: "AfWhole",
+        id: wholeB.id,
+      }).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(CardinalityError);
+    });
+
+    const edges = (
+      await store.edges.afPartOf.find({}, { temporalMode: "includeEnded" })
+    ).filter((edge) => edge.fromId === part.id);
+    expect(edges).toHaveLength(1);
+    expect(requireDefined(edges[0]).toId).toBe(wholeA.id);
+    expect(requireDefined(edges[0]).meta.validTo).toBeUndefined();
+  });
 });
 
 /**
