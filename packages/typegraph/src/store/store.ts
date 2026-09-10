@@ -4283,13 +4283,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const scopedNodes = nodes;
       const scopedEdges = edges;
       // The internal delete port travels with the surface too. It runs
-      // `executeNodeDelete` against a node operation context directly, so a
-      // scope that inherited the OUTER context's port would report the
-      // delete's write in this scope (the collection wrappers see the
-      // intent) while its composition `cascadedParts` reached the enclosing
-      // receipts alone. Rebuilt here from the scope's own surface, for the
-      // same reason the collections are: attribution follows the context the
-      // write ran through.
+      // `executeNodeDelete` against a node operation context directly and
+      // never touches `surface.nodes` — the collection wrappers just above
+      // are the only thing that increments a receipt's `writes` counters, so
+      // this delete counts toward NEITHER this scope's nor any enclosing
+      // scope's `writes`, rebound or not. What rebinding decides is
+      // `cascadedParts` alone: a scope that inherited the OUTER context's
+      // port would run the delete against the OUTER surface's node operation
+      // context, attributing its `cascadedParts` to the outer chain's
+      // recorders and leaving THIS scope's own (freshly created) receipt
+      // without them. Rebuilt here from the scope's own surface, so
+      // `cascadedParts` reaches this scope's receipt too — the same
+      // attribution-follows-the-context reasoning as the collections above,
+      // for a write those collections cannot see at all. The receipt this
+      // yields is therefore a receipt shape callers must expect: a delete
+      // reported here carries `cascadedParts` while its own `writes` stay at
+      // zero, since no collection ever counted it.
       const outerRuntime = context[TRANSACTION_RUNTIME];
       const scopedContext = overlayPropertyDescriptors(context, {
         nodes: scopedNodes,
