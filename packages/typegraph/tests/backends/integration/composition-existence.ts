@@ -650,9 +650,10 @@ export function registerCompositionExistenceIntegrationTests(
         episodeB.id,
       ]);
     });
-    // MUTATION CHECK: disable both `applyExistingPartOfPostcondition` calls
-    // in `executeNodeGetOrCreateByConstraint`
-    // (src/store/operations/node-operations.ts) — the `"found"` and
+    // MUTATION CHECK: stop resolving the attachment on the existing-row legs
+    // of `executeNodeGetOrCreateByConstraint` (drop both
+    // `resolveGetOrCreateAttachmentRequest` calls,
+    // src/store/operations/node-operations.ts) — the `"found"` and
     // `ifExists: "update"` calls above then silently drop `partOf` instead of
     // refusing the contradicting whole. (The postcondition replaced the
     // blanket refusal this comment once named: a found node with NO live
@@ -687,9 +688,10 @@ export function registerCompositionExistenceIntegrationTests(
     // The mutation this comment used to name — calling `refuseExistingPartOf`
     // unconditionally here — is no longer performable: that function and its
     // blanket refusal are gone. `partOf` on a found node is now a
-    // POSTCONDITION (`applyExistingPartOfPostcondition`), discharged in steps
-    // 4/5, and re-running it for a duplicate of the row this same call just
-    // attached would be SATISFIED rather than a refusal. Step 6 deliberately
+    // POSTCONDITION (`applyExistingPartOfPostcondition`, or the update leg's
+    // own write plan), discharged in steps 4/5, and re-running it for a
+    // duplicate of the row this same call just attached would be SATISFIED
+    // rather than a refusal. Step 6 deliberately
     // does not re-run it; see the comment there.
   });
 }
