@@ -65,11 +65,13 @@ import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
+import { isStatementCutShortError } from "../utils/sql-errors";
 import { type EdgeReadWindow, validateEdgeReadBounds } from "./neighbors";
 import {
-  buildDirectedReachableCte,
+  buildExhaustiveDirectedReachableCte,
   buildReachableCte,
   buildWindowedEdgesCte,
+} from "./recursive-cte";
 } from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
 import {
@@ -749,7 +751,7 @@ export async function executeSubgraph<
   let membership: SubgraphMembership;
   if (compositionEdgeKinds.length > 0) {
     const baseIds = await fetchIncludedIds(ctx, reachableCte, includedIdsCte);
-    const compositionIds = await fetchIncludedIds(
+    const compositionIds = await fetchCompositionClosureIds(
       readCtx,
       buildSubgraphCompositionReachableCte(
         params,
@@ -861,7 +863,7 @@ function buildSubgraphCompositionReachableCte<
       edgeKindsForTraversal,
       "parts",
     );
-  return buildDirectedReachableCte({
+  return buildExhaustiveDirectedReachableCte({
     graphId: ctx.graphId,
     sourceId: ctx.rootId,
     outEdgeKinds,
@@ -1396,6 +1398,53 @@ async function fetchCompositionEdgeKindsForRoot(input: {
   return rootKind === undefined ?
       []
     : input.registry.compositionEdgeKindsUnder(rootKind);
+}
+
+/**
+ * The composition closure's own fetch, and the ONE refusal its exhaustiveness
+ * argument cannot cover.
+ *
+ * The walk reaches a fixpoint on any finite graph, so it cannot return a
+ * truncated unit of its own accord — but an engine that CUT THE STATEMENT
+ * SHORT (`statement_timeout`, `pg_cancel_backend`, a compiled-in limit,
+ * `sqlite3_interrupt`) finished no walk at all, and a raw driver error is not
+ * an answer a caller can tell apart from a transport failure. Classified here
+ * the way the acyclicity probe classifies the identical case
+ * (`runAcyclicityProbe` -> `EdgeAcyclicityIndeterminateError`,
+ * `src/store/acyclicity.ts`) — through the same `isStatementCutShortError`
+ * predicate, so neither owner spells its own structural code check — which is
+ * what makes "the complete owned unit, delivered or refused, never partial"
+ * hold against the ENGINE too and not only against the recursion.
+ *
+ * Only the COMPOSITION closure is classified: the caller's own `edges`
+ * traversal is explicitly depth- and cycle-bounded and makes no completeness
+ * promise for a cut-short statement to break.
+ *
+ * @throws ConfigurationError (`COMPOSITION_UNIT_INDETERMINATE`)
+ */
+async function fetchCompositionClosureIds(
+  ctx: SubgraphContext,
+  reachableCte: SqlFragment,
+  includedIdsCte: SqlFragment,
+): Promise<readonly string[]> {
+  try {
+    return await fetchIncludedIds(ctx, reachableCte, includedIdsCte);
+  } catch (error) {
+    if (!isStatementCutShortError(error)) throw error;
+    throw new ConfigurationError(
+      `The composition closure of node "${ctx.rootId}" was cut short by the database before it finished, so the owned unit is unknown rather than incomplete.`,
+      {
+        code: "COMPOSITION_UNIT_INDETERMINATE",
+        rootId: ctx.rootId,
+        graphId: ctx.graphId,
+      },
+      {
+        cause: error,
+        suggestion:
+          "Retry with a higher statement timeout (or without one). `subgraph({ composition: true })` walks the whole part tree by design and never returns a prefix of it.",
+      },
+    );
+  }
 }
 
 /** Runs the traversal once and returns the closure's node ids. */

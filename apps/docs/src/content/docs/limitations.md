@@ -269,7 +269,13 @@ not what happens:
 The closure walk is bounded by its **visited set**, not a fixed depth: a kind
 may declare a reflexive composition pair (a `Section` that is `partOf`
 another `Section`, for example), so a kind-level depth bound cannot cap
-instance depth. The write path refuses an INSTANCE-level cycle (the
+instance depth. The same holds for the `subgraph({ composition: true })`
+preview above: its composition closure has no hop ceiling and never returns a
+truncated unit — a part chain of any length comes back whole, and an engine
+that cuts the closure statement short refuses with a `ConfigurationError`
+(`COMPOSITION_UNIT_INDETERMINATE`) instead of returning the prefix it reached
+(the read's temporal mode, described above, remains the one way the preview can
+be narrower than the cascade). The write path refuses an INSTANCE-level cycle (the
 composition union's acyclicity fence), so one only survives in rows written
 before the pair was declared, by trusted import, or by direct SQL; deleting
 any node in such a cycle throws `CompositionCycleError` (see
