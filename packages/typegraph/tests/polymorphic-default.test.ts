@@ -32,6 +32,7 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
 import { searchable } from "../src/core/searchable";
+import { ConfigurationError } from "../src/errors";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 import { createInitializedStore, createTestBackend } from "./test-utils";
@@ -205,6 +206,55 @@ describe("Q3 pin — store.search() candidate subquery stays exact-kind (defense
       "SearchMedia2",
       "SearchPodcast2",
     ]);
+  });
+
+  it("refuses an expansion axis the facade does not offer instead of searching exact-kind", async () => {
+    // `"narrower"` is a real member of the shared axis vocabulary that this
+    // facade does not offer, and the builder refuses the identical value —
+    // so coercing it to `"exact"` here would silently hand back a different
+    // row set than the option asked for. Reachable from JavaScript, and from
+    // a typed caller that casts.
+    const SearchableMedia3 = defineNode("SearchMedia3", {
+      schema: z.object({ title: searchable({ language: "english" }) }),
+    });
+    const graph = defineGraph({
+      id: "q3_search_refusal",
+      nodes: { SearchMedia3: { type: SearchableMedia3 } },
+      edges: {},
+      ontology: [],
+    });
+    const backend = createTestBackend();
+    const store = await createInitializedStore(graph, backend);
+    await store.nodes.SearchMedia3.create({
+      title: "unique_pin_marker3 media",
+    });
+
+    for (const axis of ["narrower", "subClasses"]) {
+      let caught: unknown;
+      try {
+        await store.search.fulltext("SearchMedia3", {
+          query: "unique_pin_marker3",
+          limit: 10,
+          expansion: axis as never,
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught, `expansion: "${axis}" must be refused`).toBeInstanceOf(
+        ConfigurationError,
+      );
+      expect((caught as ConfigurationError).details["code"]).toBe(
+        "QUERY_ALIAS_EXPANSION_INVALID",
+      );
+      expect((caught as ConfigurationError).message).toContain(axis);
+    }
+
+    // The builder's refusal of the same value, for the same vocabulary.
+    expect(() =>
+      store
+        .query()
+        .from("SearchMedia3", "m", { expansion: "narrower2" as never }),
+    ).toThrow(ConfigurationError);
   });
 });
 

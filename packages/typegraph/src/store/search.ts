@@ -30,7 +30,10 @@ import {
   DEFAULT_RRF_WEIGHT,
   type HybridFusionOptions,
 } from "../query/ast";
-import { type AliasExpansionAxis } from "../query/builder/alias-expansion";
+import {
+  type AliasExpansionAxis,
+  assertPermittedExpansionAxis,
+} from "../query/builder/alias-expansion";
 import { type QueryBuilder } from "../query/builder/query-builder";
 import { type NodeAccessor } from "../query/builder/types";
 import { validateHybridFusionOptions } from "../query/builder/validation";
@@ -89,6 +92,17 @@ export type HybridSearchHit<N = Node> = Readonly<{
  * owner of the axis vocabulary.
  */
 type SearchExpansionAxis = Extract<AliasExpansionAxis, "exact" | "subclasses">;
+
+/**
+ * The axis values this facade accepts, as a runtime list the shared refusal
+ * (`assertPermittedExpansionAxis`) checks against. `"narrower"` is a real
+ * member of the shared vocabulary, so leaving it unchecked would silently
+ * downgrade it to `"exact"` rather than say it is unsupported here.
+ */
+const SEARCH_EXPANSION_AXES: readonly SearchExpansionAxis[] = [
+  "exact",
+  "subclasses",
+];
 
 /**
  * Scope options shared by every facade search leg.
@@ -309,12 +323,21 @@ function buildKindCandidates(
 /**
  * The kinds one search call spans: the kind itself, plus its `subClassOf`
  * descendants when requested.
+ *
+ * Refuses a value outside this facade's axis set through the vocabulary's own
+ * owner, so a stated axis `search()` cannot honor — `"narrower"`, or a
+ * misspelling a JavaScript caller reached — is named rather than coerced to
+ * `"exact"`. The query builder refuses the identical value; one predicate,
+ * one owner.
  */
 function resolveSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
   expansion: SearchExpansionAxis | undefined,
 ): readonly string[] {
+  if (expansion !== undefined) {
+    assertPermittedExpansionAxis(expansion, SEARCH_EXPANSION_AXES, "search");
+  }
   if (expansion !== "subclasses") return [nodeKind];
   if (ctx.createQuery === undefined) {
     throw new ConfigurationError(

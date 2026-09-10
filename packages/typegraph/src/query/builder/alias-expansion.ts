@@ -57,14 +57,46 @@ const ALIAS_EXPANSION_AXES: readonly AliasExpansionAxis[] = [
 ];
 
 /**
+ * The one refusal for an `expansion` value a surface cannot honor.
+ *
+ * `permittedAxes` is the subset the CALLING surface offers: every axis for an
+ * alias, the `"narrower"`-less pair for the `store.search()` facade. Both
+ * decisions — "is this a known axis" and "does this surface offer it" — are
+ * made here, so a second surface cannot re-spell either, and a value this
+ * surface cannot honor is refused by name instead of being coerced to the
+ * surface's default. A stated option is applied or refused, never ignored.
+ *
+ * Unreachable through the typed options; reachable from JavaScript, and from
+ * a typed caller that casts.
+ *
+ * @throws ConfigurationError (`QUERY_ALIAS_EXPANSION_INVALID`) when
+ *   `expansion` is not one of `permittedAxes`.
+ */
+export function assertPermittedExpansionAxis(
+  expansion: AliasExpansionAxis,
+  permittedAxes: readonly AliasExpansionAxis[],
+  surface: string,
+): void {
+  if (permittedAxes.includes(expansion)) return;
+  throw new ConfigurationError(
+    ALIAS_EXPANSION_AXES.includes(expansion) ?
+      `${surface} does not support expansion: "${expansion}".`
+    : `Unknown ${surface} expansion "${expansion}".`,
+    { code: "QUERY_ALIAS_EXPANSION_INVALID", expansion, surface },
+    {
+      suggestion: `Pass one of ${permittedAxes.map((axis) => `"${axis}"`).join(", ")}.`,
+    },
+  );
+}
+
+/**
  * Resolves the expansion axis for one alias: the stated `expansion`, or the
  * store default when the option is absent or explicitly `undefined` (an
  * unstated option, not a stated one — ordinary option forwarding).
  *
  * @throws ConfigurationError (`QUERY_ALIAS_EXPANSION_INVALID`) when
- *   `expansion` names something outside the axis set. Unreachable through
- *   the typed overloads; reachable from JavaScript, and silently expanding
- *   to the wrong kind list would be worse than a refusal.
+ *   `expansion` names something outside the axis set — an alias offers all
+ *   three, so only an out-of-domain value can fail here.
  */
 export function resolveAliasExpansion(
   options: AliasExpansionOptions | undefined,
@@ -72,15 +104,7 @@ export function resolveAliasExpansion(
 ): AliasExpansionAxis {
   const expansion = options?.expansion;
   if (expansion === undefined) return storeDefaultExpansion;
-  if (!ALIAS_EXPANSION_AXES.includes(expansion)) {
-    throw new ConfigurationError(
-      `Unknown alias expansion "${expansion}".`,
-      { code: "QUERY_ALIAS_EXPANSION_INVALID", expansion },
-      {
-        suggestion: `Pass one of ${ALIAS_EXPANSION_AXES.map((axis) => `"${axis}"`).join(", ")}.`,
-      },
-    );
-  }
+  assertPermittedExpansionAxis(expansion, ALIAS_EXPANSION_AXES, "alias");
   return expansion;
 }
 
