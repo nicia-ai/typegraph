@@ -253,6 +253,7 @@ import {
   resolveCompositionAttachmentRequest,
   resolveCompositionCreate,
 } from "./composition-create";
+import { createRetiringEdgeValidationBackend } from "./edge-batch-validation";
 import {
   edgeCardinalityDeclarations,
   type EdgeCreatePrepared,
@@ -2913,6 +2914,18 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
     'decideCompositionIncumbent answered "replace" with no incumbent read',
   );
   const moveInstant = nowIso();
+  // Prepared BEFORE the incumbent is retired, so a refusal leaves the part
+  // attached where it was; `createRetiringEdgeValidationBackend` owns why the
+  // count must already exclude the retiring row.
+  const replacement = await prepareCompositionCreateEdge(
+    ctx,
+    createRetiringEdgeValidationBackend(target, incumbent.edge),
+    lock,
+    work,
+    partId,
+    { validFrom: moveInstant },
+    { validateEndpoints: true },
+  );
   const incumbentPair = ctx.registry.compositionPairVia(
     partKind,
     incumbent.whole.kind,
@@ -2966,9 +2979,7 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
     });
   }
 
-  await attachCompositionCreateEdge(ctx, session, target, lock, work, partId, {
-    validFrom: moveInstant,
-  });
+  await insertPreparedCompositionEdge(ctx, session, replacement);
   return true;
 }
 
@@ -2979,13 +2990,21 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
  * the required-existence rule — precedes the update's first statement. The
  * one statement left after the update is {@link insertPreparedCompositionEdge}.
  *
+ * The order is load-bearing because the leg may run ON a caller's enclosing
+ * `store.transaction(...)`, which has no nested frame of its own to roll
+ * back: any statement already issued stays committed with it when the
+ * caller catches the refusal. Reads-then-writes is the only atomicity this
+ * layer has (no savepoints — see `claims/node-claims.ts`), so every
+ * refusal must be reached before the first write. The insert's claim rows
+ * remain the database backstop for verdicts the fenced reads already
+ * reached; no writer holding the fence can contradict them.
+ *
  * `"satisfied"` prepares nothing (the arm writes nothing). `"replace"` is
  * unreachable here: a get-or-create request is resolved with
  * `onIncumbent: "refuse"` (`resolveGetOrCreateAttachmentRequest`), so
  * `decideCompositionIncumbent` refuses a different incumbent instead of
- * answering `"replace"` — and a replace COULD not be prepared ahead of its
- * retirement anyway, since the incumbent still counts against the part's
- * cardinality until it is retired. Reaching it is therefore an invariant
+ * answering `"replace"`; a move is `reparent`'s
+ * ({@link applyCompositionAttachmentDecision}). Reaching it is an invariant
  * failure, not a supported path.
  *
  * `partRowRestoredByUpdate` names the resurrection leg: the part row is a
@@ -4453,32 +4472,13 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
     /**
      * Item E.2. Present only from the get-or-create entries' existing-row
      * leg (`executeNodeGetOrCreateByConstraint` and its bulk twin): the
-     * stated `partOf` is decided and written in the SAME transaction as this
-     * property update, so the two halves of one call commit together.
-     *
-     * The frame is sequenced reads-then-writes so that ordering holds even
-     * for a caller that catches a refusal inside an enclosing
-     * `store.transaction(...)`: that leg runs ON the caller's transaction,
-     * which has no nested frame of its own to roll back, so any statement
-     * already issued stays committed with it. Every read the attachment
-     * owes therefore precedes the update's first statement — the fenced
-     * incumbent decision and the whole's liveness
-     * (`decideCompositionAttachmentUnderFence`), then the edge's own
-     * preparation (`prepareCompositionAttachmentDecision`: the part's
-     * liveness on the update leg, cardinality, acyclicity, the
-     * required-existence rule). A refusal from any of them leaves nothing
-     * written at all. After the update, the only attachment statement left
-     * is the edge insert itself; its claim rows are the database backstop
-     * for verdicts the fenced reads already reached, and no writer that
-     * holds the fence can contradict them.
-     *
-     * A refused property update (a unique conflict, a validation error)
-     * leaves the attachment and its history untouched, in every case: the
-     * insert never runs.
-     *
-     * The request is resolved with `onIncumbent: "refuse"`
-     * (`resolveGetOrCreateAttachmentRequest`), so this leg attaches or is
-     * satisfied — a move is `reparent`'s decision, never a lookup's.
+     * stated `partOf` is decided, prepared, and written in the SAME
+     * transaction as this property update, reads first and writes last
+     * (decide, prepare, update, insert). A refusal from any read leaves
+     * nothing written, and a refused update never reaches the insert — see
+     * {@link prepareCompositionAttachmentDecision} for why the order is
+     * load-bearing. The request is resolved with `onIncumbent: "refuse"`, so
+     * this leg attaches or is satisfied; a move is `reparent`'s decision.
      */
     compositionAttachment?: CompositionAttachmentRequest;
   }>,
@@ -4518,8 +4518,8 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           validTo,
         );
       }
-      // Reads first, then writes — see the `compositionAttachment` option's
-      // docblock for why the order is load-bearing on the nested leg.
+      // Reads first, then writes — `prepareCompositionAttachmentDecision`
+      // owns the reason.
       const decided =
         compositionAttachment === undefined ? undefined : (
           await decideCompositionAttachmentUnderFence(

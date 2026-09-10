@@ -29,10 +29,16 @@
  * tuple `countEdgesAtEndpoint` itself reads — `(graphId, edgeKind, endpoint,
  * endpointKind, endpointId, activeOnly)` — so the two sides cannot drift
  * without one comparison in one function catching it.
+ *
+ * The module's second overlay, {@link createRetiringEdgeValidationBackend},
+ * is the same device pointed the other way: a frame that RETIRES a row and
+ * inserts its replacement prepares the replacement against a count the
+ * retiring row has already left.
  */
 import { deriveBackend } from "../../backend/derive-backend";
 import {
   type CountEdgesAtEndpointParams,
+  type EdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
 } from "../../backend/types";
@@ -235,4 +241,66 @@ export function createEdgeBatchValidationBackend(
     registerPendingEdgeForCardinality,
     seedEndpointRow,
   };
+}
+
+/**
+ * Whether `countEdgesAtEndpoint(params)` counts `row`: the row-level rendering
+ * of the exact predicate that read applies — same graph, edge kind, and
+ * endpoint column pair, not deleted, and open-ended when the read is
+ * `activeOnly`. Kept beside the cache key above, which mirrors the same
+ * tuple, so the two renderings of one read live in one place.
+ */
+function countEdgesAtEndpointIncludes(
+  params: CountEdgesAtEndpointParams,
+  row: EdgeRow,
+): boolean {
+  const [endpointKind, endpointId] =
+    params.endpoint === "from" ?
+      [row.from_kind, row.from_id]
+    : [row.to_kind, row.to_id];
+  return (
+    row.graph_id === params.graphId &&
+    row.kind === params.edgeKind &&
+    endpointKind === params.endpointKind &&
+    endpointId === params.endpointId &&
+    row.deleted_at === undefined &&
+    (params.activeOnly !== true || row.valid_to === undefined)
+  );
+}
+
+/**
+ * The frame's write target as a replacement edge's preparation must read it:
+ * with `retiring` — a row this same frame retires AFTER the preparation and
+ * BEFORE the insert — already gone from every endpoint count it holds.
+ *
+ * `reparent`'s replace arm (`applyCompositionAttachmentDecision`,
+ * `node-operations.ts`) is the caller: preparing the replacement before the
+ * incumbent is retired is what keeps a refusal the preparation raises
+ * (cardinality, acyclicity, invalid edge props) from leaving the part
+ * detached when the caller catches it inside an enclosing transaction, and
+ * preparing it against the raw count would refuse every move whose incumbent
+ * realizes the same edge kind — the incumbent still counts against the
+ * part's own cardinality until it is retired. Subtracting the one row the
+ * frame retires yields exactly the count the insert will see: a
+ * `population: "one"` incumbent is soft-deleted (leaves a `live` count), a
+ * `population: "oneActive"` incumbent has its window ended (leaves a
+ * `liveAndActive` count), and the axis a pair's population names is the
+ * one whose count it leaves.
+ *
+ * `edgeExistsBetween` is deliberately not overlaid: an incumbent that shared
+ * the replacement's `(kind, from, to)` would be the same attachment, which
+ * the decision reports as `"satisfied"` and never replaces.
+ */
+export function createRetiringEdgeValidationBackend(
+  target: WriteTarget,
+  retiring: EdgeRow,
+): WriteTarget {
+  return deriveBackend(target, {
+    countEdgesAtEndpoint: async (
+      params: CountEdgesAtEndpointParams,
+    ): Promise<number> => {
+      const count = await target.countEdgesAtEndpoint(params);
+      return countEdgesAtEndpointIncludes(params, retiring) ? count - 1 : count;
+    },
+  } satisfies Partial<WriteTarget>);
 }
