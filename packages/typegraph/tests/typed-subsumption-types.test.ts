@@ -720,4 +720,231 @@ describe("R2 — typed relations and conservative widening", () => {
     type UnnamedRow = Awaited<ReturnType<typeof unnamedQuery.execute>>[number];
     expectTypeOf<UnnamedRow["kind"]>().toEqualTypeOf<"ChildErasedPerson">();
   });
+
+  it("widens every kind an endpoint kind UNION can hold", () => {
+    // A caller helper that declares a subclass of EITHER media root. Its
+    // `to` is a union of two node types, so the relation keeps both its
+    // meta-edge name literal and literal endpoint kinds — neither erased arm
+    // sees it — yet no single `{ to: { kind: K } }` shape describes it.
+    const UnionAudio = defineNode("UnionAudio", {
+      schema: z.object({ title: z.string() }),
+    });
+    const UnionVideo = defineNode("UnionVideo", {
+      schema: z.object({ title: z.string() }),
+    });
+    const UnionEpisode = defineNode("UnionEpisode", {
+      schema: z.object({ title: z.string(), durationSeconds: z.number() }),
+    });
+    const UnionUnrelated = defineNode("UnionUnrelated", {
+      schema: z.object({ name: z.string() }),
+    });
+    type MediaRoot = typeof UnionAudio | typeof UnionVideo;
+    function declareEpisodeOf(root: MediaRoot) {
+      return subClassOf(UnionEpisode, root);
+    }
+    const unionNodes = {
+      UnionAudio: { type: UnionAudio },
+      UnionVideo: { type: UnionVideo },
+      UnionEpisode: { type: UnionEpisode },
+      UnionUnrelated: { type: UnionUnrelated },
+    } as const;
+    const audioRootGraph = defineGraph({
+      id: "r2_union_endpoint_audio",
+      nodes: unionNodes,
+      edges: {},
+      ontology: [declareEpisodeOf(UnionAudio)],
+    });
+    const videoRootGraph = defineGraph({
+      id: "r2_union_endpoint_video",
+      nodes: unionNodes,
+      edges: {},
+      ontology: [declareEpisodeOf(UnionVideo)],
+    });
+    // The soundness argument, stated as an assertion: the two graphs have
+    // IDENTICAL ontology types and DIFFERENT runtime subclass closures, so a
+    // type that answered "unaffected" for either root would be wrong for one
+    // of them.
+    expectTypeOf<(typeof audioRootGraph)["ontology"]>().toEqualTypeOf<
+      (typeof videoRootGraph)["ontology"]
+    >();
+    const audioRegistry = buildKindRegistry(audioRootGraph);
+    const videoRegistry = buildKindRegistry(videoRootGraph);
+    expect(audioRegistry.expandSubClasses("UnionAudio")).toContain(
+      "UnionEpisode",
+    );
+    expect(audioRegistry.expandSubClasses("UnionVideo")).not.toContain(
+      "UnionEpisode",
+    );
+    expect(videoRegistry.expandSubClasses("UnionVideo")).toContain(
+      "UnionEpisode",
+    );
+    const builder = () =>
+      createQueryBuilder<typeof audioRootGraph>(
+        audioRootGraph.id,
+        audioRegistry,
+      );
+    const audioQuery = builder()
+      .from("UnionAudio", "a")
+      .select((ctx) => ctx.a);
+    expect(audioQuery).toBeDefined();
+    type AudioRow = Awaited<ReturnType<typeof audioQuery.execute>>[number];
+    expectTypeOf<AudioRow["kind"]>().toEqualTypeOf<string>();
+    const videoQuery = builder()
+      .from("UnionVideo", "v")
+      .select((ctx) => ctx.v);
+    expect(videoQuery).toBeDefined();
+    type VideoRow = Awaited<ReturnType<typeof videoQuery.execute>>[number];
+    expectTypeOf<VideoRow["kind"]>().toEqualTypeOf<string>();
+    // Precision: distributing over the union widens the kinds the union can
+    // hold and nothing else — a kind no endpoint names stays exact instead of
+    // the whole graph widening the way an erased arm would.
+    const unrelatedQuery = builder()
+      .from("UnionUnrelated", "u")
+      .select((ctx) => ctx.u);
+    expect(unrelatedQuery).toBeDefined();
+    type UnrelatedRow = Awaited<
+      ReturnType<typeof unrelatedQuery.execute>
+    >[number];
+    expectTypeOf<UnrelatedRow["kind"]>().toEqualTypeOf<"UnionUnrelated">();
+  });
+
+  it("widens every kind an equivalentTo endpoint union can hold, on either side", () => {
+    const EitherLeftA = defineNode("EitherLeftA", {
+      schema: z.object({ title: z.string() }),
+    });
+    const EitherLeftB = defineNode("EitherLeftB", {
+      schema: z.object({ title: z.string() }),
+    });
+    const EitherRightA = defineNode("EitherRightA", {
+      schema: z.object({ title: z.string() }),
+    });
+    const EitherRightB = defineNode("EitherRightB", {
+      schema: z.object({ title: z.string() }),
+    });
+    const EitherUnrelated = defineNode("EitherUnrelated", {
+      schema: z.object({ name: z.string() }),
+    });
+    type LeftMember = typeof EitherLeftA | typeof EitherLeftB;
+    type RightMember = typeof EitherRightA | typeof EitherRightB;
+    // `equivalentTo` is matched on BOTH endpoints, so one relation whose two
+    // sides are each a union must widen all four kinds it can hold.
+    function declareEquivalence(left: LeftMember, right: RightMember) {
+      return equivalentTo(left, right);
+    }
+    const eitherGraph = defineGraph({
+      id: "r2_union_endpoint_equivalence",
+      nodes: {
+        EitherLeftA: { type: EitherLeftA },
+        EitherLeftB: { type: EitherLeftB },
+        EitherRightA: { type: EitherRightA },
+        EitherRightB: { type: EitherRightB },
+        EitherUnrelated: { type: EitherUnrelated },
+      },
+      edges: {},
+      ontology: [declareEquivalence(EitherLeftA, EitherRightB)],
+    });
+    const eitherRegistry = buildKindRegistry(eitherGraph);
+    expect(eitherRegistry.expandSubClasses("EitherLeftA")).toContain(
+      "EitherRightB",
+    );
+    const builder = () =>
+      createQueryBuilder<typeof eitherGraph>(eitherGraph.id, eitherRegistry);
+    const leftAQuery = builder()
+      .from("EitherLeftA", "x")
+      .select((ctx) => ctx.x);
+    expect(leftAQuery).toBeDefined();
+    type LeftARow = Awaited<ReturnType<typeof leftAQuery.execute>>[number];
+    expectTypeOf<LeftARow["kind"]>().toEqualTypeOf<string>();
+    const leftBQuery = builder()
+      .from("EitherLeftB", "x")
+      .select((ctx) => ctx.x);
+    expect(leftBQuery).toBeDefined();
+    type LeftBRow = Awaited<ReturnType<typeof leftBQuery.execute>>[number];
+    expectTypeOf<LeftBRow["kind"]>().toEqualTypeOf<string>();
+    const rightAQuery = builder()
+      .from("EitherRightA", "y")
+      .select((ctx) => ctx.y);
+    expect(rightAQuery).toBeDefined();
+    type RightARow = Awaited<ReturnType<typeof rightAQuery.execute>>[number];
+    expectTypeOf<RightARow["kind"]>().toEqualTypeOf<string>();
+    const rightBQuery = builder()
+      .from("EitherRightB", "y")
+      .select((ctx) => ctx.y);
+    expect(rightBQuery).toBeDefined();
+    type RightBRow = Awaited<ReturnType<typeof rightBQuery.execute>>[number];
+    expectTypeOf<RightBRow["kind"]>().toEqualTypeOf<string>();
+    const unrelatedQuery = builder()
+      .from("EitherUnrelated", "u")
+      .select((ctx) => ctx.u);
+    expect(unrelatedQuery).toBeDefined();
+    type UnrelatedRow = Awaited<
+      ReturnType<typeof unrelatedQuery.execute>
+    >[number];
+    expectTypeOf<UnrelatedRow["kind"]>().toEqualTypeOf<"EitherUnrelated">();
+  });
+
+  it("widens every kind a single endpoint's kind-literal union can hold", () => {
+    // The second shape an endpoint union takes: not a union of endpoint
+    // TYPES but a union inside ONE endpoint's `kind`, from a helper annotated
+    // `NodeType<"LiteralAudio" | "LiteralVideo">`. Same unsoundness, same
+    // remedy — the decision reduces the endpoint to the kind literals it can
+    // hold rather than asking for assignability to a single-kind shape.
+    const LiteralAudio = defineNode("LiteralAudio", {
+      schema: z.object({ title: z.string() }),
+    });
+    const LiteralVideo = defineNode("LiteralVideo", {
+      schema: z.object({ title: z.string() }),
+    });
+    const LiteralEpisode = defineNode("LiteralEpisode", {
+      schema: z.object({ title: z.string(), durationSeconds: z.number() }),
+    });
+    const LiteralUnrelated = defineNode("LiteralUnrelated", {
+      schema: z.object({ name: z.string() }),
+    });
+    function declareEpisodeUnderEither(
+      root: NodeType<"LiteralAudio" | "LiteralVideo">,
+    ) {
+      return subClassOf(LiteralEpisode, root);
+    }
+    const literalUnionGraph = defineGraph({
+      id: "r2_union_endpoint_kind_literal",
+      nodes: {
+        LiteralAudio: { type: LiteralAudio },
+        LiteralVideo: { type: LiteralVideo },
+        LiteralEpisode: { type: LiteralEpisode },
+        LiteralUnrelated: { type: LiteralUnrelated },
+      },
+      edges: {},
+      ontology: [declareEpisodeUnderEither(LiteralAudio)],
+    });
+    const literalUnionRegistry = buildKindRegistry(literalUnionGraph);
+    expect(literalUnionRegistry.expandSubClasses("LiteralAudio")).toContain(
+      "LiteralEpisode",
+    );
+    const builder = () =>
+      createQueryBuilder<typeof literalUnionGraph>(
+        literalUnionGraph.id,
+        literalUnionRegistry,
+      );
+    const audioQuery = builder()
+      .from("LiteralAudio", "a")
+      .select((ctx) => ctx.a);
+    expect(audioQuery).toBeDefined();
+    type AudioRow = Awaited<ReturnType<typeof audioQuery.execute>>[number];
+    expectTypeOf<AudioRow["kind"]>().toEqualTypeOf<string>();
+    const videoQuery = builder()
+      .from("LiteralVideo", "v")
+      .select((ctx) => ctx.v);
+    expect(videoQuery).toBeDefined();
+    type VideoRow = Awaited<ReturnType<typeof videoQuery.execute>>[number];
+    expectTypeOf<VideoRow["kind"]>().toEqualTypeOf<string>();
+    const unrelatedQuery = builder()
+      .from("LiteralUnrelated", "u")
+      .select((ctx) => ctx.u);
+    expect(unrelatedQuery).toBeDefined();
+    type UnrelatedRow = Awaited<
+      ReturnType<typeof unrelatedQuery.execute>
+    >[number];
+    expectTypeOf<UnrelatedRow["kind"]>().toEqualTypeOf<"LiteralUnrelated">();
+  });
 });

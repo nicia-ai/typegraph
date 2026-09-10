@@ -823,6 +823,19 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // entrypoint renders `QueryBuilder`, `BaseStoreOptions` or
 // `SubgraphOptions`), and `SubgraphResultEdgeKinds` stays absent from `.`'s
 // forgotten set because the root barrel still exports it.
+//
+// Union endpoint batch (W3). The SAME seven entrypoints move once more, +1
+// apiece (`.` 437 → 438; `./graph-merge` 784 → 785; `./interchange` 769 →
+// 770; `./postgres/pglite` and `./sqlite/local` 766 → 767; `./profiler`
+// 771 → 772; `./provenance` 777 → 778), for exactly one new declaration:
+// `SubsumptionElementNamesKind`. It replaces the whole-relation `Extract`
+// arms `SubsumptionAffected` used to spell inline — those arms named no
+// declaration of their own, so nothing retires — and decides each element by
+// `Extract`ing over the element's ENDPOINTS, which is what makes an endpoint
+// kind UNION decidable. Gate: every moved entrypoint's delta is exactly +1,
+// and removing `SubsumptionElementNamesKind` from each new symbol set
+// reproduces that entrypoint's previous `sha256` exactly; no other
+// entrypoint moves (none of the rest renders `QueryBuilder`).
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Roadmap F (meta-edge removal): removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
@@ -855,8 +868,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `.` (see `src/index.ts`), so neither registers as forgotten here — the
   // debt is back to its pre-E.2 baseline for this entrypoint specifically.
   ".": {
-    count: 437,
-    sha256: "483b3090ab2c966a64300ec0f24a64b8bf6b079d82427a159aa4933b3f35c207",
+    count: 438,
+    sha256: "2ce0d0ee9228e5c7053b59df003740ca67ba4bd578e7823aa429f61e967a5f2d",
   },
   "./adapters/drizzle/engine": {
     count: 338,
@@ -913,28 +926,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 784,
-    sha256: "a6e3ae537432943622bebf62338664f058a5f91d21052b3717159776f7888c05",
+    count: 785,
+    sha256: "3ca7349506e8ed8e10b2915e561c4f40b33a6fcf068ef2cbfced5823b5b7be02",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 769,
-    sha256: "7d6dbfe63c4915f6d01e011ea993a5adf66b9d223cb6045b75d566e026c53ad2",
+    count: 770,
+    sha256: "42afe7e70005f3977a1fb9d5adfb681eabbbdb559d4b6a819fc490f84c88dfd2",
   },
   "./postgres/pglite": {
-    count: 766,
-    sha256: "b1a2b2161e9d7f3ba04c2338492d6f519ebd674efb4c0a5fe674eef65d1bf060",
+    count: 767,
+    sha256: "3e316cfb2ce30e45721203b9d78e22b301506c814ed59388cd4d1894b1b56b63",
   },
   "./profiler": {
-    count: 771,
-    sha256: "6c1bb89765c3eba587f5d069627b07d47df0f603962f4aa22ac395472b4dfc8e",
+    count: 772,
+    sha256: "ea1feda418e19f8390907019929a87864376b9d184b7fb4db61f98a9c9a7ac7d",
   },
   "./provenance": {
-    count: 777,
-    sha256: "1fd7066ec793ddbc80c2d0d1ed00c25b2770695994d2d5c154f2ebd3ad2e601f",
+    count: 778,
+    sha256: "73fd45dcc734cd95a29bf86159658e21d8b3659971e81921e4d5c09c9356999b",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -950,8 +963,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "ff190fe91f16dd83780cc450653f95fae7b2bcf2653620dbd2719ab62b8547be",
   },
   "./sqlite/local": {
-    count: 766,
-    sha256: "b1a2b2161e9d7f3ba04c2338492d6f519ebd674efb4c0a5fe674eef65d1bf060",
+    count: 767,
+    sha256: "3e316cfb2ce30e45721203b9d78e22b301506c814ed59388cd4d1894b1b56b63",
   },
 };
 
