@@ -49,6 +49,7 @@ export {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeReparent,
   executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
   executeNodeSetUpdate,

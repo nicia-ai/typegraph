@@ -196,11 +196,13 @@ import {
 } from "../resolved-mutation-set";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
 import {
+  type CompositionNodeRef,
   type CreateEdgeInput,
   type Edge,
   type GetOrCreateAction,
   type IfExistsMode,
   type OperationHookContext,
+  type OperationOutcomeFacts,
 } from "../types";
 import {
   assertClearValidToSupported,
@@ -308,6 +310,7 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
     ctx: OperationHookContext,
     fn: () => Promise<T>,
     didWrite?: (result: T) => boolean,
+    operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
   ) => Promise<T>;
 }>;
 
@@ -2128,6 +2131,8 @@ async function performEdgeUpdate<G extends GraphDef>(
     clearDeleted?: boolean;
     matchOn?: readonly string[];
     matchProps?: Record<string, unknown>;
+    /** See {@link assertCompositionExistencePreserved}'s `reattachedPart`. */
+    reattachedPart?: CompositionNodeRef;
   }>,
   resolvedExisting?: BackendEdgeRow,
   lock?: GraphWriteLock,
@@ -2386,6 +2391,9 @@ async function performEdgeUpdate<G extends GraphDef>(
           lock,
           "a composition-existence-checked edge window-end reached performEdgeUpdate with no write lock",
         ),
+        ...(options?.reattachedPart === undefined ?
+          {}
+        : { reattachedPart: options.reattachedPart }),
       },
       existing,
       target,
@@ -2440,6 +2448,7 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
     clearDeleted?: boolean;
     matchOn?: readonly string[];
     matchProps?: Record<string, unknown>;
+    reattachedPart?: CompositionNodeRef;
   }>,
   resolvedExisting?: BackendEdgeRow,
   lock?: GraphWriteLock,
@@ -2468,6 +2477,40 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
   }
   // Unreachable: the loop either returns or throws on its last attempt.
   throw new EdgeNotFoundError(input.identity.kind, input.id);
+}
+
+/**
+ * Ends one composition edge's open validity window, inside a frame that is
+ * about to attach the same part to a new whole — `reparent`'s retire for a
+ * `population: "oneActive"` pair (`executeNodeReparent`,
+ * `node-operations.ts`).
+ *
+ * Runs the ORDINARY edge-update body, so the window end takes exactly the
+ * props merge, validity-window verdict, identity fence, claim re-entry, and
+ * capture an explicit `store.edges.<kind>.update(id, {}, { validTo })` would
+ * take. `reattachedPart` is the reparent's own evidence that this part is
+ * not being detached at all (see `assertCompositionExistencePreserved`), so
+ * the required-existence refusal is APPLIED with the frame's real end state
+ * rather than bypassed.
+ */
+export async function endCompositionEdgeWindow<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  edge: BackendEdgeRow,
+  reattachedPart: CompositionNodeRef,
+  validTo: string,
+  session: EdgeWriteSession,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+): Promise<void> {
+  await performEdgeUpdateConverging(
+    ctx,
+    { id: edge.id, identity: { kind: edge.kind }, props: {}, validTo },
+    session,
+    target,
+    { reattachedPart },
+    edge,
+    lock,
+  );
 }
 
 function resolveAtomicEdgeUpdateExecutor<G extends GraphDef>(

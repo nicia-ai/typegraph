@@ -986,6 +986,12 @@ type CompileQueryOptions = Readonly<{
 type ComposableQuery = QueryAst | SetOperation;
 
 // @public
+type CompositionAttachment = CompositionNodeRef & Readonly<{
+    via?: string;
+    props?: Record<string, unknown>;
+}>;
+
+// @public
 type CompositionClaimScope = Readonly<{
     kind: "composition";
     holders: readonly Readonly<{
@@ -1013,6 +1019,12 @@ type CompositionNavigationResult<G extends GraphDef, Aliases extends AliasMap, E
 } ? P : false, NA>, CoordinateState>;
 
 // @public
+type CompositionNodeRef = Readonly<{
+    kind: string;
+    id: string;
+}>;
+
+// @public
 type CompositionPair = Readonly<{
     partKind: string;
     wholeKind: string;
@@ -1030,12 +1042,6 @@ type CompositionRelation = Readonly<{
     pairs: readonly CompositionPair[];
     edgeKinds: ReadonlySet<string>;
     partSideByEdgeKind: ReadonlyMap<string, CompositionPartSide>;
-}>;
-
-// @public
-type CompositionWholeRef = Readonly<{
-    kind: string;
-    id: string;
 }>;
 
 // @public
@@ -3742,6 +3748,8 @@ class KindRegistry {
     compositionEdgeKindsOver(partKind: string): readonly string[];
     compositionEdgeKindsUnder(wholeKind: string): readonly string[];
     compositionExistence(concretePartKind: string): CompositionExistence;
+    compositionPairsBetween(partKind: string, wholeKind: string): readonly CompositionPair[];
+    compositionPairVia(partKind: string, wholeKind: string, viaEdgeKind: string): CompositionPair | undefined;
     compositionPartKindsUnder(wholeKind: string): readonly string[];
     compositionPartSide(edgeKind: string): CompositionPartSide | undefined;
     compositionPopulation(concretePartKind: string): "one" | "oneActive" | undefined;
@@ -3766,7 +3774,6 @@ class KindRegistry {
     expandNarrower(kind: string): readonly string[];
     expandSubClasses(kind: string): readonly string[];
     getAncestors(kind: string): ReadonlySet<string>;
-    getCompositionEdge(partKind: string, wholeKind: string): CompositionPair | undefined;
     getDescendants(kind: string): ReadonlySet<string>;
     getDisjointKinds(kind: string): readonly string[];
     getEdgeType(name: string): AnyEdgeType | undefined;
@@ -4747,6 +4754,7 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
     }>) => Promise<Readonly<{
         affectedCount: number;
     }>>;
+    reparent: (id: NodeId<N>, attachment: CompositionAttachment) => Promise<void>;
     delete: (id: NodeId<N>) => Promise<void>;
     hardDelete: (id: NodeId<N>) => Promise<void>;
     find: (filter?: Readonly<{
@@ -4829,7 +4837,7 @@ type NodeCreateOptions = Readonly<{
     id?: string;
     validFrom?: string | null;
     validTo?: string;
-    partOf?: CompositionWholeRef;
+    partOf?: CompositionAttachment;
 }>;
 
 // @public
@@ -4851,7 +4859,7 @@ type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbs
 // @public
 type NodeGetOrCreateByConstraintOptions = Readonly<{
     ifExists?: IfExistsMode;
-    partOf?: CompositionWholeRef;
+    partOf?: CompositionAttachment;
 }>;
 
 // @public
@@ -5129,11 +5137,16 @@ export function openProvenanceStore<G extends GraphDef>(target: Store<G>): Promi
 export function openProvenanceStore(backend: GraphBackend, targetGraphId: string): Promise<Store<ProvenanceGraph>>;
 
 // @public
-type OperationHookContext = HookContext & Readonly<{
+type OperationHookContext = HookContext & OperationOutcomeFacts & Readonly<{
     operation: "create" | "update" | "delete";
     entity: KindEntity;
     kind: string;
     id: string;
+}>;
+
+// @public
+type OperationOutcomeFacts = Readonly<{
+    cascadedParts?: readonly CompositionNodeRef[];
 }>;
 
 // @public
@@ -7246,6 +7259,7 @@ type TransactionReceipt = Readonly<{
         identity: IdentityWriteSummary;
         total: number;
     }>;
+    cascadedParts: readonly CompositionNodeRef[];
     recorded?: RecordedInstant;
 }>;
 

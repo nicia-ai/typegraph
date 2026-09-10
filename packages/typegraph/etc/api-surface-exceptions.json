@@ -1,5 +1,885 @@
 [
   {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceStatements",
+    "member": "isolationFact",
+    "kind": "required-member-added",
+    "reason": "FenceStatements is what a resolved `lock` WriteFencePlan carries as its `sql` field, derived from FenceSql's two expressions by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant, including FenceStatements's three derived members, so they are required as a set at that boundary just as FenceSql's own members are.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "id",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CompositionNodeRef",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "`CompositionWholeRef`'s inline members are extracted into the new named `CompositionNodeRef`, which `CompositionWholeRef` now aliases \u2014 the checker reports `kind` and `id` once as members of the new named type while the shape a consumer authors is unchanged, and `CompositionAttachment` widens that ref with optional `via`/`props` only. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairVia",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindRegistry",
+    "member": "compositionPairsBetween",
+    "kind": "required-member-added",
+    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the two composition pair readers that replace `getCompositionEdge`'s silent code-point-first match \u2014 `compositionPairsBetween` for every declared pair and `compositionPairVia` for the pair a known realizing edge holds. The replacement is declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeCollection",
+    "member": "reparent",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is built by the library (`createStore`) and is never hand-implemented by an external consumer; it gains `reparent`, which moves a composition part to a new whole under one per-graph fence. Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "WriteFencePlan",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of the lock arm's drain field per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "WriteFencePlan",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of the lock arm's drain field per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceStatements",
+    "member": "acquireKeyed",
+    "kind": "required-member-added",
+    "reason": "FenceStatements is what a resolved lock or row WriteFencePlan carries as its sql field, derived from FenceSql by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant. acquireKeyed/acquireKeyedWithIsolation replace the deleted advisoryLock/advisoryLockWithIsolation names (already exempted here before the rename) as the mechanism-neutral forms every keyed lock site now calls.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceStatements",
+    "member": "acquireKeyedWithIsolation",
+    "kind": "required-member-added",
+    "reason": "FenceStatements is what a resolved lock or row WriteFencePlan carries as its sql field, derived from FenceSql by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant. acquireKeyed/acquireKeyedWithIsolation replace the deleted advisoryLock/advisoryLockWithIsolation names (already exempted here before the rename) as the mechanism-neutral forms every keyed lock site now calls.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreCore",
+    "member": "workingCopyOptions",
+    "kind": "required-member-added",
+    "reason": "StoreCore is reached at a contravariant (parameter) position through WorkingCopyStrategy.create(baseStore: Store<G>, base: BaseVersion), an existing public callable a caller implements to supply a custom working-copy strategy to branch(). No code hand-authors a Store-shaped object literal to pass as that parameter; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate workingCopyOptions.",
+    "issue": "#632"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "workingCopyOptions",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have \u2014 CoordinatePinnedView's constructor, exportGraph, exportGraphStream, trustedImportGraph, trustedImportGraphStream, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate workingCopyOptions.",
+    "issue": "#632"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "workingCopyOptions",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have \u2014 CoordinatePinnedView's constructor and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate workingCopyOptions.",
+    "issue": "#632"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "workingCopyOptions",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have \u2014 CoordinatePinnedView's constructor, ProfiledStore.attachToStore, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate workingCopyOptions.",
+    "issue": "#632"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "workingCopyOptions",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have \u2014 CoordinatePinnedView's constructor and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate workingCopyOptions.",
+    "issue": "#632"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "workingCopyOptions",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have \u2014 CoordinatePinnedView's constructor and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate workingCopyOptions.",
+    "issue": "#632"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "workingCopyOptions",
+    "kind": "required-member-added",
+    "reason": "This entrypoint does not export WorkingCopyStrategy.create; StoreCore is reached at a contravariant (parameter) position through the Store-taking public exports it does have \u2014 CoordinatePinnedView's constructor, createStore's overloads, rebuildIdentityClosure, and the RecordedStoreView/StoreView constructors. No code hand-authors a Store-shaped object literal to pass to any of them; every real Store originates from createStore/createAdapterStore/createStoreWithSchema, which now always populate workingCopyOptions.",
+    "issue": "#632"
+  },
+  {
     "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
     "declaration": "ClaimEdgeCardinalityParams",
     "member": "cardinality",
@@ -1474,14 +2354,6 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -2113,6 +2985,14 @@
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "TransactionRuntime",
     "member": "deleteNodeWithPolicy",
     "kind": "required-member-added",
@@ -2482,14 +3362,6 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -2950,6 +3822,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
@@ -3322,14 +4202,6 @@
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -3790,6 +4662,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
@@ -4162,14 +5042,6 @@
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -4630,6 +5502,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
@@ -5002,14 +5882,6 @@
   {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -5470,6 +6342,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
@@ -6282,14 +7162,6 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "KindRegistry",
     "member": "isCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
@@ -6753,6 +7625,14 @@
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "TransactionRuntime",
     "member": "deleteNodeWithPolicy",
     "kind": "required-member-added",
@@ -7147,14 +8027,6 @@
     "entrypoint": "typegraph.api.md",
     "declaration": "KindRegistry",
     "member": "compositionWholeKindsOver",
-    "kind": "required-member-added",
-    "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
-    "issue": "#641"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "KindRegistry",
-    "member": "getCompositionEdge",
     "kind": "required-member-added",
     "reason": "`KindRegistry` is built by the library (`buildKindRegistry`) and is not exported from any entrypoint, so no external consumer implements or constructs one; it gains the composition-relation accessors the registry now owns. The composition relation and its registry ownership are declared in .changeset/composition-relation.md.",
     "issue": "#641"
@@ -7670,6 +8542,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#660"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionReceipt",
+    "member": "cascadedParts",
+    "kind": "required-member-added",
+    "reason": "`TransactionReceipt` is produced by `store.transactionWithReceipt`, never authored by a consumer; it gains the always-present `cascadedParts` refs naming the parts a whole's delete cascade took with it (empty when the transaction deleted no whole). Declared in .changeset/composition-attachment.md.",
+    "issue": "#637"
   },
   {
     "entrypoint": "typegraph.api.md",

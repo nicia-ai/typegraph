@@ -14,6 +14,7 @@ import type {
 } from "./collection-surface";
 import { EDGE_WRITE_NAMES, NODE_WRITE_NAMES } from "./collection-surface";
 import type {
+  CompositionNodeRef,
   EdgeWrites,
   GraphEdgeCollections,
   GraphNodeCollections,
@@ -80,6 +81,15 @@ export type TransactionReceiptRecorder = Readonly<{
    * `identity.total` or the receipt's overall `total`.
    */
   recordIdentityTransitions: (count: number) => void;
+  /**
+   * Records the composition parts one node delete's cascade removed. Not a
+   * write intent at the collection surface — the caller issued ONE `delete`,
+   * which `recordNode` already counted — so this touches no counter; it only
+   * appends to the receipt's `cascadedParts`. Called by the delete's own row
+   * work (`node-operations.ts`), which is the only place the cascade plan
+   * exists.
+   */
+  recordCascadedParts: (parts: readonly CompositionNodeRef[]) => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
   /**
    * Seals the recorder: every subsequent write through a collection wrapped with
@@ -120,6 +130,7 @@ const NODE_WRITE_INTENT_COUNTERS = {
   create: countSingleWrite,
   createFromRecord: countSingleWrite,
   update: countSingleWrite,
+  reparent: countSingleWrite,
   compareAndSet: countSingleWrite,
   updateWhere: countSingleWrite,
   delete: countSingleWrite,
@@ -177,6 +188,8 @@ interface WriteCounters {
   readonly edges: Record<string, number>;
   readonly identity: { -readonly [K in keyof IdentityWriteSummary]: number };
   total: number;
+  /** Appended in delete order; each entry is one cascade's leaf-first closure. */
+  readonly cascadedParts: CompositionNodeRef[];
 }
 
 export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
@@ -191,6 +204,7 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       total: 0,
     },
     total: 0,
+    cascadedParts: [],
   };
   let sealed = false;
 
@@ -216,6 +230,10 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       counters.identity.transitions += count;
     },
 
+    recordCascadedParts(parts): void {
+      counters.cascadedParts.push(...parts);
+    },
+
     snapshot(recorded): TransactionReceipt {
       // Spread, not `Object.assign` onto a fresh null-prototype bucket. Both
       // keep a prototype-colliding kind name readable, but the receipt is
@@ -232,6 +250,7 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
           identity: Object.freeze({ ...counters.identity }),
           total: counters.total,
         }),
+        cascadedParts: Object.freeze([...counters.cascadedParts]),
         ...(recorded === undefined ? {} : { recorded }),
       });
     },

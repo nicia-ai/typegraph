@@ -322,7 +322,7 @@ describe.each(backendMatrix())(
 // realized by a DIFFERENT edge kind (`holdsLeaf`) than the one that binds
 // `Part` to `Whole` (`holds`). This is what regresses a fix that re-derives
 // "which pair realizes this membership" via
-// `registry.getCompositionEdge(member.kind, root.whole.kind)` instead of
+// `registry.compositionPairsBetween(member.kind, root.whole.kind)` instead of
 // reading the pair `planCompositionCascade` already resolved per member.
 // ============================================================
 
@@ -413,9 +413,8 @@ describe.each(backendMatrix())(
 
       // Before the fix: this throws a raw `TypeError` out of
       // `requireDefined` (wrapped as `MergeError`/`GRAPH_MERGE_ERROR`)
-      // instead of returning a plan, because `getCompositionEdge("Leaf",
-      // "Whole")` is undefined — no pair declares Leaf directly under
-      // Whole.
+      // instead of returning a plan, because no pair declares "Leaf"
+      // directly under "Whole".
       const planResult = await planMergeIncremental<NestedG>({
         forkPoint,
         target,
@@ -427,7 +426,7 @@ describe.each(backendMatrix())(
 
       // MUTATION (verified): reverting `compositionOrphansAmong` to its
       // pre-fix shape — a plain `orphans.push` (no dedupe) that re-derives
-      // the pair via `registry.getCompositionEdge(member.kind, whole.kind)`
+      // the pair via a (part, whole)-only pair lookup
       // (the ROOT `whole` of the OUTER loop, not `member.whole`) — makes
       // `isOk(planResult)` false above (the TypeError, wrapped as
       // `GRAPH_MERGE_ERROR`). Reverting ONLY the pair-derivation while

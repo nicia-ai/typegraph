@@ -331,7 +331,11 @@ export type SubgraphOptions<
 > = Readonly<{
   /** Edge kinds to follow during traversal. Edges not listed are not traversed. */
   edges: readonly EK[];
-  /** Maximum traversal depth from root (default: 10). */
+  /**
+   * Maximum traversal depth from root for the `edges` list above (default:
+   * 10). It does NOT bound the `composition` closure: that returns the
+   * complete owned unit at any depth — see {@link SubgraphOptions.composition}.
+   */
   maxDepth?: number;
   /**
    * Node kinds to include in the result. Nodes of other kinds are still
@@ -372,6 +376,12 @@ export type SubgraphOptions<
    * `adjacency` key the traversal can actually produce must be reachable
    * through the result type, and the exact set is not knowable at compile
    * time.
+   *
+   * The closure is COMPLETE: it is bounded by its own visited set, never by
+   * `maxDepth`. A part tree deeper than the default depth still comes back
+   * whole, because a whole plus a truncated prefix of its parts is not an
+   * owned unit. `maxDepth` (and `cyclePolicy`) bound the explicit `edges`
+   * traversal alone.
    */
   composition?: C;
   /**
@@ -856,8 +866,8 @@ function buildSubgraphCompositionReachableCte<
     sourceId: ctx.rootId,
     outEdgeKinds,
     inEdgeKinds,
-    maxHops: ctx.maxDepth,
-    cyclePolicy: ctx.cyclePolicy,
+    maxHops: MAX_EXPLICIT_RECURSIVE_DEPTH,
+    cyclePolicy: "prevent",
     includePath: false,
     temporalMode: ctx.temporalMode,
     ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),

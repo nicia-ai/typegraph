@@ -358,6 +358,7 @@ import {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeReparent,
   executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
   executeNodeSetUpdate,
@@ -458,6 +459,7 @@ import {
   type BulkFindRuntimeEdgesFromParams,
   type BulkFindRuntimeEdgesFromResult,
   type BulkOperationHookContext,
+  type CompositionNodeRef,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
   type Edge,
@@ -477,6 +479,7 @@ import {
   type MeasurableTransactionContext,
   type Node,
   type OperationHookContext,
+  type OperationOutcomeFacts,
   type QueryHookContext,
   type QueryOptions,
   type RecordedHeterogeneousNodeWriteBatch,
@@ -653,7 +656,25 @@ type OperationHookRunner = <T>(
   ctx: OperationHookContext,
   fn: () => Promise<T>,
   didWrite?: (result: T) => boolean,
+  operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
 ) => Promise<T>;
+
+/**
+ * THE one place a start context becomes an end context: the facts the
+ * operation learned while it ran, folded on. `onOperationStart` always sees
+ * the bare context — the facts do not exist yet — so the immediate and
+ * buffered runners share this fold rather than each re-spelling the spread
+ * and drifting on which hook gets the enriched object.
+ */
+function operationEndContext<T>(
+  ctx: OperationHookContext,
+  result: T,
+  operationFacts:
+    ((result: T) => OperationOutcomeFacts | undefined) | undefined,
+): OperationHookContext {
+  const facts = operationFacts?.(result);
+  return facts === undefined ? ctx : { ...ctx, ...facts };
+}
 
 type BulkOperationHookRunner = <T extends Readonly<{ affectedCount: number }>>(
   ctx: BulkOperationHookContext,
@@ -2805,6 +2826,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           nodeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
+      executeReparent: (kind, id, attachment, backend) =>
+        executeNodeReparent(ctx, kind, id, attachment, backend),
       executeDelete: (kind, id, backend) =>
         executeNodeDelete(ctx, kind, id, backend),
       executeDeleteBatch: (kind, ids, backend) =>
@@ -4944,6 +4967,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       runHooks,
       runBulkHooks,
       attempt,
+      receiptRecorder,
     );
     const txNodeOperations: NodeOperations = {
       ...this.#buildNodeOperations(txNodeOperationContext),
@@ -7101,7 +7125,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ctx: OperationHookContext,
       fn: () => Promise<T>,
       didWrite?: (result: T) => boolean,
-    ) => this.#withOperationHooks(ctx, fn, didWrite);
+      operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
+    ) => this.#withOperationHooks(ctx, fn, didWrite, operationFacts);
   }
 
   #immediateBulkHookRunner(): BulkOperationHookRunner {
@@ -7115,6 +7140,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
     runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
     attempt = 1,
+    receiptRecorder?: TransactionReceiptRecorder,
   ): NodeOperationContext<G> {
     const identityConfig = this.#graph.identity;
     return {
@@ -7186,6 +7212,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id, attempt),
       withOperationHooks: runHooks,
+      // Present only inside a receipt-tracked transaction; its absence is
+      // why a top-level delete records nothing (there is no receipt to
+      // record into).
+      ...(receiptRecorder === undefined ?
+        {}
+      : {
+          recordCascadedParts: (parts: readonly CompositionNodeRef[]) => {
+            receiptRecorder.recordCascadedParts(parts);
+          },
+        }),
       createBulkOperationContext: (operation, kind) => ({
         ...this.#createHookContext(attempt),
         operation,
@@ -7344,18 +7380,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     ctx: OperationHookContext,
     fn: () => Promise<T>,
     didWrite?: (result: T) => boolean,
+    operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
   ): Promise<T> {
     this.#hooks.onOperationStart?.(ctx);
     const startTime = Date.now();
     try {
       const result = await fn();
-      this.#hooks.onOperationEnd?.(ctx, {
-        durationMs: Date.now() - startTime,
-        outcome:
-          didWrite === undefined ? "unknown"
-          : didWrite(result) ? "written"
-          : "unchanged",
-      });
+      this.#hooks.onOperationEnd?.(
+        operationEndContext(ctx, result, operationFacts),
+        {
+          durationMs: Date.now() - startTime,
+          outcome:
+            didWrite === undefined ? "unknown"
+            : didWrite(result) ? "written"
+            : "unchanged",
+        },
+      );
       return result;
     } catch (error) {
       this.#reportError(ctx, asError(error));
@@ -7414,6 +7454,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ctx: OperationHookContext,
       fn: () => Promise<T>,
       didWrite?: (result: T) => boolean,
+      operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
     ): Promise<T> => {
       this.#hooks.onOperationStart?.(ctx);
       const startTime = Date.now();
@@ -7421,7 +7462,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         const result = await fn();
         pending.push({
           type: "operation",
-          ctx,
+          ctx: operationEndContext(ctx, result, operationFacts),
           durationMs: Date.now() - startTime,
           outcome:
             didWrite === undefined ? "unknown"

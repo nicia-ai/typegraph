@@ -34,6 +34,7 @@ import {
   partOf,
   subClassOf,
 } from "../../../src";
+import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
 import {
   type InspectableStore,
@@ -555,6 +556,41 @@ export function registerCompositionNavigationIntegrationTests(
 
       expect(new Set(result.nodes.keys())).toEqual(
         new Set([sectionChild.id, sectionGrandchild.id]),
+      );
+    });
+
+    it("subgraph({ composition: true }) returns the COMPLETE owned unit past maxDepth", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      // 14 levels: deeper than DEFAULT_SUBGRAPH_MAX_DEPTH (10), and deeper
+      // than the explicit `maxDepth: 2` this call also states.
+      const chainLength = 14;
+      const chain = [
+        await store.nodes.CnSection.create({ title: "Section 0" }),
+      ];
+      for (let level = 1; level < chainLength; level += 1) {
+        const child = await store.nodes.CnSection.create({
+          title: `Section ${level}`,
+        });
+        await store.edges.cnParentSection.create(
+          child,
+          requireDefined(chain[level - 1]),
+          {},
+        );
+        chain.push(child);
+      }
+
+      // MUTATION CHECK: restore `maxHops: ctx.maxDepth` in
+      // `buildSubgraphCompositionReachableCte` (src/store/subgraph.ts). The
+      // composition closure then stops at `maxDepth` hops and this returns
+      // 3 nodes instead of 14 — verified and reverted.
+      const result = await store.subgraph(requireDefined(chain[0]).id, {
+        edges: [],
+        composition: true,
+        maxDepth: 2,
+      });
+
+      expect(new Set(result.nodes.keys())).toEqual(
+        new Set(chain.map((section) => section.id)),
       );
     });
 

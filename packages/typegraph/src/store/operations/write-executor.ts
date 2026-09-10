@@ -24,7 +24,10 @@ import {
   type GraphWriteLock,
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
-import { type OperationHookContext } from "../types";
+import {
+  type OperationHookContext,
+  type OperationOutcomeFacts,
+} from "../types";
 import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
 import { type RowWorkKind, type WritePlan } from "./write-plan";
 import {
@@ -80,7 +83,18 @@ export type HookedWritePlanContext = WritePlanContext &
 export type WritePlanOptions<T> = Omit<
   WriteTransactionOptions<T>,
   "fencesConstraintProbe"
->;
+> &
+  Readonly<{
+    /**
+     * What this operation learned while it ran, folded onto the context
+     * `onOperationEnd` receives ({@link OperationOutcomeFacts}). Read from
+     * the row work's own result, so a fact the write did not produce cannot
+     * be reported: the node delete's composition `cascadedParts` is the one
+     * caller today. Hook-only — {@link planTransactionOptions} strips it
+     * before the transaction layer, which has no notion of hooks.
+     */
+    operationFacts?: (result: T) => OperationOutcomeFacts | undefined;
+  }>;
 
 /** Classifies a successful command whose contract guarantees a mutation. */
 export function writeResultAlwaysChanges(): boolean {
@@ -211,7 +225,9 @@ function planTransactionOptions<K extends RowWorkKind, T>(
   plan: WritePlan<K>,
   options: WritePlanOptions<T> | undefined,
 ): WriteTransactionOptions<T> {
-  return { ...options, fencesConstraintProbe: plan.constraintProbe };
+  const { operationFacts: _operationFacts, ...transactionOptions } =
+    options ?? {};
+  return { ...transactionOptions, fencesConstraintProbe: plan.constraintProbe };
 }
 
 /**
@@ -262,6 +278,7 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
     backend,
     planFrame(ctx, plan, rowWork),
     planTransactionOptions(plan, options),
+    options?.operationFacts,
   );
 }
 

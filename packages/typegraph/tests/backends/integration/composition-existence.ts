@@ -650,12 +650,14 @@ export function registerCompositionExistenceIntegrationTests(
         episodeB.id,
       ]);
     });
-    // MUTATION CHECK: drop the `!isSoftDeleted && partOf !== undefined`
-    // refusal branch in `executeNodeGetOrCreateByConstraint`
-    // (src/store/operations/node-operations.ts) — the "found" call above
-    // then silently drops `partOf` instead of throwing, and the resurrected
-    // segment's whole stays `episodeA` (never reassigned) instead of
-    // `episodeB`.
+    // MUTATION CHECK: disable both `applyExistingPartOfPostcondition` calls
+    // in `executeNodeGetOrCreateByConstraint`
+    // (src/store/operations/node-operations.ts) — the `"found"` and
+    // `ifExists: "update"` calls above then silently drop `partOf` instead of
+    // refusing the contradicting whole. (The postcondition replaced the
+    // blanket refusal this comment once named: a found node with NO live
+    // whole is now attached rather than refused, which is why the mutation is
+    // stated as removing the calls rather than as restoring a condition.)
 
     it("bulkGetOrCreateByConstraint: a within-batch duplicate of a row THIS CALL just created honors the same stated whole", async () => {
       const store = await context.createStore(buildKeyedGraph(nextGraphId()));
@@ -678,11 +680,17 @@ export function registerCompositionExistenceIntegrationTests(
     });
     // MUTATION CHECK: in step 6's duplicate-resolution loop in
     // `executeNodeBulkGetOrCreateByConstraint`
-    // (src/store/operations/node-operations.ts), remove the
-    // `sourceResult.action !== "created" && sourceResult.action !== "resurrected"`
-    // condition (call `refuseExistingPartOf` unconditionally, as before the
-    // fix). The call above then rejects with `CompositionExistenceError`
-    // instead of resolving.
+    // (src/store/operations/node-operations.ts), copy the source's own action
+    // (`action: sourceResult.action`) instead of `"found"` — the duplicate
+    // then reports `"created"` and the `results[1]` assertion above fails.
+    //
+    // The mutation this comment used to name — calling `refuseExistingPartOf`
+    // unconditionally here — is no longer performable: that function and its
+    // blanket refusal are gone. `partOf` on a found node is now a
+    // POSTCONDITION (`applyExistingPartOfPostcondition`), discharged in steps
+    // 4/5, and re-running it for a duplicate of the row this same call just
+    // attached would be SATISFIED rather than a refusal. Step 6 deliberately
+    // does not re-run it; see the comment there.
   });
 }
 

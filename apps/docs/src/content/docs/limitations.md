@@ -247,17 +247,32 @@ not what happens:
 - **The cascade emits one operation-hook event, for the whole.** Each
   cascaded part delete runs through its own node-delete pipeline but is not
   itself a caller-issued operation, so `onOperationEnd` fires exactly once —
-  for the whole's delete, not once per part. A consumer using operation hooks
-  for cache invalidation or audit must account for a composition whole's
-  parts independently (for example, by re-deriving the closure from
-  `registry.compositionRelation()`).
+  for the whole's delete, not once per part. It does not leave you guessing
+  which parts went: that hook's context carries `cascadedParts` (leaf-first
+  `{ kind, id }` refs, taken from the plan the cascade executed), and a
+  `store.transactionWithReceipt` receipt carries the same refs for every
+  cascade in the transaction. `onOperationStart` never carries them — the
+  cascade has not been planned when the operation begins.
+- **There is no cascade PREVIEW API in this release.** `cascadedParts` reports
+  what a delete removed, after the fact. To decide *before* deleting, read
+  the closure yourself with
+  [`store.subgraph(id, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier),
+  which APPROXIMATES the closure — it is not the cascade's own verdict, and
+  it is narrower in one case. The subgraph walk runs in the read's temporal
+  mode (current, unless the read is pinned), so it does not follow a
+  `population: "one"` composition edge whose validity window was ENDED; the
+  cascade does, because a `one` binding holds for the row's whole life. An
+  optional part attached through such a row is therefore deleted by the
+  cascade without appearing in the preview. Gate a destructive action on the
+  preview only for pairs you know carry no ended `one` rows.
 
 The closure walk is bounded by its **visited set**, not a fixed depth: a kind
 may declare a reflexive composition pair (a `Section` that is `partOf`
 another `Section`, for example), so a kind-level depth bound cannot cap
-instance depth. Nothing yet refuses the corresponding INSTANCE-level cycle at
-write time, so two or more nodes can end up mutually `partOf` each other;
-deleting any node in such a cycle throws `CompositionCycleError` (see
+instance depth. The write path refuses an INSTANCE-level cycle (the
+composition union's acyclicity fence), so one only survives in rows written
+before the pair was declared, by trusted import, or by direct SQL; deleting
+any node in such a cycle throws `CompositionCycleError` (see
 [Errors](/errors#compositioncycleerror)) rather than looping. Break the cycle
 by hand (delete or reassign one of the composition edges that closes it)
 before the affected nodes can be deleted.

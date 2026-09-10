@@ -821,6 +821,12 @@ export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 ext
 export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 extends AliasMap, A3 extends AliasMap, A4 extends AliasMap, A5 extends AliasMap, E1 extends EdgeAliasMap, E2 extends EdgeAliasMap, E3 extends EdgeAliasMap, E4 extends EdgeAliasMap, E5 extends EdgeAliasMap, R1 extends RecursiveAliasMap, R2 extends RecursiveAliasMap, R3 extends RecursiveAliasMap, R4 extends RecursiveAliasMap, R5 extends RecursiveAliasMap>(f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>, f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>, f3: QueryFragment<G, A3, A4, E3, E4, R3, R4>, f4: QueryFragment<G, A4, A5, E4, E5, R4, R5>): QueryFragment<G, A1, A5, E1, E5, R1, R5>;
 
 // @public
+export type CompositionAttachment = CompositionNodeRef & Readonly<{
+    via?: string;
+    props?: Record<string, unknown>;
+}>;
+
+// @public
 export type CompositionClaimScope = Readonly<{
     kind: "composition";
     holders: readonly Readonly<{
@@ -881,13 +887,21 @@ export class CompositionExistenceError extends TypeGraphError {
 export type CompositionExistenceErrorDetails = Readonly<{
     partKind: string;
     partId?: string;
-    situation: "create" | "detach" | "existing";
+    situation: "create" | "detach" | "existing" | "props";
     edgeKind?: string;
     edgeId?: string;
     currentWhole?: Readonly<{
         kind: string;
         id: string;
     }>;
+    currentVia?: string;
+    requestedWhole?: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    requestedVia?: string;
+    currentProps?: Record<string, unknown>;
+    requestedProps?: Record<string, unknown>;
 }>;
 
 // @public
@@ -904,6 +918,12 @@ type CompositionNavigationResult<G extends GraphDef, Aliases extends AliasMap, E
 } ? D : false, O extends {
     path: infer P extends string;
 } ? P : false, NA>, CoordinateState>;
+
+// @public
+export type CompositionNodeRef = Readonly<{
+    kind: string;
+    id: string;
+}>;
 
 // @public
 export type CompositionOptions = Readonly<{
@@ -933,10 +953,7 @@ type CompositionRelation = Readonly<{
 }>;
 
 // @public
-export type CompositionWholeRef = Readonly<{
-    kind: string;
-    id: string;
-}>;
+export type CompositionWholeRef = CompositionNodeRef;
 
 // @public
 export function computeTransitiveClosure(relations: readonly (readonly [string, string])[]): ReadonlyMap<string, ReadonlySet<string>>;
@@ -1366,7 +1383,7 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
     props: z.infer<N["schema"]>;
     validFrom?: string | null;
     validTo?: string;
-    partOf?: CompositionWholeRef;
+    partOf?: CompositionAttachment;
 }>;
 
 // @public (undocumented)
@@ -4692,6 +4709,8 @@ class KindRegistry {
     compositionEdgeKindsOver(partKind: string): readonly string[];
     compositionEdgeKindsUnder(wholeKind: string): readonly string[];
     compositionExistence(concretePartKind: string): CompositionExistence;
+    compositionPairsBetween(partKind: string, wholeKind: string): readonly CompositionPair[];
+    compositionPairVia(partKind: string, wholeKind: string, viaEdgeKind: string): CompositionPair | undefined;
     compositionPartKindsUnder(wholeKind: string): readonly string[];
     compositionPartSide(edgeKind: string): CompositionPartSide | undefined;
     compositionPopulation(concretePartKind: string): "one" | "oneActive" | undefined;
@@ -4716,7 +4735,6 @@ class KindRegistry {
     expandNarrower(kind: string): readonly string[];
     expandSubClasses(kind: string): readonly string[];
     getAncestors(kind: string): ReadonlySet<string>;
-    getCompositionEdge(partKind: string, wholeKind: string): CompositionPair | undefined;
     getDescendants(kind: string): ReadonlySet<string>;
     getDisjointKinds(kind: string): readonly string[];
     getEdgeType(name: string): AnyEdgeType | undefined;
@@ -5160,7 +5178,7 @@ const NODE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count"
 const NODE_TYPE_BRAND: "__nodeType";
 
 // @public
-const NODE_WRITE_NAMES: readonly ["create", "createFromRecord", "update", "compareAndSet", "updateWhere", "delete", "hardDelete", "upsertById", "upsertByIdFromRecord", "bulkCreate", "bulkReplaceById", "bulkUpsertById", "bulkInsert", "bulkDelete", "getOrCreateByConstraint", "bulkGetOrCreateByConstraint"];
+const NODE_WRITE_NAMES: readonly ["create", "createFromRecord", "update", "reparent", "compareAndSet", "updateWhere", "delete", "hardDelete", "upsertById", "upsertByIdFromRecord", "bulkCreate", "bulkReplaceById", "bulkUpsertById", "bulkInsert", "bulkDelete", "getOrCreateByConstraint", "bulkGetOrCreateByConstraint"];
 
 // @public
 export type NodeAccessor<N extends NodeType> = IsDynamicNodeType<N> extends true ? DynamicNodeAccessor : Readonly<{
@@ -5215,6 +5233,7 @@ export type NodeCollection<N extends NodeType, CN extends string = string> = Rea
     }>) => Promise<Readonly<{
         affectedCount: number;
     }>>;
+    reparent: (id: NodeId<N>, attachment: CompositionAttachment) => Promise<void>;
     delete: (id: NodeId<N>) => Promise<void>;
     hardDelete: (id: NodeId<N>) => Promise<void>;
     find: (filter?: Readonly<{
@@ -5312,7 +5331,7 @@ export type NodeCreateOptions = Readonly<{
     id?: string;
     validFrom?: string | null;
     validTo?: string;
-    partOf?: CompositionWholeRef;
+    partOf?: CompositionAttachment;
 }>;
 
 // @public
@@ -5334,7 +5353,7 @@ export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNo
 // @public
 export type NodeGetOrCreateByConstraintOptions = Readonly<{
     ifExists?: IfExistsMode;
-    partOf?: CompositionWholeRef;
+    partOf?: CompositionAttachment;
 }>;
 
 // @public
@@ -5674,11 +5693,16 @@ export type OntologyRelation = Readonly<{
 type OntologyTypeErased<G extends GraphDef> = number extends G["ontology"]["length"] ? true : false;
 
 // @public
-export type OperationHookContext = HookContext & Readonly<{
+export type OperationHookContext = HookContext & OperationOutcomeFacts & Readonly<{
     operation: "create" | "update" | "delete";
     entity: KindEntity;
     kind: string;
     id: string;
+}>;
+
+// @public
+type OperationOutcomeFacts = Readonly<{
+    cascadedParts?: readonly CompositionNodeRef[];
 }>;
 
 // @public
@@ -8047,6 +8071,7 @@ export type TransactionReceipt = Readonly<{
         identity: IdentityWriteSummary;
         total: number;
     }>;
+    cascadedParts: readonly CompositionNodeRef[];
     recorded?: RecordedInstant;
 }>;
 
