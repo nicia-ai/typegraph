@@ -561,8 +561,12 @@ export type BaseStoreOptions = Readonly<{
      * `search()` and the collection APIs (`find`, `count`, `updateWhere`,
      * `compareAndSet`) are unaffected — they stay exact-kind regardless of
      * this setting.
+     *
+     * Spelled `| undefined` so a stated `undefined` forwards from a caller's
+     * own options bag under `exactOptionalPropertyTypes`, the same way the
+     * per-alias `expansion` option does.
      */
-    expansion?: DefaultAliasExpansionAxis;
+    expansion?: DefaultAliasExpansionAxis | undefined;
   }>;
 }>;
 

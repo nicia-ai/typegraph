@@ -382,7 +382,10 @@ export class QueryBuilder<
    * rather than a bare optional (`exactOptionalPropertyTypes` rejects a
    * stated `undefined` against a bare optional) and why it cannot spell the
    * whole `AliasExpansionAxis` union (it would then also capture the
-   * `"exact"` and `"narrower"` calls the overloads below type).
+   * `"exact"` and `"subclasses"` calls the overloads below type). A bag that
+   * can carry an axis the call site does not pin — `AliasExpansionOptions`
+   * itself, or a wrapper's `{ expansion?: "exact" }` — goes to the
+   * axis-unknown overload, which types the alias conservatively.
    *
    * @param kind - The node kind to start from
    * @param alias - A unique alias for this node (compile-time error if duplicate)
@@ -423,10 +426,19 @@ export class QueryBuilder<
     CoordinateState
   >;
 
+  /**
+   * The axis-unknown overload, which covers two call shapes with one rule:
+   * a `"narrower"` expansion (no schema relationship is claimed, so no
+   * per-kind type can be promised) and a forwarded options bag whose axis is
+   * not one literal — the option type itself, or a wrapper's
+   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
+   * alias takes the conservative untyped form; state a literal axis at the
+   * call site to keep the precise alias type.
+   */
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { expansion: "narrower" },
+    options: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias>,
@@ -502,10 +514,19 @@ export class QueryBuilder<
     CoordinateState
   >;
 
+  /**
+   * The axis-unknown overload, which covers two call shapes with one rule:
+   * a `"narrower"` expansion (no schema relationship is claimed, so no
+   * per-kind type can be promised) and a forwarded options bag whose axis is
+   * not one literal — the option type itself, or a wrapper's
+   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
+   * alias takes the conservative untyped form; state a literal axis at the
+   * call site to keep the precise alias type.
+   */
   fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options: { expansion: "narrower" },
+    options: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias>,

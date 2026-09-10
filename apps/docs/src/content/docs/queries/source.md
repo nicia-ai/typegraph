@@ -156,7 +156,12 @@ caller can reach.
 
 Omitting `options` entirely, passing `{}`, or passing an explicit `undefined`
 all mean the same thing — take the store default — so an options bag can be
-forwarded through your own helper without special-casing the empty case.
+forwarded through your own helper without special-casing the empty case. A bag
+whose `expansion` is not one literal — `{ expansion?: "exact" }` from a
+wrapper that only ever narrows, say — forwards too; since the axis is not
+known at compile time, that alias is typed conservatively (untyped, the same
+way `"narrower"` is). State a literal axis at the call site to keep the
+precise alias type.
 
 ## Runtime-declared kinds
 

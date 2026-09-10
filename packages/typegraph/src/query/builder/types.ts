@@ -853,8 +853,11 @@ export type CreateQueryBuilderOptions = Readonly<{
    * store-issued builder threads its own `queryDefaults.expansion`; a
    * standalone `createQueryBuilder` defaults to `"subclasses"` too, so a
    * store-less builder and a store-issued one agree.
+   *
+   * Spelled `| undefined` so a stated `undefined` forwards from a caller's
+   * own options bag, the same way the per-alias `expansion` option does.
    */
-  defaultExpansion?: DefaultAliasExpansionAxis;
+  defaultExpansion?: DefaultAliasExpansionAxis | undefined;
   /**
    * Overrides whether a builder may compile identity-aware traversals
    * (`traverse(..., { includeIdentityMembers: true })`).

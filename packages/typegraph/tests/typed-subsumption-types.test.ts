@@ -13,6 +13,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type BaseStoreOptions,
   broader,
   createQueryBuilder,
   defineEdge,
@@ -30,6 +31,10 @@ import type {
   StructuralSubtypeMismatch,
   TypedOntologyRelation,
 } from "../src/ontology/types";
+import {
+  type AliasExpansionOptions,
+  type DefaultAliasExpansionAxis,
+} from "../src/query/builder/alias-expansion";
 import { buildKindRegistry } from "../src/registry/builders";
 
 // ============================================================
@@ -393,6 +398,74 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
     ]) {
       expect(call).toBeDefined();
     }
+  });
+
+  it("forwards an options bag that can carry an axis, on every entry point", () => {
+    // The other half of forwarding: a wrapper that narrows SOME calls has to
+    // be able to hand its own bag through. Every shape below carries a
+    // stateable axis, so none of them matches a per-axis overload — each one
+    // is a compile error if the forwarding overload is missing. The alias
+    // type is the conservative untyped one, because the axis is not a literal
+    // at the call site.
+    const edgeGraph = defineGraph({
+      id: "rs1_forwarding_axis",
+      nodes: {
+        MediaAliasTest: { type: MediaKind },
+        PodcastAliasTest: { type: PodcastKind },
+      },
+      edges: {
+        citesAxisTest: {
+          type: cites,
+          from: [MediaKind],
+          to: [MediaKind, PodcastKind],
+        },
+      },
+      ontology: [subClassOf(PodcastKind, MediaKind)],
+    });
+    const edgeRegistry = buildKindRegistry(edgeGraph);
+    const builder = () =>
+      createQueryBuilder<typeof edgeGraph>(edgeGraph.id, edgeRegistry);
+    const owned: AliasExpansionOptions = { expansion: "exact" };
+    const narrowingOnly: { expansion?: "exact" } = {};
+    const eitherSubsumptionAxis: {
+      expansion?: "exact" | "subclasses" | undefined;
+    } = {};
+    const bags = [owned, narrowingOnly, eitherSubsumptionAxis];
+    const traversal = () =>
+      builder()
+        .from("MediaAliasTest", "m", { expansion: "exact" })
+        .traverse("citesAxisTest", "e");
+    const calls = bags.flatMap((bag) => [
+      builder().from("MediaAliasTest", "m", bag),
+      builder().fromDynamic("MediaAliasTest", "m", bag),
+      traversal().to("MediaAliasTest", "t", bag),
+      traversal().toDynamic("MediaAliasTest", "t", bag),
+    ]);
+    for (const call of calls) expect(call).toBeDefined();
+
+    const forwardedQuery = builder()
+      .from("MediaAliasTest", "m", owned)
+      .select((ctx) => ctx.m);
+    expect(forwardedQuery).toBeDefined();
+    type ForwardedRow = Awaited<
+      ReturnType<typeof forwardedQuery.execute>
+    >[number];
+    expectTypeOf<ForwardedRow["kind"]>().toEqualTypeOf<string>();
+
+    // The store-wide spellings of the same option forward a stated
+    // `undefined` too — a bare optional would reject it under
+    // `exactOptionalPropertyTypes`.
+    const defaultAxis: DefaultAliasExpansionAxis | undefined = undefined;
+    const scopedBuilder = createQueryBuilder<typeof edgeGraph>(
+      edgeGraph.id,
+      edgeRegistry,
+      { defaultExpansion: defaultAxis },
+    );
+    expect(scopedBuilder).toBeDefined();
+    const storeOptions: BaseStoreOptions = {
+      queryDefaults: { expansion: defaultAxis },
+    };
+    expect(storeOptions).toBeDefined();
   });
 
   it("refuses an expansion axis outside the option's domain", () => {
