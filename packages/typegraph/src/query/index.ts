@@ -113,6 +113,10 @@ export { createQueryBuilder } from "./builder";
 export { type AggregateResult, ExecutableAggregateQuery } from "./builder";
 export { ExecutableQuery } from "./builder";
 export { QueryBuilder } from "./builder";
+export {
+  type AliasExpansionAxis,
+  type DefaultAliasExpansionAxis,
+} from "./builder/alias-expansion";
 export { PreparedQuery } from "./builder/prepared-query";
 export { UnionableQuery } from "./builder/unionable-query";
 

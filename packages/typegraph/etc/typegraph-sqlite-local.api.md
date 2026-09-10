@@ -4810,13 +4810,10 @@ type SearchableMetadata = Readonly<{
 }>;
 
 // @public
-type SearchExpansionAxis = Extract<AliasExpansionAxis, "exact" | "subclasses">;
-
-// @public
 type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
     where?: (accessor: NodeAccessor<N>) => Predicate;
     offset?: number;
-    expansion?: SearchExpansionAxis | undefined;
+    expansion?: DefaultAliasExpansionAxis | undefined;
 }>;
 
 // @public

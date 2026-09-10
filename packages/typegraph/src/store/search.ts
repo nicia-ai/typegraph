@@ -31,8 +31,8 @@ import {
   type HybridFusionOptions,
 } from "../query/ast";
 import {
-  type AliasExpansionAxis,
   assertPermittedExpansionAxis,
+  type DefaultAliasExpansionAxis,
   expandKindsForAxis,
 } from "../query/builder/alias-expansion";
 import { type QueryBuilder } from "../query/builder/query-builder";
@@ -87,20 +87,12 @@ export type HybridSearchHit<N = Node> = Readonly<{
 }>;
 
 /**
- * The expansion axes `search()` offers: the same option name and values the
- * query builder's `expansion` uses, minus `"narrower"` (a kind taxonomy is
- * not a search scope) — see `src/query/builder/alias-expansion.ts`, the one
- * owner of the axis vocabulary.
- */
-type SearchExpansionAxis = Extract<AliasExpansionAxis, "exact" | "subclasses">;
-
-/**
  * The axis values this facade accepts, as a runtime list the shared refusal
  * (`assertPermittedExpansionAxis`) checks against. `"narrower"` is a real
  * member of the shared vocabulary, so leaving it unchecked would silently
  * downgrade it to `"exact"` rather than say it is unsupported here.
  */
-const SEARCH_EXPANSION_AXES: readonly SearchExpansionAxis[] = [
+const SEARCH_EXPANSION_AXES: readonly DefaultAliasExpansionAxis[] = [
   "exact",
   "subclasses",
 ];
@@ -136,7 +128,7 @@ export type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
    * (mirroring the query builder). `"subclasses"` requires a query-capable
    * store. `"narrower"` is not an axis this facade offers.
    */
-  expansion?: SearchExpansionAxis | undefined;
+  expansion?: DefaultAliasExpansionAxis | undefined;
 }>;
 
 export type FulltextSearchOptions<N extends NodeType = NodeType> =
@@ -335,7 +327,7 @@ function buildKindCandidates(
 function resolveSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
-  axis: SearchExpansionAxis = "exact",
+  axis: DefaultAliasExpansionAxis = "exact",
 ): readonly string[] {
   assertPermittedExpansionAxis(axis, SEARCH_EXPANSION_AXES, "search");
   if (axis === "subclasses" && ctx.createQuery === undefined) {
@@ -704,7 +696,7 @@ function resolveVectorSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
   fieldPath: string,
-  expansion: SearchExpansionAxis | undefined,
+  expansion: DefaultAliasExpansionAxis | undefined,
   label: string,
 ): readonly VectorSearchKind[] {
   const kinds = resolveSearchKinds(ctx, nodeKind, expansion);

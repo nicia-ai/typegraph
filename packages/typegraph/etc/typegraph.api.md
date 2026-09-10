@@ -115,7 +115,7 @@ export type AggregateResult<R extends Record<string, FieldRef | AggregateExpr>> 
 export type AlgorithmCyclePolicy = RecursiveCyclePolicy;
 
 // @public (undocumented)
-type AliasExpansionAxis = "exact" | "subclasses" | "narrower";
+export type AliasExpansionAxis = "exact" | "subclasses" | "narrower";
 
 // @public (undocumented)
 type AliasExpansionOptions = Readonly<{
@@ -1533,7 +1533,7 @@ export const DEFAULT_SEARCHABLE_LANGUAGE: "english";
 export const DEFAULT_SQL_SCHEMA: SqlSchema;
 
 // @public
-type DefaultAliasExpansionAxis = Exclude<AliasExpansionAxis, "narrower">;
+export type DefaultAliasExpansionAxis = Exclude<AliasExpansionAxis, "narrower">;
 
 // @public
 export function defineEdge<K extends string>(name: K): EdgeType<K, EmptySchema>;
@@ -6878,13 +6878,10 @@ export type SearchableSchema = z.ZodString & Readonly<{
 }>;
 
 // @public
-type SearchExpansionAxis = Extract<AliasExpansionAxis, "exact" | "subclasses">;
-
-// @public
 export type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
     where?: (accessor: NodeAccessor<N>) => Predicate;
     offset?: number;
-    expansion?: SearchExpansionAxis | undefined;
+    expansion?: DefaultAliasExpansionAxis | undefined;
 }>;
 
 // @public (undocumented)

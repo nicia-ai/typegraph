@@ -855,8 +855,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `.` (see `src/index.ts`), so neither registers as forgotten here — the
   // debt is back to its pre-E.2 baseline for this entrypoint specifically.
   ".": {
-    count: 439,
-    sha256: "8deaa943b075b337e1ef3d4b440fdbc9dcc7c3b4cab60e5b26fe22f59f84d9f8",
+    count: 436,
+    sha256: "779ffa9919885f5cd060863d8693f7895921f05f5ab1b30207de6d30c084d811",
   },
   "./adapters/drizzle/engine": {
     count: 338,
@@ -913,28 +913,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 783,
-    sha256: "fc94dfe4c6c6e2b5e0646e7a4899203ee9a5f315df71a4d877f746b507cd5cfb",
+    count: 782,
+    sha256: "279c8abb9e345ab17298f3fe9b8bb4d2a0022d3dfbc1afdaa755b34cc11b8e7f",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 768,
-    sha256: "6f8d49b15c2fa442fe8a7e27cec0838bc766bd8d6c718cbd37d8e515a8951869",
+    count: 767,
+    sha256: "a6b1861ffab15d2ef4be9a6369ec6b941981f40c784e20b5c32e1348a3c84462",
   },
   "./postgres/pglite": {
-    count: 765,
-    sha256: "0fa713be477618b21d2841984cf95ee0f5b65ad6d8f0f6363d39e2da7a0a0769",
+    count: 764,
+    sha256: "9644c6d6d4c9fbbabaacb7603e50650240254fba2a815beefbab4e66521c4882",
   },
   "./profiler": {
-    count: 770,
-    sha256: "937656e49c0bbcc61f81d90ffb9ee850a74783ef85d0daa7c1d5fbd37607190f",
+    count: 769,
+    sha256: "6917d4e017cd88a64a762664a71c65775e77493c153ae54b376f7c73ac6b8031",
   },
   "./provenance": {
-    count: 776,
-    sha256: "b6edbc042de639f33226a9ddf499e6d5e1b1d9f5207d694ae47665a4352130f2",
+    count: 775,
+    sha256: "bbbeacc0764a2642db9ad64c9f2bfe7ff2fdb83b34450fba3ec8c2fcc3ee82c5",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -950,8 +950,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "ff190fe91f16dd83780cc450653f95fae7b2bcf2653620dbd2719ab62b8547be",
   },
   "./sqlite/local": {
-    count: 765,
-    sha256: "0fa713be477618b21d2841984cf95ee0f5b65ad6d8f0f6363d39e2da7a0a0769",
+    count: 764,
+    sha256: "9644c6d6d4c9fbbabaacb7603e50650240254fba2a815beefbab4e66521c4882",
   },
 };
 
