@@ -1235,8 +1235,12 @@ export class CompositionError extends TypeGraphError {
  * whose `partOf` postcondition the already-existing node CONTRADICTS. Both
  * sides are named so a caller can see the move it would have to make: the
  * whole (and realizing edge) the node holds now, and the one the call asked
- * for. `currentVia` is absent when the contradiction is a differing whole
- * rather than a differing realizing edge only.
+ * for. `requestedVia` is the RESOLVED realizing edge of the pair the stated
+ * `partOf` names (`resolveCompositionAttachment`), not an echo of a stated
+ * `via` — a call that omitted `via` because the part declares one pair
+ * toward that whole kind still names that pair's edge here. `currentVia` is
+ * absent when the contradiction is a differing whole rather than a differing
+ * realizing edge only.
  */
 export type CompositionExistenceErrorDetails = Readonly<{
   partKind: string;

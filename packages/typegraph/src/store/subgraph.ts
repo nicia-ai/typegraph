@@ -703,7 +703,12 @@ export async function executeSubgraph<
    * caller's cycle policy, like `maxDepth`, governs the explicit `edges`
    * traversal alone. `MAX_EXPLICIT_RECURSIVE_DEPTH` remains as the engine's
    * own runaway guard, the same ceiling every explicit traversal is capped
-   * at.
+   * at — and the one caveat on "complete": a part chain longer than that
+   * ceiling is TRUNCATED here, not refused, so the owned unit of a tree
+   * deeper than 1000 hops is still short its tail. Documented in
+   * `ontology.md` rather than silently assumed unreachable; raising it to a
+   * typed refusal needs the ceiling to be observable in the CTE's own result,
+   * which no dialect reports today.
    */
   function buildSubgraphCompositionReachableCte(
     edgeKindsForTraversal: readonly string[],

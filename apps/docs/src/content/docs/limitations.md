@@ -257,7 +257,14 @@ not what happens:
   what a delete removed, after the fact. To decide *before* deleting, read
   the closure yourself with
   [`store.subgraph(id, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier),
-  which returns the same complete owned unit.
+  which APPROXIMATES the closure — it is not the cascade's own verdict, and
+  it is narrower in one case. The subgraph walk runs in the read's temporal
+  mode (current, unless the read is pinned), so it does not follow a
+  `population: "one"` composition edge whose validity window was ENDED; the
+  cascade does, because a `one` binding holds for the row's whole life. An
+  optional part attached through such a row is therefore deleted by the
+  cascade without appearing in the preview. Gate a destructive action on the
+  preview only for pairs you know carry no ended `one` rows.
 
 The closure walk is bounded by its **visited set**, not a fixed depth: a kind
 may declare a reflexive composition pair (a `Section` that is `partOf`

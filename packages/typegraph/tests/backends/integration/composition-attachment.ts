@@ -347,6 +347,53 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(requireDefined(open[0]).meta.validTo).toBeUndefined();
     });
 
+    it("reparent is ONE move instant: the ended window and the new one abut", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const showA = await store.nodes.CaShow.create({});
+      const showB = await store.nodes.CaShow.create({});
+      const clip = await store.nodes.CaClip.create(
+        {},
+        { partOf: { kind: "CaShow", id: showA.id } },
+      );
+
+      // This case asserts the invariant on every backend, but a two-read
+      // implementation can pass it by luck: two `nowIso()` calls a few
+      // statements apart often land in the same millisecond. The mutation
+      // check for the SINGLE read lives in
+      // `tests/composition-reparent-instant.test.ts`, which advances the
+      // clock between the retire and the attach so a second read is
+      // guaranteed to sample a later instant.
+      await store.nodes.CaClip.reparent(clip.id, {
+        kind: "CaShow",
+        id: showB.id,
+      });
+
+      const all = await store.edges.caClipOf.find(
+        {},
+        { temporalMode: "includeEnded" },
+      );
+      const ended = requireDefined(
+        all.find((edge) => edge.toId === showA.id),
+        "the former attachment",
+      );
+      const open = requireDefined(
+        all.find((edge) => edge.toId === showB.id),
+        "the new attachment",
+      );
+      const moveInstant = requireDefined(
+        ended.meta.validTo,
+        "the ended window's validTo",
+      );
+      expect(open.meta.validFrom).toBe(moveInstant);
+
+      // The windows are half-open, so the move instant belongs to exactly
+      // one of them: no coordinate shows the part with zero wholes, and none
+      // shows it with two.
+      const atMove = await store.asOf(moveInstant).edges.caClipOf.find({});
+      expect(atMove).toHaveLength(1);
+      expect(requireDefined(atMove[0]).toId).toBe(showB.id);
+    });
+
     it("reparent to the whole the part already holds is an accepted no-op", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const book = await store.nodes.CaBook.create({});
@@ -646,33 +693,173 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(requireDefined(edges[0]).order).toBe(7);
     });
 
-    it("bulkGetOrCreateByConstraint applies the same postcondition per item", async () => {
+    it("getOrCreateByConstraint refuses an AMBIGUOUS partOf on a found node, exactly as on a create", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      // Already attached through ONE of the two declared pairs — the state
+      // that used to let the satisfied arm answer "any via will do".
+      await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      // MUTATION CHECK: move the `resolveCompositionAttachment` call in
+      // `applyExistingPartOfPostcondition`
+      // (src/store/operations/node-operations.ts) back below the
+      // satisfied/contradiction arms (resolve only on the no-whole arm) —
+      // this call then returns `{ action: "found" }` with no error, while the
+      // same `partOf` on a create refuses.
+      await expect(
+        store.nodes.CaChapter.getOrCreateByConstraint(
+          "ca_chapter_slug",
+          { slug: "one" },
+          { partOf: { kind: "CaBook", id: book.id } },
+        ),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          code: "CONFIGURATION_ERROR",
+          details: matchingObject({ code: "COMPOSITION_VIA_AMBIGUOUS" }),
+        }),
+      );
+    });
+
+    it("getOrCreateByConstraint refuses an UNDECLARED whole kind on a found node as a ConfigurationError, not a contradiction", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const reader = await store.nodes.CaReader.create({});
+      await store.nodes.CaChapter.create(
+        { slug: "one" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+
+      // MUTATION CHECK: as above — resolving only on the no-whole arm makes
+      // this a `CompositionExistenceError` (`situation: "existing"`) naming
+      // `CaReader` as the requested whole, and its suggestion tells the
+      // caller to `reparent` to a whole `reparent` itself refuses.
+      const error = await store.nodes.CaChapter.getOrCreateByConstraint(
+        "ca_chapter_slug",
+        { slug: "one" },
+        { partOf: { kind: "CaReader", id: reader.id } },
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect(error).not.toBeInstanceOf(CompositionExistenceError);
+      expect((error as ConfigurationError).details).toEqual(
+        matchingObject({ code: "COMPOSITION_WHOLE_NOT_DECLARED" }),
+      );
+    });
+
+    it("bulkGetOrCreateByConstraint discharges the postcondition per item: idempotent hit beside an unattached repair", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const book = await store.nodes.CaBook.create({});
       const attachment = {
         kind: "CaBook" as const,
         id: book.id,
         via: "caChapterOf",
-        props: { order: 1 },
+        props: { order: 9 },
       };
+      // Item "a" already holds this exact attachment; item "b" exists with
+      // NO whole at all. One batch, two different dispositions.
+      const attached = await store.nodes.CaChapter.create(
+        { slug: "a" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+      const bare = await store.nodes.CaChapter.create({ slug: "b" });
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
 
-      const first = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+      // MUTATION CHECK: disable either `applyExistingPartOfPostcondition`
+      // call site in `executeNodeBulkGetOrCreateByConstraint`
+      // (src/store/operations/node-operations.ts) — item "b" then comes back
+      // `"found"` with no edge written, and the edge count below stays 1.
+      const results = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
         "ca_chapter_slug",
         [{ props: { slug: "a" } }, { props: { slug: "b" } }],
         { partOf: attachment },
       );
-      expect(first.map((entry) => entry.action)).toEqual([
-        "created",
-        "created",
-      ]);
+      expect(results.map((entry) => entry.action)).toEqual(["found", "found"]);
 
-      const second = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+      const edges = await store.edges.caChapterOf.find({});
+      expect(edges).toHaveLength(2);
+      // The idempotent hit wrote nothing: "a" keeps the props it was
+      // attached with, while "b"'s brand-new edge carries the batch's.
+      expect(
+        requireDefined(edges.find((edge) => edge.fromId === attached.id)).order,
+      ).toBe(1);
+      expect(
+        requireDefined(edges.find((edge) => edge.fromId === bare.id)).order,
+      ).toBe(9);
+    });
+
+    it("bulkGetOrCreateByConstraint refuses the whole batch when ONE item's found node holds a different whole", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const anthology = await store.nodes.CaAnthology.create({});
+      await store.nodes.CaChapter.create(
+        { slug: "a" },
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 1 },
+          },
+        },
+      );
+      // "b" holds a DIFFERENT whole, through a different realizing edge.
+      const elsewhere = await store.nodes.CaChapter.create(
+        { slug: "b" },
+        { partOf: { kind: "CaAnthology", id: anthology.id } },
+      );
+
+      // MUTATION CHECK: as in the previous case — with the bulk
+      // postcondition call sites disabled this batch resolves silently to
+      // two `"found"` results and leaves "b" hanging off the anthology.
+      const error = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
         "ca_chapter_slug",
         [{ props: { slug: "a" } }, { props: { slug: "b" } }],
-        { partOf: attachment },
-      );
-      expect(second.map((entry) => entry.action)).toEqual(["found", "found"]);
-      expect(await store.edges.caChapterOf.find({})).toHaveLength(2);
+        {
+          partOf: {
+            kind: "CaBook",
+            id: book.id,
+            via: "caChapterOf",
+            props: { order: 9 },
+          },
+        },
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(CompositionExistenceError);
+      const details = (error as CompositionExistenceError).details;
+      expect(details.situation).toBe("existing");
+      expect(details.partId).toBe(elsewhere.id);
+      expect(details.currentWhole).toEqual({
+        kind: "CaAnthology",
+        id: anthology.id,
+      });
+      expect(details.requestedWhole).toEqual({ kind: "CaBook", id: book.id });
+      // Refused, not moved: "b" keeps the anthology and gains no book edge.
+      expect(await store.edges.caIncludedIn.find({})).toHaveLength(1);
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
     });
   });
 }

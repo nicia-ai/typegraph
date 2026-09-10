@@ -240,6 +240,7 @@ import {
   planCompositionCascade,
 } from "./composition-cascade";
 import {
+  assertCompositionExistencePreserved,
   buildCompositionCreateEdgeInput,
   type CompositionCreateWork,
   edgeCurrentlyAttachesPart,
@@ -2773,13 +2774,23 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
  * match that resolved to `"found"` or `"updated"`: when this returns, the
  * resolved node holds exactly the stated attachment.
  *
+ * The attachment is RESOLVED first, unconditionally
+ * ({@link resolveCompositionAttachment}), before the live attachment is even
+ * read: an undeclared whole kind, an unknown `via`, and an ambiguous omitted
+ * `via` are configuration defects of the CALL, and a call that states one
+ * must refuse identically whether the constraint matched an existing node or
+ * created one. Resolving first is also what lets the dispositions below
+ * compare the incumbent row against the resolved pair's realizing edge
+ * rather than against `attachment.via` — so "via omitted" means "the one
+ * declared pair", never "any realizing edge will do".
+ *
  * Three dispositions, decided from the node's LIVE attachment
  * (`findLiveCompositionAttachment` — the same reader `reparent` and the
  * `situation: "existing"` diagnostic use):
  *
- * - it already holds this whole (and, when `via` is stated, through this
- *   realizing edge): satisfied, no write — which is what makes a repeated
- *   get-or-create with the same `partOf` idempotent rather than a refusal;
+ * - it already holds this whole through the resolved pair's realizing edge:
+ *   satisfied, no write — which is what makes a repeated get-or-create with
+ *   the same `partOf` idempotent rather than a refusal;
  * - it holds NO live whole: the attachment is written now, through
  *   {@link executeNodeReparent} (whose no-current-attachment arm is exactly
  *   this write, under the same fence and the same final-state validation) —
@@ -2801,6 +2812,12 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
   concreteId: string,
   attachment: CompositionAttachment,
 ): Promise<void> {
+  const pair = resolveCompositionAttachment(
+    ctx.registry,
+    concreteKind,
+    attachment,
+  );
+
   const current = await findLiveCompositionAttachment(
     ctx.registry,
     backend,
@@ -2823,8 +2840,7 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
   const wholeMatches =
     current.whole.kind === attachment.kind &&
     current.whole.id === attachment.id;
-  const viaMatches =
-    attachment.via === undefined || current.edge.kind === attachment.via;
+  const viaMatches = current.edge.kind === pair.viaEdgeKind;
   if (wholeMatches && viaMatches) return;
 
   throw new CompositionExistenceError({
@@ -2834,7 +2850,7 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
     currentWhole: current.whole,
     ...(wholeMatches ? { currentVia: current.edge.kind } : {}),
     requestedWhole: { kind: attachment.kind, id: attachment.id },
-    ...(attachment.via === undefined ? {} : { requestedVia: attachment.via }),
+    requestedVia: pair.viaEdgeKind,
   });
 }
 
@@ -2875,8 +2891,8 @@ function createInputWithPartOf(
  *   `validateAndPrepareEdgeCreate` runs sees the post-retire graph, so
  *   moving a subtree under one of its own former siblings is judged on where
  *   the part actually ends up, not on a transient state;
- * - **required existence never violated mid-way** — the retire carries the
- *   part as `reattachedPart` evidence
+ * - **required existence never violated mid-way** — either retire arm (the
+ *   window end and the delete) carries the part as `reattachedPart` evidence
  *   ({@link assertCompositionExistencePreserved}), so the refusal is applied
  *   with the frame's real end state rather than bypassed.
  *
@@ -2885,12 +2901,21 @@ function createInputWithPartOf(
  * composition edge names its immediate whole, which this move does not
  * change.
  *
- * How the old attachment is retired follows its declared population, so the
- * row's meaning survives the move: a `population: "one"` edge is DELETED (a
- * `one` binding persists for the row's whole life, ended or not, so an
- * ended row would still read as an attachment), while a
- * `population: "oneActive"` edge has its window ENDED at the move instant,
- * leaving the previous membership readable as valid-time history.
+ * How the old attachment is retired follows the population declared on the
+ * INCUMBENT row's own pair (resolved through the realizing edge that holds
+ * the attachment, `KindRegistry.compositionPairVia`), so the row's meaning
+ * survives the move: a `population: "one"` edge is DELETED (a `one` binding
+ * persists for the row's whole life, ended or not, so an ended row would
+ * still read as an attachment), while a `population: "oneActive"` edge has
+ * its window ENDED at the move instant, leaving the previous membership
+ * readable as valid-time history.
+ *
+ * The move instant is read ONCE and is both the incumbent window's `validTo`
+ * and the new edge's `validFrom`, so the two halves of the move abut in valid
+ * time: no `store.asOf(t)` coordinate shows the part with zero wholes, and
+ * none shows it with two. A second clock read would open the first gap on any
+ * clock and the second on a non-monotonic one (issue #242's failure mode),
+ * and neither is fenceable — each write is legal at the instant it samples.
  *
  * Attaching to the whole the part already holds is accepted as a NO-OP (no
  * write, no history), not refused: reparent states a destination, and a
@@ -2954,27 +2979,62 @@ export async function executeNodeReparent<G extends GraphDef>(
       if (
         current?.whole.kind === attachment.kind &&
         current.whole.id === attachment.id &&
-        (attachment.via === undefined || current.edge.kind === attachment.via)
+        current.edge.kind === pair.viaEdgeKind
       ) {
         return false;
       }
 
+      // ONE clock read for ONE move. The instant the incumbent window ends is
+      // the instant the new attachment begins, so valid time has no interval
+      // in which the part holds zero wholes (which `existence: "required"`
+      // forbids) and none in which it holds two (which R4 forbids). Two
+      // independent reads would produce the first on any clock and the second
+      // on a non-monotonic one, and no fence catches either: each write is
+      // legal at the instant it samples.
+      const moveInstant = nowIso();
+
       if (current !== undefined) {
-        const population = requireDefined(
-          ctx.registry.compositionPopulation(kind),
-          `compositionPopulation(${kind}) is undefined for a kind the registry classifies as a composition part`,
+        // The population that governs how this ROW retires is the incumbent
+        // pair's own, read through the realizing edge that actually holds the
+        // attachment — not `compositionPopulation(kind)`, which re-derives it
+        // from the part kind and agrees only because
+        // `ONTOLOGY_COMPOSITION_POPULATION_MIXED` forbids a part kind's pairs
+        // from disagreeing. Same reasoning as the cascade's pair lookup.
+        const incumbentPair = requireDefined(
+          ctx.registry.compositionPairVia(
+            kind,
+            current.whole.kind,
+            current.edge.kind,
+          ),
+          `compositionPairVia(${kind}, ${current.whole.kind}, ${current.edge.kind}) is undefined for the edge kind that currently realizes this part's attachment`,
         );
-        if (population === "oneActive") {
+        if (incumbentPair.population === "oneActive") {
           await endCompositionEdgeWindow(
             ctx,
             current.edge,
             { kind, id },
-            nowIso(),
+            moveInstant,
             session,
             target,
             lock,
           );
         } else {
+          // Through the same owner every other retire path goes through, with
+          // the reparent's `reattachedPart` evidence, so a rule added to
+          // `assertCompositionExistencePreserved` later applies to a
+          // `population: "one"` move too. `endCompositionEdgeWindow` reaches
+          // it via `performEdgeUpdateConverging`; a direct `retireEdge` has no
+          // other way in.
+          await assertCompositionExistencePreserved(
+            {
+              graphId: ctx.graphId,
+              registry: ctx.registry,
+              lock,
+              reattachedPart: { kind, id },
+            },
+            current.edge,
+            target,
+          );
           await session.retireEdge({
             id: current.edge.id,
             kind: current.edge.kind,
@@ -2982,7 +3042,9 @@ export async function executeNodeReparent<G extends GraphDef>(
         }
       }
 
-      await attachCompositionCreateEdge(ctx, session, target, lock, work, id);
+      await attachCompositionCreateEdge(ctx, session, target, lock, work, id, {
+        validFrom: moveInstant,
+      });
       return true;
     },
     { didWrite: booleanWriteResultChanges },
@@ -4516,6 +4578,20 @@ const NODE_DELETE_NOT_WRITTEN: NodeDeleteOutcome = {
   cascadedParts: [],
 };
 
+/**
+ * One batch node delete's row-work result: how many items it actually
+ * retired, and every composition part their cascades removed, leaf-first
+ * within each item and in the batch's own item order.
+ *
+ * On the RESULT for {@link NodeDeleteOutcome}'s reason — an
+ * `"optimistic-retry"` replay of the frame must report the surviving
+ * attempt's parts alone.
+ */
+type NodeDeleteBatchOutcome = Readonly<{
+  affectedCount: number;
+  cascadedParts: readonly CompositionNodeRef[];
+}>;
+
 function nodeDeleteWrote(outcome: NodeDeleteOutcome): boolean {
   return outcome.wrote;
 }
@@ -4710,6 +4786,14 @@ async function findConnectedEdgesForNodeBatch<G extends GraphDef>(
  * `consumedEdgeIds` — but a composition whole in the batch still cascades to
  * its own parts: `runCompositionCascade` per item, under the one write
  * lock this batch's plan fences for when `kind` declares composition parts.
+ *
+ * Every item's cascaded parts are reported to the transaction receipt
+ * (`ctx.recordCascadedParts`), accumulated on the row-work RESULT for the
+ * reason {@link NodeDeleteOutcome} states: an `"optimistic-retry"` replay of
+ * the frame must report the surviving attempt's parts alone, which a mutable
+ * local spanning the retry could not. Per-item operation HOOKS stay absent,
+ * as they are for every other dimension of a batch delete — the receipt is
+ * transaction-scoped, not per-item.
  */
 export async function executeNodeDeleteBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -4733,17 +4817,23 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
     return;
   }
 
-  await runWritePlan(
+  const outcome = await runWritePlan(
     nodeWritePlanContext(ctx),
     nodeWritePlan(
       nodeDeleteConstraintProbe(ctx, kind),
       nodeRequiresIdentityLock(ctx),
     ),
     backend,
-    async (session, target, _overlaidSession, lock) => {
+    async (
+      session,
+      target,
+      _overlaidSession,
+      lock,
+    ): Promise<NodeDeleteBatchOutcome> => {
       const identity = ctx.identity;
       const registration = getNodeRegistration(ctx.graph, kind);
       let affectedCount = 0;
+      const cascadedParts: CompositionNodeRef[] = [];
 
       for (const id of ids) {
         // This is both the existence gate and the concurrency-correct
@@ -4762,6 +4852,7 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
           undefined,
           session,
         );
+        cascadedParts.push(...cascadedPartReferences(cascadePlan));
 
         await session.retireNode(
           {
@@ -4778,10 +4869,11 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
         affectedCount += 1;
       }
 
-      return affectedCount;
+      return { affectedCount, cascadedParts };
     },
-    { didWrite: (affectedCount) => affectedCount > 0 },
+    { didWrite: (result) => result.affectedCount > 0 },
   );
+  ctx.recordCascadedParts?.(outcome.cascadedParts);
 }
 
 async function executeAtomicNodeDeletes<G extends GraphDef>(

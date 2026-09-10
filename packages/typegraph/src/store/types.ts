@@ -370,10 +370,16 @@ export type QueryHookContext = HookContext &
 export type OperationOutcomeFacts = Readonly<{
   /**
    * The composition parts a whole's delete cascaded through, leaf-first, as
-   * `{ kind, id }` refs. Present (possibly empty) on a node delete or hard
-   * delete of a kind that declares composition parts; absent on every other
-   * operation. Taken from the plan the cascade already computed, so it names
-   * exactly the parts this delete removed.
+   * `{ kind, id }` refs. Taken from the plan the cascade already computed, so
+   * it names exactly the parts this delete removed.
+   *
+   * Present — and EMPTY when nothing cascaded, including for a kind that
+   * declares no composition pair at all — on a node hard delete, and on a
+   * node delete that took the portable write path; absent on a node delete
+   * the fused single-statement program ran (which is never a composition
+   * participant's: that program declines a composition whole or part
+   * outright) and on every non-delete operation. So "did a cascade happen"
+   * is the array's CONTENTS, never its presence.
    */
   cascadedParts?: readonly CompositionNodeRef[];
 }>;
@@ -836,12 +842,19 @@ export type NodeGetOrCreateByConstraintOptions = Readonly<{
    *
    * On `"created"` / `"resurrected"` it is applied exactly as a plain
    * create's `partOf` is. On `"found"` / `"updated"` it is CHECKED: a node
-   * whose live whole (and, when `via` is stated, whose realizing edge kind)
-   * already equals this attachment satisfies it and the call is idempotent;
-   * a node with a DIFFERENT live whole refuses with
-   * `CompositionExistenceError` (`situation: "existing"`) naming both
-   * wholes; a node with no live whole, on a kind whose pair is
-   * `existence: "optional"`, has the attachment written now.
+   * whose live whole, and whose realizing edge kind, already equal the
+   * resolved attachment satisfies it and the call is idempotent; a node with
+   * a DIFFERENT live whole, or the same whole through another realizing
+   * edge, refuses with `CompositionExistenceError`
+   * (`situation: "existing"`) naming both sides; a node with no live whole
+   * has the attachment written now, whatever the pair's declared
+   * `existence` (a REQUIRED part found unattached is repaired on the same
+   * terms — see `applyExistingPartOfPostcondition`).
+   *
+   * An attachment this graph cannot resolve at all — an undeclared whole
+   * kind, an unknown `via`, an omitted `via` where the part declares more
+   * than one pair toward that whole kind — is a `ConfigurationError` on
+   * every action alike, decided before the match is even read.
    *
    * Shared by `bulkGetOrCreateByConstraint`, applying to every item in the
    * batch. Use `reparent` to MOVE a part that already has a different whole

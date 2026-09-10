@@ -741,7 +741,9 @@ yet — deciding the refusal is what keeps the row from ever being written),
 tried to end), and `"existing"` (a `getOrCreateByConstraint` call whose
 `partOf` postcondition the already-existing node contradicts — carries
 `currentWhole`/`currentVia` and `requestedWhole`/`requestedVia`, so the move
-the caller would have to make is visible in the error).
+the caller would have to make is visible in the error). `requestedVia` is the
+RESOLVED realizing edge of the pair the call's `partOf` names, so it is
+present even when the call omitted `via`.
 
 Pass `partOf: { kind, id, via? }` naming a live, declared whole to fix a
 create refusal; soft-delete or hard-delete the part itself (which frees its
@@ -758,7 +760,10 @@ attachment — see
 
 A `partOf` the graph cannot resolve raises `ConfigurationError` rather than
 `CompositionExistenceError` — the option is accepted-shaped but names no
-declared pair, regardless of the part kind's `existence`:
+declared pair, regardless of the part kind's `existence` and regardless of
+whether the call created the node or found it (the attachment is resolved
+before the match is even read, so the refusal cannot depend on what the
+constraint matched):
 
 | `details.code` | when |
 | --- | --- |

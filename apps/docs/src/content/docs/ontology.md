@@ -190,9 +190,14 @@ the instance-level pattern instead: a single `Concept` node kind, a
 `broader` **edge** between concept instances, traversed with
 `.recursive()` — the SKOS / Wikidata / LinkML model. Choose the kind-level
 form when the vocabulary is closed and small; choose the instance-level form
-when it is open-ended. Edge-level cycle prevention is not yet available
-(tracked on the roadmap); until then, a `broader` chain's freedom from
-cycles is a data-authoring discipline the application enforces.
+when it is open-ended. The instance-level `broader` edge kind can declare
+[`acyclic: true`](#enforce-an-instance-level-taxonomy-with-acyclic-true), and
+the engine then refuses at write time any edge that would close a `broader`
+cycle ([`EdgeAcyclicityError`](/errors#edgeacyclicityerror)) rather than
+leaving cycle freedom to the application; a search the engine cuts short
+reports [`EdgeAcyclicityIndeterminateError`](/errors#edgeacyclicityindeterminateerror)
+instead of guessing. Kind-level `broader`/`narrower` needs no declaration:
+a cyclic kind taxonomy is refused when the registry is built.
 
 ```typescript
 // Instance-level: a single Concept kind, broader as an edge
@@ -456,8 +461,10 @@ acyclicity over the composition union, and a required part never left
 detached. The part keeps its id, its properties, and every descendant beneath
 it.
 
-How the old attachment is retired follows its declared population, so the row
-keeps its meaning:
+The move is ONE instant: the same timestamp ends the old window and opens the
+new one, so no `store.asOf(t)` coordinate shows the part with zero wholes (or
+with two). How the old attachment is retired follows the population declared
+on the **incumbent** row's own pair, so the row keeps its meaning:
 
 | population | retire | why |
 | --- | --- | --- |
@@ -501,12 +508,17 @@ Three refusals follow from that one declaration:
   returns, the resolved node holds exactly the stated attachment. On
   `"created"`/`"resurrected"` it is applied as a plain create's `partOf` is;
   on `"found"`/`"updated"` it is checked — a node that already holds this
-  whole (and, when `via` is stated, this realizing edge) satisfies it and the
-  call is idempotent, a node with no live whole has the attachment written
-  now, and a node with a **different** live whole is refused with
+  whole through the resolved pair's realizing edge satisfies it and the call
+  is idempotent, a node with no live whole has the attachment written now
+  (required or optional alike), and a node with a **different** live whole, or
+  the same whole through another realizing edge, is refused with
   `CompositionExistenceError` (`situation: "existing"`) naming both sides.
   Moving a part is [`reparent`](#reparent-moving-a-part-to-a-new-whole)'s
-  decision, never a side effect of a lookup.
+  decision, never a side effect of a lookup. The attachment is resolved
+  BEFORE the match is read, so the three `ConfigurationError` refusals above
+  (`COMPOSITION_WHOLE_NOT_DECLARED`, `COMPOSITION_VIA_NOT_DECLARED`,
+  `COMPOSITION_VIA_AMBIGUOUS`) fire identically on a found node and on a
+  created one.
 
 `existence: "required"` is about detachment and bare creation, not about
 deleting the *whole* — deleting a whole still cascades to its required parts
@@ -570,8 +582,10 @@ Tier 1 is enforced, in full, at write time:
   never exist without a live whole (see below).
 - **Navigation and export.** `parts()`/`wholes()` cross heterogeneous,
   mixed-orientation edge kinds, and `subgraph({ composition: true })` returns
-  the complete owned unit — a root plus its entire parts closure, at any
-  depth.
+  the complete owned unit — a root plus its entire parts closure, at whatever
+  depth the part tree happens to be rather than at the caller's `maxDepth`.
+  The engine's own runaway ceiling on a recursive traversal (1000 hops) still
+  applies: a part chain longer than that is truncated, not refused.
 
 The composition claim rides `typegraph_edge_claims`, the same relation edge
 cardinality claims use. A deployment initialized before that relation existed

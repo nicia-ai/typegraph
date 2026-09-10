@@ -1052,7 +1052,7 @@ describe("composition cascade — cascadedParts exposure", () => {
     await store.edges.segmentOf.create(segment, episode, {});
 
     // MUTATION: drop the `ctx.recordCascadedParts?.(outcome.cascadedParts)`
-    // call from `executeNodeDelete` and `cascadedParts` stays empty here
+    // call from `executeNodeHardDelete` and `cascadedParts` stays empty here
     // while the delete still removes both parts.
     const { receipt } = await store.transactionWithReceipt(async (tx) => {
       await tx.nodes.Podcast.hardDelete(podcast.id);
@@ -1067,6 +1067,45 @@ describe("composition cascade — cascadedParts exposure", () => {
     expect(receipt.writes.nodes).toEqual({ Podcast: 1 });
     await expect(
       store.nodes.Segment.getById(segment.id),
+    ).resolves.toBeUndefined();
+  });
+
+  it("reports every whole's cascade from a bulkDelete, in batch order", async () => {
+    const graph = buildPodcastGraph("cascade-receipt-exposure-bulk");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const first = await store.nodes.Podcast.create({ title: "First" });
+    const firstEpisode = await store.nodes.Episode.create({ title: "1x01" });
+    const firstSegment = await store.nodes.Segment.create({});
+    await store.edges.episodeOf.create(firstEpisode, first, {});
+    await store.edges.segmentOf.create(firstSegment, firstEpisode, {});
+
+    const second = await store.nodes.Podcast.create({ title: "Second" });
+    const secondEpisode = await store.nodes.Episode.create({ title: "2x01" });
+    await store.edges.episodeOf.create(secondEpisode, second, {});
+
+    // MUTATION: drop the `ctx.recordCascadedParts?.(outcome.cascadedParts)`
+    // call from `executeNodeDeleteBatch`
+    // (src/store/operations/node-operations.ts) — every part below is still
+    // deleted and `receipt.cascadedParts` comes back `[]`, which is the
+    // defect this test exists for: the batch path ran the cascade and
+    // reported nothing.
+    const { receipt } = await store.transactionWithReceipt(async (tx) => {
+      await tx.nodes.Podcast.bulkDelete([first.id, second.id]);
+    });
+
+    // Leaf-first within each item, items in the batch's own order.
+    expect(receipt.cascadedParts).toEqual([
+      { kind: "Segment", id: firstSegment.id },
+      { kind: "Episode", id: firstEpisode.id },
+      { kind: "Episode", id: secondEpisode.id },
+    ]);
+    await expect(
+      store.nodes.Segment.getById(firstSegment.id),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.nodes.Episode.getById(secondEpisode.id),
     ).resolves.toBeUndefined();
   });
 
