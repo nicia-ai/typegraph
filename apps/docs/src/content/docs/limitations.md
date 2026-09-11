@@ -248,8 +248,10 @@ not what happens:
   cascaded part delete runs through its own node-delete pipeline but is not
   itself a caller-issued operation, so `onOperationEnd` fires exactly once —
   for the whole's delete, not once per part. It does not leave you guessing
-  which parts went: that hook's context carries `cascadedParts` (leaf-first
-  `{ kind, id }` refs, taken from the plan the cascade executed), and a
+  which parts went: that hook's context carries `cascadedParts` (`{ kind, id }`
+  refs taken from the plan the cascade executed, leaf-first and then ordered
+  deterministically by kind, then id, within one level of the closure, so the list
+  is the same on every run and every backend), and a
   `store.transactionWithReceipt` receipt carries the same refs for every
   cascade in the transaction. `onOperationStart` never carries them — the
   cascade has not been planned when the operation begins.

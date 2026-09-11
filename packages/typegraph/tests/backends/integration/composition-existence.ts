@@ -21,6 +21,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EdgeAcyclicityError,
   EndpointNotFoundError,
   hasPart,
   partOf,
@@ -40,6 +41,14 @@ const EeCollection = defineNode("EeCollection", { schema: z.object({}) });
 /** A `has_*`-shaped realizing edge (whole -> part), for orientation coverage. */
 const EeTrack = defineNode("EeTrack", { schema: z.object({}) });
 const EeAlbum = defineNode("EeAlbum", { schema: z.object({}) });
+/**
+ * A REFLEXIVE optional-existence composition kind: a folder may be part of
+ * another folder. The only shape in which a node batch can propose a
+ * composition CYCLE at all — every item of a create batch is a new node, so a
+ * cycle can only run through the batch's own items — which is what the
+ * batch-level acyclicity probe below is about.
+ */
+const EeFolder = defineNode("EeFolder", { schema: z.object({}) });
 /** A `population: "oneActive"` required part, for the temporal (valid-time) coverage below. */
 const EeLiveClip = defineNode("EeLiveClip", { schema: z.object({}) });
 const EeShow = defineNode("EeShow", { schema: z.object({}) });
@@ -48,6 +57,7 @@ const eeSegmentOf = defineEdge("eeSegmentOf", { schema: z.object({}) });
 const eeTagOf = defineEdge("eeTagOf", { schema: z.object({}) });
 const eeHasTrack = defineEdge("eeHasTrack", { schema: z.object({}) });
 const eeLiveClipOf = defineEdge("eeLiveClipOf", { schema: z.object({}) });
+const eeFolderOf = defineEdge("eeFolderOf", { schema: z.object({}) });
 
 function buildGraph(id: string) {
   return defineGraph({
@@ -63,6 +73,7 @@ function buildGraph(id: string) {
       EeAlbum: { type: EeAlbum },
       EeLiveClip: { type: EeLiveClip },
       EeShow: { type: EeShow },
+      EeFolder: { type: EeFolder },
     },
     edges: {
       eeSegmentOf: {
@@ -89,6 +100,12 @@ function buildGraph(id: string) {
         to: [EeShow],
         cardinality: "oneActive",
       },
+      eeFolderOf: {
+        type: eeFolderOf,
+        from: [EeFolder],
+        to: [EeFolder],
+        cardinality: "one",
+      },
     },
     ontology: [
       // EeSegment is required-existence, declared only under EeEpisode —
@@ -113,6 +130,8 @@ function buildGraph(id: string) {
         via: eeLiveClipOf,
         existence: "required",
       }),
+      // Reflexive, so the orientation must be stated explicitly.
+      partOf(EeFolder, EeFolder, { via: eeFolderOf, partSide: "from" }),
     ],
   });
 }
@@ -133,6 +152,9 @@ export function registerCompositionExistenceIntegrationTests(
         (error_: unknown) => error_,
       );
       expect(error).toBeInstanceOf(CompositionExistenceError);
+      expect((error as CompositionExistenceError).code).toBe(
+        "COMPOSITION_WHOLE_REQUIRED",
+      );
       expect((error as CompositionExistenceError).details.situation).toBe(
         "create",
       );
@@ -291,6 +313,71 @@ export function registerCompositionExistenceIntegrationTests(
       expect(await store.nodes.EeSegment.count()).toBe(0);
     });
 
+    it("case 6c: the batch's ONE acyclicity probe attributes a self-attaching item to that item's own edge, and no row of the batch survives", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const root = await store.nodes.EeFolder.create({});
+      const error = await store.nodes.EeFolder.bulkCreate([
+        {
+          id: "ee-folder-ok",
+          props: {},
+          partOf: { kind: "EeFolder", id: root.id },
+        },
+        // Names ITSELF as its whole: the cycle this batch closes.
+        {
+          id: "ee-folder-loop",
+          props: {},
+          partOf: { kind: "EeFolder", id: "ee-folder-loop" },
+        },
+      ]).catch((error_: unknown) => error_);
+      expect(error).toBeInstanceOf(EdgeAcyclicityError);
+      expect((error as EdgeAcyclicityError).details).toMatchObject({
+        selfLoop: true,
+        fromKind: "EeFolder",
+        fromId: "ee-folder-loop",
+        toKind: "EeFolder",
+        toId: "ee-folder-loop",
+      });
+      // The whole batch rolled back: neither item's node row, and no edge.
+      expect(await store.nodes.EeFolder.count()).toBe(1);
+      expect(await store.edges.eeFolderOf.find({})).toHaveLength(0);
+    });
+    // MUTATION CHECK: drop the `assertPreparedEdgeCreatesAcyclic` call at the
+    // end of `attachBatchCompositionCreateEdges`
+    // (src/store/operations/node-operations.ts) — nothing probes a batch's
+    // composition edges at all (each item prepares with
+    // `validateAcyclicity: false`), so this batch commits the self-attaching
+    // folder and `count()` reads 3.
+
+    it("case 6d: an in-batch composition cycle spanning two items is refused, and no row of the batch survives", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const error = await store.nodes.EeFolder.bulkCreate([
+        {
+          id: "ee-cycle-a",
+          props: {},
+          partOf: { kind: "EeFolder", id: "ee-cycle-b" },
+        },
+        {
+          id: "ee-cycle-b",
+          props: {},
+          partOf: { kind: "EeFolder", id: "ee-cycle-a" },
+        },
+      ]).catch((error_: unknown) => error_);
+      expect(error).toBeInstanceOf(EdgeAcyclicityError);
+      const details = (error as EdgeAcyclicityError).details;
+      expect(details.selfLoop).toBe(false);
+      // Both items' edges lie on the cycle; the probe names the first of them
+      // it is given, which is the batch's own input order.
+      expect(details.edgeKind).toBe("eeFolderOf");
+      expect(details.fromId).toBe("ee-cycle-a");
+      expect(details.toId).toBe("ee-cycle-b");
+      expect(await store.nodes.EeFolder.count()).toBe(0);
+      expect(await store.edges.eeFolderOf.find({})).toHaveLength(0);
+    });
+    // MUTATION CHECK: same as case 6c — with the batch-level probe gone, the
+    // mutual cycle commits and `count()` reads 2. (Probing per item BEFORE
+    // each insert cannot see this cycle either: the first item's walk runs
+    // before the second item's edge exists.)
+
     it("case 7a: soft-delete detach refused while the required part is live", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const episode = await store.nodes.EeEpisode.create({});
@@ -303,6 +390,9 @@ export function registerCompositionExistenceIntegrationTests(
         .delete(requireDefined(edge).id)
         .catch((error_: unknown) => error_);
       expect(error).toBeInstanceOf(CompositionExistenceError);
+      expect((error as CompositionExistenceError).code).toBe(
+        "COMPOSITION_DETACH_REFUSED",
+      );
       expect((error as CompositionExistenceError).details.situation).toBe(
         "detach",
       );

@@ -1997,18 +1997,64 @@ function batchFencesConstraintProbe<G extends GraphDef>(
   return undefined;
 }
 
+/**
+ * One insert's row params as the acyclicity probe's proposed edge — the one
+ * spelling shared by every post-insert probe, whether its rows arrive as a
+ * batch's insert units ({@link proposedRelationEdgesFromInsertWork}) or as
+ * prepared creates ({@link assertPreparedEdgeCreatesAcyclic}).
+ */
+function proposedRelationEdgeFromInsertParams(
+  params: InsertEdgeParams,
+): ProposedRelationEdge {
+  return {
+    edgeId: params.id,
+    edgeKind: params.kind,
+    fromKind: params.fromKind,
+    fromId: params.fromId,
+    toKind: params.toKind,
+    toId: params.toId,
+  };
+}
+
 /** The proposed edges a batch create's post-insert acyclicity probe answers for. */
 function proposedRelationEdgesFromInsertWork(
   batchInsertWork: readonly EdgeInsertWork[],
 ): readonly ProposedRelationEdge[] {
-  return batchInsertWork.map((work) => ({
-    edgeId: work.params.id,
-    edgeKind: work.params.kind,
-    fromKind: work.params.fromKind,
-    fromId: work.params.fromId,
-    toKind: work.params.toKind,
-    toId: work.params.toId,
-  }));
+  return batchInsertWork.map((work) =>
+    proposedRelationEdgeFromInsertParams(work.params),
+  );
+}
+
+/**
+ * ONE acyclicity probe for a set of edge creates a frame has already
+ * inserted, for a caller outside this module that issues its own inserts:
+ * the node batch create's composition attach loop
+ * (`attachBatchCompositionCreateEdges`, `node-operations.ts`), which prepares
+ * each item's composition edge with `validateAcyclicity: false` and reaches
+ * this once for the whole batch.
+ *
+ * Same reasoning as {@link assertBatchEdgesRelationsAcyclic}, whose rows this
+ * function's callers cannot use: a composition batch's inserts are issued one
+ * at a time (each item's cardinality probe must see the rows before it), so
+ * what it holds at the end is the prepared creates, not one batch insert
+ * unit. `assertEdgeRelationsAcyclic` drops rows whose kind is in no acyclic
+ * relation and issues no statement for an empty remainder, so a batch of
+ * composition edges is probed in exactly one walk per relation, and a graph
+ * that declares no acyclic relation pays nothing.
+ */
+export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  operation: string,
+  prepared: readonly EdgeCreatePrepared[],
+): Promise<void> {
+  await assertEdgeRelationsAcyclic(
+    acyclicityProbeContext(ctx, target, lock, operation),
+    prepared.map((create) =>
+      proposedRelationEdgeFromInsertParams(create.insertParams),
+    ),
+  );
 }
 
 /**

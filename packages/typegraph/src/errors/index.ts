@@ -1250,6 +1250,15 @@ export class CompositionError extends TypeGraphError {
  * already-satisfied attachment, so a valid-but-different `props` is an
  * accepted option this API cannot honor — it is refused rather than silently
  * dropped, exactly like a differing whole or realizing edge.
+ *
+ * `situation` and the error's `code` say the same thing in two vocabularies —
+ * `"create"`/`COMPOSITION_WHOLE_REQUIRED`,
+ * `"detach"`/`COMPOSITION_DETACH_REFUSED`,
+ * `"existing"`/`COMPOSITION_WHOLE_CONFLICT`,
+ * `"props"`/`COMPOSITION_PROPS_CONFLICT` — from one owner
+ * ({@link describeCompositionExistenceRefusal}), so a caller may branch on
+ * either. `situation` stays because it is also the discriminant for which of
+ * the optional fields above are populated.
  */
 export type CompositionExistenceErrorDetails = Readonly<{
   partKind: string;
@@ -1266,6 +1275,70 @@ export type CompositionExistenceErrorDetails = Readonly<{
 }>;
 
 /**
+ * What one {@link CompositionExistenceErrorDetails} situation reads as: its
+ * machine-readable code, its message, and the way out.
+ *
+ * One switch rather than three parallel ones (a code map, a message builder,
+ * a suggestion ladder): a situation added to the union teaches exactly one
+ * function, and a code can never drift from the message it is raised with.
+ */
+function describeCompositionExistenceRefusal(
+  details: CompositionExistenceErrorDetails,
+): Readonly<{ code: string; message: string; suggestion: string }> {
+  const partLabel = `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
+  switch (details.situation) {
+    case "create": {
+      return {
+        code: "COMPOSITION_WHOLE_REQUIRED",
+        message: `Cannot create ${partLabel}: this kind requires a whole (\`existence: "required"\`), and no \`partOf\` was given.`,
+        suggestion: `Pass \`partOf: { kind, id }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`,
+      };
+    }
+    case "detach": {
+      return {
+        code: "COMPOSITION_DETACH_REFUSED",
+        message: `Cannot detach ${partLabel} from its whole via "${details.edgeKind}"${
+          details.edgeId === undefined ? "" : ` (edge ${details.edgeId})`
+        }: this kind requires a whole (\`existence: "required"\`) and the part is still live.`,
+        suggestion: `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { kind, id, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`,
+      };
+    }
+    case "existing": {
+      const held =
+        details.currentWhole === undefined ?
+          "no whole"
+        : `whole ${details.currentWhole.kind}/${details.currentWhole.id}${
+            details.currentVia === undefined ?
+              ""
+            : ` (via "${details.currentVia}")`
+          }`;
+      const asked =
+        details.requestedWhole === undefined ?
+          "the requested whole"
+        : `${details.requestedWhole.kind}/${details.requestedWhole.id}${
+            details.requestedVia === undefined ?
+              ""
+            : ` (via "${details.requestedVia}")`
+          }`;
+      return {
+        code: "COMPOSITION_WHOLE_CONFLICT",
+        message: `Cannot apply \`partOf\` to ${partLabel}: the node already exists with ${held}, not ${asked}.`,
+        suggestion: `Call \`store.nodes.<Kind>.reparent(id, { kind, id, via? })\` to MOVE the part to the requested whole; getOrCreateByConstraint's \`partOf\` asserts an attachment, it never re-homes one.`,
+      };
+    }
+    case "props": {
+      return {
+        code: "COMPOSITION_PROPS_CONFLICT",
+        message: `Cannot apply \`partOf.props\` to ${partLabel}: it already holds this whole via "${details.edgeKind}"${
+          details.edgeId === undefined ? "" : ` (edge ${details.edgeId})`
+        } with different properties.`,
+        suggestion: `Call \`store.edges.${details.edgeKind}.update(${details.edgeId === undefined ? "edgeId" : JSON.stringify(details.edgeId)}, props)\` to change the realizing edge's own properties directly — \`partOf\` on an already-satisfied attachment only asserts placement, it never rewrites the edge.`,
+      };
+    }
+  }
+}
+
+/**
  * Thrown when a write would leave a required-existence composition part
  * (`existence: "required"`) with no live whole (a bare create with no
  * `partOf`, or a detach that would orphan a currently-live part), or when a
@@ -1280,6 +1353,11 @@ export type CompositionExistenceErrorDetails = Readonly<{
  * live, and a whole is never silently re-assigned" refusal — a different
  * invariant with a different shape (no incumbent edge to name on the create
  * leg). Shares `CompositionError`'s `"constraint"` category.
+ *
+ * One class, four codes — one per situation, since a bare create, a refused
+ * detach, a contradicted whole and a contradicted `props` are four different
+ * things to handle and a caller that routes on `code` alone must be able to
+ * tell them apart.
  */
 export class CompositionExistenceError extends TypeGraphError {
   declare readonly details: CompositionExistenceErrorDetails;
@@ -1288,54 +1366,11 @@ export class CompositionExistenceError extends TypeGraphError {
     details: CompositionExistenceErrorDetails,
     options?: { cause?: unknown },
   ) {
-    const partLabel = `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
-    const message = ((): string => {
-      switch (details.situation) {
-        case "create": {
-          return `Cannot create ${partLabel}: this kind requires a whole (\`existence: "required"\`), and no \`partOf\` was given.`;
-        }
-        case "detach": {
-          return `Cannot detach ${partLabel} from its whole via "${details.edgeKind}"${
-            details.edgeId === undefined ? "" : ` (edge ${details.edgeId})`
-          }: this kind requires a whole (\`existence: "required"\`) and the part is still live.`;
-        }
-        case "existing": {
-          const held =
-            details.currentWhole === undefined ?
-              "no whole"
-            : `whole ${details.currentWhole.kind}/${details.currentWhole.id}${
-                details.currentVia === undefined ?
-                  ""
-                : ` (via "${details.currentVia}")`
-              }`;
-          const asked =
-            details.requestedWhole === undefined ?
-              "the requested whole"
-            : `${details.requestedWhole.kind}/${details.requestedWhole.id}${
-                details.requestedVia === undefined ?
-                  ""
-                : ` (via "${details.requestedVia}")`
-              }`;
-          return `Cannot apply \`partOf\` to ${partLabel}: the node already exists with ${held}, not ${asked}.`;
-        }
-        case "props": {
-          return `Cannot apply \`partOf.props\` to ${partLabel}: it already holds this whole via "${details.edgeKind}"${
-            details.edgeId === undefined ? "" : ` (edge ${details.edgeId})`
-          } with different properties.`;
-        }
-      }
-    })();
-    super(message, "COMPOSITION_WHOLE_REQUIRED", {
+    const refusal = describeCompositionExistenceRefusal(details);
+    super(refusal.message, refusal.code, {
       details,
       category: "constraint",
-      suggestion:
-        details.situation === "create" ?
-          `Pass \`partOf: { kind, id }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`
-        : details.situation === "detach" ?
-          `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { kind, id, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`
-        : details.situation === "props" ?
-          `Call \`store.edges.${details.edgeKind}.update(${details.edgeId === undefined ? "edgeId" : JSON.stringify(details.edgeId)}, props)\` to change the realizing edge's own properties directly — \`partOf\` on an already-satisfied attachment only asserts placement, it never rewrites the edge.`
-        : `Call \`store.nodes.<Kind>.reparent(id, { kind, id, via? })\` to MOVE the part to the requested whole; getOrCreateByConstraint's \`partOf\` asserts an attachment, it never re-homes one.`,
+      suggestion: refusal.suggestion,
       cause: options?.cause,
     });
     this.name = "CompositionExistenceError";

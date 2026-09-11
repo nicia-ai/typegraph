@@ -831,6 +831,33 @@ export function assertEndpointRowLive(
 }
 
 /**
+ * THE refusal an attachment owes for its WHOLE endpoint: the row this
+ * attachment's whole resolves to must exist and be live, reported on the side
+ * of the realizing edge the whole actually occupies.
+ *
+ * One owner for the two callers that check the whole ALONE — a part's own
+ * liveness being established some other way:
+ * {@link decideCompositionAttachmentUnderFence}, whose part row may still be
+ * a tombstone the frame's later update restores, and the batch create's
+ * attach loop (`attachBatchCompositionCreateEdges`, `node-operations.ts`),
+ * whose part row was just written by this same frame's insert. Without one
+ * spelling, each would re-derive the side from `pair.partSide` itself, and
+ * the two could report a dead whole on different endpoints.
+ */
+export function assertCompositionWholeEndpointLive(
+  work: Pick<CompositionCreateWork, "pair" | "whole">,
+  row: NodeRow | undefined,
+): void {
+  assertEndpointRowLive(
+    work.pair.viaEdgeKind,
+    wholeSide(work.pair.partSide),
+    work.whole.kind,
+    work.whole.id,
+    row,
+  );
+}
+
+/**
  * THE fenced DECIDE half of an attachment: re-read the incumbent on the
  * frame's own transaction target — under the per-graph write lock the caller
  * already holds — and judge it ({@link decideCompositionIncumbent}).
@@ -847,7 +874,7 @@ export function assertEndpointRowLive(
  * That is why this function also owns the WHOLE endpoint's liveness read:
  * when the disposition is going to attach a new edge (`"attach"` or
  * `"replace"`), a dead or missing whole is refused HERE, via
- * {@link assertEndpointRowLive}, before returning. The PART endpoint is
+ * {@link assertCompositionWholeEndpointLive}, before returning. The PART endpoint is
  * deliberately NOT read here: on the resurrection leg the part row is still
  * a tombstone until the update restores it, so a part-liveness read taken
  * here would refuse every resurrection; the edge preparation reads it on the
@@ -885,20 +912,9 @@ export async function decideCompositionAttachmentUnderFence(
     incumbent,
   );
   if (disposition === "attach" || disposition === "replace") {
-    const { pair } = request.work;
-    const { attachment } = request;
-    const wholeRow = await target.getNode(
-      graphId,
-      attachment.kind,
-      attachment.id,
-    );
-    assertEndpointRowLive(
-      pair.viaEdgeKind,
-      wholeSide(pair.partSide),
-      attachment.kind,
-      attachment.id,
-      wholeRow,
-    );
+    const { whole } = request.work;
+    const wholeRow = await target.getNode(graphId, whole.kind, whole.id);
+    assertCompositionWholeEndpointLive(request.work, wholeRow);
   }
   return {
     request,

@@ -611,6 +611,9 @@ export function registerCompositionAttachmentIntegrationTests(
       ).catch((error_: unknown) => error_);
 
       expect(error).toBeInstanceOf(CompositionExistenceError);
+      expect((error as CompositionExistenceError).code).toBe(
+        "COMPOSITION_WHOLE_CONFLICT",
+      );
       const details = (error as CompositionExistenceError).details;
       expect(details.situation).toBe("existing");
       expect(details.partId).toBe(chapter.id);
@@ -849,6 +852,9 @@ export function registerCompositionAttachmentIntegrationTests(
       ).catch((error_: unknown) => error_);
 
       expect(error).toBeInstanceOf(CompositionExistenceError);
+      expect((error as CompositionExistenceError).code).toBe(
+        "COMPOSITION_PROPS_CONFLICT",
+      );
       expect((error as CompositionExistenceError).details).toEqual(
         matchingObject({
           situation: "props",

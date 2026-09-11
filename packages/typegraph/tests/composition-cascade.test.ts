@@ -35,9 +35,17 @@ import {
   hasPart,
   partOf,
 } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+} from "../src/backend/derive-backend";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
-import { type EdgeRow, type GraphBackend } from "../src/backend/types";
+import {
+  type EdgeRow,
+  type GraphBackend,
+  type TransactionBackend,
+} from "../src/backend/types";
 import { buildKindRegistry } from "../src/registry";
 import {
   compositionEdgeCounts,
@@ -211,13 +219,130 @@ describe("planCompositionCascade", () => {
       podcast.id,
       backend,
     );
-    // MUTATION: drop the `.toReversed()` in `planCompositionCascade` and this
+    // MUTATION: drop the `.toReversed()` in `cascadeDeletionOrder` and this
     // assertion flips to [Episode, Segment] (BFS discovery order).
     expect(plan.members.map((member) => member.kind)).toEqual([
       "Segment",
       "Episode",
     ]);
     expect(plan.consumedEdgeIds.size).toBe(2);
+  });
+
+  it("orders two SIBLING parts of one whole by kind then id, not by the order they were created or read", async () => {
+    const graph = buildPodcastGraph("cascade-plan-sibling-order");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+    const podcast = await store.nodes.Podcast.create({ title: "p" });
+    const episode = await store.nodes.Episode.create(
+      { title: "e" },
+      { id: "cascade-order-episode" },
+    );
+    // Created in DESCENDING id order, so creation order and sort order
+    // disagree: anything that reports the closure in discovery (or row-read)
+    // order instead of sorting it answers "b" before "a".
+    await store.nodes.Segment.create({}, { id: "cascade-order-b" });
+    await store.nodes.Segment.create({}, { id: "cascade-order-a" });
+    await store.edges.episodeOf.create(episode, podcast, {});
+    await store.edges.segmentOf.create(
+      { kind: "Segment", id: "cascade-order-b" },
+      episode,
+      {},
+    );
+    await store.edges.segmentOf.create(
+      { kind: "Segment", id: "cascade-order-a" },
+      episode,
+      {},
+    );
+
+    const registry = buildKindRegistry(graph);
+    const plan = await planCompositionCascade(
+      { graphId: graph.id, registry, lock: uncapturedGraphWriteLock() },
+      "Podcast",
+      podcast.id,
+      backend,
+    );
+    // MUTATION: reverse the per-round sort in `cascadeDeletionOrder`
+    // (src/store/operations/composition-cascade.ts) — swap the comparison's
+    // operands — and the two segments come back "b" before "a", failing this
+    // assertion on every run.
+    expect(plan.members.map((member) => `${member.kind}/${member.id}`)).toEqual(
+      [
+        "Segment/cascade-order-a",
+        "Segment/cascade-order-b",
+        "Episode/cascade-order-episode",
+      ],
+    );
+  });
+
+  it("reports that same sibling order on the delete's receipt", async () => {
+    const graph = buildPodcastGraph("cascade-receipt-sibling-order");
+    const raw = createTestBackend();
+    // Records the ids handed to each composition-edge cleanup batch, which is
+    // the one place the cascade's consumed edges are deleted.
+    const consumedEdgeIdArguments: string[][] = [];
+    function captureEdgeBatches<T extends GraphBackend | TransactionBackend>(
+      target: T,
+    ): T {
+      const batchDelete = target.deleteEdgesBatch;
+      if (batchDelete === undefined) return target;
+      const overlay: Pick<GraphBackend, "deleteEdgesBatch"> = {
+        deleteEdgesBatch: async (params) => {
+          consumedEdgeIdArguments.push([...params.ids]);
+          return batchDelete(params);
+        },
+      };
+      return deriveBackend<T, Partial<T>>(
+        target,
+        overlay as ExactBackendOverlay<T, Partial<T>>,
+      );
+    }
+    const backend = deriveBackend(captureEdgeBatches(raw), {
+      transaction: (fn, options) =>
+        raw.transaction((target) => fn(captureEdgeBatches(target)), options),
+    });
+    const [store] = await createStoreWithSchema(graph, backend);
+    const podcast = await store.nodes.Podcast.create({ title: "p" });
+    const episode = await store.nodes.Episode.create(
+      { title: "e" },
+      { id: "receipt-order-episode" },
+    );
+    await store.nodes.Segment.create({}, { id: "receipt-order-b" });
+    await store.nodes.Segment.create({}, { id: "receipt-order-a" });
+    await store.edges.episodeOf.create(episode, podcast, {});
+    await store.edges.segmentOf.create(
+      { kind: "Segment", id: "receipt-order-b" },
+      episode,
+      {},
+    );
+    await store.edges.segmentOf.create(
+      { kind: "Segment", id: "receipt-order-a" },
+      episode,
+      {},
+    );
+
+    const { receipt } = await store.transactionWithReceipt(async (tx) => {
+      await tx.nodes.Podcast.delete(podcast.id);
+    });
+
+    // The plan's order IS the reported order: the receipt is a projection of
+    // it, never a second walk. (Same MUTATION as the test above.)
+    expect(receipt.cascadedParts).toEqual([
+      { kind: "Segment", id: "receipt-order-a" },
+      { kind: "Segment", id: "receipt-order-b" },
+      { kind: "Episode", id: "receipt-order-episode" },
+    ]);
+
+    // The consumed composition EDGE rows are deleted in one agreed order too —
+    // sorted by id, not in the order the walk collected them — so two cascades
+    // over overlapping closures cannot take these row locks in opposite
+    // orders.
+    // MUTATION: reverse the sort in `runCompositionCascade`'s
+    // `deleteCompositionEdges` call (src/store/operations/node-operations.ts)
+    // and this assertion fails.
+    expect(consumedEdgeIdArguments).toHaveLength(1);
+    const deletedEdgeIds = requireDefined(consumedEdgeIdArguments[0]);
+    expect(deletedEdgeIds).toHaveLength(3);
+    expect(deletedEdgeIds).toEqual([...deletedEdgeIds].toSorted());
   });
 
   it("throws CompositionCycleError on a revisit rather than truncating", async () => {
@@ -382,6 +507,49 @@ describe("composition cascade — delete", () => {
     const reusedTitle = await store.nodes.Episode.create({ title: "Pilot" });
     expect(reusedTitle.title).toBe("Pilot");
   });
+
+  it("reads each cascade member's row ONCE: the soft delete writes against the row the plan proved live", async () => {
+    const graph = buildPodcastGraph("cascade-member-row-reuse");
+    const raw = createTestBackend();
+    const reads: string[] = [];
+    function countReads<T extends GraphBackend | TransactionBackend>(
+      target: T,
+    ): T {
+      return deriveBackend<T, Partial<T>>(target, {
+        getNode: async (graphId: string, kind: string, id: string) => {
+          reads.push(`${kind}/${id}`);
+          return target.getNode(graphId, kind, id);
+        },
+      } as ExactBackendOverlay<T, Partial<T>>);
+    }
+    const backend = deriveBackend(countReads(raw), {
+      transaction: (fn, options) =>
+        raw.transaction((target) => fn(countReads(target)), options),
+    });
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const podcast = await store.nodes.Podcast.create({ title: "My Show" });
+    const episode = await store.nodes.Episode.create({ title: "Pilot" });
+    const segment = await store.nodes.Segment.create({});
+    await store.edges.episodeOf.create(episode, podcast, {});
+    await store.edges.segmentOf.create(segment, episode, {});
+
+    reads.length = 0;
+    await store.nodes.Podcast.delete(podcast.id);
+
+    // One read per member, taken by `planCompositionCascade`'s liveness pass;
+    // the delete of each member writes against THAT row.
+    expect(
+      reads.filter((read) => read === `Episode/${episode.id}`),
+    ).toHaveLength(1);
+    expect(
+      reads.filter((read) => read === `Segment/${segment.id}`),
+    ).toHaveLength(1);
+  });
+  // MUTATION: stop passing `member.row` as `deleteNodeRowInFrame`'s `existing`
+  // in `runCompositionCascade` (src/store/operations/node-operations.ts) —
+  // each member is then read a second time for its own pre-image and both
+  // filters find 2 reads.
 
   it("aborts a restricting grandchild's delete ATOMICALLY — zero rows changed", async () => {
     const graph = buildPodcastGraph("cascade-restrict-abort");
