@@ -59,7 +59,7 @@ Uses the same options as `traverse()`, but returns optional edge/node values in 
 |-----------|------|-------------|
 | `nodeKind` | `string` | The target node kind |
 | `nodeAlias` | `string` | Unique alias for referencing this node |
-| `options.includeSubClasses` | `boolean` | Include subclass kinds (default: `false`) |
+| `options.expansion` | `"exact" \| "subclasses" \| "narrower"` | The target alias's expansion axis. `"subclasses"` (the default) includes subclass kinds — and any kind declared `equivalentTo` the target; `"exact"` is the named kind alone; `"narrower"` follows `broader`/`narrower` descendants instead |
 
 ## Direction
 
@@ -288,6 +288,15 @@ The default expansion mode is `"inverse"`, meaning traversals automatically incl
 from your ontology. To opt out for a single traversal, pass `expand: "none"`. To change the default
 for all traversals, set `queryDefaults.traversalExpansion` in `createStore` options.
 :::
+
+## Composition Traversals
+
+When the edge you'd traverse is a declared [composition](/ontology#composition)
+relation (`partOf` / `hasPart`), `parts()` and `wholes()` are shorter than
+`traverse().recursive().to(...)` and stay correct as the relation grows across
+edge kinds and orientations — see [Recursive ▸ Composition Shortcuts: `parts()`
+and `wholes()`](/queries/recursive#composition-shortcuts-parts-and-wholes) for
+the full picture.
 
 ## Runtime-declared kinds
 

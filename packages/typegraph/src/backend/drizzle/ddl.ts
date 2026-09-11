@@ -48,6 +48,18 @@ type CustomColumnType = Readonly<{
 const EDGE_MATCH_IDENTITY_NAME_COLUMN = "match_identity_name";
 const EDGE_MATCH_IDENTITY_KEY_COLUMN = "match_identity_key";
 
+/**
+ * The columns {@link planSqliteEdgeMatchIdentityAdoption} can `ADD`, in the
+ * order it adds them. Exported so the adoption call sites classify a
+ * concurrent adopter's duplicate-column failure against this list instead of
+ * re-spelling the column names beside their own `isSqliteDuplicateColumnError`
+ * call.
+ */
+export const EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS: readonly string[] = [
+  EDGE_MATCH_IDENTITY_NAME_COLUMN,
+  EDGE_MATCH_IDENTITY_KEY_COLUMN,
+];
+
 export function quoteDdlIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
@@ -128,9 +140,7 @@ function generateSqliteEdgeMatchIdentityColumnDDL(
   return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${quoteDdlIdentifier(column)} TEXT${pairCheck};`;
 }
 
-function generateSqliteEdgeMatchIdentityIndexDDL(
-  tableName: string,
-): string {
+function generateSqliteEdgeMatchIdentityIndexDDL(tableName: string): string {
   return `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteDdlIdentifier(edgeMatchIdentityUniqueIndexName(tableName))} ON ${quoteDdlIdentifier(tableName)} (${quoteDdlIdentifier("graph_id")}, ${quoteDdlIdentifier("kind")}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN)}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN)});`;
 }
 
@@ -167,6 +177,52 @@ export function planSqliteEdgeMatchIdentityAdoption(
   return [
     ...columnStatements,
     generateSqliteEdgeMatchIdentityIndexDDL(tableName),
+  ];
+}
+
+const IDENTITY_TRANSITIONS_RESTORED_AT_COLUMN = "restored_at";
+
+/**
+ * The column {@link planSqliteIdentityTransitionsRestoredAtAdoption} can
+ * `ADD` — the counterpart of {@link EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS} for
+ * the identity-transitions relation.
+ */
+export const IDENTITY_TRANSITIONS_ADOPTION_COLUMNS: readonly string[] = [
+  IDENTITY_TRANSITIONS_RESTORED_AT_COLUMN,
+];
+
+/**
+ * Idempotent PostgreSQL DDL for adopting an existing identity-transitions
+ * table's `restored_at` column (base-schema version 4). A single statement —
+ * unlike {@link generatePostgresEdgeMatchIdentityUpgradeDDL} above, which
+ * also adds a constraint and an index Postgres cannot spell
+ * `IF NOT EXISTS`, this is one nullable column, and Postgres's native
+ * `ADD COLUMN IF NOT EXISTS` already makes the statement idempotent with no
+ * `pg_attribute` introspection needed.
+ */
+export function generatePostgresIdentityTransitionsRestoredAtAdoptionDDL(
+  tableName: string,
+): string {
+  const table = quoteDdlIdentifier(tableName);
+  const column = quoteDdlIdentifier(IDENTITY_TRANSITIONS_RESTORED_AT_COLUMN);
+  return `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} TIMESTAMPTZ;`;
+}
+
+/**
+ * Plans the focused SQLite v4 adoption from one authoritative column
+ * inventory — the identity-transitions table's `restored_at` marker,
+ * mirroring {@link planSqliteEdgeMatchIdentityAdoption}'s convention that an
+ * empty inventory means the table does not exist yet (current generated DDL
+ * will create it, column included).
+ */
+export function planSqliteIdentityTransitionsRestoredAtAdoption(
+  tableName: string,
+  existingColumns: ReadonlySet<string>,
+): readonly string[] {
+  if (existingColumns.size === 0) return [];
+  if (existingColumns.has(IDENTITY_TRANSITIONS_RESTORED_AT_COLUMN)) return [];
+  return [
+    `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${quoteDdlIdentifier(IDENTITY_TRANSITIONS_RESTORED_AT_COLUMN)} TEXT;`,
   ];
 }
 
@@ -360,7 +416,7 @@ function inlineSqlOrThrow(value: unknown, context: string): string {
 /**
  * Generates CREATE INDEX SQL statements from a Drizzle SQLite table definition.
  */
-function generateSqliteCreateIndexSQL(
+export function generateSqliteCreateIndexSQL(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   table: SQLiteTableWithColumns<any>,
 ): string[] {
@@ -589,7 +645,7 @@ export function generatePgCreateTableSQL(
 /**
  * Generates CREATE INDEX SQL statements from a Drizzle PostgreSQL table definition.
  */
-function generatePgCreateIndexSQL(
+export function generatePgCreateIndexSQL(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   table: PgTableWithColumns<any>,
 ): string[] {

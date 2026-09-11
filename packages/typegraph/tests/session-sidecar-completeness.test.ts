@@ -77,7 +77,10 @@ import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledSelectSql } from "../src/query/sql-intent";
 import { buildKindRegistry } from "../src/registry";
-import { edgeCardinalityClaim } from "../src/store/claims/edge-claims";
+import {
+  edgeCardinalityAxisReferences,
+  edgeCardinalityClaims,
+} from "../src/store/claims/edge-claims";
 import { planNodeCreateClaims } from "../src/store/claims/node-claims";
 import {
   runWritePlan,
@@ -109,7 +112,7 @@ function createEdgeWithPlan(session: WriteSession): Promise<unknown> {
       toId: "fused-b",
       props: {},
     },
-    claim: undefined,
+    claims: [],
   };
   const command: EdgeCreateCommand = {
     kind: "edge.create",
@@ -338,7 +341,10 @@ function edgeInsertWork(
   // so a change to what a `unique` kind claims moves this fixture too.
   return {
     params,
-    claim: requireDefined(edgeCardinalityClaim("unique", params)),
+    claims: edgeCardinalityClaims(
+      edgeCardinalityAxisReferences({ cardinality: "unique" }),
+      params,
+    ),
   };
 }
 
@@ -608,6 +614,45 @@ const CASES: Record<keyof WriteSession, Case> = {
     row: "updateNode",
     plan: NODE_PLAN,
   },
+  deleteCompositionEdges: {
+    run: async (raw) => {
+      // A CONSTRAINED kind, exactly as `purgeEdge`'s fixture: the claim
+      // release is a statement this case can observe, which an
+      // unconstrained kind's edge would not exercise.
+      await raw.insertNode({
+        graphId: GRAPH_ID,
+        kind: "Doc",
+        id: "cascade-edges",
+        props: documentProps("cascade-edges"),
+      });
+      await raw.insertNode({
+        graphId: GRAPH_ID,
+        kind: "Doc",
+        id: "cascade-edges-b",
+        props: documentProps("cascade-edges-b"),
+      });
+      await raw.insertEdge({
+        graphId: GRAPH_ID,
+        kind: "owns",
+        id: "edge-owns-cascade",
+        fromKind: "Doc",
+        fromId: "cascade-edges",
+        toKind: "Doc",
+        toId: "cascade-edges-b",
+        props: {},
+      });
+      // eslint-disable-next-line unicorn/consistent-function-scoping -- every case returns its row work the same way; hoisting this one would make the table read as if it were different.
+      return (session) =>
+        session.deleteCompositionEdges(["edge-owns-cascade"], "hard");
+    },
+    // The composition cascade's explicit consumed-edge cleanup routes
+    // through the SAME batched delete `retireNode` / `purgeNode` use, even
+    // for a single edge id.
+    sidecars: ["purgeEdgeClaims"],
+    row: "hardDeleteEdgesBatch",
+    postRowClaims: ["purgeEdgeClaims"],
+    plan: EDGE_PLAN,
+  },
   reviseNodeSet: {
     run: async (raw) => {
       await seed(raw, "k");
@@ -733,7 +778,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   reviseEdge: {
     run: async (raw) => {
       await seed(raw, "p");
-      const work = { id: "edge-p", props: {} };
+      const work = { id: "edge-p", props: {}, claims: [] };
       return (session) =>
         session.reviseEdge(work, {
           validityLowerBound: {},

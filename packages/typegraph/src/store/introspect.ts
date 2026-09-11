@@ -30,6 +30,7 @@ import {
   type KindAnnotations,
   type NodeRegistration,
   type NodeType,
+  type TargetCardinality,
   type UniquenessScope,
 } from "../core/types";
 import { type GraphExtension } from "../graph-extension/extension-types";
@@ -39,6 +40,11 @@ import {
   extensionKindNames,
 } from "../graph-extension/ontology-keys";
 import { getTypeName } from "../ontology/types";
+import {
+  type CompositionExistence,
+  type CompositionPartSide,
+  compositionRelationFields,
+} from "../registry/composition-relation";
 import { serializeSchemaProperties } from "../schema/serializer";
 import { type JsonSchema } from "../schema/types";
 
@@ -86,7 +92,15 @@ export type EdgeIntrospection = Readonly<{
   from: readonly string[];
   to: readonly string[];
   cardinality: Cardinality;
+  targetCardinality: TargetCardinality;
   endpointExistence: EndpointExistence;
+  /**
+   * Whether this edge kind's live relation is enforced as a DAG. Required
+   * (never optional): introspection reports the RESOLVED value, not the
+   * declaration's sparse form — see `SerializedEdgeDef.acyclic`'s docblock
+   * for why the declaration itself is emit-when-true only.
+   */
+  acyclic: boolean;
   properties: JsonSchema;
   annotations: KindAnnotations | undefined;
   deprecated: boolean;
@@ -96,6 +110,12 @@ export type OntologyIntrospection = Readonly<{
   metaEdge: string;
   from: string;
   to: string;
+  /** The realizing edge kind name. Present only for `partOf`/`hasPart`. */
+  via?: string;
+  /** R5's orientation. Meaningful only alongside `via`. */
+  partSide?: CompositionPartSide;
+  /** Item E.2: whether the part must have a live whole. Meaningful only alongside `via`. */
+  existence?: CompositionExistence;
   origin: "compile-time" | "runtime";
 }>;
 
@@ -151,7 +171,9 @@ export function introspectSchema<G extends GraphDef>(
       from: reg.from.map((entry) => (entry as AllNodeTypes<G> & NodeType).kind),
       to: projectTargetKinds(reg.to),
       cardinality: reg.cardinality ?? "many",
+      targetCardinality: reg.targetCardinality ?? "many",
       endpointExistence: reg.endpointExistence ?? "notDeleted",
+      acyclic: reg.acyclic ?? false,
       properties: serializeSchemaProperties(edgeType.schema),
       annotations: edgeType.annotations,
       deprecated: deprecated.has(name),
@@ -163,6 +185,7 @@ export function introspectSchema<G extends GraphDef>(
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),
     to: getTypeName(relation.to),
+    ...compositionRelationFields(relation),
     origin:
       runtimeOntologyKeys.has(compileTimeOntologyKey(relation)) ? "runtime" : (
         "compile-time"

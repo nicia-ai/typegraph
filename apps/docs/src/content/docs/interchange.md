@@ -48,7 +48,7 @@ const jsonSchema = toJSONSchema(GraphDataSchema);
 
 ```typescript
 interface GraphData {
-  formatVersion: "2.0";
+  formatVersion: "3.0";
   exportedAt: string; // ISO datetime
   source: {
     type: "typegraph-export" | "external";
@@ -90,6 +90,36 @@ interface GraphData {
       validFrom: string;
       validTo?: string;
     }>;
+    // `archival` mode only — see "Archival identity transitions" below.
+    transitions?: Array<{
+      transitionId: string;
+      cause:
+        | "assert"
+        | "retract"
+        | "fold"
+        | "detach"
+        | "restore"
+        | "window-end"
+        | "kind-drop"
+        | "schema-transition"
+        | "reconcile";
+      recordedRevision: number;
+      recordedAt: string;
+      validAt: string;
+      class: { kind: string; id: string };
+      priorClass?: { kind: string; id: string };
+      assertionIds: string[];
+      decision?: {
+        policy?: string;
+        branchId?: string;
+        branchAncestry?: string[];
+        mergePlanDigest?: string;
+        reviewDigest?: string;
+        sourceId?: string;
+      };
+    }>;
+    // `archival` mode only, and only when the source has ever pruned.
+    retention?: { prunedBeforeRevision: number; prunedAt: string };
   };
 }
 ```
@@ -105,12 +135,62 @@ at or before that instant, in which case it is imported with no lower bound
 
 ### Format Version Compatibility
 
-Exports always write `formatVersion: "2.0"`. The read side — both
+Exports always write `formatVersion: "3.0"`. The read side — both
 `importGraph`/`importGraphStream` and `GraphDataSchema.parse` — additionally
-accepts `"1.0"`. A 1.0 document is structurally a valid 2.0 document: the only
-2.0 change is the additive optional `identity` section, so pre-existing 1.0
-exports validate and import unchanged. You never need to rewrite the version
-field of an older backup; validation and import handle both.
+accepts `"1.0"` and `"2.0"`. A 1.0 document is structurally a valid 2.0
+document (the only 2.0 change is the additive optional `identity` section),
+and a 2.0 document is in turn a structurally valid 3.0 document (the only 3.0
+change is the additive optional `identity.transitions` / `identity.retention`
+archival fields), so pre-existing 1.0 and 2.0 exports validate and import
+unchanged. You never need to rewrite the version field of an older backup;
+validation and import handle all three.
+
+### Archival identity transitions
+
+On a `history: true` graph, `exportGraph(store, { identityMode: "archival" })`
+additionally carries every retained identity transition, plus the source's
+own retention watermark when it has ever pruned. State export and working-copy branch cloning carry
+neither field — a clone's own history starts at its clone revision, and
+current-truth state export is not a backup of explanation.
+
+Restoring `identity.transitions` validates shape only (a known cause, a
+well-formed reference, a non-decreasing `recordedRevision` sequence) and
+inserts every row verbatim, never re-deriving membership or touching the
+target's closure. Every restored row is marked internally as such — a
+restore always inserts rows this graph did not record itself, regardless of
+what the archive's own history looks like. A replay over the restored graph
+(`store.identity.replay`, see the [identity guide](/identity/#replay-and-identity-history))
+uses that marker, never a `recordedRevision` comparison, to exclude every
+restored transition from its `steps` (a restored row's revision is minted by
+the SOURCE graph's own clock and interleaves arbitrarily with the
+destination's), so `transitionsOf` answers fully while `replay` never pairs
+a restored transition with a fabricated before/after.
+
+The restore also sets the destination's own retention watermark to the
+destination's own current recorded revision + 1 at restore time — but only
+when the destination has no identity transitions of its own yet. A graph
+that already retains its own history keeps its existing watermark
+untouched, so an unrelated restore can never misreport that graph's own,
+fully-retained classes as truncated. `replay` reports the watermark, when
+set, as `truncatedBefore`.
+
+A `state`-mode document naming a `transitions` section is refused. Archival
+transitions export is always whole-graph — an export's `nodeKinds` filter
+does not scope the transitions section the way it scopes assertions.
+
+A document (or stream) naming a `transitions` section, or carrying a
+non-zero `retention` watermark, into a target opened without `history:
+true` is refused with `IDENTITY_REPLAY_REQUIRES_HISTORY`, before writing any
+node, edge, or identity assertion. On the streaming protocol, the
+`identity-transitions` chunk always arrives last (after nodes, edges, and
+the `identity` assertions chunk), so `importGraphStream` reads a
+`hasTransitions` boolean on the streamed header's `identity` object — set
+whenever the export's transitions section is non-empty — to know this
+before that chunk arrives. **This is a breaking change**: restoring an
+archival export from a `history: true` source that carries retained
+transitions or a retention watermark now requires the target to also be
+opened with `history: true`; previously the transitions section did not
+exist, so nothing was silently dropped, but nothing could refuse it either.
 
 ## Exporting Data
 
@@ -421,14 +501,39 @@ The contract is deliberately narrow:
 - The TypeGraph node and edge tables must be globally empty. A different graph
   in the same database also makes the database non-empty.
 - The caller guarantees property shapes, endpoint existence, edge endpoint
-  types, cardinality, duplicate-free IDs, and duplicate-free durable edge match
-  identities. Only stream ordering and known kind names are checked. Trusted
-  import still derives each declared edge identity and stores it with the row,
-  so a collision reaches the database arbiter and rolls back the complete
-  trusted-import transaction.
+  types, cardinality, composition, duplicate-free IDs, and duplicate-free
+  durable edge match identities. Only stream ordering and known kind names are
+  checked. Trusted import still derives each declared edge identity and stores
+  it with the row, so a collision reaches the database arbiter and rolls back
+  the complete trusted-import transaction.
 - Recorded-time history, revision tracking, node uniqueness constraints,
   `searchable()` fields, and `embedding()` fields are rejected in this first
   version because their sidecar writes would otherwise be skipped.
+- A target graph declaring [target cardinality](/core-concepts#target-cardinality)
+  or source-side `cardinality` constraints on any edge kind is rejected with
+  `details.reason === "cardinality_unsupported"` — trusted import writes only
+  the node and edge relations, so it cannot also maintain the cardinality
+  claim rows those constraints depend on. Use `importGraphStream` for a graph
+  with constrained edge kinds; it maintains claims the same way the store's
+  normal write path does.
+- A target graph declaring any `acyclic: true` edge kind is rejected with
+  `details.reason === "acyclicity_unsupported"`: trusted import validates
+  nothing by contract and holds one transaction for the whole stream, so
+  there is no per-row point to probe the relation at, and no bounded
+  end-of-stream check that would not be a second, unbounded implementation
+  of the same predicate `importGraphStream` already enforces per row. Use
+  `importGraphStream` for a graph with an acyclic edge kind.
+- A target graph declaring any `partOf`/`hasPart` pair is rejected with
+  `details.reason === "composition_unsupported"`: trusted import writes no
+  composition claim row and does not check the composition acyclicity
+  relation, so a graph loaded this way can carry a part with two live wholes
+  or a part/whole cycle. This refusal covers `existence: "required"` pairs
+  too — trusted import cannot honor that guarantee any more than the
+  one-whole claim, so there is no separate reason code for it. Use
+  `importGraphStream` for a graph with a composition pair;
+  `store.verifyConstraintFences()` reports either problem (plus a required
+  part with no whole) after the fact if trusted import is used anyway on
+  data prepared outside TypeGraph.
 - Operational Identity-enabled target stores are rejected with
   `details.reason === "identity_unsupported"`; identity-bearing input is
   rejected with `details.reason === "invalid_stream"`. The trusted session
@@ -525,6 +630,52 @@ row is reported as the same per-row error rather than aborting the import.
 
 Nodes were never affected: their probe is `getNode(graphId, kind, id)`, which is
 kind-scoped, so a cross-kind id collision simply reads as absent.
+
+#### A required composition part with no whole
+
+Import writes every node row before any edge row, so whether a required-existence
+part (`existence: "required"`, see [Ontology](/ontology#existence-a-part-that-cannot-exist-without-a-whole))
+has its composition edge cannot be decided per row at insert time — only once
+the whole payload's edge set is known. A part created by this import is
+accepted when its composition edge arrives later in the SAME import (any
+batch), or when it is already attached on the target from before this import;
+otherwise it is reported as a per-row error on the node (`error` matches
+`/requires a whole/`) and its row is removed in the same transaction before
+the import commits — no orphan node row survives, and the rest of the import
+is unaffected.
+
+```typescript
+const result = await importGraph(store, data, { onConflict: "error" });
+const orphaned = result.errors.filter(
+  (entry) => entry.entityType === "node" && /requires a whole/u.test(entry.error),
+);
+```
+
+Only nodes THIS import creates are tracked this way: a required-existence node
+already live on the target that this import merely updates or leaves alone is
+never re-checked, even if it happens to have no whole (a pre-existing gap
+`store.verifyConstraintFences()` — not import — reports).
+
+#### An edge that would close a cycle
+
+An edge kind declaring `acyclic: true` is checked per row, sequentially:
+each row's acyclicity probe runs inside the same savepoint-guarded attempt
+as its insert, so a row that would close a cycle rolls back to the
+savepoint and is reported as that row's per-row error while the rest of
+the import commits — the same per-row recovery every other declared
+constraint gets. Rows of an acyclic kind never join the batched slice
+insert other rows in the same chunk use: the in-batch cardinality/endpoint
+overlay intercepts simple counts and existence checks, not a recursive
+reachability query, so it cannot see an in-batch cycle. This is the one
+place import trades throughput for correctness on purpose — acyclic kinds
+import one row at a time.
+
+`importGraph` / `importGraphStream` additionally takes the per-graph write
+lock for the duration of each chunk whenever the target graph declares any
+`acyclic: true` edge kind, and refuses the whole import up front — before
+the first chunk, with `details.constraint: "edgeAcyclicity"` — on a backend
+with no transactions. See [Backend Setup](/backend-setup) for the full
+fence-reason table.
 
 #### An update target that changed under the import
 

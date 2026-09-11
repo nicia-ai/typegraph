@@ -1,7 +1,7 @@
 /**
  * THE INVENTORY RATCHET for `WITH RECURSIVE` emission in `src/**` (I1).
  *
- * The invariant it enforces: **exactly six `WITH RECURSIVE` emission sites
+ * The invariant it enforces: **exactly seven `WITH RECURSIVE` emission sites
  * exist in `src/**`, in both directions** — a site in the tree with no
  * matching entry fails, and an entry matching no site in the tree fails —
  * **and exactly one `assumeRecursiveTraversalSupported` call site exists**,
@@ -21,8 +21,8 @@
  * and `query/compiler/emitter/recursive.ts:13`, sit in files that also hold
  * a real site, so they do not change the file-set count.) A ratchet keyed
  * on the file set would have failed on arrival at 8. The fix is to key on
- * `(file, line)` after parsing comments out, so the six emission sites are
- * counted and the four comment occurrences are not.
+ * `(file, line)` after parsing comments out, so the (now seven) emission
+ * sites are counted and the four comment occurrences are not.
  *
  * ## Honest statement of its limits
  *
@@ -87,7 +87,7 @@
  *
  * Comment stripping is done by parsing with `ts.createSourceFile` and walking
  * the resulting AST (`ts.forEachChild`), not with a bare `ts.createScanner`
- * token loop or a regex: every one of the six sites lives inside a tagged
+ * token loop or a regex: every one of the seven sites lives inside a tagged
  * template with `${...}` interpolations, and a scanner that re-enters a
  * template body after a `}` re-lexes it as ordinary source — which mis-lexes
  * apostrophes and `--` inside the embedded SQL and can blank or swallow real
@@ -117,7 +117,7 @@ const RECURSION_PHRASE = "WITH RECURSIVE";
  * case. A same-case single-space `String.prototype.indexOf` would miss a
  * hand-written `with\n  recursive` (an actual line break) inside a tagged
  * template in BOTH ratchet directions (no `undeclared` row because the
- * phrase never matches, and no `stale` row because the six declared sites
+ * phrase never matches, and no `stale` row because the seven declared sites
  * are unaffected); the `\n`/`\r`/`\t` alternation closes the same gap for
  * the escape-sequence spelling of the same shape (`` `WITH\n  RECURSIVE` ``
  * written literally, not a real newline), which a whitespace-only pattern
@@ -141,7 +141,7 @@ type FoundSite = Readonly<{
   line: string;
 }>;
 
-/** A declared site: where it is, which of the six/one it is, and why. */
+/** A declared site: where it is, which of the seven/one it is, and why. */
 type InventoryEntry = Readonly<{
   /** Path relative to `packages/typegraph/src`. */
   file: string;
@@ -154,9 +154,11 @@ type InventoryEntry = Readonly<{
 }>;
 
 /**
- * The six `WITH RECURSIVE` emission sites, measured on this branch (§2 of
+ * The seven `WITH RECURSIVE` emission sites, measured on this branch (§2 of
  * the batch spec, reproduced from `grep -rn "WITH RECURSIVE" src
- * --include=*.ts`).
+ * --include=*.ts`) — site G (item D.2's acyclicity probe) added after that
+ * batch, and site H (the composition closure's exhaustive, set-semantics
+ * walk) in place of the hop-bounded directed builder it replaced.
  */
 const EMISSION_SITES: readonly InventoryEntry[] = [
   {
@@ -168,10 +170,17 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/recursive-cte.ts",
-    line: "return sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`;",
+    line: "return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;",
     site: "B",
     reason:
       "buildReachableCte compiles a fixed/variable-length traversal into a bounded reachable set.",
+  },
+  {
+    file: "store/recursive-cte.ts",
+    line: "return sql`WITH RECURSIVE reachable(id, kind) AS (${prepared.baseCase} UNION ${recursiveCase})`;",
+    site: "H",
+    reason:
+      "buildExhaustiveDirectedReachableCte compiles the composition closure subgraph({ composition: true }) reads (Ed-01's directed groups) as a SET-SEMANTICS walk: `UNION` over an (id, kind) frontier, bounded by its visited set with no hop ceiling, because a truncated prefix of a part tree is not an owned unit. Shares every row filter with the hop-bounded builders via prepareReachableFilters.",
   },
   {
     file: "identity/service-read.ts",
@@ -200,6 +209,13 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
     site: "F",
     reason:
       "loadIdentityWindowLedger reconstructs the identity component ledger across a mutation's window.",
+  },
+  {
+    file: "store/recursive-cte.ts",
+    line: "return sql`WITH RECURSIVE ${body}`;",
+    site: "G",
+    reason:
+      "buildEdgeAcyclicityProbe (item D.2) runs the exhaustive, set-semantics reachability walk an `acyclic: true` edge kind's write path, audit, and merge plan-time preview all probe; `body` is assembled beforehand by buildProbeBodyDirect (write path / audit: `ancestry` joins `typegraph_edges` directly, an index seek) or buildProbeBodyPlanned (the merge preview's `\"planned\"` seed form only: `ancestry` hops through a compound `candidates` CTE, the ONE seed form that still pays SQLite's full-relation materialization).",
   },
 ];
 
@@ -538,9 +554,9 @@ describe("recursion inventory ratchet", () => {
   it("finds a case-, whitespace-, and escape-sequence-variant phrase a same-case single-space match would miss", () => {
     // A same-case, exact-single-space `String.indexOf` (the defect this
     // test guards against) matches none of these four lines, so a new
-    // seventh emission site written in any of these shapes would be
+    // eighth emission site written in any of these shapes would be
     // invisible in BOTH ratchet directions: no `undeclared` row (the
-    // phrase never matches) and no `stale` row (the six declared sites are
+    // phrase never matches) and no `stale` row (the seven declared sites are
     // unaffected). The fourth shape — `\n` typed literally as two source
     // characters (backslash, then `n`), never a real line break — is the
     // escape-sequence bypass the checkpoint measured as still invisible
@@ -575,8 +591,9 @@ describe("recursion inventory ratchet", () => {
     // M-9, reproduced in miniature: the round-1 formulation counted FILES
     // holding the phrase with a comment-blind scan and compared that count
     // to 6. On this tree `grep -rl "WITH RECURSIVE" src --include=*.ts | wc
-    // -l` is 8 for exactly 6 real emission sites (EMISSION_SITES.length),
-    // because two files hold the phrase only in a doc comment. This
+    // -l` is 8 for exactly 7 real emission sites (EMISSION_SITES.length),
+    // because two files hold the phrase only in a doc comment (site G lives
+    // in `store/recursive-cte.ts`, already one of the eight). This
     // fixture reproduces the shape in miniature: at least four comment
     // lines a raw, line-oriented scan cannot distinguish from code, and
     // zero real sites once the parser strips comments out.

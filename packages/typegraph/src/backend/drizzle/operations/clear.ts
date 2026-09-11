@@ -16,8 +16,9 @@ export type ClearGraphStatement = Readonly<{
 /**
  * Builds DELETE FROM statements for all per-graph base tables filtered by
  * graph_id. Delete order respects implicit FK-like dependencies:
- * fulltext → recorded identity/edges/nodes → identity closure/assertions →
- * recorded_clock → uniques → edge_claims → edges → nodes → schema_versions.
+ * fulltext → recorded identity/edges/nodes → identity transition log/retention
+ * → identity closure/assertions → recorded_clock → uniques → edge_claims →
+ * edges → nodes → schema_versions.
  * The fulltext delete is omitted entirely when `fulltextStrategy` is
  * `undefined` — the table does not exist on a backend with no fulltext
  * strategy.
@@ -45,9 +46,9 @@ export function buildClearGraph(
     // contribution rebuild calls too — see `buildFulltextGraphDelete`. Omitted
     // entirely when no fulltext strategy is active: the table was never
     // created, so there is nothing to delete from.
-    ...(fulltextStrategy === undefined
-      ? []
-      : [{ query: buildFulltextGraphDelete(tables.fulltextTableName, graphId) }]),
+    ...(fulltextStrategy === undefined ?
+      []
+    : [{ query: buildFulltextGraphDelete(tables.fulltextTableName, graphId) }]),
     {
       query: sql`DELETE FROM ${tables.recordedIdentityAssertions} WHERE ${tables.recordedIdentityAssertions.graphId} = ${graphId}`,
       ignoreMissingTable: true,
@@ -67,6 +68,16 @@ export function buildClearGraph(
       query: sql`DELETE FROM ${tables.recordedClock} WHERE ${tables.recordedClock.graphId} = ${graphId}`,
       ignoreMissingTable: true,
       requiredTableName: getTableName(tables.recordedClock),
+    },
+    {
+      query: sql`DELETE FROM ${tables.identityTransitionRetention} WHERE ${tables.identityTransitionRetention.graphId} = ${graphId}`,
+      ignoreMissingTable: true,
+      requiredTableName: getTableName(tables.identityTransitionRetention),
+    },
+    {
+      query: sql`DELETE FROM ${tables.identityTransitions} WHERE ${tables.identityTransitions.graphId} = ${graphId}`,
+      ignoreMissingTable: true,
+      requiredTableName: getTableName(tables.identityTransitions),
     },
     {
       query: sql`DELETE FROM ${tables.identitySeparation} WHERE ${tables.identitySeparation.graphId} = ${graphId}`,

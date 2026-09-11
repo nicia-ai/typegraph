@@ -12,7 +12,7 @@ import type {
   AtomicEdgeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
 import type {
-  CountEdgesFromParams,
+  CountEdgesAtEndpointParams,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
   EdgeConvergenceMatch,
@@ -1377,21 +1377,24 @@ export function buildHardDeleteEdgesByNode(
 }
 
 /**
- * Builds a query to count edges from a source node.
+ * Builds a query to count edges at one endpoint (the source or the target).
  */
-export function buildCountEdgesFrom(
+export function buildCountEdgesAtEndpoint(
   tables: Tables,
-  params: CountEdgesFromParams,
+  params: CountEdgesAtEndpointParams,
 ): SQL {
   const { edges } = tables;
+  const kindColumn =
+    params.endpoint === "from" ? edges.fromKind : edges.toKind;
+  const idColumn = params.endpoint === "from" ? edges.fromId : edges.toId;
 
   if (params.activeOnly) {
     return sql`
       SELECT COUNT(*) as count FROM ${edges}
       WHERE ${edges.graphId} = ${params.graphId}
         AND ${edges.kind} = ${params.edgeKind}
-        AND ${edges.fromKind} = ${params.fromKind}
-        AND ${edges.fromId} = ${params.fromId}
+        AND ${kindColumn} = ${params.endpointKind}
+        AND ${idColumn} = ${params.endpointId}
         AND ${edges.deletedAt} IS NULL
         AND ${edges.validTo} IS NULL
     `;
@@ -1401,8 +1404,8 @@ export function buildCountEdgesFrom(
     SELECT COUNT(*) as count FROM ${edges}
     WHERE ${edges.graphId} = ${params.graphId}
       AND ${edges.kind} = ${params.edgeKind}
-      AND ${edges.fromKind} = ${params.fromKind}
-      AND ${edges.fromId} = ${params.fromId}
+      AND ${kindColumn} = ${params.endpointKind}
+      AND ${idColumn} = ${params.endpointId}
       AND ${edges.deletedAt} IS NULL
   `;
 }

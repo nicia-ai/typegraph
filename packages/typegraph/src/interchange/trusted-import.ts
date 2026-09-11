@@ -11,6 +11,8 @@ import { resolveGraphVectorSlots } from "../core/embedding";
 import { getSearchableFields } from "../core/searchable";
 import type { EdgeRegistration } from "../core/types";
 import { TrustedImportError } from "../errors";
+import { acyclicEdgeKinds } from "../store/acyclicity";
+import { edgeCardinalityAxisReferences } from "../store/claims/edge-claims";
 import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import { storeBackend, storeCaptureEnabled } from "../store/runtime-port";
 import type { Store } from "../store/store";
@@ -39,6 +41,29 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
       registration.matchIdentity,
       backend.capabilities,
       kind,
+    );
+  }
+
+  // Trusted import maintains no edge claim: `trustedImportGraphStream` writes
+  // through `session.insertEdges` beneath the claim path entirely, so a
+  // declared axis — source OR target — would be accepted here and written
+  // unfenced. One reason for both directions: the restriction is "this path
+  // maintains no claims", which is direction-blind.
+  const constrainedEdgeKinds = Object.entries(store.graph.edges)
+    .filter(
+      ([, registration]) =>
+        edgeCardinalityAxisReferences(registration).length > 0,
+    )
+    .map(([kind]) => kind);
+  if (constrainedEdgeKinds.length > 0) {
+    throw new TrustedImportError(
+      "Trusted import does not maintain edge cardinality claims.",
+      "cardinality_unsupported",
+      { graphId: store.graphId, edgeKinds: constrainedEdgeKinds },
+      {
+        suggestion:
+          'Use importGraph(), or declare the edge kind(s) unconstrained ("many" on both axes) and enforce the limit in application code.',
+      },
     );
   }
   if (storeCaptureEnabled(store)) {
@@ -77,6 +102,31 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
       "Trusted import does not maintain node uniqueness sidecars.",
       "uniqueness_unsupported",
       { graphId: store.graphId, nodeKinds: uniqueKinds },
+    );
+  }
+
+  // Composition edge kinds are excluded from the plain acyclicity check
+  // below and reported through their own reason: `acyclicEdgeKinds` folds
+  // item E's composition relation into its answer (D-10), and a graph whose
+  // ONLY reachability relation is composition needs a message naming the
+  // claim gap too, not just the reachability one.
+  const compositionKinds = new Set(store.registry.compositionEdgeKinds());
+  const standaloneAcyclicKinds = acyclicEdgeKinds(
+    store.graph,
+    store.registry,
+  ).filter((edgeKind) => !compositionKinds.has(edgeKind));
+  if (standaloneAcyclicKinds.length > 0) {
+    throw new TrustedImportError(
+      "Trusted import does not enforce edge acyclicity: it holds one transaction for the whole stream, validates nothing by contract, and has no per-row point to probe the relation at.",
+      "acyclicity_unsupported",
+      { graphId: store.graphId, edgeKinds: standaloneAcyclicKinds },
+    );
+  }
+  if (compositionKinds.size > 0) {
+    throw new TrustedImportError(
+      "Trusted import does not enforce composition (`partOf`/`hasPart`): it writes no composition claim row and does not check the acyclicity relation, so a graph loaded this way can carry a part with two live wholes, or a part/whole cycle. store.verifyConstraintFences() reports either afterward.",
+      "composition_unsupported",
+      { graphId: store.graphId, edgeKinds: [...compositionKinds] },
     );
   }
 
@@ -392,6 +442,16 @@ async function consumeTrustedChunks<G extends GraphDef>(
             "Use importGraphStream() for an export that carries identity truth.",
         );
       }
+      case "identity-transitions": {
+        // Same refusal as "identity" above, and unreachable in practice: the
+        // header check earlier in this loop already refuses a stream whose
+        // header declares `identity` at all, and archival export never emits
+        // this chunk type without one.
+        throw invalidStream(
+          "Trusted graph interchange import does not support identity transitions. " +
+            "Use importGraphStream() for an archival export that carries identity history.",
+        );
+      }
     }
   }
 
@@ -407,8 +467,8 @@ async function consumeTrustedChunks<G extends GraphDef>(
  * Atomically imports a header-first stream into a fresh, dedicated database.
  *
  * This is an intentionally trusted path. It checks stream ordering and kind
- * names, but it does not validate properties, references, cardinality, or
- * conflicts. The caller must guarantee those invariants. Use
+ * names, but it does not validate properties, references, cardinality,
+ * composition, or conflicts. The caller must guarantee those invariants. Use
  * {@link importGraphStream} for untrusted data.
  *
  * Trusted of the DATA, not of the connection: this holds ONE write transaction

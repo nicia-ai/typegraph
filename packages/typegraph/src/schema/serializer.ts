@@ -36,6 +36,7 @@ import {
   type MetaEdge,
   type OntologyRelation,
 } from "../ontology/types";
+import { compositionRelationFields } from "../registry/composition-relation";
 import { computeClosuresFromOntology } from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
@@ -509,6 +510,18 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
     ...(targetKindsBySource === undefined ? {} : { targetKindsBySource }),
     properties: serializeZodSchema(edge.schema),
     cardinality: registration.cardinality ?? "many",
+    // Omitted (rather than always written, like `cardinality`) when the
+    // registration leaves it undeclared or declares the default explicitly:
+    // a graph that never uses this option must serialize byte-identically,
+    // and hash byte-identically, to a document produced before this option
+    // existed — the deserializer's `.default("many")` (`src/schema/types.ts`)
+    // is what reads an absent key back as unconstrained.
+    ...((
+      registration.targetCardinality === undefined ||
+      registration.targetCardinality === "many"
+    ) ?
+      {}
+    : { targetCardinality: registration.targetCardinality }),
     endpointExistence: registration.endpointExistence ?? "notDeleted",
     ...(registration.matchIdentity === undefined ?
       {}
@@ -518,6 +531,10 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
           fields: [...registration.matchIdentity.fields],
         },
       }),
+    // Emitted only when true: `computeSchemaHash` hashes this document, so
+    // emitting `acyclic: false` on every edge would move the hash of every
+    // existing graph on next open (see `SerializedEdgeDef.acyclic`).
+    ...(registration.acyclic === true ? { acyclic: true } : {}),
     description: edge.description,
     ...(annotations === undefined ? {} : { annotations }),
   };
@@ -529,6 +546,11 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
 
 /**
  * Serializes the complete ontology.
+ *
+ * `metaEdges` is derived 1:1 from `relations` — see
+ * `SerializedOntology.metaEdges`'s docblock — so it is computed here purely
+ * for introspection and carries no information `classifyOntologyChanges`
+ * (`src/schema/ontology-change.ts`) needs; that module diffs `relations`.
  */
 function serializeOntology(
   relations: readonly OntologyRelation[],
@@ -570,11 +592,6 @@ function serializeOntology(
 function serializeMetaEdge(metaEdge: MetaEdge): SerializedMetaEdge {
   return {
     name: metaEdge.name,
-    transitive: metaEdge.properties.transitive,
-    symmetric: metaEdge.properties.symmetric,
-    reflexive: metaEdge.properties.reflexive,
-    inverse: metaEdge.properties.inverse,
-    inference: metaEdge.properties.inference,
     description: metaEdge.properties.description,
   };
 }
@@ -589,6 +606,7 @@ function serializeOntologyRelation(
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),
     to: getTypeName(relation.to),
+    ...compositionRelationFields(relation),
   };
 }
 
@@ -698,7 +716,16 @@ function serializeZodSchema(schema: z.ZodType): JsonSchema {
     const jsonSchema = z.toJSONSchema(schema);
     return jsonSchema as JsonSchema;
   } catch {
-    // Fallback for schemas that can't be converted
+    // Fallback for schemas that can't be converted (e.g. z.set(), z.map()).
+    // Every unconvertible construct collapses to this SAME `{ type: "object" }`
+    // projection, so two structurally unrelated schemas that both fail
+    // conversion become indistinguishable to any caller comparing
+    // projections — including src/registry/validate-structural-subsumption.ts
+    // (C13-R1-09), which otherwise treats identical projections as proof of
+    // structural subtyping. Fine for a best-effort introspection view; NOT
+    // sound as an equality oracle. A caller that needs to tell "genuinely
+    // identical" from "both unprojectable" apart cannot do so from this
+    // return value alone.
     return { type: "object" };
   }
 }

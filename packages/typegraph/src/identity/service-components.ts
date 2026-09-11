@@ -370,8 +370,30 @@ export function validateSnapshotIntegrity(
   }
 }
 
-type RawClosureRow = RawClosureClassRow &
+/** One materialized closure row: a member and the class it is labeled with. */
+type RawClosureMemberClassRow = RawClosureClassRow &
   Readonly<{ class_kind: string; class_id: string }>;
+
+/**
+ * The graph-wide read of the materialized closure. ONE owner for the
+ * verification path ({@link assertClosureMatchesComponents}) and the
+ * transition-diff snapshot (`snapshotIdentityClosureClasses`), so a column
+ * rename or an added closure column cannot leave one of them reading a stale
+ * projection while the other is updated.
+ */
+export async function readClosureRowsForGraph(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<readonly RawClosureMemberClassRow[]> {
+  return target.execute<RawClosureMemberClassRow>(
+    asCompiledRowsSql(sql`
+      SELECT member_kind, member_id, class_kind, class_id
+      FROM ${schema.identityClosureTable}
+      WHERE graph_id = ${graphId}
+    `),
+  );
+}
 
 export function closureMismatchError(
   graphId: string,
@@ -417,13 +439,7 @@ export async function assertClosureMatchesComponents(
     }
   }
 
-  const rows = await target.execute<RawClosureRow>(
-    asCompiledRowsSql(sql`
-      SELECT member_kind, member_id, class_kind, class_id
-      FROM ${schema.identityClosureTable}
-      WHERE graph_id = ${graphId}
-    `),
-  );
+  const rows = await readClosureRowsForGraph(target, schema, graphId);
   const seen = new Set<string>();
   for (const row of rows) {
     const member = { kind: row.member_kind, id: row.member_id };

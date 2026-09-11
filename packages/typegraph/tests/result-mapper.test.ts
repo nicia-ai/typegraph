@@ -22,7 +22,7 @@ describe("transformPathColumns", () => {
     startKinds: ["Person"],
     startAlias: "p",
     currentAlias: "p",
-    includeSubClasses: false,
+    startExpansion: "exact",
     traversals: [],
     predicates: [],
     projection: [],

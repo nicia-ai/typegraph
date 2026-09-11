@@ -80,7 +80,7 @@ import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { type Assert, type Equal } from "../../utils/type-assert";
 import {
-  claimEdgeCardinality,
+  claimEdgeCardinalities,
   claimEdgeCardinalityBatch,
 } from "../claims/edge-claims";
 import {
@@ -120,6 +120,8 @@ import {
   applyNodeSoftDelete,
   applyNodeUpdate,
   createNodeWriteContext,
+  deleteEdgesById,
+  type NodeDeleteMode,
   type NodeDeletePolicy,
   type NodeSetUpdateResult,
   type NodeSetUpdateWork,
@@ -361,13 +363,14 @@ type NodeResurrectWork = Readonly<{
 }>;
 
 /**
- * One edge insert: the row params and the cardinality claim the row owes.
+ * One edge insert: the row params and the cardinality claims the row owes.
  *
  * An edge write obliges no DERIVED data — no uniqueness entries, no fulltext, no
- * embeddings — but a constrained kind owes a claim, and the claim is what fences
- * the axis its declaration spans. It is absent for an unconstrained kind and for
- * a born-ended row whose cardinality does not count it, which is what
- * `edgeCardinalityClaim` decides; the caller states the decision and this
+ * embeddings — but a constrained kind owes a claim per declared axis, and each
+ * claim is what fences the axis its declaration spans. The list is empty when
+ * the kind reserves nothing — an unconstrained kind on both axes, or a
+ * born-ended row whose axis does not count it — which is what
+ * `edgeCardinalityClaims` decides; the caller states the decision and this
  * surface applies it at its PRE-INSERT placement.
  *
  * The update and delete work records live in `edge-write-pipeline.ts` instead,
@@ -377,7 +380,8 @@ type NodeResurrectWork = Readonly<{
  */
 export type EdgeInsertWork = Readonly<{
   params: InsertEdgeParams;
-  claim: ClaimEdgeCardinalityParams | undefined;
+  /** Every axis this row reserves, in claim order. Empty when it reserves none. */
+  claims: readonly ClaimEdgeCardinalityParams[];
 }>;
 
 /**
@@ -386,7 +390,7 @@ export type EdgeInsertWork = Readonly<{
 function edgeBatchClaims(
   work: readonly EdgeInsertWork[],
 ): readonly ClaimEdgeCardinalityParams[] {
-  return work.flatMap((item) => (item.claim === undefined ? [] : [item.claim]));
+  return work.flatMap((item) => item.claims);
 }
 
 export type NodeWriteSession = Readonly<{
@@ -413,8 +417,24 @@ export type NodeWriteSession = Readonly<{
     work: NodeDeleteWork,
     policy?: NodeDeletePolicy,
   ) => Promise<void>;
-  purgeNode: (work: NodeHardDeleteWork) => Promise<void>;
+  purgeNode: (
+    work: NodeHardDeleteWork,
+    policy?: NodeDeletePolicy,
+  ) => Promise<void>;
   reviveNode: (work: NodeResurrectWork) => Promise<NodeRow>;
+  /**
+   * Deletes a set of composition edges by id, in `mode` — the composition
+   * cascade's explicit cleanup of the edges it consumed
+   * (`node-operations.ts`'s `runCompositionCascade`), which every member's
+   * own delete-behavior enforcement was told to skip via
+   * `NodeDeletePolicy.consumedEdgeIds`. Row work has no direct edge-write
+   * member to call (only the session may write), so this is that write's
+   * one seam.
+   */
+  deleteCompositionEdges: (
+    edgeIds: readonly string[],
+    mode: NodeDeleteMode,
+  ) => Promise<void>;
 
   // ---- B1b: delegates to node-write-pipeline.ts's applyNodeSetUpdate
   reviseNodeSet: (
@@ -712,9 +732,13 @@ export function createWriteSession(
     retireNode: (work, policy) =>
       applyNodeSoftDelete(writeContext, work, target, policy),
 
-    purgeNode: (work) => applyNodeHardDelete(writeContext, work, target),
+    purgeNode: (work, policy) =>
+      applyNodeHardDelete(writeContext, work, target, policy),
 
     reviveNode: (work) => applyNodeResurrect(writeContext, work, target),
+
+    deleteCompositionEdges: (edgeIds, mode) =>
+      deleteEdgesById(writeContext, target, mode, edgeIds),
 
     reviseNodeSet: (work, fences) => {
       // The fences are applied for their REFUSAL, not for their contribution:
@@ -738,9 +762,7 @@ export function createWriteSession(
     // `compareClaimTargets`), so a batch and a peer batch take their row locks
     // in the same order.
     createEdge: async (work) => {
-      if (work.claim !== undefined) {
-        await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
-      }
+      await claimEdgeCardinalities(target, ctx.claimsVerdict(), work.claims);
       return edgeDispatch.one(work.params);
     },
 
@@ -749,18 +771,21 @@ export function createWriteSession(
         target.commands,
         command,
       );
+      // Membership, not exact-arity identity: a two-axis declaration's
+      // `unsupported` result still names only `"cardinalityClaim"` dimensions
+      // (repeated per unmet claim), and `.every` over that non-empty tuple
+      // recognizes it exactly as it recognized the one-axis case before this
+      // port ever fused more than one claim.
+      const claims = command.plan.cardinalityClaims ?? [];
       if (
         result.outcome === "unsupported" &&
-        result.dimensions.length === 1 &&
-        result.dimensions[0] === "cardinalityClaim" &&
+        result.dimensions.every(
+          (dimension) => dimension === "cardinalityClaim",
+        ) &&
         command.plan.schemaFence === undefined &&
-        command.plan.cardinalityClaim !== undefined
+        claims.length > 0
       ) {
-        await claimEdgeCardinality(
-          target,
-          ctx.claimsVerdict(),
-          command.plan.cardinalityClaim,
-        );
+        await claimEdgeCardinalities(target, ctx.claimsVerdict(), claims);
         const retryCommand: EdgeCreateCommand = {
           kind: "edge.create",
           plan: {
@@ -778,9 +803,7 @@ export function createWriteSession(
     },
 
     createEdgeNoReturn: async (work) => {
-      if (work.claim !== undefined) {
-        await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
-      }
+      await claimEdgeCardinalities(target, ctx.claimsVerdict(), work.claims);
       await runInsertNoReturn(edgeDispatch, work.params);
     },
 

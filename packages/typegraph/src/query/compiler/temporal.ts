@@ -129,6 +129,20 @@ export type TemporalFilterOptions = Readonly<{
 }>;
 
 /**
+ * The columns {@link compileTemporalFilter} references beyond
+ * `valid_from`/`valid_to`/`deleted_at` when `recordedAsOf` is set. THE one
+ * spelling of "which extra columns does a recorded-pinned temporal filter
+ * read" — a narrowed column projection (e.g. the recursive compiler's
+ * `<edgeAlias>_directed_edges` CTE) must build its column list against this
+ * constant (surfaced per-AST via `TemporalFilterPass.recordedColumns`)
+ * rather than re-deriving "is this read recorded-pinned" itself.
+ */
+export const RECORDED_TEMPORAL_COLUMNS = [
+  "recorded_from",
+  "recorded_to",
+] as const;
+
+/**
  * Compiles a temporal filter to SQL.
  *
  * This is the unified temporal filter function that handles all temporal modes

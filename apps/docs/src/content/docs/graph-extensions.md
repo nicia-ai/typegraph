@@ -304,11 +304,57 @@ Adding allowed pairs broadens an extension edge. Removing a pair tightens it,
 even if the overall source and target kind sets stay the same. Tightening
 currently requires the **entire edge kind** to be empty, not just the removed pair.
 
+A runtime-authored edge may declare `acyclic: true`, exactly like a
+compile-time one — its live relation becomes a DAG, enforced under the same
+per-graph write fence:
+
+```ts
+const proposal = defineGraphExtension({
+  edges: {
+    dependsOn: {
+      from: ["Task"],
+      to: ["Task"],
+      properties: {},
+      acyclic: true,
+    },
+  },
+});
+```
+
+It may **not** declare `cardinality` or `targetCardinality` — those stay
+compile-time-only, so a runtime-authored edge is always `many` on that axis.
+This is a deliberate asymmetry: `acyclic` needs no ownership slot and no
+sidecar to maintain, while cardinality's claim relation is not (yet) part of
+the runtime-authored surface.
+
 ### Ontology
 
 Pass `ontology: [{ metaEdge, from, to }, ...]` to declare ontology
 relations between kinds (subClassOf, partOf, etc.). The meta-edge name
 must match a meta-edge known to the merged graph.
+
+A `subClassOf` (or `equivalentTo`/`sameAs`) relation declared this way is
+checked against the same structural contract a compile-time declaration
+gets — the child's schema must extend the parent's — at `evolve()`, before
+any write. Because extension relations are authored as plain data (`{
+metaEdge: "subClassOf", from: "Child", to: "Parent" }`) rather than through
+the typed `subClassOf()` function, there is no compile-time check to catch
+the mismatch first; `evolve()` throws a `ConfigurationError` (the same codes
+`/ontology` documents) and no kind from the extension becomes reachable.
+This also covers **redeclaring** an existing kind through a later
+`evolve()`: the registry is rebuilt from the merged graph on every call, so
+a redeclaration that breaks a hierarchy it already participates in — as a
+parent, a child, or an equivalent — is re-checked and refused just as a
+first declaration would be.
+
+**A `subClassOf` declared through `evolve()` is invisible to the
+compile-time alias type.** `evolve()` returns `Store<G>` with the same
+compile-time `G` it was called on, so a base-graph kind that only becomes
+polymorphic through an extension's `subClassOf` still types `from(kind,
+alias)` as the narrow, exact kind — even though a row may come back as the
+extension's subclass at runtime. See [Query Source ▸ Subclass
+Expansion](/queries/source#subclass-expansion) for the `fromDynamic()` /
+`expansion: "exact"` workaround.
 
 ## `store.evolve(extension, options?)`
 

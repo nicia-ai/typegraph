@@ -113,6 +113,8 @@ const CLONE_TABLE_NAMES = {
   recordedIdentityAssertions: "clone_recorded_identity_assertions",
   identityClosure: "clone_identity_closure",
   identitySeparation: "clone_identity_separation",
+  identityTransitions: "clone_identity_transitions",
+  identityTransitionRetention: "clone_identity_transition_retention",
   uniques: "clone_node_uniques",
   edgeClaims: "clone_edge_claims",
   baseSchemaVersions: "clone_base_schema_versions",

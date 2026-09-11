@@ -61,7 +61,7 @@ const READ_MEMBERS = [
   "countNodesByKind",
   "getEdge",
   "getEdges",
-  "countEdgesFrom",
+  "countEdgesAtEndpoint",
   "countEdgesByKind",
   "edgeExistsBetween",
   "findEdgesConnectedTo",

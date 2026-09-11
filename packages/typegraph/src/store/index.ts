@@ -112,6 +112,7 @@ export type {
   AnyNode,
   SubgraphOptions,
   SubgraphResult,
+  SubgraphResultEdgeKinds,
   SubsetEdge,
   SubsetNode,
 } from "./subgraph";

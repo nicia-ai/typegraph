@@ -5,6 +5,7 @@
  * pure-unit budget.
  */
 export const PGLITE_TEST_FILES = [
+  "tests/atomic-edge-target-cardinality.test.ts",
   "tests/atomic-generated-edge-batch-pglite.test.ts",
   "tests/atomic-generated-node-batch-pglite.test.ts",
   "tests/atomic-mutation-program-pglite-routing.test.ts",
@@ -16,10 +17,12 @@ export const PGLITE_TEST_FILES = [
   "tests/caller-serialized-queue.test.ts",
   "tests/capability-bundle-dialect-honesty.test.ts",
   "tests/capability-declaration-validation.test.ts",
+  "tests/composition-cascade-pglite.test.ts",
   "tests/constraint-claim-inventory.test.ts",
   "tests/constraint-write-fence.test.ts",
   "tests/contribution-rebuild-lock.test.ts",
   "tests/durable-edge-match-identity.test.ts",
+  "tests/edge-acyclicity.test.ts",
   "tests/edge-convergence-command.test.ts",
   "tests/edge-match-identity-ddl.test.ts",
   "tests/engine-catalog-probes.test.ts",
@@ -40,6 +43,7 @@ export const PGLITE_TEST_FILES = [
   "tests/lock-fence-refusal.test.ts",
   "tests/materialize-trigram-extension.test.ts",
   "tests/node-claim-write-fusion.test.ts",
+  "tests/node-delete-policy-root-atomic-bypass-pglite.test.ts",
   "tests/node-fulltext-write-fusion.test.ts",
   "tests/node-vector-write-fusion.test.ts",
   "tests/optimistic-tier.test.ts",

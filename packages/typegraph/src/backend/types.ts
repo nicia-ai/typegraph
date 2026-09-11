@@ -5,7 +5,6 @@
  * SQL implementations (SQLite, PostgreSQL) behind a common interface.
  */
 import {
-  type Cardinality,
   type IndexEntity,
   type JsonScalar,
   type JsonValue,
@@ -26,6 +25,10 @@ import {
   type CompiledTemporaryStatementSql,
 } from "../query/sql-intent";
 import { type SerializedSchema } from "../schema/types";
+// Type-only: `store/claims/edge-claims.ts` value-imports several params
+// types from this file, but a type-only import is erased at runtime, so this
+// back-edge creates no value cycle.
+import { type EdgeCardinalityAxisRef } from "../store/claims/edge-claims";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 
 // ============================================================
@@ -636,6 +639,7 @@ export type GraphReadBackend = Pick<
   GraphBackend,
   | "dialect"
   | "getNode"
+  | "getNodes"
   | "getEdge"
   | "findNodesByKind"
   | "findEdgesByKind"
@@ -1131,7 +1135,14 @@ export type ManagedEdgeCreatePlan = Readonly<{
   entity: "edge";
   params: InsertEdgeParams;
   schemaFence?: SchemaWriteFenceParams;
-  cardinalityClaim?: ClaimEdgeCardinalityParams;
+  /**
+   * Every cardinality claim this create owes. A command port applies EVERY
+   * entry or returns `unsupported` with the `"cardinalityClaim"` dimension
+   * before executing any SQL — the bundled fused insert applies exactly one
+   * entry and refuses a two-axis plan to the portable path (see
+   * `executeEdgeManagedCreate`).
+   */
+  cardinalityClaims?: readonly ClaimEdgeCardinalityParams[];
 }>;
 
 /** A node create command accepted by the authoritative command port. */
@@ -2103,19 +2114,26 @@ export type InternalTransactionOptions = TransactionOptions &
 // ============================================================
 
 /**
- * The physical names of the four Operational Identity relations: the current
- * assertion ledger, its recorded-time twin, and the two DERIVED relations
- * (closure, separation) rebuilt from the ledger.
+ * The physical names of the six Operational Identity relations: the current
+ * assertion ledger, its recorded-time twin, the two DERIVED relations
+ * (closure, separation) rebuilt from the ledger, and the transition log's
+ * append-only annotation relation plus its retention watermark.
  *
  * Named once so the two ports that speak about them —
  * {@link GraphBackend.ensureIdentityTables} and
- * {@link GraphBackend.identityTableDdl} — cannot drift apart.
+ * {@link GraphBackend.identityTableDdl} — cannot drift apart. A backend
+ * that implements those ports directly (rather than through the bundled
+ * Drizzle profiles, which also self-heal these two relations through base
+ * schema adoption) is the sole provisioning path for the transition log on
+ * such a backend, so both fields are required here, not optional.
  */
 export type IdentityTableNames = Readonly<{
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
   identitySeparation: string;
+  identityTransitions: string;
+  identityTransitionRetention: string;
 }>;
 
 /**
@@ -2346,7 +2364,10 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly EdgeRow[]>;
 
   // === Edge Cardinality Operations ===
-  countEdgesFrom: (this: void, params: CountEdgesFromParams) => Promise<number>;
+  countEdgesAtEndpoint: (
+    this: void,
+    params: CountEdgesAtEndpointParams,
+  ) => Promise<number>;
   edgeExistsBetween: (
     this: void,
     params: EdgeExistsBetweenParams,
@@ -2516,7 +2537,7 @@ export type GraphBackend = Readonly<{
    *
    * Returns the contending ROWS, not the verdict: the axis a `uniques` row
    * belongs to is a fold over the graph's subclass component, and the key an
-   * edge's claim sits on is `EDGE_CARDINALITY_SPECS`' — both of which live
+   * edge's claim sits on is `edgeCardinalitySpec`'s — both of which live
    * above the backend, so a backend that decided either would be a second
    * spelling of a decision the fence already owns.
    *
@@ -3585,7 +3606,7 @@ export type EdgeEntityReadBackend = Pick<
   GraphBackend,
   | "getEdge"
   | "getEdges"
-  | "countEdgesFrom"
+  | "countEdgesAtEndpoint"
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
@@ -3820,6 +3841,15 @@ export type SchemaWriteTransactionBackend = TransactionBackend &
 export type SchemaCommitPreflightBackend = TransactionBackend &
   Readonly<{
     executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+    /**
+     * The read-only fence audit, when the preflight target can run it.
+     * Optional for the same reason `executeSchemaDdl` is: a custom
+     * backend's `commitSchemaVersionWithPreflight` may hand back a
+     * transaction that cannot. An ontology-tightening preflight that needs
+     * it refuses with `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` rather than
+     * skipping the check.
+     */
+    readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
   }>;
 
 /**
@@ -3863,7 +3893,7 @@ export function createTransactionReadBackend(
         getEdges: (graphId: string, ids: readonly string[]) =>
           getEdges(graphId, ids),
       }),
-    countEdgesFrom: (params) => backend.countEdgesFrom(params),
+    countEdgesAtEndpoint: (params) => backend.countEdgesAtEndpoint(params),
     edgeExistsBetween: (params) => backend.edgeExistsBetween(params),
     findEdgesConnectedTo: (params) => backend.findEdgesConnectedTo(params),
     findNodesByKind: (params) => backend.findNodesByKind(params),
@@ -4024,34 +4054,53 @@ export type HardDeleteUniquesByConcreteKindParams = Readonly<{
 }>;
 
 /**
+ * Present only on a composition claim: the reserved relation-wide axis
+ * (item E, `COMPOSITION_RELATION_NAME`), and the ORIENTED realizing edge
+ * kinds whose live rows can hold it — every edge kind the graph's
+ * `partOf`/`hasPart` declarations resolve to, tagged with which endpoint of
+ * that kind carries the part. Absent means the ordinary per-edge-kind
+ * cardinality claim.
+ *
+ * The two arms this carries (`partSide: "from"` vs `"to"`) are what let
+ * {@link file://./drizzle/operations/edge-claims.ts claimHolderTerms} render
+ * the "does a live edge already hold this part" predicate as a cross-kind,
+ * oriented OR — a plain `kind IN (...)` cannot express which endpoint of each
+ * kind is the part.
+ */
+export type CompositionClaimScope = Readonly<{
+  kind: "composition";
+  holders: readonly Readonly<{ edgeKind: string; partSide: "from" | "to" }>[];
+}>;
+
+/**
  * One edge cardinality claim, named by the components its axis, its key and its
  * holder-liveness predicate are all built from.
  *
- * The components are passed RAW rather than pre-rendered: `EDGE_CARDINALITY_SPECS`
- * (`store/claims/edge-claims.ts`) is the one table that decides which endpoints
- * the key covers and what a holder must still be, and both the TypeScript probe
- * and the SQL builder read it. A caller that rendered the axis and key itself
- * would be a second spelling of that decision.
+ * The components are passed RAW rather than pre-rendered: `edgeCardinalitySpec`
+ * (`store/claims/edge-claims.ts`) is the one function that decides which
+ * endpoints the key covers and what a holder must still be, and both the
+ * TypeScript probe and the SQL builder read it. A caller that rendered the
+ * axis and key itself would be a second spelling of that decision.
  */
-export type ClaimEdgeCardinalityParams = Readonly<{
-  graphId: string;
-  /** The declared cardinality; `many` declares nothing and never claims. */
-  cardinality: Exclude<Cardinality, "many">;
-  edgeKind: string;
-  /** The edge that will hold the axis if this claim lands. */
-  edgeId: string;
-  fromKind: string;
-  fromId: string;
-  toKind: string;
-  toId: string;
-}>;
+export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef &
+  Readonly<{
+    graphId: string;
+    edgeKind: string;
+    /** The edge that will hold the axis if this claim lands. */
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    scope?: CompositionClaimScope;
+  }>;
 
 /**
  * What a claim statement decided.
  *
  * `refused` carries the incumbent so the caller can say which edge holds the
- * axis; the typed refusal itself is the store's, built from the same
- * `checkCardinality` / `checkUniqueEdge` owners the probe uses, so a caller
+ * axis; the typed refusal itself is the store's, built from
+ * `edgeCardinalityViolation`, the same owner the probe uses, so a caller
  * cannot tell which layer refused.
  */
 export type EdgeClaimOutcome =
@@ -4065,11 +4114,18 @@ export type PurgeEdgeClaimsParams = Readonly<{
 }>;
 
 /** One edge kind's declared cardinality, as the fence audit reads it. */
-export type EdgeCardinalityDeclaration = Readonly<{
-  edgeKind: string;
-  /** `many` declares nothing, so it is unrepresentable here. */
-  cardinality: Exclude<Cardinality, "many">;
-}>;
+export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef &
+  Readonly<{
+    edgeKind: string;
+    /**
+     * Present when this edge kind's declared axis is a composition axis —
+     * see {@link CompositionClaimScope}. The fence-audit reader groups and
+     * queries a composition declaration by its two oriented arms rather than
+     * by exact-kind equality, because R4's axis is relation-wide: two
+     * different realizing edge kinds contend for the SAME row.
+     */
+    scope?: CompositionClaimScope;
+  }>;
 
 /**
  * What a constraint-fence audit asks the database about: the declarations the
@@ -4090,6 +4146,31 @@ export type ReadConstraintFenceViolationsParams = Readonly<{
   disjointKindPairs: readonly (readonly [string, string])[];
   /** Every edge kind declaring a cardinality other than `many`. */
   edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+  /**
+   * Edge kinds whose live rows must still sit on a declared endpoint pair.
+   * Optional (and, when present, possibly empty) so a params object built
+   * before this family existed keeps compiling: an absent value means the
+   * caller does not ask for the family, and `readConstraintFenceViolations`
+   * must then omit `misassignedEdgeEndpointRows` rather than reporting a
+   * clean (and therefore reassuring) empty result for it.
+   */
+  edgeEndpointAllowances?: readonly EdgeEndpointAllowance[];
+}>;
+
+/** Every concrete `(fromKind, toKind)` pair an edge kind's declaration still admits. */
+export type EdgeEndpointAllowance = Readonly<{
+  edgeKind: string;
+  allowedPairs: readonly (readonly [string, string])[];
+}>;
+
+/** One live edge whose endpoints no declared pair admits. */
+export type MisassignedEdgeEndpointRow = Readonly<{
+  edgeKind: string;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
 }>;
 
 /**
@@ -4109,16 +4190,31 @@ export type ContendedUniqueRow = Readonly<{
  * One live edge that shares its declared cardinality's population with at least
  * one other live edge. The endpoints are returned whole so the caller can name
  * the claim key through the one builder that renders it.
+ *
+ * `scope` names which declaration's query produced this row — the ordinary
+ * per-edge-kind axis (`undefined`) or the reserved, relation-wide composition
+ * axis (present) — exactly as {@link EdgeCardinalityDeclaration.scope} names
+ * it for the declaration itself. The reader must never re-derive this from
+ * the row's own (possibly dirty) endpoints: which query found the row already
+ * says which axis it contends on.
+ *
+ * Required-but-nullable, not optional: a custom `readConstraintFenceViolationRows`
+ * implementation that omits the field would compile with `scope` silently
+ * `undefined` on every row, misclassifying every genuine composition row as
+ * an ordinary one — the exact drift this field exists to prevent. Spelling
+ * it `| undefined` forces a backend author to state the fact explicitly,
+ * even when the answer is "never composition" (`undefined` for every row).
  */
-export type ContendedEdgeRow = Readonly<{
-  edgeKind: string;
-  cardinality: Exclude<Cardinality, "many">;
-  edgeId: string;
-  fromKind: string;
-  fromId: string;
-  toKind: string;
-  toId: string;
-}>;
+export type ContendedEdgeRow = EdgeCardinalityAxisRef &
+  Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    scope: CompositionClaimScope | undefined;
+  }>;
 
 /** One node id live under BOTH kinds of a declared disjoint pair. */
 export type DisjointOverlapRow = Readonly<{
@@ -4131,6 +4227,12 @@ export type ConstraintFenceViolationRows = Readonly<{
   contendedUniqueRows: readonly ContendedUniqueRow[];
   contendedEdgeRows: readonly ContendedEdgeRow[];
   disjointOverlaps: readonly DisjointOverlapRow[];
+  /**
+   * Present whenever `edgeEndpointAllowances` was asked for (defined on the
+   * params, even if empty). A backend that cannot answer the family omits
+   * it, and the caller refuses rather than reporting a clean result.
+   */
+  misassignedEdgeEndpointRows?: readonly MisassignedEdgeEndpointRow[];
 }>;
 
 /**
@@ -4253,13 +4355,28 @@ export type SetActiveVersionParams = Readonly<{
 }>;
 
 /**
- * Parameters for counting edges from a source node.
+ * Parameters for counting edges at one endpoint.
+ *
+ * One member and one statement answer both the source-side and target-side
+ * count rather than a mirrored `countEdgesTo` — two members with two SQL
+ * builders, two cache keys and two liveness spellings that would drift.
+ * `endpoint` selects which column pair (`fromKind`/`fromId` or
+ * `toKind`/`toId`) the predicate reads.
  */
-export type CountEdgesFromParams = Readonly<{
+export type CountEdgesAtEndpointParams = Readonly<{
   graphId: string;
   edgeKind: string;
-  fromKind: string;
-  fromId: string;
+  /** Which endpoint column pair the predicate reads. */
+  endpoint: "from" | "to";
+  /**
+   * Deliberately not `kind` / `id`: those names, on a shape this narrow,
+   * would structurally satisfy {@link DeleteEdgeParams} /
+   * {@link HardDeleteEdgeParams} (`{graphId, id, kind?}`) and silently
+   * conscript this READ into `write-surface.ts`'s derived graph-entity WRITE
+   * surface.
+   */
+  endpointKind: string;
+  endpointId: string;
   /** If true, only count edges where valid_to IS NULL */
   activeOnly?: boolean;
 }>;

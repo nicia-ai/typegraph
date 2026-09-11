@@ -405,6 +405,261 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   `BulkOperationHookContext`. Gate: every added symbol at every moved
 //   entrypoint is one of those eight names, no entrypoint's debt decreased,
 //   and no other entrypoint moved.
+//
+// Ontology change classification batch (roadmap §3.A, item A): the fourth
+// constraint-fence-audit family (`edgeEndpointAssignability`) adds
+// `EdgeEndpointAllowance` and `MisassignedEdgeEndpointRow` to
+// `src/backend/types.ts`'s `ReadConstraintFenceViolationsParams` /
+// `ConstraintFenceViolationRows`, and the new `MigrationErrorDetails`
+// `"ontology-tightening-violated"` member carries `changes: readonly
+// OntologyChange[]` (whose own `probes?: readonly OntologyDataProbe[]` names
+// the new `OntologyDataProbe` union and its `UniquenessComponentProbeGroup`
+// member). `OntologyChange` itself was ALREADY forgotten-export debt
+// everywhere it renders (pre-existing, via `SchemaDiff.ontology`) and so is
+// NOT part of this batch's delta — only the four truly new names are.
+// Measured, not assumed:
+// - `./schema` (271→273, +2) and the six `./adapters/drizzle/*` sub-entrypoints
+//   plus `./adapters/drizzle/engine` (each +2: `./adapters/drizzle/sqlite`
+//   247→249, `./adapters/drizzle/postgres` 246→248,
+//   `./adapters/drizzle/postgres/pglite` 250→252,
+//   `./adapters/drizzle/sqlite/local` 250→252,
+//   `./adapters/drizzle/sqlite/libsql` 250→252, `./adapters/drizzle/engine`
+//   320→322) gain only `EdgeEndpointAllowance` and `MisassignedEdgeEndpointRow`:
+//   `./schema` exports `OntologyChange` / `OntologyDataProbe` /
+//   `UniquenessComponentProbeGroup` directly (`classifyOntologyChanges`,
+//   `ontologyTighteningProbes`), so nothing else the new
+//   `MigrationErrorDetails` member or the fourth audit family reaches needs a
+//   forgotten name there or at the backend-adapter entrypoints, which never
+//   name `OntologyChange` at all.
+// - The six `Store`-bearing entrypoints that do not export
+//   `classifyOntologyChanges` (`./interchange` 709→713, `./profiler`
+//   711→715, `./graph-merge` 726→730, `./provenance` 717→721, `./sqlite/local`
+//   706→710, `./postgres/pglite` 706→710) each gain all four:
+//   `EdgeEndpointAllowance`, `MisassignedEdgeEndpointRow`, `OntologyDataProbe`,
+//   and `UniquenessComponentProbeGroup` (+4 apiece). `./backend`,
+//   `./adapters/drizzle/indexes`, `./core`, `./graph-extension`, and
+//   `./indexes` are unaffected: `./backend` exports `EdgeEndpointAllowance`
+//   and `MisassignedEdgeEndpointRow` directly, and the other four never reach
+//   `MigrationErrorDetails`, `ReadConstraintFenceViolationsParams`, or
+//   `ConstraintFenceViolationRows` at all.
+// - `.` (the package root) is the one Store-bearing entrypoint that does NOT
+//   gain any of the four: `src/index.ts` exports `EdgeEndpointAllowance` and
+//   `MisassignedEdgeEndpointRow` directly (alongside `ConstraintFenceViolation`)
+//   and `OntologyDataProbe` / `UniquenessComponentProbeGroup` directly
+//   (alongside the schema-reads block), so a consumer of
+//   `"@nicia-ai/typegraph"` alone can name every field of a narrowed
+//   `ConstraintFenceViolation` or `MigrationErrorDetails` without a subpath
+//   import. IN THIS BATCH's OWN commit, its debt therefore stayed at the
+//   pre-batch baseline (388), not 388→392 — item D.2 below moves `.` on top
+//   of that baseline instead. Gate (item A's own commit): every added symbol
+//   at every OTHER moved entrypoint is one of the four names above (never
+//   `OntologyChange` itself, which is pre-existing debt everywhere including
+//   `.`), `.` is the one entrypoint this batch leaves unchanged, no OTHER
+//   entrypoint's debt decreased, and exactly 13 entrypoints moved in this
+//   commit (a later batch, item D.2, moves more — see below).
+//
+// Edge acyclicity batch (roadmap §3.D.2, item D.2): the store's
+// `assertEdgeRelationsAcyclic` / `readEdgeAcyclicityViolations` add a fifth
+// `ConstraintFenceViolation` member (`src/store/claims/verify.ts`),
+// `EdgeAcyclicityViolation` (`src/store/acyclicity.ts`) — internal, exported
+// by name at NO entrypoint, unlike item A's `EdgeEndpointAllowance` /
+// `MisassignedEdgeEndpointRow`. A consumer narrowing `ConstraintFenceViolation`
+// to `{ family: "edgeAcyclicity" }` can therefore never import its shape by
+// name from any subpath, including `.` itself. Measured, not assumed: every
+// one of item A's SEVEN `ConstraintFenceViolation`-reaching entrypoints gains
+// exactly this one name, +1 apiece, on top of item A's own baseline —
+// `.` (388→389), `./graph-merge` (730→731), `./interchange` (713→714),
+// `./postgres/pglite` (710→711), `./profiler` (715→716), `./provenance`
+// (721→722), and `./sqlite/local` (710→711). No other entrypoint moves:
+// `./schema`, the six `./adapters/drizzle/*` sub-entrypoints, `./backend`,
+// `./core`, `./graph-extension`, `./adapters/drizzle/indexes`, and
+// `./indexes` never reach `ConstraintFenceViolation` at all. Gate: every
+// moved entrypoint gains exactly one name (`EdgeAcyclicityViolation`), `.`
+// is no longer exempt the way it was in item A (a batch CAN move it — the
+// exemption was about item A's four names specifically, not a standing
+// invariant), no entrypoint's debt decreased, and exactly 7 entrypoints
+// moved in THIS commit.
+//
+// Target-side edge cardinality (issue #610): every entrypoint that reaches
+// `GraphBackend`, `ManagedEdgeCreatePlan`, `CardinalityErrorDetails`,
+// `MigrationErrorDetails`, or the serialized/introspected edge shapes picks
+// up `EdgeCardinalityAxisRef`, `EdgeCardinalityDirection`,
+// `ConstrainedCardinality`, `ConstrainedTargetCardinality`, and/or
+// `CountEdgesAtEndpointParams` as forgotten exports (the renamed
+// `countEdgesFrom` → `countEdgesAtEndpoint` member and its widened claim/audit
+// param types). `./core`, `./indexes` and `./adapters/drizzle/indexes` reach
+// none of those shapes and are unaffected.
+//
+// D.1 review fix (finding D1-R1-05): `.` (the package root) now exports
+// `EdgeCardinalityAxisRef` and `EdgeCardinalityDirection` directly — the two
+// types `EdgeCardinalityDeclaration` (already public from `.`) and
+// `CardinalityErrorDetails.direction` (already public from `.`) are built
+// from — so a consumer of `"@nicia-ai/typegraph"` alone can name either
+// field's type without a subpath import. `.`'s debt therefore DROPS 391→389
+// (two names move from forgotten to real exports); every OTHER entrypoint is
+// unaffected, since none of them re-exports either name and both remain
+// forgotten there exactly as the paragraph above describes.
+//
+// Transaction-scoped policy delete (EC1-R1-01 fix): `TransactionRuntime` and
+// `StoreRuntime` both gain a `deleteNodeWithPolicy` member typed over
+// `NodeDeletePolicy` (`store/operations/node-write-pipeline.ts`) so merge
+// apply's node delete can bind to the SAME transaction's buffered hook
+// runner and attempt instead of a freshly-built Store-scoped context. This
+// is exactly the B8 `[STORE_RUNTIME]`-reachable set (`.`, `./graph-merge`,
+// `./interchange`, `./profiler`, `./provenance`, `./sqlite/local`,
+// `./postgres/pglite`), each +1 for `NodeDeletePolicy` on top of the D.1 baseline: `.` 389→390,
+// `./graph-merge` 734→735, `./interchange` 717→718, `./postgres/pglite`
+// 714→715, `./profiler` 719→720, `./provenance` 725→726, `./sqlite/local`
+// 714→715. No other entrypoint renders `TransactionRuntime`/`StoreRuntime`,
+// so no other entrypoint moved.
+//
+// Composition relation (partOf/hasPart via/partSide, issue plan-E-a): every
+// entrypoint that reaches `KindRegistry`, `ExtensionOntologyRelation`, or the
+// registry closures picks up `CompositionPartSide` (a `@public` named export)
+// and, where the entrypoint also surfaces `RegistryClosures` internals,
+// `CompositionPair` / `CompositionRelation` as forgotten exports. `./indexes`
+// and `./adapters/drizzle/indexes` never reach the registry and are
+// unaffected.
+//
+// Typed subsumption batch (C.1/C.2/Q3/C.3): measured, not assumed — every
+// added name below was confirmed against a merge-base build run through this
+// same script (a temporary unconditional dump of each entrypoint's forgotten-
+// export set, diffed line by line against this batch's set, then reverted).
+//
+// `.` gains exactly the 13 new declarations this batch introduces, all
+// reachable only through `subClassOf`/`equivalentTo`/`sameAs`'s new generic
+// signatures, none of them exported directly at the root: `TypedOntologyRelation`,
+// `SubClassOfCheck`, `EquivalentToCheck`, `IncompatibleKeys`, `LiteralKeysOf`,
+// `StructuralSubtypeMismatch`, `META_EDGE_SUB_CLASS_OF`,
+// `META_EDGE_EQUIVALENT_TO`, `META_EDGE_SAME_AS`, `PolymorphicNodeType`,
+// `AliasExpansionAxis`, `AliasNodeType`, `SubsumptionAffected` (388 → 401).
+//
+// The six Store-bearing entrypoints that render `QueryBuilder`/`Store`
+// without naming the ontology relation functions themselves (`./interchange`,
+// `./profiler`, `./graph-merge`, `./provenance`, `./sqlite/local`,
+// `./postgres/pglite`) each gain only the four names reachable through the
+// widened `from`/`to`/`fromDynamic`/`toDynamic` overloads and `QueryStart`'s
+// new `expansion` field — `AliasExpansionAxis`, `AliasNodeType`,
+// `PolymorphicNodeType`, `SubsumptionAffected` (+4 apiece) — never the
+// `subClassOf`/`equivalentTo`/`sameAs`-only names above, since none of these
+// six re-exports those functions. No other entrypoint moves: `./backend`,
+// `./core`, `./schema`, `./graph-extension`, `./indexes`, and the five
+// `./adapters/drizzle/*` entrypoints render neither the ontology relation
+// functions nor a `QueryBuilder`, so none of this batch's new vocabulary
+// becomes reachable there. `./schema` gains `isTypeLevelSubtype` and
+// `projectTypeVisible` as DIRECT exports (visible in the api report diff, not
+// this ledger), so its forgotten-export debt is unaffected.
+//
+// C13-R2-01 follow-up: `SubsumptionAffected` gained a new private helper,
+// `OntologyTypeErased` (whether `G["ontology"]` has lost its `const`-inferred
+// tuple shape — see its docblock in `src/query/builder/types.ts`), reachable
+// through the exact same seven entrypoints as `SubsumptionAffected` itself
+// and no others, for the same reason: `.` (+1: 401 → 402) and the six
+// Store-bearing entrypoints above (+1 apiece: `./interchange` 717 → 718,
+// `./profiler` 719 → 720, `./graph-merge` 734 → 735, `./provenance`
+// 725 → 726, `./sqlite/local` 714 → 715, `./postgres/pglite` 714 → 715).
+//
+// Identity transition log batch: `StoreRuntime.identityContext()` (added
+// earlier in this feature, alongside the transition log's relations and
+// `IdentityTableNames`/`SqlTableNames` gaining `identityTransitions` /
+// `identityTransitionRetention`) was never reconciled against this ledger —
+// `pnpm api-report:update` had not been run since. It returns
+// `IdentityServiceContext<G>`, an internal (non-exported) type that itself
+// names `PlainNodeRef`; neither is exported directly anywhere, including the
+// root. Both become newly reachable, and so newly forgotten-exported, at
+// every entrypoint whose full `StoreRuntime` member set renders: `.`
+// (388→390), `./interchange` (709→711), `./profiler` (711→713),
+// `./graph-merge` (726→728), `./provenance` (717→719), `./sqlite/local`
+// (706→708), `./postgres/pglite` (706→708) — +2 apiece, `IdentityServiceContext`
+// and `PlainNodeRef` exactly. The `identityTransitions`/`identityTransitionRetention`
+// string fields introduce no new symbol names, so they move no entrypoint's
+// debt on their own. Gate: every moved entrypoint's delta is exactly +2,
+// both added names are `IdentityServiceContext`/`PlainNodeRef`, and no other
+// entrypoint moved.
+//
+// This is internal-convenience debt, not a user-facing requirement (G1R3-05):
+// `identityContext()`'s two consumers, replay and prune, are plain functions
+// over `IdentityServiceContext<G>`. The release batch below evaluates, and
+// declines, both ways of retiring these seven +2 entries — see that batch's
+// own comment for the reasoning; this one stays permanent, not staged.
+//
+// `ensureSchema`'s `historyEnabled` extra moved off the public
+// `SchemaManagerOptions` (G1R3-04) onto an unexported `EnsureSchemaInternalOptions`
+// that only `ensureSchemaInternal` (imported directly by `store.ts`, never
+// re-exported) accepts, so it renders at no entrypoint at all — no ledger
+// entry to update for that change.
+// `IdentityDecisionProvenance` (+1 on `./interchange`, `./postgres/pglite`,
+// `./profiler`, `./provenance` and `./sqlite/local`): the graph-merge identity
+// apply threads the governing merge decision through
+// `StoreRuntime.applyIdentityMergeAtTarget`, so the runtime port's declared
+// parameter type renders at every entrypoint that projects `StoreRuntime`.
+// Naming the type on the port is the point — a structurally-inlined copy of the
+// decision shape would be a second spelling of "what a governing decision is".
+// It is exported from the package barrel and from `src/graph-merge/index.ts`,
+// which is what keeps `.` and `./graph-merge` off this list; the five above
+// each carry their own narrow barrel that has no business re-exporting an
+// identity type, so their entry is the honest cost of naming it on the port.
+//
+// `./graph-merge` nets DOWN: the identity reconciliation surface
+// (`IdentityReconciliationOptions`, the conflict/decision types, the
+// staged-assertion shapes a policy callback receives, the pairing scope) is
+// exported deliberately from `src/graph-merge/index.ts` rather than left as
+// debt, which retires more forgotten exports than the port adds.
+//
+// Ruling (2026-09-09): the five `IdentityDecisionProvenance` entries above
+// stay PERMANENT debt, not retired. The only retirement this ledger's own
+// discipline allows is re-exporting the type from each of those five narrow
+// barrels — `./interchange`, `./postgres/pglite`, `./profiler`,
+// `./provenance`, `./sqlite/local` — purely to move a count, which is
+// exactly the "export machinery invented to avoid debt" this file's header
+// forbids and the identical `IdentityServiceContext` / `PlainNodeRef` ruling
+// two comments below already declined for the same reason. None of those
+// five barrels has a type-surface reason of its own to name a merge
+// decision's shape.
+//
+// Release batch, publishing replay and archival restore (this had not been
+// run since the `identityContext()` batch above landed either, so `.`'s
+// baseline already carried that batch's `IdentityServiceContext` /
+// `PlainNodeRef`, unmentioned by name below because this batch changes
+// neither count on `.`):
+//
+// `IdentityFacade` gains `replay` / `transitionsOf`
+// (`IdentityReplay`, `IdentityReplayOptions`, `IdentityReplayStep`,
+// `IdentityTransition`, `IdentityTransitionCause` in their signatures, all
+// exported deliberately from the package barrel), and
+// `StoreRuntime` gains the archival-restore port members
+// `readIdentityTransitionPageAtTarget` / `importIdentityTransitionsAtTarget`
+// (`IdentityTransitionCursor` / `IdentityTransitionTransfer`, internal
+// wire-transfer shapes owned by `transition-log.ts`, exported nowhere).
+// That is seven names, and every one of them renders at the six
+// Store-bearing entrypoints exactly as `IdentityDecisionProvenance` already
+// does two comments up — `./interchange`, `./profiler`, `./graph-merge`,
+// `./provenance`, `./sqlite/local`, `./postgres/pglite`, +7 apiece — because
+// none of those narrow barrels re-exports the five deliberately-public
+// names, the same "has no business re-exporting an identity type" reasoning
+// that already applies to `IdentityDecisionProvenance` there.
+//
+// `.` moves only +2: the five deliberately-exported names are exported AT
+// `.` itself, so they are not forgotten there — only the two never-exported
+// transfer types (`IdentityTransitionCursor`, `IdentityTransitionTransfer`)
+// newly render, through the same `StoreRuntime` reachability
+// `IdentityServiceContext` / `PlainNodeRef` already established.
+//
+// Narrowing `identityContext()`'s declared return (the retirement path this
+// file's own comment above named as "expected") was evaluated and NOT
+// taken: `identityContext()`'s sole consumer, `pruneIdentityTransitionsForContext`,
+// hands the context straight to `runIdentityMutation` — the identity
+// module's central mutation runner, called from every write site — so
+// narrowing the return would cascade into re-typing `runIdentityMutation`
+// across the whole module, exactly the kind of internal-semantics change
+// this release is scoped not to make. Exporting `IdentityServiceContext` /
+// `PlainNodeRef` publicly (this file's other named option) was also
+// declined: `pruneIdentityTransitions`'s own public signature (`store:
+// Store<G>`, an options bag) never mentions either type, so exporting two
+// backend-shaped internal types would add public surface with no caller who
+// needs it, purely to move a ledger number. That debt stays as documented,
+// unretired.
+//
 // TransactionBackend gaining LineageBackend batch. `TransactionBackend`
 // gained `LineageBackend` (a `Pick<GraphBackend, "lineage">`, mirroring the
 // pre-existing `CatalogBackend`) so `tx.lineage` is type-accessible on a
@@ -498,85 +753,218 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // new top-level type beyond the two already-public seam types
 // (`EngineRecordedTimeMembers`/`EngineRecordedRevision`, added in the prior
 // commit) referencing `RecordedInstantParts`'s new shape indirectly.
+//
+// Typed ontology relations and the one expansion option batch. Two source
+// changes move this ledger, and both move it for the same mechanical reason:
+// a type a PUBLIC signature now names, that no entrypoint exports.
+//
+// `.` moves +11 (424 → 435), from twelve newly rendered declarations:
+//  - the eight meta-edge name constants the newly typed factories name in
+//    their return types (`META_EDGE_BROADER`, `META_EDGE_DISJOINT_WITH`,
+//    `META_EDGE_HAS_PART`, `META_EDGE_IMPLIES`, `META_EDGE_INVERSE_OF`,
+//    `META_EDGE_NARROWER`, `META_EDGE_PART_OF`, `META_EDGE_RELATED_TO`).
+//    `broader`/`narrower`/`relatedTo`/`disjointWith`/`partOf`/`hasPart`/
+//    `inverseOf`/`implies` each return `TypedOntologyRelation<typeof
+//    META_EDGE_X, …>` now instead of a bare `OntologyRelation`, which is
+//    exactly how `META_EDGE_EQUIVALENT_TO` and `META_EDGE_SUB_CLASS_OF`
+//    became debt here when `equivalentTo`/`subClassOf` were typed — same
+//    category, same accepted cost, eight more of it.
+//  - `BareOntologyRelation` (the conservative-widening arm of
+//    `SubsumptionAffected`) and `DefaultAliasExpansionAxis` /
+//    `SearchExpansionAxis` (the store-default and search-facade spellings of
+//    the one `expansion` option), each named by a public type —
+//    `CreateQueryBuilderOptions`/`BaseStoreOptions` and
+//    `SearchScopeOptions` respectively. `AliasExpansionAxis` was already
+//    debt here for the same reason.
+// `SubgraphResultEdgeKinds` is the twelfth declaration and is NOT debt at
+// `.`: the root barrel exports it deliberately (`src/index.ts`), because a
+// caller that stores a `subgraph({ composition })` result needs to be able
+// to name that result's edge-key type.
+//
+// The six entrypoints that mirror `.`'s Store surface through a narrow
+// barrel (`./graph-merge`, `./interchange`, `./postgres/pglite`,
+// `./profiler`, `./provenance`, `./sqlite/local`) move +4 apiece, and by the
+// same four names every time: `BareOntologyRelation`,
+// `DefaultAliasExpansionAxis`, `SearchExpansionAxis` and
+// `SubgraphResultEdgeKinds` — the fourth because none of those barrels
+// re-exports it, the same "has no business re-exporting" reasoning the
+// `IdentityDecisionProvenance` ruling above already applies. They do NOT
+// move for the eight meta-edge constants: the ontology factories are
+// exported from the root barrel alone, so no narrow barrel renders them.
+//
+// Gate: exactly seven entrypoints move; `.` by +11 with the twelve names
+// above (eleven of them forgotten); the six narrow barrels by exactly +4
+// with those four names; no other entrypoint moves, and no backend-adapter
+// entrypoint moves at all (none of them renders `QueryBuilder`,
+// `BaseStoreOptions` or `SubgraphOptions`).
+//
+// Expansion-forwarding and projection-key review batch. The SAME seven
+// entrypoints move again, +4 apiece (`.` 435 → 439; `./graph-merge` 778 →
+// 782; `./interchange` 763 → 767; `./postgres/pglite` and `./sqlite/local`
+// 760 → 764; `./profiler` 765 → 769; `./provenance` 771 → 775) — five new
+// declarations minus one retired, everywhere:
+//  - `EndpointKindErased`, `MatchedEndpoints` and
+//    `SubsumptionLiteralsErased` replace `BareOntologyRelation` as
+//    `SubsumptionAffected`'s conservative arm. The arm now tests for the
+//    ERASED kind literals rather than assignability from `OntologyRelation`,
+//    which needs the endpoint-position and per-endpoint helpers alongside the
+//    per-element one (net +2 for the three-for-one swap).
+//  - `AliasExpansionOptions`, because `from`/`to`/`fromDynamic`/`toDynamic`
+//    now each declare an overload taking the option owner's own bag so a
+//    caller's options can be forwarded; the type it names,
+//    `AliasExpansionAxis`, was already debt here.
+//  - `SubgraphProjectFor`, the projection-over-the-result's-edge-kinds
+//    constraint every `subgraph` signature and option bag now takes. It is
+//    treated exactly like `SubgraphProject`, which the same signatures
+//    already rendered as debt: a constraint type, not a value a caller
+//    constructs.
+// Gate: exactly those seven entrypoints move, each by exactly +4 and by the
+// same five-in/one-out name set; no other entrypoint moves (no adapter
+// entrypoint renders `QueryBuilder`, `BaseStoreOptions` or
+// `SubgraphOptions`), and `SubgraphResultEdgeKinds` stays absent from `.`'s
+// forgotten set because the root barrel still exports it.
+//
+// Union endpoint batch (W3). The SAME seven entrypoints move once more, +1
+// apiece (`.` 437 → 438; `./graph-merge` 784 → 785; `./interchange` 769 →
+// 770; `./postgres/pglite` and `./sqlite/local` 766 → 767; `./profiler`
+// 771 → 772; `./provenance` 777 → 778), for exactly one new declaration:
+// `SubsumptionElementNamesKind`. It replaces the whole-relation `Extract`
+// arms `SubsumptionAffected` used to spell inline — those arms named no
+// declaration of their own, so nothing retires — and decides each element by
+// `Extract`ing over the element's ENDPOINTS, which is what makes an endpoint
+// kind UNION decidable. Gate: every moved entrypoint's delta is exactly +1,
+// and removing `SubsumptionElementNamesKind` from each new symbol set
+// reproduces that entrypoint's previous `sha256` exactly; no other
+// entrypoint moves (none of the rest renders `QueryBuilder`).
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
+  // Roadmap F (meta-edge removal): removing the public `InferenceType`
+  // union (never re-exported from most entrypoints, only pulled in
+  // transitively through `MetaEdgeProperties`/`SerializedMetaEdge`) dropped
+  // exactly one forgotten export apiece from every entrypoint below that
+  // saw its count change under THIS ONE batch — Roadmap F only ever
+  // lowered a count, never raised one. That is not a standing guarantee
+  // for the ledger as a whole: later batches below (Item E.2 among them)
+  // document counts this ledger RAISES, each with its own gate on the
+  // exact delta and the exact new names responsible.
+  //
+  // Item E.2: `CompositionExistence` (the `existence: "optional" | "required"`
+  // union) is a new public type, re-exported directly only from `.` and
+  // `./ontology` (alongside its existing sibling `CompositionPartSide`).
+  // Every OTHER entrypoint below reaches it only transitively — through a
+  // public signature that names `CompositionOptions`/`OntologyRelation`/
+  // `CompositionPair`-derived shapes it never itself exports — so it
+  // registers as a NEW forgotten export everywhere those signatures are
+  // reachable (+1 apiece). A few entrypoints (`./backend`,
+  // `./adapters/drizzle/*`, `./adapters/drizzle/postgres/pglite`,
+  // `./adapters/drizzle/sqlite/local`, `./adapters/drizzle/sqlite/libsql`,
+  // `./adapters/drizzle/engine`) also newly forgotten-export
+  // `CompositionPartSide` for the first time at +1 each (it was already
+  // reachable at every OTHER entrypoint below before this lane), because
+  // the new `ConstraintFenceViolation.compositionExistence` member and the
+  // `ReadConstraintFenceViolationsParams`-adjacent surface it rides in on
+  // make the composition-relation types reachable from those backend
+  // entrypoints for the first time.
+  // `CompositionWholeRef` and `NodeCreateOptions` are exported directly from
+  // `.` (see `src/index.ts`), so neither registers as forgotten here — the
+  // debt is back to its pre-E.2 baseline for this entrypoint specifically.
   ".": {
-    count: 402,
-    sha256: "9a8bb93ef5faa50db4d7afdb9eaeff371125c99df44408886f9a2e7c1d02085a",
+    count: 439,
+    sha256: "a53778171f3127a8a992673caea67104fe5dcb9c63a9a3f6b824bf70f93d34cb",
   },
   "./adapters/drizzle/engine": {
-    count: 331,
-    sha256: "da8304e4098dd2432ddd76161f81b9040d473e726cedd101b5f8b2ae76d26af9",
+    count: 338,
+    sha256: "64362f1444811bfdb7a8733c2bd762cf22ae771701650270bc9f09b29567eb4c",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 257,
-    sha256: "27f87a205d76e7373828a6727e1325b8a8ff8ea3137284a5cbaf795f6a9172ad",
+    count: 265,
+    sha256: "7bdf82896ceb9f06ef9e20bb54dba00de80385094bd205d46d2ead9777eea8e7",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 261,
-    sha256: "065875845610833fe425cb7dc48207fd762182c1a7bdd55529c884a27d80f8eb",
+    count: 269,
+    sha256: "d21428fc296d1cfbacd173d7633b62bf30433847c13b536c59140567cdf7c8e0",
   },
   "./adapters/drizzle/sqlite": {
-    count: 258,
-    sha256: "0e23e4f6f1312675be5669a9e3f8215c5b8b8fd5214ea76203e3cc5ef723f212",
+    count: 266,
+    sha256: "55b088506df22af835a635251d32e24f4741562e98d85f45ce6c2b26692f4c28",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 261,
-    sha256: "c563ebdaa5cea1405885bdd20e676660738e404b89e522af157f8e617576a931",
+    count: 269,
+    sha256: "b8d34f2e0f3423d8a0a45ec240d10cfa6cd42f2b3b7603c60213381c2fb56715",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 261,
-    sha256: "c563ebdaa5cea1405885bdd20e676660738e404b89e522af157f8e617576a931",
+    count: 269,
+    sha256: "b8d34f2e0f3423d8a0a45ec240d10cfa6cd42f2b3b7603c60213381c2fb56715",
   },
   "./backend": {
-    count: 16,
-    sha256: "fbcbd40667f4a4374dd0e267e595a852e5dfeec68d3d4e5e775848bc6468738f",
+    count: 22,
+    sha256: "7e3362491e07c2eb5729cb621a7994eebb2f19b6585859d9bb1abbe7f854af1b",
   },
   "./core": {
-    count: 72,
-    sha256: "bf73c4f71677d2b3ec2e36bfd37e9ede5c3f57377fc923f0df2eb1b500cfc84d",
+    count: 73,
+    sha256: "558fb671c7c7fc1053c0bc22a807110516596cd49364a1804abcce8d2878d621",
   },
   "./graph-extension": {
-    count: 16,
-    sha256: "1678650d02e0d9d7cc767ffbacbf163724c82fd4590c219b97d3dff85a6bf2f6",
+    count: 20,
+    sha256: "f88c3ebb710441aa204483f98147921b40dd8ba978c7b87b803c561c82137638",
   },
+  // Paged identity history: `IdentityFacade.transitionsOf` now returns the
+  // named `IdentityTransitionHistory` instead of a bare array. The root
+  // entrypoint `.` already exports the type directly, so its debt is
+  // unchanged; the six entrypoints below reach it only transitively through
+  // `Store`'s identity facade and each gains exactly that one name
+  // (+1 apiece). Gate: no entrypoint's debt decreased, no seventh entrypoint
+  // moved, and the single added symbol at each of the six is
+  // `IdentityTransitionHistory`.
+  // Delta: `./graph-merge` 774→775, `./interchange` 759→760,
+  // `./postgres/pglite` 756→757, `./profiler` 761→762, `./provenance`
+  // 767→768, `./sqlite/local` 756→757.
   // MergePlanReadContext derives its read-only surface from the runtime method
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 742,
-    sha256: "8a92ed390b5d23fef63c7d602e1c6f9267eb3dcf793c014e279f36878d5a0464",
+    count: 786,
+    sha256: "ade7fb5437ef4751c6367c9e5103a9b5f84fe0106da9d88316558180be58313c",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 725,
-    sha256: "5f423a61795baaa16e1b65de5e77f5241b44e8288dc227f66cfa0ea796f4d386",
+    count: 771,
+    sha256: "f381c348a2d1171097d5bbf67cd34b7fcdd268e6681125c4a680c8e32ca74ea4",
   },
   "./postgres/pglite": {
-    count: 722,
-    sha256: "361a6b28b5d4e6766ec2d50aa01af5cdb36f4ab0a984e55527821ff56721003d",
+    count: 768,
+    sha256: "fa1230e7805d26d027f24cb9ddf48806747cdedf1ff37dc0fccbe439c8581b9c",
   },
   "./profiler": {
-    count: 727,
-    sha256: "ba4d0d10bccf568b061ab2fe7fef0dddffdb792e565f5fc86dc0f79dd46ccbb4",
+    count: 773,
+    sha256: "05661e0386ea3e4ff296bee43fa85a1ba67c5b151df89a4860d51a0f2b8db0fe",
   },
   "./provenance": {
-    count: 733,
-    sha256: "2157102548e6ddbb364f3188be91c9af51e9fae1ab115636026f5d59df04c941",
+    count: 779,
+    sha256: "dc4b8935e1513396669bd255706de8662c2e413354662fc08e6ddf95d0adb1c6",
   },
+  // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
+  // options type was extracted into the named (but non-exported)
+  // `EnsureSchemaPreloadedOptions` alias so `EnsureSchemaInternalOptions`
+  // could extend it for `ensureSchemaInternal` (the new export `store.ts`
+  // calls directly with `historyEnabled`, never re-exported from a public
+  // entry point). An anonymous inline type never registers as a forgotten
+  // export; a named non-exported one used in `ensureSchema`'s public
+  // signature does. +1, only on `./schema` — the sole entrypoint that
+  // names `ensureSchema`.
   "./schema": {
-    count: 282,
-    sha256: "912798b14b4548dc5f66ce6ff9db71dd7561b7d0f1303fd165aa9f58b37390de",
+    count: 294,
+    sha256: "ff190fe91f16dd83780cc450653f95fae7b2bcf2653620dbd2719ab62b8547be",
   },
   "./sqlite/local": {
-    count: 722,
-    sha256: "361a6b28b5d4e6766ec2d50aa01af5cdb36f4ab0a984e55527821ff56721003d",
+    count: 768,
+    sha256: "fa1230e7805d26d027f24cb9ddf48806747cdedf1ff37dc0fccbe439c8581b9c",
   },
 };
 

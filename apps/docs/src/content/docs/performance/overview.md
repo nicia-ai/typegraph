@@ -621,7 +621,7 @@ SQLite always operates at `serializable` isolation.
 
 When you define an ontology (e.g., `subClassOf`, `implies`), TypeGraph precomputes the full
 transitive closure at store initialization. Queries like
-`.from("Parent", "p", { includeSubClasses: true })` use a pre-calculated list of kinds rather than
+`.from("Parent", "p", { expansion: "subclasses" })` use a pre-calculated list of kinds rather than
 recursive lookups at runtime.
 
 ### Smart Select
@@ -805,8 +805,11 @@ properly configured indexes.
 
 ### Use specific kinds
 
-Unless you specifically need to query across a hierarchy, avoid `includeSubClasses: true`. Being
-specific about the node kind allows the SQL engine to use more restrictive index scans.
+A query against a kind with `subClassOf` descendants returns their rows too
+by default. Unless you specifically need to query across the hierarchy, pass
+`{ expansion: "exact" }` (or set `queryDefaults.expansion: "exact"` on the
+store). Being specific about the node kind allows the SQL
+engine to use more restrictive index scans.
 
 ### Use cursor pagination
 

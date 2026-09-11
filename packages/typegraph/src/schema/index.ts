@@ -95,6 +95,31 @@ export {
 } from "./migration";
 
 // ============================================================
+// Structural Subtyping
+// ============================================================
+
+export {
+  isStructuralSubtype,
+  isTypeLevelSubtype,
+  projectTypeVisible,
+  type StructuralIncomparableReason,
+  type StructuralSubtypeReason,
+  type StructuralSubtypeResult,
+} from "./structural-subtype";
+
+// ============================================================
+// Ontology change classification (data-validated tightening)
+// ============================================================
+
+export {
+  classifyOntologyChanges,
+  type OntologyDataProbe,
+  type OntologySnapshot,
+  ontologyTighteningProbes,
+  type UniquenessComponentProbeGroup,
+} from "./ontology-change";
+
+// ============================================================
 // Validation Utilities
 // ============================================================
 

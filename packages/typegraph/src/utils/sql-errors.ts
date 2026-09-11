@@ -577,18 +577,28 @@ export function isSqliteMissingEdgeMatchIdentityColumnError(
   return false;
 }
 
-/** Whether a concurrent SQLite adopter already added the column we planned. */
-export function isSqliteDuplicateEdgeMatchIdentityColumnError(
+/**
+ * Whether a concurrent SQLite adopter already added one of the columns we
+ * planned to `ADD`.
+ *
+ * `columnNames` is the adoption's own column list, so one predicate serves
+ * every additive column rather than one hand-written predicate per column.
+ * Deliberately narrow — an exact `duplicate column name: <column>` message on
+ * a `SQLITE_ERROR` — because provisioning treats a match as "the post-state I
+ * wanted is already there" and must not swallow any other DDL failure.
+ */
+export function isSqliteDuplicateColumnError(
   error: unknown,
+  columnNames: readonly string[],
 ): boolean {
+  const duplicateMessages = new Set(
+    columnNames.map((column) => `duplicate column name: ${column}`),
+  );
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) continue;
     if (Reflect.get(link, "code") !== "SQLITE_ERROR") continue;
     const message = sqliteErrorMessage(link);
-    if (
-      message === "duplicate column name: match_identity_name" ||
-      message === "duplicate column name: match_identity_key"
-    ) {
+    if (typeof message === "string" && duplicateMessages.has(message)) {
       return true;
     }
   }
@@ -724,6 +734,77 @@ export function isSqliteStaleSnapshotError(error: unknown): boolean {
     if (!canReadProperty(link)) continue;
     for (const field of SQLITE_EXTENDED_CODE_FIELDS) {
       if (Reflect.get(link, field) === SQLITE_STALE_SNAPSHOT_EXTENDED_CODE) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * PostgreSQL SQLSTATE for `query_canceled` — raised by `statement_timeout`
+ * expiring or by `pg_cancel_backend` — and `program_limit_exceeded`, raised
+ * when the planner or executor hits a compiled-in resource ceiling.
+ */
+const POSTGRES_QUERY_CANCELED_CODE = "57014";
+const POSTGRES_PROGRAM_LIMIT_EXCEEDED_CODE = "54000";
+
+/**
+ * SQLite's base result codes for a statement the engine stopped before it
+ * finished: `SQLITE_INTERRUPT` (a call to `sqlite3_interrupt()`, which is how
+ * a statement timeout is implemented on this engine) and `SQLITE_TOOBIG`
+ * (a string/blob or a whole statement exceeded a compiled-in limit). Neither
+ * needs an extended-code variant — unlike the constraint-violation codes
+ * above, these carry no finer bucket to disambiguate.
+ */
+const SQLITE_INTERRUPT_CODE = "SQLITE_INTERRUPT";
+const SQLITE_INTERRUPT_EXTENDED_CODE = 9;
+const SQLITE_TOOBIG_CODE = "SQLITE_TOOBIG";
+const SQLITE_TOOBIG_EXTENDED_CODE = 18;
+
+/**
+ * Whether `error` (or anything in its `.cause` chain) reports that the
+ * ENGINE cut a statement short rather than completing it — a cancelled or
+ * resource-exhausted search, never a business-rule refusal. Classified by
+ * code only, on both dialects, so it needs no dialect literal and adds no
+ * `DIALECT_LITERAL_EXEMPTIONS` entry.
+ *
+ * This is the one predicate the edge-acyclicity probe
+ * (`src/store/acyclicity.ts`) consults to decide "indeterminate" versus "no
+ * cycle": an unbounded reachability search that the engine could not finish
+ * must never be reported as a clean result, and only a structural code check
+ * — never a driver message, which is locale-dependent — can tell "the
+ * search ran out of budget" apart from "the search found nothing".
+ *
+ * PostgreSQL: `query_canceled` (57014) and `program_limit_exceeded` (54000),
+ * plus the shared "insufficient resources" class (SQLSTATE prefix `53`,
+ * {@link isInsufficientResourcesError}) rather than a second copy of it.
+ * SQLite: extended result codes `SQLITE_INTERRUPT` (9) and `SQLITE_TOOBIG`
+ * (18), in both spellings a driver reports them (better-sqlite3's symbolic
+ * `code`, libSQL's numeric `rawCode`/`extendedCode`).
+ *
+ * An error this function does not recognize propagates unchanged — a plain
+ * driver error is not silently reinterpreted as "indeterminate" either.
+ */
+export function isStatementCutShortError(error: unknown): boolean {
+  if (isInsufficientResourcesError(error)) return true;
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (
+      code === POSTGRES_QUERY_CANCELED_CODE ||
+      code === POSTGRES_PROGRAM_LIMIT_EXCEEDED_CODE ||
+      code === SQLITE_INTERRUPT_CODE ||
+      code === SQLITE_TOOBIG_CODE
+    ) {
+      return true;
+    }
+    for (const field of SQLITE_EXTENDED_CODE_FIELDS) {
+      const extended: unknown = Reflect.get(link, field);
+      if (
+        extended === SQLITE_INTERRUPT_EXTENDED_CODE ||
+        extended === SQLITE_TOOBIG_EXTENDED_CODE
+      ) {
         return true;
       }
     }

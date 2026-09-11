@@ -558,7 +558,7 @@ export type AllEdgeTypes<G extends GraphDef> = {
 export function defineGraph<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
   const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
@@ -569,7 +569,7 @@ export function defineGraph<
 function defineGraphUnchecked<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
   const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
@@ -589,7 +589,7 @@ function defineGraphUnchecked<
 
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
-  assertClaimNamesAreSafe(config.nodes);
+  assertClaimNamesAreSafe(config.nodes, normalizedEdges);
   assertUniqueConstraintsAreDeclared(config.nodes);
   // Vector indexes are auto-derived from `embedding()` brands on node
   // schemas (see `autoDeriveVectorIndexes`). Explicit declarations
@@ -647,7 +647,7 @@ function defineGraphUnchecked<
 export function defineInternalGraph<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
   const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
@@ -679,12 +679,21 @@ const EMPTY_DEPRECATED_KINDS: ReadonlySet<string> = Object.freeze(
  */
 function assertClaimNamesAreSafe(
   nodes: Record<string, NodeRegistration>,
+  edges: Record<string, AnyEdgeRegistration>,
 ): void {
   for (const registration of Object.values(nodes)) {
     assertClaimAxisSafe(registration.type.kind, "Node kind");
     for (const constraint of registration.unique ?? []) {
       assertClaimAxisSafe(constraint.name, "Unique constraint");
     }
+  }
+  // Edge kinds are checked here too: no collision is reachable today or
+  // after `targetCardinality` (a source axis always begins with a
+  // cardinality literal, a target axis always with U+001E), but the
+  // reserved-vocabulary rule should hold for every name that reaches an
+  // axis, not only the ones that currently could collide.
+  for (const registration of Object.values(edges)) {
+    assertClaimAxisSafe(registration.type.kind, "Edge kind");
   }
 }
 

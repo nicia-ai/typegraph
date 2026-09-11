@@ -17,13 +17,17 @@ import {
   type EndpointExistence,
   type GraphAnnotations,
   type KindAnnotations,
+  type TargetCardinality,
   type TemporalMode,
   type UniquenessScope,
 } from "../core/types";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import { type IndexDeclaration } from "../indexes/types";
-import { type InferenceType } from "../ontology/types";
 import { type JsonPointer } from "../query/json-pointer";
+import {
+  type CompositionExistence,
+  type CompositionPartSide,
+} from "../registry/composition-relation";
 
 // ============================================================
 // Enum Zod Schemas
@@ -39,6 +43,11 @@ const deleteBehaviorZod = z.enum(["restrict", "cascade", "disconnect"]);
 
 const cardinalityZod = z.enum(["many", "one", "unique", "oneActive"]);
 
+// A target cardinality is every cardinality except `"unique"`, which is a
+// source-side-only declaration. Excluding from the shared enum (rather than a
+// second hand-written list) keeps the two in sync as the union evolves.
+const targetCardinalityZod = cardinalityZod.exclude(["unique"]);
+
 const endpointExistenceZod = z.enum(["notDeleted", "currentlyValid", "ever"]);
 
 const temporalModeZod = z.enum([
@@ -51,16 +60,6 @@ const temporalModeZod = z.enum([
 const uniquenessScopeZod = z.enum(["kind", "kindWithSubClasses"]);
 
 const collationZod = z.enum(["binary", "caseInsensitive"]);
-
-const inferenceTypeZod = z.enum([
-  "subsumption",
-  "hierarchy",
-  "substitution",
-  "constraint",
-  "composition",
-  "association",
-  "none",
-]);
 
 const indexScopeZod = z.enum(["graphAndKind", "graph", "none"]);
 
@@ -302,11 +301,17 @@ const runtimeEdgeDocumentZod = z
   })
   .loose();
 
+const compositionPartSideZod = z.enum(["from", "to"]);
+const compositionExistenceZod = z.enum(["optional", "required"]);
+
 const runtimeOntologyRelationZod = z
   .object({
     metaEdge: z.string(),
     from: z.string(),
     to: z.string(),
+    via: z.string().optional(),
+    partSide: compositionPartSideZod.optional(),
+    existence: compositionExistenceZod.optional(),
   })
   .loose();
 
@@ -358,7 +363,11 @@ export type JsonSchema = Readonly<{
   properties?: Record<string, JsonSchema>;
   required?: readonly string[];
   items?: JsonSchema;
+  prefixItems?: readonly JsonSchema[];
+  minItems?: number;
+  maxItems?: number;
   additionalProperties?: boolean | JsonSchema;
+  propertyNames?: JsonSchema;
   enum?: readonly unknown[];
   const?: unknown;
   anyOf?: readonly JsonSchema[];
@@ -369,10 +378,19 @@ export type JsonSchema = Readonly<{
   default?: unknown;
   minimum?: number;
   maximum?: number;
+  multipleOf?: number;
   minLength?: number;
   maxLength?: number;
   pattern?: string;
   format?: string;
+  // `exclusiveMinimum`, `exclusiveMaximum`, and `contentEncoding` are
+  // deliberately NOT named members: every reader of them
+  // (`structural-subtype.ts`'s `readNumber` and `unmodeledConstruct`) reaches
+  // them through the index signature below with a dynamic key, so naming them
+  // here would only widen this public type's surface with no code that needs
+  // the narrower access `noPropertyAccessFromIndexSignature` requires for the
+  // members that ARE named (`prefixItems`, `minItems`, `maxItems`,
+  // `propertyNames`, `multipleOf`).
   [key: string]: unknown;
 }>;
 
@@ -382,14 +400,15 @@ export type JsonSchema = Readonly<{
 
 /**
  * Serialized representation of a meta-edge.
+ *
+ * `transitive`/`symmetric`/`reflexive`/`inverse`/`inference` were removed
+ * (roadmap F) — see `MetaEdgeProperties`'s docblock. The parsing zod schema
+ * (`serializedSchemaZod`, below) stays `.loose()` on this record, so an
+ * older document that still carries those keys still parses; they are
+ * simply never read.
  */
 export type SerializedMetaEdge = Readonly<{
   name: string;
-  transitive: boolean;
-  symmetric: boolean;
-  reflexive: boolean;
-  inverse: string | undefined;
-  inference: InferenceType;
   description: string | undefined;
 }>;
 
@@ -404,6 +423,12 @@ export type SerializedOntologyRelation = Readonly<{
   metaEdge: string; // Meta-edge name
   from: string; // Node kind name or external IRI
   to: string; // Node kind name or external IRI
+  /** The realizing edge kind name. Required for `partOf`/`hasPart`, absent otherwise. */
+  via?: string;
+  /** R5's orientation. Meaningful only alongside `via`. */
+  partSide?: CompositionPartSide;
+  /** Item E.2: whether the part must have a live whole. Meaningful only alongside `via`. */
+  existence?: CompositionExistence;
 }>;
 
 // ============================================================
@@ -436,6 +461,16 @@ export type SerializedClosures = Readonly<{
  * Complete serialized ontology section.
  */
 export type SerializedOntology = Readonly<{
+  /**
+   * Derived state, computed 1:1 from `relations` by the serializer: one
+   * entry per meta-edge name any relation below currently uses. Carried for
+   * introspection (readers that want to list the meta-edges a schema
+   * touches without scanning every relation) — never an independent
+   * classification input. `classifyOntologyChanges`
+   * (`src/schema/ontology-change.ts`) diffs `relations` only; see that
+   * module's docblock for why a meta-edge name appearing or disappearing
+   * here is always a consequence of a relation change, not a distinct event.
+   */
   metaEdges: Record<string, SerializedMetaEdge>;
   relations: readonly SerializedOntologyRelation[];
   closures: SerializedClosures;
@@ -486,11 +521,23 @@ export type SerializedEdgeDef = Readonly<{
   targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
   properties: JsonSchema;
   cardinality: Cardinality;
+  // Optional, unlike `cardinality`: omitted from the serialized document
+  // (see `serializeEdgeDef`) when the registration leaves it undeclared or
+  // equal to the default `"many"`, so a graph that never uses this option
+  // keeps its pre-existing document shape and schema hash.
+  targetCardinality?: TargetCardinality;
   endpointExistence: EndpointExistence;
   matchIdentity?: Readonly<{
     name: string;
     fields: readonly string[];
   }>;
+  /**
+   * Present, and `true`, only when the edge kind declares `acyclic: true`.
+   * Absent (never `false`) so a graph with no acyclic edge kind serializes
+   * byte-identically to a pre-D.2 document and `computeSchemaHash` does not
+   * move for it — see `serializeEdgeDef`.
+   */
+  acyclic?: boolean;
   description: string | undefined;
   annotations?: KindAnnotations;
 }>;
@@ -579,6 +626,12 @@ export const serializedSchemaZod = z
               .optional(),
             properties: z.record(z.string(), z.unknown()),
             cardinality: cardinalityZod,
+            // `.default("many")` is what makes a document stored before this
+            // option existed load as unconstrained on the target side: the
+            // record is `.loose()`, so an absent key parses to nothing, and
+            // without the default a persisted declaration on a NEWER document
+            // read by this schema would be silently dropped instead of kept.
+            targetCardinality: targetCardinalityZod.default("many"),
             endpointExistence: endpointExistenceZod,
             matchIdentity: z
               .object({
@@ -587,6 +640,7 @@ export const serializedSchemaZod = z
               })
               .loose()
               .optional(),
+            acyclic: z.boolean().optional(),
             description: z.string().optional(),
             annotations: annotationsZod.optional(),
           })
@@ -601,13 +655,12 @@ export const serializedSchemaZod = z
             z
               .object({
                 name: z.string(),
-                transitive: z.boolean(),
-                symmetric: z.boolean(),
-                reflexive: z.boolean(),
-                inference: inferenceTypeZod,
-                inverse: z.string().optional(),
                 description: z.string().optional(),
               })
+              // `.loose()`: an older document may still carry `transitive`/
+              // `symmetric`/`reflexive`/`inverse`/`inference` (removed,
+              // roadmap F) — they parse through unread rather than
+              // rejecting the document.
               .loose(),
           )
           .superRefine(
@@ -619,6 +672,9 @@ export const serializedSchemaZod = z
               metaEdge: z.string(),
               from: z.string(),
               to: z.string(),
+              via: z.string().optional(),
+              partSide: compositionPartSideZod.optional(),
+              existence: compositionExistenceZod.optional(),
             })
             .loose(),
         ),

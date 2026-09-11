@@ -1,0 +1,617 @@
+/**
+ * Acyclicity of an edge relation: `acyclic: true` on an edge registration,
+ * and the composition relation.
+ *
+ * THE acyclicity predicate: "does `from` lie in the reflexive-transitive
+ * closure of `to`, over one acyclic relation's live edges". Every write path
+ * that can put an edge into a declared-acyclic relation calls
+ * {@link assertEdgeRelationsAcyclic} and no other function; the audit and the
+ * schema-tightening preflight call {@link readEdgeAcyclicityViolations},
+ * which shares the same SQL builder (`buildEdgeAcyclicityProbe`,
+ * `src/store/recursive-cte.ts`) so a live-graph audit and a write-path probe
+ * can never disagree about what counts as a cycle.
+ *
+ * The check is exhaustive: a set-semantics (`UNION`, never `UNION ALL`)
+ * recursive reachability with no depth bound. `MAX_EXPLICIT_RECURSIVE_DEPTH`
+ * does not apply here — see `buildEdgeAcyclicityProbe`'s docblock. An engine
+ * that cuts the search short (statement timeout, resource exhaustion) is
+ * reported as indeterminate, never as "no cycle".
+ *
+ * Population: every non-deleted edge of the relation
+ * counts, regardless of its validity window. A cycle is a property of the
+ * edge relation, not of an instant, so honoring `validTo` would let a
+ * future-dated edge close a cycle no write ever probed.
+ */
+import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
+import { observesPostFenceCommits } from "../backend/command-contract";
+import { graphCommandCoordinationIsolation } from "../backend/command-contract";
+import { type GraphBackend } from "../backend/types";
+import { type GraphDef } from "../core/define-graph";
+import { ConfigurationError, EdgeAcyclicityError } from "../errors";
+import { EdgeAcyclicityIndeterminateError } from "../errors";
+import { type SqlSchema } from "../query/compiler/schema";
+import { type DialectAdapter } from "../query/dialect/types";
+import { asCompiledRowsSql } from "../query/sql-intent";
+import { type KindRegistry } from "../registry/kind-registry";
+import { compareStrings } from "../utils/compare";
+import { requireDefined } from "../utils/presence";
+import { isStatementCutShortError } from "../utils/sql-errors";
+import {
+  COMPOSITION_RELATION_NAME,
+  displayAcyclicRelationName,
+} from "./claims/axis";
+import { type GraphWriteLock } from "./recorded-capture/clock";
+import {
+  type AcyclicityProbeSeed,
+  buildEdgeAcyclicityProbe,
+} from "./recursive-cte";
+
+/**
+ * One member of an acyclic relation: an edge kind, and the orientation its
+ * rows must be read in to walk the relation part->whole. A standalone
+ * `acyclic: true` registration is always `reversed: false` — that relation IS
+ * the edge kind, read in its stored direction. The composition relation mixes
+ * `reversed: false` (part -> whole realizing edges) and `reversed: true`
+ * (whole -> part realizing edges) and is checked as ONE directed relation; a
+ * plain edge-kind list cannot express that.
+ */
+export type AcyclicRelationMember = Readonly<{
+  edgeKind: string;
+  reversed: boolean;
+}>;
+
+/** One acyclic relation: a name, and the oriented edge kinds that form it. */
+export type AcyclicEdgeRelation = Readonly<{
+  /** The edge kind for a standalone relation; the composition relation's
+   * reserved name for the composition union. */
+  name: string;
+  members: readonly AcyclicRelationMember[];
+}>;
+
+/**
+ * A standalone `acyclic: true` registration's own relation: the edge
+ * kind IS the relation, named after itself, with one `reversed: false`
+ * member. The one constructor for this shape, so a caller that reasons over
+ * a proposed edge kind rather than a runtime {@link GraphDef} — the
+ * schema-tightening preflight, grouping a tightening's newly-declared edge
+ * kinds — builds the identical shape {@link acyclicEdgeRelations} does,
+ * rather than hand-spelling the member literal a second time.
+ */
+export function standaloneAcyclicRelation(
+  edgeKind: string,
+): AcyclicEdgeRelation {
+  return { name: edgeKind, members: [{ edgeKind, reversed: false }] };
+}
+
+/**
+ * The composition relation as ONE acyclic relation, oriented part -> whole. `undefined` when the graph declares no composition pair —
+ * the caller drops it from the relation list rather than probing an empty
+ * one.
+ *
+ * `reversed` is defined relative to this relation's canonical walk direction,
+ * part -> whole: a `partSide: "to"` realizing edge (a `has_*`-shaped kind,
+ * whole `from` / part `to`) is stored whole -> part, so it must be walked in
+ * reverse to read part -> whole like every other member; a `partSide: "from"`
+ * kind already IS part -> whole in its stored direction. This is what lets
+ * `A partOf B via chapterOf` and `B partOf A via includedIn` — two edge
+ * kinds, opposite orientations — form ONE directed relation the recursive
+ * probe walks uniformly, so a cycle spanning both is caught even though
+ * neither edge kind is acyclic alone.
+ *
+ * Named after {@link COMPOSITION_RELATION_NAME} (the same reserved axis the
+ * composition CLAIM is written at, `src/store/claims/axis.ts`) — the
+ * acyclicity relation and the claim relation are two independent invariants
+ * that happen to share one reserved string because both are graph-wide, not
+ * per-edge-kind. The reserved separator is what keeps this
+ * name from ever colliding with a standalone `acyclic: true` relation (which
+ * is named after its own edge kind, and no edge kind may spell the
+ * separator — `assertClaimAxisSafe`); every place this name reaches a public
+ * error or audit field reads it through {@link displayAcyclicRelationName}
+ * first, so the separator itself is never something a caller sees.
+ */
+export function compositionAcyclicRelation(
+  registry: KindRegistry,
+): AcyclicEdgeRelation | undefined {
+  const edgeKinds = registry.compositionEdgeKinds();
+  if (edgeKinds.length === 0) return undefined;
+  return {
+    name: COMPOSITION_RELATION_NAME,
+    members: edgeKinds.map((edgeKind) => ({
+      edgeKind,
+      reversed: registry.compositionPartSide(edgeKind) === "to",
+    })),
+  };
+}
+
+const acyclicEdgeRelationsCache = new WeakMap<
+  GraphDef,
+  WeakMap<KindRegistry, readonly AcyclicEdgeRelation[]>
+>();
+
+/**
+ * Every acyclic relation this graph declares, in code-point order by name:
+ * one standalone relation per `acyclic: true` edge kind, plus the
+ * composition relation ({@link compositionAcyclicRelation}) when the
+ * registry declares any `partOf`/`hasPart` pair.
+ *
+ * Memoized per `(GraphDef, KindRegistry)` object identity:
+ * {@link assertEdgeRelationsAcyclic} calls {@link acyclicRelationForEdgeKind}
+ * (which reads this) once per proposed edge, and neither a `GraphDef` nor a
+ * built `KindRegistry` changes after construction, so rebuilding and
+ * re-sorting this list per row of a large batch would be pure waste. Nested
+ * rather than a single map keyed on a composite: the schema-tightening
+ * preflight calls this with a PROPOSED registry built fresh per
+ * probe, so caching must never let a stale registry's relation answer for a
+ * different one built from the same `GraphDef`.
+ */
+export function acyclicEdgeRelations(
+  graph: GraphDef,
+  registry: KindRegistry,
+): readonly AcyclicEdgeRelation[] {
+  const byRegistry = acyclicEdgeRelationsCache.get(graph);
+  const cached = byRegistry?.get(registry);
+  if (cached !== undefined) return cached;
+  const standalone = Object.entries(graph.edges)
+    .filter(([, registration]) => registration.acyclic === true)
+    .map(([edgeKind]) => standaloneAcyclicRelation(edgeKind));
+  const composition = compositionAcyclicRelation(registry);
+  const relations = [
+    ...standalone,
+    ...(composition === undefined ? [] : [composition]),
+  ].toSorted((left, right) => compareStrings(left.name, right.name));
+  const registryCache = byRegistry ?? new WeakMap();
+  registryCache.set(registry, relations);
+  acyclicEdgeRelationsCache.set(graph, registryCache);
+  return relations;
+}
+
+/**
+ * The relation an edge of this kind belongs to, or `undefined`.
+ *
+ * Ordinarily an edge kind matches at most one relation. It can match TWO when
+ * a composition-realizing edge kind is also independently declared
+ * `acyclic: true` on its own registration — a standalone singleton
+ * (`standaloneAcyclicRelation`) named after the kind itself, alongside the
+ * composition union it already participates in. When that happens the
+ * COMPOSITION relation wins, EXPLICITLY (matched by
+ * {@link COMPOSITION_RELATION_NAME}), rather than as an artifact of
+ * {@link acyclicEdgeRelations}' name sort — `COMPOSITION_RELATION_NAME`'s
+ * reserved U+001E prefix happens to sort before every printable kind name,
+ * but that is an accident of code-point order, not a decision this function
+ * should depend on. Preferring composition is safe for cycle detection: its
+ * membership is a strict superset of the standalone singleton's one member,
+ * so any cycle the singleton alone could have caught is still caught — the
+ * refusal simply names the (correct, wider) `"composition"` relation instead
+ * of the kind's own name.
+ */
+export function acyclicRelationForEdgeKind(
+  graph: GraphDef,
+  registry: KindRegistry,
+  edgeKind: string,
+): AcyclicEdgeRelation | undefined {
+  const matches = acyclicEdgeRelations(graph, registry).filter((relation) =>
+    relation.members.some((member) => member.edgeKind === edgeKind),
+  );
+  if (matches.length <= 1) return matches[0];
+  return (
+    matches.find((relation) => relation.name === COMPOSITION_RELATION_NAME) ??
+    matches[0]
+  );
+}
+
+/**
+ * Every edge kind that participates in ANY acyclic relation, in code-point
+ * order. A projection of {@link acyclicEdgeRelations} for callers that need
+ * the flat kind list (a trusted-import capability refusal, an import-time
+ * batching decision over more than one candidate edge) rather than the
+ * relation structure itself — reading it through this function rather than
+ * re-filtering `graph.edges` keeps them from drifting once a relation can
+ * have more than one member.
+ */
+export function acyclicEdgeKinds(
+  graph: GraphDef,
+  registry: KindRegistry,
+): readonly string[] {
+  return acyclicEdgeRelations(graph, registry).flatMap((relation) =>
+    relation.members.map((member) => member.edgeKind),
+  );
+}
+
+/**
+ * Whether this edge kind participates in ANY acyclic relation. THE predicate
+ * every write-eligibility, fused-command, or import-batching decision must
+ * consult instead of re-reading `registration.acyclic === true` directly
+ * (AGENTS.md "one predicate, one owner": a second inline spelling of an
+ * existing decision drifts even while the copies still agree). This is wider
+ * than `registration.acyclic === true`: the composition relation is an
+ * oriented union, so a composition-realizing edge kind answers `true` here
+ * even though its OWN registration carries no `acyclic` field.
+ */
+export function edgeKindIsInAcyclicRelation(
+  graph: GraphDef,
+  registry: KindRegistry,
+  edgeKind: string,
+): boolean {
+  return acyclicRelationForEdgeKind(graph, registry, edgeKind) !== undefined;
+}
+
+/** An edge a writer proposes to have in the relation when the frame commits. */
+export type ProposedRelationEdge = Readonly<{
+  edgeId: string;
+  edgeKind: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
+/**
+ * A proposed edge whose endpoints are the same node: a cycle of length one,
+ * answerable without a round trip because the reflexive seed would return it.
+ */
+function proposedEdgeIsSelfLoop(edge: ProposedRelationEdge): boolean {
+  return edge.fromKind === edge.toKind && edge.fromId === edge.toId;
+}
+
+/** One acyclic relation's share of a proposed edge set. */
+type ProposedAcyclicGroup = Readonly<{
+  relation: AcyclicEdgeRelation;
+  /** The edges that still need the recursive probe. */
+  edges: readonly ProposedRelationEdge[];
+  /** Edges already decided by {@link proposedEdgeIsSelfLoop}. */
+  selfLoopEdgeIds: readonly string[];
+}>;
+
+/**
+ * The classification that decides WHAT gets probed, owned once: proposed
+ * edges whose kind is in no acyclic relation are dropped, the rest are
+ * bucketed by relation in code-point order by name, and the self-loops are
+ * separated out. `firstSelfLoop` is the earliest self-loop in `proposed`
+ * order, so the write path can refuse exactly the row its caller listed first
+ * while the plan-time preview collects every relation's self-loops.
+ */
+function groupProposedByAcyclicRelation(
+  graph: GraphDef,
+  registry: KindRegistry,
+  proposed: readonly ProposedRelationEdge[],
+): Readonly<{
+  groups: readonly ProposedAcyclicGroup[];
+  firstSelfLoop:
+    | Readonly<{ relation: AcyclicEdgeRelation; edge: ProposedRelationEdge }>
+    | undefined;
+}> {
+  const byRelationName = new Map<
+    string,
+    {
+      relation: AcyclicEdgeRelation;
+      edges: ProposedRelationEdge[];
+      selfLoopEdgeIds: string[];
+    }
+  >();
+  for (const edge of proposed) {
+    const relation = acyclicRelationForEdgeKind(graph, registry, edge.edgeKind);
+    if (relation === undefined) continue;
+    const entry = byRelationName.get(relation.name) ?? {
+      relation,
+      edges: [],
+      selfLoopEdgeIds: [],
+    };
+    byRelationName.set(relation.name, entry);
+    if (proposedEdgeIsSelfLoop(edge)) entry.selfLoopEdgeIds.push(edge.edgeId);
+    else entry.edges.push(edge);
+  }
+  const groups = [...byRelationName.keys()]
+    .toSorted((left, right) => compareStrings(left, right))
+    .map((name) => requireDefined(byRelationName.get(name)));
+  const selfLoopIds = new Set(
+    groups.flatMap((group) => [...group.selfLoopEdgeIds]),
+  );
+  const firstSelfLoopEdge = proposed.find((edge) =>
+    selfLoopIds.has(edge.edgeId),
+  );
+  return {
+    groups,
+    firstSelfLoop:
+      firstSelfLoopEdge === undefined ? undefined : (
+        {
+          relation: requireDefined(
+            acyclicRelationForEdgeKind(
+              graph,
+              registry,
+              firstSelfLoopEdge.edgeKind,
+            ),
+          ),
+          edge: firstSelfLoopEdge,
+        }
+      ),
+  };
+}
+
+/**
+ * The `edgeAcyclicity` member of `ConstraintFenceViolation`
+ * (`src/store/claims/verify.ts`), defined here so the shape has one owner:
+ * the family carries no `ClaimTarget` — acyclicity reserves no claim row,
+ * so there is nothing shaped like one to name.
+ */
+export type EdgeAcyclicityViolation = Readonly<{
+  family: "edgeAcyclicity";
+  /** The declared relation's display name. */
+  relation: string;
+  /** Live edges of the relation whose `to` reaches their `from`. */
+  edgeIds: readonly string[];
+}>;
+
+export type AcyclicityProbeContext = Readonly<{
+  graphId: string;
+  graph: GraphDef;
+  /**
+   * Needed alongside `graph`: whether an edge kind is IN an acyclic relation,
+   * and which one, depends on the composition relation too — a fact `graph`
+   * alone cannot answer.
+   */
+  registry: KindRegistry;
+  schema: SqlSchema;
+  dialect: DialectAdapter;
+  /** The transaction target the frame's row work runs on. */
+  target: Pick<
+    GraphBackend,
+    "capabilities" | "commands" | "dialect" | "execute"
+  >;
+  /** Compile-time evidence the per-graph fence was taken before any read. */
+  lock: GraphWriteLock;
+  /** Echoed in every refusal's `details.operation`. */
+  operation: string;
+}>;
+
+/**
+ * What the audit reader needs — `AcyclicityProbeContext` minus `lock` (no
+ * write to fence) and `graph` (the relations to probe are passed
+ * explicitly, so a caller working from a SERIALIZED schema document rather
+ * than a runtime `GraphDef` — the schema-tightening preflight — need not
+ * fabricate one just to satisfy this type).
+ */
+export type AcyclicityAuditContext = Omit<
+  AcyclicityProbeContext,
+  "lock" | "graph"
+>;
+
+/**
+ * Runs one acyclicity probe statement and returns the `origin_key`s the
+ * database reports as reaching their own `from` — empty when the seed's rows
+ * are all fine. Shared by the write-path assertion and the audit reader, so
+ * a cut-short statement is classified identically by both.
+ *
+ * @throws EdgeAcyclicityIndeterminateError when the engine cut the statement
+ *   short.
+ */
+async function runAcyclicityProbe(
+  ctx: AcyclicityAuditContext,
+  relation: AcyclicEdgeRelation,
+  seed: AcyclicityProbeSeed,
+): Promise<readonly string[]> {
+  const fragment = buildEdgeAcyclicityProbe({
+    graphId: ctx.graphId,
+    members: relation.members,
+    seed,
+    dialect: ctx.dialect,
+    schema: ctx.schema,
+    recursiveTraversal: resolveRecursiveTraversal(ctx.target.capabilities),
+    operation: ctx.operation,
+  });
+  try {
+    const rows = await ctx.target.execute<Readonly<{ origin_key: string }>>(
+      asCompiledRowsSql(fragment),
+    );
+    return rows.map((row) => row.origin_key);
+  } catch (error) {
+    if (!isStatementCutShortError(error)) throw error;
+    throw new EdgeAcyclicityIndeterminateError(
+      {
+        relation: displayAcyclicRelationName(relation.name),
+        operation: ctx.operation,
+        graphId: ctx.graphId,
+      },
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * A fresh-snapshot guard, applied only where an isolation question exists:
+ * `ctx.lock.coordination` is `undefined` for `engine-serialized` /
+ * `caller-serialized` write-fence plans (SQLite's single writer, or a
+ * caller-serialized deployment), where there is nothing to observe — see
+ * `uncapturedGraphWriteLock`. A keyed acquisition on a shared session
+ * (`lock` / `row`) mints real coordination, and this is the one place that
+ * verifies the session it belongs to actually observes commits made while
+ * it waited for the fence.
+ *
+ * @throws ConfigurationError (`EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT`)
+ */
+function assertFreshSnapshot(ctx: AcyclicityProbeContext): void {
+  if (ctx.lock.coordination === undefined) return;
+  const isolation = graphCommandCoordinationIsolation(
+    ctx.target.commands,
+    ctx.graphId,
+    ctx.lock.coordination,
+  );
+  if (observesPostFenceCommits(isolation)) return;
+  throw new ConfigurationError(
+    "Edge-acyclicity requires a transaction isolation that observes writes " +
+      "committed while this session waited for the per-graph write fence.",
+    {
+      code: "EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT",
+      graphId: ctx.graphId,
+      isolation,
+    },
+    {
+      suggestion:
+        "Use read_committed or serializable transaction isolation, or " +
+        "configure a custom PostgreSQL graph-write fence to report the " +
+        "effective transaction isolation.",
+    },
+  );
+}
+
+/**
+ * THE acyclicity predicate. Every write path calls exactly this function and
+ * no other. Refuses with {@link EdgeAcyclicityError} when any proposed edge
+ * closes a cycle in its relation; with {@link EdgeAcyclicityIndeterminateError}
+ * when the engine cut the search short; with `ConfigurationError`
+ * (`RECURSIVE_TRAVERSAL_UNSUPPORTED`) when the backend declares no recursive
+ * traversal; with `ConfigurationError`
+ * (`EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT`) when the fenced session cannot
+ * observe writes committed while it waited for the fence.
+ *
+ * Order-insensitive with respect to the proposed rows: the question is "does
+ * `from` lie in the reflexive-transitive closure of `to`", and the proposed
+ * edge itself, present or absent, is never on such a path unless a cycle
+ * already exists. Probe-then-insert (single writes) and insert-then-probe
+ * (batches, merge apply) therefore call the same function with the same
+ * meaning.
+ *
+ * Short-circuits three ways before touching SQL: a proposed row whose kind is
+ * in no acyclic relation is dropped; a self-loop
+ * (`fromKind === toKind && fromId === toId`) is refused immediately, because
+ * the reflexive seed would answer the same question with a round trip; and an
+ * empty remaining set returns with no statement.
+ */
+export async function assertEdgeRelationsAcyclic(
+  ctx: AcyclicityProbeContext,
+  proposed: readonly ProposedRelationEdge[],
+): Promise<void> {
+  const { groups, firstSelfLoop } = groupProposedByAcyclicRelation(
+    ctx.graph,
+    ctx.registry,
+    proposed,
+  );
+  if (firstSelfLoop !== undefined) {
+    throw new EdgeAcyclicityError({
+      relation: displayAcyclicRelationName(firstSelfLoop.relation.name),
+      edgeKind: firstSelfLoop.edge.edgeKind,
+      edgeId: firstSelfLoop.edge.edgeId,
+      fromKind: firstSelfLoop.edge.fromKind,
+      fromId: firstSelfLoop.edge.fromId,
+      toKind: firstSelfLoop.edge.toKind,
+      toId: firstSelfLoop.edge.toId,
+      selfLoop: true,
+    });
+  }
+  const probeable = groups.filter((group) => group.edges.length > 0);
+  if (probeable.length === 0) return;
+
+  assertFreshSnapshot(ctx);
+
+  for (const { relation, edges } of probeable) {
+    const violatingOriginKeys = await runAcyclicityProbe(ctx, relation, {
+      kind: "proposed",
+      edges,
+    });
+    if (violatingOriginKeys.length === 0) continue;
+    const violatingEdge =
+      edges.find((edge) => violatingOriginKeys.includes(edge.edgeId)) ??
+      requireDefined(edges[0]);
+    throw new EdgeAcyclicityError({
+      relation: displayAcyclicRelationName(relation.name),
+      edgeKind: violatingEdge.edgeKind,
+      edgeId: violatingEdge.edgeId,
+      fromKind: violatingEdge.fromKind,
+      fromId: violatingEdge.fromId,
+      toKind: violatingEdge.toKind,
+      toId: violatingEdge.toId,
+      selfLoop: false,
+    });
+  }
+}
+
+/**
+ * The audit reader: every live edge of `relations` whose `to` endpoint
+ * reaches its `from` endpoint. Shared verbatim with `verifyConstraintFences`
+ * (`src/store/claims/verify.ts`) and with the `acyclic`-added schema-tightening
+ * probe (`src/schema/tightening-preflight.ts`), so there is exactly one
+ * implementation of "is there a cycle".
+ *
+ * Takes no `lock`: this is a read-only diagnostic, never gating a live write
+ * against a concurrent race, so it runs no isolation-freshness check.
+ */
+export async function readEdgeAcyclicityViolations(
+  ctx: AcyclicityAuditContext,
+  relations: readonly AcyclicEdgeRelation[],
+): Promise<readonly EdgeAcyclicityViolation[]> {
+  const violations: EdgeAcyclicityViolation[] = [];
+  for (const relation of [...relations].toSorted((left, right) =>
+    compareStrings(left.name, right.name),
+  )) {
+    const originKeys = await runAcyclicityProbe(ctx, relation, {
+      kind: "relation",
+    });
+    if (originKeys.length === 0) continue;
+    violations.push({
+      family: "edgeAcyclicity",
+      relation: displayAcyclicRelationName(relation.name),
+      edgeIds: [...originKeys].toSorted(compareStrings),
+    });
+  }
+  return violations;
+}
+
+/**
+ * The plan-time preview: every violation a caller-proposed edge
+ * set would create if it were added to the relation's CURRENT live
+ * population. This is what lets the graph-merge planner ask "would this
+ * resolved plan's edge writes close a cycle" and surface a typed conflict
+ * for review, without ever writing anything.
+ *
+ * Read-only and lock-free like {@link readEdgeAcyclicityViolations} — this is
+ * a PREVIEW, not a write gate, and takes no `lock` for the same reason that
+ * function does not: it decides nothing on its own. It runs before any
+ * per-graph write lock exists (a merge plan does no write to fence), and its
+ * answer is inherently racy against a concurrent writer of the SAME relation
+ * — which is fine, because the actual write path
+ * ({@link assertEdgeRelationsAcyclic}) re-verifies under the per-graph write
+ * lock at commit/apply time regardless, and remains the sole authority.
+ *
+ * Shares `runAcyclicityProbe` (and so `buildEdgeAcyclicityProbe`) with the
+ * write path and the audit reader, so a write-path refusal, a live-graph
+ * audit, and a plan-time preview can never disagree about what counts as a
+ * cycle. This is the ONE caller that probes rows not yet written anywhere,
+ * so it is the ONE caller that passes the `"planned"` seed form: the
+ * write path's own probe passes `"proposed"` (rows already inserted, or a
+ * single row) precisely because it never needs to hop through a row that
+ * isn't live yet — see `AcyclicityProbeSeed`'s docblock in
+ * `src/store/recursive-cte.ts` for the full contract. A self-loop among
+ * `proposed` is reported directly, mirroring
+ * {@link assertEdgeRelationsAcyclic}'s immediate refusal, without a round
+ * trip.
+ */
+export async function readProposedEdgeAcyclicityViolations(
+  ctx: AcyclicityAuditContext,
+  graph: GraphDef,
+  proposed: readonly ProposedRelationEdge[],
+): Promise<readonly EdgeAcyclicityViolation[]> {
+  const { groups } = groupProposedByAcyclicRelation(
+    graph,
+    ctx.registry,
+    proposed,
+  );
+  const violations: EdgeAcyclicityViolation[] = [];
+  for (const { relation, edges, selfLoopEdgeIds } of groups) {
+    const probedIds =
+      edges.length === 0 ?
+        []
+      : await runAcyclicityProbe(ctx, relation, {
+          kind: "planned",
+          edges,
+        });
+    const edgeIds = [...new Set([...selfLoopEdgeIds, ...probedIds])].toSorted(
+      compareStrings,
+    );
+    if (edgeIds.length === 0) continue;
+    violations.push({
+      family: "edgeAcyclicity",
+      relation: displayAcyclicRelationName(relation.name),
+      edgeIds,
+    });
+  }
+  return violations;
+}

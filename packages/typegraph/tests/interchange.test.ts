@@ -396,7 +396,7 @@ describe("Interchange Round-Trip", () => {
 
     expect(exported.nodes).toHaveLength(0);
     expect(exported.edges).toHaveLength(0);
-    expect(exported.formatVersion).toBe("2.0");
+    expect(exported.formatVersion).toBe("3.0");
     expect(exported.source.type).toBe("typegraph-export");
 
     const targetBackend = createTestBackend();
@@ -1707,18 +1707,18 @@ describe("Interchange import property fidelity", () => {
 // ============================================================
 
 describe("Interchange format version compatibility", () => {
-  it("exports always carry formatVersion 2.0", async () => {
+  it("exports always carry formatVersion 3.0", async () => {
     const store = createStore(testGraph, createTestBackend());
     await store.nodes.Person.create({ name: "Alice" });
 
     const exported = await exportGraph(store);
-    expect(exported.formatVersion).toBe("2.0");
+    expect(exported.formatVersion).toBe("3.0");
 
     const [headerChunk] = await collectChunks(exportGraphStream(store));
     if (headerChunk?.type !== "header") {
       throw new Error("Expected the export stream to start with a header.");
     }
-    expect(headerChunk.header.formatVersion).toBe("2.0");
+    expect(headerChunk.header.formatVersion).toBe("3.0");
   });
 
   it("accepts a 1.0 document (no identity section) via schema and import", async () => {
@@ -1759,6 +1759,30 @@ describe("Interchange format version compatibility", () => {
     };
 
     expect(GraphDataSchema.safeParse(document).success).toBe(true);
+  });
+
+  it("accepts a 2.0 document (no transitions/retention) via schema and import", async () => {
+    // A pre-existing 2.0 export is structurally a valid 3.0 document; the
+    // documented GraphDataSchema.parse path must keep accepting it.
+    const document = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" as const },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "Alice" } }],
+      edges: [],
+    };
+
+    const parsed = GraphDataSchema.parse(document);
+    expect(parsed.formatVersion).toBe("2.0");
+
+    const store = createStore(testGraph, createTestBackend());
+    const result = await importGraph(
+      store,
+      parsed,
+      importOptions({ onConflict: "error" }),
+    );
+    expect(result.success).toBe(true);
+    expect(result.nodes.created).toBe(1);
   });
 });
 

@@ -6,15 +6,20 @@
  */
 import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
+import { isSubsumptionMetaEdge } from "../ontology/constants";
 import { compareStrings } from "../utils/compare";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { canonicalEqual, sortedReplacer } from "./canonical";
+import { buildRegistryFromSerializedSchema } from "./deserializer";
+import {
+  classifyOntologyChanges,
+  type OntologyChange,
+} from "./ontology-change";
 import {
   type JsonSchema,
   type SerializedEdgeDef,
   type SerializedNodeDef,
-  type SerializedOntology,
   type SerializedSchema,
 } from "./types";
 
@@ -29,10 +34,20 @@ export type ChangeType = "added" | "removed" | "modified" | "renamed";
 
 /**
  * Severity of a change for migration purposes.
+ *
+ * `warning` auto-migrates only if the data allows it: an ontology tightening
+ * (`disjointWith` / `subClassOf` / `equivalentTo` / `sameAs` addition, or a
+ * `subClassOf` / `equivalentTo` / `sameAs` removal) is `warning`-severity and
+ * still routes through `ensureSchema`'s auto-migrate branch, but the commit
+ * transaction runs a data probe first (`prepareSchemaTighteningPreflight`)
+ * and refuses with `MigrationError` `reason: "ontology-tightening-violated"`
+ * when existing rows would violate the tightened ontology. `isBackwardsCompatible`
+ * keeps meaning exactly "no `breaking` change" — it does not mean "safe to
+ * auto-migrate unconditionally".
  */
 export type ChangeSeverity =
   | "safe" // No data migration needed
-  | "warning" // Might need attention
+  | "warning" // Auto-migrates only if the data allows it
   | "breaking"; // Requires data migration
 
 // ============================================================
@@ -70,17 +85,6 @@ export type EdgeChange = Readonly<{
 // ============================================================
 // Ontology Changes
 // ============================================================
-
-/**
- * A change to the ontology.
- */
-export type OntologyChange = Readonly<{
-  type: ChangeType;
-  entity: "metaEdge" | "relation";
-  name: string;
-  severity: ChangeSeverity;
-  details: string;
-}>;
 
 /** A durable graph-level Operational Identity capability change. */
 export type IdentityChange = Readonly<{
@@ -233,6 +237,24 @@ export type SchemaDiff = Readonly<{
  * @param before - The previous schema version
  * @param after - The new schema version
  * @returns A diff describing all changes
+ * @throws ConfigurationError when `before` or `after` adds or removes a
+ *   relation and the ontology on the affected side cannot be interpreted —
+ *   see {@link classifyOntologyChanges}. Every caller of this function
+ *   inherits the throw: `loadAndVerifyGraph` / `createVerifiedStore`,
+ *   `getSchemaChanges`, and (through it) `requiresMigration` are audited at
+ *   their own declarations.
+ * @throws ConfigurationError (C.2, `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE`
+ *   / `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` /
+ *   `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` /
+ *   `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE`) when `after` declares a
+ *   `subClassOf`/`equivalentTo`/`sameAs` hierarchy whose child does not
+ *   structurally extend its parent — including a hierarchy no relation in
+ *   this diff touched: a migration that only edits a node kind's property
+ *   schema can break an EXISTING hierarchy that kind already participates
+ *   in, so this diff builds and enforces the AFTER registry whenever a
+ *   changed node kind's name appears in `after.ontology.relations` under one
+ *   of those three meta-edges, even when `classifyOntologyChanges` found no
+ *   relation change to build one for.
  */
 export function computeSchemaDiff(
   before: SerializedSchema,
@@ -240,7 +262,15 @@ export function computeSchemaDiff(
 ): SchemaDiff {
   const nodeChanges = diffNodes(before.nodes, after.nodes);
   const edgeChanges = diffEdges(before.edges, after.edges);
-  const ontologyChanges = diffOntology(before.ontology, after.ontology);
+  const ontologyChanges = classifyOntologyChanges(before, after);
+  // classifyOntologyChanges only builds (and thereby structurally enforces,
+  // C.2) a registry when a RELATION changed. A migration that edits only a
+  // node kind's PROPERTY schema never touches a relation, so without this
+  // check it would sail through the dry run and fail only at commit —
+  // exactly the gap `computeSchemaDiff`'s docblock now documents.
+  if (nodePropertyChangeMayAffectExistingSubsumption(nodeChanges, after)) {
+    buildRegistryFromSerializedSchema(after);
+  }
   const identityChange = diffIdentity(before.identity, after.identity);
   const annotationsChange = diffGraphAnnotations(
     before.annotations,
@@ -407,6 +437,39 @@ function diffNodes(
 }
 
 /**
+ * Whether an added or modified node kind's property schema could have
+ * broken a `subClassOf`/`equivalentTo`/`sameAs` hierarchy this diff's
+ * relation-level classification never looked at, because no RELATION
+ * changed. A cheap name scan over `nodeChanges` and `after.ontology.relations`
+ * — the caller builds a registry (which structurally enforces, C.2) only
+ * when this returns `true`.
+ *
+ * A REMOVED node kind is excluded: it cannot violate a hierarchy going
+ * forward, and it carries no property schema in `after` to compare.
+ */
+function nodePropertyChangeMayAffectExistingSubsumption(
+  nodeChanges: readonly NodeChange[],
+  after: SerializedSchema,
+): boolean {
+  const changedKinds = new Set(
+    nodeChanges
+      .filter((change) => change.type !== "removed")
+      .map((change) => change.kind),
+  );
+  if (changedKinds.size === 0) return false;
+
+  for (const relation of after.ontology.relations) {
+    if (
+      isSubsumptionMetaEdge(relation.metaEdge) &&
+      (changedKinds.has(relation.from) || changedKinds.has(relation.to))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * JSON-Schema keywords whose array value is semantically a *set*: `required`
  * lists which properties must be present, `enum` lists which values are
  * allowed. Reordering either changes nothing a validator — or a stored row —
@@ -564,7 +627,7 @@ function normalizedSubschemaMap(value: unknown): unknown {
  * in a different order is correctly a no-op rather than a "modified" kind that
  * forces a migration.
  */
-function propertySchemasEqual(before: unknown, after: unknown): boolean {
+export function propertySchemasEqual(before: unknown, after: unknown): boolean {
   return canonicalEqual(
     orderNormalizedSchema(before),
     orderNormalizedSchema(after),
@@ -701,9 +764,15 @@ function propertyTypeSignature(schema: JsonSchema): string {
 
 /**
  * Non-constraining JSON-Schema keywords: changing them cannot invalidate an
- * existing stored value, so a diff limited to these is safe.
+ * existing stored value, so a diff limited to these is safe. Exported (module-
+ * local; not re-exported from `./index`) so `structural-subtype.ts`'s
+ * projection-coverage test can classify a projected keyword as migration
+ * metadata without re-spelling this list — this predicate's own rule 4
+ * silently drops the same keywords for a different reason (see that module's
+ * doc comment), but the KEYWORD SET a Zod projection can emit has exactly one
+ * owner regardless of which predicate is asking about it.
  */
-const NON_CONSTRAINING_KEYWORDS = new Set([
+export const NON_CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
   "description",
   "title",
   "default",
@@ -711,7 +780,9 @@ const NON_CONSTRAINING_KEYWORDS = new Set([
 ]);
 
 /** A copy of `schema` with the non-constraining keywords removed. */
-function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
+export function stripSchemaMetadata(
+  schema: JsonSchema,
+): Record<string, unknown> {
   // Data-keyed: JSON-Schema keywords parsed out of the persisted document.
   const stripped = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(schema)) {
@@ -720,7 +791,7 @@ function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
   return stripped;
 }
 
-function isObjectSchema(schema: JsonSchema): boolean {
+export function isObjectSchema(schema: JsonSchema): boolean {
   return schema.type === "object" || schema.properties !== undefined;
 }
 
@@ -1005,6 +1076,25 @@ function diffEdgeDef(
     });
   }
 
+  // Check target cardinality — same "modified"/"warning" shape as the source
+  // axis: severity policy is unchanged for both directions, because the data
+  // probe (not the severity) is what actually gates a tightening. Defaulted
+  // before comparing: unlike `cardinality`, an absent key means "many" (see
+  // `SerializedEdgeDef`), so an undeclared-vs-undeclared or
+  // undeclared-vs-explicit-"many" pair must diff as unchanged.
+  const beforeTargetCardinality = before.targetCardinality ?? "many";
+  const afterTargetCardinality = after.targetCardinality ?? "many";
+  if (beforeTargetCardinality !== afterTargetCardinality) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "warning",
+      details: `Target cardinality changed from "${beforeTargetCardinality}" to "${afterTargetCardinality}" for "${name}"`,
+      before,
+      after,
+    });
+  }
+
   if (!matchIdentitiesEqual(before.matchIdentity, after.matchIdentity)) {
     const details =
       before.matchIdentity === undefined ?
@@ -1086,84 +1176,6 @@ function annotationsChanged(before: unknown, after: unknown): boolean {
   if (before === undefined && after === undefined) return false;
   if (before === undefined || after === undefined) return true;
   return !canonicalEqual(before, after);
-}
-
-// ============================================================
-// Ontology Diff
-// ============================================================
-
-/**
- * Computes changes to the ontology.
- */
-function diffOntology(
-  before: SerializedOntology,
-  after: SerializedOntology,
-): readonly OntologyChange[] {
-  const changes: OntologyChange[] = [];
-
-  // Diff meta-edges
-  const metaEdgesBefore = new Set(Object.keys(before.metaEdges));
-  const metaEdgesAfter = new Set(Object.keys(after.metaEdges));
-
-  for (const name of metaEdgesBefore) {
-    if (!metaEdgesAfter.has(name)) {
-      changes.push({
-        type: "removed",
-        entity: "metaEdge",
-        name,
-        severity: "breaking",
-        details: `Meta-edge "${name}" was removed`,
-      });
-    }
-  }
-
-  for (const name of metaEdgesAfter) {
-    if (!metaEdgesBefore.has(name)) {
-      changes.push({
-        type: "added",
-        entity: "metaEdge",
-        name,
-        severity: "safe",
-        details: `Meta-edge "${name}" was added`,
-      });
-    }
-  }
-
-  // Diff relations (simplified - just detect additions/removals)
-  const relationsBefore = new Set(
-    before.relations.map((r) => `${r.metaEdge}:${r.from}:${r.to}`),
-  );
-  const relationsAfter = new Set(
-    after.relations.map((r) => `${r.metaEdge}:${r.from}:${r.to}`),
-  );
-
-  for (const relationKey of relationsBefore) {
-    if (!relationsAfter.has(relationKey)) {
-      const [metaEdge, from, to] = relationKey.split(":");
-      changes.push({
-        type: "removed",
-        entity: "relation",
-        name: relationKey,
-        severity: "warning",
-        details: `Relation ${metaEdge}(${from}, ${to}) was removed`,
-      });
-    }
-  }
-
-  for (const relationKey of relationsAfter) {
-    if (!relationsBefore.has(relationKey)) {
-      const [metaEdge, from, to] = relationKey.split(":");
-      changes.push({
-        type: "added",
-        entity: "relation",
-        name: relationKey,
-        severity: "safe",
-        details: `Relation ${metaEdge}(${from}, ${to}) was added`,
-      });
-    }
-  }
-
-  return changes;
 }
 
 // ============================================================
@@ -1414,12 +1426,18 @@ function generateSummary(
 // ============================================================
 
 /**
- * Checks if a schema change is backwards compatible.
+ * Checks if a schema change is backwards compatible: exactly "no `breaking`
+ * change" (`!diff.hasBreakingChanges`) — nodes or edges removed, required
+ * properties added, existing properties removed, and a `breaking` ontology
+ * change (`inverseOf`/`implies` added or removed, or Operational Identity's
+ * `sameIdAcrossKinds` flip) all count.
  *
- * A change is backwards compatible if:
- * - No nodes or edges were removed
- * - No required properties were added
- * - No existing properties were removed
+ * "Backwards compatible" does NOT mean "will commit unconditionally": a
+ * `warning`-severity ontology change (see `ChangeSeverity`'s docblock)
+ * passes this check and then owes a commit-time data probe that can still
+ * refuse it with `MigrationError` `reason: "ontology-tightening-violated"`.
+ * See docs/schema-evolution.md's "Ontology tightenings are checked against
+ * your data" section.
  */
 export function isBackwardsCompatible(diff: SchemaDiff): boolean {
   return !diff.hasBreakingChanges;
@@ -1429,7 +1447,13 @@ export function isBackwardsCompatible(diff: SchemaDiff): boolean {
  * How a proposed graph relates to the committed schema.
  *
  * - `identical` — a semantic no-op; committing it changes nothing.
- * - `additive` — changes exist and are all backwards compatible.
+ * - `additive` — changes exist and are all backwards compatible
+ *   (`isBackwardsCompatible`). This is a pre-flight classification, not a
+ *   commit guarantee: an `additive` diff that carries a `warning`-severity
+ *   ontology change (see `ChangeSeverity`) is still subject to the
+ *   commit-time data probe and can be refused with `MigrationError`
+ *   `reason: "ontology-tightening-violated"` if existing rows violate the
+ *   tightened ontology.
  * - `incompatible` — at least one breaking change; needs a deliberate
  *   migration decision.
  */
@@ -1512,3 +1536,12 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
 
   return actions;
 }
+
+/**
+ * A change to the ontology.
+ *
+ * Defined in `./ontology-change` (alongside the data-probe machinery that
+ * classifies it) and re-exported here so the public path
+ * (`src/schema/index.ts`) is unchanged.
+ */
+export { type OntologyChange } from "./ontology-change";

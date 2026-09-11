@@ -28,14 +28,36 @@ import type { GraphDef } from "../../core/define-graph";
 import { DatabaseOperationError } from "../../errors";
 import type { KindRegistry } from "../../registry/kind-registry";
 import { hasOwnKey } from "../../utils/object";
+import { edgeKindIsInAcyclicRelation } from "../acyclicity";
+import { edgeCardinalityAxisReferences } from "../claims/edge-claims";
+import { edgeWriteNeedsConstraintFence } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
 import type { CreateEdgeInput, CreateNodeInput } from "../types";
+import { compositionEdgeHasRequiredExistencePart } from "./composition-create";
 import { diagnoseFusedSchemaFenceNoRow } from "./write-transaction";
+
+/**
+ * Item E.2: whether `item` owes a composition edge a fused node-create
+ * program has no shape for — a stated `partOf`, or a required-existence
+ * kind (which owes one even with no `partOf` stated; `resolveCompositionCreate`
+ * is what refuses that bare create). The one predicate both node-create
+ * fused-eligibility checks below share, so neither re-spells it.
+ */
+function nodeCreateOwesCompositionEdge(
+  registry: KindRegistry,
+  item: CreateNodeInput,
+): boolean {
+  return (
+    item.partOf !== undefined ||
+    registry.compositionExistence(item.kind) === "required"
+  );
+}
 
 type CommonAtomicMutationEligibility = Readonly<{
   backend: GraphBackend | TransactionBackend;
   graph: GraphDef;
+  registry: KindRegistry;
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
@@ -96,6 +118,18 @@ export function resolveAtomicNodeBatchExecutor(
   input: AtomicNodeBatchEligibilityInput,
 ): BackendAtomicNodeBatchExecutor | undefined {
   if (input.inputs.length === 0 || input.identityEnabled) return;
+  // Item E.2: a fused node-batch program writes node rows only — it has no
+  // shape for the composition edge a required-existence kind or a stated
+  // `partOf` also owes. Declined by declaration, before any row is read: a
+  // fused command is an optimization attempt, not evidence that its
+  // dimensions ran.
+  if (
+    input.inputs.some((item) =>
+      nodeCreateOwesCompositionEdge(input.registry, item),
+    )
+  ) {
+    return;
+  }
   const profile = resolveAtomicMutationProfile(input);
   if (profile?.createNodes === undefined) return;
   const claimSupport = profile.createNodes.claimSupport;
@@ -158,6 +192,12 @@ export function resolveAtomicNodeReplacementBatchProgram(
   if (!hasOwnKey(input.graph.nodes, input.kind)) return;
   const registration = input.graph.nodes[input.kind];
   if (registration === undefined) return;
+  // Item E.2: a replacement that lands on no existing row CREATES the node,
+  // and this fused program has no `partOf` parameter and no composition-edge
+  // shape — a required-existence kind must take the portable path so
+  // `resolveCompositionCreate` gets to refuse the bare create rather than
+  // this program silently writing an orphan.
+  if (input.registry.compositionExistence(input.kind) === "required") return;
   const executor = resolveAtomicMutationProfile(input)?.replaceNodes;
   if (executor === undefined) return;
   const releasedClaimFamilies = new Set(executor.releasedClaimFamilies);
@@ -238,7 +278,21 @@ export function resolveAtomicEdgeConvergenceExecutor(
   if (registration?.matchIdentity === undefined) {
     return;
   }
-  if ((registration.cardinality ?? "many") !== "many") return;
+  // No native program applies a constrained cardinality axis or acyclicity;
+  // such a create must re-enter the portable path, which probes and refuses.
+  if (
+    edgeWriteNeedsConstraintFence({
+      ...registration,
+      acyclic: edgeKindIsInAcyclicRelation(
+        input.graph,
+        input.registry,
+        input.kind,
+      ),
+      composition: input.registry.isCompositionEdge(input.kind),
+    }) !== undefined
+  ) {
+    return;
+  }
   const declaredFields = registration.matchIdentity.fields;
   if (
     declaredFields.length !== input.matchOn.length ||
@@ -267,8 +321,47 @@ export function resolveAtomicEdgeBatchExecutor(
     !input.inputs.every(
       (item) =>
         hasOwnKey(input.graph.edges, item.kind) &&
-        input.graph.edges[item.kind] !== undefined,
+        input.graph.edges[item.kind] !== undefined &&
+        // No native program applies acyclicity: acyclicity's fence has no
+        // database key to claim through (`CONSTRAINT_FENCE_BACKING.
+        // edgeAcyclicity === "lockOnly"`), which this fused program's claim
+        // rows cannot express. Any acyclic kind in the batch sends the WHOLE
+        // batch through the portable path, which probes the combined insert
+        // once, after it lands.
+        // This ALREADY excludes every composition edge kind, with no
+        // separate check needed: `compositionAcyclicRelation`
+        // (`src/store/acyclicity.ts`) folds every composition-realizing edge
+        // kind into D-10's union the moment the graph declares ANY
+        // `partOf`/`hasPart` pair, so `edgeKindIsInAcyclicRelation` answers
+        // `true` for such a kind regardless of whether ITS OWN write would
+        // close a cycle. That is load-bearing here for an unrelated reason:
+        // a composition edge kind owes a SECOND claim (the reserved
+        // relation-wide axis, `compositionClaim`) beyond whatever ordinary
+        // axis its own registration declares — a fact the two-axis check
+        // below cannot see, because it counts only
+        // `edgeCardinalityAxisReferences`. `assertMatchingFusedEdgeClaim`
+        // (`operation-backend-core.ts`) is the belt behind this gate, for
+        // both reasons alike.
+        !edgeKindIsInAcyclicRelation(input.graph, input.registry, item.kind),
     )
+  ) {
+    return;
+  }
+  // A kind declaring BOTH axes claims two rows per edge; the native program
+  // matches claim results back to edges one-to-one
+  // (`executeAtomicEdgeBatch`), so it refuses the whole batch rather than
+  // silently dropping the second axis for the affected rows. The portable
+  // path (`createEdge`'s single-write route) handles a two-axis kind fine —
+  // it issues every claim in `claimEdgeCardinalities`'s loop, not a single
+  // matched statement.
+  if (
+    input.inputs.some((item) => {
+      const registration = input.graph.edges[item.kind];
+      return (
+        registration !== undefined &&
+        edgeCardinalityAxisReferences(registration).length > 1
+      );
+    })
   ) {
     return;
   }
@@ -288,6 +381,17 @@ export function resolveAtomicEdgeDeleteBatchExecutor(
 ): AtomicEdgeDeleteBatchExecutor | undefined {
   if (input.ids.length === 0) return;
   if (!hasOwnKey(input.graph.edges, input.expectedKind)) return;
+  // Item E.2: `assertCompositionExistencePreserved` reads the part row under
+  // the held write lock — a decision this read-free fused command cannot
+  // express. A composition edge kind realizing a required-existence part
+  // must take the portable path for its delete, exactly as its create-side
+  // counterpart (`resolveAtomicNodeBatchExecutor`) declines the fused
+  // program for a required-existence node create.
+  if (
+    compositionEdgeHasRequiredExistencePart(input.registry, input.expectedKind)
+  ) {
+    return;
+  }
   return resolveAtomicMutationProfile(input)?.deleteEdges;
 }
 
@@ -308,6 +412,31 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   if (!hasOwnKey(input.graph.nodes, input.kind)) return;
   const registration = input.graph.nodes[input.kind];
   if (registration === undefined) return;
+  // A composition whole's delete cascades to its parts through the portable
+  // pipeline (`planCompositionCascade`, `node-operations.ts`) — a decision
+  // that reads rows and recurses, which the fused command's single read-free
+  // SQL shape cannot express. Statically ineligible by declaration, before
+  // any row is read: "does this kind declare parts?" is a property of the
+  // registry, not of this particular delete.
+  //
+  // A kind that is itself a composition PART (`registry.isCompositionPart`)
+  // is equally ineligible, for a second, independent reason: composition edges
+  // never count against `restrict`, on either end
+  // (composition-contract-design.md's binding ruling), and only the portable
+  // path's `enforceNodeDeleteBehavior` (`node-write-pipeline.ts`) knows how
+  // to exclude them from its restrict count — the fused command's read-free
+  // refusal diagnosis has no such filter and would misreport a composition
+  // edge as a live restrict obstacle. This is the second, declared owner
+  // `nodeDeletePolicyRequiresPortablePath`'s doc cross-references: that
+  // predicate owns the two `NodeDeletePolicy`-shaped dimensions
+  // (`enforceDeleteBehavior`, `consumedEdgeIds`); this guard owns the
+  // registry-shaped one (static composition participation).
+  if (
+    input.registry.isCompositionWhole(input.kind) ||
+    input.registry.isCompositionPart(input.kind)
+  ) {
+    return;
+  }
   const executor = resolveAtomicMutationProfile(input)?.deleteNodes;
   if (executor === undefined) return;
   const releasedClaimFamilies = new Set(executor.releasedClaimFamilies);
@@ -375,13 +504,24 @@ function supportsAtomicResolvedNodeKindProjections(
 }
 
 function isAtomicResolvedEdgeKindEligible(
-  input: Readonly<{ graph: GraphDef; kind: string }>,
+  input: Readonly<{ graph: GraphDef; registry: KindRegistry; kind: string }>,
 ): boolean {
   if (!hasOwnKey(input.graph.edges, input.kind)) return false;
   const registration = input.graph.edges[input.kind];
   return (
     registration !== undefined &&
-    (registration.cardinality ?? "many") === "many" &&
+    // No native program applies a constrained cardinality axis, acyclicity,
+    // or composition; such a create must re-enter the portable path, which
+    // probes and refuses.
+    edgeWriteNeedsConstraintFence({
+      ...registration,
+      acyclic: edgeKindIsInAcyclicRelation(
+        input.graph,
+        input.registry,
+        input.kind,
+      ),
+      composition: input.registry.isCompositionEdge(input.kind),
+    }) === undefined &&
     registration.matchIdentity === undefined
   );
 }
@@ -446,6 +586,16 @@ export function resolveAtomicNodeResolvedMutationSetExecutor(
   if (
     input.creates.some(
       (item) => item.kind !== input.kind || item.id === undefined,
+    )
+  ) {
+    return;
+  }
+  // Item E.2: same reasoning as the other two node-create fused resolvers —
+  // no shape here for the composition edge a `partOf` or a required-existence
+  // kind also owes.
+  if (
+    input.creates.some((item) =>
+      nodeCreateOwesCompositionEdge(input.registry, item),
     )
   ) {
     return;

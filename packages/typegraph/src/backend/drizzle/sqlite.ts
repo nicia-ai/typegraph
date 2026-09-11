@@ -51,9 +51,7 @@ import {
 import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
-import {
-  sinceIndexAdoptionDdl,
-} from "../../indexes/system";
+import { sinceIndexAdoptionDdl } from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -74,7 +72,7 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteDuplicateColumnError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
 import {
@@ -177,9 +175,13 @@ import {
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
+  EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
+  generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
+  IDENTITY_TRANSITIONS_ADOPTION_COLUMNS,
   planSqliteEdgeMatchIdentityAdoption,
+  planSqliteIdentityTransitionsRestoredAtAdoption,
   sqliteContributions,
 } from "./ddl";
 import {
@@ -1305,6 +1307,10 @@ export function buildSqliteEngineProfile(
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
     identitySeparation: getTableName(tables.identitySeparation),
+    identityTransitions: getTableName(tables.identityTransitions),
+    identityTransitionRetention: getTableName(
+      tables.identityTransitionRetention,
+    ),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
@@ -1349,16 +1355,16 @@ export function buildSqliteEngineProfile(
   // neon-http) have no transactions and manage their own concurrency, so they
   // stay unqueued.
   const serializedQueue =
-    transactionMode === "none" ?
-      undefined
-    : createSerializedExecutionQueue({
+    transactionMode === "none" ? undefined : (
+      createSerializedExecutionQueue({
         // Best-effort: undetected reentrancy here degrades to the deadlock
         // this queue has always risked when AsyncLocalStorage is
         // unavailable, not a broken correctness promise — SQLite's own
         // engine-serialized fence never depended on this detection.
         reentrancy: "detect",
         subject: "sqlite",
-      });
+      })
+    );
 
   // Durable fulltext + vector materialization (#135): the dialect-specific
   // marker-table primitives. Orchestration (materialize / assert /
@@ -1510,7 +1516,10 @@ export function buildSqliteEngineProfile(
       } catch (error) {
         if (
           attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(error)
+          !isSqliteDuplicateColumnError(
+            error,
+            EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
+          )
         ) {
           throw error;
         }
@@ -1519,6 +1528,42 @@ export function buildSqliteEngineProfile(
     throw new CompilerInvariantError(
       "SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
     );
+  }
+
+  async function ensureIdentityTransitionsRestoredAtColumn(): Promise<void> {
+    const identityTransitionsTableName = getTableName(
+      tables.identityTransitions,
+    );
+    // Same "no ADD COLUMN IF NOT EXISTS" shape as `ensureEdgeMatchIdentityStorage`
+    // above, narrowed to one column. One pass, no retry: a concurrent adopter
+    // that wins the race leaves exactly the post-state this call wanted, so a
+    // precisely classified duplicate-column failure IS success.
+    const columnRows = await executionAdapter.execute<{
+      name?: unknown;
+    }>(sql`PRAGMA table_info(${sql.identifier(identityTransitionsTableName)})`);
+    const columns = new Set(
+      columnRows.flatMap((row) =>
+        typeof row.name === "string" ? [row.name] : [],
+      ),
+    );
+    const statements = planSqliteIdentityTransitionsRestoredAtAdoption(
+      identityTransitionsTableName,
+      columns,
+    );
+    try {
+      for (const statement of statements) {
+        await db.run(sql.raw(statement));
+      }
+    } catch (error) {
+      if (
+        !isSqliteDuplicateColumnError(
+          error,
+          IDENTITY_TRANSITIONS_ADOPTION_COLUMNS,
+        )
+      ) {
+        throw error;
+      }
+    }
   }
 
   async function readBaseSchemaVersion(): Promise<number | undefined> {
@@ -1645,6 +1690,14 @@ export function buildSqliteEngineProfile(
         tables.recordedIdentityAssertions,
       ),
     }),
+    identityTransitionsTableDdl: [
+      generateSqliteCreateTableSQL(tables.identityTransitions),
+      ...generateSqliteCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generateSqliteCreateTableSQL(
+      tables.identityTransitionRetention,
+    ),
+    ensureIdentityTransitionsRestoredAtColumn,
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`

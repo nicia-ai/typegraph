@@ -1,5 +1,6 @@
 import { createDataKeyedBag } from "../utils/object";
 import { requireDefined } from "../utils/presence";
+import { encodeTupleKey } from "../utils/tuple-key";
 /**
  * Candidate SOURCES (design §4 / §6.1) — the RECALL layer of candidate generation.
  *
@@ -58,6 +59,7 @@ import { FORCED_MATCH_SCORE } from "./scoring";
 import { fieldText } from "./similarity";
 import type {
   GraphDef,
+  IdentityTransferAssertion,
   JsonValue,
   Node,
   NodeId,
@@ -149,6 +151,25 @@ export type SourceScope = Readonly<{
    * neighbourhood instead of all-vs-all (the `keyless` source, §6.2). */
   keyless?: KeylessConfig;
   store?: BaseLookupStore;
+  /**
+   * The `same` identity assertions in scope for this kind, and how strongly
+   * they pair. Present only when the graph declares `identity` and the caller
+   * stated `identity.pairing` as something other than `"off"`; the field is a
+   * SCOPE fragment, not a backend handle.
+   */
+  identity?: IdentityPairingScope;
+}>;
+
+/**
+ * The identity slice of a {@link SourceScope}: every `same` assertion whose two
+ * endpoints are both staged new nodes of this kind, plus the strength the
+ * caller asked for. An assertion is a recall signal (`"candidate"`, scored
+ * against the kind's threshold) or a definition (`"definitional"`, a forced
+ * edge at {@link FORCED_MATCH_SCORE}) — never both.
+ */
+export type IdentityPairingScope = Readonly<{
+  pairing: "candidate" | "definitional";
+  assertions: readonly IdentityTransferAssertion[];
 }>;
 
 /**
@@ -838,6 +859,137 @@ export const baseKeySource: CandidateSource = {
         compareStrings(left.id, right.id),
       ),
     };
+  },
+};
+
+/**
+ * `identity` source — the IDENTITY-DRIVEN recall path. An explicit
+ * `store.identity.assertSame(a, b)` says the two nodes are one entity; this
+ * source is what lets a merge act on that, instead of only refusing the
+ * contradiction it would otherwise discover at commit.
+ *
+ * It reads `scope.identity.assertions` — the `same` assertions the CALLER
+ * already restricted to this kind, drawn from the same staging slices the
+ * three-way classifier reads, so the pairing source and the classifier can
+ * never disagree about which assertions exist. An assertion naming a node that
+ * is not a staged new node of this kind proposes nothing: recall can only
+ * propose over the nodes in scope.
+ *
+ * The strength is the caller's, not this module's:
+ *
+ *   - `"candidate"` emits a scored {@link CandidatePair}, so the assertion is
+ *     strong recall and the kind's threshold still decides. An assertion is
+ *     evidence, not proof.
+ *   - `"definitional"` emits a forced {@link CandidateEdge} at
+ *     {@link FORCED_MATCH_SCORE}, exactly as a shared unique value does — the
+ *     one place a `same` assertion consolidates two rows into one.
+ *
+ * NOT part of {@link CANDIDATE_SOURCES}: the source is constructed only when
+ * the graph declares `identity` and the caller stated a pairing mode, so a
+ * merge that never sets `identity` runs precisely the sources it always has.
+ *
+ * Determinism: assertions are visited in `(a, b, id)` order and each pair is
+ * canonicalized by {@link orderEndpoints}, so the emission order is a pure
+ * function of the assertion SET.
+ */
+export const identitySource: CandidateSource = {
+  id: "identity",
+  generate(scope) {
+    const { identity, nodes } = scope;
+    if (identity === undefined || identity.assertions.length === 0) {
+      return Promise.resolve({ pairs: [], forcedEdges: [], baseMembers: [] });
+    }
+    if (nodes === undefined) {
+      throw new CandidateSourceError(
+        "identitySource requires the kind's staged nodes in the source scope.",
+        {
+          details: {
+            kind: scope.kind,
+            source: "identity",
+            sourceId: "identity",
+            operation: "generate",
+          },
+        },
+      );
+    }
+    // The kind's staged NEW nodes directly, not the blocked buckets: an
+    // assertion pairs the entities it names, whatever blocking key they carry
+    // (a kind can be identity-paired with no `block` at all).
+    const nodesByKey = new Map<MergeKey, Node<NodeType>>();
+    for (const node of nodes) nodesByKey.set(mergeKeyOf(node), node);
+    // One entry per ENDPOINT PAIR: several assertions can name the same pair
+    // (a re-assertion under a fresh id, or two branches asserting it
+    // independently), and the evidence records every one of them rather than
+    // proposing the pair twice.
+    const assertionIdsByPair = new Map<
+      string,
+      Readonly<{ left: Node<NodeType>; right: Node<NodeType>; ids: string[] }>
+    >();
+    const ordered = [...identity.assertions].sort((left, right) =>
+      compareStrings(
+        encodeTupleKey([
+          left.a.kind,
+          left.a.id,
+          left.b.kind,
+          left.b.id,
+          left.id,
+        ]),
+        encodeTupleKey([
+          right.a.kind,
+          right.a.id,
+          right.b.kind,
+          right.b.id,
+          right.id,
+        ]),
+      ),
+    );
+    for (const assertion of ordered) {
+      const left = nodesByKey.get(mergeKeyOf(assertion.a));
+      const right = nodesByKey.get(mergeKeyOf(assertion.b));
+      // Not in scope for this kind's candidate generation — the assertion
+      // names a committed node, a node of another kind, or one no branch
+      // staged. Recall proposes over the nodes it has.
+      if (left === undefined || right === undefined) continue;
+      // An assertion naming one node twice is a self-loop, never a pairing.
+      if (left.id === right.id && left.kind === right.kind) continue;
+      const { a, b } = orderEndpoints(left, right, []);
+      const pairKey = `${a}\u0000${b}`;
+      const existing = assertionIdsByPair.get(pairKey);
+      if (existing === undefined) {
+        assertionIdsByPair.set(pairKey, { left, right, ids: [assertion.id] });
+      } else {
+        existing.ids.push(assertion.id);
+      }
+    }
+
+    const pairs: CandidatePair[] = [];
+    const forcedEdges: CandidateEdge[] = [];
+    for (const { left, right, ids } of assertionIdsByPair.values()) {
+      const source: MatchSource = {
+        kind: "identity",
+        sourceId: "identity",
+        assertionIds: [...ids].sort((first, second) =>
+          compareStrings(first, second),
+        ),
+      };
+      if (identity.pairing === "candidate") {
+        pairs.push(orderEndpoints(left, right, [source]));
+        continue;
+      }
+      const { a, b } = orderEndpoints(left, right, []);
+      forcedEdges.push({
+        a,
+        b,
+        score: FORCED_MATCH_SCORE,
+        evidence: {
+          a: entityRef(a),
+          b: entityRef(b),
+          sources: [source],
+          decision: "definitional",
+        },
+      });
+    }
+    return Promise.resolve({ pairs, forcedEdges, baseMembers: [] });
   },
 };
 

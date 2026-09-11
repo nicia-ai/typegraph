@@ -177,7 +177,7 @@ const store = createStore(graph, backend);
 These closures are stored in the `TypeRegistry` and used during query compilation:
 
 ```typescript
-.from("Media", "m", { includeSubClasses: true })
+.from("Media", "m", { expansion: "subclasses" })
 // At compile time, expands to: WHERE kind IN ('Media', 'Podcast', 'Article', 'Video')
 ```
 
@@ -585,13 +585,14 @@ nearest neighbor search efficiently.
 - **Whole-graph algorithms**: WCC, label propagation, and PageRank iterate over every visible node
   by default, or over an explicit `nodeKinds` induced subgraph, and their selected edges
 - **Large property filtering without indexes**: JSON extraction is slower than column access
-- **Cross-kind queries**: `includeSubClasses: true` increases the WHERE IN set
+- **Cross-kind queries**: `expansion: "subclasses"` increases the WHERE IN set
 
 ### Optimization Strategies
 
 1. **Filter early**: Apply predicates as close to the source as possible
 2. **Limit results**: Always paginate large result sets
-3. **Use specific kinds**: Avoid `includeSubClasses` unless needed
+3. **Use specific kinds**: A supertype query expands its `WHERE kind IN (...)` set by
+   default; pass `{ expansion: "exact" }` when the wider set isn't needed
 4. **Index JSON paths**: For frequently-filtered properties, add expression indexes
 5. **Batch writes**: Use transactions to reduce disk syncs and round-trips
 

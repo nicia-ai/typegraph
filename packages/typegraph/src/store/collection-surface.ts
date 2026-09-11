@@ -45,6 +45,7 @@ export const NODE_WRITE_NAMES = [
   "create",
   "createFromRecord",
   "update",
+  "reparent",
   "compareAndSet",
   "updateWhere",
   "delete",
@@ -114,6 +115,18 @@ export const IDENTITY_READ_NAMES = [
   "areSame",
   "areDifferent",
   "assertionsOf",
+] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
+
+/**
+ * Identity facade methods that answer across every recorded coordinate
+ * (transition history), never available on a coordinate-pinned StoreView —
+ * and not receipt-tracked writes either, so they are neither a "read" (the
+ * `IdentityReadFacade` split) nor a "write" (the receipt counters) in the
+ * senses those two buckets mean.
+ */
+export const IDENTITY_HISTORY_NAMES = [
+  "transitionsOf",
+  "replay",
 ] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
 
 /** Identity facade write method names: never available on a read-only view. */

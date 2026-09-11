@@ -191,9 +191,11 @@ import {
 import {
   edgeMatchIdentityPairCheckName,
   edgeMatchIdentityUniqueIndexName,
+  generatePgCreateIndexSQL,
   generatePgCreateTableSQL,
   generatePostgresDDL,
   generatePostgresEdgeMatchIdentityUpgradeDDL,
+  generatePostgresIdentityTransitionsRestoredAtAdoptionDDL,
   postgresContributions,
   postgresIdentifierRegclassName,
 } from "./ddl";
@@ -1031,6 +1033,10 @@ export function buildPostgresEngineProfile(
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
     identitySeparation: getTableName(tables.identitySeparation),
+    identityTransitions: getTableName(tables.identityTransitions),
+    identityTransitionRetention: getTableName(
+      tables.identityTransitionRetention,
+    ),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
@@ -1344,6 +1350,23 @@ export function buildPostgresEngineProfile(
     }
   }
 
+  /**
+   * Ensures the identity-transitions table's `restored_at` column exists —
+   * the version-4 adoption step. Unlike `ensureEdgeMatchIdentityStorage`
+   * above, this needs no `pg_attribute` introspection: it is one nullable
+   * column, and Postgres's native `ADD COLUMN IF NOT EXISTS` is already
+   * idempotent. No "does the table exist yet" guard either — version-4's
+   * `adopt()` always runs after version-3's in the same ordered walk
+   * (`createBaseSchemaMembers`), and version-3 is what creates this table.
+   */
+  async function ensureIdentityTransitionsRestoredAtColumn(): Promise<void> {
+    await executeConcurrentCreateDdl(
+      generatePostgresIdentityTransitionsRestoredAtAdoptionDDL(
+        getTableName(tables.identityTransitions),
+      ),
+    );
+  }
+
   async function readBaseSchemaVersion(): Promise<number | undefined> {
     try {
       const rows = await db
@@ -1542,6 +1565,14 @@ export function buildPostgresEngineProfile(
         tables.recordedIdentityAssertions,
       ),
     }),
+    identityTransitionsTableDdl: [
+      generatePgCreateTableSQL(tables.identityTransitions),
+      ...generatePgCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generatePgCreateTableSQL(
+      tables.identityTransitionRetention,
+    ),
+    ensureIdentityTransitionsRestoredAtColumn,
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
@@ -2833,9 +2864,7 @@ function createPostgresOperationBackend(
    */
   const schemaFenceFusionPlan = resolveWriteFencePlan(fenceTarget);
   const schemaFenceInsertLockClause: SQL =
-    schemaFenceFusionPlan.kind === "lock" ?
-      sql.raw("FOR SHARE")
-    : sql.raw("");
+    schemaFenceFusionPlan.kind === "lock" ? sql.raw("FOR SHARE") : sql.raw("");
 
   const commonOperationMembers = createCommonOperationBackend(
     buildCommonOperationOptions({
@@ -2864,8 +2893,10 @@ function createPostgresOperationBackend(
         atomicProgramsAtTransactionScope: true,
         nodeProjectionInsertFusion: true,
         dynamicEdgeConvergence: true,
-        ...(schemaFenceFusionPlan.kind === "lock" &&
-        fenceTarget.fenceSql !== undefined ?
+        ...((
+          schemaFenceFusionPlan.kind === "lock" &&
+          fenceTarget.fenceSql !== undefined
+        ) ?
           { fenceSql: fenceTarget.fenceSql }
         : {}),
         async beforeNodeProjectionInsert(params, plan): Promise<void> {

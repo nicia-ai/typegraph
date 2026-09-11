@@ -574,6 +574,47 @@ describe("repointEdges fold scope (#393)", () => {
     expect(result.dropped).toEqual([]);
   });
 
+  it("reports a fold that collapsed DISTINCT pre-repoint relationships, and never ordinary multiplicity", () => {
+    const staged = [
+      // x→a and x→b are two relationships repointing brought together …
+      stagedEdge({ id: "edge-1", from: "x", to: "a" }),
+      stagedEdge({ id: "edge-2", from: "x", to: "b" }),
+      // … while the two parallel y→a rows are one relationship's multiplicity.
+      stagedEdge({ id: "edge-3", from: "y", to: "a" }),
+      stagedEdge({ id: "edge-4", from: "y", to: "a", branchId: BRANCH_B }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.collapsed).toEqual([
+      {
+        kind: "references",
+        survivorId: "edge-1",
+        fromKey: key("x"),
+        toKey: key("a"),
+        rows: [
+          { id: "edge-1", fromKey: key("x"), toKey: key("a") },
+          { id: "edge-2", fromKey: key("x"), toKey: key("b") },
+        ],
+      },
+    ]);
+    // The parallel rows still commit separately and report no collapse.
+    expect(result.edges.map((edge) => edge.id as string)).toEqual([
+      "edge-1",
+      "edge-3",
+      "edge-4",
+    ]);
+  });
+  // MUTATION CHECK: make `foldCollapse` skip its `distinctPairs.size < 2`
+  // guard (always report) — the y→a fold set is then reported as a collapse
+  // and the `toEqual` above fails on a second entry.
+
   it("keeps two same-endpoint edges with IDENTICAL props as parallel edges", () => {
     // The id-keyed ruling: a distinct id is a distinct row even when its props
     // coincide, because `create()` on the target would have made a second row.

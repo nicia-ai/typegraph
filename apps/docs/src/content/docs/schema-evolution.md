@@ -30,9 +30,17 @@ These changes are backwards compatible and auto-migrate without intervention:
 - Adding new node types
 - Adding new edge types
 - Adding optional properties (with defaults)
-- Adding ontology relations
+- Adding `broader`, `narrower`, `partOf`, `hasPart`, or `relatedTo` ontology
+  relations
+- Removing `disjointWith` ontology relations
 - Changing per-kind annotations (UI hints, audit policy, etc.)
 - Changing graph-scoped annotations (display metadata, capabilities, etc.)
+
+Adding `disjointWith`, `subClassOf`, or `equivalentTo` — and removing
+`subClassOf` or `equivalentTo` — auto-migrate too, but only after a
+data check. See
+[Ontology tightenings are checked against your data](#ontology-tightenings-are-checked-against-your-data)
+below.
 
 ### Adding an Optional Property
 
@@ -156,6 +164,267 @@ before annotations are enabled. TypeGraph 0.54+ preserves unknown top-level
 schema fields across parse-and-recommit cycles, so later additive metadata
 slices follow the same rollout rule.
 
+## Ontology tightenings are checked against your data
+
+Some ontology changes can invalidate rows that already exist. TypeGraph
+classifies these by what they do to your data, not just to the schema
+document, and runs a data check inside the schema-commit transaction before
+publishing the new version:
+
+| Meta-edge / property                          | Added                                             | Removed                                           |
+| --------------------------------------------- | -------------------------------------------------- | -------------------------------------------------- |
+| `disjointWith`                                | Warning — checked against live nodes               | Safe                                                |
+| `subClassOf`, `equivalentTo`                  | Warning — checked against live nodes               | Warning — checked against live edges               |
+| `inverseOf`, `implies`                        | Breaking                                            | Breaking                                            |
+| `broader`, `narrower`, `partOf`, `hasPart`, `relatedTo` | Safe | Safe |
+| an edge's `acyclic: true`                     | Warning — checked against live edges for an existing cycle | Safe |
+
+`sameAs` and `differentFrom` no longer have a public factory to author them
+with (see
+[Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis)
+below), but a document persisted before the removal can still name one: the
+classifier treats a `sameAs` relation exactly like `equivalentTo` above, and
+a `differentFrom` relation exactly like the always-safe row.
+
+- **Adding `disjointWith`** is checked against every live node: if two nodes
+  already share an id under kinds the new relation makes mutually exclusive
+  (directly, or via `subClassOf` propagation), the commit refuses.
+- **Adding `subClassOf` or `equivalentTo`** is checked two ways: it
+  can propagate an existing `disjointWith` down to a kind that was not
+  disjoint before (same check as above), and it can merge two previously
+  independent `kindWithSubClasses` uniqueness components — if both already
+  hold a live row under the same key, the commit refuses.
+- **Removing `subClassOf` or `equivalentTo`** can shrink an edge
+  kind's admitted endpoint pairs. If a live edge's endpoints rely on the
+  subsumption the relation provided, the commit refuses.
+- **Removing `disjointWith`** never invalidates anything — loosening a
+  constraint cannot make an existing row wrong — so it stays safe and
+  auto-migrates unconditionally.
+- **Adding or removing `inverseOf` or `implies`** changes what a default
+  `expand: "inverse"` / `expand: "implying"` traversal returns for existing
+  edges — a read-semantics change, not a data-validity one — so it is
+  `breaking` and requires an explicit `migrateSchema()`, the same treatment
+  the Operational Identity `sameIdAcrossKinds` flip gets.
+- A relation whose `from` or `to` names a kind **this same commit removes**
+  is always safe with no check — `Store.removeKinds()` is unaffected.
+- **Declaring `acyclic: true`** on an edge kind that already carries live
+  rows is checked against the whole relation: if any live edge's `to`
+  endpoint already reaches its `from` endpoint, the commit refuses with the
+  offending edge ids in `details.violations` (family `edgeAcyclicity`).
+  Dropping `acyclic: true` never invalidates anything and stays safe. A
+  brand-new edge kind's `acyclic: true` is vacuously safe — there is no
+  prior data it could violate.
+
+A refused tightening throws `MigrationError`:
+
+```typescript
+try {
+  await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "ontology-tightening-violated") {
+    console.log(error.details.violations);
+    // → the exact rows blocking the migration, in the shape
+    //   store.verifyConstraintFences() returns
+  }
+}
+```
+
+Resolve the offending rows (delete them, change their kind, or narrow the
+ontology change), then retry. `store.verifyConstraintFences()` lists the same
+rows on demand at any time — run it against a live store to find conflicts
+before attempting a migration.
+
+**Residual window.** The check runs inside the commit transaction but takes no
+additional lock: under the previous schema the tightening's kinds are not yet
+disjoint (or their uniqueness components have not yet merged, or the edge
+kind's endpoints have not yet shrunk), so there is no claim for a lock to
+fence. A writer that commits under the previous schema version between the
+check and the version compare-and-swap is invisible to it — the same residual
+window the existing empty-kind removal fence carries.
+`store.verifyConstraintFences()` remains the post-hoc detector for exactly
+that window.
+
+## Edge cardinality tightenings are checked against your data
+
+Making an edge's `cardinality` or `targetCardinality` more restrictive — for
+example widening `many` to `one`, or adding `targetCardinality: "one"` to an
+edge that previously had none — runs the same kind of data check as an
+ontology tightening, inside the same schema-commit transaction, using the
+same fold every cardinality-aware layer shares
+(`edgeCardinalityAxisReferences`, see
+[Target cardinality](/core-concepts#target-cardinality)). Each axis this
+commit newly constrains — source or target, independently — is probed
+against the live population before the version is published:
+
+- **Source-side tightening** (`cardinality` narrowing) counts live edges per
+  source; a source already exceeding the new bound refuses the commit.
+- **Target-side tightening** (`targetCardinality` narrowing) counts live
+  edges per target instead, using the same probe shape with the endpoint
+  swapped — a target already exceeding the new bound refuses the commit.
+- An edge kind that tightens **both axes in the same commit** is checked
+  independently for each; either violation refuses the whole commit, and the
+  thrown error reports every newly-constrained axis, not just the first one
+  found.
+- A commit that declares a constrained `cardinality` or `targetCardinality`
+  on a **brand-new edge kind** owes this exact same check: a stored schema
+  with no entry for the kind reads as `many` on both axes, so any constrained
+  value the new kind declares differs from that default and is probed like
+  any other tightening. This is intentional — an edge kind can be re-added
+  after removal, with live rows already under it — but it means a purely
+  additive schema change (adding a kind) can still require the atomic
+  preflight primitive described below.
+
+Like an ontology tightening, this check needs the backend's atomic
+preflight-commit primitive (`commitSchemaVersionWithPreflight`); a backend
+that implements only `commitSchemaVersion` throws `ConfigurationError` code
+`EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` — see
+[Schema-tightening and constraint-fence audit guard codes](/errors#schema-tightening-and-constraint-fence-audit-guard-codes).
+
+A refused tightening throws `MigrationError` with
+`details.reason === "edge-cardinality-tightening-violated"`:
+
+```typescript
+try {
+  await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (
+    error instanceof MigrationError &&
+    error.details.reason === "edge-cardinality-tightening-violated"
+  ) {
+    console.log(error.details.axes); // → the newly-constrained axes
+    console.log(error.details.violations); // → the offending rows
+  }
+}
+```
+
+Resolve the offending rows (delete the excess edges, or loosen the target
+schema change), then retry. This check has the same residual window as the
+ontology tightening check above: it takes no additional lock, so a writer
+committing under the previous schema version between the probe and the
+version compare-and-swap is invisible to it.
+
+## Structural subsumption is checked before you upgrade
+
+Separately from the data check above, a `subClassOf`/`equivalentTo`
+hierarchy is checked for a **schema-shape** violation — the child's schema
+no longer structurally extends the parent's — and this check happens before
+the data check, before any commit: `getSchemaChanges(backend, graph)` throws
+a `ConfigurationError` naming the child, the parent, and the offending
+property path if the graph you're about to commit would introduce one. This
+runs even when a migration only edits a node kind's **property** schema and
+touches no relation at all — a property change on a kind already party to an
+existing hierarchy can break it just as surely as a relation change can.
+
+**`requiresMigration` does not surface this refusal.** By design, it
+collapses any `ConfigurationError` from `getSchemaChanges` — this one
+included — to `true` rather than propagating it, so it can serve as a
+least-privilege routing check that never throws for a document it cannot
+interpret. Call `getSchemaChanges` directly (as below) to see the refusal
+and its details; `requiresMigration` only tells you a migration is needed,
+never why.
+
+```typescript
+try {
+  await getSchemaChanges(backend, graph);
+} catch (error) {
+  if (error instanceof ConfigurationError) {
+    console.log(error.details.code); // e.g. ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE
+    console.log(error.details.childKind, error.details.parentKind);
+  }
+}
+```
+
+No data migration is required for this class of refusal — it's a
+schema-authoring fix (loosen the parent, tighten the child, or replace
+`subClassOf` with `broader` if the relation was really a taxonomy). Only the
+**AFTER** side of a diff is enforced this way; the BEFORE (stored) side is a
+delta input the diff never writes through, so an already-incoherent
+persisted document can still be repaired by a fix-forward migration that
+removes the offending relation.
+
+## Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs
+
+Three ontology APIs were removed: the custom `metaEdge()` factory (and its
+`MetaEdgeOptions`), the public `InferenceType` union and the
+`transitive`/`symmetric`/`reflexive`/`inverse`/`inference` members of
+`MetaEdgeProperties`, and the deprecated `sameAs`/`differentFrom` factories.
+None of them ever drove runtime behavior beyond serialized introspection —
+see [Type-Level Annotations](/ontology#type-level-annotations) and the
+[Verified Support Matrix](/ontology#verified-support-matrix). A bare
+upgrade — deploying this release against an existing store with no
+accompanying ontology change — keeps loading the schema document unmodified
+and reports `status: "unchanged"`; no action is required for that case
+alone. **This does not mean every existing document is unaffected** — see
+the `metaEdge()` bullet immediately below for the one case where opening a
+store under this release rewrites the persisted document on its own.
+
+**If your code calls `metaEdge()`.** Delete the declaration, and **before
+upgrading**, copy any relation you actually rely on into `annotations` on
+`defineGraph()` — the custom `metaEdge()` factory is gone, so a graph that
+no longer declares the relation can no longer serialize it. The first
+`ensureSchema`/`createStoreWithSchema` call after upgrading auto-migrates:
+it classifies every one of the persisted document's relations naming your
+custom meta-edge as a `safe` removal (a custom name reaches no closure or
+write-path decision, so dropping it changes nothing the engine can
+observe) and commits a rewritten schema document with those relations
+gone — silently, with no opt-in and no warning. The only way to recover the
+dropped relation afterward is to read it back out of the now-inactive prior
+schema-version row. Move any other free-form metadata you attached (a
+custom `description`, or the `transitive`/`inference`/etc. properties you
+set) into `annotations` too, and update whatever application code walked
+`store.introspect().ontology` for that meta-edge's relations to instead walk
+the annotated data — see
+[Type-Level Annotations](/ontology#type-level-annotations) for a worked
+example.
+
+**If your code calls `sameAs(A, B)`.** Replace it with `equivalentTo(A, B)`
+— behaviorally identical in every release `sameAs` ever shipped in (the
+registry always folded `sameAs` into the same equivalence closure as
+`equivalentTo`; that fold is exactly how a persisted `sameAs` relation keeps
+being interpreted below).
+
+**If your code calls `differentFrom(A, B)`.** Delete the call. It was
+decorative — the registry never enforced it — so removing it changes
+nothing your application could observe. For actual cross-kind instance
+identity, enable the graph-level TypeGraph Identity Profile
+(`identity: { sameIdAcrossKinds: "fold" }`) and use `store.identity`.
+
+**A store opened against a persisted document that still has one of
+these keeps loading**, and reading `store.introspect()` on it still works:
+
+- A `metaEdges` catalog entry that still carries `transitive`/`symmetric`/
+  `reflexive`/`inverse`/`inference` parses — those fields are simply never
+  read. The serializer no longer emits them, but only the next commit that
+  detects an actual semantic change rewrites the document — an upgrade with
+  no accompanying ontology change leaves the old document, extra fields and
+  all, in place, and pays the slower parse-and-diff path on every boot
+  instead of the schema-hash fast path (`ensureSchema`,
+  `src/schema/manager.ts`) until a real change lands.
+- A relation naming `sameAs` keeps folding into the equivalence closure
+  exactly like `equivalentTo` — `registry.areEquivalent(A, B)`,
+  `isAssignableTo`, and every other equivalence-driven check are unaffected.
+- A relation naming `differentFrom` keeps being inert, as it always was.
+
+**This is a one-way door for rolling deploys and rollback.** The narrowed
+`SerializedMetaEdge` shape only appears once a document gets rewritten (see
+above), but from that point on it cannot be read by a `@nicia-ai/typegraph`
+release older than this one — the pre-change `serializedSchemaZod` required
+`transitive`/`symmetric`/`reflexive`/`inference` on every `metaEdges` entry,
+so an older reader's `parseSerializedSchema` throws on the new shape instead
+of degrading. In a mixed-version fleet, upgrade every application instance
+sharing a database to this release or later before any of them commits a
+schema change, and do not roll back to an older release once one has.
+
+**Once your code moves a `sameAs(A, B)` to `equivalentTo(A, B)`, or deletes a
+`differentFrom(A, B)`, the next commit auto-migrates.** Both are classified
+by the same relation-level severity table as any other ontology change (see
+[Ontology tightenings are checked against your data](#ontology-tightenings-are-checked-against-your-data)
+above): migrating `sameAs` to `equivalentTo` is a relation removed
+(`warning`, checked against live edges) plus a relation added (`warning`,
+checked against live nodes) — never `breaking` — and dropping
+`differentFrom` is a relation removed (`safe`). Neither requires an explicit
+`migrateSchema()`.
+
 ## Breaking Changes
 
 These require explicit handling:
@@ -164,6 +433,7 @@ These require explicit handling:
 - Removing properties
 - Adding required properties (no default)
 - Renaming types or properties
+- Adding or removing an `inverseOf` or `implies` ontology relation
 
 TypeGraph will throw `MigrationError` by default. You have two options: fix
 the schema to be backwards compatible, or use the expand-contract pattern.
@@ -499,7 +769,11 @@ console.log("Current version:", active?.version);
 | Add node type                  | Safe           | Yes            |
 | Add edge type                  | Safe           | Yes            |
 | Add optional property          | Safe           | Yes            |
-| Add ontology relation          | Safe           | Yes            |
+| Add `broader`/`narrower`/`partOf`/`hasPart`/`relatedTo` | Safe | Yes |
+| Add `disjointWith`, `subClassOf`, `equivalentTo` | Warning (data-checked) | Yes, if the check passes |
+| Remove `subClassOf`, `equivalentTo` | Warning (data-checked) | Yes, if the check passes |
+| Remove `disjointWith`          | Safe           | Yes            |
+| Add/remove `inverseOf`, `implies` | Breaking    | No             |
 | Change kind annotations           | Safe           | Yes            |
 | Add required property          | Breaking       | No             |
 | Remove property                | Breaking       | No             |
@@ -508,7 +782,8 @@ console.log("Current version:", active?.version);
 | Change property type           | Breaking       | No             |
 | Change onDelete behavior       | Warning        | Yes            |
 | Change unique constraints      | Warning        | Yes            |
-| Change edge cardinality        | Warning        | Yes            |
+| Change edge cardinality (source-side, `cardinality`) | Warning (data-checked if tightened) | Yes, if the check passes |
+| Change edge target cardinality (`targetCardinality`) | Warning (data-checked if tightened) | Yes, if the check passes |
 | Change edge endpoint kinds     | Warning        | Yes            |
 | Remove allowed source-dependent endpoint pairs | Breaking | No |
 

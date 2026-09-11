@@ -43,6 +43,7 @@ import type {
   DynamicNodeKind,
   DynamicNodeType,
 } from "../query/builder";
+import type { DefaultAliasExpansionAxis } from "../query/builder/alias-expansion";
 import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
 import {
   type ExternalRecordedReadSource,
@@ -59,6 +60,7 @@ import type {
   NODE_WRITE_NAMES,
   RECORDED_POINT_READ_NAMES,
 } from "./collection-surface";
+import type { NodeDeletePolicy } from "./operations/node-write-pipeline";
 import type {
   EdgeCollectionLookup,
   RequiredEdgeCollectionLookup,
@@ -155,6 +157,51 @@ export type Node<N extends NodeType = NodeType> = Readonly<{
   Readonly<z.infer<N["schema"]>>;
 
 /**
+ * One node named by its kind and id, on the composition surfaces: the whole a
+ * part is attached to, and the parts a whole's delete cascaded through.
+ */
+export type CompositionNodeRef = Readonly<{ kind: string; id: string }>;
+
+/**
+ * The whole a required (or, as a convenience, an optional) part is created
+ * under, or detached at the moment its composition edge would end.
+ * Runtime-checked against the declared composition pairs — see
+ * `resolveCompositionCreate` (`src/store/operations/composition-create.ts`),
+ * the one owner of what this option is applied or refused against.
+ */
+export type CompositionWholeRef = CompositionNodeRef;
+
+/**
+ * Where a part attaches, and how — the value every attachment surface takes
+ * (`create`, `bulkCreate`, `getOrCreateByConstraint`,
+ * `bulkGetOrCreateByConstraint`, and `reparent`).
+ *
+ * `kind`/`id` name the whole. `via` names the realizing edge kind, and is
+ * required only when the part kind declares MORE THAN ONE composition pair
+ * toward that whole kind: omitting it there is refused
+ * (`COMPOSITION_VIA_AMBIGUOUS`) rather than resolved by sort order, and
+ * naming an edge kind that realizes no declared pair between the two is
+ * refused too (`COMPOSITION_VIA_NOT_DECLARED`). `props` are the realizing
+ * edge's own properties, validated against that edge kind's schema exactly
+ * as `store.edges.<via>.create(...)` would validate them — on EVERY call
+ * that states them, including `getOrCreateByConstraint` / `reparent` calls
+ * that resolve to an attachment already holding: those write no edge, but
+ * still validate stated `props` and refuse (`CompositionExistenceError`,
+ * `situation: "props"`) a valid value that differs from the edge's live
+ * stored props, rather than silently ignoring it.
+ *
+ * `resolveCompositionAttachment` (`src/store/operations/composition-create.ts`)
+ * is the one owner of both `via` refusals;
+ * `assertSatisfiedPartOfPropsHonored` (same file) is the one owner of the
+ * already-satisfied `props` check.
+ */
+export type CompositionAttachment = CompositionNodeRef &
+  Readonly<{
+    via?: string;
+    props?: Record<string, unknown>;
+  }>;
+
+/**
  * Input for creating a node.
  */
 export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
@@ -164,6 +211,30 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
   /** Omit to use the creation default; null explicitly requests no lower bound. */
   validFrom?: string | null;
   validTo?: string;
+  /** The whole (and realizing edge) this create attaches its part to. */
+  partOf?: CompositionAttachment;
+}>;
+
+/**
+ * Options for {@link NodeCollection.create}. Extracted (rather than left as
+ * `create`'s inline options object) so `partOf`'s docblock is written once
+ * for every entry point that accepts it.
+ */
+export type NodeCreateOptions = Readonly<{
+  id?: string;
+  /** Omit to use the creation default; null explicitly requests no lower bound. */
+  validFrom?: string | null;
+  validTo?: string;
+  /**
+   * The whole a required part is created under, atomically with the node, in
+   * one write plan: a lost composition claim or a dead/missing whole aborts
+   * the node create too. Accepted on an optional-existence kind as a
+   * convenience (the same one write); never required for one. Runtime-checked
+   * against the graph's declared composition pairs — `ConfigurationError`
+   * (`COMPOSITION_WHOLE_NOT_DECLARED`) when no pair exists from this kind to
+   * `partOf.kind`. See {@link CompositionAttachment} for `via` and `props`.
+   */
+  partOf?: CompositionAttachment;
 }>;
 
 /**
@@ -299,9 +370,37 @@ export type QueryHookContext = HookContext &
   }>;
 
 /**
+ * What an operation LEARNED while it ran, folded onto the context
+ * `onOperationEnd` receives. `onOperationStart` cannot carry any of it — the
+ * facts do not exist yet when the operation begins.
+ */
+export type OperationOutcomeFacts = Readonly<{
+  /**
+   * The composition parts a whole's delete cascaded through, as `{ kind, id }`
+   * refs in the cascade's own delete order: LEAF-FIRST — every part before the
+   * whole it belongs to — and then a deterministic order by kind, then id,
+   * within one level of the closure. Two sibling parts of one whole have no order
+   * between them to respect, so they are sorted rather than left in the order
+   * the cascade's reads returned them, which makes this list comparable for
+   * equality across runs and backends. Taken from the plan the cascade already
+   * computed, so it names exactly the parts this delete removed.
+   *
+   * Present — and EMPTY when nothing cascaded, including for a kind that
+   * declares no composition pair at all — on a node hard delete, and on a
+   * node delete that took the portable write path; absent on a node delete
+   * the fused single-statement program ran (which is never a composition
+   * participant's: that program declines a composition whole or part
+   * outright) and on every non-delete operation. So "did a cascade happen"
+   * is the array's CONTENTS, never its presence.
+   */
+  cascadedParts?: readonly CompositionNodeRef[];
+}>;
+
+/**
  * Operation hook context for CRUD operations.
  */
 export type OperationHookContext = HookContext &
+  OperationOutcomeFacts &
   Readonly<{
     /** Operation type */
     operation: "create" | "update" | "delete";
@@ -374,6 +473,16 @@ export type StoreHooks = Readonly<{
    * `withTransaction` / `withRecordedTransaction` — the commit belongs to
    * the caller and cannot be observed, so this fires when the operation
    * completes within the still-open transaction.)
+   *
+   * A composition whole's delete cascades to its parts (see
+   * [Composition Cascade](https://typegraph.dev/limitations#composition-cascade))
+   * inside the SAME transaction, but each cascaded part delete is not itself
+   * a caller-issued operation: this hook fires exactly once, for the whole's
+   * own delete. The parts it removed are named on THIS context's
+   * `cascadedParts` (see {@link OperationOutcomeFacts}) — a consumer using
+   * hooks for cache invalidation or audit reads them from there rather than
+   * re-deriving the closure. `onOperationStart` never carries them: the
+   * cascade has not been planned when the operation begins.
    */
   onOperationEnd?: (
     ctx: OperationHookContext,
@@ -510,6 +619,21 @@ export type BaseStoreOptions = Readonly<{
   queryDefaults?: Readonly<{
     /** Default traversal ontology expansion mode (default: "inverse"). */
     traversalExpansion?: TraversalExpansion;
+    /**
+     * Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when
+     * an alias states no `expansion` (default: `"subclasses"`, roadmap Q3 —
+     * a supertype query is polymorphic by default). Pass `"exact"` to
+     * restore the pre-Q3 exact-kind behavior everywhere. `"narrower"` is not
+     * a store-wide default (see {@link DefaultAliasExpansionAxis}).
+     * `search()` and the collection APIs (`find`, `count`, `updateWhere`,
+     * `compareAndSet`) are unaffected — they stay exact-kind regardless of
+     * this setting.
+     *
+     * Spelled `| undefined` so a stated `undefined` forwards from a caller's
+     * own options bag under `exactOptionalPropertyTypes`, the same way the
+     * per-alias `expansion` option does.
+     */
+    expansion?: DefaultAliasExpansionAxis | undefined;
   }>;
 }>;
 
@@ -662,6 +786,22 @@ export type TransactionReceipt = Readonly<{
     total: number;
   }>;
   /**
+   * Every composition part a node delete inside this transaction cascaded
+   * through, in the order the deletes ran: each delete's own closure —
+   * leaf-first, then deterministically by kind, then id, within one level —
+   * concatenated in the order the deletes were issued. Empty when the
+   * transaction deleted no composition whole. Taken from the same plan the
+   * cascade executed, so it never names a part the cascade did not delete, and
+   * the order is fixed by the closure rather than by the order any read
+   * returned its rows.
+   *
+   * Not a write COUNT: a cascaded part is not a write intent at the
+   * collection surface (`writes.nodes` counts the whole's own `delete` call
+   * alone), so it is reported as refs beside the counters rather than folded
+   * into them.
+   */
+  cascadedParts: readonly CompositionNodeRef[];
+  /**
    * The recorded commit instant allocated for this store's graph by this
    * transaction. Undefined when history capture is off, the transaction is
    * read-only, or no captured writes were flushed. **Always undefined on a
@@ -711,6 +851,38 @@ export type NodeGetOrCreateByConstraintResult<N extends NodeType> = Readonly<{
 export type NodeGetOrCreateByConstraintOptions = Readonly<{
   /** Existing record behavior. Default: "return" */
   ifExists?: IfExistsMode;
+  /**
+   * The attachment this call GUARANTEES the resolved node holds when it
+   * returns — a postcondition, not a create-only option.
+   *
+   * On `"created"` / `"resurrected"` it is applied exactly as a plain
+   * create's `partOf` is. On `"found"` / `"updated"` it is CHECKED: a node
+   * whose live whole, and whose realizing edge kind, already equal the
+   * resolved attachment satisfies it; a node with a DIFFERENT live whole, or
+   * the same whole through another realizing edge, refuses with
+   * `CompositionExistenceError` (`situation: "existing"`) naming both sides;
+   * a node with no live whole has the attachment written now, whatever the
+   * pair's declared `existence` (a REQUIRED part found unattached is
+   * repaired on the same terms — see `applyExistingPartOfPostcondition`).
+   *
+   * A satisfied match writes no edge, so stated `props` are never applied to
+   * it — but they are still validated, and still honored as a postcondition:
+   * omitted, or valid and canonically equal to the edge's live stored props,
+   * the call is idempotent; valid but DIFFERENT refuses with
+   * `CompositionExistenceError` (`situation: "props"`) naming both, rather
+   * than silently keeping the stored value. Update the realizing edge
+   * directly (`store.edges.<via>.update(...)`) to actually change it.
+   *
+   * An attachment this graph cannot resolve at all — an undeclared whole
+   * kind, an unknown `via`, an omitted `via` where the part declares more
+   * than one pair toward that whole kind — is a `ConfigurationError` on
+   * every action alike, decided before the match is even read.
+   *
+   * Shared by `bulkGetOrCreateByConstraint`, applying to every item in the
+   * batch. Use `reparent` to MOVE a part that already has a different whole
+   * — this option never silently re-homes one.
+   */
+  partOf?: CompositionAttachment;
 }>;
 
 /**
@@ -891,11 +1063,7 @@ export type NodeCollection<
    */
   create: (
     props: z.input<N["schema"]>,
-    options?: Readonly<{
-      id?: string;
-      validFrom?: string | null;
-      validTo?: string;
-    }>,
+    options?: NodeCreateOptions,
   ) => Promise<Node<N>>;
 
   /** Get a node by ID */
@@ -963,6 +1131,38 @@ export type NodeCollection<
     }>,
   ) => Promise<Readonly<{ affectedCount: number }>>;
 
+  /**
+   * Moves this composition part to a new whole, atomically: the old
+   * attachment is retired and the new one created in one transaction under
+   * one per-graph fence, so neither R4's one-whole-per-part claim nor
+   * `existence: "required"` ever observes an intermediate state. Neither
+   * half is expressible on its own — the create refuses while the old edge
+   * holds the claim, and the delete refuses while a required part is live.
+   *
+   * The part keeps its id, its properties, and every descendant beneath it.
+   * The FINAL state is what is validated: one whole, acyclicity over the
+   * oriented composition union, and a required part never left detached.
+   *
+   * How the old attachment is retired follows its declared population: a
+   * `population: "one"` edge is deleted, a `population: "oneActive"` edge
+   * has its window ended at the move instant, leaving the previous
+   * membership readable as valid-time history.
+   *
+   * Reparenting to the whole the part already holds (through the same
+   * realizing edge) is a no-op (no write, no history), not a refusal — but a
+   * stated `attachment.props` is still validated and still honored as a
+   * postcondition on that no-op: omitted, or valid and canonically equal to
+   * the edge's live stored props, the no-op stands; valid but DIFFERENT
+   * refuses with `CompositionExistenceError` (`situation: "props"`) rather
+   * than silently keeping the stored value. Refuses with `ConfigurationError`
+   * (`COMPOSITION_NOT_A_PART`) on a kind that declares no `partOf`/`hasPart`
+   * pair at all, (`COMPOSITION_WHOLE_NOT_DECLARED`) on an undeclared target
+   * pair, and (`COMPOSITION_VIA_AMBIGUOUS` / `COMPOSITION_VIA_NOT_DECLARED`)
+   * on an unresolvable `via`; with `NodeNotFoundError` when the part is
+   * missing or already deleted.
+   */
+  reparent: (id: NodeId<N>, attachment: CompositionAttachment) => Promise<void>;
+
   /** Delete a node (soft delete - sets deletedAt timestamp) */
   delete: (id: NodeId<N>) => Promise<void>;
 
@@ -1012,11 +1212,7 @@ export type NodeCollection<
    */
   createFromRecord: (
     data: Record<string, unknown>,
-    options?: Readonly<{
-      id?: string;
-      validFrom?: string | null;
-      validTo?: string;
-    }>,
+    options?: NodeCreateOptions,
   ) => Promise<Node<N>>;
 
   /**
@@ -1097,12 +1293,8 @@ export type NodeCollection<
    * `undefined`. A future `validTo` is unaffected.
    */
   bulkCreate: (
-    items: readonly Readonly<{
-      props: z.input<N["schema"]>;
-      id?: string;
-      validFrom?: string | null;
-      validTo?: string;
-    }>[],
+    items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
+      NodeCreateOptions)[],
   ) => Promise<Node<N>[]>;
 
   /**
@@ -2184,6 +2376,24 @@ type TransactionRuntime = Readonly<{
     id: string,
     fn: () => Promise<T>,
   ) => Promise<T>;
+  /**
+   * Soft-deletes one node under an explicit {@link NodeDeletePolicy} through
+   * this SAME transaction's node-operation context — the buffered hook
+   * runner and attempt number `#buildTransactionContext` already built for
+   * `nodes`/`edges` on this context, not a freshly-minted immediate-hook
+   * context. `StoreRuntime.deleteNodeWithPolicy` builds exactly such a fresh
+   * context and is correct only OUTSIDE a `store.transaction` callback; a
+   * caller invoking that Store-scoped variant from inside one (as
+   * `graph-merge`'s merge apply once did) would report `onOperationEnd` for a
+   * delete the instant it runs, even when the transaction it is part of
+   * later rolls back. A caller already inside a `store.transaction` callback
+   * — today, merge apply — reaches this transaction-scoped variant instead,
+   * via {@link file://./runtime-port.ts transactionDeleteNodeWithPolicy}.
+   */
+  deleteNodeWithPolicy: (
+    work: Readonly<{ kind: string; id: string }>,
+    policy?: NodeDeletePolicy,
+  ) => Promise<void>;
 }>;
 
 /**

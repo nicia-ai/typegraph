@@ -13,6 +13,7 @@ import {
   type KindAnnotations,
   type TemporalMode,
 } from "../../src/core/types";
+import { ConfigurationError } from "../../src/errors";
 import { defineGraphExtension } from "../../src/graph-extension";
 import { mergeGraphExtension } from "../../src/graph-extension/merge";
 import {
@@ -384,7 +385,13 @@ const graphDefArb = fc
       nodeTypes.length >= 2 ?
         fc
           .array(
-            fc.integer({ min: 0, max: 5 }).chain((relationType) => {
+            // `partOf`/`hasPart` are deliberately not generated here: they
+            // now require a `via` edge kind whose registration (existence,
+            // endpoint compatibility, a constraining cardinality) this
+            // generic relation-shape fuzzer has no way to guarantee.
+            // Composition's own structural and registration-dependent rules
+            // are covered by `tests/ontology-composition-declaration.test.ts`.
+            fc.integer({ min: 0, max: 3 }).chain((relationType) => {
               // Pick two distinct nodes
               return fc
                 .record({
@@ -407,12 +414,6 @@ const graphDefArb = fc
                     }
                     case 3: {
                       return relatedTo(from, to);
-                    }
-                    case 4: {
-                      return partOf(from, to);
-                    }
-                    case 5: {
-                      return hasPart(from, to);
                     }
                     default: {
                       return equivalentTo(from, to);
@@ -562,12 +563,24 @@ describe("Schema Serialization Properties", () => {
       );
     });
 
-    it("serialize -> JSON -> Zod parse -> JSON is byte-identical", () => {
+    it("JSON -> Zod parse -> JSON is stable under a second round-trip", () => {
       fc.assert(
         fc.property(graphDefArb, versionArb, (graph, version) => {
           const serialized = serializeSchema(graph, version);
 
-          const canonicalBefore = JSON.stringify(serialized, sortedReplacer);
+          // The FIRST parse is deliberately not compared against the raw
+          // `serialized` object's own JSON: `targetCardinality` (see
+          // `SerializedEdgeDef`) is omitted at serialize time when it's the
+          // default `"many"`, and the zod schema backfills it with
+          // `.default("many")` on read — the same asymmetry a document
+          // stored before the option existed relies on to keep loading as
+          // unconstrained. That first parse is where the one intentional
+          // rewrite happens; what this test actually guards is that parsing
+          // is otherwise idempotent — a document already round-tripped once
+          // (as every document read back from storage has been) must not
+          // keep drifting on every subsequent parse.
+          const onceParsed = serializedSchemaZod.parse(serialized);
+          const canonicalBefore = JSON.stringify(onceParsed, sortedReplacer);
           const reparsed = serializedSchemaZod.parse(
             JSON.parse(canonicalBefore),
           );
@@ -1216,7 +1229,13 @@ describe("Schema Serialization Properties", () => {
       });
 
       const serialized = serializeSchema(graph, 1);
-      const json = JSON.stringify(serialized, sortedReplacer);
+      // Parsed once before taking the baseline — see the comment on
+      // "JSON -> Zod parse -> JSON is stable under a second round-trip"
+      // above: `targetCardinality` is omitted at serialize time and
+      // backfilled by the zod default on the first parse, so the baseline
+      // here is the already-parsed form, not the raw serializer output.
+      const onceParsed = serializedSchemaZod.parse(serialized);
+      const json = JSON.stringify(onceParsed, sortedReplacer);
       const parsed = serializedSchemaZod.parse(JSON.parse(json));
       const reSerialized = JSON.stringify(parsed, sortedReplacer);
 
@@ -1386,20 +1405,180 @@ describe("Schema Serialization Properties", () => {
   });
 
   describe("registry building", () => {
-    it("buildRegistry produces valid KindRegistry", () => {
+    it("buildRegistry produces a valid KindRegistry, or refuses a fuzzed structural mismatch by name (C.2)", () => {
       fc.assert(
         fc.property(graphDefArb, versionArb, (graph, version) => {
           const serialized = serializeSchema(graph, version);
           const deserialized = deserializeSchema(serialized);
 
-          // Should not throw
-          const registry = deserialized.buildRegistry();
+          // `graphDefArb` picks a fuzzed `subClassOf`/`equivalentTo` pair
+          // with no regard for schema compatibility, so a genuinely
+          // incompatible pair is a REACHABLE, correct outcome here (C.2)
+          // — the property is that buildRegistry() only ever fails with
+          // this one typed, well-formed refusal, never an unrelated crash.
+          const ALLOWED_STRUCTURAL_REFUSAL_CODES = new Set([
+            "ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE",
+            "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
+            "ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE",
+            "ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE",
+          ]);
 
-          // Registry should exist
-          expect(registry).toBeDefined();
+          function buildRegistryOrAllowedRefusalCode(): unknown {
+            try {
+              return deserialized.buildRegistry();
+            } catch (error) {
+              if (
+                error instanceof ConfigurationError &&
+                ALLOWED_STRUCTURAL_REFUSAL_CODES.has(
+                  error.details["code"] as string,
+                )
+              ) {
+                return error.details["code"];
+              }
+              throw error;
+            }
+          }
+
+          expect(buildRegistryOrAllowedRefusalCode()).toBeDefined();
         }),
         { numRuns: 30 },
       );
     });
+  });
+});
+
+/**
+ * A focused round-trip property over a fixed composition shape (E-a-9).
+ *
+ * `partOf`/`hasPart` are deliberately excluded from the generic
+ * `ontologyArb` above (see its comment): a fuzzed `via` edge cannot be
+ * guaranteed endpoint-compatible or cardinality-constrained enough to
+ * build. This property fuzzes what two always-valid composition shapes can
+ * safely vary — the node/edge kind names, the declaration form (`partOf`
+ * vs. the mirrored `hasPart`), and the whole-side population:
+ *
+ *  - a cross-kind pair, where orientation is unambiguous and `partSide` is
+ *    INFERRED (never present on the wire) — this is what exercises `via`
+ *    surviving the round trip;
+ *  - a reflexive (R5) pair, where the edge admits both orientations and
+ *    `partSide` is REQUIRED and DECLARED — this is what exercises
+ *    `partSide` itself, the one field that cannot be re-derived on load
+ *    (E-a-4). A property that only ever generated the unambiguous shape
+ *    would never put a `partSide` on the wire to lose.
+ */
+describe("composition relation round-trip (E-a-9)", () => {
+  it("serializes and deserializes a fuzzed cross-kind partOf/hasPart pair's via and inferred orientation", () => {
+    fc.assert(
+      fc.property(
+        identifierArb,
+        identifierArb,
+        edgeIdentifierArb,
+        fc.constantFrom<"one" | "oneActive">("one", "oneActive"),
+        fc.boolean(),
+        versionArb,
+        (
+          partKindName,
+          wholeKindName,
+          edgeKindName,
+          population,
+          declareAsHasPart,
+          version,
+        ) => {
+          fc.pre(partKindName !== wholeKindName);
+
+          const Part = defineNode(partKindName, { schema: z.object({}) });
+          const Whole = defineNode(wholeKindName, { schema: z.object({}) });
+          const viaEdge = defineEdge(edgeKindName, { schema: z.object({}) });
+
+          const graph = defineGraph({
+            id: "composition-roundtrip-property",
+            nodes: {
+              [partKindName]: { type: Part },
+              [wholeKindName]: { type: Whole },
+            },
+            edges: {
+              [edgeKindName]: {
+                type: viaEdge,
+                from: [Part],
+                to: [Whole],
+                cardinality: population,
+              },
+            },
+            ontology: [
+              declareAsHasPart ?
+                hasPart(Whole, Part, { via: viaEdge })
+              : partOf(Part, Whole, { via: viaEdge }),
+            ],
+          });
+
+          const serialized = serializeSchema(graph, version);
+          const registry = deserializeSchema(serialized).buildRegistry();
+
+          expect(registry.compositionPartSide(edgeKindName)).toBe("from");
+          expect(registry.compositionRelation().pairs).toEqual([
+            {
+              partKind: partKindName,
+              wholeKind: wholeKindName,
+              viaEdgeKind: edgeKindName,
+              partSide: "from",
+              population,
+              existence: "optional",
+            },
+          ]);
+        },
+      ),
+      { numRuns: 25 },
+    );
+  });
+
+  it("serializes and deserializes a fuzzed reflexive pair's declared partSide", () => {
+    fc.assert(
+      fc.property(
+        identifierArb,
+        edgeIdentifierArb,
+        fc.constantFrom<"one" | "oneActive">("one", "oneActive"),
+        fc.constantFrom<"from" | "to">("from", "to"),
+        versionArb,
+        (kindName, edgeKindName, population, partSide, version) => {
+          const Kind = defineNode(kindName, { schema: z.object({}) });
+          const viaEdge = defineEdge(edgeKindName, { schema: z.object({}) });
+
+          const graph = defineGraph({
+            id: "composition-roundtrip-reflexive-property",
+            nodes: { [kindName]: { type: Kind } },
+            edges: {
+              [edgeKindName]: {
+                type: viaEdge,
+                from: [Kind],
+                to: [Kind],
+                // Set on both sides: the whole-side fence reads
+                // `cardinality` when `partSide` is "from" and
+                // `targetCardinality` when it is "to", and this property
+                // fuzzes `partSide` itself.
+                cardinality: population,
+                targetCardinality: population,
+              },
+            },
+            ontology: [partOf(Kind, Kind, { via: viaEdge, partSide })],
+          });
+
+          const serialized = serializeSchema(graph, version);
+          const registry = deserializeSchema(serialized).buildRegistry();
+
+          expect(registry.compositionPartSide(edgeKindName)).toBe(partSide);
+          expect(registry.compositionRelation().pairs).toEqual([
+            {
+              partKind: kindName,
+              wholeKind: kindName,
+              viaEdgeKind: edgeKindName,
+              partSide,
+              population,
+              existence: "optional",
+            },
+          ]);
+        },
+      ),
+      { numRuns: 25 },
+    );
   });
 });

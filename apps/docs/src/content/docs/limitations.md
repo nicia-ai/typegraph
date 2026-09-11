@@ -86,9 +86,14 @@ primary and sidecar writes when a later statement fails. An authoritative comman
 whose database statement returns the decision it made. It can provide a safe
 transactionless create/found path only when the backend has a durable arbiter.
 
-Operational Identity, single-edge claim/cardinality enforcement, and any
-undeclared dynamic `matchOn` convergence that may write still require an
-interactive transaction and fail closed on a backend that cannot provide one.
+Operational Identity, single-edge claim/cardinality enforcement, edge
+acyclicity (`acyclic: true`), and any undeclared dynamic `matchOn`
+convergence that may write still require an interactive transaction and
+fail closed on a backend that cannot provide one. No fused write program
+applies acyclicity — the axis has no database key that could back a claim
+inside a fused statement — so an `acyclic: true` edge kind always declines
+the fused single-row and bulk-create fast paths and takes the complete
+portable probe-then-insert path instead, whatever else is eligible for it.
 Outside the native durable-convergence envelope, an all-live
 `ifExists: "return"` endpoint batch is read-only and can return from its
 set-oriented root read without a transaction. Inside the native envelope, the
@@ -223,6 +228,115 @@ The unbounded-traversal limit is defined as `MAX_RECURSIVE_DEPTH`:
 import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 // MAX_RECURSIVE_DEPTH = 10
 ```
+
+## Composition Cascade
+
+Deleting a [composition](/ontology#composition) whole cascades leaf-first
+through its live parts closure, each part going through its own node-delete
+pipeline in the same transaction. Several behaviors are easy to assume and
+are not what happens:
+
+- **Resurrecting a soft-deleted whole restores the whole alone.** Ownership
+  of its parts ended when the cascade ran; the parts stay deleted. There is
+  no opt-in to cascade a resurrection back onto them.
+- **Ending a whole's validity window is still not a cascade.** Closing an
+  `oneActive` composition edge's currency leaves the part node itself
+  untouched — it is not deleted, and a later reattach of the SAME part to a
+  different whole is a reparent, not a resurrection.
+- **A belief-status close DOES close the whole's required parts, and it is
+  not this cascade that does it.** A [provenance](/provenance) retraction
+  that closes a whole's currency closes its required parts in the same
+  transition because support treats a required part as dependent on its
+  whole, not because a delete cascade ran: no edge is touched, an optional
+  part is left believed, and reopening the whole reopens the parts that are
+  otherwise supported. Each closed part fires its own `delete` operation hook,
+  rather than folding into one event for the whole the way this cascade does.
+  See [Composition and retraction](/provenance#composition-and-retraction).
+- **The cascade emits one operation-hook event, for the whole.** Each
+  cascaded part delete runs through its own node-delete pipeline but is not
+  itself a caller-issued operation, so `onOperationEnd` fires exactly once —
+  for the whole's delete, not once per part. It does not leave you guessing
+  which parts went: that hook's context carries `cascadedParts` (`{ kind, id }`
+  refs taken from the plan the cascade executed, leaf-first and then ordered
+  deterministically by kind, then id, within one level of the closure, so the list
+  is the same on every run and every backend), and a
+  `store.transactionWithReceipt` receipt carries the same refs for every
+  cascade in the transaction. `onOperationStart` never carries them — the
+  cascade has not been planned when the operation begins.
+- **There is no cascade PREVIEW API in this release.** `cascadedParts` reports
+  what a delete removed, after the fact. To decide *before* deleting, read
+  the closure yourself with
+  [`store.subgraph(id, { edges: [], composition: true })`](/ontology#choosing-a-containment-tier),
+  which APPROXIMATES the closure — it is not the cascade's own verdict, and
+  it is narrower in one case. The subgraph walk runs in the read's temporal
+  mode (current, unless the read is pinned), so it does not follow a
+  `population: "one"` composition edge whose validity window was ENDED; the
+  cascade does, because a `one` binding holds for the row's whole life. An
+  optional part attached through such a row is therefore deleted by the
+  cascade without appearing in the preview. Gate a destructive action on the
+  preview only for pairs you know carry no ended `one` rows.
+
+The closure walk is bounded by its **visited set**, not a fixed depth: a kind
+may declare a reflexive composition pair (a `Section` that is `partOf`
+another `Section`, for example), so a kind-level depth bound cannot cap
+instance depth. The same holds for the `subgraph({ composition: true })`
+preview above: its composition closure has no hop ceiling and never returns a
+truncated unit — a part chain of any length comes back whole, and an engine
+that cuts the closure statement short refuses with a `ConfigurationError`
+(`COMPOSITION_UNIT_INDETERMINATE`) instead of returning the prefix it reached
+(the read's temporal mode, described above, remains the one way the preview can
+be narrower than the cascade). The write path refuses an INSTANCE-level cycle (the
+composition union's acyclicity fence), so one only survives in rows written
+before the pair was declared, by trusted import, or by direct SQL; deleting
+any node in such a cycle throws `CompositionCycleError` (see
+[Errors](/errors#compositioncycleerror)) rather than looping. Break the cycle
+by hand (delete or reassign one of the composition edges that closes it)
+before the affected nodes can be deleted.
+
+## Composition Existence (`existence: "required"`)
+
+- **No type-level narrowing of `partOf`'s whole kind.** `NodeCreateOptions.partOf`
+  is structurally typed `{ kind: string; id: string }` and checked against the
+  declared composition pairs at runtime (`ConfigurationError`,
+  `COMPOSITION_WHOLE_NOT_DECLARED`, for an undeclared pair) — not narrowed to a
+  union of the kinds a part is actually declared under. `OntologyRelation.from`/
+  `to` are not carried into `GraphDef`'s type parameters, so this would need a
+  separate, larger change to the ontology's compile-time representation.
+- **Trusted import refuses every declared composition pair, required or
+  optional** (`composition_unsupported`), not just required ones: it writes rows
+  without the store's validation, so it cannot honor either the one-whole claim
+  or the existence guarantee. There is no separate
+  `composition_existence_unsupported` reason — a graph with ANY `partOf`/
+  `hasPart` pair cannot use trusted import at all.
+- **Fused/read-free programs decline a required-existence kind or a stated
+  `partOf`.** The three node-create fused resolvers
+  (`resolveAtomicNodeBatchExecutor`, `resolveAtomicNodeReplacementBatchProgram`,
+  `resolveAtomicNodeResolvedMutationSetExecutor`) and the fused edge-delete-batch
+  resolver (`resolveAtomicEdgeDeleteBatchExecutor`, for a required-existence
+  composition edge kind) all return `undefined` in that case, so a
+  required-existence bulk create or delete always takes the portable path —
+  slower, never silently incomplete.
+- **No backfill tool.** Changing an existing pair's `existence` in place is a
+  schema-tightening commit like any other: it is refused for a dirty graph (a
+  live required part with no live whole) and ships no repair step.
+  `store.verifyConstraintFences()` reports the same finding on an already-live
+  graph but does not fix it.
+- **Graph merge's `existence: "required"` audit has one residual gap: a
+  composition edge silently DROPPED by canonicalization, with no explicit
+  write for anything to intercept.** Merge's composition-orphan check
+  (`compositionOrphansAmong` — a delete orphans a part the plan does not also
+  delete — plus its sibling `unattachedRequiredPartOrphansAmong`, reported at
+  plan time and re-verified at apply) catches a required part that this merge
+  writes, or whose composition edge this merge explicitly deletes or ends,
+  and resolves to no live whole at all. It does NOT catch a composition edge
+  removed from the write set entirely because canonicalization repointed it
+  onto a finally-deleted endpoint (`ENDPOINT_DELETED_DROP_REASON`,
+  `src/graph-merge/edge-repoint.ts`): that drop issues no delete or update
+  call for any per-write guard (`MergeCompositionOrphan` included) to see,
+  and `DroppedEdge` carries no endpoint data to recover the orphaned part
+  from after the fact. The gap is caught after the fact by
+  `store.verifyConstraintFences()`'s `compositionExistence` family run
+  separately against the merged store.
 
 ## Connection Management
 

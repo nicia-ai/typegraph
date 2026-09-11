@@ -81,16 +81,18 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import {
-  type Cardinality,
   type EdgeRegistration,
   type NodeRegistration,
   type UniqueConstraint,
 } from "../core/types";
 import {
   CardinalityError,
+  CompositionError,
+  CompositionExistenceError,
   ConfigurationError,
   DatabaseOperationError,
   DisjointError,
+  EdgeAcyclicityError,
   EdgeMatchIdentityConflictError,
   IdentityContradictionError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
@@ -104,23 +106,37 @@ import {
   IDENTITY_IMPORT_PROGRESS,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
+import { identityReplayRequiresHistoryError } from "../identity/transition-log";
+import { type SqlSchema } from "../query/compiler/schema";
+import { getDialect } from "../query/dialect";
+import { type DialectAdapter } from "../query/dialect/types";
 import { type KindRegistry } from "../registry/kind-registry";
-import { edgeCardinalityClaim } from "../store/claims/edge-claims";
+import {
+  assertEdgeRelationsAcyclic,
+  edgeKindIsInAcyclicRelation,
+} from "../store/acyclicity";
+import { edgeInsertClaims } from "../store/claims/composition-claims";
+import {
+  edgeCardinalityAxisReferences,
+  type EdgeCardinalityDeclarations,
+} from "../store/claims/edge-claims";
 import {
   checkUniquenessConstraints,
   type NodeClaimItem,
   planNodeCreateClaims,
 } from "../store/claims/node-claims";
 import {
-  checkCardinalityConstraint,
   checkDisjointnessConstraint,
+  checkEdgeCardinalityConstraints,
   graphOwesClaims,
+  graphOwesLockOnlyFence,
 } from "../store/constraints";
 import { classifyDurableEdgeBatchOutcomes } from "../store/durable-edge-batch";
 import {
   edgeMatchIdentityUpdateRefusal,
   resolveEdgeMatchIdentityStorage,
 } from "../store/edge-match-key";
+import { findLiveCompositionWhole } from "../store/operations/composition-create";
 import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
 import {
   createNodeBatchValidationSeams,
@@ -143,6 +159,7 @@ import {
   type WriteTransactionMode,
 } from "../store/operations/write-transaction";
 import { runRecordedTransactionSavepoint } from "../store/recorded-capture";
+import { type GraphWriteLock } from "../store/recorded-capture/clock";
 import {
   storeBackend,
   storeCaptureEnabled,
@@ -175,6 +192,7 @@ import {
   type InterchangeEdge,
   type InterchangeIdentityAssertion,
   InterchangeIdentitySchema,
+  type InterchangeIdentityTransition,
   type InterchangeNode,
   type ResolvedImportOptions,
   type UnknownPropertyStrategy,
@@ -301,6 +319,15 @@ export async function withImportStreamLease<G extends GraphDef, T>(
  * alone, because it is a property of the frame, not of the leg. It takes the
  * READS to answer; the executor owns decorating its own target with them.
  */
+/**
+ * One required-existence part THIS import created, pending the composition edge
+ * that attaches it.
+ */
+type PendingRequiredPart = Readonly<{ kind: string; id: string }>;
+
+/** Pending required parts by `makeNodeKey`, cleared as their edges arrive. */
+type PendingRequiredParts = Map<string, PendingRequiredPart>;
+
 type ImportWriteFrame = Readonly<{
   session: WriteSession;
   target: WriteTarget;
@@ -313,6 +340,18 @@ type ImportWriteFrame = Readonly<{
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   /** Threaded `statementExecution` verdict — resolved once, from `backend`. */
   statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
+  /**
+   * The write-transaction's lock evidence — real coordination only when
+   * `graphOwesLockOnlyFence` made this chunk take the per-graph lock (an
+   * acyclic edge kind is declared). Threaded here so `processEdgeSlice` can
+   * run the combined post-flush acyclicity probe under the same evidence a
+   * managed store write would use.
+   */
+  lock: GraphWriteLock;
+  /** The code-level graph, for `acyclicRelationForEdgeKind`. */
+  graph: GraphDef;
+  schema: SqlSchema;
+  dialect: DialectAdapter;
 }>;
 
 /**
@@ -349,6 +388,9 @@ function createImportAttemptState(): ImportAttemptState {
  */
 export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
   graphId: string;
+  graph: G;
+  schema: SqlSchema;
+  dialect: DialectAdapter;
   registry: KindRegistry;
   data: GraphData;
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>;
@@ -380,8 +422,16 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   target: WriteTarget,
   overlaidSession: OverlaidSessionMint<"mixed">,
   transactionMode: WriteTransactionMode,
+  lock: GraphWriteLock,
 ): Promise<ImportAttemptState> {
   const { result, errors, importedNodeIds } = createImportAttemptState();
+  // Every required-existence part THIS import creates, keyed by
+  // `makeNodeKey`, removed as soon as the SAME batch's composition edge for
+  // it is accepted (`processEdgeSlice`'s `record`). Frame-scoped, like
+  // `pendingMatchIdentityOwners`: nodes are written before any edge is even
+  // seen (`processNodes` then `processEdges`), so "the edge in the same
+  // batch" can only be decided once the whole edge set is known.
+  const pendingRequiredParts: PendingRequiredParts = new Map();
   let nextEdgeSavepointId = 0;
   const frame: ImportWriteFrame = {
     session,
@@ -393,6 +443,10 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     batchPointRead: inputs.batchPointRead,
     uniqueSidecarBatch: inputs.uniqueSidecarBatch,
     statementExecution: inputs.statementExecution,
+    lock,
+    graph: inputs.graph,
+    schema: inputs.schema,
+    dialect: inputs.dialect,
   };
   await processNodes(
     frame,
@@ -404,6 +458,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     result,
     errors,
     importedNodeIds,
+    pendingRequiredParts,
   );
   await inputs.runtime.foldImportedIdentityNodes(
     target,
@@ -422,6 +477,24 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     result,
     errors,
     importedNodeIds,
+    pendingRequiredParts,
+  );
+  // What remains in `pendingRequiredParts` after every edge in the
+  // payload is seen is either attached on the TARGET from before this
+  // import, or genuinely orphaned. Runs AFTER `foldImportedIdentityNodes`
+  // above (which needs the full node batch, before edges can clear any
+  // pending part) — a part purged here undoes that fold itself, through
+  // `runtime.detachDeletedImportedIdentityNode`, rather than
+  // never having been folded in the first place.
+  await assertImportedRequiredPartsAttached(
+    frame,
+    inputs.graphId,
+    inputs.registry,
+    inputs.runtime,
+    pendingRequiredParts,
+    result,
+    importedNodeIds,
+    errors,
   );
   if (inputs.data.identity !== undefined) {
     await importIdentitySection(
@@ -446,6 +519,11 @@ async function importGraphData<G extends GraphDef>(
   // see assertIdentityImportSupported / validateIdentitySection.
   assertIdentityImportSupported(store, data.identity !== undefined);
   validateIdentitySection(data.identity);
+  assertIdentityTransitionsRestoreSupported(
+    store,
+    (data.identity?.transitions?.length ?? 0) > 0,
+    data.identity?.retention,
+  );
 
   const graph = store.graph;
   const graphId = store.graphId;
@@ -477,6 +555,20 @@ async function importGraphData<G extends GraphDef>(
     );
   if (claimRefusal !== undefined) throw claimRefusal;
 
+  // The lock-only question is separate from the claim question above and can
+  // answer differently: acyclicity (`lockOnly`) has no claim row to
+  // substitute for the per-graph lock import otherwise takes none of, so a
+  // graph with an acyclic edge kind and no claim-backed constraint at all
+  // would sail past the check above and reach a transactionless backend
+  // unfenced. Answered per graph, before the first chunk, same as the claim
+  // question — see `graphOwesLockOnlyFence`.
+  const owedLockOnlyReason = graphOwesLockOnlyFence(graph, registry);
+  const lockOnlyRefusal =
+    owedLockOnlyReason === undefined ? undefined : (
+      constraintFenceRefusal({ graphId }, backend, owedLockOnlyReason)
+    );
+  if (lockOnlyRefusal !== undefined) throw lockOnlyRefusal;
+
   // Build lookup maps for schema validation
   const nodeSchemas = buildNodeSchemaMap(graph);
   const edgeSchemas = buildEdgeSchemaMap(graph);
@@ -493,6 +585,9 @@ async function importGraphData<G extends GraphDef>(
   // schema maps, verdicts, and request pieces reach whichever attempt(s) run.
   const attemptInputs: ImportAttemptInputs<G> = {
     graphId,
+    graph,
+    schema: store.revisionSchema,
+    dialect: getDialect(backend.dialect),
     registry,
     data,
     nodeSchemas,
@@ -537,15 +632,22 @@ async function importGraphData<G extends GraphDef>(
     },
     // An import writes node rows AND edge rows in one frame, so it declares the
     // mixed family explicitly instead of receiving either narrower session.
-    mixedWritePlan(undefined, true),
+    // The constraint probe is the lock-only reason ONLY (never the claim
+    // reason above): a claim-backed axis is fenced by its reservation row,
+    // never by this lock, so passing it here would take a lock this import
+    // has never needed and does not document taking. `undefined` when the
+    // graph declares no acyclic edge kind, matching every prior release's
+    // behavior byte-for-byte.
+    mixedWritePlan(owedLockOnlyReason, true),
     backend,
-    (session, target, overlaidSession, _lock, transactionMode) =>
+    (session, target, overlaidSession, lock, transactionMode) =>
       runImportWritePlanAttempt(
         attemptInputs,
         session,
         target,
         overlaidSession,
         transactionMode,
+        lock,
       ),
   );
 
@@ -633,6 +735,7 @@ export async function importGraphStream<G extends GraphDef>(
   let header: GraphDataHeader | undefined;
   let receivedEdges = false;
   let receivedIdentity = false;
+  let receivedIdentityTransitions = false;
   let releaseImportLease: (() => void) | undefined;
 
   try {
@@ -686,6 +789,15 @@ export async function importGraphStream<G extends GraphDef>(
             store,
             chunk.header.identity !== undefined,
           );
+          // Same guard as importGraph's upfront check, using the header's
+          // `hasTransitions` announcement in place of the array itself — the
+          // "identity-transitions" chunk always arrives last, after nodes,
+          // edges and identity assertions have already been written.
+          assertIdentityTransitionsRestoreSupported(
+            store,
+            chunk.header.identity?.hasTransitions === true,
+            chunk.header.identity?.retention,
+          );
           header = chunk.header;
           break;
         }
@@ -695,11 +807,17 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream must start with a header.",
             );
           }
-          if (receivedEdges || receivedIdentity) {
+          if (
+            receivedEdges ||
+            receivedIdentity ||
+            receivedIdentityTransitions
+          ) {
+            const after =
+              receivedEdges ? "edges"
+              : receivedIdentity ? "identity assertions"
+              : "identity transitions";
             throw new Error(
-              `Graph interchange stream cannot emit nodes after ${
-                receivedEdges ? "edges" : "identity assertions"
-              }.`,
+              `Graph interchange stream cannot emit nodes after ${after}.`,
             );
           }
           if (chunk.nodes.length === 0) break;
@@ -723,7 +841,7 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream must start with a header.",
             );
           }
-          if (receivedIdentity) {
+          if (receivedIdentity || receivedIdentityTransitions) {
             throw new Error(
               "Graph interchange stream cannot emit edges after identity assertions.",
             );
@@ -755,6 +873,11 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream emitted identity rows without an identity header.",
             );
           }
+          if (receivedIdentityTransitions) {
+            throw new Error(
+              "Graph interchange stream cannot emit identity assertions after identity transitions.",
+            );
+          }
           receivedIdentity = true;
           if (chunk.assertions.length === 0) break;
           mergeImportResult(
@@ -762,6 +885,29 @@ export async function importGraphStream<G extends GraphDef>(
             await importGraphData(
               store,
               graphDataForChunk(header, [], [], chunk.assertions),
+              { ...options, refreshStatistics: false },
+            ),
+          );
+          throwIfStreamChunkFailed(result, options);
+          break;
+        }
+        case "identity-transitions": {
+          if (header === undefined) {
+            throw new Error(
+              "Graph interchange stream must start with a header.",
+            );
+          }
+          if (header.identity === undefined) {
+            throw new Error(
+              "Graph interchange stream emitted identity transitions without an identity header.",
+            );
+          }
+          receivedIdentityTransitions = true;
+          mergeImportResult(
+            result,
+            await importGraphData(
+              store,
+              graphDataForChunk(header, [], [], [], chunk.transitions),
               { ...options, refreshStatistics: false },
             ),
           );
@@ -934,6 +1080,38 @@ function assertIdentityImportSupported<G extends GraphDef>(
       "Cannot import identity assertions into an identity-disabled graph.",
       { code: "IDENTITY_IMPORT_REQUIRES_PROFILE", graphId: store.graphId },
     );
+  }
+}
+
+/**
+ * Rejects an archival transitions/retention payload aimed at a history-off
+ * store BEFORE any entity write. A non-zero retention watermark counts as an
+ * archival restore on its own, exactly as a non-empty `transitions` array does,
+ * so both call sites refuse the same documents.
+ *
+ * `importIdentityTransitionsAtTarget` (`store.ts`) raises the same
+ * `IdentityReplayError` / `IDENTITY_REPLAY_REQUIRES_HISTORY` as a backstop,
+ * but only from the LAST import section — after nodes, edges and identity
+ * assertions have already committed durably on a non-transactional target,
+ * or after they have queued inside a transaction that a later error would
+ * still have to unwind. This guard runs first: from
+ * {@link importGraphData}'s upfront validation for the atomic path (which
+ * already has the full `transitions` array in hand), and from
+ * `importGraphStream`'s "header" chunk arm for the streaming path (which
+ * does not — by protocol the `identity-transitions` chunk is always last,
+ * so the header's `hasTransitions` announcement is the only pre-write
+ * signal available).
+ */
+function assertIdentityTransitionsRestoreSupported<G extends GraphDef>(
+  store: Store<G>,
+  hasTransitions: boolean,
+  retention: Readonly<{ prunedBeforeRevision: number }> | undefined,
+): void {
+  if (
+    (hasTransitions || (retention?.prunedBeforeRevision ?? 0) > 0) &&
+    !store.historyEnabled
+  ) {
+    throw identityReplayRequiresHistoryError(store.graphId);
   }
 }
 
@@ -1141,6 +1319,47 @@ async function importIdentitySection<G extends GraphDef>(
     result.identity.skipped += progress.skipped;
     errors.push(entry);
   }
+  await importIdentityTransitionsSection(runtime, target, identity);
+}
+
+/**
+ * Restores an archival payload's `transitions` section, if any — a verbatim
+ * restore (see "Archival transitions and the retention watermark" in the
+ * identity documentation): no closure repair, no renumbering, nothing reported back on
+ * {@link ImportResult} (there is no live-conflict dimension to count, unlike
+ * assertions). Never attempted for `state` mode, which carries current truth
+ * only; a `state` payload naming transitions is a shape defect and throws
+ * uncaught here, exactly like {@link validateIdentitySection}'s upfront schema
+ * check — a malformed archival payload is a precondition failure, not a
+ * per-row import outcome.
+ */
+async function importIdentityTransitionsSection<G extends GraphDef>(
+  runtime: ReturnType<typeof storeRuntime<G>>,
+  target: IdentityTarget,
+  identity: NonNullable<GraphData["identity"]>,
+): Promise<void> {
+  const transitions = identity.transitions ?? [];
+  if (identity.mode === "state") {
+    if (transitions.length === 0) return;
+    throw new ValidationError(
+      "State identity import cannot carry archival transitions.",
+      {
+        issues: [
+          {
+            path: "identity.transitions",
+            message: 'transitions is only valid for mode: "archival".',
+            code: "IDENTITY_STATE_IMPORT_TRANSITIONS",
+          },
+        ],
+      },
+    );
+  }
+  if (transitions.length === 0 && identity.retention === undefined) return;
+  await runtime.importIdentityTransitionsAtTarget(
+    target,
+    transitions,
+    identity.retention?.prunedBeforeRevision,
+  );
 }
 
 function identityImportProgress(
@@ -1196,16 +1415,42 @@ function graphDataForChunk(
   nodes: GraphData["nodes"],
   edges: GraphData["edges"],
   assertions: readonly InterchangeIdentityAssertion[],
+  // Present ONLY for the "identity-transitions" chunk — its absence (as
+  // opposed to an empty array) is what tells `importIdentityTransitionsSection`
+  // this reconstructed document carries no transitions section at all, so the
+  // nodes/edges/identity(assertions) chunk calls never redundantly re-write
+  // the retention watermark. `header.identity.retention`, when the source
+  // carried one, is likewise omitted on those same three chunk calls (it is
+  // only ever attached alongside `transitions` below) for the same reason:
+  // left in, every chunk would reconstruct a `retention`-bearing identity
+  // section and re-invoke the watermark write once per chunk instead of once
+  // for the whole stream.
+  transitions?: readonly InterchangeIdentityTransition[],
 ): GraphData {
   const { identity, ...headerWithoutIdentity } = header;
   return {
     ...headerWithoutIdentity,
     nodes,
     edges,
+    // `identity.hasTransitions` is a streaming-header-only announcement (see
+    // `InterchangeIdentityHeaderSchema`) with no place on the reconstructed
+    // per-chunk document — deliberately dropped, not spread through.
     ...(identity === undefined ?
       {}
     : {
-        identity: { ...identity, assertions: [...assertions] },
+        identity: {
+          profile: identity.profile,
+          mode: identity.mode,
+          assertions: [...assertions],
+          ...(transitions === undefined ?
+            {}
+          : {
+              transitions: [...transitions],
+              ...(identity.retention === undefined ?
+                {}
+              : { retention: identity.retention }),
+            }),
+        },
       }),
   };
 }
@@ -1339,6 +1584,7 @@ async function processNodes(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
+  pendingRequiredParts: PendingRequiredParts,
 ): Promise<void> {
   const batchSize = options.batchSize;
 
@@ -1354,6 +1600,7 @@ async function processNodes(
       result,
       errors,
       importedNodeIds,
+      pendingRequiredParts,
     );
   }
 }
@@ -1426,9 +1673,22 @@ async function processNodeSlice(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
+  pendingRequiredParts: PendingRequiredParts,
 ): Promise<void> {
   const record = (node: InterchangeNode, outcome: ProcessResult): void => {
     recordNodeOutcome(node, outcome, result, errors, importedNodeIds);
+    // A freshly created required-existence part owes a
+    // composition edge before this import commits — tracked here, cleared
+    // by `clearAttachedRequiredPart` the moment the edge for it lands.
+    if (
+      outcome.status === "created" &&
+      registry.compositionExistence(node.kind) === "required"
+    ) {
+      pendingRequiredParts.set(makeNodeKey(node.kind, node.id), {
+        kind: node.kind,
+        id: node.id,
+      });
+    }
   };
 
   // Pass 1 (synchronous): kind + property + validity validation, and
@@ -1767,12 +2027,18 @@ function isDeclaredConstraintRefusal(
   | UniquenessError
   | DisjointError
   | CardinalityError
-  | EdgeMatchIdentityConflictError {
+  | CompositionError
+  | CompositionExistenceError
+  | EdgeMatchIdentityConflictError
+  | EdgeAcyclicityError {
   return (
     error instanceof UniquenessError ||
     error instanceof DisjointError ||
     error instanceof CardinalityError ||
-    error instanceof EdgeMatchIdentityConflictError
+    error instanceof CompositionError ||
+    error instanceof CompositionExistenceError ||
+    error instanceof EdgeMatchIdentityConflictError ||
+    error instanceof EdgeAcyclicityError
   );
 }
 
@@ -2109,6 +2375,9 @@ async function updateImportedEdge(
         id: edge.id,
         props,
         ...(edge.validTo !== undefined && { validTo: edge.validTo }),
+        // Import re-admits no row to a counted population here (see below),
+        // so it owes no claim.
+        claims: [],
       },
       {
         validityLowerBound: windowFence,
@@ -2445,6 +2714,7 @@ async function processEdges(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
+  pendingRequiredParts: PendingRequiredParts,
 ): Promise<void> {
   const batchSize = options.batchSize;
   // A slice flush makes its accepted keys visible to later database reads, but
@@ -2467,7 +2737,129 @@ async function processEdges(
       errors,
       importedNodeIds,
       pendingMatchIdentityOwners,
+      pendingRequiredParts,
     );
+  }
+}
+
+/**
+ * Removes `key` from `pendingRequiredParts` when the just-accepted
+ * write attaches its part: a fresh composition edge create (`processEdgeSlice`)
+ * naming a pending required part on either endpoint. The ONE place both
+ * directions of "this write closed the gap" are decided, so the two callers
+ * (single-item accept, batch accept — see the two `record` sites below)
+ * cannot drift on which endpoint is the part.
+ */
+function clearAttachedRequiredPart(
+  registry: KindRegistry,
+  edge: InterchangeEdge,
+  pendingRequiredParts: PendingRequiredParts,
+): void {
+  const partSide = registry.compositionPartSide(edge.kind);
+  if (partSide === undefined) return;
+  const part = partSide === "from" ? edge.from : edge.to;
+  pendingRequiredParts.delete(makeNodeKey(part.kind, part.id));
+}
+
+/**
+ * What remains in `pendingRequiredParts` after every node AND
+ * every edge in the payload has been processed: for each, whether the
+ * target ALREADY carried a live whole for it before this import (via
+ * {@link findLiveCompositionWhole} — the same predicate the write-path
+ * detach refusal reads) decides accept vs. refuse.
+ *
+ * A refused part's node row is removed in the SAME transaction — `no orphan
+ * node row survives` is the whole point of this assertion — through the
+ * session's ordinary hard-delete step (the row was created THIS import, so
+ * `session.purgeNode`'s uniqueness release and embedding cleanup are exactly
+ * what an ordinary `hardDelete` would run). Its delete-behavior enforcement
+ * is explicitly turned OFF (`enforceDeleteBehavior: false`): the part row
+ * AND every edge touching it (e.g. an ordinary, non-composition edge this
+ * same import also created) were all born this import, so there is no
+ * pre-existing reference for `restrict` to protect — `hardDeleteNode`
+ * (`src/backend/drizzle/operation-backend-core.ts`) unconditionally deletes
+ * every edge connected to the node before deleting the node row itself,
+ * `restrict` or not, so nothing is left dangling. Passing the default
+ * policy here would let a part's ordinary edge (not the composition edge
+ * that makes it a part) throw `RestrictedDeleteError` PAST this function —
+ * an uncaught throw inside the same transaction as every other accepted
+ * row, aborting the whole import instead of refusing this one row.
+ *
+ * This runs AFTER `foldImportedIdentityNodes` already folded
+ * the batch's new node references into identity (the fold needs the
+ * complete node batch, and `pendingRequiredParts` is not fully resolved
+ * until every edge is processed too, so neither can move ahead of the
+ * other) — a purged part's identity membership is undone here, through
+ * `runtime.detachDeletedImportedIdentityNode`, the same
+ * `identity.detachDeleted(..., "hard")` `executeNodeHardDelete`
+ * (`src/store/operations/node-operations.ts`) issues for an ordinary hard
+ * delete. That call, too, is inside the `try`: an identity-layer failure
+ * on an already-purged row must not abort every other accepted row either.
+ * One per-row `ImportError` is recorded for each refusal, or — on the
+ * unexpected path — for whatever the purge/detach itself failed with; the
+ * rest of the import's accepted rows are unaffected (the catch-per-row
+ * contract holds).
+ */
+async function assertImportedRequiredPartsAttached<G extends GraphDef>(
+  frame: ImportWriteFrame,
+  graphId: string,
+  registry: KindRegistry,
+  runtime: ReturnType<typeof storeRuntime<G>>,
+  pendingRequiredParts: ReadonlyMap<string, PendingRequiredPart>,
+  result: ImportResult,
+  importedNodeIds: Set<string>,
+  errors: ImportError[],
+): Promise<void> {
+  for (const part of pendingRequiredParts.values()) {
+    const whole = await findLiveCompositionWhole(
+      registry,
+      frame.target,
+      graphId,
+      part.kind,
+      part.id,
+    );
+    if (whole !== undefined) continue;
+
+    const registration = frame.graph.nodes[part.kind];
+    if (registration === undefined) continue;
+    try {
+      await frame.session.purgeNode(
+        {
+          kind: part.kind,
+          id: part.id,
+          schema: registration.type.schema,
+          onDelete: registration.onDelete,
+        },
+        { enforceDeleteBehavior: false },
+      );
+      await runtime.detachDeletedImportedIdentityNode(frame.target, {
+        kind: part.kind,
+        id: part.id,
+      });
+    } catch (error: unknown) {
+      errors.push({
+        entityType: "node",
+        kind: part.kind,
+        id: part.id,
+        error:
+          error instanceof Error ?
+            error.message
+          : `Failed to purge unattached required-existence part: ${String(error)}`,
+      });
+      continue;
+    }
+    result.nodes.created--;
+    importedNodeIds.delete(makeNodeKey(part.kind, part.id));
+    errors.push({
+      entityType: "node",
+      kind: part.kind,
+      id: part.id,
+      error: new CompositionExistenceError({
+        partKind: part.kind,
+        partId: part.id,
+        situation: "create",
+      }).message,
+    });
   }
 }
 
@@ -2510,7 +2902,7 @@ type EdgeImportCandidate = Readonly<{
 type PreparedEdgeImportCreate = Readonly<{
   candidate: EdgeImportCandidate;
   params: InsertEdgeParams;
-  cardinality: Cardinality;
+  declarations: EdgeCardinalityDeclarations;
 }>;
 
 /**
@@ -2553,7 +2945,7 @@ function prepareEdgeImportCreate(
   return {
     candidate,
     params,
-    cardinality: registration.cardinality ?? "many",
+    declarations: registration,
   };
 }
 
@@ -2716,9 +3108,16 @@ async function processEdgeSlice(
   errors: ImportError[],
   importedNodeIds: Set<string>,
   pendingMatchIdentityOwners: Set<string>,
+  pendingRequiredParts: PendingRequiredParts,
 ): Promise<void> {
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
+    // A composition edge accepted this import closes the gap for
+    // whichever endpoint is its part, when that part is itself pending from
+    // `processNodes` (same batch) — see `clearAttachedRequiredPart`.
+    if (outcome.status === "created" && registry.isCompositionEdge(edge.kind)) {
+      clearAttachedRequiredPart(registry, edge, pendingRequiredParts);
+    }
   };
 
   // The store's own in-batch cardinality accounting, constructed once per
@@ -2975,22 +3374,37 @@ async function processEdgeSlice(
 
   const accepted: PreparedEdgeImportCreate[] = [];
   for (const prepared of preparedCreates) {
-    const { candidate, params, cardinality } = prepared;
+    const { candidate, params, declarations } = prepared;
     const { edge } = candidate;
 
+    // Acyclic-kind rows never join the batched flush below (§10.1): the
+    // in-batch overlay `cardinalityValidationBackend` intercepts
+    // `countEdgesFrom` / `edgeExistsBetween`, not a recursive `execute`
+    // statement, so it cannot account for an in-batch cycle. Each instead
+    // joins the same sequential write-as-you-go fallback in-slice duplicate
+    // ids already use (`deferred`, processed via `processEdge` below),
+    // where the row lands inside the transaction before the next row's
+    // probe runs and the database itself carries the in-batch state.
+    if (edgeKindIsInAcyclicRelation(frame.graph, registry, edge.kind)) {
+      deferred.push(edge);
+      continue;
+    }
+
     // The cardinality probe, per row and against the pending-aware overlay, so
-    // two `cardinality: "one"` edges from one source IN ONE SLICE refuse the
-    // second row instead of both passing and colliding at the batch claim —
-    // which runs once for the whole slice, outside every per-row recovery.
+    // two edges declaring the same axis from/to one node IN ONE SLICE refuse
+    // the second row instead of both passing and colliding at the batch claim
+    // — which runs once for the whole slice, outside every per-row recovery.
     const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
-      checkCardinalityConstraint(
+      checkEdgeCardinalityConstraints(
         { graphId, registry, backend: cardinalityValidationBackend },
         edge.kind,
-        cardinality,
-        edge.from.kind,
-        edge.from.id,
-        edge.to.kind,
-        edge.to.id,
+        edgeCardinalityAxisReferences(declarations),
+        {
+          fromKind: edge.from.kind,
+          fromId: edge.from.id,
+          toKind: edge.to.kind,
+          toId: edge.to.id,
+        },
         edge.validTo,
       ),
     );
@@ -3018,7 +3432,7 @@ async function processEdgeSlice(
       });
       continue;
     }
-    registerPendingEdgeForCardinality(params, cardinality);
+    registerPendingEdgeForCardinality(params, declarations);
     if (pendingIdentityKey !== undefined) {
       pendingMatchIdentityOwners.add(pendingIdentityKey);
     }
@@ -3037,7 +3451,7 @@ async function processEdgeSlice(
     // changed under a bulk load and is why the per-row probe above exists for
     // everything that is not concurrent.
     const acceptedWork = accepted.map((prepared) =>
-      importEdgeInsertWork(prepared.params, prepared.cardinality),
+      importEdgeInsertWork(registry, prepared.params, prepared.declarations),
     );
     const retryAcceptedIndividually = async (): Promise<void> => {
       for (const prepared of accepted) {
@@ -3045,7 +3459,11 @@ async function processEdgeSlice(
           frame,
           () =>
             frame.session.createEdge(
-              importEdgeInsertWork(prepared.params, prepared.cardinality),
+              importEdgeInsertWork(
+                registry,
+                prepared.params,
+                prepared.declarations,
+              ),
             ),
         );
         if (rowResult.ok) {
@@ -3062,7 +3480,7 @@ async function processEdgeSlice(
       ({ params }) => params.matchIdentity !== undefined,
     ).length;
     const hasDurableIdentity = durableIdentityCount > 0;
-    const hasClaims = acceptedWork.some(({ claim }) => claim !== undefined);
+    const hasClaims = acceptedWork.some(({ claims }) => claims.length > 0);
     if (
       hasDurableIdentity &&
       durableIdentityCount === accepted.length &&
@@ -3322,16 +3740,18 @@ async function processEdge(
   // claims before it writes — the same order the collection create uses. No
   // pending state is needed: this path writes each edge as it goes, so the next
   // row's probe reads the previous one from the same transaction.
-  const { cardinality, params } = preparation.value;
+  const { declarations, params } = preparation.value;
   const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
-    checkCardinalityConstraint(
+    checkEdgeCardinalityConstraints(
       { graphId, registry, backend: frame.target },
       edge.kind,
-      cardinality,
-      edge.from.kind,
-      edge.from.id,
-      edge.to.kind,
-      edge.to.id,
+      edgeCardinalityAxisReferences(declarations),
+      {
+        fromKind: edge.from.kind,
+        fromId: edge.from.id,
+        toKind: edge.to.kind,
+        toId: edge.to.id,
+      },
       edge.validTo,
     ),
   );
@@ -3339,9 +3759,43 @@ async function processEdge(
     return { status: "error", error: cardinalityResult.error };
   }
 
+  // Acyclicity is checked AFTER the row lands, inside the same
+  // savepoint-guarded attempt as the insert: import writes each row as it
+  // goes, so this row's own probe already sees the previous rows in this
+  // same transaction, and a cycle rolls back to the savepoint and reports as
+  // this row's per-row error rather than aborting the whole chunk.
   const { result: createResult } = await catchEdgeCreateRefusalWithSavepoint(
     frame,
-    () => frame.session.createEdge(importEdgeInsertWork(params, cardinality)),
+    async () => {
+      const row = await frame.session.createEdge(
+        importEdgeInsertWork(registry, params, declarations),
+      );
+      if (edgeKindIsInAcyclicRelation(frame.graph, registry, edge.kind)) {
+        await assertEdgeRelationsAcyclic(
+          {
+            graphId,
+            graph: frame.graph,
+            registry,
+            schema: frame.schema,
+            dialect: frame.dialect,
+            target: frame.target,
+            lock: frame.lock,
+            operation: "importGraph",
+          },
+          [
+            {
+              edgeId: params.id,
+              edgeKind: params.kind,
+              fromKind: params.fromKind,
+              fromId: params.fromId,
+              toKind: params.toKind,
+              toId: params.toId,
+            },
+          ],
+        );
+      }
+      return row;
+    },
   );
   if (!createResult.ok) {
     return { status: "error", error: createResult.error };
@@ -3351,20 +3805,23 @@ async function processEdge(
 }
 
 /**
- * The insert unit for one imported edge: the row params and the cardinality
+ * The insert unit for one imported edge: the row params and every cardinality
  * claim the row owes.
  *
  * ONE owner, shared by the batched slice and the per-row fallback, for the same
  * reason {@link importNodeCreateWork} is one: two spellings of the same row are
- * two spellings that can drift. The claim is built here and ISSUED by the
+ * two spellings that can drift. The claims are built here and ISSUED by the
  * session, which is the only handle in this module that reaches a write member.
  */
 function importEdgeInsertWork(
+  registry: KindRegistry,
   params: InsertEdgeParams,
-  cardinality: Cardinality,
+  declarations: EdgeCardinalityDeclarations,
 ): EdgeInsertWork {
-  const claim = edgeCardinalityClaim(cardinality, params);
-  return { params, claim };
+  return {
+    params,
+    claims: edgeInsertClaims(registry, declarations, params),
+  };
 }
 
 // ============================================================

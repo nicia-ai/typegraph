@@ -354,7 +354,23 @@ does not promise that apply will succeed: new rows may introduce constraint
 conflicts, and any write between revalidation and apply causes
 `StaleMergePlanError`. A failed application commits no partial candidate node,
 edge, or identity writes. Revalidate again after a stale refusal; require reapproval if
-the result changes.
+the result changes. This includes an `acyclic: true` edge kind: canonicalization
+and repointing can close a cycle out of edges that were individually fine in
+every branch. Every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`,
+`planMergeIncremental()`, `mergeIncremental()`) checks the resolved plan's
+projected edge writes for such a cycle at PLAN time, before anything is
+written — including a cycle formed entirely from edges the plan itself
+proposes, with nothing live on the target yet. A violation surfaces as the
+typed `AcyclicityMergeConflictError` (`code: "GRAPH_MERGE_ACYCLICITY_CONFLICT"`),
+naming the relation and every offending edge in `details`, so a `planMerge()`
+review sees it before deciding whether to apply. Only a cycle that arises from
+a write racing the plan-time check (which holds no per-graph lock, since
+planning does no write) escapes it, and is still caught by the unchanged
+apply-time write path: apply refuses with `MergeConstraintConflictError`
+wrapping the underlying `EdgeAcyclicityError` — the same generic
+declared-constraint translation cardinality, disjointness, and uniqueness
+conflicts already take, because apply writes every edge through the store's
+own collection API, which already enforces it.
 
 `policy.id` identifies your policy implementation; `policy.context` explicitly
 records every opaque dependency that can change its decision. Include callback
@@ -502,9 +518,12 @@ fallback is acceptable.
 Turning revision tracking off does **not** turn off all serialization.
 *Constrained* writes now take the same per-graph mutual exclusion regardless of
 `revisionTracking` or `history`, because their check-then-write is only sound if
-nothing else writes the graph in between: edge cardinality (`one`, `unique`,
-`oneActive`, and the `getOrCreateByEndpoints` create and resurrect legs),
-node-kind disjointness on create, and a `kindWithSubClasses` uniqueness
+nothing else writes the graph in between: edge cardinality — both the
+source-side axis (`one`, `unique`, `oneActive`) and the independent
+[target-side axis](/core-concepts#target-cardinality) (`targetCardinality:
+"one" | "oneActive"`), including the `getOrCreateByEndpoints` create and
+resurrect legs on either axis — node-kind disjointness on create, and a
+`kindWithSubClasses` uniqueness
 constraint that actually expands to more than one kind — a scope covering a
 single kind probes exactly the row the uniques table's primary key then
 reserves, so that key is already its fence. Everything else — an unconstrained
@@ -670,6 +689,71 @@ const result = await merge(base, branches, {
 A `vector`/`hybrid` strategy with no embedder configured fails with a typed
 `SimilarityUnavailableError`, never a silent no-op.
 
+### Identity-driven pairing
+
+On a graph with `identity` enabled, an explicit `same` assertion can also
+propose — or force — a candidate match, independent of blocking and
+similarity scoring:
+
+```typescript
+const result = await merge(base, branches, {
+  identity: { pairing: "candidate" }, // or "definitional"
+});
+```
+
+| `pairing` | Effect |
+| --- | --- |
+| `"off"` (default) | Identity assertions recall no candidates — today's behavior, byte-for-byte |
+| `"candidate"` | Each `same` assertion emits a **scored** candidate pair, subject to the kind's own threshold — strong recall, not proof |
+| `"definitional"` | Each `same` assertion **forces** a fused candidate edge, merging its endpoints regardless of similarity score |
+
+**What the pairing source can reach.** An assertion proposes a pair only when
+both endpoints are *staged new nodes of the kind being planned*, drawn from
+the same staging slices the three-way classifier reads. An assertion naming a
+node already committed on the target, a node of another kind, or a node no
+branch staged proposes nothing at all — recall proposes over the nodes in
+scope. What it does instead depends on where the assertion came from: a
+branch-staged assertion whose endpoints are out of scope is reported on
+[`MergeReport.identityConflicts`](#identity-conflicts) with reason
+`out-of-scope-pairing`, and *every* cross-kind `same` is reported with
+`cross-kind-pairing` regardless of provenance. Both are reported, never
+fatal — the merge proceeds and fuses nothing for that pair, whatever
+`onAssertionConflict` says. Only an **inherited** assertion no branch
+restaged — the target's own existing ledger between two committed rows — is
+silent, because it is not a conflict any branch caused. So this is a
+**branch-reconciliation** knob: it decides which rows two branches
+contributed collapse into one entity as they land. It is not an API for
+consolidating two entities that already live in the target graph; there is no
+`store.identity.consolidate(a, b)` today, and asserting `same` between two
+committed nodes records identity truth (a class, honored by every
+identity-aware read) without ever rewriting them into a single row. A future
+direct consolidation API would build on this same reviewed merge machinery —
+the plan artifact, the review digest, the separation veto — rather than
+introducing a second, unaudited path.
+
+**`pairing: "definitional"` is consolidation, said once and loudly.** It
+merges nodes that were created under different ids purely because a `same`
+assertion relates them — not because they scored above a threshold. That is
+a real, audited entity consolidation, sanctioned as the reviewed-merge-plan
+form of the operational-identity ledger's "a separate, explicit, audited
+`merge(a, b)` operation" — there is no separate
+`store.identity.consolidate(a, b)` API. Reach for `"candidate"` when an
+identity assertion should strengthen recall alongside similarity scoring;
+reach for `"definitional"` only when the assertion itself is the intended
+authority for the merge.
+
+A current `different` assertion between two nodes' identity classes vetoes
+a match **at plan time**, whichever source proposed it — a scored candidate
+edge is silently dropped (reported on the plan's `dropped` list), while a
+forced edge (from a unique constraint, `blockIndex`, or `pairing:
+"definitional"`) fails the plan with `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT`,
+naming the constraint and the two entities. This converts what used to be a
+commit-time database constraint violation into an upfront, attributed
+refusal. The veto also reaches a *transitive* fusion: if `a`–`b` and `b`–`c`
+each pass the threshold independently, but `a` and `c` are held apart by a
+`different` assertion, the whole three-node cluster is refused even though
+no single pairwise edge was itself vetoed.
+
 ## Conflicts
 
 When merged contributors disagree on a property value, Graph Merge **resolves by
@@ -704,6 +788,94 @@ const result = await merge(base, branches, {
 });
 ```
 
+### Identity conflicts
+
+The `identity` options bag (see also [Identity-driven pairing](#identity-driven-pairing)
+above) also governs the conflict shapes a three-way classification against
+the staged base identity assertions cannot resolve by rule alone, and the two
+collisions an identity **pairing** can induce once it fuses rows:
+
+```typescript
+const result = await merge(base, branches, {
+  identity: {
+    pairing: "candidate",
+    onAssertionConflict: "flag",
+    onProvenanceConflict: "refuse",
+    onEdgeConflict: "flag",
+    onUniquenessConflict: "flag",
+  },
+});
+```
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `onAssertionConflict` | `"refuse"` | How to arbitrate a `same`/`different` opposing-relations collision, or a retract/reassert race, that the classifier cannot resolve by rule alone. `"refuse"` fails the merge, byte-identical to today. `"assertWins"` / `"retractWins"` resolve a retract/reassert race specifically — refused as an invalid option against any other conflict shape, which has no assert/retract axis to decide. `"flag"` keeps base truth and records a typed `IdentityUnresolvedConflict` on the merge report; a function receives the fully-populated conflict and returns the decision itself. |
+| `onProvenanceConflict` | `"keepBoth"` | How contradictory source attribution across the members an identity assertion fused is handled — `"keepBoth"` keeps every contribution, exactly as the merge always has; `"refuse"` fails the plan with `GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT`, naming the canonical entity and the branches that disagree. "Contradictory" means two different BRANCHES independently authored the paired rows — a single branch asserting `same` over two rows it created itself is not a contradiction. |
+| `onEdgeConflict` | `"repoint"` | What happens when an identity pairing collapses two **distinct** pre-repoint relationships onto one edge slot — `x → a` and `x → b` both landing on the fused survivor. `"repoint"` folds them into one edge, exactly as the ordinary repoint always has. `"flag"` drops the pairing that induced the collision, rebuilds the plan once without it, and records an `IdentityUnresolvedConflict` of kind `"edge"` (see below). |
+| `onUniquenessConflict` | `"refuse"` | What happens when an identity pairing fuses members into one entity whose **unioned** properties violate a unique constraint — a compound key completed by `first` from one member and `last` from the other, say. `"refuse"` leaves the collision to the commit's own constraint refusal (`GRAPH_MERGE_CONSTRAINT_CONFLICT`), exactly as today. `"flag"` probes the resolved write set at plan time through the store's own constraint decision — the same key computation, `where` filter, scope and collation the write path enforces — drops the pairing that induced each collision, rebuilds once, and records an `IdentityUnresolvedConflict` of kind `"uniqueness"`. The constraint itself is never relaxed. |
+
+**What `"flag"` drops, and what it keeps.** Under `onEdgeConflict: "flag"` and
+`onUniquenessConflict: "flag"` the merge builds its plan, looks for the
+collisions an identity pairing induced, and — if it finds any — rebuilds the
+plan **once** with the `same` assertions behind those pairings removed from
+candidate generation — only the assertions on the identity path between the
+entities the conflict names, never every assertion the cluster holds. Only the
+pairing is dropped: the assertion itself still lands in the identity ledger, so
+the two rows stay in one identity class (every identity-aware read still sees
+them as one entity) — they are simply not consolidated into a single row by
+this merge, and every relationship each row carried lands as it was staged. A
+collision that similarity, a shared unique value or an ontology retype would
+have produced without the assertion is not the pairing's doing and is not
+reported against it. Attribution happens *before* each rebuild: an **edge**
+collapse is induced when the cluster's non-identity edges alone do not connect
+the two endpoints (and confirmed by the rebuild, since fusions only shrink); a
+**uniqueness** collision is attributed against the cluster's own unfused
+writes — the planner probes the same store decision a second time over the
+writes the plan would carry with that cluster's identity edges removed (each
+component its similarity, unique-value or retype edges still hold together,
+canonicalized, retyped and modification-folded exactly as the plan does), and
+drops a pairing only when no such write claims that key on its own. A cluster
+whose non-identity edges already connect every member has no pairing to drop
+and is never induced. The decision then iterates to a fixpoint: splitting a fused entity puts its
+members' own writes back into the plan, and a member's own key the fused union
+had discarded can meet a *different* induced pairing the fused plan never met,
+so each pass inspects the rebuilt plan and drops what it newly induces, and
+every pass's conflicts are carried on the report. It terminates because every
+pass must drop at least one assertion no earlier pass dropped and the staged
+assertions are finite; a pass that named nothing new while still reporting an
+induced conflict would contradict its own counterfactual, and only that is
+refused with a `GRAPH_MERGE_ERROR` instead of looped on. Three things stay
+where they are today: a uniqueness collision a member carries **on
+its own** (not one the fusion created) is still refused by the commit, flag or
+not, and drops no pairing; the plan-time probe reads the plan's resolved
+properties, so a key the target's row carries that no branch restated is caught
+by the commit's authoritative check rather than at plan time; and, in the
+converse direction, the probe is a lock-free read of the target, so a row
+committed between planning and apply can make the planner drop a pairing the
+commit would have allowed — the safe direction, since the plan stays
+applicable and the report says what was dropped.
+
+The two arms carry what a reviewer needs to act on the dropped pairing:
+
+| Arm | Fields |
+| --- | --- |
+| `kind: "edge"` | `edgeKind`; `a` and `b`, the two pre-repoint endpoints whose pairing collapsed the rows; `canonical`, the survivor both repointed onto; `side` (`"from"` or `"to"`); `edgeIds`, the rows that would have folded; `assertionIds`, the `same` assertions whose pairing was dropped; `branches`, the branches that staged them. |
+| `kind: "uniqueness"` | `constraintName` and `fields`; `canonical`, the fused entity whose pairing was dropped; `owner`, the current holder of the key — another write of the same plan, or a row the target already holds (reported under its **own** kind, the subclass row a `kindWithSubClasses` scope reached, say); `loser`, the write the store refused for it (`canonical` is one of the two); `members`, the fused cluster; `assertionIds` and `branches` as above. |
+
+**A plan carrying an `IdentityUnresolvedConflict` is still applicable.**
+`"flag"` means "keep the base truth, keep the data, tell the caller" — the
+same posture `"flag"` already has for delete/modify conflicts above. Only
+`"refuse"` fails the plan. Every unresolved case is reported on
+`MergeReport.identityConflicts` and inside the durable plan artifact, and
+the whole `identity` options bag is part of the review digest, so a
+reviewed plan cannot be applied under policies its reviewer did not
+approve.
+
+There is no separate property-conflict knob for identity-paired clusters:
+`onBasePropertyConflict` applies when the identity-paired cluster contains a
+committed base member, `onPropertyConflict` otherwise — the two knobs
+[above](#property-conflicts) already own that decision.
+
 ### Delete / modify conflicts
 
 An inherited node or edge that one branch **deletes** while another **modifies**
@@ -721,6 +893,47 @@ Independent edits to the *same* inherited row by different branches are
 that change with no conflict; only fields multiple branches changed to differing
 values become conflicts. This holds for node *and* edge properties, so disjoint
 edits compose instead of clobbering each other.
+
+### Composition orphans
+
+Two independent ways a merge can leave a required or optional composition
+part with no whole, both surfaced through the same
+`MergePlanReview.compositionOrphans` finding and the same
+`MergeCompositionOrphanError`:
+
+- **`cause: "deleted"`** — a branch deletes a composition whole (see
+  [Composition](/ontology#composition)) while a part attached to it on the
+  target *after* the branch point, or independently of it, survives — the
+  branch's diff carries no deletion for that part, so applying the plan as
+  trusted would leave it pointing at a whole that no longer exists.
+- **`cause: "unattached"`** — a required-existence part (`existence:
+  "required"`, see [Composition existence](/ontology#existence-a-part-that-cannot-exist-without-a-whole))
+  this merge writes, or whose composition edge this merge explicitly deletes
+  or ends, resolves to no live whole at all after canonicalization. There is
+  no whole to name for this cause, so `whole` is absent.
+
+`planMerge` and `planMergeIncremental` scan for both against the target's
+current state and report every finding in `MergePlanReview.compositionOrphans`:
+
+```typescript
+type MergePlanCompositionOrphan = {
+  part: { kind: string; id: string };
+  whole?: { kind: string; id: string }; // absent for cause: "unattached"
+  viaEdgeKind: string; // the realizing composition edge
+  cause: "deleted" | "unattached";
+};
+```
+
+This is a best-effort, unlocked dry-run read, surfaced for an operator to act
+on before approving the plan. `applyMergePlan` re-verifies the same finding
+inside the apply transaction, under the per-graph write lock, and refuses with
+`MergeCompositionOrphanError` (see [Errors](/errors#mergecompositionorphanerror))
+if it still recurs there — so a plan-time report that comes back empty is not
+a guarantee against a concurrent attach racing the eventual apply. The
+`"unattached"` cause has its own residual blind spot: a composition edge
+silently dropped by canonicalization's endpoint-deleted repointing issues no
+write for any per-write guard to see — see
+[Limitations](/limitations#composition-existence-existence-required).
 
 ## Edges follow their entities
 
@@ -768,16 +981,23 @@ contributes no claim and raises no conflict, whatever its branch's rank.
 ## Ontology type reconciliation
 
 With `reconcileTypes: "ontology"`, two staged nodes that share an id but carry
-subtype-compatible kinds (via the graph's `subClassOf` closure) are collapsed to
-the **most-specific** common type, recorded as a `TypeReconciliation`. A base
-`Doctor` and a branch `SpecialistDoctor` reconcile to `SpecialistDoctor` instead
-of being dropped as incompatible. The default `"off"` keeps identity strictly
-`(kind, id)`.
+subtype-compatible kinds (via the store's own validated `KindRegistry` — the
+same registry a query runs against, not a private closure the merge recomputes)
+are collapsed to the **most-specific** common type, recorded as a
+`TypeReconciliation`. A base `Doctor` and a branch `SpecialistDoctor` reconcile
+to `SpecialistDoctor` instead of being dropped as incompatible. The default
+`"off"` keeps identity strictly `(kind, id)`.
 
 ```typescript
 const graph = defineGraph({ /* ... */ ontology: [subClassOf(SpecialistDoctor, Doctor)] });
 const result = await merge(base, branches, { reconcileTypes: "ontology" });
 ```
+
+`equivalentTo` participates in "most specific" too, since it is mutual
+subsumption (see [Ontology & Reasoning](/ontology#equivalence)): a base
+`Doctor` and a branch `Physician` declared `equivalentTo` reconcile to whichever
+of the two sorts first in code-point order, deterministically, rather than
+being flagged incompatible.
 
 ## Choosing the survivor
 
@@ -862,6 +1082,10 @@ reconciliation.
 A same-id ontology retype remains a `TypeReconciliation`, rather than creating
 an id-merge resolution. Its optional `decisiveEdges` carries the accepted retype
 witness without changing the meaning of the existing resolution collection.
+When a retype cluster also spans several ids, the id-merge resolution it does
+produce names the **reconciled** kind in `EntityResolution.kind` — the kind the
+canonical row is written under, the same value `TypeReconciliation.toType`
+records — never the staged survivor's pre-retype kind.
 
 Each edge records every candidate source that proposed the pair in stable order.
 Definitional evidence names the trusted rule, such as a unique constraint, and
@@ -889,8 +1113,9 @@ type MatchEvidence =
 ```
 
 Built-in source metadata distinguishes block, unique, base-unique, base-index,
-keyless, and ontology-retype proposals. Several sources proposing the same pair
-are all retained after deduplication. Strategy metadata describes `fulltext`,
+keyless, ontology-retype, and (under `identity.pairing`) `identity` proposals
+— the latter naming the assertion ids that proposed the pair. Several
+sources proposing the same pair are all retained after deduplication. Strategy metadata describes `fulltext`,
 `vector`, `hybrid`, or `custom` configuration, never custom function source.
 Default evidence excludes the raw compared values and rejected pairs because
 those may contain PII and can make reports enormous.
@@ -1491,7 +1716,7 @@ keeps the complete graph schema and rejects the duplicate during staging,
 before entity resolution can review and collapse it. An ingestion branch
 materializes an honest working-copy schema with only node uniqueness deferred;
 schema validation, edge endpoint checks, disjointness, and edge cardinality
-still apply immediately.
+(both the source and target axis) still apply immediately.
 
 ```typescript
 import { asNodeId } from "@nicia-ai/typegraph";
@@ -1720,8 +1945,9 @@ subclass you can branch on:
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BranchError`                | `branch()` or `ingestionBranch()` could not materialize a working copy.                                                                                                                                                                                                        |
 | `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
-| `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge).                                  |
-| `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. The resolved plan would violate a deterministic store constraint, such as edge cardinality or node uniqueness. Its category is `constraint`, its `cause` is the original typed store error, and its details expose the original constraint fields. No graph or provenance writes commit. |
+| `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT` by default. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races the configured `onAssertionConflict` policy does not resolve. See the [identity guide](/identity/#interchange-and-branch-merge). Two related codes on the same error class name a more specific cause: `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` (a forced identity-paired match crosses a class-lifted `different` assertion — see [Identity-driven pairing](#identity-driven-pairing)) and `GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT` (`onProvenanceConflict: "refuse"` found contradictory branch attribution across a fused cluster — see [Identity conflicts](#identity-conflicts)). |
+| `AcyclicityMergeConflictError` | Code `GRAPH_MERGE_ACYCLICITY_CONFLICT`. Thrown at plan time by every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`, `planMergeIncremental()`, `mergeIncremental()`) when the resolved plan's edge writes — after canonicalization and repointing — would close a cycle in a declared `acyclic: true` relation. Its `details` name the relation and every offending edge. |
+| `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. The resolved plan would violate a deterministic store constraint, such as source- or target-side edge cardinality or node uniqueness. Its category is `constraint`, its `cause` is the original typed store error (a `CardinalityError` with `details.direction` for a cardinality conflict), and its details expose the original constraint fields. No graph or provenance writes commit. |
 | `InvalidMergeOptionsError`   | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`.                         |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |
 | `MergeConflictError`         | A conflict could not be resolved under the configured policy.                                                                                                                                                                                                                 |

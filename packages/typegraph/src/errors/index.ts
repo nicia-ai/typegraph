@@ -22,11 +22,16 @@
  * ```
  */
 
+import type { EdgeCardinalityDeclaration } from "../backend/types";
 import type { KindEntity } from "../core/types";
+import type { OntologyChange } from "../schema/migration";
 import type { SchemaDiff } from "../schema/migration";
-// Type-only import: `materialize-indexes.ts` value-imports
-// `ConfigurationError` from this file, but type-only imports are erased
-// at runtime so this back-edge does not create a value cycle.
+import type { EdgeCardinalityDirection } from "../store/claims/edge-claims";
+import type { ConstraintFenceViolation } from "../store/claims/verify";
+// Type-only imports: `materialize-indexes.ts` and `claims/verify.ts`
+// value-import `ConfigurationError` / `MigrationError` from this file, but
+// type-only imports are erased at runtime so these back-edges do not create
+// a value cycle.
 import type { MaterializeIndexesResult } from "../store/materialize-indexes";
 
 // ============================================================
@@ -719,11 +724,29 @@ export class EdgeMatchIdentityConflictError extends TypeGraphError {
  */
 export type CardinalityErrorDetails = Readonly<{
   edgeKind: string;
+  /** Which endpoint's population the write overran. */
+  direction: EdgeCardinalityDirection;
   fromKind: string;
   fromId: string;
+  toKind: string;
+  toId: string;
   cardinality: string;
   existingCount: number;
 }>;
+
+/**
+ * The remediation suggestion for a {@link CardinalityError}, naming the
+ * option the caller actually set rather than the source-side one by default:
+ * a `direction: "target"` violation is never fixed by setting `cardinality`,
+ * so the suggestion must name `targetCardinality` for it.
+ */
+function cardinalityErrorSuggestion(details: CardinalityErrorDetails): string {
+  const option =
+    details.direction === "target" ? "targetCardinality" : "cardinality";
+  return details.cardinality === "one" || details.cardinality === "unique" ?
+      `Delete the existing edge before creating a new one, or use ${option} "many".`
+    : `Check if the ${option} constraint "${details.cardinality}" is correct for your use case.`;
+}
 
 /**
  * Thrown when cardinality constraint is violated.
@@ -733,19 +756,100 @@ export class CardinalityError extends TypeGraphError {
 
   constructor(details: CardinalityErrorDetails, options?: { cause?: unknown }) {
     super(
-      `Cardinality violation: "${details.edgeKind}" from ${details.fromKind}/${details.fromId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`,
+      details.direction === "target" ?
+        `Cardinality violation: "${details.edgeKind}" targeting ${details.toKind}/${details.toId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`
+      : `Cardinality violation: "${details.edgeKind}" from ${details.fromKind}/${details.fromId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`,
       "CARDINALITY_ERROR",
       {
         details,
         category: "constraint",
-        suggestion:
-          details.cardinality === "one" || details.cardinality === "unique" ?
-            `Delete the existing edge before creating a new one, or use cardinality "many".`
-          : `Check if the cardinality constraint "${details.cardinality}" is correct for your use case.`,
+        suggestion: cardinalityErrorSuggestion(details),
         cause: options?.cause,
       },
     );
     this.name = "CardinalityError";
+  }
+}
+
+/**
+ * Details for EdgeAcyclicityError.
+ */
+export type EdgeAcyclicityErrorDetails = Readonly<{
+  relation: string;
+  edgeKind: string;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+  /** True when `from` and `to` are the same node: a cycle of length one. */
+  selfLoop: boolean;
+}>;
+
+/**
+ * Thrown when a write would give a declared `acyclic: true` edge relation a
+ * cycle. Carries no witness path — reconstructing one requires path
+ * tracking, which the set-semantics reachability check gives up in exchange
+ * for terminating with no depth bound (see `src/store/acyclicity.ts`).
+ */
+export class EdgeAcyclicityError extends TypeGraphError {
+  declare readonly details: EdgeAcyclicityErrorDetails;
+
+  constructor(
+    details: EdgeAcyclicityErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      details.selfLoop ?
+        `Acyclicity violation: "${details.edgeKind}" edge ${details.edgeId} is a self-loop (${details.fromKind}/${details.fromId} -> ${details.toKind}/${details.toId}), a cycle of length one.`
+      : `Acyclicity violation: "${details.edgeKind}" edge ${details.edgeId} would close a cycle in the "${details.relation}" relation (${details.toKind}/${details.toId} already reaches ${details.fromKind}/${details.fromId}).`,
+      "EDGE_ACYCLICITY_ERROR",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Inspect store.verifyConstraintFences() for every offending edge in this relation, or run a .recursive() traversal from the endpoints to see the path a human should resolve.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "EdgeAcyclicityError";
+  }
+}
+
+/**
+ * Details for EdgeAcyclicityIndeterminateError.
+ */
+export type EdgeAcyclicityIndeterminateErrorDetails = Readonly<{
+  relation: string;
+  operation: string;
+  graphId: string;
+}>;
+
+/**
+ * Thrown when the engine cut an acyclicity reachability search short
+ * (statement timeout, resource exhaustion) before it could prove or refute a
+ * cycle. An incomplete search is never reported as "no cycle" — see
+ * `isStatementCutShortError` in `src/utils/sql-errors.ts`.
+ */
+export class EdgeAcyclicityIndeterminateError extends TypeGraphError {
+  declare readonly details: EdgeAcyclicityIndeterminateErrorDetails;
+
+  constructor(
+    details: EdgeAcyclicityIndeterminateErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Acyclicity check for "${details.relation}" could not complete: the engine cut the reachability search short during "${details.operation}".`,
+      "EDGE_ACYCLICITY_INDETERMINATE",
+      {
+        details,
+        category: "system",
+        suggestion:
+          "Raise the statement budget for this operation, or drop `acyclic: true` from the edge and enforce acyclicity in application code.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "EdgeAcyclicityIndeterminateError";
   }
 }
 
@@ -937,6 +1041,55 @@ export class IdentitySeparationViolationError extends TypeGraphError {
   }
 }
 
+export type IdentityReplayErrorDetails =
+  | Readonly<{ code: "IDENTITY_REPLAY_REQUIRES_HISTORY"; graphId: string }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
+      /**
+       * The caller's OWN `fromRecorded`, present only when the caller
+       * actually supplied one. `requestedTo` is `toRecorded`, always present
+       * (this refusal only fires when a bounded range — `toRecorded` given —
+       * lies entirely below the watermark). Never fabricated from the other:
+       * an open-ended request (no `fromRecorded`) must not read back a
+       * `requestedFrom` it never named.
+       */
+      requestedFrom?: string;
+      requestedTo: string;
+      prunedBefore: string;
+    }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_WALK_INCOMPLETE";
+      ceiling: number;
+    }>;
+
+/**
+ * Thrown by `store.identity.replay` / `transitionsOf` (and
+ * `pruneIdentityTransitions`'s own history precondition) when the transition
+ * log cannot answer a request: history capture is off, the requested range
+ * lies entirely below the retention watermark, or the lineage walk's own
+ * internal read ceiling was reached before the seed set converged. A range
+ * with more boundaries than the caller's `limit` is NOT a refusal — it pages,
+ * through the `nextFrom` cursor on the result.
+ */
+export class IdentityReplayError extends TypeGraphError {
+  declare readonly details: IdentityReplayErrorDetails;
+
+  constructor(
+    message: string,
+    details: IdentityReplayErrorDetails,
+    options?: Readonly<{ suggestion?: string }>,
+  ) {
+    super(message, details.code, {
+      details,
+      category: "constraint",
+      ...(options?.suggestion === undefined ?
+        {}
+      : { suggestion: options.suggestion }),
+    });
+    this.name = "IdentityReplayError";
+  }
+}
+
 /**
  * Details for RestrictedDeleteError.
  */
@@ -969,6 +1122,258 @@ export class RestrictedDeleteError extends TypeGraphError {
       },
     );
     this.name = "RestrictedDeleteError";
+  }
+}
+
+/**
+ * Details for CompositionCycleError.
+ */
+export type CompositionCycleErrorDetails = Readonly<{
+  wholeKind: string;
+  wholeId: string;
+  revisitedKind: string;
+  revisitedId: string;
+}>;
+
+/**
+ * Thrown when a composition parts closure revisits a node already in the
+ * walk — an INSTANCE-level cycle, not a library invariant violation.
+ *
+ * Reflexive composition (a kind declaring `partOf`/`hasPart` against itself)
+ * is permitted at the kind level, and the store refuses the corresponding
+ * INSTANCE cycle at write time: every realizing edge kind belongs to the
+ * oriented composition union, which is probed for acyclicity on each
+ * composition edge write. A ring therefore only reaches this walk through
+ * rows that bypassed that fence — written before the `partOf`/`hasPart`
+ * pair was declared, by trusted import, or by direct SQL. The cascade's
+ * visited set catches it deterministically rather than looping or silently
+ * truncating, but the affected nodes stay undeletable through the ordinary
+ * delete path until the cycle is broken by hand.
+ */
+export class CompositionCycleError extends TypeGraphError {
+  declare readonly details: CompositionCycleErrorDetails;
+
+  constructor(
+    details: CompositionCycleErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Composition parts closure of "${details.wholeKind}/${details.wholeId}" revisited "${details.revisitedKind}/${details.revisitedId}": an instance-level cycle exists among reflexive composition edges.`,
+      "COMPOSITION_CYCLE_DETECTED",
+      {
+        details,
+        category: "constraint",
+        suggestion: `Delete or reassign one of the composition edges that closes this cycle (the "${details.revisitedKind}/${details.revisitedId}" ↔ ancestor link), then retry the delete.`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "CompositionCycleError";
+  }
+}
+
+/**
+ * Details for CompositionError.
+ *
+ * `incumbentEdgeId` is omitted only when a caller builds this error with no
+ * claim outcome in hand at all; every claim-issuing call site has one and
+ * supplies it. It names the EDGE that already holds the axis — the one fact
+ * the claim statement's `holder_edge_id` actually reports — never the
+ * incumbent whole's own kind/id, which would need a second read this refusal
+ * path does not make.
+ */
+export type CompositionErrorDetails = Readonly<{
+  partKind: string;
+  partId: string;
+  wholeKind: string;
+  wholeId: string;
+  edgeKind: string;
+  incumbentEdgeId?: string;
+}>;
+
+/**
+ * Thrown when a composition edge (`partOf`/`hasPart`) would give a part a
+ * second whole. R4: a part holds exactly one whole across every declared
+ * composition relation, enforced by one claim row per part
+ * (`typegraph_edge_claims`, the reserved composition axis).
+ */
+export class CompositionError extends TypeGraphError {
+  declare readonly details: CompositionErrorDetails;
+
+  constructor(details: CompositionErrorDetails, options?: { cause?: unknown }) {
+    super(
+      `Cannot attach ${details.partKind}/${details.partId} to ${details.wholeKind}/${details.wholeId} via "${details.edgeKind}": ` +
+        `it already has a whole${
+          details.incumbentEdgeId === undefined ?
+            ""
+          : ` (held by edge ${details.incumbentEdgeId})`
+        }, and composition allows exactly one.`,
+      "COMPOSITION_WHOLE_OCCUPIED",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Call `store.nodes.<PartKind>.reparent(partId, { kind, id, via? })` to move the part — it retires the incumbent attachment and creates the new one in one transaction. A second composition edge create can never succeed while the first one holds the part.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "CompositionError";
+  }
+}
+
+/**
+ * Details for CompositionExistenceError.
+ *
+ * `partId` is absent on a bare create refusal (`situation: "create"`): the
+ * node has not been assigned an id yet at the point the refusal is decided,
+ * since deciding it is what keeps the row from ever being written.
+ * `edgeKind`/`edgeId` are present only on `situation: "detach"`, where an
+ * existing composition edge row is what the caller is trying to end,
+ * soft-delete, or hard-delete.
+ *
+ * `currentWhole`/`currentVia` and `requestedWhole`/`requestedVia` are
+ * present only on `situation: "existing"` — a `getOrCreateByConstraint` call
+ * whose `partOf` postcondition the already-existing node CONTRADICTS. Both
+ * sides are named so a caller can see the move it would have to make: the
+ * whole (and realizing edge) the node holds now, and the one the call asked
+ * for. `requestedVia` is the RESOLVED realizing edge of the pair the stated
+ * `partOf` names (`resolveCompositionAttachment`), not an echo of a stated
+ * `via` — a call that omitted `via` because the part declares one pair
+ * toward that whole kind still names that pair's edge here. `currentVia` is
+ * absent when the contradiction is a differing whole rather than a differing
+ * realizing edge only.
+ *
+ * `currentProps`/`requestedProps` are present only on `situation: "props"` —
+ * a `getOrCreateByConstraint` or `reparent` call whose attachment is already
+ * satisfied (same whole, same realizing edge — named by `edgeKind`/`edgeId`)
+ * but whose stated `partOf.props` are schema-valid and canonically DIFFERENT
+ * from the edge's live stored props. Neither call writes on an
+ * already-satisfied attachment, so a valid-but-different `props` is an
+ * accepted option this API cannot honor — it is refused rather than silently
+ * dropped, exactly like a differing whole or realizing edge.
+ *
+ * `situation` and the error's `code` say the same thing in two vocabularies —
+ * `"create"`/`COMPOSITION_WHOLE_REQUIRED`,
+ * `"detach"`/`COMPOSITION_DETACH_REFUSED`,
+ * `"existing"`/`COMPOSITION_WHOLE_CONFLICT`,
+ * `"props"`/`COMPOSITION_PROPS_CONFLICT` — from one owner
+ * ({@link describeCompositionExistenceRefusal}), so a caller may branch on
+ * either. `situation` stays because it is also the discriminant for which of
+ * the optional fields above are populated.
+ */
+export type CompositionExistenceErrorDetails = Readonly<{
+  partKind: string;
+  partId?: string;
+  situation: "create" | "detach" | "existing" | "props";
+  edgeKind?: string;
+  edgeId?: string;
+  currentWhole?: Readonly<{ kind: string; id: string }>;
+  currentVia?: string;
+  requestedWhole?: Readonly<{ kind: string; id: string }>;
+  requestedVia?: string;
+  currentProps?: Record<string, unknown>;
+  requestedProps?: Record<string, unknown>;
+}>;
+
+/**
+ * What one {@link CompositionExistenceErrorDetails} situation reads as: its
+ * machine-readable code, its message, and the way out.
+ *
+ * One switch rather than three parallel ones (a code map, a message builder,
+ * a suggestion ladder): a situation added to the union teaches exactly one
+ * function, and a code can never drift from the message it is raised with.
+ */
+function describeCompositionExistenceRefusal(
+  details: CompositionExistenceErrorDetails,
+): Readonly<{ code: string; message: string; suggestion: string }> {
+  const partLabel = `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
+  switch (details.situation) {
+    case "create": {
+      return {
+        code: "COMPOSITION_WHOLE_REQUIRED",
+        message: `Cannot create ${partLabel}: this kind requires a whole (\`existence: "required"\`), and no \`partOf\` was given.`,
+        suggestion: `Pass \`partOf: { kind, id }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`,
+      };
+    }
+    case "detach": {
+      return {
+        code: "COMPOSITION_DETACH_REFUSED",
+        message: `Cannot detach ${partLabel} from its whole via "${details.edgeKind}"${
+          details.edgeId === undefined ? "" : ` (edge ${details.edgeId})`
+        }: this kind requires a whole (\`existence: "required"\`) and the part is still live.`,
+        suggestion: `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { kind, id, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`,
+      };
+    }
+    case "existing": {
+      const held =
+        details.currentWhole === undefined ?
+          "no whole"
+        : `whole ${details.currentWhole.kind}/${details.currentWhole.id}${
+            details.currentVia === undefined ?
+              ""
+            : ` (via "${details.currentVia}")`
+          }`;
+      const asked =
+        details.requestedWhole === undefined ?
+          "the requested whole"
+        : `${details.requestedWhole.kind}/${details.requestedWhole.id}${
+            details.requestedVia === undefined ?
+              ""
+            : ` (via "${details.requestedVia}")`
+          }`;
+      return {
+        code: "COMPOSITION_WHOLE_CONFLICT",
+        message: `Cannot apply \`partOf\` to ${partLabel}: the node already exists with ${held}, not ${asked}.`,
+        suggestion: `Call \`store.nodes.<Kind>.reparent(id, { kind, id, via? })\` to MOVE the part to the requested whole; getOrCreateByConstraint's \`partOf\` asserts an attachment, it never re-homes one.`,
+      };
+    }
+    case "props": {
+      return {
+        code: "COMPOSITION_PROPS_CONFLICT",
+        message: `Cannot apply \`partOf.props\` to ${partLabel}: it already holds this whole via "${details.edgeKind}"${
+          details.edgeId === undefined ? "" : ` (edge ${details.edgeId})`
+        } with different properties.`,
+        suggestion: `Call \`store.edges.${details.edgeKind}.update(${details.edgeId === undefined ? "edgeId" : JSON.stringify(details.edgeId)}, props)\` to change the realizing edge's own properties directly — \`partOf\` on an already-satisfied attachment only asserts placement, it never rewrites the edge.`,
+      };
+    }
+  }
+}
+
+/**
+ * Thrown when a write would leave a required-existence composition part
+ * (`existence: "required"`) with no live whole (a bare create with no
+ * `partOf`, or a detach that would orphan a currently-live part), or when a
+ * `getOrCreateByConstraint`/`reparent` call stating `partOf` resolves to an
+ * attachment that already holds — a different whole, the same whole through
+ * a different realizing edge, or the same whole and edge with different
+ * `props` (`"found"`/`"updated"`/reparent's no-op) — an accepted option this
+ * API cannot honor without silently dropping it.
+ *
+ * Its own class rather than a `CompositionError` code: `CompositionError` is
+ * R4's "at most one whole" refusal; this is R-E.2's "at least one whole while
+ * live, and a whole is never silently re-assigned" refusal — a different
+ * invariant with a different shape (no incumbent edge to name on the create
+ * leg). Shares `CompositionError`'s `"constraint"` category.
+ *
+ * One class, four codes — one per situation, since a bare create, a refused
+ * detach, a contradicted whole and a contradicted `props` are four different
+ * things to handle and a caller that routes on `code` alone must be able to
+ * tell them apart.
+ */
+export class CompositionExistenceError extends TypeGraphError {
+  declare readonly details: CompositionExistenceErrorDetails;
+
+  constructor(
+    details: CompositionExistenceErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    const refusal = describeCompositionExistenceRefusal(details);
+    super(refusal.message, refusal.code, {
+      details,
+      category: "constraint",
+      suggestion: refusal.suggestion,
+      cause: options?.cause,
+    });
+    this.name = "CompositionExistenceError";
   }
 }
 
@@ -1122,6 +1527,22 @@ export const MIGRATION_FAILURE_REASONS = [
   "kind-removal",
   /** A declared edge match identity changed while its edge kind held rows. */
   "edge-match-identity-rekey",
+  /**
+   * An ontology tightening (`disjointWith` / `subClassOf` / `equivalentTo` /
+   * `sameAs` addition, or a `subClassOf` / `equivalentTo` / `sameAs`
+   * removal) is false against existing rows. Inspect `details.violations`
+   * — in exactly the shape `store.verifyConstraintFences()` returns — for
+   * the rows that must be resolved before retrying.
+   */
+  "ontology-tightening-violated",
+  /**
+   * An edge cardinality tightening (`cardinality` or `targetCardinality`
+   * newly constrained, or moved to a stricter constrained value) is false
+   * against existing rows. Inspect `details.violations` — in exactly the
+   * shape `store.verifyConstraintFences()` returns — for the rows that must
+   * be resolved before retrying.
+   */
+  "edge-cardinality-tightening-violated",
 ] as const;
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
@@ -1179,6 +1600,41 @@ export type MigrationErrorDetails =
       toVersion: number;
       reason: "edge-match-identity-rekey";
       edgeKinds: readonly string[];
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      reason: "ontology-tightening-violated";
+      /**
+       * The ontology changes that required a data check — every classified
+       * change in the diff whose `probes` is non-empty. A change classified
+       * `safe` or `breaking` (which carries no `probes`) never appears here,
+       * even when the same diff also contains one.
+       */
+      changes: readonly OntologyChange[];
+      /**
+       * The rows that make the proposed ontology false, in exactly the
+       * shape `store.verifyConstraintFences()` returns — so the same rows
+       * that block the migration can be listed, resolved, and the
+       * migration retried.
+       */
+      violations: readonly ConstraintFenceViolation[];
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      reason: "edge-cardinality-tightening-violated";
+      /** The axes this commit newly constrains — those that owed the data check. */
+      axes: readonly EdgeCardinalityDeclaration[];
+      /**
+       * The rows that make the proposed cardinality false, in exactly the
+       * shape `store.verifyConstraintFences()` returns — so the same rows
+       * that block the migration can be listed, resolved, and the
+       * migration retried.
+       */
+      violations: readonly ConstraintFenceViolation[];
     }>;
 
 /**
@@ -1692,7 +2148,10 @@ export class UnsupportedBackendCapabilityError extends TypeGraphError {
 
 /** Stable reasons an intentionally trusted initial import can be rejected. */
 export type TrustedImportErrorReason =
+  | "acyclicity_unsupported"
   | "backend_unsupported"
+  | "cardinality_unsupported"
+  | "composition_unsupported"
   | "database_not_empty"
   | "fulltext_unsupported"
   | "history_unsupported"

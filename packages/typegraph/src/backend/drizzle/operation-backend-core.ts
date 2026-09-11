@@ -25,7 +25,9 @@ import {
   isSameClaimOwner,
 } from "../../store/claims/axis";
 import {
-  type ConstrainedCardinality,
+  type EdgeCardinalityAxisName,
+  edgeCardinalityAxisName,
+  type EdgeCardinalityAxisRef,
   edgeCardinalityClaimTarget,
   edgeClaimRelationMissing,
 } from "../../store/claims/edge-claims";
@@ -102,10 +104,11 @@ import type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
   CompareAndSetNodeParams,
+  CompositionClaimScope,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
+  CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
-  CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
@@ -113,10 +116,12 @@ import type {
   DeleteUniqueParams,
   DisjointOverlapRow,
   DurableEdgeBatchMembers,
+  EdgeCardinalityDeclaration,
   EdgeClaimOutcome,
   EdgeConvergeCreateCommand,
   EdgeConvergeCreateCommandResult,
   EdgeCreateCommandResult,
+  EdgeEndpointAllowance,
   EdgeExistsBetweenParams,
   EdgeRow,
   FindEdgesByEndpointSetParams,
@@ -137,6 +142,7 @@ import type {
   InsertUniqueParams,
   ManagedEdgeCreatePlan,
   ManagedNodeCreatePlan,
+  MisassignedEdgeEndpointRow,
   NodeCreateCommandResult,
   NodeRow,
   PopulatedSchemaKind,
@@ -281,10 +287,34 @@ export function atomicNodeReplacementSubmissionMaxEntries(
   );
 }
 
+/**
+ * The belt behind the composition-eligibility gates (`resolveAtomicEdgeBatchExecutor`
+ * et al., `src/store/operations/atomic-mutation-program.ts`): a fused command
+ * is an optimization attempt, not evidence that its dimensions ran, and a
+ * composition claim (item E, `scope.kind === "composition"`) must NEVER
+ * reach a fused write — the fused single-claim path (`createEdgeWithPlan`)
+ * carries exactly one claim by construction, and even the batch path's
+ * generic multi-claim support is a policy choice this assertion enforces
+ * rather than a capability this library exercises. A composition edge
+ * always owes at least two claims (its own declared axis, plus this one),
+ * so every gate that reaches this function should already have routed such
+ * an edge kind through the portable path; this throws if one ever does not.
+ */
 function assertMatchingFusedEdgeClaim(
   params: InsertEdgeParams,
   claim: ClaimEdgeCardinalityParams,
 ): void {
+  if (claim.scope?.kind === "composition") {
+    throw new CompilerInvariantError(
+      "A fused edge write can never apply a composition claim: a composition " +
+        "edge kind always owes at least two claims, which every static " +
+        "eligibility gate must route through the portable write path instead.",
+      {
+        edgeId: claim.edgeId,
+        edgeKind: claim.edgeKind,
+      },
+    );
+  }
   const matchesEdge =
     claim.graphId === params.graphId &&
     claim.edgeId === params.id &&
@@ -539,6 +569,33 @@ function claimOwnerOf(params: InsertUniqueParams): ClaimOwner {
 }
 
 /**
+ * Narrows a fence-audit declaration to the axis ref alone, dropping
+ * `edgeKind`.
+ *
+ * A switch on the discriminant, the same shape {@link edgeCardinalityAxisName}
+ * uses and for the same stated reason: reading `declaration.cardinality`
+ * outside a narrowed branch widens to the union of both directions'
+ * cardinality types (`unique` included), so building the object field-by-field
+ * would need an `as EdgeCardinalityAxisRef` assertion — defeating the very
+ * pairing {@link EdgeCardinalityAxisRef} exists to make unspellable. The
+ * switch keeps the compiler correlating `direction` and `cardinality` instead
+ * of trusting an assertion that a wrongly-paired future declaration would
+ * silently pass.
+ */
+function axisRefFromDeclaration(
+  declaration: EdgeCardinalityDeclaration,
+): EdgeCardinalityAxisRef {
+  switch (declaration.direction) {
+    case "source": {
+      return { direction: "source", cardinality: declaration.cardinality };
+    }
+    case "target": {
+      return { direction: "target", cardinality: declaration.cardinality };
+    }
+  }
+}
+
+/**
  * The internal operation backend — what `createCommonOperationBackend`
  * returns. Includes `commitSchemaVersion` and `setActiveVersion` so the
  * top-level backend wrappers can call them on a fresh tx-scoped
@@ -553,7 +610,7 @@ export type CommonOperationBackend = Pick<
   | "clearGraph"
   | "compareAndSetNode"
   | "countEdgesByKind"
-  | "countEdgesFrom"
+  | "countEdgesAtEndpoint"
   | "countNodesByKind"
   | "deleteEdge"
   | "deleteEdgesBatch"
@@ -1010,6 +1067,111 @@ function pairAtomicMutationChunksWithIds<T>(
     offset += entries.length;
     return { entries, ids: chunkIds };
   });
+}
+
+// `graphId`, `edgeKind`, and `now` (bound twice, once per side of the
+// current-window predicate) are fixed per statement; each admitted pair
+// costs two more (`fromKind`, `toKind`).
+const MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT = 4;
+const MISASSIGNED_EDGE_ENDPOINT_PAIR_PARAM_COUNT = 2;
+
+/**
+ * How many admitted pairs one `buildMisassignedEdgeEndpointAudit` statement
+ * may render, sized to the connection's bound-parameter budget. Unlike the
+ * disjunction this statement used to render, a `VALUES` derived table does
+ * not grow SQLite's expression-tree depth with the pair count, so the bound
+ * budget is the only ceiling left to respect.
+ */
+function misassignedEdgeEndpointPairChunkSize(
+  maxBindParameters: number,
+): number {
+  return Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT) /
+        MISASSIGNED_EDGE_ENDPOINT_PAIR_PARAM_COUNT,
+    ),
+  );
+}
+
+/**
+ * The projection every edge-family fence-audit statement returns
+ * (`src/backend/drizzle/operations/constraint-fence-audit.ts`
+ * `edgeAuditProjection`). One declaration, so an added audit column is a type
+ * error at every reader rather than an `undefined` field on a reported row.
+ */
+type EdgeAuditRow = Readonly<{
+  edge_id: string;
+  edge_kind: string;
+  from_kind: string;
+  from_id: string;
+  to_kind: string;
+  to_id: string;
+}>;
+
+/** The audit row's snake_case columns as the reported row names them. */
+function edgeAuditRowFields(row: EdgeAuditRow): Readonly<{
+  edgeKind: string;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}> {
+  return {
+    edgeKind: row.edge_kind,
+    edgeId: row.edge_id,
+    fromKind: row.from_kind,
+    fromId: row.from_id,
+    toKind: row.to_kind,
+    toId: row.to_id,
+  };
+}
+
+/**
+ * The live edges of one edge kind whose endpoints match none of its
+ * allowance's admitted pairs, chunking the pairs across several statements
+ * when the allowance exceeds `pairChunkSize`.
+ *
+ * A row is truly misassigned only when it fails EVERY chunk's admitted-pairs
+ * predicate — failing one chunk means only that the row is not admitted by
+ * that chunk's pairs, not that no pair anywhere admits it. So the final
+ * answer is the INTERSECTION, by edge id, of what each chunk's statement
+ * reports; a chunk that already leaves no candidates ends the loop early,
+ * since intersecting with the empty set can only stay empty.
+ */
+async function readMisassignedEdgeEndpointRows(
+  execution: OperationBackendExecution,
+  operationStrategy: CommonOperationStrategy,
+  graphId: string,
+  allowance: EdgeEndpointAllowance,
+  now: string,
+  pairChunkSize: number,
+): Promise<readonly MisassignedEdgeEndpointRow[]> {
+  const pairChunks =
+    allowance.allowedPairs.length === 0 ?
+      [[]]
+    : chunkArray(allowance.allowedPairs, pairChunkSize);
+  let candidates: Map<string, EdgeAuditRow> | undefined;
+  for (const pairChunk of pairChunks) {
+    const rows = await execution.execAll<EdgeAuditRow>(
+      operationStrategy.buildMisassignedEdgeEndpointAudit(
+        graphId,
+        allowance.edgeKind,
+        now,
+        pairChunk,
+      ),
+    );
+    const rowsByEdgeId = new Map(rows.map((row) => [row.edge_id, row]));
+    candidates =
+      candidates === undefined ? rowsByEdgeId : (
+        new Map([...candidates].filter(([edgeId]) => rowsByEdgeId.has(edgeId)))
+      );
+    if (candidates.size === 0) break;
+  }
+  return [...(candidates?.values() ?? [])].map((row) =>
+    edgeAuditRowFields(row),
+  );
 }
 
 function assembleAtomicResolvedMutationSet<TRow>(
@@ -1745,8 +1907,11 @@ export function createCommonOperationBackend(
     }
 
     const outcomes = new Map<string, EdgeClaimOutcome>();
-    // One claim row per inserted edge, so the edge-insert budget is the right
-    // ceiling for the multi-row lock statement.
+    // Chunked by CLAIM entries, not edges — a two-axis edge kind emits two
+    // claims per inserted edge. The edge-insert budget is still a safe
+    // ceiling here: a claim row binds fewer parameters than an edge row, so
+    // chunking claims at the same size never exceeds the bind budget an edge
+    // insert of that size already clears.
     for (const chunk of chunkArray(entries, batchConfig.edgeInsertBatchSize)) {
       const lockQuery = operationStrategy.buildLockEdgeClaims(chunk, nowIso());
       const rows = await execution.execAll<{
@@ -4289,6 +4454,7 @@ export function createCommonOperationBackend(
     plan: ManagedEdgeCreatePlan,
   ): Promise<EdgeCreateCommandResult> {
     const { params } = plan;
+    const claims = plan.cardinalityClaims ?? [];
     if (
       plan.schemaFence !== undefined &&
       plan.schemaFence.graphId !== params.graphId
@@ -4302,7 +4468,7 @@ export function createCommonOperationBackend(
         },
       );
     }
-    if (plan.schemaFence !== undefined && plan.cardinalityClaim !== undefined) {
+    if (plan.schemaFence !== undefined && claims.length > 0) {
       return {
         outcome: "unsupported",
         entity: "edge",
@@ -4319,9 +4485,14 @@ export function createCommonOperationBackend(
         dimensions: ["schemaFence"],
       };
     }
+    // v1 fuses at most one claim: the fused CTE
+    // (`buildInsertEdgeIfEndpointsLiveWithCardinalityClaim`) reserves exactly
+    // one axis row. A two-axis plan takes the portable claim-then-insert
+    // path on every engine — refused here, before any SQL runs, never a
+    // silently-dropped second axis.
     if (
-      plan.cardinalityClaim !== undefined &&
-      executeEdgeCardinalityInsert === undefined
+      claims.length > 1 ||
+      (claims.length === 1 && executeEdgeCardinalityInsert === undefined)
     ) {
       return {
         outcome: "unsupported",
@@ -4333,7 +4504,7 @@ export function createCommonOperationBackend(
     let row: EdgeRow | undefined;
     if (plan.schemaFence !== undefined) {
       row = await executeEdgeSchemaFencedInsert(params, plan.schemaFence);
-    } else if (plan.cardinalityClaim === undefined) {
+    } else if (claims.length === 0) {
       row = await executeEdgeEndpointInsert(params);
     } else {
       // The unsupported case is returned above before any SQL executes.
@@ -4347,7 +4518,8 @@ export function createCommonOperationBackend(
           },
         );
       }
-      row = await executeEdgeCardinalityInsert(params, plan.cardinalityClaim);
+      const claim = requireDefined(claims[0]);
+      row = await executeEdgeCardinalityInsert(params, claim);
     }
 
     return row === undefined ?
@@ -4379,7 +4551,7 @@ export function createCommonOperationBackend(
     // Durable convergence delegates that decision to the row-level unique
     // arbiter and may therefore execute directly on a root session.
     if (
-      plan.cardinalityClaim !== undefined ||
+      (plan.cardinalityClaims ?? []).length > 0 ||
       operationStrategy.buildConvergeEdgeCreate === undefined ||
       (!durable && !options.dynamicEdgeConvergence) ||
       (!durable && context.coordination === "none") ||
@@ -4968,8 +5140,10 @@ export function createCommonOperationBackend(
       }
     },
 
-    async countEdgesFrom(params: CountEdgesFromParams): Promise<number> {
-      const query = operationStrategy.buildCountEdgesFrom(params);
+    async countEdgesAtEndpoint(
+      params: CountEdgesAtEndpointParams,
+    ): Promise<number> {
+      const query = operationStrategy.buildCountEdgesAtEndpoint(params);
       const row = await execution.execGet<{ count: string | number }>(query);
       return Number(row?.count ?? 0);
     },
@@ -5247,42 +5421,61 @@ export function createCommonOperationBackend(
         nodeId: row.node_id,
       }));
 
-      // One statement per declared cardinality, because that is the
-      // granularity at which the population's key and liveness differ.
-      const edgeKindsByCardinality = new Map<
-        ConstrainedCardinality,
-        string[]
+      // One statement per declared axis, because that is the granularity at
+      // which the population's key and liveness differ — and a composition
+      // declaration (`declaration.scope !== undefined`) is its own axis even
+      // under the same axis name, because its population is relation-wide:
+      // the peer test is the oriented two-arm union, not exact-kind equality
+      // (see `buildContendedCompositionEdgeRowAudit`).
+      const edgeAxes = new Map<
+        string,
+        Readonly<{
+          ref: EdgeCardinalityAxisRef;
+          edgeKinds: string[];
+          scope: CompositionClaimScope | undefined;
+        }>
       >();
       for (const declaration of params.edgeCardinalities) {
-        const kinds = edgeKindsByCardinality.get(declaration.cardinality) ?? [];
-        kinds.push(declaration.edgeKind);
-        edgeKindsByCardinality.set(declaration.cardinality, kinds);
+        const axisName: EdgeCardinalityAxisName =
+          edgeCardinalityAxisName(declaration);
+        const scope: CompositionClaimScope | undefined =
+          declaration.scope === undefined ?
+            undefined
+          : { kind: "composition", holders: declaration.scope.holders };
+        const axisKey = `${axisName}|${scope === undefined ? "" : "composition"}`;
+        const entry = edgeAxes.get(axisKey) ?? {
+          // Narrowed to the axis ref alone: `declaration` also carries
+          // `edgeKind`, and keeping that field on `ref` would let a later
+          // `{...ref, edgeKind: row.edge_kind}` merge silently depend on
+          // spread ORDER to discard it instead of the type excluding it.
+          ref: axisRefFromDeclaration(declaration),
+          edgeKinds: [],
+          scope,
+        };
+        entry.edgeKinds.push(declaration.edgeKind);
+        edgeAxes.set(axisKey, entry);
       }
       const contendedEdgeRows: ContendedEdgeRow[] = [];
-      for (const [cardinality, edgeKinds] of edgeKindsByCardinality) {
-        const rows = await execution.execAll<{
-          edge_id: string;
-          edge_kind: string;
-          from_kind: string;
-          from_id: string;
-          to_kind: string;
-          to_id: string;
-        }>(
-          operationStrategy.buildContendedEdgeRowAudit(
-            params.graphId,
-            cardinality,
-            edgeKinds,
-          ),
+      for (const { ref, edgeKinds, scope } of edgeAxes.values()) {
+        const rows = await execution.execAll<EdgeAuditRow>(
+          scope === undefined ?
+            operationStrategy.buildContendedEdgeRowAudit(
+              params.graphId,
+              ref,
+              edgeKinds,
+            )
+          : operationStrategy.buildContendedCompositionEdgeRowAudit(
+              params.graphId,
+              ref,
+              scope.holders,
+              edgeKinds,
+            ),
         );
         for (const row of rows) {
           contendedEdgeRows.push({
-            edgeKind: row.edge_kind,
-            cardinality,
-            edgeId: row.edge_id,
-            fromKind: row.from_kind,
-            fromId: row.from_id,
-            toKind: row.to_kind,
-            toId: row.to_id,
+            ...ref,
+            ...edgeAuditRowFields(row),
+            scope,
           });
         }
       }
@@ -5296,7 +5489,41 @@ export function createCommonOperationBackend(
           disjointOverlaps.push({ kinds, nodeId: row.node_id });
       }
 
-      return { contendedUniqueRows, contendedEdgeRows, disjointOverlaps };
+      // Present whenever the caller asked for the family (the key is
+      // defined, even if empty) — never present otherwise, so
+      // `auditConstraintFences`'s "asked and got nothing" refusal stays
+      // meaningful.
+      const misassignedEdgeEndpointRows: MisassignedEdgeEndpointRow[] = [];
+      if (params.edgeEndpointAllowances !== undefined) {
+        // One instant for the whole family: every chunk of every allowance
+        // in this call reads against the same "current" window, exactly as
+        // `withPinnedReadInstant` pins one instant across the operands of a
+        // set operation (`src/query/compiler/temporal.ts`).
+        const now = nowIso();
+        const pairChunkSize =
+          misassignedEdgeEndpointPairChunkSize(maxBindParameters);
+        for (const allowance of params.edgeEndpointAllowances) {
+          for (const row of await readMisassignedEdgeEndpointRows(
+            execution,
+            operationStrategy,
+            params.graphId,
+            allowance,
+            now,
+            pairChunkSize,
+          )) {
+            misassignedEdgeEndpointRows.push(row);
+          }
+        }
+      }
+
+      return {
+        contendedUniqueRows,
+        contendedEdgeRows,
+        disjointOverlaps,
+        ...(params.edgeEndpointAllowances === undefined ?
+          {}
+        : { misassignedEdgeEndpointRows }),
+      };
     },
 
     async checkUnique(

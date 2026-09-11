@@ -1,3 +1,5 @@
+export { bindExtraIfReachable } from "../backend/capabilities/bind";
+export { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
 export { requireLineage } from "../backend/capabilities/lineage";
 export {
   batchPointReadVerdict,
@@ -21,6 +23,7 @@ export type {
   EngineRevision,
   EntityKey,
   GraphBackend,
+  GraphReadBackend,
   LineageDelta,
   LineageMembers,
   LineageSession,
@@ -47,18 +50,32 @@ export {
   TypeGraphError,
   type TypeGraphErrorOptions,
 } from "../errors";
+export {
+  bulkIsSeparated,
+  IDENTITY_STORAGE_MISSING_CODE,
+  separationClassPairKey,
+  separationFactsEmpty,
+} from "../identity/separation";
 export type { IdentityTransferAssertion } from "../identity/service";
+export { currentClassKey } from "../identity/service-mutation";
+export {
+  refKey as identityReferenceKeyOf,
+  loadCurrentStructuralClasses,
+  loadSpanningDifferentAssertion,
+} from "../identity/service-read";
+export type { PlainNodeRef } from "../identity/sql-target";
+export type { IdentityDecisionProvenance } from "../identity/transition-log";
 export type {
   IdentityAssertionWriteFacade,
   IdentityFacade,
+  IdentityRelation,
 } from "../identity/types";
 export { exportGraph, exportGraphStream } from "../interchange/export";
 export { importGraph, importGraphStream } from "../interchange/import";
-export { computeTransitiveClosure, isReachable } from "../ontology/closures";
 export {
-  META_EDGE_EQUIVALENT_TO,
-  META_EDGE_SAME_AS,
-} from "../ontology/constants";
+  RESOLVED_NODE_UNIQUENESS_UNSUPPORTED_CODE,
+  type ResolvedNodeClaimConflict,
+} from "../store/claims/resolved-node-claims";
 export { getEdgeRowsByIds } from "../store/edge-fetch";
 export { getNodeRowsByIds } from "../store/node-fetch";
 // The provenance ownership probe needs graph-scoped raw SQL to look for rows
@@ -67,14 +84,23 @@ export {
   createSqlSchema,
   type ResolvedSqlTableNames,
 } from "../query/compiler/schema";
+export { getDialect } from "../query/dialect";
 export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+export { type KindRegistry } from "../registry/kind-registry";
 export { sortedReplacer } from "../schema/canonical";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
 export {
-  type OntologyIntrospection,
-  type UniqueIntrospection,
-} from "../store/introspect";
+  acyclicEdgeRelations,
+  type EdgeAcyclicityViolation,
+  edgeKindIsInAcyclicRelation,
+  type ProposedRelationEdge,
+  readProposedEdgeAcyclicityViolations,
+} from "../store/acyclicity";
+export { type UniqueIntrospection } from "../store/introspect";
+export { planCompositionCascade } from "../store/operations/composition-cascade";
+export { findLiveCompositionWhole } from "../store/operations/composition-create";
+export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
@@ -87,11 +113,18 @@ export {
   resolveLineage,
 } from "../store/recorded-capture";
 export {
+  type GraphWriteLock,
+  lockRecordedGraphWrite,
+  uncapturedGraphWriteLock,
+} from "../store/recorded-capture/clock";
+export {
   storeBackend,
   storeCaptureEnabled,
   storeQueryBackend,
   storeRuntime,
   transactionBackend,
+  type TransactionDeleteNodeWithPolicy,
+  transactionDeleteNodeWithPolicy,
 } from "../store/runtime-port";
 export type { Store } from "../store/store";
 export { createStore, createStoreWithSchema } from "../store/store";

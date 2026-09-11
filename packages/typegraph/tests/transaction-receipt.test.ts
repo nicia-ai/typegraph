@@ -256,4 +256,44 @@ describe("transaction receipt recorder", () => {
     expect(Object.entries(receipt.writes.nodes)).toEqual([]);
     expect(receipt.writes.total).toBe(0);
   });
+
+  // Load-bearing: `transitions` sits BESIDE `total` on `IdentityWriteSummary`,
+  // never inside it — `total` stays the count of ledger truth rows a
+  // transaction produced (design §7.2). Revert check: fold
+  // `recordIdentityTransitions` into `recordIdentity`'s bucket (so it also
+  // bumps `counters.identity.total` and the receipt's overall `total`) and
+  // both `toEqual` assertions below fail (`total` reports 8, not 3).
+  it("records identity transitions beside total, never inside it (enabled + history)", () => {
+    const recorder = createTransactionReceiptRecorder();
+    recorder.recordIdentity("sameAssertions", 2);
+    recorder.recordIdentity("retractions", 1);
+    recorder.recordIdentityTransitions(5);
+
+    const receipt = recorder.snapshot();
+
+    expect(receipt.writes.identity).toEqual({
+      sameAssertions: 2,
+      differentAssertions: 0,
+      retractions: 1,
+      transitions: 5,
+      total: 3,
+    });
+    expect(receipt.writes.total).toBe(3);
+  });
+
+  // Companion to the above: the shared frozen zero-valued summary (identity
+  // disabled, or enabled without any writes) carries `transitions` too, so a
+  // disabled graph's receipt shape never diverges from an enabled one's.
+  it("carries transitions: 0 on the zero-valued identity summary (disabled or untouched)", () => {
+    const recorder = createTransactionReceiptRecorder();
+    const receipt = recorder.snapshot();
+
+    expect(receipt.writes.identity).toEqual({
+      sameAssertions: 0,
+      differentAssertions: 0,
+      retractions: 0,
+      transitions: 0,
+      total: 0,
+    });
+  });
 });

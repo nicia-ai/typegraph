@@ -1,0 +1,453 @@
+/**
+ * The data preflight a schema tightening owes, run INSIDE the schema-commit
+ * transaction.
+ *
+ * `classifyOntologyChanges` + `ontologyTighteningProbes` (`./ontology-change`)
+ * decide WHAT the ontology half must check; `newlyConstrainedEdgeAxes` decides
+ * the same for the edge-cardinality half. `auditConstraintFences`
+ * (`src/store/claims/verify.ts`) is the ONE reader that actually checks
+ * either, shared with `store.verifyConstraintFences()`. This module's only
+ * job is to turn a proposed schema transition into the one
+ * `ConstraintFenceAuditPlan` that reader needs, and to turn a non-empty
+ * violation report into the `MigrationError` a caller refuses the commit
+ * with.
+ *
+ * Generalizes the ontology-only preflight rather than forking it:
+ * `OntologySnapshot` already carries `edges`, so no input change was needed
+ * to add the cardinality half.
+ */
+import { type SchemaCommitPreflightBackend } from "../backend/types";
+import { MigrationError } from "../errors";
+import { createSqlSchema } from "../query/compiler/schema";
+import { getDialect } from "../query/dialect";
+import { type KindRegistry } from "../registry/kind-registry";
+import {
+  compositionAcyclicRelation,
+  readEdgeAcyclicityViolations,
+  standaloneAcyclicRelation,
+} from "../store/acyclicity";
+import { compositionEdgeCardinalityDeclarations } from "../store/claims/composition-claims";
+import {
+  auditConstraintFences,
+  type ConstraintFenceViolation,
+  uniquenessAxisGroupFor,
+} from "../store/claims/verify";
+import {
+  readCompositionUnattachedParts,
+  requiredCompositionPartKinds,
+} from "../store/operations/composition-create";
+import { groupBy } from "../utils/array";
+import { requireDefined } from "../utils/presence";
+import { buildRegistryFromSerializedSchema } from "./deserializer";
+import {
+  type EdgeCardinalityDeclaration,
+  newlyConstrainedEdgeAxes,
+} from "./edge-cardinality-change";
+import {
+  classifyOntologyChanges,
+  type OntologyChange,
+  type OntologyDataProbe,
+  type OntologySnapshot,
+  ontologyTighteningProbes,
+} from "./ontology-change";
+
+/**
+ * What a caller of `commitNewSchemaVersionWithPreflight` refuses with when
+ * the backend cannot commit a preflight atomically. Reusing IDENTITY's code
+ * for a tightening-only commit would misdirect an operator on a graph with
+ * identity disabled, so `prepareSchemaTighteningPreflight` hands back the
+ * SPECIFIC bag its own decision earned, rather than a caller re-deriving
+ * which half (ontology or edge-cardinality) is actually why the atomic
+ * primitive is needed.
+ */
+export type AtomicPreflightCapabilityError = Readonly<{
+  code: string;
+  message: string;
+  suggestion?: string;
+}>;
+
+/**
+ * Thrown when an ontology tightening needs the atomic preflight-commit
+ * primitive and the backend does not implement it.
+ */
+const ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
+  {
+    code: "ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
+    message:
+      "This backend cannot atomically validate an ontology tightening against existing data as part of a schema transition.",
+    suggestion:
+      "Run this migration through a backend built by `createSqliteBackend` or " +
+      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
+  };
+
+/**
+ * Thrown when an edge-cardinality tightening (a commit that newly declares a
+ * constrained `cardinality` or `targetCardinality` on an edge kind, INCLUDING
+ * a brand-new kind — see {@link newlyConstrainedEdgeAxes}) needs the atomic
+ * preflight-commit primitive and the backend does not implement it. Kept
+ * distinct from {@link ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR}
+ * so the refusal names the axis a caller actually declared, rather than
+ * blaming "ontology" for a commit that touched no disjointness, uniqueness,
+ * or endpoint-assignability axiom at all.
+ */
+const EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
+  {
+    code: "EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
+    message:
+      "This backend cannot atomically validate a newly-constrained edge cardinality against existing data as part of a schema transition.",
+    suggestion:
+      "Run this migration through a backend built by `createSqliteBackend` or " +
+      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
+  };
+
+export type SchemaTighteningPreflightParams = Readonly<{
+  graphId: string;
+  fromVersion: number;
+  toVersion: number;
+  before: OntologySnapshot;
+  after: OntologySnapshot;
+  /**
+   * The already-classified diff, when a caller computed one (`ensureSchema`
+   * and `Store.evolve` both diff `before`/`after` before reaching this
+   * preflight). Reusing it avoids reclassifying the identical
+   * `before`/`after` pair a second time in the same commit; `migrateSchema`
+   * and `evolve`'s dropped-kinds branch, which never compute a diff, omit
+   * this and classification runs internally, once.
+   */
+  changes?: readonly OntologyChange[];
+}>;
+
+/**
+ * The probe of one kind, or `undefined` when this diff carries none —
+ * `ontologyTighteningProbes` emits at most one probe per kind, so the first
+ * match is the only one.
+ */
+function probeOfKind<K extends OntologyDataProbe["kind"]>(
+  probes: readonly OntologyDataProbe[],
+  kind: K,
+): Extract<OntologyDataProbe, { kind: K }> | undefined {
+  return probes.find((probe) => probe.kind === kind) as
+    Extract<OntologyDataProbe, { kind: K }> | undefined;
+}
+
+/** The first couple of violations, rendered for a refusal message. */
+function previewViolations(
+  violations: readonly ConstraintFenceViolation[],
+): string {
+  return violations
+    .slice(0, 2)
+    .map((violation) => JSON.stringify(violation))
+    .join("; ");
+}
+
+/**
+ * Item E.2. Resolves the delta's `via` edge kinds to their REQUIRED-existence
+ * part kinds against the PROPOSED registry — reusing
+ * {@link requiredCompositionPartKinds} (`../store/operations/composition-create`)
+ * rather than re-spelling "which part kinds does a required existence pair
+ * name" a second time, so this probe can never admit an `existence:
+ * "optional"` pair's part kind (which can never violate `compositionExistence`)
+ * or miss a subclass of a declared required part kind — reads
+ * {@link readCompositionUnattachedParts} for the
+ * result, dedupes, one owner of "which part kinds does this probe's
+ * edge-kind list name", shared by nothing else because this preflight is
+ * its only caller.
+ */
+async function readCompositionUnattachedPartsForEdgeKinds(
+  proposedRegistry: KindRegistry,
+  target: SchemaCommitPreflightBackend,
+  graphId: string,
+  edgeKinds: readonly string[],
+): Promise<readonly ConstraintFenceViolation[]> {
+  const requiredPartKinds = new Set(
+    requiredCompositionPartKinds(proposedRegistry),
+  );
+  const partKinds = new Set<string>();
+  for (const pair of proposedRegistry.compositionRelation().pairs) {
+    if (!edgeKinds.includes(pair.viaEdgeKind)) continue;
+    for (const concreteKind of proposedRegistry.expandSubClasses(
+      pair.partKind,
+    )) {
+      if (requiredPartKinds.has(concreteKind)) partKinds.add(concreteKind);
+    }
+  }
+  if (partKinds.size === 0) return [];
+  const unattached = await readCompositionUnattachedParts(
+    proposedRegistry,
+    target,
+    graphId,
+    [...partKinds],
+  );
+  const byPartKind = groupBy(unattached, (part) => part.kind);
+  return [...byPartKind.entries()].map(([partKind, parts]) => ({
+    family: "compositionExistence" as const,
+    partKind,
+    parts,
+  }));
+}
+
+function buildOntologyTighteningViolatedError(
+  params: SchemaTighteningPreflightParams,
+  changes: readonly OntologyChange[],
+  violations: readonly ConstraintFenceViolation[],
+): MigrationError {
+  const shown = previewViolations(violations);
+  // Only the changes that actually required a data check: a `safe` or
+  // `breaking` change in the same diff (`relatedTo` added alongside the
+  // `disjointWith` this refusal is about, say) carries no `probes` and would
+  // otherwise show up in `details.changes` as if it, too, were implicated —
+  // see `MigrationErrorDetails`'s `"ontology-tightening-violated"` docblock.
+  const probedChanges = changes.filter(
+    (change) => (change.probes ?? []).length > 0,
+  );
+  return new MigrationError(
+    `Ontology tightening refused: ${String(violations.length)} existing row(s) violate the proposed ontology. ` +
+      `${shown}. Run store.verifyConstraintFences() to list them, resolve the rows, then retry.`,
+    {
+      graphId: params.graphId,
+      fromVersion: params.fromVersion,
+      toVersion: params.toVersion,
+      reason: "ontology-tightening-violated",
+      changes: probedChanges,
+      violations,
+    },
+  );
+}
+
+function buildEdgeCardinalityTighteningViolatedError(
+  params: SchemaTighteningPreflightParams,
+  axes: readonly EdgeCardinalityDeclaration[],
+  violations: readonly ConstraintFenceViolation[],
+): MigrationError {
+  const shown = previewViolations(violations);
+  return new MigrationError(
+    `Edge cardinality tightening refused: ${String(violations.length)} existing row(s) violate the proposed cardinality. ` +
+      `${shown}. Run store.verifyConstraintFences() to list them, resolve the rows, then retry.`,
+    {
+      graphId: params.graphId,
+      fromVersion: params.fromVersion,
+      toVersion: params.toVersion,
+      reason: "edge-cardinality-tightening-violated",
+      axes,
+      violations,
+    },
+  );
+}
+
+/**
+ * The data preflight a schema tightening owes, alongside the capability
+ * error a caller refuses with when its backend cannot commit that preflight
+ * atomically.
+ */
+export type SchemaTighteningPreflight = Readonly<{
+  run: (target: SchemaCommitPreflightBackend) => Promise<void>;
+  /**
+   * {@link EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR}
+   * when this commit newly constrains an edge cardinality — on either axis,
+   * including a brand-new kind — {@link
+   * ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR} otherwise. Decided
+   * HERE, from the same `newlyConstrainedAxes` fold `run` above closes over,
+   * so a caller names the axis this exact preflight is about instead of
+   * re-deriving which half applies (and risking a refusal that blames
+   * "ontology" for a commit that touched no disjointness, uniqueness, or
+   * endpoint-assignability axiom at all).
+   */
+  capabilityError: AtomicPreflightCapabilityError;
+}>;
+
+/**
+ * The data preflight a schema tightening owes, or `undefined` when the
+ * proposal tightens nothing on either the ontology or the edge-cardinality
+ * axis. Its `run` step executes INSIDE the schema-commit transaction.
+ *
+ * Takes NO advisory lock. Under the PREVIOUS schema the tightening's kinds
+ * are not yet disjoint (or their uniqueness components have not yet merged,
+ * or the edge kind's endpoints have not yet shrunk, or the edge kind's
+ * cardinality was not yet this constrained), so a writer creating the very
+ * row that will violate the new axiom owes no claim and takes no lock — the
+ * lock cannot fence what it cannot see. The residual window this leaves is
+ * the one the existing kind-emptiness fence already carries: a writer that
+ * commits under the previous schema version between this probe and the
+ * version CAS is invisible to it.
+ * `store.verifyConstraintFences()` remains the post-hoc detector for exactly
+ * that window.
+ *
+ * When BOTH halves have violations, the edge-cardinality refusal wins: it is
+ * the more specific diagnosis, and the two reasons are mutually exclusive
+ * gates on the same commit (fixing one leaves the other still refusing on
+ * retry). The same preference governs `capabilityError`.
+ *
+ * @throws ConfigurationError if either `params.before` or `params.after`
+ *   cannot be interpreted as a coherent ontology and `params.changes` was
+ *   not supplied (propagates from `classifyOntologyChanges`).
+ */
+export function prepareSchemaTighteningPreflight(
+  params: SchemaTighteningPreflightParams,
+): SchemaTighteningPreflight | undefined {
+  const changes =
+    params.changes ?? classifyOntologyChanges(params.before, params.after);
+  const probes = ontologyTighteningProbes(changes);
+  const newlyConstrainedAxes = newlyConstrainedEdgeAxes(
+    params.before,
+    params.after,
+  );
+  if (probes.length === 0 && newlyConstrainedAxes.length === 0) {
+    return undefined;
+  }
+
+  // Built once, outside the returned closure: every commit path already ran
+  // `buildKindRegistry` on the target graph before reaching the preflight, so
+  // this cannot throw here for a reason the commit has not already surfaced.
+  const proposedRegistry = buildRegistryFromSerializedSchema(params.after);
+
+  const grouped = {
+    disjointness: probeOfKind(probes, "nodeDisjointness"),
+    uniqueness: probeOfKind(probes, "nodeUniquenessComponent"),
+    endpoints: probeOfKind(probes, "edgeEndpointAssignability"),
+    acyclicity: probeOfKind(probes, "edgeAcyclicity"),
+    composition: probeOfKind(probes, "compositionSingleWhole"),
+    compositionExistence: probeOfKind(probes, "compositionRequiredWhole"),
+  } as const;
+  const uniquenessGroups = (grouped.uniqueness?.groups ?? []).map((group) =>
+    uniquenessAxisGroupFor(group.constraintName, group.coveredKinds),
+  );
+
+  // Item E's composition declarations, delta-scoped to exactly the
+  // `partOf`/`hasPart` pairs THIS commit adds (`grouped.composition.edgeKinds`)
+  // — a pre-existing, already-tightened pair's data is never re-walked by an
+  // unrelated commit, the same discipline `edgeCardinalities`/
+  // `disjointKindPairs` above already honor. That delta-scoping is only
+  // which edge kinds' rows are the OUTER (reported) rows: each declaration's
+  // own `scope.holders` — R4's oriented holder list — is still the WHOLE
+  // graph's composition holders, from `compositionEdgeCardinalityDeclarations`,
+  // because a delta-scoped edge kind can still be found contending against a
+  // pre-existing, unrelated composition edge kind's live row (R4 is one
+  // relation-wide invariant, not one per pair).
+  const compositionEdgeCardinalities =
+    grouped.composition === undefined ?
+      []
+    : compositionEdgeCardinalityDeclarations(proposedRegistry).filter(
+        (declaration) =>
+          requireDefined(grouped.composition).edgeKinds.includes(
+            declaration.edgeKind,
+          ),
+      );
+
+  const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
+    const claimBackedViolations = await auditConstraintFences(target, {
+      declarations: {
+        graphId: params.graphId,
+        // Delta-scoped, not graph-wide: the audit reads only the pairs,
+        // constraint names, and edge kinds THIS tightening affects, so a
+        // pre-existing violation elsewhere in the graph can never make this
+        // commit refuse.
+        disjointKindPairs: grouped.disjointness?.pairs ?? [],
+        uniqueConstraintNames: [
+          ...new Set(uniquenessGroups.map((group) => group.constraintName)),
+        ],
+        edgeCardinalities: [
+          ...newlyConstrainedAxes,
+          ...compositionEdgeCardinalities,
+        ],
+        edgeEndpointAllowances: grouped.endpoints?.allowances ?? [],
+      },
+      uniquenessGroups,
+      registry: proposedRegistry,
+    });
+
+    // `edgeAcyclicity` does NOT go through `auditConstraintFences` /
+    // `readConstraintFenceViolations` (the non-recursive row-shape port every
+    // other family above reads through): folding the recursive predicate
+    // behind it would create a second implementation of "is there a cycle".
+    // It runs `readEdgeAcyclicityViolations` directly, scoped to exactly the
+    // edge kinds THIS commit newly declares `acyclic: true` on — the same
+    // delta-scoping discipline as every family above.
+    const acyclicityViolations =
+      grouped.acyclicity === undefined ?
+        []
+      : await readEdgeAcyclicityViolations(
+          {
+            graphId: params.graphId,
+            registry: proposedRegistry,
+            schema: createSqlSchema(target.tableNames),
+            dialect: getDialect(target.dialect),
+            target,
+            operation: "schema-commit:acyclic-tightening",
+          },
+          grouped.acyclicity.edgeKinds.map((edgeKind) =>
+            standaloneAcyclicRelation(edgeKind),
+          ),
+        );
+
+    // Item E's D-10 acyclicity check, over the FULL proposed composition
+    // relation rather than delta-scoped: unlike the single-whole audit
+    // above, a cross-kind cycle (D-10's whole point) can span a
+    // pre-existing pair and the one this commit adds, so checking only the
+    // new edge kind would miss exactly the cycle this check exists to
+    // catch. Triggered by the delta (`grouped.composition` is only set when
+    // this commit adds a pair) but checked against everything, matching
+    // `acyclicEdgeRelations`'s own population rule (every live edge of the
+    // relation counts, not just the ones a particular write touched).
+    const compositionRelation = compositionAcyclicRelation(proposedRegistry);
+    const compositionAcyclicityViolations =
+      grouped.composition === undefined || compositionRelation === undefined ?
+        []
+      : await readEdgeAcyclicityViolations(
+          {
+            graphId: params.graphId,
+            registry: proposedRegistry,
+            schema: createSqlSchema(target.tableNames),
+            dialect: getDialect(target.dialect),
+            target,
+            operation: "schema-commit:composition-tightening",
+          },
+          [compositionRelation],
+        );
+
+    // Item E.2's third composition check: for every required-existence part
+    // kind this commit's added pair(s) name, does a LIVE part already have
+    // no live whole? Delta-scoped to WHICH part kinds are checked (only
+    // those a `compositionRequiredWhole` probe names); the check itself
+    // still reads the PROPOSED registry's full composition relation for
+    // each — an already-attached part via a pre-existing edge kind under
+    // the same part kind is found, not missed, matching
+    // `readCompositionUnattachedParts`'s own docblock.
+    const compositionExistenceViolations =
+      grouped.compositionExistence === undefined ?
+        []
+      : await readCompositionUnattachedPartsForEdgeKinds(
+          proposedRegistry,
+          target,
+          params.graphId,
+          grouped.compositionExistence.edgeKinds,
+        );
+
+    const violations = [
+      ...claimBackedViolations,
+      ...acyclicityViolations,
+      ...compositionAcyclicityViolations,
+      ...compositionExistenceViolations,
+    ];
+    if (violations.length === 0) return;
+
+    const cardinalityViolations = violations.filter(
+      (violation) => violation.family === "edgeCardinality",
+    );
+    if (cardinalityViolations.length > 0) {
+      throw buildEdgeCardinalityTighteningViolatedError(
+        params,
+        newlyConstrainedAxes,
+        cardinalityViolations,
+      );
+    }
+    throw buildOntologyTighteningViolatedError(params, changes, violations);
+  };
+
+  return {
+    run,
+    capabilityError:
+      newlyConstrainedAxes.length > 0 ?
+        EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+      : ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+  };
+}

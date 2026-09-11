@@ -545,6 +545,7 @@ function createStore<G extends GraphDef>(
 | `recordedRead` | `ExternalRecordedReadSource` | Bind an already-populated recorded relation for `store.asOfRecorded(T)` reads without enabling TypeGraph-managed capture. Must be created with `recordedRelation({ schema })` using a `createSqlSchema(...)` schema; the store validates those factory descriptors at runtime. Use `history: true` when TypeGraph should capture writes and advance `store.recordedNow()`. |
 | `schema` | `SqlSchema` | Custom table name configuration created with `createSqlSchema(...)` |
 | `queryDefaults.traversalExpansion` | `TraversalExpansion` | Default ontology expansion mode for traversals (default: `"inverse"`) |
+| `queryDefaults.expansion` | `"exact" \| "subclasses"` | Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an alias states no `expansion` (default: `"subclasses"` — a supertype query is polymorphic by default; see [Ontology](/ontology#subsumption-type-inheritance)). `"narrower"` is not a store-wide default. `search()` and the collection APIs are unaffected and stay exact-kind. |
 | `autoRefreshStatistics` | `false \| number` | Row threshold at which a single autocommit `bulkCreate`/`bulkInsert` triggers an automatic planner-statistics refresh (default: `1000`); `false` disables. See [Refreshing planner statistics](/backend-setup#refreshing-planner-statistics-after-bulk-loads). |
 | `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById` or endpoint get-or-create update whose validated props and requested window already equal the existing live row; bulk forms behave identically (default: `false`). Node `getOrCreateByConstraint` updates are not coalesced; use `upsertById` for replay projectors that must avoid unchanged node history churn. For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options), [`getOrCreateByEndpoints`](#getorcreatebyendpointsfrom-to-props-options), and [Materializing external event logs](/materializing-event-logs). |
 
@@ -569,6 +570,14 @@ Override the default traversal expansion:
 ```typescript
 const store = createStore(graph, backend, {
   queryDefaults: { traversalExpansion: "none" },
+});
+```
+
+Restore the pre-Q3 exact-kind query behavior everywhere:
+
+```typescript
+const store = createStore(graph, backend, {
+  queryDefaults: { expansion: "exact" },
 });
 ```
 
@@ -2081,6 +2090,24 @@ affected:
 - Rows-affected fidelity is intentionally out of scope for this first version; a
   future extension could ask backends to return row counts.
 
+On an identity-enabled graph, `writes.identity` counts `tx.identity`'s writers
+the same way: `sameAssertions`, `differentAssertions`, and `retractions`, plus
+`total` (their sum — the count of ledger truth rows the transaction produced).
+`writes.identity.transitions` sits beside `total`, not inside it: it is the
+number of identity transition-log notes the transaction's flush wrote, an
+annotation of the writes above rather than a fourth kind of write. It is
+always `0` when identity is disabled, when the store was opened without
+`history: true`, and on a `tx.measure()` scoped receipt — transitions are
+counted at commit-flush time, once per transaction, never per scope.
+
+```typescript
+const outcome = await store.transactionWithReceipt(async (tx) => {
+  await tx.identity.assertSame(alice, bob);
+});
+outcome.receipt.writes.identity;
+// { sameAssertions: 1, differentAssertions: 0, retractions: 0, transitions: 1, total: 1 }
+```
+
 When the store was created with `{ history: true }` and the transaction flushed
 captured writes, `receipt.recorded` is the recorded commit instant allocated for
 this store's graph by this transaction. It is `undefined` when history capture is
@@ -2127,6 +2154,119 @@ through its own scoped context, never cross-count. Nesting composes:
 A scoped receipt's `recorded` is **always `undefined`** — the recorded instant is
 a per-transaction flush concern, unknowable mid-transaction. Plain
 `store.transaction()` contexts have no `measure` (no receipt is being produced).
+
+##### Cascaded parts in receipts and hooks
+
+Deleting a [composition](/ontology#composition) whole cascades through its
+live parts — see [Composition Cascade](/limitations#composition-cascade) for
+what the cascade itself does and does not do. Both the delete's
+`onOperationEnd` hook context (see [Observability Hooks](#observability-hooks))
+and every transaction receipt that covers the delete carry the parts it
+removed, as `cascadedParts`: `{ kind, id }` refs taken from the same plan the
+cascade executed, in the order the cascade deleted them — **leaf-first, then
+deterministically by kind, then id**. Leaf-first is the part of that order with
+meaning: a part is always named before the whole it belongs to. Two sibling
+parts of one whole have no order between them to respect, so they are sorted
+rather than left in the order the cascade's reads returned them — which is what
+lets you compare `cascadedParts` for equality across runs and backends.
+
+```typescript
+import {
+  createStore,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  partOf,
+} from "@nicia-ai/typegraph";
+import { z } from "zod";
+
+const Album = defineNode("Album", { schema: z.object({ title: z.string() }) });
+const Track = defineNode("Track", { schema: z.object({ title: z.string() }) });
+const trackOf = defineEdge("trackOf");
+
+const graph = defineGraph({
+  id: "music",
+  nodes: { Album: { type: Album }, Track: { type: Track } },
+  edges: {
+    trackOf: { type: trackOf, from: [Track], to: [Album], cardinality: "one" },
+  },
+  ontology: [partOf(Track, Album, { via: trackOf })],
+});
+
+const store = createStore(graph, backend, {
+  hooks: {
+    onOperationStart: (ctx) => {
+      // cascadedParts is never present here — the cascade has not been
+      // planned when the operation begins.
+      console.log("start", ctx.kind, ctx.cascadedParts);
+    },
+    onOperationEnd: (ctx) => {
+      console.log("end", ctx.kind, ctx.cascadedParts);
+    },
+  },
+});
+
+const album = await store.nodes.Album.create({ title: "Origins" });
+const trackOne = await store.nodes.Track.create(
+  { title: "Intro" },
+  { partOf: { kind: "Album", id: album.id } },
+);
+const trackTwo = await store.nodes.Track.create(
+  { title: "Outro" },
+  { partOf: { kind: "Album", id: album.id } },
+);
+
+const albumTwo = await store.nodes.Album.create({ title: "Reissue" });
+const trackThree = await store.nodes.Track.create(
+  { title: "Bonus" },
+  { partOf: { kind: "Album", id: albumTwo.id } },
+);
+
+const { receipt, result } = await store.transactionWithReceipt(async (tx) => {
+  const scope = await tx.measure(async (scoped) => {
+    // "end" fires exactly once, for the Album delete — the two cascaded
+    // Track deletes are not separate operations.
+    await scoped.nodes.Album.delete(album.id);
+  });
+  // Issued through the outer `tx`, outside the measured scope: this
+  // cascade belongs only to the transaction's own receipt, not to `scope`.
+  await tx.nodes.Album.delete(albumTwo.id);
+  return scope;
+});
+
+result.receipt.cascadedParts;
+// [{ kind: "Track", id: trackOne.id }, { kind: "Track", id: trackTwo.id }]
+result.receipt.writes.nodes;
+// { Album: 1 } — the scope's own delete call. The two cascaded Track
+// deletes never went through `scoped.nodes.Track.*`, so they are not write
+// intents and are not folded into this count.
+
+receipt.cascadedParts;
+// every cascade the transaction ran, scoped and outer alike: each delete's own
+// closure (leaf-first, then by kind and id), concatenated in the order the
+// deletes ran:
+// [
+//   { kind: "Track", id: trackOne.id },
+//   { kind: "Track", id: trackTwo.id },
+//   { kind: "Track", id: trackThree.id },
+// ]
+receipt.writes.nodes; // { Album: 2 }
+```
+
+`onOperationStart` never carries `cascadedParts` — the cascade has not run
+yet. `onOperationEnd` carries it on every node delete, present but empty when
+the whole has no live parts. A `tx.measure()` scope's receipt sees a cascade
+only for a delete issued **through that scoped context**; the same delete
+issued through the outer `tx` while the scope is open counts in the
+transaction's own receipt instead, following the same attribution rule as
+`scope.receipt.writes` (see
+[Scoped receipts: `tx.measure()`](#scoped-receipts-txmeasure)).
+
+A cascaded part is never a write intent, in either place it is reported.
+`receipt.writes.nodes` counts only the whole's own `delete` call, and the
+hook context's `entity` / `kind` / `id` fields describe only that same call.
+Cascaded parts are reported as refs beside those counters, never folded into
+them.
 
 #### Rollback and error propagation
 
@@ -2463,6 +2603,7 @@ store.subgraph<EK, NK>(
 | `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to both nodes and edges along the traversal — same semantics as `store.query()` and collection reads |
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 | `project` | `{ nodes?, edges? }` | *(none)* | Per-kind field projection — see [Projection](#subgraph-projection) below |
+| `composition` | `boolean` | `false` | Close the root over its declared composition parts — see [Composition export](#composition-export) below |
 
 **Result:**
 
@@ -2545,6 +2686,46 @@ const neighborhood = await store.subgraph(skill.id, {
   maxDepth: 3,
 });
 ```
+
+#### Composition export
+
+`composition: true` closes the root over its declared `partOf`/`hasPart`
+parts — the whole-plus-parts export unit — in addition to whatever `edges`
+already lists. It walks every composition edge kind transitively under the
+root's kind (see [Composition](/ontology#composition) in the ontology
+guide), regardless of orientation, so a mix of `part -> whole` and `whole ->
+part` (`has_*`) edges in the same chain is exported in one call:
+
+```typescript
+const sg = await store.subgraph(episode.id, {
+  edges: [],
+  composition: true,
+});
+
+// sg.nodes includes the Episode and every Segment transitively part of it,
+// reached through whichever composition edge kind realizes each level —
+// no need to name segmentOf/episodeOf/... by hand.
+```
+
+This is set-level, not per-root-kind-required: a root whose kind declares
+no composition parts contributes nothing extra and the read still runs
+normally. A graph that declares no composition relation at all cannot
+honor the option meaningfully and throws `ConfigurationError`
+(`COMPOSITION_NO_PARTS_DECLARED`) rather than silently running as if
+`composition` were absent.
+
+Which composition edge kinds join depends on the ROOT's runtime kind, so
+the exact set is not knowable at compile time. `composition: true`
+therefore widens the result's edge-key type to the graph's whole edge-kind
+union: every key the traversal can produce is reachable through
+`adjacency` / `reverseAdjacency`, and no key outside the graph's own edges
+ever appears. With `composition` absent or `false`, the key type is the
+`edges` list you named, exactly as before. (A `composition` whose value is
+only known to be a `boolean` widens too — the conservative reading.) The
+matching `project.edges` keys widen with it, so a `composition: true` call can
+shrink the payload of the composition edges it receives; without
+`composition: true`, projecting an edge kind outside `edges` stays a
+compile-time error.
 
 #### Subgraph Projection
 
@@ -3076,6 +3257,7 @@ Configuration for observability callbacks:
 
 ```typescript
 import type {
+  CompositionNodeRef,
   HookContext,
   QueryHookContext,
   OperationHookContext,
@@ -3115,6 +3297,14 @@ type OperationHookContext = HookContext &
     entity: "node" | "edge";
     kind: string;
     id: string;
+    /**
+     * The composition parts a whole's delete cascaded through, leaf-first, as
+     * `{ kind, id }` refs. Present (and possibly empty) on `onOperationEnd`
+     * for a node delete; absent on `onOperationStart`, which fires before the
+     * cascade is planned, and on every non-delete operation. See
+     * [Cascaded parts in receipts and hooks](#cascaded-parts-in-receipts-and-hooks).
+     */
+    cascadedParts?: readonly CompositionNodeRef[];
   }>;
 ```
 

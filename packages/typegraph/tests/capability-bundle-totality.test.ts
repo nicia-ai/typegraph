@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("33 reasoned entries sum to 93 accesses; 50 deferred entries sum to 217", () => {
+  it("33 reasoned entries sum to 97 accesses; 50 deferred entries sum to 219", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -134,11 +134,22 @@ describe("capability bundle totality (T9)", () => {
     // scanner excludes wholesale — so its measured access count is 0 and
     // the floor is unchanged. The forked working-copy strategy then reads
     // the connected backend's `tableNames` to fence them against the base
-    // store's resolved schema — 90 -> 91. The lineage capability then added
+    // store's resolved schema — 90 -> 91. Item D.2's acyclicity probe reads
+    // `tableNames` twice more to build the `SqlSchema` its ontology-
+    // tightening preflight and constraint-fence audit families need — 91
+    // -> 93. The merge planner's seed-hop acyclicity conflict detection reads
+    // `tableNames` once more to build the `SqlSchema` its plan-time preview
+    // needs — 93 -> 94. The composition delete cascade's parts-closure read
+    // then added a 5th `findEdgesByHeterogeneousEndpointSet` consumer,
+    // raising its ceiling by one — 217 -> 218. Item E's composition
+    // tightening then adds one more `tableNames` access on top of that: the
+    // preflight's SEPARATE D-10 check over the full proposed composition
+    // relation builds its own `SqlSchema`, alongside the ontology
+    // acyclicity probe's — 94 -> 95. The lineage capability then added
     // `lineage`, a reasoned member with two live accesses (`resolveLineage`'s
     // two reads of the backend's own `lineage`, in
-    // `store/recorded-capture/lineage.ts`) — 91 -> 93. A prior fix round
-    // briefly grew this to 95 by re-deriving `resolveLineage(target)`'s
+    // `store/recorded-capture/lineage.ts`) — 95 -> 97. A prior fix round
+    // briefly grew that further by re-deriving `resolveLineage(target)`'s
     // resolution and comparing it against the transaction handle's own
     // `lineage` by identity inside `assertTargetUnchanged` — a dead read
     // (`LineageMembers` took no session argument, so the comparison never
@@ -146,13 +157,16 @@ describe("capability bundle totality (T9)", () => {
     // `changesSince` a real `session` parameter made that comparison
     // unnecessary: `assertTargetUnchanged` now reaches `lineage` through
     // `requireLineage(txBackend, …)`, which reads `.lineage` inside
-    // `backend/capabilities/`, outside the scanner's scope — back to 93.
+    // `backend/capabilities/`, outside the scanner's scope — back to 97.
     // The engine-native recorded-time capability then added `recordedTime`,
     // a reasoned member with zero measured accesses for the same reason as
     // `catalog`: every current read is either inside `backend/capabilities/`
     // or off `EngineProvisioning`, never off a `GraphBackend`/
-    // `TransactionBackend`-typed receiver — still 93.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(93);
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
+    // `TransactionBackend`-typed receiver — still 97. The deferred ceilings
+    // moved 218 -> 219 when the unattached-parts audit began reading one
+    // page's attachment candidates through
+    // `findEdgesByHeterogeneousEndpointSet` (its 6th consumer).
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(97);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(219);
   });
 });

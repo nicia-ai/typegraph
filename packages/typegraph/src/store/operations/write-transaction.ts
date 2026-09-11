@@ -97,7 +97,10 @@ import {
   memoizeAcquiredRecordedGraphWriteLock,
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
-import { type OperationHookContext } from "../types";
+import {
+  type OperationHookContext,
+  type OperationOutcomeFacts,
+} from "../types";
 
 /**
  * The slice of an operation context {@link runInWriteTransaction} needs: the
@@ -514,8 +517,12 @@ export {
 
 /** What a caller must change to make each refused constraint class writable. */
 const CONSTRAINT_FENCE_ADVICE = {
+  edgeAcyclicity:
+    "drop `acyclic: true` from the edge and detect cycles in application code",
   edgeCardinality:
     'declare the edge `cardinality: "many"` and enforce the limit in application code',
+  edgeComposition:
+    "drop the `partOf`/`hasPart` declaration realized by this edge kind and enforce the single-whole rule in application code",
   edgeMatchKeyConvergence:
     "use `create` with a caller-chosen id, whose uniqueness the edges primary key enforces, instead of `getOrCreateByEndpoints`",
   nodeDisjointness:
@@ -813,6 +820,7 @@ export type HookedWriteOperationContext = WriteTransactionContext &
       ctx: OperationHookContext,
       fn: () => Promise<T>,
       didWrite?: (result: T) => boolean,
+      operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
     ) => Promise<T>;
   }>;
 
@@ -837,10 +845,12 @@ export function runHookedWriteOperation<T>(
     transactionMode: WriteTransactionMode,
   ) => Promise<T>,
   options?: WriteTransactionOptions<T>,
+  operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
 ): Promise<T> {
   return ctx.withOperationHooks(
     opContext,
     () => runInWriteTransaction(ctx, backend, body, options),
     options?.didWrite,
+    operationFacts,
   );
 }

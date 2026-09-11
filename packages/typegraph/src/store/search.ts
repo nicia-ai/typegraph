@@ -30,6 +30,11 @@ import {
   DEFAULT_RRF_WEIGHT,
   type HybridFusionOptions,
 } from "../query/ast";
+import {
+  assertPermittedExpansionAxis,
+  type DefaultAliasExpansionAxis,
+  expandKindsForAxis,
+} from "../query/builder/alias-expansion";
 import { type QueryBuilder } from "../query/builder/query-builder";
 import { type NodeAccessor } from "../query/builder/types";
 import { validateHybridFusionOptions } from "../query/builder/validation";
@@ -82,9 +87,20 @@ export type HybridSearchHit<N = Node> = Readonly<{
 }>;
 
 /**
+ * The axis values this facade accepts, as a runtime list the shared refusal
+ * (`assertPermittedExpansionAxis`) checks against. `"narrower"` is a real
+ * member of the shared vocabulary, so leaving it unchecked would silently
+ * downgrade it to `"exact"` rather than say it is unsupported here.
+ */
+const SEARCH_EXPANSION_AXES: readonly DefaultAliasExpansionAxis[] = [
+  "exact",
+  "subclasses",
+];
+
+/**
  * Scope options shared by every facade search leg.
  *
- * `where` and `includeSubClasses` compile into the search statement's
+ * `where` and `expansion` compile into the search statement's
  * candidate set (a subquery produced by the store's own query compiler), so
  * filtering happens INSIDE the engine's top-k — never by post-filtering a
  * ranked list. `offset` is rank-relative pagination: the engine fetches
@@ -103,12 +119,16 @@ export type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
   /** Rows to skip after ranking (rank-relative pagination). */
   offset?: number;
   /**
-   * Expand the searched kind to include its `subClassOf` descendants.
-   * Vector legs search each declaring kind's storage and merge by score;
-   * kinds that don't declare the embedding field are skipped (mirroring
-   * the query builder). Requires a query-capable store.
+   * The searched kind's expansion axis, spelled with the same option name
+   * the query builder uses. `"exact"` (the DEFAULT here — unlike the query
+   * builder, `search()` is not polymorphic by default) searches the named
+   * kind alone; `"subclasses"` expands to its `subClassOf`/`equivalentTo`
+   * descendants. Vector legs search each declaring kind's storage and merge
+   * by score; kinds that don't declare the embedding field are skipped
+   * (mirroring the query builder). `"subclasses"` requires a query-capable
+   * store. `"narrower"` is not an axis this facade offers.
    */
-  includeSubClasses?: boolean;
+  expansion?: DefaultAliasExpansionAxis | undefined;
 }>;
 
 export type FulltextSearchOptions<N extends NodeType = NodeType> =
@@ -224,7 +244,7 @@ type StoreSearchContext = Readonly<{
    * Builds a fresh query for candidate compilation (`store.query()`, the
    * same seam collection `find({ where })` uses). Optional so a bare
    * context still supports unscoped searches; `where` /
-   * `includeSubClasses` throw without it.
+   * `expansion: "subclasses"` throw without it.
    */
   createQuery?: () => QueryBuilder<GraphDef>;
   /**
@@ -271,9 +291,19 @@ function buildKindCandidates(
       { capability: "search", graphId: ctx.graphId },
     );
   }
+  // Pinned exact-kind, defense in depth: `resolveSearchKinds` has already
+  // expanded the kind set and this runs PER resolved kind, so
+  // `backend.fulltextSearch({ nodeKind: kind, ... })` below already scopes
+  // the physical search to `kind` regardless of what this candidate
+  // subquery's `from()` widens to — inheriting the query-builder default
+  // here would not currently change any result (tests/polymorphic-default.test.ts
+  // documents this), but keeping it explicit is what would make an un-opted
+  // `search()` silently polymorphic if that outer scoping ever changed
+  // (search()'s own `expansion` option stays the one and only axis
+  // for this facade).
   const chain = ctx
     .createQuery()
-    .from(nodeKind, SEARCH_CANDIDATE_ALIAS)
+    .from(nodeKind, SEARCH_CANDIDATE_ALIAS, { expansion: "exact" })
     .whereNode(SEARCH_CANDIDATE_ALIAS, where);
   const compiled = chain
     .select(
@@ -286,20 +316,27 @@ function buildKindCandidates(
 /**
  * The kinds one search call spans: the kind itself, plus its `subClassOf`
  * descendants when requested.
+ *
+ * Refuses a value outside this facade's axis set through the vocabulary's own
+ * owner, so a stated axis `search()` cannot honor — `"narrower"`, or a
+ * misspelling a JavaScript caller reached — is named rather than coerced to
+ * `"exact"`. The query builder refuses the identical value; one predicate,
+ * one owner. The axis-to-kind-list mapping itself is likewise the shared
+ * owner's (`expandKindsForAxis`), not re-spelled here.
  */
 function resolveSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
-  includeSubClasses: boolean | undefined,
+  axis: DefaultAliasExpansionAxis = "exact",
 ): readonly string[] {
-  if (includeSubClasses !== true) return [nodeKind];
-  if (ctx.createQuery === undefined) {
+  assertPermittedExpansionAxis(axis, SEARCH_EXPANSION_AXES, "search");
+  if (axis === "subclasses" && ctx.createQuery === undefined) {
     throw new ConfigurationError(
-      "search with includeSubClasses requires a query-capable store",
+      'search with expansion: "subclasses" requires a query-capable store',
       { capability: "search", graphId: ctx.graphId },
     );
   }
-  return ctx.registry.expandSubClasses(nodeKind);
+  return expandKindsForAxis(axis, nodeKind, ctx.registry);
 }
 
 function assertSearchOffset(offset: number | undefined, label: string): void {
@@ -462,7 +499,7 @@ export async function executeFulltextSearch<N = Node>(
     language: options.language,
   });
 
-  const kinds = resolveSearchKinds(ctx, nodeKind, options.includeSubClasses);
+  const kinds = resolveSearchKinds(ctx, nodeKind, options.expansion);
   const offset = options.offset ?? 0;
   const singleKind = kinds.length === 1;
 
@@ -558,7 +595,7 @@ export async function executeVectorSearch<N = Node>(
     ctx,
     nodeKind,
     options.fieldPath,
-    options.includeSubClasses,
+    options.expansion,
     "vectorSearch",
   );
   for (const { slot } of searchKinds) {
@@ -659,10 +696,10 @@ function resolveVectorSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
   fieldPath: string,
-  includeSubClasses: boolean | undefined,
+  expansion: DefaultAliasExpansionAxis | undefined,
   label: string,
 ): readonly VectorSearchKind[] {
-  const kinds = resolveSearchKinds(ctx, nodeKind, includeSubClasses);
+  const kinds = resolveSearchKinds(ctx, nodeKind, expansion);
   const resolved: VectorSearchKind[] = [];
   for (const kind of kinds) {
     const slot = tryResolveSearchSlot(ctx, kind, fieldPath);
@@ -779,16 +816,12 @@ export async function executeHybridSearch<N = Node>(
   // The fulltext half spans every expanded kind; the vector half only the
   // kinds that declare the embedding field (mirroring the query builder's
   // treatment of non-declaring kinds).
-  const fulltextKinds = resolveSearchKinds(
-    ctx,
-    nodeKind,
-    options.includeSubClasses,
-  );
+  const fulltextKinds = resolveSearchKinds(ctx, nodeKind, options.expansion);
   const vectorKinds = resolveVectorSearchKinds(
     ctx,
     nodeKind,
     options.vector.fieldPath,
-    options.includeSubClasses,
+    options.expansion,
     "hybridSearch.vector",
   );
   for (const { slot } of vectorKinds) {

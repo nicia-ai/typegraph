@@ -10,6 +10,7 @@ import {
   type NullCheckOp,
   type TemporalMode,
 } from "../core/types";
+import { type AliasExpansionAxis } from "./builder/alias-expansion";
 import { type JsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -368,8 +369,14 @@ export type PredicateExpression =
  */
 type QueryStart = Readonly<{
   alias: string;
-  kinds: readonly string[]; // Expanded via ontology if includeSubClasses
-  includeSubClasses: boolean;
+  kinds: readonly string[]; // Expanded per `expansion` (subclasses/narrower)
+  /**
+   * Which expansion axis produced `kinds` — see
+   * `src/query/builder/alias-expansion.ts`. A `boolean` cannot describe a
+   * `"narrower"`-expanded alias, so this records the DECISION itself rather
+   * than a flag a compiled-AST consumer would have to re-derive.
+   */
+  expansion: AliasExpansionAxis;
 }>;
 
 // ============================================================

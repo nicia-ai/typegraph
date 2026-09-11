@@ -9,7 +9,12 @@ import {
   type RuntimeNodeTypeFor,
 } from "../../core/runtime-kind";
 import { type AnyEdgeType, type NodeType } from "../../core/types";
-import { EndpointError, KindNotFoundError } from "../../errors";
+import {
+  ConfigurationError,
+  EndpointError,
+  KindNotFoundError,
+} from "../../errors";
+import { type PolymorphicNodeType } from "../../ontology/types";
 import { isInteropProbeKey } from "../../utils/object";
 import {
   type NodePredicate,
@@ -29,6 +34,11 @@ import {
   type Predicate,
   stringField,
 } from "../predicates";
+import {
+  type AliasExpansionOptions,
+  expandKindsForAxis,
+  resolveAliasExpansion,
+} from "./alias-expansion";
 // Type-only import to get the QueryBuilder type without runtime circular dependency
 import {
   createDynamicFieldBuilder,
@@ -39,6 +49,7 @@ import { getQueryBuilderInternalContext } from "./internal-context";
 import { type QueryBuilder } from "./query-builder";
 import {
   type AliasMap,
+  type AliasNodeType,
   type BaseFieldAccessor,
   type BuildRecursiveAliases,
   type EdgeAccessor,
@@ -480,13 +491,32 @@ export class TraversalBuilder<
    * - "out" direction: kind must be in the edge's "to" array
    * - "in" direction: kind must be in the edge's "from" array
    *
+   * The alias's expansion axis is the same one option `from()` states,
+   * resolved through the same owner (`./alias-expansion.ts`): `expansion`,
+   * taking the store default when the option is omitted, `{}`, or an
+   * explicit `undefined`, and accepting a forwarded bag whose axis is not
+   * one literal (the axis-unknown overload). A `"narrower"` expansion
+   * additionally admits each expanded kind as an endpoint of this edge.
+   *
    * @param kind - The target node kind
    * @param alias - A unique alias for this node (compile-time error if duplicate)
    */
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: false },
+    options?: { expansion?: undefined },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<AliasNodeType<G, K & string>, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
+    kind: K,
+    alias: UniqueAlias<A, Aliases>,
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"], Optional>>,
@@ -498,7 +528,32 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: true },
+    options: { expansion: "subclasses" },
+  ): QueryBuilder<
+    G,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>, Optional>
+      >,
+    EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  /**
+   * The axis-unknown overload, which covers two call shapes with one rule:
+   * a `"narrower"` expansion (no schema relationship is claimed, so no
+   * per-kind type can be promised) and a forwarded options bag whose axis is
+   * not one literal — the option type itself, or a wrapper's
+   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
+   * alias takes the conservative untyped form; state a literal axis at the
+   * call site to keep the precise alias type.
+   */
+  to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
+    kind: K,
+    alias: UniqueAlias<A, Aliases>,
+    options: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
@@ -510,7 +565,7 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: boolean },
+    options?: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
@@ -520,9 +575,14 @@ export class TraversalBuilder<
   > {
     validateSqlIdentifier(alias);
 
-    const includeSubClasses = options?.includeSubClasses ?? false;
-    const kinds =
-      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+    const expansion = resolveAliasExpansion(
+      options,
+      this.#config.defaultExpansion,
+    );
+    const kinds = expandKindsForAxis(expansion, kind, this.#config.registry);
+    if (expansion === "narrower") {
+      this.#assertNarrowerEndpointsAdmitted(kind, kinds);
+    }
 
     const newState = this.#stateWithTraversal(alias, kinds);
 
@@ -540,14 +600,68 @@ export class TraversalBuilder<
   /**
    * Runtime-kind sibling of `to`; accepts a kind name or Store-issued token.
    * Throws `KindNotFoundError` if the kind is not registered.
+   *
+   * Like `fromDynamic`, the runtime kind may not appear in `G["ontology"]`,
+   * so any axis other than `"exact"` widens to {@link PolymorphicNodeType}.
+   * Omitting the option, passing `{}`, and passing an explicit `undefined`
+   * all take the store default.
    */
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: boolean },
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  toDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options?: { expansion?: "subclasses" | undefined },
+  ): QueryBuilder<
+    G,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>, Optional>
+      >,
+    EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  /**
+   * The axis-unknown overload, which covers two call shapes with one rule:
+   * a `"narrower"` expansion (no schema relationship is claimed, so no
+   * per-kind type can be promised) and a forwarded options bag whose axis is
+   * not one literal — the option type itself, or a wrapper's
+   * `{ expansion?: "exact" }`. Neither pins the axis at compile time, so the
+   * alias takes the conservative untyped form; state a literal axis at the
+   * call site to keep the precise alias type.
+   */
+  toDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options: AliasExpansionOptions,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<NodeType, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  toDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options?: AliasExpansionOptions,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<NodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
     RecAliases & BuildRecursiveAliases<DC, PC, A>,
     CoordinateState
@@ -565,11 +679,18 @@ export class TraversalBuilder<
     }
     this.#assertValidEndpoint(kindName);
 
-    const includeSubClasses = options?.includeSubClasses ?? false;
-    const kinds =
-      includeSubClasses ?
-        this.#config.registry.expandSubClasses(kindName)
-      : [kindName];
+    const expansion = resolveAliasExpansion(
+      options,
+      this.#config.defaultExpansion,
+    );
+    const kinds = expandKindsForAxis(
+      expansion,
+      kindName,
+      this.#config.registry,
+    );
+    if (expansion === "narrower") {
+      this.#assertNarrowerEndpointsAdmitted(kindName, kinds);
+    }
 
     const baseState = this.#stateWithTraversal(alias, kinds);
     const newState: QueryBuilderState = {
@@ -579,7 +700,119 @@ export class TraversalBuilder<
 
     return new QueryBuilderClass(this.#config, newState) as QueryBuilder<
       G,
-      Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
+      Aliases & Record<A, NodeAlias<NodeType, Optional>>,
+      EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+      RecAliases & BuildRecursiveAliases<DC, PC, A>,
+      CoordinateState
+    >;
+  }
+
+  /**
+   * C.3 endpoint admission for a `to()`/`toDynamic()` alias expanded through
+   * `expansion: "narrower"`. `broader`/`narrower` is NOT an assignability axis —
+   * unlike subclass expansion, a narrower kind is not automatically admitted
+   * by `expandEdgeEndpointAllowance` — so each expanded kind is checked
+   * individually through the existing `#assertValidEndpoint` owner, and a
+   * failure is re-raised as the C.3-specific, narrower-naming error rather
+   * than the generic `EndpointError`.
+   *
+   * @throws ConfigurationError (`ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED`)
+   *   naming the offending kind, the root kind, and the edge kind.
+   */
+  #assertNarrowerEndpointsAdmitted(
+    rootKind: string,
+    expandedKinds: readonly string[],
+  ): void {
+    const edgeKind = this.#edgeKinds[0] ?? "(unknown)";
+    for (const kind of expandedKinds) {
+      try {
+        this.#assertValidEndpoint(kind);
+      } catch (error) {
+        if (!(error instanceof EndpointError)) throw error;
+        throw new ConfigurationError(
+          `expansion: "narrower" on "${rootKind}" includes "${kind}", ` +
+            `which is not an admitted endpoint of edge "${edgeKind}".`,
+          {
+            code: "ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED",
+            rootKind,
+            narrowerKind: kind,
+            edgeKind,
+          },
+          {
+            suggestion: `Widen edge "${edgeKind}"'s declared endpoints to admit "${kind}", or drop its broader/narrower relation to "${rootKind}".`,
+            cause: error,
+          },
+        );
+      }
+    }
+  }
+
+  /**
+   * Finalizes the traversal against an explicit, already-resolved set of
+   * target node kinds, rather than one compile-time-known kind (`to`) or one
+   * runtime-resolved kind (`toDynamic`).
+   *
+   * `parts()`/`wholes()` (`QueryBuilder`) are today's one caller: the
+   * composition part/whole closure under a kind can itself span several node
+   * kinds with different schemas, computed from the registry rather than
+   * named by the query author. The alias is dynamic, like `toDynamic`, for
+   * the same reason — a heterogeneous closure has no single schema to type
+   * the accessor against.
+   *
+   * `alias` is a bare `A`, not `UniqueAlias<A, Aliases>`: `parts()`/`wholes()`
+   * build the `TraversalBuilder` this runs on over the generic `AliasMap`
+   * upper bound rather than the calling query's actual alias map (the
+   * composition closure has already been reduced to a flat kind array by
+   * then, so there is no specific `Aliases` left to check against), and
+   * `keyof AliasMap` is `string` — every `A` would fail the collision check
+   * vacuously. The real duplicate-alias guard already ran, against the real
+   * `Aliases`, on `QueryBuilder.parts`/`.wholes`'s own public signature.
+   *
+   * Validates like `toDynamic`, not merely `to`'s compile-time endpoint
+   * check: an empty `kinds` array refuses rather than silently compiling to
+   * a filter no row can match, each kind must be registered
+   * (`KindNotFoundError` otherwise), and each runs `#assertValidEndpoint`.
+   * `parts()`/`wholes()`'s own registry-derived `targetKindList` pays
+   * nothing for this — it is already registered and endpoint-valid by
+   * construction — but `toKindSet` is a public finalizer like its siblings,
+   * so it cannot skip the checks they apply (Ed-r2-2).
+   */
+  toKindSet<A extends string>(
+    kinds: readonly string[],
+    alias: A,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  > {
+    validateSqlIdentifier(alias);
+
+    if (kinds.length === 0) {
+      throw new ConfigurationError(
+        `toKindSet(alias: "${alias}") requires at least one kind; an empty kind set would compile to a filter no row can match instead of refusing the invalid traversal.`,
+        { code: "EMPTY_KIND_SET", alias },
+      );
+    }
+    for (const kind of kinds) {
+      if (!this.#config.registry.hasNodeType(kind)) {
+        throw new KindNotFoundError(kind, "node", {
+          graphId: this.#config.graphId,
+        });
+      }
+      this.#assertValidEndpoint(kind);
+    }
+
+    const baseState = this.#stateWithTraversal(alias, kinds);
+    const newState: QueryBuilderState = {
+      ...baseState,
+      dynamicNodeAliases: new Set([...baseState.dynamicNodeAliases, alias]),
+    };
+
+    return new QueryBuilderClass(this.#config, newState) as QueryBuilder<
+      G,
+      Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
       EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
       RecAliases & BuildRecursiveAliases<DC, PC, A>,
       CoordinateState

@@ -18,8 +18,14 @@ import { deriveBackend } from "../src/backend/derive-backend";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
-import { defineGraph, defineNode, embedding, searchable } from "../src/core";
-import { disjointWith, subClassOf } from "../src/ontology";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  embedding,
+  searchable,
+} from "../src/core";
+import { disjointWith, partOf, subClassOf } from "../src/ontology";
 import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
@@ -27,6 +33,7 @@ import {
   assertAtomicDeleteSchemaFenceMatched,
   resolveAtomicNodeBatchExecutor,
   resolveAtomicNodeDeleteBatchExecutor,
+  resolveAtomicNodeReplacementBatchProgram,
 } from "../src/store/operations/atomic-mutation-program";
 import type { CreateNodeInput } from "../src/store/types";
 
@@ -902,5 +909,168 @@ describe("atomic node batch store consumer", () => {
       client.close();
       rmSync(temporaryDirectory, { recursive: true, force: true });
     }
+  });
+});
+
+// ============================================================
+// Item E.2: the composition gates on the fused node-create programs.
+//
+// `resolveAtomicNodeBatchExecutor` and `resolveAtomicNodeReplacementBatchProgram`
+// each decline (return `undefined`) for a composition dimension a fused
+// node-create program has no shape for: a stated `partOf`, or a kind whose
+// declared existence is `"required"`. Exercised directly against a backend
+// marked eligible for the fused path — the ONLY way to prove the guard
+// itself fires, since the store's ordinary create paths never reach the
+// fused executor for a composition create in the first place (there is no
+// shape for the second row either way), which is exactly what let a
+// deleted guard clause pass the full composition-existence integration
+// suite unnoticed.
+// ============================================================
+
+const CompPart = defineNode("CompPart", { schema: z.object({}) });
+const CompWhole = defineNode("CompWhole", { schema: z.object({}) });
+const compPartOf = defineEdge("compPartOf", { schema: z.object({}) });
+
+const compositionRequiredGraph = defineGraph({
+  id: "atomic-node-batch-composition-required",
+  nodes: { CompPart: { type: CompPart }, CompWhole: { type: CompWhole } },
+  edges: {
+    compPartOf: {
+      type: compPartOf,
+      from: [CompPart],
+      to: [CompWhole],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    partOf(CompPart, CompWhole, { via: compPartOf, existence: "required" }),
+  ],
+});
+
+const compositionOptionalGraph = defineGraph({
+  id: "atomic-node-batch-composition-optional",
+  nodes: { CompPart: { type: CompPart }, CompWhole: { type: CompWhole } },
+  edges: compositionRequiredGraph.edges,
+  ontology: [partOf(CompPart, CompWhole, { via: compPartOf })],
+});
+
+describe("atomic node batch eligibility: composition gate (item E.2)", () => {
+  it("resolveAtomicNodeBatchExecutor declines a required-existence kind with no partOf", () => {
+    const backend = rootBackend(false);
+    markAtomicRoot(backend);
+
+    expect(
+      resolveAtomicNodeBatchExecutor({
+        backend,
+        graph: compositionRequiredGraph,
+        registry: buildKindRegistry(compositionRequiredGraph),
+        inputs: [{ kind: "CompPart", props: {} }],
+        schemaVersion: 1,
+        identityEnabled: false,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeUndefined();
+  });
+  // MUTATION CHECK: delete the `item.partOf !== undefined || ... === "required"`
+  // guard clause in `resolveAtomicNodeBatchExecutor`
+  // (src/store/operations/atomic-mutation-program.ts). This assertion then
+  // fails (`toBeDefined()` instead).
+
+  it("resolveAtomicNodeBatchExecutor declines an optional-existence kind that states partOf", () => {
+    const backend = rootBackend(false);
+    markAtomicRoot(backend);
+
+    expect(
+      resolveAtomicNodeBatchExecutor({
+        backend,
+        graph: compositionOptionalGraph,
+        registry: buildKindRegistry(compositionOptionalGraph),
+        inputs: [
+          {
+            kind: "CompPart",
+            props: {},
+            partOf: { kind: "CompWhole", id: "whole-1" },
+          },
+        ],
+        schemaVersion: 1,
+        identityEnabled: false,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("resolveAtomicNodeBatchExecutor accepts an optional-existence composition kind with no partOf", () => {
+    const backend = rootBackend(false);
+    markAtomicRoot(backend);
+
+    expect(
+      resolveAtomicNodeBatchExecutor({
+        backend,
+        graph: compositionOptionalGraph,
+        registry: buildKindRegistry(compositionOptionalGraph),
+        inputs: [{ kind: "CompPart", props: {} }],
+        schemaVersion: 1,
+        identityEnabled: false,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeDefined();
+  });
+
+  it("resolveAtomicNodeReplacementBatchProgram declines a required-existence kind", () => {
+    const backend = rootBackend(false);
+    declareAtomicBatchForTest(backend);
+    markBundledRootAutocommitEligible(backend);
+    markBundledRootAtomicMutationPrograms(backend, {
+      replaceNodes: Object.assign(() => Promise.resolve([]), {
+        maxEntries: { plain: 512, claimed: 128 },
+      }),
+    });
+
+    expect(
+      resolveAtomicNodeReplacementBatchProgram({
+        backend,
+        graph: compositionRequiredGraph,
+        registry: buildKindRegistry(compositionRequiredGraph),
+        kind: "CompPart",
+        entryCount: 1,
+        identityEnabled: false,
+        schemaVersion: 1,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeUndefined();
+  });
+  // MUTATION CHECK: delete the
+  // `if (input.registry.compositionExistence(input.kind) === "required") return;`
+  // guard in `resolveAtomicNodeReplacementBatchProgram`
+  // (src/store/operations/atomic-mutation-program.ts). This assertion then
+  // fails.
+
+  it("resolveAtomicNodeReplacementBatchProgram accepts an optional-existence composition kind", () => {
+    const backend = rootBackend(false);
+    declareAtomicBatchForTest(backend);
+    markBundledRootAutocommitEligible(backend);
+    markBundledRootAtomicMutationPrograms(backend, {
+      replaceNodes: Object.assign(() => Promise.resolve([]), {
+        maxEntries: { plain: 512, claimed: 128 },
+      }),
+    });
+
+    expect(
+      resolveAtomicNodeReplacementBatchProgram({
+        backend,
+        graph: compositionOptionalGraph,
+        registry: buildKindRegistry(compositionOptionalGraph),
+        kind: "CompPart",
+        entryCount: 1,
+        identityEnabled: false,
+        schemaVersion: 1,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeDefined();
   });
 });

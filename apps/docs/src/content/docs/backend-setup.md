@@ -417,8 +417,8 @@ unique constraint (a create takes a generated or a caller-supplied id) —
 except a node delete, which fuses even when the kind DOES carry a declared
 unique constraint, because the atomic delete program releases that claim in
 the same statement. A singleton edge create fuses when the kind's
-cardinality is `"many"`, and edge update and delete fuse the same way
-(`EdgeCollection` has no `upsertById`). So do
+cardinality AND targetCardinality are both `"many"`, and edge update and
+delete fuse the same way (`EdgeCollection` has no `upsertById`). So do
 `bulkInsert`/`bulkCreate`/`bulkDelete`/`bulkReplaceById`/`bulkUpsertById`,
 and a constrained write inside an atomic program's claim envelope. Each of
 these asserts the active schema version inside the statements neon-http
@@ -1290,8 +1290,8 @@ no declared unique constraint (a create takes a generated or a
 caller-supplied id) — except a node delete, which fuses even when the kind
 DOES carry a declared unique constraint, because the atomic delete program
 releases that claim in the same statement. A singleton edge create fuses
-when the kind's cardinality is `"many"`, and edge update and delete fuse the
-same way (`EdgeCollection` has no `upsertById`). So do
+when the kind's cardinality AND targetCardinality are both `"many"`, and edge
+update and delete fuse the same way (`EdgeCollection` has no `upsertById`). So do
 `bulkInsert`/`bulkCreate`/`bulkDelete`/`bulkReplaceById`/`bulkUpsertById`,
 and a constrained write inside an atomic program's claim envelope. Each of
 these asserts the active schema version inside the statements
@@ -1335,9 +1335,10 @@ its callback. See
 [Limitations](/limitations) for details. For a transactional Cloudflare
 SQLite store, use **Durable Objects** (below) instead.
 
-For the same reason, a write guarded by a **declared constraint** — edge
-cardinality other than `many`, a `disjointWith` axiom, a shared-scope unique, or
-dynamic `getOrCreateByEndpoints` convergence — is refused on D1 with
+For the same reason, a write guarded by a **declared constraint** — source or
+target edge cardinality other than `many`, a `disjointWith` axiom, a
+shared-scope unique, or dynamic `getOrCreateByEndpoints` convergence — is
+refused on D1 with
 `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` rather than committed unfenced. See
 [Declared constraints require an interactive transaction](#declared-constraints-require-an-interactive-transaction).
 
@@ -2065,7 +2066,9 @@ class needed the fence, because the way forward differs per class:
 
 | `details.constraint` | The write that needs the fence | Way forward without a transactional backend |
 | --- | --- | --- |
-| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive` | Declare the edge `cardinality: "many"` and enforce the limit in application code |
+| `edgeAcyclicity` | Creating, bulk-creating, or resurrecting an edge whose kind declares `acyclic: true` | Drop `acyclic: true` from the edge and detect cycles in application code |
+| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`, or whose `targetCardinality` is `one` or `oneActive` | Declare `cardinality: "many"` and `targetCardinality: "many"` (or omit both) and enforce the limit in application code |
+| `edgeComposition` | Creating or resurrecting an edge that realizes a declared `partOf`/`hasPart` pair | Drop the `partOf`/`hasPart` declaration realized by this edge kind and enforce the single-whole rule in application code |
 | `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` using an undeclared dynamic `matchOn` key | Declare the edge registration's durable `matchIdentity`, or use `create` with a caller-chosen id |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom | Drop the axiom and keep ids distinct across those kinds yourself |
 | `nodeUniquenessClaim` | **Updating or resurrecting** a node whose kind declares any unique constraint, of any scope — a transition reserves the new key *before* the row write it gates, and only a transaction can undo the pair together | Drop the constraint, or run updates on a transactional backend. Plain **creates** under a `scope: "kind"` unique are unaffected: their claim follows the row |
@@ -2073,16 +2076,31 @@ class needed the fence, because the way forward differs per class:
 
 `importGraph` / `importGraphStream` is refused on the same backends whenever any
 node kind of the graph owes a claim ahead of its row — that is, declares **any**
-unique constraint or has a disjoint partner — or any edge kind is non-`many`.
+unique constraint or has a disjoint partner — or any edge kind's `cardinality`
+or `targetCardinality` is non-`many`.
 The import writes both creates and updates, so the widest of those placements is
-what decides it.
+what decides it. A graph declaring an `acyclic: true` edge kind — or any
+`partOf`/`hasPart` pair, whose composition relation D-10 checks with the same
+exhaustive reachability probe — refuses the same way even when no other
+constraint applies: acyclicity has no claim row to substitute for the
+per-graph lock import otherwise takes none of, so the whole import is refused
+with `details.constraint: "edgeAcyclicity"` before the first chunk. (A
+composition edge kind is separately refused with `edgeComposition` first, by
+the ordinary claim-backed path above — the composition claim itself needs
+only an interactive transaction, not the lock-only fence; it is the
+*acyclicity* check over the composition relation that is lock-only.) On a
+transactional backend, import instead takes the per-graph lock for the
+duration of each chunk it processes — a real change to import's concurrency
+posture for such a graph, so every other writer of that graph blocks for the
+chunk's duration.
 
 This affects **Cloudflare D1**, **`drizzle-orm/neon-http`**, and any SQLite
 backend built with `transactionMode: "none"`. Durable Objects are unaffected —
 `do-sqlite` reports `capabilities.execution.interactiveTransactions: true` and fences normally.
 
 Unconstrained writes on those backends are untouched and keep working exactly as
-before: a `cardinality: "many"` edge created, updated and deleted; any node
+before: an edge with `cardinality: "many"` and `targetCardinality: "many"`
+created, updated and deleted; any node
 delete, including one whose kind participates in a disjointness axiom (a delete
 re-derives no cross-kind verdict); a node whose uniques are all `scope: "kind"`;
 and an undeclared `getOrCreateByEndpoints` that *finds* an existing edge in the default
@@ -2098,8 +2116,8 @@ the logical `"found"` outcome in one exchange but may take incumbent-row locks
 and produce write amplification. If any member may write, the whole batch
 retains that refusal on transactionless roots unless it matches the narrow native
 durable-convergence envelope: schema-declared
-`matchIdentity`, `cardinality: "many"`, declared match fields, default
-`ifExists: "return"`, and no temporal mutation. That eligible form is one
+`matchIdentity`, `cardinality: "many"` and `targetCardinality: "many"`,
+declared match fields, default `ifExists: "return"`, and no temporal mutation. That eligible form is one
 closed atomic exchange; dynamic match fields, update mode, constrained
 cardinality, temporal options, and all transaction-scoped or derived roots
 retain the refusal or fallback path required by their contracts.
@@ -2113,7 +2131,10 @@ transaction-capable backend when schema-aware resurrection is required.
 Underneath the lock, a declared constraint is also reserved in a **claim
 relation** whose primary key admits one live claimant per axis: `uniques` (for
 uniqueness scopes and `disjointWith` pairs) and `typegraph_edge_claims` (for
-`cardinality: "one" | "unique" | "oneActive"`). Both bundled backends carry them
+source-side `cardinality: "one" | "unique" | "oneActive"` and, independently,
+[target-side `targetCardinality: "one" | "oneActive"`](/core-concepts#target-cardinality)
+— an edge kind declaring both axes reserves one row per axis, keyed apart by
+the axis name so the two never collide). Both bundled backends carry them
 and report `capabilities.constraintClaims: true`. The claim is what makes those
 constraints hold for TypeGraph writers that hold no per-graph lock at all —
 `importGraph` is the one in the box. The protocol is application-maintained:
@@ -2153,10 +2174,42 @@ for (const violation of await store.verifyConstraintFences()) {
 It reports one entry per contended axis — `nodeUniqueness` and
 `nodeDisjointness` carry the conflicting `owners` (each a `concrete_kind` /
 `node_id` pair, because ids are unique only per kind), `edgeCardinality` carries
-the conflicting `edgeIds`. It reads the nodes, edges and `uniques` relations, so
+the conflicting `edgeIds`. A fourth family, `edgeEndpointAssignability`,
+reports edge kinds whose live rows sit outside every endpoint pair the current
+ontology admits (`edgeKind`, the `allowedPairs` still admitted, and the
+offending `edges`) — the same shrink an [ontology tightening](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+checks against, but reported for a whole graph rather than just the delta one
+schema commit proposes. It reads the nodes, edges and `uniques` relations, so
 it finds violations that predate the claim tables; it writes nothing, and it
 repairs nothing — choosing which claimant keeps the axis is a data-loss decision
 that stays with you.
+
+A fifth family, `compositionExistence`, reports every LIVE node of an
+`existence: "required"` composition part kind with no live whole
+(`partKind`, and the offending `parts`). No live whole means either of two
+states: the part has no current composition edge at all, or the whole its edge
+names is not a live row. The second is why a part left hanging from a
+TOMBSTONED whole is reported — a state the delete cascade cannot produce, but a
+direct backend write, a custom port, or a bypassed import can. The write path's
+own incumbent decision is deliberately narrower: a tombstoned whole still holds
+its part's attachment there, so a second whole cannot quietly take it. Unlike
+the other four, this family is a portable scan (`findNodesByKind` paged, each
+page's attachments resolved through the same owner the write-path detach
+refusal reads, and each page's wholes read once per kind through the batch
+point read) rather than a `readConstraintFenceViolations` backend member — this runs only at an
+explicit diagnostic call and at schema-tightening-commit time, never on a
+write's hot path, so there is no per-dialect SQL for a custom backend to
+implement for this family.
+
+A custom backend implementing `readConstraintFenceViolations` may receive an
+`edgeEndpointAllowances` declaration (one entry per edge kind, each the
+concrete `(fromKind, toKind)` pairs the ontology still admits) and must answer
+with a `misassignedEdgeEndpointRows` array — present (even if empty) whenever
+`edgeEndpointAllowances` was non-empty. Leaving the key `undefined` when the
+family was requested is refused with `CONSTRAINT_FENCE_AUDIT_FAMILY_UNSUPPORTED`
+rather than tolerated as a clean result: an empty report there would be
+indistinguishable from a database with no violations, which is the one answer
+this diagnostic must never fabricate.
 
 ### SQLite ↔ PostgreSQL parity
 
@@ -2181,17 +2234,19 @@ TypeGraph choosing separate query semantics per backend:
 | Per-query fulltext `language` override                 | ✗                                                 | ✓                                          | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query               |
 | HNSW `efSearch` query tuning                           | ✗                                                 | ✓ transactional HNSW drivers               | Refused, never ignored: `UnsupportedBackendCapabilityError` with `details.capability` `vector.searchFrontierTuning` on **any** SQLite backend (vector and hybrid alike — neither `sqlite-vec`'s `vec0` KNN nor `libsql-native`'s DiskANN has a per-search frontier), and on transaction-less Postgres or a non-HNSW slot |
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
-| TypeGraph Identity Profile                             | ✓ transactional drivers                           | ✓ transactional drivers                    | Enabled graphs fail fast on non-atomic drivers; identity-disabled graphs retain their ordinary path                      |
+| TypeGraph Identity Profile                             | ✓ transactional drivers                           | ✓ transactional drivers                    | Enabled graphs fail fast on non-atomic drivers; identity-disabled graphs retain their ordinary path. Replay (`store.identity.replay` / `transitionsOf`) additionally requires `history: true` — refuses with `IDENTITY_REPLAY_REQUIRES_HISTORY` otherwise, on both dialects |
 | Constraint claim relations (`capabilities.constraintClaims`) | ✓                                           | ✓                                          | Identical relations and identical statements on both dialects. A third-party backend that omits them declares `constraintClaims` absent and keeps the per-graph lock as its only fence |
+| Composition claim (`partOf`/`hasPart`)                 | ✓                                                  | ✓                                           | One reserved axis in `typegraph_edge_claims`, identical on both dialects — no new relation or statement shape. Needs an interactive transaction the same way any other declared-cardinality write does (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, `edgeComposition`), and needs `typegraph_edge_claims` to already exist: a deployment initialized before it did raises `EDGE_CLAIM_RELATION_MISSING` on the first `partOf`/`hasPart` write and must be migrated under owner credentials first |
 | Durable edge match identity (`capabilities.durableEdgeMatchIdentity`) | ✓ bundled adapters | ✓ bundled adapters | Both dialects persist the same canonical key and use a unique database arbiter. A custom backend must satisfy the full capability contract above or leave the capability absent |
 | Managed node projection fusion                        | ✓ registered atomic bulk programs; singleton fallback | ✓ registered atomic bulk programs; singleton create fusion | Eligible node bulk creates and resolved updates group fulltext/vector transitions into the same atomic program as their row mutations on both dialects. PostgreSQL additionally fuses an eligible singleton generated-ID create into one SQL statement when every active strategy supplies an inserted-node builder |
 | Managed node claim fusion (`capabilities.atomicNodeInsertClaims`) | ✗ portable transactional fallback             | ✓ PostgreSQL/PGlite                        | SQLite keeps claim acquisition and insertion in the portable transaction. PostgreSQL transaction receivers fuse supported claim plans; a root non-transactional receiver is limited to exactly one generated-id, same-kind uniqueness claim with no other side effects |
-| Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, one cardinality claim, and the insert in one statement after any required graph lock |
+| Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, exactly one cardinality claim (source *or* target), and the insert in one statement after any required graph lock. An edge kind constraining **both** axes always takes the portable guarded-claim path on every engine — the fused command carries at most one claim per write in this version |
 | Atomic SQL transport (`capabilities.execution.atomicBatch`) | ✓ on certified D1/libSQL roots; otherwise `none` | ✓ on bundled recognized PostgreSQL drivers, including neon-http | `root` means the exact backend owns the atomic boundary; `session` means the exact object is already bound to an open transaction and the outer transaction owns commit/rollback. Both require identity-keyed executor registration. Neon HTTP uses its native transaction batch; session-capable `pg`, postgres-js, neon-serverless, and PGlite drivers can execute programs on one pinned Drizzle transaction. Unrecognized drivers remain `none`. A custom backend must pass the framework-agnostic conformance runner before opting in; omitted support keeps the portable path |
 | Eligible registered managed writes                    | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative create statement. Eligible node updates may carry fulltext/vector replacements; unconstrained non-durable-identity edge updates, direct edge deletes, and plain restricted node deletes use one authoritative read/gate plus one registered atomic mutation. Generated-, caller-, or mixed-ID node `bulkInsert`/`bulkCreate` batches compose supported multi-claim/cross-scope claim sets with projections in one schema-fenced native program; direct edge programs also maintain durable match identity and cardinality claims. Direct edge `bulkDelete` and plain restricted node `bulkDelete` use the same mutation profile. Eligible mixed `bulkUpsertById` sets, including node projections, use the profile on serverless roots and on exact bundled PostgreSQL transaction sessions; a generic derived backend still loses the evidence. A custom backend may opt in per family only after registering its exact transport and semantic executor. Unregistered or otherwise ineligible families, projected/identity-enabled node deletes, over-budget claimed members, cascade/disconnect deletes, and other managed writes retain the existing path |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |
+| Edge acyclicity probe (`acyclic: true`)                 | ✓ index-only scan of `typegraph_edges_from_idx`   | ✓ index-only scan of `typegraph_edges_from_idx` | Both engines enforce the check identically — the same recursive-reachability builder, `UNION` set semantics, and no depth bound. Both refuse without transactions (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, `edgeAcyclicity`) and both raise `RECURSIVE_TRAVERSAL_UNSUPPORTED` if `recursiveTraversal` is declared unsupported. No new system index is required |
 | Write fence (`capabilities.writeFence`)           | ✓ `engine-serialized` (single writer slot)        | ✓ `lock` (advisory + table locks)          | Identical guarantee, different mechanism. A custom backend that declares no `writeFence` resolves `unfenced` and is refused at construction for Operational Identity or TypeGraph-owned recorded-clock allocation |
 | Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |
 | Engine-native lineage (`backend.lineage`)               | ✗ (recorded-relations lineage via `history`)      | ✗ (recorded-relations lineage via `history`) | Neither bundled profile declares its own `lineage`. `resolveLineage` derives it from the store's recorded relations whenever `history: true` is on, identically on both dialects, so a graph-merge diff against such a store is pruned the same way regardless of backend. Without `history`, no lineage source resolves and the diff is full; the anchor is the durable revision anchor when `revisionTracking: true`, otherwise the compatibility content fingerprint |

@@ -1,4 +1,7 @@
-import { type UNIQUE_SIDECAR_BATCH } from "../backend/capabilities/bundle-registry";
+import {
+  type BATCH_POINT_READ,
+  type UNIQUE_SIDECAR_BATCH,
+} from "../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   type BackendIdentity,
@@ -23,15 +26,24 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
+import { type IdentityServiceContext } from "../identity/service-types";
+import {
+  type IdentityDecisionProvenance,
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
+} from "../identity/transition-log";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
+import { type ResolvedNodeClaimConflict } from "./claims/resolved-node-claims";
+import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import {
   type InternalSubgraphOptions,
-  type SubgraphProject,
+  type SubgraphProjectFor,
   type SubgraphResult,
+  type SubgraphResultEdgeKinds,
 } from "./subgraph";
 import {
   type Edge,
@@ -80,15 +92,27 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * a second verdict for the same backend — the same reason `backend` itself
    * is exposed here rather than reconstructed.
    *
-   * Optional at this boundary — a `StoreRuntime`-shaped value is a
-   * contravariant (externally-authorable) position, so a new REQUIRED member
-   * here would be a breaking change (`scripts/api-surface-compat.ts`).
-   * Required after resolution instead, the same pattern
+   * Optional at this boundary, required after resolution — the same pattern
    * `CompileQueryOptions.recursiveTraversal` uses: the one real producer
    * (`store.ts`'s constructor) always populates it, and the one real
-   * consumer (`provenance/index.ts`) asserts it with `requireDefined`.
+   * consumer (`provenance/index.ts`) asserts it with `requireDefined`. This
+   * shim predates the ruling that `StoreRuntime` is an `@internal`,
+   * symbol-keyed port no external consumer can name; later members are added
+   * as plain required members, and the API-surface checker's findings for
+   * them are recorded in `etc/api-surface-exceptions.json` rather than
+   * shimmed. Kept as is so its consumer's assertion stays truthful.
    */
   uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
+  /**
+   * @internal The `batchPointRead` bundle's verdict, minted once at store
+   * construction and exposed for the same reason `uniqueSidecarBatch` is: a
+   * Store-owned view (provenance's support computation, which reads the whole
+   * rows its required parts hang from) must not re-resolve a second verdict for
+   * the same backend. Bound per read against the object that read runs on, so a
+   * transaction target implementing less than the store's backend falls back to
+   * the per-id read the bundle declares.
+   */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   /**
    * @internal The backend this Store's queries actually execute through for
    * `target` — the Store's own backend when `target` is omitted.
@@ -139,17 +163,64 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   subgraphAtCoordinate: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends boolean | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: InternalSubgraphOptions<G, EK, NK, P>,
-  ) => Promise<SubgraphResult<G, NK, EK, P>>;
+    options: InternalSubgraphOptions<G, EK, NK, P, C>,
+  ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
   algorithmsAtCoordinate: (
     coordinate: ReadCoordinate,
   ) => InternalGraphAlgorithms<G>;
   identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
+  /**
+   * @internal The full identity service context this Store builds writes and
+   * reads against — reached by the transition-log/replay module functions
+   * (`pruneIdentityTransitions`, and `store.identity.replay` /
+   * `transitionsOf`), which are plain functions over
+   * `IdentityServiceContext<G>` like every other identity algorithm, rather
+   * than Store methods. Throws when the graph never declared `identity: {}`,
+   * the same guard `identityAtCoordinate` applies.
+   */
+  identityContext: () => IdentityServiceContext<G>;
   rebuildIdentityClosure: () => Promise<void>;
   validateIdentity: () => Promise<void>;
+  /**
+   * Deletes one node under an explicit {@link NodeDeletePolicy}, going through
+   * `executeNodeDelete` — the SAME entry point (fused-atomic-or-portable
+   * routing included) the public collection facade uses — against `target`
+   * directly. The public collection `delete(id)` takes no options by design
+   * (a merge-only flag does not belong on it, the `bulkInsert` precedent), so
+   * a caller that needs a non-default policy reaches an internal port
+   * instead.
+   *
+   * This Store-scoped variant builds its OWN operation context — an
+   * immediate (unbuffered) hook runner and `attempt: 1` — so it is correct
+   * only for a caller managing its own transaction directly against the raw
+   * backend, or calling against the root backend with no enclosing
+   * transaction at all, OUTSIDE any `store.transaction` callback: nothing
+   * here is aware of a `store.transaction` in progress, so a caller invoking
+   * this INSIDE one would report `onOperationEnd` for the delete immediately,
+   * even if that outer transaction later rolls back. A caller already inside
+   * a `store.transaction` callback MUST use
+   * {@link transactionDeleteNodeWithPolicy} instead, which reaches that
+   * transaction's own buffered hook runner and attempt — every production
+   * caller (merge apply) does this today.
+   *
+   * `target` accepts the root {@link GraphBackend} itself, not only a
+   * `TransactionBackend`, on purpose: `transactionDeleteNodeWithPolicy` is
+   * always transaction-scoped, and a transaction-scoped backend never
+   * exposes the fused atomic delete command (see `executeNodeDelete`'s
+   * `resolveAtomicNodeDeleteBatchExecutor` call) — so calling THIS port
+   * directly against the root backend is the only way, in production or in a
+   * test, to exercise the routing decision between the fused and portable
+   * delete paths at all.
+   */
+  deleteNodeWithPolicy: (
+    target: GraphBackend | TransactionBackend,
+    work: Readonly<{ kind: string; id: string }>,
+    policy?: NodeDeletePolicy,
+  ) => Promise<void>;
   /**
    * Validates one final resolved node write set, then clears the affected
    * nodes' claim rows so its upserts may take their approved keys in any order,
@@ -173,6 +244,25 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     }>,
     apply: () => Promise<Output>,
   ) => Promise<Output>;
+  /**
+   * THE plan-time half of `applyResolvedNodeUniqueness`: every uniqueness
+   * collision the same resolved write set would be refused for, as decisions
+   * rather than a thrown first refusal, read through the same constraint
+   * registration and key computation the apply uses. Read-only, so a plain
+   * backend serves it. `RESOLVED_NODE_UNIQUENESS_UNSUPPORTED` when the
+   * backend cannot serve the batched probe the set semantic needs.
+   */
+  probeResolvedNodeUniqueness: (
+    target: GraphBackend | TransactionBackend,
+    writes: Readonly<{
+      upserts: readonly Readonly<{
+        kind: string;
+        id: string;
+        props: Readonly<Record<string, unknown>>;
+      }>[];
+      releases: readonly Readonly<{ kind: string; id: string }>[];
+    }>,
+  ) => Promise<readonly ResolvedNodeClaimConflict[]>;
   /**
    * @internal Reads the graph's identity assertions in transfer shape, honoring
    * this store's SQL binding. Used by interchange export, base-version
@@ -302,6 +392,23 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     >,
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
+  /**
+   * Item E.2: detaches a node import purges AFTER `foldImportedIdentityNodes`
+   * already folded it into identity for this attempt's batch — see
+   * `assertImportedRequiredPartsAttached` (`src/interchange/import.ts`).
+   */
+  detachDeletedImportedIdentityNode: (
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
+    reference: Readonly<{ kind: string; id: string }>,
+  ) => Promise<void>;
   importIdentityAssertionsAtTarget: (
     target: Readonly<
       BackendIdentity &
@@ -323,6 +430,54 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     }>[],
     mode: "state" | "archival",
   ) => Promise<Readonly<{ created: number; skipped: number }>>;
+  /**
+   * @internal Reads one bounded page of a graph's ARCHIVAL identity
+   * transitions, ordered oldest first — the archival export's sole reader,
+   * mirroring `readIdentityAssertionPageAtTarget` above.
+   */
+  readIdentityTransitionPageAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    options: Readonly<{ after?: IdentityTransitionCursor; limit: number }>,
+  ) => Promise<
+    Readonly<{
+      transitions: readonly IdentityTransitionTransfer[];
+      nextAfter?: IdentityTransitionCursor;
+      done: boolean;
+    }>
+  >;
+  /**
+   * @internal Reads a graph's identity transition-retention watermark for
+   * archival export; `{ prunedBeforeRevision: 0, ... }` when nothing has been
+   * pruned.
+   */
+  identityTransitionRetentionAtTarget: (
+    target: GraphBackend | TransactionBackend,
+  ) => Promise<Readonly<{ prunedBeforeRevision: number; prunedAt: string }>>;
+  /**
+   * @internal Restores archival identity transitions inside an import
+   * transaction. `carriedWatermark` is the source graph's own retention
+   * watermark from the archival payload, used only when `transitions` is
+   * empty (see `importIdentityTransitionsIntoTarget`).
+   */
+  importIdentityTransitionsAtTarget: (
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
+    transitions: readonly IdentityTransitionTransfer[],
+    carriedWatermark: number | undefined,
+  ) => Promise<Readonly<{ created: number; watermark: number | undefined }>>;
+  /**
+   * `decision` is the governing merge decision, when the apply runs under one:
+   * every identity transition the call causes carries it, so a fold a merged
+   * node create triggered is attributed to the merge rather than filed as an
+   * anonymous `fold`. `undefined` for an apply with no governing decision.
+   */
   applyIdentityMergeAtTarget: (
     target: GraphBackend | TransactionBackend,
     retractions: readonly Readonly<{
@@ -343,6 +498,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       validTo?: string | undefined;
       endedBy?: Readonly<{ kind: string; id: string }> | undefined;
     }>[],
+    decision?: IdentityDecisionProvenance,
   ) => Promise<Readonly<{ created: number; retracted: number }>>;
   /**
    * Proves the identity classes of `seeds` carry no contradiction in the state
@@ -409,6 +565,7 @@ type TransactionRuntimePort = Readonly<{
   [TRANSACTION_RUNTIME]?: Readonly<{
     backend: TransactionBackend;
     runNodeOperationHooks: TransactionNodeOperationHookRunner;
+    deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy;
   }>;
 }>;
 
@@ -418,6 +575,18 @@ type TransactionNodeOperationHookRunner = <T>(
   id: string,
   fn: () => Promise<T>,
 ) => Promise<T>;
+
+/**
+ * A node delete bound to the transaction it is invoked from — see
+ * {@link transactionDeleteNodeWithPolicy}. Exported so a caller threading this
+ * seam through its own call stack (merge apply) names ONE type rather than
+ * redeclaring an identical structural alias that could drift from this port's
+ * actual shape.
+ */
+export type TransactionDeleteNodeWithPolicy = (
+  work: Readonly<{ kind: string; id: string }>,
+  policy?: NodeDeletePolicy,
+) => Promise<void>;
 
 /** Returns the full backend for privileged transaction-bound internals. */
 export function transactionBackend(
@@ -443,4 +612,32 @@ export function transactionNodeOperationHookRunner(
     );
   }
   return runtime.runNodeOperationHooks;
+}
+
+/**
+ * Soft-deletes one node under an explicit {@link NodeDeletePolicy} through
+ * THIS transaction's own node-operation context — the buffered hook runner
+ * and attempt number `#buildTransactionContext` already built for this
+ * transaction's `nodes`/`edges`, not a freshly-minted immediate-hook context
+ * scoped to the outer Store. Reaching the outer Store's own hook runner from
+ * inside a caller-opened transaction would report `onOperationEnd` for a
+ * delete the instant it runs even when the enclosing transaction later rolls
+ * back, which is why this delete-behavior-carrying escape hatch is
+ * transaction-scoped rather than Store-scoped: the public collection
+ * `delete(id)` takes no options by design (a merge-only flag does not belong
+ * on it, the `bulkInsert` precedent), so a caller that needs a non-default
+ * policy — today, merge apply — reaches this internal port instead.
+ */
+export function transactionDeleteNodeWithPolicy(
+  transaction: TransactionRuntimePort,
+  work: Readonly<{ kind: string; id: string }>,
+  policy?: NodeDeletePolicy,
+): Promise<void> {
+  const runtime = transaction[TRANSACTION_RUNTIME];
+  if (runtime === undefined) {
+    throw new TypeError(
+      "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
+    );
+  }
+  return runtime.deleteNodeWithPolicy(work, policy);
 }

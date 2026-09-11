@@ -430,25 +430,38 @@ describe("Query Builder - Traversals", () => {
 describe("Query Builder - Subclass Expansion", () => {
   it("expands queries to include subclasses when requested", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
-      .from("Organization", "o", { includeSubClasses: true })
+      .from("Organization", "o", { expansion: "subclasses" })
       .select((context) => context.o);
 
     const ast = query.toAst();
 
     expect(ast.start.kinds).toContain("Organization");
     expect(ast.start.kinds).toContain("Company");
-    expect(ast.start.includeSubClasses).toBe(true);
+    expect(ast.start.expansion).toBe("subclasses");
   });
 
-  it("does not expand subclasses by default", () => {
+  // Q3 (roadmap): a supertype query is polymorphic by default once C ships.
+  it("expands subclasses by default", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Organization", "o")
       .select((context) => context.o);
 
     const ast = query.toAst();
 
+    expect(ast.start.kinds).toContain("Organization");
+    expect(ast.start.kinds).toContain("Company");
+    expect(ast.start.expansion).toBe("subclasses");
+  });
+
+  it("does not expand subclasses when explicitly narrowed", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Organization", "o", { expansion: "exact" })
+      .select((context) => context.o);
+
+    const ast = query.toAst();
+
     expect(ast.start.kinds).toEqual(["Organization"]);
-    expect(ast.start.includeSubClasses).toBe(false);
+    expect(ast.start.expansion).toBe("exact");
   });
 });
 
@@ -534,10 +547,14 @@ describe("Query Compilation to SQL", () => {
   });
 
   it("adds edge endpoint kind filters for outgoing traversals", () => {
+    // Pinned exact-kind: Organization is a subClassOf parent in this
+    // fixture graph, so an un-narrowed `.to()` would poly-expand to an
+    // `IN (...)` filter under the Q3 default — this test is about the
+    // single-kind filter shape itself.
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
-      .from("Person", "p")
+      .from("Person", "p", { expansion: "exact" })
       .traverse("worksAt", "e")
-      .to("Organization", "o")
+      .to("Organization", "o", { expansion: "exact" })
       .select((context) => ({ p: context.p, o: context.o }));
 
     const sqlObject = compileQuery(query.toAst(), graph.id);

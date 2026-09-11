@@ -49,6 +49,7 @@ export {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeReparent,
   executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
   executeNodeSetUpdate,
@@ -63,7 +64,6 @@ export { runWritePlan } from "./write-executor";
 export {
   edgeWritePlan,
   mixedWritePlan,
-  nodeBatchWritePlan,
   nodeWritePlan,
   type RowWorkKind,
   type WritePlan,

@@ -17,9 +17,11 @@ import {
   type NodeType,
 } from "../core/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
+import { serializeSchemaProperties } from "../schema/serializer";
 import { buildValidatedKindRegistry } from "./build-validated";
+import { compositionRelationFields } from "./composition-relation";
+import { type EdgeKindFacts } from "./edge-kind-facts";
 import type { KindRegistry } from "./kind-registry";
-import { type EdgeEndpointKinds } from "./validate-implies";
 
 const EMPTY_NAMED_ONTOLOGY: readonly NamedOntologyRelation[] = [];
 
@@ -65,28 +67,49 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
               relation.from
             : relation.from.kind,
           to: typeof relation.to === "string" ? relation.to : relation.to.kind,
+          ...compositionRelationFields(relation),
         })),
-    edgeEndpoints: buildEdgeEndpointKinds(graph.edges),
+    edgeFacts: buildGraphEdgeKindFacts(graph.edges),
+    // Memoized by serializeSchemaProperties itself (keyed on the Zod schema
+    // reference), so this closure is called once per node kind per registry
+    // build, not once per closure pair — the C.2 structural-subsumption
+    // check's schema source for a live, compile-time graph.
+    nodePropertySchemas: (kind) => {
+      const nodeType = nodeTypes.get(kind);
+      return nodeType === undefined ? undefined : (
+          serializeSchemaProperties(nodeType.schema)
+        );
+    },
+    structuralSubsumption: "enforce",
     ...(graph.identity === undefined ? {} : { identity: graph.identity }),
   });
 }
 
 /**
  * Maps each registered edge kind to its declared domain/range kind names,
- * for `validateImpliesEndpointCompatibility`. A `Map` (rather than the
- * plain `graph.edges` object) so a lookup for an edge kind literally named
- * "toString" or another `Object.prototype` member can't resolve to an
- * inherited member instead of `undefined`.
+ * for `validateImpliesEndpointCompatibility` and for
+ * `expandEdgeEndpointAllowance` (`src/registry/edge-endpoint-allowance.ts`).
+ * A `Map` (rather than the plain `graph.edges` object) so a lookup for an
+ * edge kind literally named "toString" or another `Object.prototype` member
+ * can't resolve to an inherited member instead of `undefined`.
+ *
+ * The serialized-schema sibling of this adapter is
+ * `buildSerializedEdgeKindFacts` (`src/schema/deserializer.ts`): the two
+ * read genuinely different representations (a live `GraphDef` vs a persisted
+ * document), so they stay separate, but both feed the one
+ * `expandEdgeEndpointAllowance`.
  */
-function buildEdgeEndpointKinds(
+export function buildGraphEdgeKindFacts(
   edges: Record<string, EdgeRegistration>,
-): ReadonlyMap<string, EdgeEndpointKinds> {
-  const result = new Map<string, EdgeEndpointKinds>();
+): ReadonlyMap<string, EdgeKindFacts> {
+  const result = new Map<string, EdgeKindFacts>();
   for (const [kind, registration] of Object.entries(edges)) {
     result.set(kind, {
       from: registration.from.map((node) => node.kind),
       to: projectTargetKinds(registration.to),
       pairs: getEdgeEndpointPairs(registration.from, registration.to),
+      cardinality: registration.cardinality ?? "many",
+      targetCardinality: registration.targetCardinality ?? "many",
     });
   }
   return result;

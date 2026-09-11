@@ -19,7 +19,7 @@
  *      WITHOUT calling an owner, which is precisely how the duplicate resolver
  *      in `trusted-import.ts` survived the last two rounds of review.
  *  (c) FILE SET — the set of files under `src/backend/**` that name the column at
- *      all equals the fifteen declared here, each with the role that earns it. (a)
+ *      all equals the sixteen declared here, each with the role that earns it. (a)
  *      and (b) only see five files; a NEW file that binds `valid_from` would be
  *      invisible to them, and I5 is quantified over the whole directory.
  *
@@ -155,7 +155,7 @@ const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
   "drizzle/trusted-import.ts":
     "writer — four stamping sites (native per-dialect INSERT)",
   "drizzle/operations/shared.ts":
-    "expectedValidFromPredicate — the NULL-safe fence",
+    "expectedValidFromPredicate — the NULL-safe fence; currentWindowPredicate — the constraint-fence audit's current-window liveness filter",
   "drizzle/operations/collections.ts": "read predicate",
   "live-node-candidates.ts": "read predicate (search currency)",
   "drizzle/operations/hybrid.ts": "projection into the hybrid-search statement",

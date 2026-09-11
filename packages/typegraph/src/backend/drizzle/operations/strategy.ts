@@ -3,7 +3,7 @@ import { getTableName, type SQL, sql } from "drizzle-orm";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
-import { type ConstrainedCardinality } from "../../../store/claims/edge-claims";
+import { type EdgeCardinalityAxisRef } from "../../../store/claims/edge-claims";
 import { isPresent, requireDefined } from "../../../utils/presence";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import type {
@@ -24,9 +24,10 @@ import type {
   CheckUniqueParams,
   ClaimEdgeCardinalityParams,
   CompareAndSetNodeParams,
+  CompositionClaimScope,
   ContributionMaterializationIdentity,
+  CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
-  CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
@@ -83,9 +84,11 @@ import {
   buildFindNodesByKind,
 } from "./collections";
 import {
+  buildContendedCompositionEdgeRowAudit,
   buildContendedEdgeRowAudit,
   buildContendedUniqueRowAudit,
   buildDisjointOverlapAudit,
+  buildMisassignedEdgeEndpointAudit,
 } from "./constraint-fence-audit";
 import type { AtomicContributionEvidence } from "./contribution-evidence";
 import {
@@ -110,7 +113,7 @@ import {
   buildAtomicEdgeDeleteBatchWithSchemaFence,
   buildAtomicEdgeResolvedUpdateBatch,
   buildConvergeEdgeCreate,
-  buildCountEdgesFrom,
+  buildCountEdgesAtEndpoint,
   buildDeleteEdge,
   buildDeleteEdgesBatch,
   buildEdgeExistsBetween,
@@ -498,7 +501,7 @@ export type CommonOperationStrategy = Readonly<{
     nodeKind: string,
     nodeId: string,
   ) => SQL;
-  buildCountEdgesFrom: (params: CountEdgesFromParams) => SQL;
+  buildCountEdgesAtEndpoint: (params: CountEdgesAtEndpointParams) => SQL;
   buildEdgeExistsBetween: (params: EdgeExistsBetweenParams) => SQL;
   buildFindEdgesConnectedTo: (params: FindEdgesConnectedToParams) => SQL;
   buildFindNodesByKind: (params: FindNodesByKindParams) => SQL;
@@ -576,12 +579,37 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildContendedEdgeRowAudit: (
     graphId: string,
-    cardinality: ConstrainedCardinality,
+    ref: EdgeCardinalityAxisRef,
     edgeKinds: readonly string[],
+  ) => SQL;
+  /**
+   * The composition (item E) variant of {@link buildContendedEdgeRowAudit}:
+   * the peer test is the oriented two-arm union
+   * {@link file://./edge-claims.ts claimHolderTerms} folds a write's
+   * liveness predicate over, not exact-kind equality — R4's axis is
+   * relation-wide, so two different realizing edge kinds must be found
+   * contending for one part.
+   */
+  buildContendedCompositionEdgeRowAudit: (
+    graphId: string,
+    ref: EdgeCardinalityAxisRef,
+    holders: CompositionClaimScope["holders"],
+    reportedEdgeKinds: readonly string[],
   ) => SQL;
   buildDisjointOverlapAudit: (
     graphId: string,
     kinds: readonly [string, string],
+  ) => SQL;
+  /**
+   * The fourth read-only fence-audit statement: live edges of one kind
+   * whose endpoints match no declared pair. A member for the same reason
+   * the other three are — the type checker forces both dialects to have it.
+   */
+  buildMisassignedEdgeEndpointAudit: (
+    graphId: string,
+    edgeKind: string,
+    now: string,
+    allowedPairs: readonly (readonly [string, string])[],
   ) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
   /**
@@ -696,7 +724,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildHardDeleteEdge,
   buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
-  buildCountEdgesFrom,
+  buildCountEdgesAtEndpoint,
   buildEdgeExistsBetween,
   buildFindEdgesConnectedTo,
   buildFindNodesByKind,
@@ -782,9 +810,9 @@ function createCommonOperationStrategy(
       params: UpsertFulltextParams,
       timestamp: string,
     ): readonly SQL[] =>
-      (fulltextStrategy?.buildUpsert(fulltextTable, params, timestamp) ?? []).map(
-        (statement) => toDrizzleSql(statement, dialect),
-      ),
+      (
+        fulltextStrategy?.buildUpsert(fulltextTable, params, timestamp) ?? []
+      ).map((statement) => toDrizzleSql(statement, dialect)),
     buildDeleteFulltext: (params: DeleteFulltextParams): readonly SQL[] =>
       (fulltextStrategy?.buildDelete(fulltextTable, params) ?? []).map(
         (statement) => toDrizzleSql(statement, dialect),
@@ -1229,14 +1257,23 @@ function createCommonOperationStrategy(
     },
     buildContendedEdgeRowAudit(
       graphId: string,
-      cardinality: ConstrainedCardinality,
+      ref: EdgeCardinalityAxisRef,
       edgeKinds: readonly string[],
     ): SQL {
-      return buildContendedEdgeRowAudit(
+      return buildContendedEdgeRowAudit(tables, graphId, ref, edgeKinds);
+    },
+    buildContendedCompositionEdgeRowAudit(
+      graphId: string,
+      ref: EdgeCardinalityAxisRef,
+      holders: CompositionClaimScope["holders"],
+      reportedEdgeKinds: readonly string[],
+    ): SQL {
+      return buildContendedCompositionEdgeRowAudit(
         tables,
         graphId,
-        cardinality,
-        edgeKinds,
+        ref,
+        holders,
+        reportedEdgeKinds,
       );
     },
     buildDisjointOverlapAudit(
@@ -1244,6 +1281,20 @@ function createCommonOperationStrategy(
       kinds: readonly [string, string],
     ): SQL {
       return buildDisjointOverlapAudit(tables, graphId, kinds);
+    },
+    buildMisassignedEdgeEndpointAudit(
+      graphId: string,
+      edgeKind: string,
+      now: string,
+      allowedPairs: readonly (readonly [string, string])[],
+    ): SQL {
+      return buildMisassignedEdgeEndpointAudit(
+        tables,
+        graphId,
+        edgeKind,
+        now,
+        allowedPairs,
+      );
     },
     buildGetActiveSchema(graphId: string): SQL {
       return buildGetActiveSchema(tables, graphId, dialect);

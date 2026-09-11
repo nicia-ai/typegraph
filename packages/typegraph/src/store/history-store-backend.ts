@@ -37,7 +37,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "lockSchemaVersionAndGraphWrite",
   "compileSql",
   "countEdgesByKind",
-  "countEdgesFrom",
+  "countEdgesAtEndpoint",
   "countNodesByKind",
   "createVectorIndex",
   "deleteEdge",

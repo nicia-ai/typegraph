@@ -7,9 +7,13 @@
  */
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
-import { buildValidatedKindRegistry } from "../registry/build-validated";
+import {
+  buildValidatedKindRegistry,
+  type StructuralSubsumptionMode,
+} from "../registry/build-validated";
+import { compositionRelationFields } from "../registry/composition-relation";
+import { type EdgeKindFacts } from "../registry/edge-kind-facts";
 import type { KindRegistry } from "../registry/kind-registry";
-import { type EdgeEndpointKinds } from "../registry/validate-implies";
 import { hasOwnKey } from "../utils/object";
 import {
   type SerializedClosures,
@@ -95,7 +99,7 @@ export function deserializeSchema(
     version: schema.version,
     generatedAt: schema.generatedAt,
 
-    // Own-key reads, for the same reason {@link buildEdgeEndpointKinds} below
+    // Own-key reads, for the same reason {@link buildSerializedEdgeKindFacts} below
     // uses a `Map`: `schema` is parsed out of a stored JSON document and the
     // caller supplies the name, so a raw read hands back an `Object.prototype`
     // member typed as a definition for any name no kind is registered under.
@@ -120,7 +124,7 @@ export function deserializeSchema(
     getIdentity: () => schema.identity,
     getRaw: () => schema,
 
-    buildRegistry: () => buildRegistryFromRelations(schema),
+    buildRegistry: () => buildRegistryFromSerializedSchema(schema),
   };
 }
 
@@ -129,12 +133,29 @@ export function deserializeSchema(
 // ============================================================
 
 /**
- * Builds a KindRegistry from serialized relations.
+ * Builds a KindRegistry from a serialized schema's ontology, edges, and
+ * identity slices.
  *
  * Persisted closures are a legacy inspection artifact. Relations are validated
  * and closures are recomputed so old schemas gain current hardening rules.
+ *
+ * Deliberately narrower than `SerializedSchema`: `nodes` carries no
+ * information this construction needs (node kinds are discovered through the
+ * ontology relations and edge endpoints, and no Zod schema can be
+ * reconstructed from JSON Schema anyway), so the ontology-tightening
+ * classifier (`src/schema/ontology-change.ts`) can build a registry for
+ * either side of a diff from an `OntologySnapshot` without also carrying the
+ * property-schema slice.
+ *
+ * Exported (renamed from the former private `buildRegistryFromRelations`) so
+ * the deserializer's registry and the ontology-tightening classifier's
+ * registry are the SAME construction — one owner, so a persisted ontology
+ * cannot be interpreted two different ways by two call sites.
  */
-function buildRegistryFromRelations(schema: SerializedSchema): KindRegistry {
+export function buildRegistryFromSerializedSchema(
+  schema: Pick<SerializedSchema, "ontology" | "nodes" | "edges" | "identity">,
+  structuralSubsumption: StructuralSubsumptionMode = "enforce",
+): KindRegistry {
   // Build empty node/edge kind maps (we don't have the actual Zod schemas)
   const nodeKinds = new Map<string, NodeType>();
   const edgeKinds = new Map<string, AnyEdgeType>();
@@ -146,24 +167,47 @@ function buildRegistryFromRelations(schema: SerializedSchema): KindRegistry {
         metaEdge: relation.metaEdge,
         from: relation.from,
         to: relation.to,
+        ...compositionRelationFields(relation),
       }),
     ),
-    edgeEndpoints: buildEdgeEndpointKinds(schema.edges),
+    edgeFacts: buildSerializedEdgeKindFacts(schema.edges),
+    // The registry above is built with EMPTY node/edge kind maps (no Zod
+    // schemas survive serialization), so the equivalence-class check needs
+    // its own classifier built from the document's own `nodes`/`edges`
+    // records, or every name would classify as neither and the check would
+    // silently pass a persisted schema `buildValidatedKindRegistry` would
+    // otherwise refuse.
+    kindClassification: {
+      isNodeKind: (name) => hasOwnKey(schema.nodes, name),
+      isEdgeKind: (name) => hasOwnKey(schema.edges, name),
+    },
+    // The persisted document's own projected property schema per node kind
+    // — the C.2 structural-subsumption check's schema source for a
+    // deserialized ontology (`src/registry/validate-structural-subsumption.ts`).
+    nodePropertySchemas: (kind) => {
+      const nodeDef =
+        hasOwnKey(schema.nodes, kind) ? schema.nodes[kind] : undefined;
+      return nodeDef?.properties;
+    },
+    structuralSubsumption,
     ...(schema.identity === undefined ? {} : { identity: schema.identity }),
   });
 }
 
 /**
  * Maps each edge kind's serialized definition to its domain/range kind
- * names, for `validateImpliesEndpointCompatibility`. A `Map` (rather than
- * the plain `schema.edges` object) so a lookup for an edge kind literally
- * named "toString" or another `Object.prototype` member can't resolve to
- * an inherited member instead of `undefined`.
+ * names and cardinalities, for `validateImpliesEndpointCompatibility`, for
+ * `expandEdgeEndpointAllowance` (`src/registry/edge-endpoint-allowance.ts`),
+ * and for `buildCompositionRelation`
+ * (`src/registry/composition-relation.ts`). A `Map` (rather than the plain
+ * `schema.edges` object) so a lookup for an edge kind literally named
+ * "toString" or another `Object.prototype` member can't resolve to an
+ * inherited member instead of `undefined`.
  */
-function buildEdgeEndpointKinds(
+export function buildSerializedEdgeKindFacts(
   edges: Record<string, SerializedEdgeDef>,
-): ReadonlyMap<string, EdgeEndpointKinds> {
-  const result = new Map<string, EdgeEndpointKinds>();
+): ReadonlyMap<string, EdgeKindFacts> {
+  const result = new Map<string, EdgeKindFacts>();
   for (const [kind, def] of Object.entries(edges)) {
     const pairs: { from: string; to: string }[] = [];
     if (def.targetKindsBySource === undefined) {
@@ -185,6 +229,10 @@ function buildEdgeEndpointKinds(
       from: def.fromKinds,
       to: def.toKinds,
       pairs,
+      cardinality: def.cardinality,
+      // Absent in documents stored before the option existed (the serializer
+      // omits the default so untouched graphs keep their hash).
+      targetCardinality: def.targetCardinality ?? "many",
     });
   }
   return result;

@@ -210,6 +210,7 @@ export {
   executeAuthoritativeGraphCommand,
   graphCommandExecutionContext,
   normalizeGraphCommandIsolation,
+  observesPostFenceCommits,
 } from "./command-contract";
 export type {
   AtomicMutationProgramConformanceCase,
@@ -289,6 +290,7 @@ export type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
   CompareAndSetNodeParams,
+  CompositionClaimScope,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
   ContendedUniqueRow,
@@ -307,8 +309,8 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
   ContributionRepopulationStats,
+  CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
-  CountEdgesFromParams,
   CountNodesByKindParams,
   CreateVectorIndexParams,
   DatabaseExtensionName,
@@ -329,6 +331,7 @@ export type {
   EdgeConvergenceMatch,
   EdgeCreateCommand,
   EdgeCreateCommandResult,
+  EdgeEndpointAllowance,
   EdgeEntityReadBackend,
   EdgeEntityWriteBackend,
   EdgeExistsBetweenParams,
@@ -384,6 +387,7 @@ export type {
   ManagedEdgeCreatePlan,
   ManagedNodeCreateMode,
   ManagedNodeCreatePlan,
+  MisassignedEdgeEndpointRow,
   NodeCreateCommand,
   NodeCreateCommandResult,
   NodeEntityReadBackend,
@@ -531,7 +535,6 @@ export type {
 } from "../indexes/types";
 export type { MetaEdgeName } from "../ontology/constants";
 export { ALL_META_EDGE_NAMES } from "../ontology/constants";
-export type { InferenceType } from "../ontology/types";
 export type { ValueType } from "../query/ast";
 export type { JsonPointer } from "../query/json-pointer";
 export type {

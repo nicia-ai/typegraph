@@ -347,11 +347,127 @@ The default depth was lowered from 100 to 10. If your traversals relied on the
 implicit 100-hop cap, add an explicit `.maxHops(100)` call.
 :::
 
+## Composition Shortcuts: `parts()` and `wholes()`
+
+A `.traverse(edgeKind, "e").recursive().to(kind, "x")` chain is the general
+tool for "follow this edge to unknown depth". When the edge you'd name is a
+declared [composition](/ontology#composition) relation (`partOf` / `hasPart`),
+`parts()` and `wholes()` are shorter and stay correct as the relation grows:
+
+```typescript
+// Instead of naming the realizing edge kind and recursing over it by hand:
+const segments = await store
+  .query()
+  .from("Episode", "e")
+  .whereNode("e", (e) => e.id.eq(episodeId))
+  .traverse("segmentOf", "seg_edge", { direction: "in" })
+  .recursive()
+  .toDynamic("Segment", "s")
+  .select((ctx) => ctx.s)
+  .execute();
+
+// parts() derives the edge kind(s) and direction(s) from the registry:
+const parts = await store
+  .query()
+  .from("Episode", "e")
+  .whereNode("e", (e) => e.id.eq(episodeId))
+  .parts("x")
+  .select((ctx) => ctx.x)
+  .execute();
+```
+
+The difference is not just brevity. A composition relation can be realized by
+**more than one edge kind** across levels — a Podcast whose Episodes attach
+via `episodeOf` and whose Segments attach via `segmentOf` — and those levels
+can even mix orientation, a `partOf` (`part -> whole`) edge at one level and a
+`hasPart` (`whole -> part`, the `has_*` convention) edge at another.
+`parts()`/`wholes()` follow the whole declared structure in one call; spelling
+the equivalent by hand would mean naming every realizing edge kind and getting
+each one's direction right.
+
+```typescript
+partOf(Episode, Podcast, { via: episodeOf });
+partOf(Segment, Episode, { via: segmentOf });
+
+// One call reaches both levels, regardless of how many edge kinds realize them:
+const parts = await store
+  .query()
+  .from("Podcast", "p")
+  .whereNode("p", (p) => p.id.eq(podcastId))
+  .parts("x")
+  .select((ctx) => ctx.x)
+  .execute();
+// parts includes every Episode AND every Segment transitively under the Podcast.
+
+// wholes() is the mirror — the ancestor chain from a part:
+const ancestors = await store
+  .query()
+  .from("Segment", "s")
+  .whereNode("s", (s) => s.id.eq(segmentId))
+  .wholes("x")
+  .select((ctx) => ctx.x)
+  .execute();
+// ancestors includes the Segment's Episode and that Episode's Podcast.
+```
+
+**Direction is derived, not declared.** `registry.compositionPartSide` decides
+per realizing edge kind: a `part -> whole` edge is followed reversed (`"in"`)
+by `parts()` (forward, `"out"`, by `wholes()`), and a `whole -> part` (`has_*`)
+edge is followed in its own direction (`"out"` by `parts()`, reversed, `"in"`,
+by `wholes()`). When a relation mixes both orientations across levels, the
+step compiles to one traversal whose direct and inverse edge-kind sets union
+via the same mechanism `{ expand: "inverse" }` already uses — no extra query,
+no extra call.
+
+**Recursion is the default**, matching the value proposition over `traverse()`:
+`parts()`/`wholes()` reach the full transitive closure unless you pass
+`maxHops: 1` for the direct level only. `depth` and `path` behave exactly as
+they do for `.recursive({ depth, path })`.
+
+```typescript
+const directChildren = await store
+  .query()
+  .from("Section", "s")
+  .whereNode("s", (s) => s.id.eq(sectionId))
+  .parts("x", { maxHops: 1 }) // direct sub-sections only, no recursion
+  .select((ctx) => ctx.x)
+  .execute();
+```
+
+**The result alias is untyped** (reached via `.field(name)`, like
+[`fromDynamic`](/queries/source#runtime-declared-kinds)): the parts or wholes
+closure under a kind is registry data — it may span more than one node kind
+with different schemas — not a single kind the graph's static type can name.
+
+**`parts()` on a kind declaring no composition parts refuses** rather than
+returning zero rows — an accepted call that cannot mean anything is an error,
+not a silently empty result:
+
+```typescript
+await store.query().from("Segment", "s").parts("x");
+// throws ConfigurationError, details.code: "COMPOSITION_NO_PARTS_DECLARED"
+// (Segment has no partOf/hasPart relation declaring parts of its own)
+```
+
+`wholes()` refuses the same way with `COMPOSITION_NO_WHOLES_DECLARED` on a
+kind declaring no composition wholes. `expand` is not accepted on either
+step: it means "same relation, more members" (ontology implying/inverse
+expansion), and the edge-kind set here is derived from the composition
+relation, not from an expansion mode.
+
+For the whole-plus-parts *export* shape (rather than a query result), see
+[`subgraph({ composition: true })`](/schemas-stores#composition-export).
+
 ## Limitations
 
 - **One recursive traversal per query.** A query with multiple `.recursive()` calls throws
   `UnsupportedPredicateError`. If you need multiple recursive paths, run separate queries or
-  use [set operations](/queries/combine) to merge results.
+  use [set operations](/queries/combine) to merge results. `parts()`/`wholes()` count toward
+  this limit whenever they recurse (the default — see
+  [Composition Shortcuts](#composition-shortcuts-parts-and-wholes)): combining either with any
+  other `.traverse()`/`.recursive()` step in the same query throws `UnsupportedPredicateError`
+  naming the step and the `maxHops: 1` workaround, which compiles to a direct (non-recursive)
+  traversal and so does not count.
 - **Edge properties are not projected** in recursive results. You can filter on edge properties
   with `whereEdge()`, but the `select()` context only exposes the start node, target node, and
   any depth/path aliases.

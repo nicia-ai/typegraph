@@ -46,7 +46,14 @@ export type EdgeAutocommitSingleStatementCandidate = Readonly<{
   revisionTrackingEnabled: boolean;
   kindRegistered: boolean;
   convergesDynamically: boolean;
-  cardinality: "many" | "one" | "unique" | "oneActive";
+  /**
+   * Whether the edge kind declares any cardinality axis, source or target, or
+   * `acyclic: true` — the same {@link edgeWriteNeedsConstraintFence} fold the
+   * write path itself consults. No native single-statement program applies
+   * either check, so a constrained edge declines both fused paths below and
+   * re-enters the portable route, which probes and refuses.
+   */
+  constrained: boolean;
 }>;
 
 export type AutocommitSingleStatementCandidate =
@@ -123,7 +130,7 @@ export function canFuseSchemaFenceInFirstWrite(
         !candidate.revisionTrackingEnabled &&
         candidate.kindRegistered &&
         !candidate.convergesDynamically &&
-        candidate.cardinality === "many"
+        !candidate.constrained
       );
     }
   }
@@ -197,7 +204,7 @@ export function isAutocommitSingleStatementWrite(
         !candidate.revisionTrackingEnabled &&
         candidate.kindRegistered &&
         !candidate.convergesDynamically &&
-        candidate.cardinality === "many"
+        !candidate.constrained
       );
     }
   }

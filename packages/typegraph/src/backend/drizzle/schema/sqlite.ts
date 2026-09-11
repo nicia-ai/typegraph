@@ -54,6 +54,8 @@ export type SqliteTableNames = Readonly<{
   recordedIdentityAssertions: string;
   identityClosure: string;
   identitySeparation: string;
+  identityTransitions: string;
+  identityTransitionRetention: string;
   uniques: string;
   edgeClaims: string;
   baseSchemaVersions: string;
@@ -95,6 +97,8 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
   identitySeparation: "typegraph_identity_separation",
+  identityTransitions: "typegraph_identity_transitions",
+  identityTransitionRetention: "typegraph_identity_transition_retention",
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
   baseSchemaVersions: "typegraph_base_schema_versions",
@@ -405,6 +409,70 @@ export function createSqliteTables(
     ],
   );
 
+  // The identity transition log: an append-only annotation on the recorded
+  // axis. Carries no membership — `class_kind`/`class_id` name the class
+  // canonical AFTER the transition, `prior_class_kind`/`prior_class_id` the
+  // canonical BEFORE (NULL when that class did not exist as a real row).
+  // Every membership answer still comes from `historicalIdentityReconstructionCtes`.
+  const identityTransitions = sqliteTable(
+    n.identityTransitions,
+    {
+      graphId: text("graph_id").notNull(),
+      transitionId: text("transition_id").notNull(),
+      recordedRevision: integer("recorded_revision").notNull(),
+      recordedAt: text("recorded_at").notNull(),
+      validAt: text("valid_at").notNull(),
+      cause: text("cause").notNull(),
+      classKind: text("class_kind").notNull(),
+      classId: text("class_id").notNull(),
+      priorClassKind: text("prior_class_kind"),
+      priorClassId: text("prior_class_id"),
+      assertionIds: text("assertion_ids").notNull(),
+      decision: text("decision"),
+      txId: text("tx_id"),
+      // NULL for a row this graph recorded itself through the live capture
+      // flush; set to the restore's own wall time for a row an archival
+      // restore inserted verbatim. `identityReplay` uses ONLY this marker —
+      // never a revision comparison — to decide whether a row may be paired
+      // with a reconstructed before/after snapshot, because a restored row's
+      // `recorded_revision` is the SOURCE graph's own number and interleaves
+      // arbitrarily with this graph's (see `isRestoredTransitionRow`).
+      restoredAt: text("restored_at"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.transitionId] }),
+      index(`${n.identityTransitions}_class_idx`).on(
+        t.graphId,
+        t.classKind,
+        t.classId,
+        t.recordedRevision,
+      ),
+      index(`${n.identityTransitions}_revision_idx`).on(
+        t.graphId,
+        t.recordedRevision,
+      ),
+      index(`${n.identityTransitions}_prior_class_idx`).on(
+        t.graphId,
+        t.priorClassKind,
+        t.priorClassId,
+        t.recordedRevision,
+      ),
+    ],
+  );
+
+  // One row per graph: the transition-retention high-water mark
+  // `pruneIdentityTransitions` advances. `0` (absent row) means nothing has
+  // been pruned.
+  const identityTransitionRetention = sqliteTable(
+    n.identityTransitionRetention,
+    {
+      graphId: text("graph_id").notNull(),
+      prunedBeforeRevision: integer("pruned_before_revision").notNull(),
+      prunedAt: text("pruned_at").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
   const uniques = sqliteTable(
     n.uniques,
     {
@@ -623,6 +691,8 @@ export function createSqliteTables(
     recordedIdentityAssertions,
     identityClosure,
     identitySeparation,
+    identityTransitions,
+    identityTransitionRetention,
     uniques,
     edgeClaims,
     fences,
