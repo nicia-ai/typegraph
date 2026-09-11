@@ -1296,6 +1296,7 @@ export function buildSqliteEngineProfile(
   // `ctx` rather than re-deriving a local copy.
 
   const tableNames: ResolvedSqlTableNames = {
+    schemaVersions: getTableName(tables.schemaVersions),
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
     recordedNodes: getTableName(tables.recordedNodes),

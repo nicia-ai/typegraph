@@ -46,6 +46,53 @@ const graph = defineGraph({
 export function registerBulkFindHeterogeneousIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  describe("bulkFindEdgesTo", () => {
+    it("reads inbound kinds once and preserves repeated and empty target buckets", async () => {
+      const store = await context.createStore(graph);
+      const person = await store.nodes.Person.create({ name: "Ada" });
+      const project = await store.nodes.Project.create({ name: "Project" });
+      const empty = await store.nodes.Project.create({ name: "Empty" });
+      const owner = await store.edges.owns.create(person, project, {
+        share: 1,
+      });
+      const dependency = await store.edges.dependsOn.create(project, project, {
+        reason: "self",
+      });
+      const spy = vi.spyOn(
+        context.getBackend(),
+        "findEdgesByHeterogeneousEndpointSet",
+      );
+      try {
+        const rows = await store.bulkFindEdgesTo({
+          targets: [
+            { kind: "Project", ids: [project.id, empty.id, project.id] },
+          ],
+          edgeKinds: ["owns", "dependsOn"],
+        });
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy).toHaveBeenCalledWith(
+          expect.objectContaining({ side: "to" }),
+        );
+        expect(rows.map((row) => row.edges.length)).toEqual([2, 0, 2]);
+        expect(rows[0]?.target.id).toBe(project.id);
+        expect(rows[0]?.edges.map((edge) => edge.id).toSorted()).toEqual(
+          [owner.id, dependency.id].toSorted(),
+        );
+        expect(rows[0]?.edges).not.toBe(rows[2]?.edges);
+        const limited = await store.snapshot().bulkFindEdgesTo(
+          {
+            targets: [{ kind: "Project", ids: [project.id] }],
+            edgeKinds: ["owns", "dependsOn"],
+          },
+          { limitPerInput: 1 },
+        );
+        expect(limited[0]?.edges).toHaveLength(1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   describe("bulkFindEdgesFrom", () => {
     it("reads several source and edge kinds through one backend call", async () => {
       const store = await context.createStore(graph);

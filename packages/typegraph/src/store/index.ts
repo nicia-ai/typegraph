@@ -11,6 +11,8 @@ export {
   type BulkEdgeSourceGroup,
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type BulkFindEdgesToParams,
+  type BulkFindEdgesToResult,
   type BulkFindRuntimeEdgesFromParams,
   type BulkFindRuntimeEdgesFromResult,
   type BulkOperationHookContext,

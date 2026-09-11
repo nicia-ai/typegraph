@@ -1658,6 +1658,23 @@ The operation validates every dynamic kind against the Store's graph. It require
 implements `findEdgesByHeterogeneousEndpointSet`; a custom backend without that capability gets a
 `ConfigurationError` instead of an implicit loop of singleton reads.
 
+#### `store.bulkFindEdgesTo(params, options?)`
+
+The reverse-direction mirror accepts `targets` and `edgeKinds`, returning `{ target, edges }`
+buckets in input order. It shares the forward method's chunking, empty/repeated bucket behavior,
+`limitPerInput`, capability checks, and temporal options. `StoreView.bulkFindEdgesTo` uses the
+view's pinned coordinate.
+
+```typescript
+const inbound = await store.bulkFindEdgesTo({
+  targets: [{ kind: "Document", ids: documentIds }],
+  edgeKinds: ["owns", "references"],
+});
+```
+
+For a single edge kind, `store.edges.references.bulkFindTo(targets)` already provides a
+set-oriented reverse read. Neither API needs `store.batch()`.
+
 #### `batchFindFrom(from, options?)` / `batchFindTo(to, options?)` / `batchFindByEndpoints(from, to, options?)`
 
 Deferred variants of `findFrom`, `findTo`, and `findByEndpoints` for use with
@@ -2282,10 +2299,11 @@ order — N query executions, never one round trip. Accepts two or more queries 
 set operations, or edge collection `batchFind*` methods), each keeping its own projection,
 filtering, sorting, and pagination.
 
-**Cost.** At least one statement per query, sometimes two: a query whose selective-field mapping
-falls back re-runs as a full fetch, and that fallback is detected *after* the selective statement
-has already executed. It clears the fast path, so a reused query instance pays the double only
-once — but the builder is immutable, so a query rebuilt per request pays it every request.
+**Cost.** At least one statement per query. Whole-node, whole-edge, and spread selections detected
+during planning use a full fetch from the start. A selector branch that depends on actual row
+values can still trigger a second statement: selective-field mapping falls back after its
+statement has executed, then re-runs as a full fetch. That fallback clears the fast path for the
+query instance, so reusing it avoids repeating the extra statement.
 
 With `backend.capabilities.execution.interactiveTransactions` the queries share one transaction; how that reaches the
 wire is the adapter's business. A SQL backend frames them with `begin`/`commit`, putting a networked
@@ -2965,6 +2983,7 @@ coordinate:
 | `view.nodes` / `view.edges`: `getById`, `getByIds`, `find`, `count` | pinned |
 | `view.edges`: `findFrom`, `findTo`, `bulkFindFrom`, `bulkFindTo`, `findByEndpoints` | pinned |
 | `view.bulkFindEdgesFrom(params, options?)` | pinned |
+| `view.bulkFindEdgesTo(params, options?)` | pinned |
 | `view.query()` | a pinned query builder with a **sealed** temporal axis — `.temporal(...)` throws |
 | `view.subgraph(rootId, options)` | pinned |
 | `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree` | pinned |

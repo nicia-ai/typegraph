@@ -377,6 +377,8 @@ import {
   AUTO_REFRESH_STATISTICS_ROW_THRESHOLD,
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type BulkFindEdgesToParams,
+  type BulkFindEdgesToResult,
   type BulkFindRuntimeEdgesFromParams,
   type BulkFindRuntimeEdgesFromResult,
   type BulkOperationHookContext,
@@ -755,6 +757,10 @@ type StoreCore<G extends GraphDef> = Readonly<{
     params: BulkFindEdgesFromParams<G, K>,
     options?: EdgeBulkFindEndpointOptions,
   ) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
+  bulkFindEdgesTo: <const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesToParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
   bulkFindRuntimeEdgesFrom: <
     NT extends RuntimeNodeKind,
     ET extends RuntimeEdgeKind,
@@ -3033,6 +3039,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     params: BulkFindEdgesFromParams<G, K>,
     options?: EdgeBulkFindEndpointOptions,
   ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
+    return this.#bulkFindEdgesByEndpoint("from", params, options);
+  }
+
+  /** Reverse-direction mirror of bulkFindEdgesFrom, grouped by target. */
+  async bulkFindEdgesTo<const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesToParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<readonly BulkFindEdgesToResult<G, K>[]> {
+    const results = await this.#bulkFindEdgesByEndpoint(
+      "to",
+      { sources: params.targets, edgeKinds: params.edgeKinds },
+      options,
+    );
+    return results.map(({ source, edges }) => ({ target: source, edges }));
+  }
+
+  async #bulkFindEdgesByEndpoint<const K extends EdgeKinds<G>>(
+    side: "from" | "to",
+    params: BulkFindEdgesFromParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
+    const operation = side === "from" ? "bulkFindEdgesFrom" : "bulkFindEdgesTo";
     const sources: readonly GraphNodeReference<G>[] = params.sources.flatMap(
       (group) => {
         if (!Object.hasOwn(this.#graph.nodes, group.kind)) {
@@ -3059,15 +3087,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#baseBackend.findEdgesByHeterogeneousEndpointSet;
     if (readEndpointSet === undefined) {
       throw new ConfigurationError(
-        "store.bulkFindEdgesFrom() requires a backend that can read heterogeneous endpoint and edge-kind sets in set-oriented statements.",
+        `store.${operation}() requires a backend that can read heterogeneous endpoint and edge-kind sets in set-oriented statements.`,
         {
           backend: this.#baseBackend.dialect,
           capability: "findEdgesByHeterogeneousEndpointSet",
-          operation: "bulkFindEdgesFrom",
+          operation,
         },
         {
-          suggestion:
-            "Use per-edge-kind bulkFindFrom calls explicitly if that round-trip tradeoff is acceptable.",
+          suggestion: `Use per-edge-kind ${side === "from" ? "bulkFindFrom" : "bulkFindTo"} calls explicitly if that round-trip tradeoff is acceptable.`,
         },
       );
     }
@@ -3101,7 +3128,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       sources;
     const rows = await readEndpointSet({
       graphId: this.graphId,
-      side: "from",
+      side,
       endpoints,
       edgeKinds: params.edgeKinds,
       ...(limitPerInput !== undefined &&
@@ -3114,7 +3141,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const edgesBySource = new Map<string, GraphEdgeForKinds<G, K>[]>();
     for (const row of rows) {
       const edge = rowToEdge(row) as GraphEdgeForKinds<G, K>;
-      const key = `${edge.fromKind}\0${edge.fromId}`;
+      const key =
+        side === "from" ?
+          `${edge.fromKind}\0${edge.fromId}`
+        : `${edge.toKind}\0${edge.toId}`;
       const bucket = edgesBySource.get(key);
       if (bucket === undefined) edgesBySource.set(key, [edge]);
       else bucket.push(edge);

@@ -31,9 +31,11 @@ import {
   buildPaginatedResult,
   buildSelectContext,
   buildSelectiveFields,
+  containsSelectableAliasObject,
   createStreamIterable,
   createTrackingContext,
   decodeSelectedValue,
+  executeSchemaCheckedRead,
   FieldAccessTracker,
   getStreamBatchSize,
   mapResults,
@@ -587,6 +589,43 @@ export class ExecutableQuery<
   }
 
   /**
+   * Reads rows and the active schema version in one statement snapshot.
+   * Throws SchemaChangedError before invoking the selector on stale rows,
+   * including when the query has no matches. Reload the schema and rebuild
+   * the query before retrying. This does not pin subsequent request reads.
+   * Uses a full projection; relevance and recursive queries are refused.
+   */
+  async executeChecked(
+    expectedSchemaVersion: number | undefined,
+  ): Promise<readonly R[]> {
+    if (this.#hasParameterReferences()) {
+      throw new Error(
+        "Checked reads require bound values, not param() references.",
+      );
+    }
+    const ast = this.toAst();
+    const backend = this.#requireBackend();
+    const rows = await this.#executeOnBackend(
+      backend,
+      executeSchemaCheckedRead({
+        backend,
+        ast,
+        graphId: this.#config.graphId,
+        expectedVersion: expectedSchemaVersion,
+        compile: () =>
+          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+      }),
+      "recorded-checked-query",
+    );
+    return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+      rows,
+      this.#state.startAlias,
+      this.#state.traversals,
+      this.#selectFn,
+    );
+  }
+
+  /**
    * Executes the query against a provided backend.
    *
    * Used by `store.batch()` to run several queries in sequence against one
@@ -753,14 +792,15 @@ export class ExecutableQuery<
 
       try {
         // Execute the select callback against a lightweight tracking context.
-        // We intentionally ignore the return value: we only need accessed fields.
-        void this.#selectFn(
+        const selected = this.#selectFn(
           trackingContext as SelectContext<
             Aliases,
             EdgeAliases,
             RecursiveAliases
           >,
         );
+        if (containsSelectableAliasObject(selected))
+          tracker.requiresFullRow = true;
       } catch {
         // Best-effort tracking: any runtime errors in the callback (e.g. calling
         // a method on an undefined optional field) should simply disable or
@@ -782,7 +822,7 @@ export class ExecutableQuery<
     this.#trackSelectFunctionAccesses(tracker);
 
     const accessed = tracker.getAccessedFields();
-    if (accessed.length === 0) {
+    if (tracker.requiresFullRow || accessed.length === 0) {
       this.#cachedSelectiveFieldsForExecute = undefined;
       return undefined;
     }
@@ -808,7 +848,10 @@ export class ExecutableQuery<
 
     const tracker = new FieldAccessTracker();
     this.#trackSelectFunctionAccesses(tracker);
-    if (!this.#recordOrderByFieldsForPagination(tracker)) {
+    if (
+      tracker.requiresFullRow ||
+      !this.#recordOrderByFieldsForPagination(tracker)
+    ) {
       this.#cachedSelectiveFieldsForPagination = undefined;
       return undefined;
     }

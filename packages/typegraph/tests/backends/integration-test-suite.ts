@@ -79,6 +79,7 @@ import {
   registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
   registerRemovalMaterializationIntegrationTests,
+  registerSchemaCheckedReadIntegrationTests,
   registerSelectiveRetryIntegrationTests,
   registerSetNodeMutationIntegrationTests,
   registerSetOperationIntegrationTests,
@@ -314,6 +315,7 @@ export function createIntegrationTestSuite<
     registerSetOperationIntegrationTests(context);
     registerSetNodeMutationIntegrationTests(context);
     registerSelectiveRetryIntegrationTests(context);
+    registerSchemaCheckedReadIntegrationTests(context);
     registerEdgeOperationIntegrationTests(context);
     registerRecursiveIntegrationTests(context);
     registerPaginationIntegrationTests(context);

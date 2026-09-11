@@ -3531,6 +3531,7 @@ export function resolveBundle<const D extends CapabilityBundleDefinition>(backen
 
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
+    schemaVersions?: string;
     nodes: string;
     edges: string;
     recordedNodes: string;
@@ -3775,6 +3776,7 @@ export type SqlPlaceholderChunk = Readonly<{
 
 // @public
 export type SqlTableNames = Readonly<{
+    schemaVersions?: string | undefined;
     nodes: string;
     edges: string;
     recordedNodes?: string | undefined;
@@ -4061,8 +4063,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly tableNames: {
         readonly kind: "reasoned";
-        readonly reason: "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.";
-        readonly accesses: 24;
+        readonly reason: "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.";
+        readonly accesses: 25;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";

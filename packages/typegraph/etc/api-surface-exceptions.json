@@ -1,1 +1,282 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "executeChecked",
+    "kind": "required-member-added",
+    "reason": "Additive method on a concrete query class with private state. Existing callers and subclasses receive the implementation; no existing call requires using the new method.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method supplied by every library-created store. StoreCore carries the internal STORE_RUNTIME symbol; custom backend implementations gain no required member.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created class with private state. The structural report omits its nominal state; existing callers and subclasses inherit the implementation.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "targets",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "executeChecked",
+    "kind": "required-member-added",
+    "reason": "Additive method on a concrete query class with private state. Existing callers and subclasses receive the implementation; no existing call requires using the new method.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method supplied by every library-created store. StoreCore carries the internal STORE_RUNTIME symbol; custom backend implementations gain no required member.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created class with private state. The structural report omits its nominal state; existing callers and subclasses inherit the implementation.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "targets",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "executeChecked",
+    "kind": "required-member-added",
+    "reason": "Additive method on a concrete query class with private state. Existing callers and subclasses receive the implementation; no existing call requires using the new method.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method supplied by every library-created store. StoreCore carries the internal STORE_RUNTIME symbol; custom backend implementations gain no required member.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created class with private state. The structural report omits its nominal state; existing callers and subclasses inherit the implementation.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "targets",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "executeChecked",
+    "kind": "required-member-added",
+    "reason": "Additive method on a concrete query class with private state. Existing callers and subclasses receive the implementation; no existing call requires using the new method.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method supplied by every library-created store. StoreCore carries the internal STORE_RUNTIME symbol; custom backend implementations gain no required member.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created class with private state. The structural report omits its nominal state; existing callers and subclasses inherit the implementation.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "targets",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "executeChecked",
+    "kind": "required-member-added",
+    "reason": "Additive method on a concrete query class with private state. Existing callers and subclasses receive the implementation; no existing call requires using the new method.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method supplied by every library-created store. StoreCore carries the internal STORE_RUNTIME symbol; custom backend implementations gain no required member.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created class with private state. The structural report omits its nominal state; existing callers and subclasses inherit the implementation.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "targets",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "executeChecked",
+    "kind": "required-member-added",
+    "reason": "Additive method on a concrete query class with private state. Existing callers and subclasses receive the implementation; no existing call requires using the new method.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method supplied by every library-created store. StoreCore carries the internal STORE_RUNTIME symbol; custom backend implementations gain no required member.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created class with private state. The structural report omits its nominal state; existing callers and subclasses inherit the implementation.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "targets",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "executeChecked",
+    "kind": "required-member-added",
+    "reason": "Additive method on a concrete query class with private state. Existing callers and subclasses receive the implementation; no existing call requires using the new method.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method supplied by every library-created store. StoreCore carries the internal STORE_RUNTIME symbol; custom backend implementations gain no required member.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "bulkFindEdgesTo",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created class with private state. The structural report omits its nominal state; existing callers and subclasses inherit the implementation.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "targets",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BulkFindEdgesToParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Required field of a new parameter type used only by the new bulkFindEdgesTo API. No existing call must construct this input.",
+    "issue": "#684"
+  }
+]

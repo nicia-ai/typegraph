@@ -5,7 +5,6 @@
  * SelectContext expected by the select callback, while guarding against
  * missing fields and unsupported "return whole node/edge" selections.
  */
-
 import {
   normalizeRequiredRowTimestamp,
   normalizeRowTimestamp,
@@ -24,6 +23,11 @@ import {
   type FieldTypeInfo,
   type SchemaIntrospector,
 } from "../schema-introspector";
+import {
+  containsSelectableAliasObject,
+  SELECTABLE_ALIAS_MARKER,
+  type SelectableAliasMarker,
+} from "./selectable-alias";
 import { decodeSelectedValue, nullToUndefined } from "./value-decoder";
 
 // ============================================================
@@ -92,52 +96,6 @@ function normalizeMetaValue(
 // ============================================================
 // Marker for "whole alias object" detection
 // ============================================================
-
-const SELECTABLE_ALIAS_MARKER = Symbol("selectable_alias_marker");
-
-type SelectableAliasMarker = Readonly<{
-  alias: string;
-  kind: AliasKind;
-}>;
-
-function isSelectableAliasObject(
-  value: unknown,
-): value is SelectableAliasMarker {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    SELECTABLE_ALIAS_MARKER in value
-  );
-}
-
-function containsSelectableAliasObject(value: unknown): boolean {
-  const visited = new WeakSet<object>();
-
-  function walk(current: unknown): boolean {
-    if (isSelectableAliasObject(current)) return true;
-
-    if (Array.isArray(current)) {
-      for (const item of current) {
-        if (walk(item)) return true;
-      }
-      return false;
-    }
-
-    if (typeof current !== "object" || current === null) {
-      return false;
-    }
-
-    if (visited.has(current)) return false;
-    visited.add(current);
-
-    for (const value of Object.values(current)) {
-      if (walk(value)) return true;
-    }
-    return false;
-  }
-
-  return walk(value);
-}
 
 // ============================================================
 // Public API

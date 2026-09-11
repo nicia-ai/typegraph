@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("33 reasoned entries sum to 93 accesses; 50 deferred entries sum to 217", () => {
+  it("33 reasoned entries sum to 94 accesses; 50 deferred entries sum to 217", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -152,7 +152,8 @@ describe("capability bundle totality (T9)", () => {
     // `catalog`: every current read is either inside `backend/capabilities/`
     // or off `EngineProvisioning`, never off a `GraphBackend`/
     // `TransactionBackend`-typed receiver — still 93.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(93);
+    // The checked-read schema binding adds one tableNames access: 93 -> 94.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(94);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });
 });

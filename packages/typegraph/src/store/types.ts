@@ -797,6 +797,24 @@ export type BulkFindEdgesFromResult<
   edges: readonly GraphEdgeForKinds<G, K>[];
 }>;
 
+/** Input for {@link Store.bulkFindEdgesTo}. */
+export type BulkFindEdgesToParams<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = Readonly<{
+  targets: readonly BulkEdgeSourceGroup<G>[];
+  edgeKinds: readonly K[];
+}>;
+
+/** One target bucket returned by {@link Store.bulkFindEdgesTo}. */
+export type BulkFindEdgesToResult<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = Readonly<{
+  target: GraphNodeReference<G>;
+  edges: readonly GraphEdgeForKinds<G, K>[];
+}>;
+
 /**
  * Result of an edge getOrCreateByEndpoints operation.
  */

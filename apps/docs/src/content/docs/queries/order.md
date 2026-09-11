@@ -304,3 +304,22 @@ async function searchProducts(query: string, page: number) {
 - [Execute](/queries/execute) - Cursor pagination and streaming
 - [Shape](/queries/shape) - Output transformation
 - [Filter](/queries/filter) - Reducing results with predicates
+
+## Newest target through an edge
+
+Traverse to the target, sort by its version sequence (or timestamp), and limit the result.
+This reads the edge and target together in one statement:
+
+```typescript
+const [newest] = await store.query()
+  .from("Document", "document")
+  .whereNode("document", (node) => node.id.eq(documentId))
+  .traverse("hasVersion", "edge").to("Version", "version")
+  .orderBy("version", "sequence", "desc")
+  .orderBy("version", "id", "desc")
+  .select((ctx) => ctx.version)
+  .limit(1)
+  .execute();
+```
+
+The ID order resolves ties deterministically. With no matching target, `newest` is `undefined`.

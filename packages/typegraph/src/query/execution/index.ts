@@ -37,4 +37,12 @@ export {
 } from "./selective-result-mapper";
 
 // Value decoding for selective projections
+export {
+  executeSchemaCheckedRead,
+  type SchemaCheckedReadInput,
+} from "./schema-checked-read";
+export {
+  containsSelectableAliasObject,
+  SELECTABLE_ALIAS_MARKER,
+} from "./selectable-alias";
 export { decodeSelectedValue, nullToUndefined } from "./value-decoder";

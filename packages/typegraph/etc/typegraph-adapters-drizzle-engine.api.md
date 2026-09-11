@@ -8671,6 +8671,7 @@ type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable
 
 // @public (undocumented)
 type ResolvedSqlTableNames = Readonly<{
+    schemaVersions?: string;
     nodes: string;
     edges: string;
     recordedNodes: string;
@@ -8970,6 +8971,7 @@ type SqlPlaceholderChunk = Readonly<{
 
 // @public
 type SqlTableNames = Readonly<{
+    schemaVersions?: string | undefined;
     nodes: string;
     edges: string;
     recordedNodes?: string | undefined;

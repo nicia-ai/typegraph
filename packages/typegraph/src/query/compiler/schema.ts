@@ -34,6 +34,8 @@ const SQL_SCHEMA_BRAND: unique symbol = typeGraphGlobalSymbol("sql-schema-v1");
  * rows.
  */
 export type SqlTableNames = Readonly<{
+  /** Active schema version relation; absent on backends without checked reads. */
+  schemaVersions?: string | undefined;
   /** Nodes table name (default: "typegraph_nodes") */
   nodes: string;
   /** Edges table name (default: "typegraph_edges") */
@@ -70,6 +72,8 @@ export type SqlTableNames = Readonly<{
 }>;
 
 export type ResolvedSqlTableNames = Readonly<{
+  /** Active schema version relation; absent on backends without checked reads. */
+  schemaVersions?: string;
   /** Nodes table name */
   nodes: string;
   /** Edges table name */
@@ -189,7 +193,8 @@ class SqlSchemaDescriptor extends SqlSchema {
 /**
  * Default table names matching the standard TypeGraph schema.
  */
-const DEFAULT_TABLE_NAMES: ResolvedSqlTableNames = {
+const DEFAULT_TABLE_NAMES = {
+  schemaVersions: "typegraph_schema_versions",
   nodes: "typegraph_nodes",
   edges: "typegraph_edges",
   recordedNodes: "typegraph_recorded_nodes",
@@ -204,7 +209,7 @@ const DEFAULT_TABLE_NAMES: ResolvedSqlTableNames = {
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
   fences: "typegraph_fences",
-};
+} satisfies ResolvedSqlTableNames;
 
 function resolveTableNames(
   names: Partial<SqlTableNames>,
@@ -230,6 +235,7 @@ function resolveTableNames(
     uniques: names.uniques ?? DEFAULT_TABLE_NAMES.uniques,
     edgeClaims: names.edgeClaims ?? DEFAULT_TABLE_NAMES.edgeClaims,
     fences: names.fences ?? DEFAULT_TABLE_NAMES.fences,
+    schemaVersions: names.schemaVersions ?? DEFAULT_TABLE_NAMES.schemaVersions,
   };
 }
 

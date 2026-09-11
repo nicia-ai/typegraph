@@ -87,6 +87,8 @@ import {
 import {
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type BulkFindEdgesToParams,
+  type BulkFindEdgesToResult,
   type DynamicStoreViewEdgeCollection,
   type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
@@ -1096,6 +1098,17 @@ class StoreViewImplementation<
     options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">,
   ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
     return this.store.bulkFindEdgesFrom(params, {
+      ...options,
+      ...withValidCoordinate(this.coordinate),
+    });
+  }
+
+  /** Inbound multi-kind edge read pinned to this view's coordinate. */
+  bulkFindEdgesTo<const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesToParams<G, K>,
+    options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">,
+  ): Promise<readonly BulkFindEdgesToResult<G, K>[]> {
+    return this.store.bulkFindEdgesTo(params, {
       ...options,
       ...withValidCoordinate(this.coordinate),
     });
