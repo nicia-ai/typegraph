@@ -2155,6 +2155,113 @@ A scoped receipt's `recorded` is **always `undefined`** — the recorded instant
 a per-transaction flush concern, unknowable mid-transaction. Plain
 `store.transaction()` contexts have no `measure` (no receipt is being produced).
 
+##### Cascaded parts in receipts and hooks
+
+Deleting a [composition](/ontology#composition) whole cascades through its
+live parts — see [Composition Cascade](/limitations#composition-cascade) for
+what the cascade itself does and does not do. Both the delete's
+`onOperationEnd` hook context (see [Observability Hooks](#observability-hooks))
+and every transaction receipt that covers the delete carry the parts it
+removed, as `cascadedParts`: leaf-first `{ kind, id }` refs, taken from the
+same plan the cascade executed.
+
+```typescript
+import {
+  createStore,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  partOf,
+} from "@nicia-ai/typegraph";
+import { z } from "zod";
+
+const Album = defineNode("Album", { schema: z.object({ title: z.string() }) });
+const Track = defineNode("Track", { schema: z.object({ title: z.string() }) });
+const trackOf = defineEdge("trackOf");
+
+const graph = defineGraph({
+  id: "music",
+  nodes: { Album: { type: Album }, Track: { type: Track } },
+  edges: {
+    trackOf: { type: trackOf, from: [Track], to: [Album], cardinality: "one" },
+  },
+  ontology: [partOf(Track, Album, { via: trackOf })],
+});
+
+const store = createStore(graph, backend, {
+  hooks: {
+    onOperationStart: (ctx) => {
+      // cascadedParts is never present here — the cascade has not been
+      // planned when the operation begins.
+      console.log("start", ctx.kind, ctx.cascadedParts);
+    },
+    onOperationEnd: (ctx) => {
+      console.log("end", ctx.kind, ctx.cascadedParts);
+    },
+  },
+});
+
+const album = await store.nodes.Album.create({ title: "Origins" });
+const trackOne = await store.nodes.Track.create(
+  { title: "Intro" },
+  { partOf: { kind: "Album", id: album.id } },
+);
+const trackTwo = await store.nodes.Track.create(
+  { title: "Outro" },
+  { partOf: { kind: "Album", id: album.id } },
+);
+
+const albumTwo = await store.nodes.Album.create({ title: "Reissue" });
+const trackThree = await store.nodes.Track.create(
+  { title: "Bonus" },
+  { partOf: { kind: "Album", id: albumTwo.id } },
+);
+
+const { receipt, result } = await store.transactionWithReceipt(async (tx) => {
+  const scope = await tx.measure(async (scoped) => {
+    // "end" fires exactly once, for the Album delete — the two cascaded
+    // Track deletes are not separate operations.
+    await scoped.nodes.Album.delete(album.id);
+  });
+  // Issued through the outer `tx`, outside the measured scope: this
+  // cascade belongs only to the transaction's own receipt, not to `scope`.
+  await tx.nodes.Album.delete(albumTwo.id);
+  return scope;
+});
+
+result.receipt.cascadedParts;
+// [{ kind: "Track", id: trackOne.id }, { kind: "Track", id: trackTwo.id }]
+result.receipt.writes.nodes;
+// { Album: 1 } — the scope's own delete call. The two cascaded Track
+// deletes never went through `scoped.nodes.Track.*`, so they are not write
+// intents and are not folded into this count.
+
+receipt.cascadedParts;
+// every cascade the transaction ran, scoped and outer alike, in the order
+// the deletes ran:
+// [
+//   { kind: "Track", id: trackOne.id },
+//   { kind: "Track", id: trackTwo.id },
+//   { kind: "Track", id: trackThree.id },
+// ]
+receipt.writes.nodes; // { Album: 2 }
+```
+
+`onOperationStart` never carries `cascadedParts` — the cascade has not run
+yet. `onOperationEnd` carries it on every node delete, present but empty when
+the whole has no live parts. A `tx.measure()` scope's receipt sees a cascade
+only for a delete issued **through that scoped context**; the same delete
+issued through the outer `tx` while the scope is open counts in the
+transaction's own receipt instead, following the same attribution rule as
+`scope.receipt.writes` (see
+[Scoped receipts: `tx.measure()`](#scoped-receipts-txmeasure)).
+
+A cascaded part is never a write intent, in either place it is reported.
+`receipt.writes.nodes` counts only the whole's own `delete` call, and the
+hook context's `entity` / `kind` / `id` fields describe only that same call.
+Cascaded parts are reported as refs beside those counters, never folded into
+them.
+
 #### Rollback and error propagation
 
 If the callback throws, the transaction is rolled back and the error re-throws to the
@@ -3144,6 +3251,7 @@ Configuration for observability callbacks:
 
 ```typescript
 import type {
+  CompositionNodeRef,
   HookContext,
   QueryHookContext,
   OperationHookContext,
@@ -3183,6 +3291,14 @@ type OperationHookContext = HookContext &
     entity: "node" | "edge";
     kind: string;
     id: string;
+    /**
+     * The composition parts a whole's delete cascaded through, leaf-first, as
+     * `{ kind, id }` refs. Present (and possibly empty) on `onOperationEnd`
+     * for a node delete; absent on `onOperationStart`, which fires before the
+     * cascade is planned, and on every non-delete operation. See
+     * [Cascaded parts in receipts and hooks](#cascaded-parts-in-receipts-and-hooks).
+     */
+    cascadedParts?: readonly CompositionNodeRef[];
   }>;
 ```
 
