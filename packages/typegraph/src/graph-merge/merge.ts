@@ -2687,25 +2687,30 @@ async function pairingInducedUniquenessConflicts<G extends GraphDef>(
 }
 
 /**
- * The ONE deterministic rebuild the `"flag"` policies share.
+ * The rebuild the `"flag"` policies share, iterated to a FIXPOINT.
  *
- * Builds are pure over the scored candidate set, so: inspect the first build
- * for the pairing-induced conflicts a `"flag"` policy must drop
+ * Builds are pure over the scored candidate set, so each pass inspects the
+ * current build for the pairing-induced conflicts a `"flag"` policy must drop
  * (`onEdgeConflict` — a collapse of distinct relationships;
- * `onUniquenessConflict` — a fused entity violating a unique constraint), and
- * if there are any, rebuild ONCE with the identity assertions on the paths
- * behind those pairings removed from candidate generation, carrying the
- * dropped conflicts forward on the plan's report. Every other cluster is
- * byte-identical across the two builds.
+ * `onUniquenessConflict` — a fused entity violating a unique constraint,
+ * attributed per member up front), rebuilds with the identity assertions on
+ * the paths behind those pairings removed from candidate generation, and
+ * carries the dropped conflicts forward on the plan's report. Every cluster no
+ * dropped assertion touched is byte-identical across passes.
  *
- * Why one rebuild is enough differs per arm. Edge: removing candidate edges
- * only ever shrinks fusions, so the rebuilt plan collapses a subset of what
- * the first did and nothing new can appear. Uniqueness: induction is decided
- * per member up front ({@link pairingInducedUniquenessConflicts}), so every
- * dropped pairing is one whose members claim no such key on their own, and
- * the writes the split adds back cannot claim it either. A second build that
- * still reports a pairing-induced conflict therefore violates one of those two
- * arguments, and the merge refuses with a typed error rather than looping.
+ * One pass is usually enough, but not always: splitting a fused entity puts
+ * its members' OWN writes back into the set, and a member's own key — one the
+ * fused union had discarded — can collide with a different, independently
+ * induced pairing that the fused set never met. The next pass sees exactly
+ * that collision on the rebuilt plan and attributes it the same way.
+ *
+ * Termination is by monotone decrease: every pass must drop at least one
+ * assertion id no earlier pass dropped, and the staged assertions are finite.
+ * A pass that names only already-dropped assertions while still reporting an
+ * induced conflict would mean the current plan's own counterfactual blamed a
+ * pairing that is not in the plan — impossible by construction, since
+ * induction runs over the current build's clusters — so that, and only that,
+ * is refused as an invariant violation rather than looped on.
  */
 async function resolvePairingInducedConflicts<G extends GraphDef>(
   target: Store<G>,
@@ -2723,42 +2728,51 @@ async function resolvePairingInducedConflicts<G extends GraphDef>(
       await pairingInducedUniquenessConflicts(target, built)
     : []),
   ];
-  const suspected = await inducedConflictsOf(first);
-  if (suspected.length === 0) return first.plan;
-  const droppedAssertionIds = new Set(
-    suspected.flatMap((conflict) => conflict.assertionIds),
-  );
-  const rebuilt = await rebuild(droppedAssertionIds);
-  const remaining = await inducedConflictsOf(rebuilt);
-  if (remaining.length > 0) {
-    throw new MergeError(
-      "Identity pairing rebuild did not converge: the plan rebuilt without the dropped identity pairings still reports a pairing-induced conflict.",
-      {
-        details: {
-          droppedAssertionIds: [...droppedAssertionIds].sort((left, right) =>
-            compareStrings(left, right),
-          ),
-          remaining,
+  const dropped = new Set<string>();
+  const carried: IdentityUnresolvedConflict[] = [];
+  let current = first;
+  for (;;) {
+    const suspected = await inducedConflictsOf(current);
+    if (suspected.length === 0) break;
+    const newlyDropped = suspected
+      .flatMap((conflict) => conflict.assertionIds)
+      .filter((id) => !dropped.has(id));
+    if (newlyDropped.length === 0) {
+      throw new MergeError(
+        "Identity pairing rebuild did not converge: the plan rebuilt without the dropped identity pairings still reports a pairing-induced conflict that names no further pairing to drop.",
+        {
+          details: {
+            droppedAssertionIds: [...dropped].sort((left, right) =>
+              compareStrings(left, right),
+            ),
+            remaining: suspected,
+          },
         },
-      },
+      );
+    }
+    for (const id of newlyDropped) dropped.add(id);
+    const rebuilt = await rebuild(dropped);
+    // The edge arm's first pass counts an edge carrying identity AND another
+    // source as identity (a forced pairing a block source also proposed is
+    // never scored, so whether similarity alone would fuse the pair is
+    // unknowable before the rebuild). The rebuild answers it: a pair the
+    // rebuilt plan fused anyway was never held together by the pairing, so
+    // its collapse is the merge's ordinary repoint and is not reported against
+    // the pairing. The uniqueness arm decided induction up front and passes
+    // through unchanged.
+    carried.push(
+      ...suspected.filter(
+        (conflict) => !stillFusedWithoutPairing(rebuilt.plan, conflict),
+      ),
     );
+    current = rebuilt;
   }
-  // The edge arm's first pass counts an edge carrying identity AND another
-  // source as identity (a forced pairing a block source also proposed is never
-  // scored, so whether similarity alone would fuse the pair is unknowable
-  // before the rebuild). The rebuild answers it: a pair the rebuilt plan fused
-  // anyway was never held together by the pairing, so its collapse is the
-  // merge's ordinary repoint and is not reported against the pairing. The
-  // uniqueness arm decided induction up front and passes through unchanged.
-  const induced = suspected.filter(
-    (conflict) => !stillFusedWithoutPairing(rebuilt.plan, conflict),
-  );
-  if (induced.length === 0) return first.plan;
+  if (carried.length === 0) return first.plan;
   return {
-    ...rebuilt.plan,
+    ...current.plan,
     identityConflicts: sortIdentityConflicts([
-      ...rebuilt.plan.identityConflicts,
-      ...induced,
+      ...current.plan.identityConflicts,
+      ...carried,
     ]),
   };
 }

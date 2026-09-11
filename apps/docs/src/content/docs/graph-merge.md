@@ -826,15 +826,22 @@ them as one entity) — they are simply not consolidated into a single row by
 this merge, and every relationship each row carried lands as it was staged. A
 collision that similarity, a shared unique value or an ontology retype would
 have produced without the assertion is not the pairing's doing and is not
-reported against it. One rebuild is always enough, for a different reason per
-arm: an **edge** collapse can only disappear when candidate edges are removed,
-since fusions only shrink; a **uniqueness** collision is attributed *before*
-the rebuild, member by member — the planner probes the same store decision a
-second time over the members' own unfused writes, and drops a pairing only when
-no member claims that key on its own, so the writes the split adds back cannot
-claim it either. The merge refuses with a `GRAPH_MERGE_ERROR` rather than
-looping if a rebuilt plan ever reports a pairing-induced conflict again. Three
-things stay where they are today: a uniqueness collision a member carries **on
+reported against it. Attribution happens *before* each rebuild: an **edge**
+collapse is induced when the cluster's non-identity edges alone do not connect
+the two endpoints (and confirmed by the rebuild, since fusions only shrink); a
+**uniqueness** collision is attributed member by member — the planner probes
+the same store decision a second time over the members' own unfused writes,
+and drops a pairing only when no member claims that key on its own. The
+decision then iterates to a fixpoint: splitting a fused entity puts its
+members' own writes back into the plan, and a member's own key the fused union
+had discarded can meet a *different* induced pairing the fused plan never met,
+so each pass inspects the rebuilt plan and drops what it newly induces, and
+every pass's conflicts are carried on the report. It terminates because every
+pass must drop at least one assertion no earlier pass dropped and the staged
+assertions are finite; a pass that named nothing new while still reporting an
+induced conflict would contradict its own counterfactual, and only that is
+refused with a `GRAPH_MERGE_ERROR` instead of looped on. Three things stay
+where they are today: a uniqueness collision a member carries **on
 its own** (not one the fusion created) is still refused by the commit, flag or
 not, and drops no pairing; the plan-time probe reads the plan's resolved
 properties, so a key the target's row carries that no branch restated is caught

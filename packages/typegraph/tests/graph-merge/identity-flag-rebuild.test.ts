@@ -595,6 +595,89 @@ describe.each(backendMatrix())(
     // "did not converge" GRAPH_MERGE_ERROR instead of the constraint refusal.
 
     /**
+     * A collision only the SECOND pass can see. Pairing A fuses `a1` (first
+     * only) with `a2` (`Grace Hopper`); the union keeps the survivor's `first`,
+     * so the fused key is `Ada Hopper` — which the target's `emp` holds — while
+     * `a2`'s own key `Grace Hopper` is discarded by the union. Pairing C fuses
+     * `c1` (first `Grace`) with `c2` (`Zed Hopper`) into `Grace Hopper`. Pass
+     * one sees only A's collision (C collides with nothing the fused set
+     * writes) and drops A; splitting A puts `a2`'s own `Grace Hopper` back,
+     * which now collides with C's fused write. Pass two attributes that to C
+     * (no member of C claims `Grace Hopper` alone) and drops it; pass three
+     * finds nothing. Every pass's conflict is carried on the report.
+     */
+    it("iterates induction and rebuild to a fixpoint when a split member's own key meets a second induced pairing", async () => {
+      const [base] = await createStoreWithSchema(
+        uniqueGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      await base.nodes.NamedEmployee.create(
+        { name: "Ada Hopper", first: "Ada", last: "Hopper" },
+        { id: "emp" },
+      );
+      const source = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.NamedPerson.create(
+        { name: "Ada", first: "Ada" },
+        { id: "a1" },
+      );
+      await source.store.nodes.NamedPerson.create(
+        { name: "Grace Hopper", first: "Grace", last: "Hopper" },
+        { id: "a2" },
+      );
+      await source.store.nodes.NamedPerson.create(
+        { name: "Grace", first: "Grace" },
+        { id: "c1" },
+      );
+      await source.store.nodes.NamedPerson.create(
+        { name: "Zed Hopper", first: "Zed", last: "Hopper" },
+        { id: "c2" },
+      );
+      const pairA = await source.store.identity.assertSame(
+        { kind: "NamedPerson", id: "a1" },
+        { kind: "NamedPerson", id: "a2" },
+      );
+      const pairC = await source.store.identity.assertSame(
+        { kind: "NamedPerson", id: "c1" },
+        { kind: "NamedPerson", id: "c2" },
+      );
+
+      const result = await merge(base, [source], {
+        branchOrder: [BRANCH_A],
+        identity: { pairing: "definitional", onUniquenessConflict: "flag" },
+      });
+      if (isErr(result)) throw result.error;
+      const conflicts = conflictsOfKind(result.data as never, "uniqueness");
+      console.info(`[${entry.name}] fixpoint conflicts:`, conflicts);
+      expect(
+        conflicts.map((conflict) => ({
+          canonical: conflict.canonical.id,
+          owner: conflict.owner.id,
+          assertionIds: conflict.assertionIds,
+        })),
+      ).toEqual([
+        // Pass one: A's fused `Ada Hopper` against the employee row.
+        { canonical: "a1", owner: "emp", assertionIds: [pairA.assertion.id] },
+        // Pass two: C's fused `Grace Hopper` against `a2`'s own write.
+        { canonical: "c1", owner: "a2", assertionIds: [pairC.assertion.id] },
+      ]);
+      // Both pairings dropped, every row lands on its own, nothing collides.
+      expect(
+        (await base.nodes.NamedPerson.find())
+          .map((row) => row.id as string)
+          .toSorted(),
+      ).toEqual(["a1", "a2", "c1", "c2"]);
+      expect(await base.verifyConstraintFences()).toEqual([]);
+    });
+    // MUTATION CHECK: force a single pass in `resolvePairingInducedConflicts`
+    // (`break` after the first rebuild, throwing the invariant error if the
+    // rebuilt plan still reports an induced conflict) — pass two's collision
+    // is then the "did not converge" GRAPH_MERGE_ERROR and `throw result.error`
+    // fails this test.
+
+    /**
      * The dropped pairing is the one on the PATH between the collapsed
      * endpoints, not the cluster's whole pairing: `x`–`y`–`z`–`w` chained by
      * three assertions, with only `x` and `z` carrying edges that collapse.
