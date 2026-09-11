@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("34 reasoned entries sum to 106 accesses; 50 deferred entries sum to 230", () => {
+  it("34 reasoned entries sum to 106 accesses; 50 deferred entries sum to 231", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -166,6 +166,6 @@ describe("capability bundle totality (T9)", () => {
     // The composition cascade adds one heterogeneous endpoint-set consumer:
     // 229 -> 230.
     // Edge acyclicity adds three tableNames reads: 102 -> 105.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(230);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(231);
   });
 });

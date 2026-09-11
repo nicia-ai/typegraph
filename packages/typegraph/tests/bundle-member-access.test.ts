@@ -34,7 +34,7 @@ const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
 const REASONED_FLOOR = 106;
-const DEFERRED_LIVE_TOTAL = 226;
+const DEFERRED_LIVE_TOTAL = 227;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -42,9 +42,9 @@ const DEFERRED_LIVE_TOTAL = 226;
 // The resolved-node batch update reads its optional port at five guarded call
 // sites and reserves one additional access in its declared ceiling.
 // The composition cascade adds one heterogeneous endpoint-set read.
-const DEFERRED_DECLARED_TOTAL = 230;
+const DEFERRED_DECLARED_TOTAL = 231;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 346;
+const TOTAL_ROW_COUNT = 347;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
