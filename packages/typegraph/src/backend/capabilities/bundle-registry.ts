@@ -1214,8 +1214,10 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     // 5th consumer: `store/operations/composition-cascade.ts`'s
     // `planCompositionCascade`, reading one round's whole-side composition
     // edges the same way `findConnectedEdgesForNodeBatch`
-    // (`node-operations.ts`) already does.
-    ceiling: 5,
+    // (`node-operations.ts`) already does. 6th: `composition-create.ts`'s
+    // `readCompositionUnattachedParts`, reading one page's attachment
+    // candidates per orientation instead of one connected-edges read per row.
+    ceiling: 6,
   },
   fulltextSearch: {
     kind: "deferred",

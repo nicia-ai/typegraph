@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("33 reasoned entries sum to 97 accesses; 50 deferred entries sum to 218", () => {
+  it("33 reasoned entries sum to 97 accesses; 50 deferred entries sum to 219", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -162,8 +162,11 @@ describe("capability bundle totality (T9)", () => {
     // a reasoned member with zero measured accesses for the same reason as
     // `catalog`: every current read is either inside `backend/capabilities/`
     // or off `EngineProvisioning`, never off a `GraphBackend`/
-    // `TransactionBackend`-typed receiver — still 97.
+    // `TransactionBackend`-typed receiver — still 97. The deferred ceilings
+    // moved 218 -> 219 when the unattached-parts audit began reading one
+    // page's attachment candidates through
+    // `findEdgesByHeterogeneousEndpointSet` (its 6th consumer).
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(97);
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(218);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(219);
   });
 });

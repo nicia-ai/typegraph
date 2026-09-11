@@ -155,11 +155,9 @@ const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
   "drizzle/trusted-import.ts":
     "writer — four stamping sites (native per-dialect INSERT)",
   "drizzle/operations/shared.ts":
-    "expectedValidFromPredicate — the NULL-safe fence",
+    "expectedValidFromPredicate — the NULL-safe fence; currentWindowPredicate — the constraint-fence audit's current-window liveness filter",
   "drizzle/operations/collections.ts": "read predicate",
   "live-node-candidates.ts": "read predicate (search currency)",
-  "drizzle/operations/constraint-fence-audit.ts":
-    "read predicate — the misassigned-endpoint audit's current-window liveness filter",
   "drizzle/operations/hybrid.ts": "projection into the hybrid-search statement",
   "row-mappers.ts": "row mapper — NULL to undefined",
   "drizzle/schema/sqlite.ts": "column declaration",
@@ -258,6 +256,6 @@ describe("the stamping-site inventory (I5)", () => {
     for (const role of Object.values(BACKEND_COLUMN_FILES)) {
       expect(role.length).toBeGreaterThan(0);
     }
-    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(16);
+    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(15);
   });
 });
