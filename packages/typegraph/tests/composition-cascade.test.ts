@@ -219,13 +219,95 @@ describe("planCompositionCascade", () => {
       podcast.id,
       backend,
     );
-    // MUTATION: drop the `.toReversed()` in `planCompositionCascade` and this
+    // MUTATION: drop the `.toReversed()` in `cascadeDeletionOrder` and this
     // assertion flips to [Episode, Segment] (BFS discovery order).
     expect(plan.members.map((member) => member.kind)).toEqual([
       "Segment",
       "Episode",
     ]);
     expect(plan.consumedEdgeIds.size).toBe(2);
+  });
+
+  it("orders two SIBLING parts of one whole by code-point (kind, id), not by the order they were created or read", async () => {
+    const graph = buildPodcastGraph("cascade-plan-sibling-order");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+    const podcast = await store.nodes.Podcast.create({ title: "p" });
+    const episode = await store.nodes.Episode.create(
+      { title: "e" },
+      { id: "cascade-order-episode" },
+    );
+    // Created in DESCENDING id order, so creation order and sort order
+    // disagree: anything that reports the closure in discovery (or row-read)
+    // order instead of sorting it answers "b" before "a".
+    await store.nodes.Segment.create({}, { id: "cascade-order-b" });
+    await store.nodes.Segment.create({}, { id: "cascade-order-a" });
+    await store.edges.episodeOf.create(episode, podcast, {});
+    await store.edges.segmentOf.create(
+      { kind: "Segment", id: "cascade-order-b" },
+      episode,
+      {},
+    );
+    await store.edges.segmentOf.create(
+      { kind: "Segment", id: "cascade-order-a" },
+      episode,
+      {},
+    );
+
+    const registry = buildKindRegistry(graph);
+    const plan = await planCompositionCascade(
+      { graphId: graph.id, registry, lock: uncapturedGraphWriteLock() },
+      "Podcast",
+      podcast.id,
+      backend,
+    );
+    // MUTATION: reverse the per-round sort in `cascadeDeletionOrder`
+    // (src/store/operations/composition-cascade.ts) — swap the comparison's
+    // operands — and the two segments come back "b" before "a", failing this
+    // assertion on every run.
+    expect(plan.members.map((member) => `${member.kind}/${member.id}`)).toEqual(
+      [
+        "Segment/cascade-order-a",
+        "Segment/cascade-order-b",
+        "Episode/cascade-order-episode",
+      ],
+    );
+  });
+
+  it("reports that same sibling order on the delete's receipt", async () => {
+    const graph = buildPodcastGraph("cascade-receipt-sibling-order");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+    const podcast = await store.nodes.Podcast.create({ title: "p" });
+    const episode = await store.nodes.Episode.create(
+      { title: "e" },
+      { id: "receipt-order-episode" },
+    );
+    await store.nodes.Segment.create({}, { id: "receipt-order-b" });
+    await store.nodes.Segment.create({}, { id: "receipt-order-a" });
+    await store.edges.episodeOf.create(episode, podcast, {});
+    await store.edges.segmentOf.create(
+      { kind: "Segment", id: "receipt-order-b" },
+      episode,
+      {},
+    );
+    await store.edges.segmentOf.create(
+      { kind: "Segment", id: "receipt-order-a" },
+      episode,
+      {},
+    );
+
+    const { receipt } = await store.transactionWithReceipt(async (tx) => {
+      await tx.nodes.Podcast.delete(podcast.id);
+    });
+
+    // The plan's order IS the reported order: the receipt is a projection of
+    // it, never a second walk. (Same MUTATION as the test above.)
+    expect(receipt.cascadedParts).toEqual([
+      { kind: "Segment", id: "receipt-order-a" },
+      { kind: "Segment", id: "receipt-order-b" },
+      { kind: "Episode", id: "receipt-order-episode" },
+    ]);
   });
 
   it("throws CompositionCycleError on a revisit rather than truncating", async () => {

@@ -240,7 +240,7 @@ describe.each(backendMatrix())(
       const artifact = planResult.data;
 
       // MUTATION: drop `liveDiscoveredMembers`'s filter from
-      // `planCompositionCascade` (return `discoveryOrder` unfiltered) and
+      // `planCompositionCascade` (keep every discovered member, live or not) and
       // this reports `p2` as an orphan instead of an empty array — a dead
       // node is not a live composition part for a caller to act on.
       expect(artifact.review.compositionOrphans).toEqual([]);

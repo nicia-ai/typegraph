@@ -376,9 +376,14 @@ export type QueryHookContext = HookContext &
  */
 export type OperationOutcomeFacts = Readonly<{
   /**
-   * The composition parts a whole's delete cascaded through, leaf-first, as
-   * `{ kind, id }` refs. Taken from the plan the cascade already computed, so
-   * it names exactly the parts this delete removed.
+   * The composition parts a whole's delete cascaded through, as `{ kind, id }`
+   * refs in the cascade's own delete order: LEAF-FIRST — every part before the
+   * whole it belongs to — and then code-point order by kind and id within one
+   * level of the closure. Two sibling parts of one whole have no order
+   * between them to respect, so they are sorted rather than left in the order
+   * the cascade's reads returned them, which makes this list comparable for
+   * equality across runs and backends. Taken from the plan the cascade already
+   * computed, so it names exactly the parts this delete removed.
    *
    * Present — and EMPTY when nothing cascaded, including for a kind that
    * declares no composition pair at all — on a node hard delete, and on a
@@ -782,10 +787,13 @@ export type TransactionReceipt = Readonly<{
   }>;
   /**
    * Every composition part a node delete inside this transaction cascaded
-   * through, in the order the deletes ran (each delete's own leaf-first
-   * closure, concatenated). Empty when the transaction deleted no
-   * composition whole. Taken from the same plan the cascade executed, so it
-   * never names a part the cascade did not delete.
+   * through, in the order the deletes ran: each delete's own closure —
+   * leaf-first, then code-point order by kind and id within one level —
+   * concatenated in the order the deletes were issued. Empty when the
+   * transaction deleted no composition whole. Taken from the same plan the
+   * cascade executed, so it never names a part the cascade did not delete, and
+   * the order is fixed by the closure rather than by the order any read
+   * returned its rows.
    *
    * Not a write COUNT: a cascaded part is not a write intent at the
    * collection surface (`writes.nodes` counts the whole's own `delete` call
