@@ -3419,16 +3419,18 @@ export type IdentityUnresolvedConflict = Readonly<{
 /**
 * `onUniquenessConflict: "flag"` dropped an identity pairing because the
 * entity it fused (`canonical`, out of `members`) would have violated
-* `constraintName` over `fields` against `holder` — another write of the same
-* plan, or a row the target already holds. `assertionIds` and `branches` name
-* the dropped pairing exactly as the `"edge"` arm does.
+* `constraintName` over `fields`: `owner` holds the key — another write of the
+* same plan, or a row the target already holds — and `loser` is the write the
+* store refused for it; `canonical` is one of the two. `assertionIds` and
+* `branches` name the dropped pairing exactly as the `"edge"` arm does.
 */
 | Readonly<{
     kind: "uniqueness";
     constraintName: string;
     fields: readonly string[];
     canonical: EntityRef;
-    holder: EntityRef;
+    owner: EntityRef;
+    loser: EntityRef;
     members: readonly EntityRef[];
     assertionIds: readonly string[];
     branches: readonly BranchId[];
@@ -6064,6 +6066,7 @@ type ResolveDepthAlias<DC, A extends string> = DC extends string ? DC : DC exten
 type ResolvedNodeClaimConflict = Readonly<{
     constraintName: string;
     fields: readonly string[];
+    key: string;
     claimant: Readonly<{
         kind: string;
         id: string;
@@ -6824,17 +6827,6 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>, policy?: NodeDeletePolicy) => Promise<void>;
-    probeResolvedNodeUniqueness: (target: GraphBackend | TransactionBackend, writes: Readonly<{
-        upserts: readonly Readonly<{
-            kind: string;
-            id: string;
-            props: Readonly<Record<string, unknown>>;
-        }>[];
-        releases: readonly Readonly<{
-            kind: string;
-            id: string;
-        }>[];
-    }>) => Promise<readonly ResolvedNodeClaimConflict[]>;
     applyResolvedNodeUniqueness: <Output>(target: TransactionBackend, writes: Readonly<{
         upserts: readonly Readonly<{
             kind: string;
@@ -6846,6 +6838,17 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }>[];
     }>, apply: () => Promise<Output>) => Promise<Output>;
+    probeResolvedNodeUniqueness: (target: GraphBackend | TransactionBackend, writes: Readonly<{
+        upserts: readonly Readonly<{
+            kind: string;
+            id: string;
+            props: Readonly<Record<string, unknown>>;
+        }>[];
+        releases: readonly Readonly<{
+            kind: string;
+            id: string;
+        }>[];
+    }>) => Promise<readonly ResolvedNodeClaimConflict[]>;
     readCurrentIdentityAssertions: (mode: "state" | "archival", options?: Readonly<{
         nodeKinds?: readonly string[];
         includeDeleted?: boolean;

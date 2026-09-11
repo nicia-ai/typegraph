@@ -4664,6 +4664,7 @@ type ResolveDepthAlias<DC, A extends string> = DC extends string ? DC : DC exten
 type ResolvedNodeClaimConflict = Readonly<{
     constraintName: string;
     fields: readonly string[];
+    key: string;
     claimant: Readonly<{
         kind: string;
         id: string;
@@ -5327,17 +5328,6 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>, policy?: NodeDeletePolicy) => Promise<void>;
-    probeResolvedNodeUniqueness: (target: GraphBackend | TransactionBackend, writes: Readonly<{
-        upserts: readonly Readonly<{
-            kind: string;
-            id: string;
-            props: Readonly<Record<string, unknown>>;
-        }>[];
-        releases: readonly Readonly<{
-            kind: string;
-            id: string;
-        }>[];
-    }>) => Promise<readonly ResolvedNodeClaimConflict[]>;
     applyResolvedNodeUniqueness: <Output>(target: TransactionBackend, writes: Readonly<{
         upserts: readonly Readonly<{
             kind: string;
@@ -5349,6 +5339,17 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }>[];
     }>, apply: () => Promise<Output>) => Promise<Output>;
+    probeResolvedNodeUniqueness: (target: GraphBackend | TransactionBackend, writes: Readonly<{
+        upserts: readonly Readonly<{
+            kind: string;
+            id: string;
+            props: Readonly<Record<string, unknown>>;
+        }>[];
+        releases: readonly Readonly<{
+            kind: string;
+            id: string;
+        }>[];
+    }>) => Promise<readonly ResolvedNodeClaimConflict[]>;
     readCurrentIdentityAssertions: (mode: "state" | "archival", options?: Readonly<{
         nodeKinds?: readonly string[];
         includeDeleted?: boolean;
