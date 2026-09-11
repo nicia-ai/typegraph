@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.58.0
+
+### Minor Changes
+
+- [#683](https://github.com/nicia-ai/typegraph/pull/683) [`ce35043`](https://github.com/nicia-ai/typegraph/commit/ce35043aa9356317229d85d0c4b9998284a36e1a) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.bulkFindEdgesTo` and its pinned-view counterpart for set-oriented inbound reads across edge kinds. Detect whole-node and whole-edge selections before issuing a projected query, avoiding a redundant fetch for fresh query instances. Add `executeChecked(expectedSchemaVersion)` for a relational read and committed-schema check in one statement, with `SchemaChangedError` on mismatch, including empty results.
+
 ## 0.57.1
 
 ### Patch Changes
