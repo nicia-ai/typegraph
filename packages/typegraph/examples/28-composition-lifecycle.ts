@@ -30,6 +30,8 @@
  * Run with:
  *   npx tsx examples/28-composition-lifecycle.ts
  */
+import { deepStrictEqual } from "node:assert/strict";
+
 import {
   CompositionExistenceError,
   createAdapterStore,
@@ -125,11 +127,9 @@ const graph = defineGraph({
 });
 
 function assertEqual<T>(actual: T, expected: T, label: string): void {
-  const actualJson = JSON.stringify(actual);
-  const expectedJson = JSON.stringify(expected);
-  if (actualJson !== expectedJson) {
-    throw new Error(`${label}: expected ${expectedJson}, got ${actualJson}`);
-  }
+  // `deepStrictEqual` compares Sets and Maps by membership; a JSON round
+  // trip would serialize every Set as `{}` and pass vacuously.
+  deepStrictEqual(actual, expected, label);
   console.log(`  OK: ${label}`);
 }
 
