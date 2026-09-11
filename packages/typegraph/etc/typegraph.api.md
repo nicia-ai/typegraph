@@ -6603,6 +6603,21 @@ type ResolvedEmbeddingIndex = Readonly<{
 // @public
 type ResolveDepthAlias<DC, A extends string> = DC extends string ? DC : DC extends true ? `${A}_depth` : never;
 
+// @public
+type ResolvedNodeClaimConflict = Readonly<{
+    constraintName: string;
+    fields: readonly string[];
+    claimant: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    holder: Readonly<{
+        kind: string;
+        id: string;
+        origin: "set" | "persisted";
+    }>;
+}>;
+
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
     nodes: string;
@@ -7480,6 +7495,17 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>, policy?: NodeDeletePolicy) => Promise<void>;
+    probeResolvedNodeUniqueness: (target: GraphBackend | TransactionBackend, writes: Readonly<{
+        upserts: readonly Readonly<{
+            kind: string;
+            id: string;
+            props: Readonly<Record<string, unknown>>;
+        }>[];
+        releases: readonly Readonly<{
+            kind: string;
+            id: string;
+        }>[];
+    }>) => Promise<readonly ResolvedNodeClaimConflict[]>;
     applyResolvedNodeUniqueness: <Output>(target: TransactionBackend, writes: Readonly<{
         upserts: readonly Readonly<{
             kind: string;

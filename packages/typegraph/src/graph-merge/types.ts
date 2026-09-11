@@ -389,6 +389,29 @@ export type IdentityReconciliationOptions = Readonly<{
    * entity and the contributions that disagree.
    */
   onProvenanceConflict?: "keepBoth" | "refuse";
+  /**
+   * What happens when an identity pairing collapses two DISTINCT pre-repoint
+   * relationships onto one edge slot — `x → a` and `x → b` both landing on
+   * the fused survivor. `"repoint"` (default) folds them into one edge, exactly
+   * as the ordinary repoint always has. `"flag"` drops the identity pairing
+   * that induced the collision, rebuilds the plan once without it, and records
+   * the collision as an `IdentityUnresolvedConflict` of kind `"edge"`; the plan
+   * stays applicable and both relationships survive as they were staged. A
+   * collision similarity scoring would have produced on its own is not
+   * identity-induced and is folded either way.
+   */
+  onEdgeConflict?: "repoint" | "flag";
+  /**
+   * What happens when an identity pairing fuses members into one canonical
+   * entity whose unioned properties violate a unique constraint. `"refuse"`
+   * (default) leaves the collision to the commit's own constraint refusal,
+   * exactly as today. `"flag"` probes the resolved write set through the
+   * store's own constraint decision at plan time, drops the identity pairing
+   * that induced each collision, rebuilds the plan once without it, and
+   * records the collision as an `IdentityUnresolvedConflict` of kind
+   * `"uniqueness"`. The constraint itself is never relaxed.
+   */
+  onUniquenessConflict?: "refuse" | "flag";
 }>;
 
 /**
@@ -645,6 +668,42 @@ export type IdentityUnresolvedConflict =
        * source cannot make this a crash.
        */
       source?: MatchSource | undefined;
+    }>
+  /**
+   * `onEdgeConflict: "flag"` dropped an identity pairing because the repoint it
+   * induced collapsed two distinct pre-repoint relationships onto one edge
+   * slot. `a` and `b` are the two pre-repoint endpoints on `side` whose pairing
+   * fused them into `canonical`; `edgeIds` are the rows that would have folded;
+   * `assertionIds` are the `same` assertions whose pairing the rebuild dropped,
+   * and `branches` the branches that staged them.
+   */
+  | Readonly<{
+      kind: "edge";
+      edgeKind: string;
+      a: EntityRef;
+      b: EntityRef;
+      canonical: EntityRef;
+      side: "from" | "to";
+      edgeIds: readonly string[];
+      assertionIds: readonly string[];
+      branches: readonly BranchId[];
+    }>
+  /**
+   * `onUniquenessConflict: "flag"` dropped an identity pairing because the
+   * entity it fused (`canonical`, out of `members`) would have violated
+   * `constraintName` over `fields` against `holder` — another write of the same
+   * plan, or a row the target already holds. `assertionIds` and `branches` name
+   * the dropped pairing exactly as the `"edge"` arm does.
+   */
+  | Readonly<{
+      kind: "uniqueness";
+      constraintName: string;
+      fields: readonly string[];
+      canonical: EntityRef;
+      holder: EntityRef;
+      members: readonly EntityRef[];
+      assertionIds: readonly string[];
+      branches: readonly BranchId[];
     }>;
 // No `"provenance"` arm: `onProvenanceConflict` has exactly two dispositions
 // (`"keepBoth"`, which reports nothing, and `"refuse"`, which throws) and no
@@ -865,6 +924,11 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
   provenancePersisted?: Readonly<{ graphId: string; count: number }>;
   /** Duplicate-assertion survivor picks the three-way classifier resolved. */
   identityReconciliations: readonly IdentityReconciliation[];
-  /** Identity-assertion conflicts a resolving `onAssertionConflict` kept rather than refused. */
+  /**
+   * Identity conflicts a resolving policy kept rather than refused: assertion
+   * conflicts `onAssertionConflict: "flag"` kept, separation vetoes, and the
+   * identity pairings `onEdgeConflict: "flag"` / `onUniquenessConflict: "flag"`
+   * dropped.
+   */
   identityConflicts: readonly IdentityUnresolvedConflict[];
 }>;

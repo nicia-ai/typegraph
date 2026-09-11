@@ -37,6 +37,7 @@ import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
+import { type ResolvedNodeClaimConflict } from "./claims/resolved-node-claims";
 import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import {
   type InternalSubgraphOptions,
@@ -231,6 +232,25 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * the same claim writer an ordinary create uses rather than a uniqueness-only
    * insert. See `store/claims/resolved-node-claims.ts`.
    */
+  /**
+   * THE plan-time half of `applyResolvedNodeUniqueness`: every uniqueness
+   * collision the same resolved write set would be refused for, as decisions
+   * rather than a thrown first refusal, read through the same constraint
+   * registration and key computation the apply uses. Read-only, so a plain
+   * backend serves it. `RESOLVED_NODE_UNIQUENESS_UNSUPPORTED` when the
+   * backend cannot serve the batched probe the set semantic needs.
+   */
+  probeResolvedNodeUniqueness: (
+    target: GraphBackend | TransactionBackend,
+    writes: Readonly<{
+      upserts: readonly Readonly<{
+        kind: string;
+        id: string;
+        props: Readonly<Record<string, unknown>>;
+      }>[];
+      releases: readonly Readonly<{ kind: string; id: string }>[];
+    }>,
+  ) => Promise<readonly ResolvedNodeClaimConflict[]>;
   applyResolvedNodeUniqueness: <Output>(
     target: TransactionBackend,
     writes: Readonly<{

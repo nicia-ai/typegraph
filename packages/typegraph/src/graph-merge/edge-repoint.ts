@@ -212,14 +212,47 @@ export type MergedEdge = Readonly<{
   ValidityEndMutation;
 
 /**
+ * One row of a fold set as its author named it: the edge id and the
+ * PRE-repoint `(kind, id)` endpoint keys.
+ */
+export type EdgeFoldRow = Readonly<{
+  id: EdgeId;
+  fromKey: MergeKey;
+  toKey: MergeKey;
+}>;
+
+/**
+ * A fold set that COLLAPSED DISTINCT RELATIONSHIPS: its `rows` named at least
+ * two different pre-repoint endpoint pairs, and repointing onto `fromKey` /
+ * `toKey` (the canonical endpoints) brought them onto one `(from, type, to)`
+ * slot, so they commit as the single row `survivorId`. Ordinary multigraph
+ * multiplicity — several rows of ONE pre-repoint pair — is never reported here,
+ * because those rows are not folded (see {@link foldSets}).
+ *
+ * Returned as data rather than re-derived by a caller: the fold partition is
+ * this module's decision, and which pairing induced a collapse (an identity
+ * assertion, or similarity) is a question only the plan builder can answer,
+ * so the repoint states WHAT collapsed and leaves WHY to the consumer.
+ */
+export type EdgeFoldCollapse = Readonly<{
+  kind: string;
+  survivorId: EdgeId;
+  fromKey: MergeKey;
+  toKey: MergeKey;
+  rows: readonly EdgeFoldRow[];
+}>;
+
+/**
  * The outcome of the repoint + dedupe cascade: the surviving merged edges, every
- * edge dropped for a deleted endpoint, and every edge-level property conflict the
- * dedupe surfaced.
+ * edge dropped for a deleted endpoint, every edge-level property conflict the
+ * dedupe surfaced, and every fold set that collapsed distinct pre-repoint
+ * relationships ({@link EdgeFoldCollapse}).
  */
 export type EdgeRepointResult<G extends GraphDef = GraphDef> = Readonly<{
   edges: readonly MergedEdge[];
   dropped: readonly DroppedEdge[];
   conflicts: readonly PropertyConflict<G>[];
+  collapsed: readonly EdgeFoldCollapse[];
 }>;
 
 /**
@@ -866,6 +899,7 @@ export function repointEdges<G extends GraphDef = GraphDef>(
 
   const merged: MergedEdge[] = [];
   const conflicts: PropertyConflict<G>[] = [];
+  const collapsed: EdgeFoldCollapse[] = [];
 
   const sortedGroups = [...liveByGroup.keys()].sort((left, right) =>
     compareStrings(left, right),
@@ -884,6 +918,8 @@ export function repointEdges<G extends GraphDef = GraphDef>(
       for (const conflict of folded.conflicts) {
         conflicts.push(conflict as PropertyConflict<G>);
       }
+      const collapse = foldCollapse(folded.edge, foldSet);
+      if (collapse !== undefined) collapsed.push(collapse);
     }
   }
 
@@ -917,5 +953,47 @@ export function repointEdges<G extends GraphDef = GraphDef>(
         `${right.entityId}|${right.property}`,
       ),
     ),
+    collapsed: collapsed.sort((left, right) =>
+      compareStrings(left.survivorId, right.survivorId),
+    ),
+  };
+}
+
+/**
+ * The {@link EdgeFoldCollapse} a fold set reports, or `undefined` when the set
+ * is a single row (nothing folded) or every row named one pre-repoint pair.
+ * The fold set's rows are already one per pre-repoint pair (`foldSets` keeps a
+ * pair's representative row and commits the rest as parallel rows), so
+ * distinct source pairs are counted over the set's distinct edge ids.
+ */
+function foldCollapse(
+  edge: MergedEdge,
+  foldSet: readonly RepointedEdge[],
+): EdgeFoldCollapse | undefined {
+  // A row two branches staged from different endpoints (a chosen id) keeps
+  // its minimal pair — the same choice `sourcePairByRow` made for the fold.
+  const sourcePairById = new Map<EdgeId, string>();
+  for (const member of foldSet) {
+    const existing = sourcePairById.get(member.staged.id);
+    if (
+      existing === undefined ||
+      compareStrings(member.sourcePair, existing) < 0
+    ) {
+      sourcePairById.set(member.staged.id, member.sourcePair);
+    }
+  }
+  if (new Set(sourcePairById.values()).size < 2) return undefined;
+  const rows = [...sourcePairById]
+    .sort(([left], [right]) => compareStrings(left, right))
+    .map(([id, sourcePair]): EdgeFoldRow => {
+      const [fromKey, toKey] = JSON.parse(sourcePair) as [MergeKey, MergeKey];
+      return { id, fromKey, toKey };
+    });
+  return {
+    kind: edge.kind,
+    survivorId: edge.id,
+    fromKey: mergeKey(edge.fromKind, edge.fromId),
+    toKey: mergeKey(edge.toKind, edge.toId),
+    rows,
   };
 }

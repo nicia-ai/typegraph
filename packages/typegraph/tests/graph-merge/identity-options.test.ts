@@ -96,6 +96,21 @@ describe("T6 (options layer) — policy is part of the review evidence", () => {
     expect(assertWinsEvidence).not.toEqual(retractWinsEvidence);
   });
 
+  it("the edge and uniqueness policies are inside the evidence too", () => {
+    const repoint = reviewOptionEvidence({
+      identity: { pairing: "definitional", onEdgeConflict: "repoint" },
+    });
+    const flagged = reviewOptionEvidence({
+      identity: { pairing: "definitional", onEdgeConflict: "flag" },
+    });
+    const uniquenessFlagged = reviewOptionEvidence({
+      identity: { pairing: "definitional", onUniquenessConflict: "flag" },
+    });
+    expect(repoint).not.toEqual(flagged);
+    expect(repoint).not.toEqual(uniquenessFlagged);
+    expect(flagged).not.toEqual(uniquenessFlagged);
+  });
+
   it("a function policy encodes as a callback marker, not its source", () => {
     const evidence = reviewOptionEvidence({
       identity: {
@@ -135,23 +150,28 @@ describe("§3.3 refusal matrix — identity option validation", () => {
     ).toThrow();
   });
 
-  // The two deferred knobs (`onEdgeConflict`, `onUniquenessConflict`) are not
-  // part of the option at all this release: an option whose only accepted
-  // value is its default is dead surface. `.strict()` refuses them exactly as
-  // it refuses a typo, so a caller who states one is told rather than served a
-  // plan that ignored it.
-  it("refuses the deferred onEdgeConflict knob", () => {
+  it("refuses an unrecognized onEdgeConflict value", () => {
     expect(() =>
-      // @ts-expect-error deferred: not part of this release's option
-      normalizeMergeOptions({ identity: { onEdgeConflict: "repoint" } }),
+      // @ts-expect-error deliberately invalid enum value
+      normalizeMergeOptions({ identity: { onEdgeConflict: "fold" } }),
     ).toThrow();
   });
 
-  it("refuses the deferred onUniquenessConflict knob", () => {
+  it("refuses an unrecognized onUniquenessConflict value", () => {
     expect(() =>
-      // @ts-expect-error deferred: not part of this release's option
-      normalizeMergeOptions({ identity: { onUniquenessConflict: "refuse" } }),
+      // @ts-expect-error deliberately invalid enum value
+      normalizeMergeOptions({ identity: { onUniquenessConflict: "relax" } }),
     ).toThrow();
+  });
+
+  it("defaults onEdgeConflict to repoint and onUniquenessConflict to refuse — today's behavior", () => {
+    expect(normalizeMergeOptions({ identity: {} }).identity).toEqual({
+      pairing: "off",
+      onAssertionConflict: "refuse",
+      onProvenanceConflict: "keepBoth",
+      onEdgeConflict: "repoint",
+      onUniquenessConflict: "refuse",
+    });
   });
 
   it("a refused identity option carries details.option through tryNormalize", async () => {
@@ -175,12 +195,16 @@ describe("§3.3 refusal matrix — identity option validation", () => {
         pairing: "definitional",
         onAssertionConflict: "flag",
         onProvenanceConflict: "refuse",
+        onEdgeConflict: "flag",
+        onUniquenessConflict: "flag",
       },
     });
     expect(normalized.identity).toEqual({
       pairing: "definitional",
       onAssertionConflict: "flag",
       onProvenanceConflict: "refuse",
+      onEdgeConflict: "flag",
+      onUniquenessConflict: "flag",
     });
   });
 });

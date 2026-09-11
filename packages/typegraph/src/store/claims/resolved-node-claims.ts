@@ -41,6 +41,14 @@ import {
   withNodeCreateClaimsBatch,
 } from "./node-claims";
 
+/**
+ * The refusal code for a backend that cannot serve the batched claim
+ * operations a resolved write set needs — carried on the thrown
+ * `ConfigurationError`'s `details.code`.
+ */
+export const RESOLVED_NODE_UNIQUENESS_UNSUPPORTED_CODE =
+  "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED";
+
 /** A complete node after-image whose claims belong to one resolved write set. */
 export type ResolvedNodeUpsert = Readonly<{
   kind: string;
@@ -75,6 +83,35 @@ function claimRowKey(entry: UniquenessClaimEntry): string {
 }
 
 /**
+ * One uniqueness collision the resolved write set would commit: `claimant` is
+ * the set member whose claim loses, `holder` the owner that already has the
+ * key — another member of the set (`holder.origin: "set"`) or a persisted row
+ * outside it (`"persisted"`). The decision itself, so a consumer that only
+ * wants to REPORT a collision (the merge planner under
+ * `onUniquenessConflict: "flag"`) and the one that REFUSES it
+ * ({@link validateResolvedNodeClaims}) read one finding.
+ */
+export type ResolvedNodeClaimConflict = Readonly<{
+  constraintName: string;
+  fields: readonly string[];
+  claimant: Readonly<{ kind: string; id: string }>;
+  holder: Readonly<{ kind: string; id: string; origin: "set" | "persisted" }>;
+}>;
+
+/** The refusal a {@link ResolvedNodeClaimConflict} throws as. */
+function resolvedNodeClaimRefusal(
+  conflict: ResolvedNodeClaimConflict,
+): UniquenessError {
+  return new UniquenessError({
+    constraintName: conflict.constraintName,
+    kind: conflict.holder.kind,
+    existingId: conflict.holder.id,
+    newId: conflict.claimant.id,
+    fields: conflict.fields,
+  });
+}
+
+/**
  * Whether two proposals in one set are competing — one writes a row the other
  * reads.
  *
@@ -94,21 +131,30 @@ function claimsCompete(left: ProposedClaim, right: ProposedClaim): boolean {
   );
 }
 
-function proposedClaimRefusal(
+function proposedClaimConflict(
   incumbent: ProposedClaim,
   challenger: ProposedClaim,
-): UniquenessError {
-  return new UniquenessError({
+): ResolvedNodeClaimConflict {
+  return {
     constraintName: challenger.entry.constraintName,
-    kind: incumbent.owner.concreteKind,
-    existingId: incumbent.owner.nodeId,
-    newId: challenger.owner.nodeId,
     fields: challenger.entry.refusal.constraint.fields,
-  });
+    claimant: {
+      kind: challenger.owner.concreteKind,
+      id: challenger.owner.nodeId,
+    },
+    holder: {
+      kind: incumbent.owner.concreteKind,
+      id: incumbent.owner.nodeId,
+      origin: "set",
+    },
+  };
 }
 
 /**
- * The set's uniqueness claims, with every in-set competition already refused.
+ * The set's uniqueness claims, with every in-set competition decided: the
+ * accepted proposals, and one conflict per proposal that lost to an earlier
+ * member of the set (a loser is not accepted, so it competes with nothing
+ * after it).
  *
  * Reads its work from {@link nodeClaimEntries} at the CREATE extent — the wider
  * of the two, exactly as {@link file://./node-claims.ts checkUniquenessConstraints}
@@ -117,14 +163,16 @@ function proposedClaimRefusal(
  * and each write inside the set's `apply()` reaches it. Filtering rather than
  * asking for a narrower list is what keeps that omission a stated decision
  * instead of an absence nobody notices.
- *
- * @throws UniquenessError when two members of the set compete for one claim.
  */
 function proposedClaims(
   ctx: UniquenessContext,
   upserts: readonly ResolvedNodeUpsert[],
-): readonly ProposedClaim[] {
+): Readonly<{
+  accepted: readonly ProposedClaim[];
+  conflicts: readonly ResolvedNodeClaimConflict[];
+}> {
   const accepted: ProposedClaim[] = [];
+  const conflicts: ResolvedNodeClaimConflict[] = [];
   for (const upsert of upserts) {
     const owner: ClaimOwner = {
       concreteKind: upsert.kind,
@@ -155,12 +203,13 @@ function proposedClaims(
           claimsCompete(candidate, proposal),
       );
       if (incumbent !== undefined) {
-        throw proposedClaimRefusal(incumbent, proposal);
+        conflicts.push(proposedClaimConflict(incumbent, proposal));
+        continue;
       }
       accepted.push(proposal);
     }
   }
-  return accepted;
+  return { accepted, conflicts };
 }
 
 /** One `checkUniqueBatch` round trip: every key this set claims at one axis. */
@@ -242,36 +291,42 @@ function requireBatchProbe(
   if (bound === undefined) {
     throw new ConfigurationError(
       "Resolved node writes require batched uniqueness probes",
-      { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
+      { code: RESOLVED_NODE_UNIQUENESS_UNSUPPORTED_CODE },
     );
   }
   return bound.checkUniqueBatch;
 }
 
 /**
- * Validates node uniqueness against the FINAL state of a resolved write set.
+ * THE uniqueness decision over the FINAL state of a resolved write set: every
+ * collision the set would commit, in-set competitions first (upsert order),
+ * then persisted holders (probe-group order).
  *
  * All proposed after-images are compared together before persisted claim rows
  * are consulted. Owners the set itself releases or replaces are ignored, which
- * permits atomic swaps and handoffs while still refusing every owner outside the
- * set. The probe is batch-only by contract: a caller that needs this set
+ * permits atomic swaps and handoffs while still reporting every owner outside
+ * the set. The probe is batch-only by contract: a caller that needs this set
  * semantic must not quietly degrade to sequential checks.
+ *
+ * Read-only. {@link validateResolvedNodeClaims} refuses on the first finding;
+ * the merge planner reports the findings an identity pairing induced.
  */
-export async function validateResolvedNodeClaims(
+export async function findResolvedNodeClaimConflicts(
   ctx: UniquenessContext,
   upserts: readonly ResolvedNodeUpsert[],
   releases: readonly ResolvedNodeRelease[] = [],
-): Promise<void> {
+): Promise<readonly ResolvedNodeClaimConflict[]> {
   const checkUniqueBatch = requireBatchProbe(ctx);
   const claims = proposedClaims(ctx, upserts);
-  if (claims.length === 0) return;
+  const conflicts = [...claims.conflicts];
+  if (claims.accepted.length === 0) return conflicts;
 
   const affectedOwners = new Set(
     [...upserts, ...releases].map((reference) =>
       claimOwnerKey({ concreteKind: reference.kind, nodeId: reference.id }),
     ),
   );
-  for (const group of groupClaimsForProbe(claims)) {
+  for (const group of groupClaimsForProbe(claims.accepted)) {
     const existingRows = await checkUniqueBatch({
       graphId: ctx.graphId,
       nodeKind: group.probeKind,
@@ -291,18 +346,38 @@ export async function validateResolvedNodeClaims(
       }
       const claim = group.claimsByKey.get(existing.key);
       if (claim === undefined) continue;
-      throw new UniquenessError({
+      conflicts.push({
         constraintName: group.constraintName,
+        fields: claim.entry.refusal.constraint.fields,
+        claimant: {
+          kind: claim.owner.concreteKind,
+          id: claim.owner.nodeId,
+        },
         // The holder's own kind, never `group.probeKind`: that is the claim
         // AXIS, which a shared scope folds across kinds and which the caller
         // never wrote. The probe and the fence report the same value.
-        kind: existing.concrete_kind,
-        existingId: existing.node_id,
-        newId: claim.owner.nodeId,
-        fields: claim.entry.refusal.constraint.fields,
+        holder: {
+          kind: existing.concrete_kind,
+          id: existing.node_id,
+          origin: "persisted",
+        },
       });
     }
   }
+  return conflicts;
+}
+
+/**
+ * Validates node uniqueness against the FINAL state of a resolved write set:
+ * {@link findResolvedNodeClaimConflicts}'s first finding, thrown.
+ */
+export async function validateResolvedNodeClaims(
+  ctx: UniquenessContext,
+  upserts: readonly ResolvedNodeUpsert[],
+  releases: readonly ResolvedNodeRelease[] = [],
+): Promise<void> {
+  const [first] = await findResolvedNodeClaimConflicts(ctx, upserts, releases);
+  if (first !== undefined) throw resolvedNodeClaimRefusal(first);
 }
 
 /**
@@ -315,7 +390,7 @@ export async function validateResolvedNodeClaims(
 function resolvedNodeUniquenessOperationsRefusal(): ConfigurationError {
   return new ConfigurationError(
     "Resolved node writes require batched uniqueness operations",
-    { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
+    { code: RESOLVED_NODE_UNIQUENESS_UNSUPPORTED_CODE },
   );
 }
 

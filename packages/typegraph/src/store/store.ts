@@ -258,7 +258,12 @@ import {
   type GraphAlgorithms,
   type InternalGraphAlgorithms,
 } from "./algorithms";
-import { applyResolvedNodeClaims } from "./claims/resolved-node-claims";
+import {
+  applyResolvedNodeClaims,
+  findResolvedNodeClaimConflicts,
+  type ResolvedNodeRelease,
+  type ResolvedNodeUpsert,
+} from "./claims/resolved-node-claims";
 import {
   type ConstraintFenceViolation,
   verifyConstraintFences as verifyConstraintFencesImpl,
@@ -1394,42 +1399,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           target,
           policy,
         ),
-      applyResolvedNodeUniqueness: async (target, writes, apply) => {
-        const upserts = writes.upserts.map((upsert) => {
-          if (!hasOwnKey(this.#graph.nodes, upsert.kind)) {
-            throw new KindNotFoundError(upsert.kind, "node", {
-              graphId: this.graphId,
-            });
-          }
-          const registration = this.#graph.nodes[upsert.kind];
-          if (registration === undefined) {
-            throw new KindNotFoundError(upsert.kind, "node", {
-              graphId: this.graphId,
-            });
-          }
-          return {
-            ...upsert,
-            constraints: registration.unique ?? [],
-          };
-        });
-        // Which kinds a release is worth CLEARING for: the clear exists so the
-        // set's upserts can take keys the set is giving back, and only a
-        // uniqueness declaration produces a key another node could take.
-        const constrainedKinds = new Set(
-          Object.entries(this.#graph.nodes)
-            .filter(
-              ([, registration]) => (registration.unique ?? []).length > 0,
-            )
-            .map(([kind]) => kind),
+      probeResolvedNodeUniqueness: (target, writes) => {
+        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
+        if (upserts.every((upsert) => upsert.constraints.length === 0)) {
+          return Promise.resolve([]);
+        }
+        return findResolvedNodeClaimConflicts(
+          {
+            graphId: this.graphId,
+            registry: this.#registry,
+            backend: target,
+            uniqueSidecarBatch: this.#uniqueSidecarBatch,
+          },
+          upserts,
+          releases,
         );
-        const releases = writes.releases.filter((release) => {
-          if (!Object.hasOwn(this.#graph.nodes, release.kind)) {
-            throw new KindNotFoundError(release.kind, "node", {
-              graphId: this.graphId,
-            });
-          }
-          return constrainedKinds.has(release.kind);
-        });
+      },
+      applyResolvedNodeUniqueness: async (target, writes, apply) => {
+        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
         if (
           upserts.every((upsert) => upsert.constraints.length === 0) &&
           releases.length === 0
@@ -1582,6 +1569,63 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Refuses an identity operation on a graph that never declared
    * `identity: { ... }`, where none of the identity tables exist.
    */
+  /**
+   * The resolved write set as the claim layer reads it: every upsert carrying
+   * its kind's registered unique constraints, and the releases narrowed to the
+   * kinds whose declarations produce a key another node could take. One owner
+   * for the probe (`probeResolvedNodeUniqueness`) and the apply
+   * (`applyResolvedNodeUniqueness`), so the merge planner's plan-time finding
+   * and the commit's refusal read the same constraints over the same rows.
+   */
+  #resolvedNodeClaimWrites(
+    writes: Readonly<{
+      upserts: readonly Readonly<{
+        kind: string;
+        id: string;
+        props: Readonly<Record<string, unknown>>;
+      }>[];
+      releases: readonly Readonly<{ kind: string; id: string }>[];
+    }>,
+  ): Readonly<{
+    upserts: readonly ResolvedNodeUpsert[];
+    releases: readonly ResolvedNodeRelease[];
+  }> {
+    const upserts = writes.upserts.map((upsert) => {
+      if (!hasOwnKey(this.#graph.nodes, upsert.kind)) {
+        throw new KindNotFoundError(upsert.kind, "node", {
+          graphId: this.graphId,
+        });
+      }
+      const registration = this.#graph.nodes[upsert.kind];
+      if (registration === undefined) {
+        throw new KindNotFoundError(upsert.kind, "node", {
+          graphId: this.graphId,
+        });
+      }
+      return {
+        ...upsert,
+        constraints: registration.unique ?? [],
+      };
+    });
+    // Which kinds a release is worth CLEARING for: the clear exists so the
+    // set's upserts can take keys the set is giving back, and only a
+    // uniqueness declaration produces a key another node could take.
+    const constrainedKinds = new Set(
+      Object.entries(this.#graph.nodes)
+        .filter(([, registration]) => (registration.unique ?? []).length > 0)
+        .map(([kind]) => kind),
+    );
+    const releases = writes.releases.filter((release) => {
+      if (!Object.hasOwn(this.#graph.nodes, release.kind)) {
+        throw new KindNotFoundError(release.kind, "node", {
+          graphId: this.graphId,
+        });
+      }
+      return constrainedKinds.has(release.kind);
+    });
+    return { upserts, releases };
+  }
+
   #requireIdentityEnabled(suggestion?: string): void {
     if (this.#graph.identity !== undefined) return;
     throw new ConfigurationError(
