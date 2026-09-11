@@ -59,14 +59,16 @@ to spell the lock; every other refusal above is `WRITE_FENCE_UNAVAILABLE`. Decla
 mechanism: "advisory", drain: "table-lock" }` — the bundled `createPostgresBackend` default, which
 also supplies `fenceSql` — to restore the lock.
 
-**Author-facing:** `CommonOperationStrategy` no longer carries `dynamicEdgeConvergence`. That field
-was required, so every external `SqlEngineProfile.strategy` literal now fails to typecheck; delete
-it from the literal. The flag it carried — whether a convergent edge create's non-durable match may
-inspect JSON match fields — moved onto `OperationFusionHooks.dynamicEdgeConvergence`, which the
-bundled dialect factories pass to `buildCommonOperationOptions`. Neither `OperationFusionHooks` nor
-`buildCommonOperationOptions` is exported from any entrypoint (nothing under
-`src/backend/drizzle/engine/` re-exports them), so a custom profile has no field to set; it
-implements whatever convergent-match behavior it wants in its own `buildOperations`.
+**Author-facing:** `CommonOperationStrategy` no longer carries `dynamicEdgeConvergence`. The flag it
+carried — whether a convergent edge create's non-durable match may inspect JSON match fields —
+moved onto `OperationFusionHooks.dynamicEdgeConvergence`, which the bundled dialect factories pass
+to `buildCommonOperationOptions`. Neither `OperationFusionHooks` nor `buildCommonOperationOptions`
+is exported from any entrypoint. No action is required of a backend author: a
+`CommonOperationStrategy` is not author-supplyable in this release. `strategy` is absent from
+`DERIVABLE_ENGINE_PROFILE_KEYS`, so `deriveEngineProfile` refuses it, and `SqlEngineProfile.assembly`
+— which replaced the `buildOperations`/`lateMembers` pair, see the derivable-profiles entry below —
+is branded with a non-exported symbol, so a profile cannot be built from a literal either. The
+bundled builders are the only source of a strategy.
 
 `SqlEngineProfile.graphTemplateRuntime.instantiateStatement` is a required builder: given a
 template and target graph's ids and schema hashes (`InstantiateGraphTemplateSqlParams` —
