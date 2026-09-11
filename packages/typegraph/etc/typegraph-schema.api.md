@@ -2101,6 +2101,7 @@ export function requiresMigration<G extends GraphDef>(backend: GraphBackend, gra
 
 // @public (undocumented)
 type ResolvedSqlTableNames = Readonly<{
+    schemaVersions?: string;
     nodes: string;
     edges: string;
     recordedNodes: string;
@@ -2414,6 +2415,7 @@ type SqlSchemaFields = Readonly<{
 
 // @public
 type SqlTableNames = Readonly<{
+    schemaVersions?: string | undefined;
     nodes: string;
     edges: string;
     recordedNodes?: string | undefined;

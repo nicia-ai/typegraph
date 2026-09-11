@@ -47,6 +47,7 @@ const graph = defineGraph({
 
 describe("custom table names", () => {
   const CUSTOM_NAMES = {
+    schemaVersions: "app_schema_versions",
     nodes: "app_nodes",
     edges: "app_edges",
     recordedNodes: "app_recorded_nodes",
@@ -67,6 +68,7 @@ describe("custom table names", () => {
 
   beforeEach(() => {
     const tables = createSqliteTables({
+      schemaVersions: CUSTOM_NAMES.schemaVersions,
       nodes: CUSTOM_NAMES.nodes,
       edges: CUSTOM_NAMES.edges,
       recordedNodes: CUSTOM_NAMES.recordedNodes,
@@ -169,6 +171,17 @@ describe("custom table names", () => {
     ]);
   });
 
+  it("checks the schema version against the custom schema relation", async () => {
+    const store = createStore(graph, backend);
+    const person = await store.nodes.Person.create({ name: "Custom" });
+    const rows = await store
+      .query()
+      .from("Person", "p")
+      .select((ctx) => ctx.p)
+      .executeChecked(undefined);
+    expect(rows[0]?.id).toBe(person.id);
+  });
+
   it("explicit schema option takes precedence over backend.tableNames", () => {
     const explicitSchema = createSqlSchema({
       nodes: "override_nodes",
@@ -189,6 +202,7 @@ describe("custom table names", () => {
     const defaultBackend = createTestBackend();
 
     expect(defaultBackend.tableNames).toEqual({
+      schemaVersions: "typegraph_schema_versions",
       nodes: "typegraph_nodes",
       edges: "typegraph_edges",
       recordedNodes: "typegraph_recorded_nodes",

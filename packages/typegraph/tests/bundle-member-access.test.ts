@@ -33,11 +33,11 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-const REASONED_FLOOR = 93;
+const REASONED_FLOOR = 94;
 const DEFERRED_LIVE_TOTAL = 212;
 const DEFERRED_DECLARED_TOTAL = 217;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 319;
+const TOTAL_ROW_COUNT = 320;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -184,7 +184,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 319)", () => {
+  it("the class partition covers every scanned row (total 320)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

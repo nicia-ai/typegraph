@@ -2344,3 +2344,28 @@ export function isConstraintError(error: unknown): boolean {
 export function getErrorSuggestion(error: unknown): string | undefined {
   return isTypeGraphError(error) ? error.suggestion : undefined;
 }
+
+/** The committed schema differs from the version expected by a checked read. */
+export type SchemaChangedErrorDetails = Readonly<{
+  graphId: string;
+  expected: number | undefined;
+  actual: number | undefined;
+}>;
+
+export class SchemaChangedError extends TypeGraphError {
+  declare readonly details: SchemaChangedErrorDetails;
+
+  constructor(details: SchemaChangedErrorDetails) {
+    super(
+      `Schema changed for graph "${details.graphId}": expected ${String(details.expected)}, observed ${String(details.actual)}`,
+      "SCHEMA_CHANGED",
+      {
+        details,
+        category: "system",
+        suggestion:
+          "Reload the reconciled schema, rebuild the query, and retry the read.",
+      },
+    );
+    this.name = "SchemaChangedError";
+  }
+}

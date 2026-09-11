@@ -51,6 +51,7 @@ export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-bin
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
 export { registerRemovalMaterializationIntegrationTests } from "./removal-materialization";
+export { registerSchemaCheckedReadIntegrationTests } from "./schema-checked-read";
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerSetNodeMutationIntegrationTests } from "./set-node-mutation";
 export { registerSetOperationIntegrationTests } from "./set-operations";

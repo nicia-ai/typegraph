@@ -50,6 +50,119 @@ export function registerSelectiveRetryIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("selective projection retries", () => {
+    it("selects complete nodes before executing fresh, prepared, and paginated queries", async () => {
+      const counter = createStatementCounter(context.getBackend());
+      const [store] = await createStoreWithSchema(
+        integrationTestGraph,
+        counter.backend,
+      );
+      const person = await store.nodes.Person.create({
+        name: "Whole",
+        age: 42,
+      });
+      function query() {
+        return store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (node) => node.id.eq(person.id))
+          .orderBy("p", "name")
+          .select((ctx) => ({ id: ctx.p.id, nested: [ctx.p] }));
+      }
+      for (const execute of [
+        () => query().execute(),
+        () => query().execute(),
+        () => query().prepare().execute({}),
+        async () => {
+          const page = await query().paginate({ first: 1 });
+          return page.data;
+        },
+        () => query().executeOn(counter.backend),
+      ]) {
+        counter.reset();
+        const rows = await execute();
+        expect(rows[0]?.nested[0]).toMatchObject({
+          id: person.id,
+          name: "Whole",
+          age: 42,
+        });
+        expect(counter.count()).toBe(1);
+      }
+    });
+
+    it("plans whole edges and spread aliases as full rows before executing", async () => {
+      const counter = createStatementCounter(context.getBackend());
+      const [store] = await createStoreWithSchema(
+        integrationTestGraph,
+        counter.backend,
+      );
+      const person = await store.nodes.Person.create({
+        name: "Whole",
+        age: 42,
+      });
+      const target = await store.nodes.Person.create({ name: "Target" });
+      const edge = await store.edges.knows.create(person, target, {
+        since: "2024",
+      });
+      function query() {
+        return store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (node) => node.id.eq(person.id))
+          .traverse("knows", "edge")
+          .to("Person", "target");
+      }
+      counter.reset();
+      const whole = await query()
+        .select((ctx) => ({ id: ctx.p.id, edge: ctx.edge }))
+        .execute();
+      expect(whole[0]?.edge).toMatchObject({ id: edge.id, since: "2024" });
+      expect(counter.count()).toBe(1);
+
+      counter.reset();
+      const spread = await query()
+        .select((ctx) => ({
+          id: ctx.p.id,
+          person: { ...ctx.p },
+          edge: { ...ctx.edge },
+        }))
+        .execute();
+      expect(spread[0]?.person).toMatchObject({
+        id: person.id,
+        name: "Whole",
+        age: 42,
+      });
+      expect(spread[0]?.edge).toMatchObject({ id: edge.id, since: "2024" });
+      expect(counter.count()).toBe(1);
+    });
+
+    it("fetches the newest traversed target in one ordered limit statement", async () => {
+      const counter = createStatementCounter(context.getBackend());
+      const [store] = await createStoreWithSchema(
+        integrationTestGraph,
+        counter.backend,
+      );
+      const source = await store.nodes.Person.create({ name: "Source" });
+      const older = await store.nodes.Person.create({ name: "Older", age: 1 });
+      const newer = await store.nodes.Person.create({ name: "Newer", age: 2 });
+      await store.edges.knows.create(source, older, {});
+      await store.edges.knows.create(source, newer, {});
+      counter.reset();
+      const rows = await store
+        .query()
+        .from("Person", "source")
+        .whereNode("source", (node) => node.id.eq(source.id))
+        .traverse("knows", "edge")
+        .to("Person", "target")
+        .orderBy("target", "age", "desc")
+        .orderBy("target", "id", "desc")
+        .select((ctx) => ctx.target)
+        .limit(1)
+        .execute();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.id).toBe(newer.id);
+      expect(counter.count()).toBe(1);
+    });
+
     it("tracks threshold branches without issuing a fallback statement", async () => {
       const counter = createStatementCounter(context.getBackend());
       const [store] = await createStoreWithSchema(

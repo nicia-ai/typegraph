@@ -894,13 +894,13 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   tableNames: {
     kind: "reasoned",
     reason:
-      "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.",
-    // 24, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
+      "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.",
+    // 25, including the schema-checked read binding. Previously 24, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
     // accesses on one physical line, which a line-keyed grep counts once but
     // the type-aware scanner counts as two access nodes (§Baselines). The
     // forked working-copy strategy reads the connected backend's names to
     // fence them against the base store's resolved schema.
-    accesses: 24,
+    accesses: 25,
   },
   fenceSql: {
     kind: "reasoned",

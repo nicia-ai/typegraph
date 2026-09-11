@@ -5,7 +5,6 @@
  * a select callback, enabling the query compiler to selectively project
  * only those fields instead of fetching the full props blob.
  */
-
 import type { KindEntity } from "../../core/types";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../../system-fields";
 import { compareStrings } from "../../utils/compare";
@@ -16,6 +15,7 @@ import {
   type FieldTypeInfo,
   type SchemaIntrospector,
 } from "../schema-introspector";
+import { SELECTABLE_ALIAS_MARKER } from "./selectable-alias";
 
 // ============================================================
 // Types
@@ -73,6 +73,8 @@ const OBJECT_PROTOTYPE_PROPERTIES = new Set<string>([
 // ============================================================
 
 export class FieldAccessTracker {
+  requiresFullRow = false;
+
   readonly #fields = new Map<string, AccessedField>();
 
   record(alias: string, field: string, isSystemField: boolean): void {
@@ -167,8 +169,12 @@ function createNodeTrackingProxy(
   options: TrackingContextOptions,
 ): unknown {
   return new Proxy(
-    {},
+    { [SELECTABLE_ALIAS_MARKER]: true },
     {
+      ownKeys: () => {
+        tracker.requiresFullRow = true;
+        return [];
+      },
       get: (_, property: string | symbol) => {
         if (typeof property === "symbol") return;
         // The interop probes are exempted so an incidental `await` or
@@ -224,8 +230,12 @@ function createEdgeTrackingProxy(
   options: TrackingContextOptions,
 ): unknown {
   return new Proxy(
-    {},
+    { [SELECTABLE_ALIAS_MARKER]: true },
     {
+      ownKeys: () => {
+        tracker.requiresFullRow = true;
+        return [];
+      },
       get: (_, property: string | symbol) => {
         if (typeof property === "symbol") return;
         // See `createNodeTrackingProxy`: a DECLARED `then` / `toJSON` is stored
