@@ -981,8 +981,9 @@ describe.each(backendMatrix())(
               kind: "custom",
               score: (left, right) =>
                 (
-                  [left.id as string, right.id as string].toSorted().join(',') ===
-                  "c,p"
+                  [left.id as string, right.id as string]
+                    .toSorted()
+                    .join(",") === "c,p"
                 ) ?
                   1
                 : 0,
@@ -1068,8 +1069,9 @@ describe.each(backendMatrix())(
               kind: "custom",
               score: (left, right) =>
                 (
-                  [left.id as string, right.id as string].toSorted().join(',') ===
-                  "x1,x2"
+                  [left.id as string, right.id as string]
+                    .toSorted()
+                    .join(",") === "x1,x2"
                 ) ?
                   1
                 : 0,

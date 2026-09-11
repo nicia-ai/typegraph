@@ -1082,6 +1082,10 @@ reconciliation.
 A same-id ontology retype remains a `TypeReconciliation`, rather than creating
 an id-merge resolution. Its optional `decisiveEdges` carries the accepted retype
 witness without changing the meaning of the existing resolution collection.
+When a retype cluster also spans several ids, the id-merge resolution it does
+produce names the **reconciled** kind in `EntityResolution.kind` — the kind the
+canonical row is written under, the same value `TypeReconciliation.toType`
+records — never the staged survivor's pre-retype kind.
 
 Each edge records every candidate source that proposed the pair in stable order.
 Definitional evidence names the trusted rule, such as a unique constraint, and

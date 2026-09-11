@@ -2219,12 +2219,25 @@ function buildInternalMergePlan<G extends GraphDef>(
     // names that contain `|`; either makes the comparator non-total, so the
     // returned order would depend on stable-sort + insertion order and break the
     // order-independence the whole subsystem guarantees.
-    resolutions: resolutions.sort((left, right) =>
-      compareMergeKeys(
-        mergeKey(left.kind, left.canonicalId),
-        mergeKey(right.kind, right.canonicalId),
+    // A resolution names the kind its survivor is WRITTEN under — the
+    // reconciled kind when the ontology cascade retypes the cluster — the same
+    // value the commit's node write, the artifact's `guards.retypes` and its
+    // resolution evidence check all read, so one owner decides it. The staged
+    // (pre-retype) survivor kind is the retype map's key.
+    resolutions: resolutions
+      .map((resolution) => ({
+        ...resolution,
+        kind:
+          reconciliation.retypeMap.get(
+            mergeKey(resolution.kind, resolution.canonicalId),
+          ) ?? resolution.kind,
+      }))
+      .sort((left, right) =>
+        compareMergeKeys(
+          mergeKey(left.kind, left.canonicalId),
+          mergeKey(right.kind, right.canonicalId),
+        ),
       ),
-    ),
     propertyConflicts: [...propertyConflicts, ...repoint.conflicts].sort(
       (left, right) => {
         const byEntity = compareMergeKeys(

@@ -547,6 +547,12 @@ export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
 export type EntityResolution = Readonly<{
   canonicalId: NodeId<NodeType>;
   memberIds: readonly NodeId<NodeType>[];
+  /**
+   * The kind the canonical survivor is written under: its staged kind, or,
+   * when `reconcileTypes: "ontology"` retypes the cluster, the reconciled
+   * kind {@link TypeReconciliation.toType} names — the same kind the committed
+   * row carries.
+   */
   kind: string;
   branchOrigins: readonly BranchId[];
   /** Deterministic minimal accepted-edge witness for this resolution. */
