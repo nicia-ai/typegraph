@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.57.1
+
+### Patch Changes
+
+- [#681](https://github.com/nicia-ai/typegraph/pull/681) [`d34dd51`](https://github.com/nicia-ai/typegraph/commit/d34dd515a75ab2c34451a77b113a70ca3939ad7c) Thanks [@pdlug](https://github.com/pdlug)! - Fix upgrades from older databases that lack recorded identity-assertion storage. Base-schema adoption now creates the missing table and its structural indexes before installing the version-3 changed-since indexes, preserving existing data and honoring custom table names.
+
 ## 0.57.0
 
 ### Highlights
