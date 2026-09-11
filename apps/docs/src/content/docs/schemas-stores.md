@@ -2164,7 +2164,7 @@ what the cascade itself does and does not do. Both the delete's
 and every transaction receipt that covers the delete carry the parts it
 removed, as `cascadedParts`: `{ kind, id }` refs taken from the same plan the
 cascade executed, in the order the cascade deleted them — **leaf-first, then
-code-point order by kind and id**. Leaf-first is the part of that order with
+deterministically by kind, then id**. Leaf-first is the part of that order with
 meaning: a part is always named before the whole it belongs to. Two sibling
 parts of one whole have no order between them to respect, so they are sorted
 rather than left in the order the cascade's reads returned them — which is what

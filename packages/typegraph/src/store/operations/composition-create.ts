@@ -874,7 +874,7 @@ export function assertCompositionWholeEndpointLive(
  * That is why this function also owns the WHOLE endpoint's liveness read:
  * when the disposition is going to attach a new edge (`"attach"` or
  * `"replace"`), a dead or missing whole is refused HERE, via
- * {@link assertEndpointRowLive}, before returning. The PART endpoint is
+ * {@link assertCompositionWholeEndpointLive}, before returning. The PART endpoint is
  * deliberately NOT read here: on the resurrection leg the part row is still
  * a tombstone until the update restores it, so a part-liveness read taken
  * here would refuse every resurrection; the edge preparation reads it on the

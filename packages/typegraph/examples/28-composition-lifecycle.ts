@@ -429,8 +429,8 @@ export async function main(): Promise<void> {
       "the delete's cascadedParts",
     );
     // The cascade reports its parts leaf-first — every part before the whole it
-    // belongs to — and, within one level of the closure, in code-point order by
-    // kind and id. The two segments are siblings of one episode, so their
+    // belongs to — and, within one level of the closure, ordered by kind and
+    // then id. The two segments are siblings of one episode, so their
     // relative order is that sort, not the order they were created in; the
     // episode follows both of them because it owns them.
     const expectedCascade = [

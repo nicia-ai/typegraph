@@ -140,6 +140,7 @@ import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { chunk } from "../../utils/array";
+import { compareStrings } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
@@ -647,7 +648,17 @@ async function runCompositionCascade<G extends GraphDef>(
   // its endpoints, even when a member's own onDelete is `restrict`: every
   // consumed edge was deliberately excluded from each endpoint's own
   // cascade/disconnect removal above.
-  await session.deleteCompositionEdges([...plan.consumedEdgeIds], mode);
+  //
+  // Sorted for the same reason `cascadeDeletionOrder` sorts the members: the
+  // set's iteration order is the order the walk happened to read the rows, and
+  // two cascades whose closures overlap must take their EDGE row locks in one
+  // agreed order too, not only their node row locks.
+  await session.deleteCompositionEdges(
+    [...plan.consumedEdgeIds].toSorted((left, right) =>
+      compareStrings(left, right),
+    ),
+    mode,
+  );
   return plan;
 }
 
@@ -2953,12 +2964,18 @@ async function readBatchCompositionWholeRows<G extends GraphDef>(
  * CARDINALITY probe must see the rows the earlier items wrote, which for
  * composition edges is the `one`/`oneActive` whole-side count their inserts
  * already carry.
+ *
+ * `operation` is the batch shape that reached here, carried into the probe's
+ * diagnostics (an `EdgeAcyclicityIndeterminateError` names the operation whose
+ * statement the engine cut short). Supplied by the caller rather than spelled
+ * here, because this one function serves both batch executors.
  */
 async function attachBatchCompositionCreateEdges<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: WriteSession,
   target: WriteTarget,
   lock: GraphWriteLock,
+  operation: string,
   preparedCreates: readonly NodeCreatePrepared[],
   compositionWorks: readonly (CompositionCreateWork | undefined)[],
 ): Promise<void> {
@@ -2997,7 +3014,7 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
     ctx,
     target,
     lock,
-    "nodes.bulkCreate",
+    operation,
     preparedEdges,
   );
 }
@@ -4054,6 +4071,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
         session,
         target,
         lock,
+        "nodes.bulkInsert",
         preparedCreates,
         compositionWorks,
       );
@@ -4204,6 +4222,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         session,
         target,
         lock,
+        "nodes.bulkCreate",
         preparedCreates,
         compositionWorks,
       );

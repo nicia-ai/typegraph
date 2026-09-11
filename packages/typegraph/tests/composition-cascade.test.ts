@@ -228,7 +228,7 @@ describe("planCompositionCascade", () => {
     expect(plan.consumedEdgeIds.size).toBe(2);
   });
 
-  it("orders two SIBLING parts of one whole by code-point (kind, id), not by the order they were created or read", async () => {
+  it("orders two SIBLING parts of one whole by kind then id, not by the order they were created or read", async () => {
     const graph = buildPodcastGraph("cascade-plan-sibling-order");
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(graph, backend);
@@ -276,7 +276,30 @@ describe("planCompositionCascade", () => {
 
   it("reports that same sibling order on the delete's receipt", async () => {
     const graph = buildPodcastGraph("cascade-receipt-sibling-order");
-    const backend = createTestBackend();
+    const raw = createTestBackend();
+    // Records the ids handed to each composition-edge cleanup batch, which is
+    // the one place the cascade's consumed edges are deleted.
+    const consumedEdgeIdArguments: string[][] = [];
+    function captureEdgeBatches<T extends GraphBackend | TransactionBackend>(
+      target: T,
+    ): T {
+      const batchDelete = target.deleteEdgesBatch;
+      if (batchDelete === undefined) return target;
+      const overlay: Pick<GraphBackend, "deleteEdgesBatch"> = {
+        deleteEdgesBatch: async (params) => {
+          consumedEdgeIdArguments.push([...params.ids]);
+          return batchDelete(params);
+        },
+      };
+      return deriveBackend<T, Partial<T>>(
+        target,
+        overlay as ExactBackendOverlay<T, Partial<T>>,
+      );
+    }
+    const backend = deriveBackend(captureEdgeBatches(raw), {
+      transaction: (fn, options) =>
+        raw.transaction((target) => fn(captureEdgeBatches(target)), options),
+    });
     const [store] = await createStoreWithSchema(graph, backend);
     const podcast = await store.nodes.Podcast.create({ title: "p" });
     const episode = await store.nodes.Episode.create(
@@ -308,6 +331,18 @@ describe("planCompositionCascade", () => {
       { kind: "Segment", id: "receipt-order-b" },
       { kind: "Episode", id: "receipt-order-episode" },
     ]);
+
+    // The consumed composition EDGE rows are deleted in one agreed order too —
+    // sorted by id, not in the order the walk collected them — so two cascades
+    // over overlapping closures cannot take these row locks in opposite
+    // orders.
+    // MUTATION: reverse the sort in `runCompositionCascade`'s
+    // `deleteCompositionEdges` call (src/store/operations/node-operations.ts)
+    // and this assertion fails.
+    expect(consumedEdgeIdArguments).toHaveLength(1);
+    const deletedEdgeIds = requireDefined(consumedEdgeIdArguments[0]);
+    expect(deletedEdgeIds).toHaveLength(3);
+    expect(deletedEdgeIds).toEqual([...deletedEdgeIds].toSorted());
   });
 
   it("throws CompositionCycleError on a revisit rather than truncating", async () => {

@@ -34,10 +34,11 @@ import {
 import {
   deriveBackend,
   type ExactBackendOverlay,
+  projectBackendWithout,
 } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
-import { UniquenessError } from "../src/errors";
+import { EndpointNotFoundError, UniquenessError } from "../src/errors";
 import * as acyclicityModule from "../src/store/acyclicity";
 import { requireDefined } from "../src/utils/presence";
 
@@ -506,6 +507,89 @@ describe("bulkCreate composition attach batching", () => {
       expect(new Set(edges.map((edge) => edge.toId))).toEqual(
         new Set([whole.id]),
       );
+    });
+  });
+});
+
+/**
+ * The `getNodes` port is an optimization, so the attach loop keeps a
+ * per-`(kind, id)` `getNode` fallback. A backend projected WITHOUT the port
+ * is the only way to reach that arm — and what it must prove is not the read
+ * count but that the arm reaches the identical verdicts: the same successful
+ * attachment, and the same refusal on the same endpoint side.
+ */
+async function withPortlessCompositionStore<T>(
+  run: (
+    store: Awaited<
+      ReturnType<
+        typeof createStoreWithSchema<ReturnType<typeof buildCompositionGraph>>
+      >
+    >[0],
+    counts: CallCounts,
+  ) => Promise<T>,
+): Promise<T> {
+  return withCountedBackend(async (backend, counts) => {
+    const portless = projectBackendWithout(backend, ["getNodes"]);
+    expect("getNodes" in portless).toBe(false);
+    const [store] = await createStoreWithSchema(
+      buildCompositionGraph(),
+      portless,
+    );
+    resetCounts(counts);
+    return run(store, counts);
+  });
+}
+
+describe("bulkCreate composition attach on a backend without the batch point read", () => {
+  it("attaches every item through the per-key getNode fallback", async () => {
+    await withPortlessCompositionStore(async (store, counts) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      resetCounts(counts);
+
+      const parts = await store.nodes.Folder.bulkCreate([
+        { props: { name: "one" }, partOf: { kind: "Folder", id: whole.id } },
+        { props: { name: "two" }, partOf: { kind: "Folder", id: whole.id } },
+      ]);
+
+      const edges = await store.edges.folderOf.find({});
+      expect(edges).toHaveLength(2);
+      expect(new Set(edges.map((edge) => edge.fromId))).toEqual(
+        new Set(parts.map((part) => part.id)),
+      );
+      // The fallback reads the one distinct whole ONCE, not once per item.
+      expect(counts["getNodes"]).toBe(0);
+      expect(counts["getNode"]).toBe(1);
+    });
+  });
+  // MUTATION CHECK: make `readBatchCompositionWholeRows`
+  // (src/store/operations/node-operations.ts) return an empty map when the port
+  // is unreachable instead of falling back — both items then refuse with
+  // EndpointNotFoundError against a whole that is demonstrably live.
+
+  it("refuses a missing whole with the identical error the ported path raises", async () => {
+    await withPortlessCompositionStore(async (store) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      const before = await store.nodes.Folder.count();
+
+      const error = await store.nodes.Folder.bulkCreate([
+        { props: { name: "ok" }, partOf: { kind: "Folder", id: whole.id } },
+        {
+          props: { name: "orphan" },
+          partOf: { kind: "Folder", id: "no-such-folder" },
+        },
+      ]).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(EndpointNotFoundError);
+      expect((error as EndpointNotFoundError).details).toMatchObject({
+        edgeKind: "folderOf",
+        // `folderOf` carries the part on its `from` side, so the WHOLE is `to`.
+        endpoint: "to",
+        nodeKind: "Folder",
+        nodeId: "no-such-folder",
+      });
+      // One refused item aborts the whole batch: neither node row survives.
+      expect(await store.nodes.Folder.count()).toBe(before);
+      expect(await store.edges.folderOf.find({})).toHaveLength(0);
     });
   });
 });

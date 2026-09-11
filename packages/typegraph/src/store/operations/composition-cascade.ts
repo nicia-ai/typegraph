@@ -75,8 +75,8 @@ type CompositionCascadeMember = DiscoveredCascadeMember &
 
 export type CompositionCascadePlan = Readonly<{
   /**
-   * LIVE parts in the cascade's delete order: LEAF-FIRST, then code-point
-   * order by `(kind, id)` within one level of the closure
+   * LIVE parts in the cascade's delete order: LEAF-FIRST, then a
+   * deterministic order by kind, then id, within one level of the closure
    * ({@link cascadeDeletionOrder}). Empty when the whole declares no parts.
    * A member whose node row is already dead (see {@link liveDiscoveredMembers})
    * is excluded — it is not something for a caller to retire/purge, nor a
@@ -94,7 +94,7 @@ const EMPTY_COMPOSITION_CASCADE_PLAN: CompositionCascadePlan = {
 
 /**
  * The plan's members as bare `{ kind, id }` refs, in the cascade's own delete
- * order — leaf-first, then code-point order by `(kind, id)` within each level
+ * order — leaf-first, then deterministically by kind, then id, within each level
  * ({@link cascadeDeletionOrder}) — what a whole's delete reports to its
  * operation hook and to the transaction receipt (`cascadedParts`).
  *
@@ -393,8 +393,8 @@ async function liveDiscoveredMembers(
  * THE order a cascade deletes its members in, and therefore the order every
  * consumer reports them in (`cascadedParts` on a receipt and on the delete's
  * operation-hook context, merge's orphan reports): LEAF-FIRST — every part
- * before the whole it belongs to — and, within one level of the closure,
- * code-point order by `(kind, id)`.
+ * before the whole it belongs to — and, within one level of the closure, a
+ * deterministic order by kind, then id.
  *
  * Leaf-first is the part of the order that carries meaning: a part's own
  * delete must run while its whole is still there. Two SIBLING parts of one
@@ -405,6 +405,12 @@ async function liveDiscoveredMembers(
  * reports the same list on every run and on every backend, so a consumer may
  * compare `cascadedParts` for equality, and two concurrent cascades over
  * overlapping closures take their row locks in one agreed order.
+ *
+ * The order itself is {@link compareStringTuples}' — UTF-16 code-unit order on
+ * `kind`, then `id`. Any total order would serve: nothing compares this list
+ * against a SQL `ORDER BY`, so the cheaper comparator is the right one and
+ * `compareCodePoints` (which exists for orders that must match an engine's)
+ * would be a promise this list does not need to keep.
  *
  * Rounds arrive deepest-LAST (breadth-first discovery) and are reversed here;
  * each round is sorted on the way out, so the sort is ascending in the
@@ -451,8 +457,8 @@ function cascadeDeletionOrder(
  * exact on every backend and needs no recursive-traversal capability.
  *
  * `members` is ordered by {@link cascadeDeletionOrder} — leaf-first, then
- * code-point order by `(kind, id)` within each level — never in the order the
- * edge reads returned their rows.
+ * deterministically by kind, then id, within each level — never in the order
+ * the edge reads returned their rows.
  */
 export async function planCompositionCascade(
   ctx: Readonly<{

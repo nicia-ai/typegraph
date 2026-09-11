@@ -378,8 +378,8 @@ export type OperationOutcomeFacts = Readonly<{
   /**
    * The composition parts a whole's delete cascaded through, as `{ kind, id }`
    * refs in the cascade's own delete order: LEAF-FIRST — every part before the
-   * whole it belongs to — and then code-point order by kind and id within one
-   * level of the closure. Two sibling parts of one whole have no order
+   * whole it belongs to — and then a deterministic order by kind, then id,
+   * within one level of the closure. Two sibling parts of one whole have no order
    * between them to respect, so they are sorted rather than left in the order
    * the cascade's reads returned them, which makes this list comparable for
    * equality across runs and backends. Taken from the plan the cascade already
@@ -788,7 +788,7 @@ export type TransactionReceipt = Readonly<{
   /**
    * Every composition part a node delete inside this transaction cascaded
    * through, in the order the deletes ran: each delete's own closure —
-   * leaf-first, then code-point order by kind and id within one level —
+   * leaf-first, then deterministically by kind, then id, within one level —
    * concatenated in the order the deletes were issued. Empty when the
    * transaction deleted no composition whole. Taken from the same plan the
    * cascade executed, so it never names a part the cascade did not delete, and
