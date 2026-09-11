@@ -23,7 +23,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
-import { applyMergePlan, merge, planMerge } from "../../src/graph-merge/merge";
+import {
+  applyMergePlan,
+  merge,
+  planMerge,
+  planMergeIncremental,
+} from "../../src/graph-merge/merge";
 import { parseMergePlanArtifact } from "../../src/graph-merge/plan-wire";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import {
@@ -103,8 +108,90 @@ const uniqueGraph = defineGraph({
 });
 type UniqueGraph = typeof uniqueGraph;
 
+const NamedManager = defineNode("NamedManager", {
+  schema: z.object({
+    name: z.string(),
+    first: z.string().optional(),
+    last: z.string().optional(),
+  }),
+});
+
+/**
+ * The compound key declared on every level of a three-deep chain, each
+ * scoped to its OWN kind (separate namespaces): the kind a write lands under
+ * decides which namespace it claims in, so a counterfactual that skipped the
+ * retype would probe the wrong one.
+ */
+const KIND_SCOPED_FULL_NAME = {
+  ...FULL_NAME_CONSTRAINT,
+  scope: "kind",
+} as const;
+const retypeGraph = defineGraph({
+  id: "identity_flag_rebuild_retype",
+  nodes: {
+    NamedPerson: {
+      type: NamedPerson,
+      unique: [KIND_SCOPED_FULL_NAME as never],
+    },
+    NamedEmployee: {
+      type: NamedEmployee,
+      unique: [KIND_SCOPED_FULL_NAME as never],
+    },
+    NamedManager: {
+      type: NamedManager,
+      unique: [KIND_SCOPED_FULL_NAME as never],
+    },
+  },
+  edges: {},
+  ontology: [
+    subClassOf(NamedEmployee, NamedPerson),
+    subClassOf(NamedManager, NamedEmployee),
+  ],
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+type RetypeGraph = typeof retypeGraph;
+
+const EmailedPerson = defineNode("NamedPerson", {
+  schema: z.object({
+    name: z.string(),
+    email: z.string().optional(),
+    first: z.string().optional(),
+    last: z.string().optional(),
+  }),
+});
+
+/** `uniqueGraph` plus a second, kind-scoped key on `email` for the base-unique source. */
+const modifiedGraph = defineGraph({
+  id: "identity_flag_rebuild_modified",
+  nodes: {
+    NamedPerson: {
+      type: EmailedPerson,
+      unique: [
+        FULL_NAME_CONSTRAINT as never,
+        {
+          name: "person_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+          where: (fields: Readonly<Record<string, { isNotNull(): unknown }>>) =>
+            requireDefined(fields["email"]).isNotNull(),
+        } as never,
+      ],
+    },
+    NamedEmployee: {
+      type: NamedEmployee,
+      unique: [FULL_NAME_CONSTRAINT as never],
+    },
+  },
+  edges: {},
+  ontology: [subClassOf(NamedEmployee, EmailedPerson)],
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+type ModifiedGraph = typeof modifiedGraph;
+
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
+const TARGET_CLONE = asBranchId("target-clone");
 
 /** Every staged Person lands in one bucket, so `exactKey` proposes all pairs. */
 const ONE_BUCKET = { block: () => "all" } as const;
@@ -676,6 +763,347 @@ describe.each(backendMatrix())(
     // rebuilt plan still reports an induced conflict) — pass two's collision
     // is then the "did not converge" GRAPH_MERGE_ERROR and `throw result.error`
     // fails this test.
+
+    /**
+     * A cluster whose SIMILARITY edges already connect every member is not
+     * identity-induced, whatever redundant `same` it also carries: `a1`–`b1`–`c1`
+     * chain by score, `same(a1, c1)` adds nothing, and the fused key collides
+     * with the employee row. `"flag"` has nothing to drop here and must hand
+     * the collision to the commit's refusal — never a "names no further
+     * pairing" invariant error.
+     */
+    it("leaves a similarity-fused collision alone when the only identity edge is redundant", async () => {
+      const [base] = await createStoreWithSchema(
+        uniqueGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      await base.nodes.NamedEmployee.create(
+        { name: "Ada Lovelace", first: "Ada", last: "Lovelace" },
+        { id: "emp" },
+      );
+      const source = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.NamedPerson.create(
+        { name: "Ada", first: "Ada" },
+        { id: "a1" },
+      );
+      await source.store.nodes.NamedPerson.create(
+        { name: "B", last: "Lovelace" },
+        { id: "b1" },
+      );
+      await source.store.nodes.NamedPerson.create({ name: "C" }, { id: "c1" });
+      await source.store.identity.assertSame(
+        { kind: "NamedPerson", id: "a1" },
+        { kind: "NamedPerson", id: "c1" },
+      );
+      // a1–b1 and b1–c1 score; a1–c1 does not, so only the assertion relates
+      // them directly — and the chain already fuses them.
+      const chain = {
+        NamedPerson: {
+          ...ONE_BUCKET,
+          threshold: 0.5,
+          similarity: {
+            kind: "custom" as const,
+            score: (left: { id: string }, right: { id: string }) =>
+              [left.id, right.id].includes("b1") ? 1 : 0,
+          },
+        },
+      };
+      const artifact = unwrap(
+        await planMerge(base, [source], {
+          branchOrder: [BRANCH_A],
+          resolve: chain,
+          identity: { pairing: "definitional", onUniquenessConflict: "flag" },
+        }),
+      );
+      expect(artifact.review.identityConflicts ?? []).toEqual([]);
+      const applied = await applyMergePlan(base, artifact);
+      if (isOk(applied)) throw new Error("expected a constraint refusal");
+      expect(applied.error.code).toBe("GRAPH_MERGE_CONSTRAINT_CONFLICT");
+      expect(applied.error.message).not.toContain("did not converge");
+      const byDefault = await merge(base, [source], {
+        branchOrder: [BRANCH_A],
+        resolve: chain,
+        identity: { pairing: "definitional" },
+      });
+      if (isOk(byDefault)) throw new Error("expected a constraint refusal");
+      expect(byDefault.error.code).toBe("GRAPH_MERGE_CONSTRAINT_CONFLICT");
+    });
+    // MUTATION CHECK: two guards cover this shape and BOTH must go to reach the
+    // old failure — in `pairingInducedUniquenessConflicts` remove the
+    // empty-`assertionIds` guard AND make `unfusedWrites` singleton member
+    // writes instead of per-component writes — the plan then reports a
+    // conflict naming no assertion and the merge fails with the "names no
+    // further pairing to drop" GRAPH_MERGE_ERROR instead of the constraint
+    // refusal.
+
+    /**
+     * A MODIFIED base member's own write carries the fork's edit: `m` (a
+     * fork-point row the target still holds) gains `last: "Lovelace"` in the
+     * branch, which alone completes the key the target's newer employee row
+     * holds. The branch also stages `n1` (matched onto `m` by the base-unique
+     * `email` source) and `n2`, asserted `same` with `n1`. The collision is
+     * `m`'s own, so the pairing is not to blame — which the counterfactual can
+     * only see if the modification is folded into `m`'s unfused write.
+     */
+    it("folds a modified base member's own write into the counterfactual", async () => {
+      const [forkPoint] = await createStoreWithSchema(
+        modifiedGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      await forkPoint.nodes.NamedPerson.create(
+        { name: "M", first: "Ada", email: "m@example.test" },
+        { id: "m" },
+      );
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: TARGET_CLONE }),
+      ).store;
+      await target.nodes.NamedEmployee.create(
+        { name: "Ada Lovelace", first: "Ada", last: "Lovelace" },
+        { id: "emp" },
+      );
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.NamedPerson.update("m" as never, {
+        last: "Lovelace",
+        email: "moved@example.test",
+      });
+      await source.store.nodes.NamedPerson.create(
+        { name: "N1", email: "m@example.test" },
+        { id: "n1" },
+      );
+      await source.store.nodes.NamedPerson.create({ name: "N2" }, { id: "n2" });
+      await source.store.identity.assertSame(
+        { kind: "NamedPerson", id: "n1" },
+        { kind: "NamedPerson", id: "n2" },
+      );
+
+      const artifact = unwrap(
+        await planMergeIncremental<ModifiedGraph>({
+          forkPoint,
+          target,
+          branches: [source],
+          options: {
+            branchOrder: [BRANCH_A],
+            // A resolve entry is what runs the kind's sources; scoring itself
+            // accepts nothing, so the base-unique `email` match is the only
+            // non-identity edge.
+            resolve: {
+              NamedPerson: {
+                ...ONE_BUCKET,
+                threshold: 1,
+                similarity: { kind: "custom", score: () => 0 },
+              },
+            },
+            identity: { pairing: "definitional", onUniquenessConflict: "flag" },
+          },
+        }),
+      );
+      console.info(
+        `[${entry.name}] modified-member review:`,
+        artifact.review.identityConflicts,
+        artifact.review.resolutions.map((resolution) => resolution.memberIds),
+      );
+      // `m`, `n1` and `n2` fused onto the committed `m` …
+      expect(
+        artifact.review.resolutions.find(
+          (resolution) => resolution.canonicalId === "m",
+        )?.memberIds,
+      ).toEqual(["m", "n1", "n2"]);
+      // … and the collision is m's own, so nothing is blamed on the pairing.
+      expect(artifact.review.identityConflicts ?? []).toEqual([]);
+      const applied = await applyMergePlan(target, artifact);
+      if (isOk(applied)) throw new Error("expected a constraint refusal");
+      expect(applied.error.code).toBe("GRAPH_MERGE_CONSTRAINT_CONFLICT");
+    });
+    // MUTATION CHECK: in `unfusedComponentWrites` drop the modification fold
+    // (write `entity.props` alone) — `m`'s unfused write then lacks `last`,
+    // the counterfactual finds no member-owned claim, the plan reports a
+    // `uniqueness` conflict against the pairing and `toEqual([])` fails.
+
+    /**
+     * The counterfactual write lands under the RETYPED kind. `p` is staged as
+     * both a `NamedPerson` and a `NamedEmployee`, `d` as both a `NamedPerson`
+     * and a `NamedManager` (two ontology retype pairs), `c` is similarity-fused
+     * with `p`, and `d` joins only through `same(c, d)`. The fused entity is
+     * therefore a `NamedManager` whose `Ada Lovelace` key collides with the
+     * committed manager. Without the pairing, `{p, p, c}` is a `NamedEmployee`
+     * — a namespace where `Ada Lovelace` is free — so the pairing IS to blame,
+     * the plan drops it and applies. A counterfactual written under the
+     * un-retyped `NamedPerson` kind would instead meet the committed PERSON
+     * `Ada Lovelace`, call the collision member-owned, drop nothing, and hand
+     * back a plan the commit refuses.
+     */
+    it("retypes the counterfactual component write the way the plan does", async () => {
+      const [base] = await createStoreWithSchema(
+        retypeGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      await base.nodes.NamedManager.create(
+        { name: "Ada Lovelace", first: "Ada", last: "Lovelace" },
+        { id: "mgr" },
+      );
+      await base.nodes.NamedPerson.create(
+        { name: "Ada Lovelace", first: "Ada", last: "Lovelace" },
+        { id: "per" },
+      );
+      const source = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.NamedPerson.create(
+        { name: "C", first: "Ada" },
+        { id: "c" },
+      );
+      await source.store.nodes.NamedPerson.create({ name: "D" }, { id: "d" });
+      await source.store.nodes.NamedManager.create({ name: "D" }, { id: "d" });
+      await source.store.nodes.NamedPerson.create(
+        { name: "P", last: "Lovelace" },
+        { id: "p" },
+      );
+      await source.store.nodes.NamedEmployee.create({ name: "P" }, { id: "p" });
+      const pair = await source.store.identity.assertSame(
+        { kind: "NamedPerson", id: "c" },
+        { kind: "NamedPerson", id: "d" },
+      );
+      const result = await merge<RetypeGraph>(base, [source], {
+        branchOrder: [BRANCH_A],
+        reconcileTypes: "ontology",
+        resolve: {
+          NamedPerson: {
+            ...ONE_BUCKET,
+            threshold: 0.5,
+            similarity: {
+              kind: "custom",
+              score: (left, right) =>
+                (
+                  [left.id as string, right.id as string].toSorted().join(',') ===
+                  "c,p"
+                ) ?
+                  1
+                : 0,
+            },
+          },
+        },
+        identity: { pairing: "definitional", onUniquenessConflict: "flag" },
+      });
+      if (isErr(result)) throw result.error;
+      const conflicts = conflictsOfKind(result.data as never, "uniqueness");
+      console.info(`[${entry.name}] retype conflicts:`, conflicts);
+      expect(
+        conflicts.map((conflict) => ({
+          canonical: conflict.canonical,
+          owner: conflict.owner.id,
+          assertionIds: conflict.assertionIds,
+        })),
+      ).toEqual([
+        {
+          canonical: { kind: "NamedManager", id: "c" },
+          owner: "mgr",
+          assertionIds: [pair.assertion.id],
+        },
+      ]);
+      // {p, p, c} landed as the NamedEmployee `c`; d stayed a manager of its own.
+      expect(
+        (await base.nodes.NamedEmployee.find())
+          .map((row) => `${row.id}:${row.first ?? ""} ${row.last ?? ""}`)
+          .toSorted(),
+      ).toEqual(["c:Ada Lovelace"]);
+      expect(
+        (await base.nodes.NamedManager.find())
+          .map((row) => row.id as string)
+          .toSorted(),
+      ).toEqual(["d", "mgr"]);
+    });
+    // MUTATION CHECK: in `unfusedComponentWrites` write `entity.kind` instead
+    // of the retyped kind — the component probes as a `NamedPerson`, meets the
+    // committed person `per`, the collision reads as member-owned, nothing is
+    // dropped, and the merge is refused at the commit instead of applying.
+
+    /**
+     * The returned plan excludes exactly the pairings the report names. In one
+     * pass, pairing X (`x1`,`x2`, also a scored match) and pairing Y (`y1`,`y2`,
+     * identity only) both collapse an edge; the rebuild re-fuses X on its own
+     * score, so only Y is carried — and the plan handed back must be rebuilt
+     * from {Y} alone, so X's identity evidence is back on its resolution.
+     */
+    it("rebuilds the final plan from the attributed pairings when a pass cleared a suspect", async () => {
+      const [base] = await createStoreWithSchema(
+        edgeGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      await base.nodes.Company.create({ name: "C" }, { id: "c" });
+      const source = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_A }),
+      );
+      for (const id of ["x1", "x2", "y1", "y2"]) {
+        await source.store.nodes.Person.create({ name: "Ada" }, { id });
+        await source.store.edges.worksAt.create(
+          { kind: "Person", id },
+          { kind: "Company", id: "c" },
+          { role: "engineer" },
+          { id: `edge-${id}` },
+        );
+      }
+      await source.store.identity.assertSame(
+        { kind: "Person", id: "x1" },
+        { kind: "Person", id: "x2" },
+      );
+      const pairY = await source.store.identity.assertSame(
+        { kind: "Person", id: "y1" },
+        { kind: "Person", id: "y2" },
+      );
+      const result = await merge(base, [source], {
+        branchOrder: [BRANCH_A],
+        resolve: {
+          Person: {
+            ...ONE_BUCKET,
+            threshold: 0.5,
+            similarity: {
+              kind: "custom",
+              score: (left, right) =>
+                (
+                  [left.id as string, right.id as string].toSorted().join(',') ===
+                  "x1,x2"
+                ) ?
+                  1
+                : 0,
+            },
+          },
+        },
+        identity: { pairing: "definitional", onEdgeConflict: "flag" },
+      });
+      if (isErr(result)) throw result.error;
+      const conflicts = conflictsOfKind(result.data as never, "edge");
+      expect(conflicts.map((conflict) => conflict.assertionIds)).toEqual([
+        [pairY.assertion.id],
+      ]);
+      // X fused (by score), Y did not.
+      expect(
+        (await base.nodes.Person.find())
+          .map((row) => row.id as string)
+          .toSorted(),
+      ).toEqual(["x1", "y1", "y2"]);
+      // The plan was rebuilt from {Y}: X's pairing is back in candidate
+      // generation, so its resolution carries the identity source again.
+      const resolution = result.data.resolutions.find(
+        (entry) => entry.canonicalId === "x1",
+      );
+      expect(
+        resolution?.decisiveEdges.some((edge) =>
+          edge.sources.some((sourceRef) => sourceRef.kind === "identity"),
+        ),
+      ).toBe(true);
+    });
+    // MUTATION CHECK: return `current` instead of rebuilding from the
+    // attributed set when the two differ — X's pairing stays excluded, its
+    // resolution shows only the scored source, and the final `toBe(true)`
+    // fails.
 
     /**
      * The dropped pairing is the one on the PATH between the collapsed

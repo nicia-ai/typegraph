@@ -829,10 +829,14 @@ have produced without the assertion is not the pairing's doing and is not
 reported against it. Attribution happens *before* each rebuild: an **edge**
 collapse is induced when the cluster's non-identity edges alone do not connect
 the two endpoints (and confirmed by the rebuild, since fusions only shrink); a
-**uniqueness** collision is attributed member by member — the planner probes
-the same store decision a second time over the members' own unfused writes,
-and drops a pairing only when no member claims that key on its own. The
-decision then iterates to a fixpoint: splitting a fused entity puts its
+**uniqueness** collision is attributed against the cluster's own unfused
+writes — the planner probes the same store decision a second time over the
+writes the plan would carry with that cluster's identity edges removed (each
+component its similarity, unique-value or retype edges still hold together,
+canonicalized, retyped and modification-folded exactly as the plan does), and
+drops a pairing only when no such write claims that key on its own. A cluster
+whose non-identity edges already connect every member has no pairing to drop
+and is never induced. The decision then iterates to a fixpoint: splitting a fused entity puts its
 members' own writes back into the plan, and a member's own key the fused union
 had discarded can meet a *different* induced pairing the fused plan never met,
 so each pass inspects the rebuilt plan and drops what it newly induces, and
