@@ -2874,7 +2874,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
   const unattachedCandidates = await requiredExistenceOrphanCandidates(
     { graphId: target.graphId, registry: target.registry },
     txBackend,
-    plan,
+    resolvedMergeWrites(plan),
   );
 
   const committedEdges = await applyEdgeRows(
@@ -3719,6 +3719,52 @@ function resolvedNodeUpserts<G extends GraphDef>(
   }));
 }
 
+function resolvedEdgeUpserts<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly MergePlanEdgeUpsert[] {
+  return plan.mergedEdges.map((edge) => {
+    const baseProps = plan.inheritedEdgeBaseProps.get(edge.id);
+    const props =
+      baseProps === undefined ?
+        edge.props
+      : commitModificationProps(baseProps, edge.props);
+    return {
+      kind: edge.kind,
+      id: edge.id,
+      from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
+      to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
+      ...splitWireProps(props),
+      ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
+      ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
+    };
+  });
+}
+
+/**
+ * THE normalized write view of a resolved plan — every row it deletes, upserts,
+ * asserts, or retracts, in the wire artifact's own shape. The artifact
+ * serializes exactly this, and every walk that asks "what does this merge
+ * write" (the required-existence orphan candidates, for one) reads it, so the
+ * live-plan apply path and the replayed-artifact apply path see one view of
+ * the same plan rather than two hand-maintained projections of it.
+ */
+export function resolvedMergeWrites<G extends GraphDef>(
+  plan: MergePlan<G>,
+): MergePlanWrites {
+  return {
+    nodeDeletes: [...plan.nodeDeletions].map(([identity, kind]) =>
+      wireEntityRef(kind, idOf(identity)),
+    ),
+    nodeUpserts: resolvedNodeUpserts(plan),
+    edgeDeletes: [...plan.edgeDeletions].map(([identity, kind]) =>
+      wireEntityRef(kind, idOf(identity)),
+    ),
+    edgeUpserts: resolvedEdgeUpserts(plan),
+    identityAssertions: plan.identityAssertions,
+    identityRetractions: plan.identityRetractions,
+  };
+}
+
 /**
  * THE composition-orphan finding, shared by the plan-time report and apply's
  * authoritative re-verification: for every `(kind, id)` in `wholes` whose
@@ -3802,11 +3848,8 @@ async function compositionOrphansAmong(
 async function planTimeCompositionOrphans<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
+  writes: MergePlanWrites,
 ): Promise<readonly MergePlanCompositionOrphan[]> {
-  const wholes = [...plan.nodeDeletions].map(([identity, kind]) => ({
-    kind,
-    id: idOf(identity),
-  }));
   const ctx = {
     graphId: target.graphId,
     registry: target.registry,
@@ -3816,7 +3859,7 @@ async function planTimeCompositionOrphans<G extends GraphDef>(
   const deleted = await compositionOrphansAmong(
     ctx,
     backend,
-    wholes,
+    writes.nodeDeletes,
     new Set(plan.nodeDeletions.keys()),
   );
   // The candidates themselves are resolved against the backend's real,
@@ -3832,7 +3875,7 @@ async function planTimeCompositionOrphans<G extends GraphDef>(
   const unattachedCandidates = await requiredExistenceOrphanCandidates(
     ctx,
     backend,
-    plan,
+    writes,
   );
   const unattached = await unattachedRequiredPartOrphansAmong(
     ctx,
@@ -3906,18 +3949,24 @@ async function refuseFirstOrphan<G extends GraphDef>(
 }
 
 /**
- * Every required-existence part this merge's `plan` could newly orphan — the
- * exact, bounded candidate set {@link unattachedRequiredPartOrphansAmong}
- * scans, rather than a graph-wide `findNodesByKind` scan (the way
+ * Every required-existence part this merge could newly orphan — the exact,
+ * bounded candidate set {@link unattachedRequiredPartOrphansAmong} scans,
+ * rather than a graph-wide `findNodesByKind` scan (the way
  * `readCompositionUnattachedParts` audits a schema tightening).
+ *
+ * ONE walk over ONE view: `writes` is the plan's normalized write view
+ * ({@link resolvedMergeWrites}), the same shape the wire artifact carries, so
+ * the live-plan apply (`applyInternalMergePlan`), the plan-time preview, and
+ * the replayed-artifact apply (`applyWireMergeWrites`) all derive their
+ * candidates here. A new source is added to this function and nowhere else.
  *
  * THREE sources, unioned (a part can be newly orphaned without its OWN row
  * ever being rewritten — an edge-only change is enough):
  *
- * 1. This merge's own planned node writes (`plannedNodeWrites`) — a
- *    brand-new or re-canonicalized required-existence part.
+ * 1. Every node row this merge writes (`writes.nodeUpserts`) — a brand-new
+ *    or re-canonicalized required-existence part.
  * 2. Every required-existence endpoint of a composition edge THIS MERGE
- *    DELETES (`plan.edgeDeletions`) — an edge-level delete/modify conflict,
+ *    DELETES (`writes.edgeDeletes`) — an edge-level delete/modify conflict,
  *    or a repointed edge dropped for a finally-deleted endpoint, can sever
  *    a part's only attachment while the part's own row is never touched.
  *    Read from `backend` while the edge is STILL LIVE there — callers MUST
@@ -3925,135 +3974,59 @@ async function refuseFirstOrphan<G extends GraphDef>(
  *    deleted it, then run {@link unattachedRequiredPartOrphansAmong}'s
  *    actual CHECK only after both have landed.
  * 3. Every required-existence endpoint of a composition edge in
- *    `plan.mergedEdges` whose validity window THIS MERGE explicitly closes
- *    (`validTo` stated, or `clearValidTo` — reopening can only ATTACH, never
- *    orphan, so it needs no candidate) — a `population: "oneActive"` pair
- *    ended by this merge's own canonicalization, mirroring the write-path's
- *    own `assertCompositionExistencePreserved`. An edge whose window this
- *    merge does not mention at all is not what could newly close it, so it
+ *    `writes.edgeUpserts` whose validity window THIS MERGE explicitly closes
+ *    (`validTo` stated — reopening can only ATTACH, never orphan, so it needs
+ *    no candidate) — a `population: "oneActive"` pair ended by this merge's
+ *    own canonicalization, mirroring the write-path's own
+ *    `assertCompositionExistencePreserved`. An edge whose window this merge
+ *    does not mention at all is not what could newly close it, so it
  *    contributes no candidate.
+ *
+ * Only `registry.compositionExistence(kind) === "required"` kinds are worth
+ * tracking; candidates are deduped by identity.
  */
-/**
- * A `(kind, id) -> required-existence?` accumulator shared by
- * {@link requiredExistenceOrphanCandidates} and its wire-artifact sibling
- * {@link requiredExistenceOrphanCandidatesFromWrites}: one place decides
- * whether a candidate is worth tracking (`registry.compositionExistence`)
- * and dedupes by identity, so the two candidate builders cannot drift on
- * either.
- */
-function requiredExistenceCandidateAdder(registry: KindRegistry): Readonly<{
-  add: (kind: string, id: string) => void;
-  values: () => readonly MergePlanEntityRef[];
-}> {
-  const candidates = new Map<MergeKey, MergePlanEntityRef>();
-  return {
-    add: (kind, id) => {
-      if (registry.compositionExistence(kind) !== "required") return;
-      candidates.set(mergeKey(kind, id), { kind, id });
-    },
-    values: () => [...candidates.values()],
-  };
-}
-
-/**
- * Reads a composition edge THIS MERGE DELETES (`edgeId`/`edgeKind`) from
- * `backend` — while it is STILL LIVE there — and folds its required-existence
- * part-side endpoint into `add`. Shared by both candidate builders' second
- * source (`plan.edgeDeletions` / `writes.edgeDeletes`).
- */
-async function addRequiredEndpointFromDeletedEdge(
-  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
-  backend: GraphReadBackend,
-  edgeId: string,
-  edgeKind: string,
-  add: (kind: string, id: string) => void,
-): Promise<void> {
-  if (!ctx.registry.isCompositionEdge(edgeKind)) return;
-  const edgeRow = await backend.getEdge(ctx.graphId, edgeId);
-  if (edgeRow === undefined) return;
-  const partSide = ctx.registry.compositionPartSide(edgeRow.kind);
-  if (partSide === undefined) return;
-  if (partSide === "from") {
-    add(edgeRow.from_kind, edgeRow.from_id);
-  } else {
-    add(edgeRow.to_kind, edgeRow.to_id);
-  }
-}
-
-async function requiredExistenceOrphanCandidates<G extends GraphDef>(
-  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
-  backend: GraphReadBackend,
-  plan: MergePlan<G>,
-): Promise<readonly MergePlanEntityRef[]> {
-  const { add, values } = requiredExistenceCandidateAdder(ctx.registry);
-
-  for (const write of plannedNodeWrites(plan)) {
-    add(write.kind, write.id);
-  }
-
-  for (const [identity, edgeKind] of plan.edgeDeletions) {
-    await addRequiredEndpointFromDeletedEdge(
-      ctx,
-      backend,
-      idOf(identity),
-      edgeKind,
-      add,
-    );
-  }
-
-  for (const edge of plan.mergedEdges) {
-    if (edge.clearValidTo !== true && edge.validTo === undefined) continue;
-    const partSide = ctx.registry.compositionPartSide(edge.kind);
-    if (partSide === undefined) continue;
-    if (partSide === "from") {
-      add(edge.fromKind, edge.fromId);
-    } else {
-      add(edge.toKind, edge.toId);
-    }
-  }
-
-  return values();
-}
-
-/**
- * {@link requiredExistenceOrphanCandidates}'s sibling for the wire-artifact
- * apply path (`applyWireMergeWrites`): identical three sources, built from
- * `MergePlanWrites` (the serialized/replayed shape) instead of a live
- * `MergePlan`.
- */
-async function requiredExistenceOrphanCandidatesFromWrites(
+export async function requiredExistenceOrphanCandidates(
   ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
   backend: GraphReadBackend,
   writes: MergePlanWrites,
 ): Promise<readonly MergePlanEntityRef[]> {
-  const { add, values } = requiredExistenceCandidateAdder(ctx.registry);
+  const candidates = new Map<MergeKey, MergePlanEntityRef>();
+  const add = (kind: string, id: string): void => {
+    if (ctx.registry.compositionExistence(kind) !== "required") return;
+    candidates.set(mergeKey(kind, id), { kind, id });
+  };
+  const addPartSide = (
+    edgeKind: string,
+    from: MergePlanEntityRef,
+    to: MergePlanEntityRef,
+  ): void => {
+    const partSide = ctx.registry.compositionPartSide(edgeKind);
+    if (partSide === undefined) return;
+    const part = partSide === "from" ? from : to;
+    add(part.kind, part.id);
+  };
 
   for (const upsert of writes.nodeUpserts) {
     add(upsert.kind, upsert.id);
   }
 
   for (const deletion of writes.edgeDeletes) {
-    await addRequiredEndpointFromDeletedEdge(
-      ctx,
-      backend,
-      deletion.id,
-      deletion.kind,
-      add,
+    if (!ctx.registry.isCompositionEdge(deletion.kind)) continue;
+    const edgeRow = await backend.getEdge(ctx.graphId, deletion.id);
+    if (edgeRow === undefined) continue;
+    addPartSide(
+      edgeRow.kind,
+      { kind: edgeRow.from_kind, id: edgeRow.from_id },
+      { kind: edgeRow.to_kind, id: edgeRow.to_id },
     );
   }
 
   for (const upsert of writes.edgeUpserts) {
     if (upsert.validTo === undefined) continue;
-    const partSide = ctx.registry.compositionPartSide(upsert.kind);
-    if (partSide === undefined) continue;
-    if (partSide === "from") {
-      add(upsert.from.kind, upsert.from.id);
-    } else {
-      add(upsert.to.kind, upsert.to.id);
-    }
+    addPartSide(upsert.kind, upsert.from, upsert.to);
   }
 
-  return values();
+  return [...candidates.values()];
 }
 
 /**
@@ -4254,24 +4227,12 @@ async function resolvedMergeArtifact<G extends GraphDef>(
   anchors: MergePlanAnchors,
 ): Promise<MergePlanArtifactV2> {
   const { plan, options } = resolved;
-  const compositionOrphans = await planTimeCompositionOrphans(target, plan);
-  const nodeUpserts = resolvedNodeUpserts(plan);
-  const edgeUpserts = plan.mergedEdges.map((edge) => {
-    const baseProps = plan.inheritedEdgeBaseProps.get(edge.id);
-    const props =
-      baseProps === undefined ?
-        edge.props
-      : commitModificationProps(baseProps, edge.props);
-    return {
-      kind: edge.kind,
-      id: edge.id,
-      from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
-      to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
-      ...splitWireProps(props),
-      ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
-      ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
-    };
-  });
+  const writes = resolvedMergeWrites(plan);
+  const compositionOrphans = await planTimeCompositionOrphans(
+    target,
+    plan,
+    writes,
+  );
   const input: MergePlanArtifactV2Input = {
     formatVersion: MERGE_PLAN_FORMAT_VERSION,
     mode,
@@ -4279,30 +4240,19 @@ async function resolvedMergeArtifact<G extends GraphDef>(
     anchors,
     proposed: {
       nodes: {
-        upserts: nodeUpserts.length,
-        deletions: plan.nodeDeletions.size,
+        upserts: writes.nodeUpserts.length,
+        deletions: writes.nodeDeletes.length,
       },
       edges: {
-        upserts: edgeUpserts.length,
-        deletions: plan.edgeDeletions.size,
+        upserts: writes.edgeUpserts.length,
+        deletions: writes.edgeDeletes.length,
       },
       identity: {
-        assertions: plan.identityAssertions.length,
-        retractions: plan.identityRetractions.length,
+        assertions: writes.identityAssertions.length,
+        retractions: writes.identityRetractions.length,
       },
     },
-    writes: {
-      nodeDeletes: [...plan.nodeDeletions].map(([identity, kind]) =>
-        wireEntityRef(kind, idOf(identity)),
-      ),
-      nodeUpserts,
-      edgeDeletes: [...plan.edgeDeletions].map(([identity, kind]) =>
-        wireEntityRef(kind, idOf(identity)),
-      ),
-      edgeUpserts,
-      identityAssertions: plan.identityAssertions,
-      identityRetractions: plan.identityRetractions,
-    },
+    writes,
     guards: {
       canonicalMappings: [...plan.canonicalOf]
         .sort(([left], [right]) => compareMergeKeys(left, right))
@@ -5646,12 +5596,11 @@ async function applyWireMergeWrites<G extends GraphDef>(
   // Resolved BEFORE `applyEdgeRows` below deletes
   // any of `artifact.writes.edgeDeletes` — same reasoning as
   // `applyInternalMergePlan`'s own resolve-then-check split.
-  const unattachedCandidates =
-    await requiredExistenceOrphanCandidatesFromWrites(
-      { graphId: target.graphId, registry: target.registry },
-      txBackend,
-      artifact.writes,
-    );
+  const unattachedCandidates = await requiredExistenceOrphanCandidates(
+    { graphId: target.graphId, registry: target.registry },
+    txBackend,
+    artifact.writes,
+  );
 
   const committedEdges = await applyEdgeRows(
     edgesApi,
