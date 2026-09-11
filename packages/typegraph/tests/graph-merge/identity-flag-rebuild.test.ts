@@ -1026,6 +1026,91 @@ describe.each(backendMatrix())(
     // dropped, and the merge is refused at the commit instead of applying.
 
     /**
+     * The same retype shape with the EMPLOYEE namespace occupied too: the
+     * unfused `{p, p, c}` component, written as the `NamedEmployee` `c` — an
+     * identity no staged member carries (the members are `NamedPerson c`,
+     * `NamedPerson p`, `NamedEmployee p`) — collides with the committed
+     * employee on its own. The collision is the component's, not the
+     * pairing's, which the attribution can only see by matching the
+     * counterfactual finding against the cluster's own unfused write
+     * identities rather than its staged member keys.
+     */
+    it("matches a counterfactual finding against the retyped write identity, not the staged member keys", async () => {
+      const [base] = await createStoreWithSchema(
+        retypeGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      for (const [collection, id] of [
+        [base.nodes.NamedManager, "mgr"],
+        [base.nodes.NamedEmployee, "emp"],
+        [base.nodes.NamedPerson, "per"],
+      ] as const) {
+        await collection.create(
+          { name: "Ada Lovelace", first: "Ada", last: "Lovelace" },
+          { id },
+        );
+      }
+      const source = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.NamedPerson.create(
+        { name: "C", first: "Ada" },
+        { id: "c" },
+      );
+      await source.store.nodes.NamedPerson.create({ name: "D" }, { id: "d" });
+      await source.store.nodes.NamedManager.create({ name: "D" }, { id: "d" });
+      await source.store.nodes.NamedPerson.create(
+        { name: "P", last: "Lovelace" },
+        { id: "p" },
+      );
+      await source.store.nodes.NamedEmployee.create({ name: "P" }, { id: "p" });
+      await source.store.identity.assertSame(
+        { kind: "NamedPerson", id: "c" },
+        { kind: "NamedPerson", id: "d" },
+      );
+      const artifact = unwrap(
+        await planMerge<RetypeGraph>(base, [source], {
+          branchOrder: [BRANCH_A],
+          reconcileTypes: "ontology",
+          resolve: {
+            NamedPerson: {
+              ...ONE_BUCKET,
+              threshold: 0.5,
+              similarity: {
+                kind: "custom",
+                score: (left, right) =>
+                  (
+                    [left.id as string, right.id as string]
+                      .toSorted()
+                      .join(',') === "c,p"
+                  ) ?
+                    1
+                  : 0,
+              },
+            },
+          },
+          identity: { pairing: "definitional", onUniquenessConflict: "flag" },
+        }),
+      );
+      console.info(
+        `[${entry.name}] retyped-identity review:`,
+        artifact.review.identityConflicts,
+      );
+      // Nothing blamed on the pairing …
+      expect(artifact.review.identityConflicts ?? []).toEqual([]);
+      // … and the fused manager write meets the commit's refusal.
+      const applied = await applyMergePlan(base, artifact);
+      if (isOk(applied)) throw new Error("expected a constraint refusal");
+      expect(applied.error.code).toBe("GRAPH_MERGE_CONSTRAINT_CONFLICT");
+    });
+    // MUTATION CHECK: in `pairingInducedUniquenessConflicts` match the
+    // counterfactual finding against `cluster.members` again — the employee
+    // write `NamedEmployee c` is no member key, the collision reads as
+    // induced, and the plan reports a `uniqueness` conflict against the
+    // pairing (`toEqual([])` fails).
+
+    /**
      * The returned plan excludes exactly the pairings the report names. In one
      * pass, pairing X (`x1`,`x2`, also a scored match) and pairing Y (`y1`,`y2`,
      * identity only) both collapse an edge; the rebuild re-fuses X on its own

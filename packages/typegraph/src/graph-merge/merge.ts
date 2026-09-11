@@ -2463,6 +2463,38 @@ function droppedPairingFor(
 }
 
 /**
+ * INVARIANT backstop, not a decision: a pairing-induced conflict always names
+ * at least one assertion to drop, and the fixpoint's termination argument
+ * rests on it. Both arms establish it before they get here — the edge arm
+ * only reports a pair the non-identity edges do NOT connect, so some identity
+ * path joins them; the uniqueness arm's counterfactual reproduces a
+ * single-component cluster's fused write exactly and attributes its collision
+ * to the member, so a cluster with no identity path among its members never
+ * reaches the report. An empty set here is therefore a defect in one of those
+ * two, refused loudly rather than looped on or silently skipped.
+ */
+function requireDroppedPairing(
+  dropped: Readonly<{
+    assertionIds: readonly string[];
+    branches: readonly BranchId[];
+  }>,
+  cluster: IdentityPairedCluster,
+): typeof dropped {
+  if (dropped.assertionIds.length === 0) {
+    throw new MergeError(
+      "Identity pairing attribution named a cluster with no pairing to drop.",
+      {
+        details: {
+          canonical: entityRef(cluster.canonical),
+          members: cluster.members.map((member) => entityRef(member)),
+        },
+      },
+    );
+  }
+  return dropped;
+}
+
+/**
  * `onEdgeConflict: "flag"`'s detection: every fold set the repoint collapsed
  * across distinct pre-repoint relationships ({@link EdgeFoldCollapse}) whose
  * collapsing endpoints an identity pairing — and only an identity pairing —
@@ -2489,8 +2521,6 @@ function pairingInducedEdgeConflicts(
       for (const [index, a] of endpoints.entries()) {
         for (const b of endpoints.slice(index + 1)) {
           if (connectedWithoutIdentity(cluster, a, b)) continue;
-          const dropped = droppedPairingFor(cluster, [a, b]);
-          if (dropped.assertionIds.length === 0) continue;
           conflicts.push({
             kind: "edge",
             edgeKind: collapse.kind,
@@ -2502,7 +2532,10 @@ function pairingInducedEdgeConflicts(
               .filter((row) => endpointOf(row) === a || endpointOf(row) === b)
               .map((row) => row.id as string)
               .sort((left, right) => compareStrings(left, right)),
-            ...dropped,
+            ...requireDroppedPairing(
+              droppedPairingFor(cluster, [a, b]),
+              cluster,
+            ),
           });
         }
       }
@@ -2674,13 +2707,18 @@ async function pairingInducedUniquenessConflicts<G extends GraphDef>(
   const memberOwnedClaims = new Map<MergeKey, Set<string>>();
   for (const finding of counterfactual) {
     for (const cluster of partyClusters.values()) {
-      const members = new Set(cluster.members);
+      // The cluster's OWN unfused writes, under the identities they land at —
+      // a retyped component writes under a kind no staged member carries, so
+      // the staged member keys would miss it.
+      const ownWrites = new Set(
+        cluster.unfusedWrites.map((write) => mergeKey(write.kind, write.id)),
+      );
       const touches = [
         mergeKey(finding.claimant.kind, finding.claimant.id),
         ...(finding.holder.origin === "set" ?
           [mergeKey(finding.holder.kind, finding.holder.id)]
         : []),
-      ].some((key) => members.has(key));
+      ].some((key) => ownWrites.has(key));
       if (!touches) continue;
       const claims =
         memberOwnedClaims.get(cluster.writeIdentity) ?? new Set<string>();
@@ -2698,13 +2736,6 @@ async function pairingInducedUniquenessConflicts<G extends GraphDef>(
       ) {
         continue;
       }
-      // A cluster whose non-identity edges already connect every member has
-      // no pairing on any path between them: its fusion is similarity's, the
-      // counterfactual above reproduced the same fused write, and there is
-      // nothing for this policy to drop — the collision stays with the
-      // commit's refusal.
-      const dropped = droppedPairingFor(cluster, cluster.members);
-      if (dropped.assertionIds.length === 0) continue;
       conflicts.push({
         kind: "uniqueness",
         constraintName: finding.constraintName,
@@ -2713,7 +2744,10 @@ async function pairingInducedUniquenessConflicts<G extends GraphDef>(
         owner: entityRef(mergeKey(finding.holder.kind, finding.holder.id)),
         loser: entityRef(mergeKey(finding.claimant.kind, finding.claimant.id)),
         members: cluster.members.map((member) => entityRef(member)),
-        ...dropped,
+        ...requireDroppedPairing(
+          droppedPairingFor(cluster, cluster.members),
+          cluster,
+        ),
       });
     }
   }
@@ -3314,11 +3348,19 @@ function unfusedComponentWrites<G extends GraphDef>(
     );
     const sourceIdentity = mergeKey(entity.kind, entity.canonicalId);
     if (!ctx.nodeDeletions.has(sourceIdentity)) {
-      const kinds = [...new Set(contributions.map((member) => member.kind))];
-      const retyped =
-        ctx.options.reconcileTypes === "ontology" && kinds.length > 1 ?
-          mostSpecificCommonKind(ctx.registry, kinds)
-        : undefined;
+      // The SAME reconciler that produced the plan's `retypeMap`, run over
+      // this one component, so the counterfactual's kind cannot drift from
+      // the plan's.
+      const retyped = reconcileTypes(
+        [
+          {
+            canonicalId: sourceIdentity,
+            memberKinds: contributions.map((member) => member.kind),
+          },
+        ],
+        ctx.registry,
+        ctx.options.reconcileTypes,
+      ).retypeMap.get(sourceIdentity);
       const modification = ctx.modificationsByIdentity.get(sourceIdentity);
       written.add(sourceIdentity);
       writes.push({
