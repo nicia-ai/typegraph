@@ -39,6 +39,37 @@ const results = await store
 // results: readonly { name: string; email: string | undefined }[]
 ```
 
+## executeChecked(expectedSchemaVersion)
+
+Check a cached reconciled schema while reading data in one SQL statement:
+
+```typescript
+const rows = await store.query()
+  .from("Person", "person")
+  .select((ctx) => ctx.person)
+  .executeChecked(store.reconciledSchema.version);
+```
+
+The active schema version and data come from the same statement snapshot. A mismatch throws
+`SchemaChangedError` with `details.graphId`, `details.expected`, and `details.actual` before
+calling the selector, even when the data query matches no rows. `undefined` means no active
+schema; it is distinct from version zero. On mismatch, reload the reconciled schema, rebuild
+the query against the reopened store, and retry. Retry in a new transaction if the old one
+holds a repeatable-read snapshot.
+
+This is an explicit alternative to a standalone `getCommittedSchemaVersion` probe on the first
+relational query. It checks that statement only; subsequent request reads can observe later
+commits. It neither locks the schema nor replaces write fences, and does not alter store-open
+or application cache policies.
+
+Checked reads fetch full rows and support relational traversals, ordering, offsets, and limits.
+Recursive and relevance-ranked queries are refused with `ConfigurationError`; use a separate
+probe for those. Named parameters must be bound as ordinary values before building the query.
+Bundled SQLite and PostgreSQL backends provide the required `tableNames.schemaVersions` binding.
+A custom backend without it is refused before executing SQL. A custom binding must name a
+relation with the standard `graph_id`, `version`, and `is_active` columns and one active row
+per graph, consistent with `getActiveSchema`.
+
 ## first()
 
 Get the first result or `undefined`:
@@ -253,6 +284,9 @@ back after its statement has already run. On a SQL backend with transactions it 
 `begin`/`commit`, putting a networked one at N+2 round trips **at best**; Durable Objects use an
 ambient storage transaction with no framing, and without transactions there is no framing at all.
 Connection reuse is the adapter's business either way.
+
+Whole-node, whole-edge, and spread selections detected during planning use a full fetch from
+the start. A selector branch that depends on actual row values can still trigger the fallback.
 
 It will not fix an N+1. For that, fold the work into one query: a `.traverse()` chain (one
 statement), `store.subgraph()` (2 statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
