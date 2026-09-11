@@ -452,6 +452,10 @@ await store.nodes.Chapter.reparent(chapter.id, {
 });
 ```
 
+`reparent` writes a brand-new realizing edge, so it takes the same
+`props` as `create`'s `partOf`: a realizing edge whose schema has required
+fields needs them restated on every move.
+
 Moving a part is a first-class operation because neither half is legal on its
 own: the new attachment refuses while the old edge still holds the part's
 one-whole claim, and — under `existence: "required"` — detaching the old edge
