@@ -656,6 +656,32 @@ const identityUnresolvedConflictSchema = z.discriminatedUnion("kind", [
       source: matchSourceSchema.optional(),
     })
     .strict(),
+  z
+    .object({
+      kind: z.literal("edge"),
+      edgeKind: nonEmptyStringSchema,
+      a: mergePlanEntityRefSchema,
+      b: mergePlanEntityRefSchema,
+      canonical: mergePlanEntityRefSchema,
+      side: z.enum(["from", "to"]),
+      edgeIds: z.array(nonEmptyStringSchema),
+      assertionIds: z.array(nonEmptyStringSchema),
+      branches: z.array(nonEmptyStringSchema),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("uniqueness"),
+      constraintName: nonEmptyStringSchema,
+      fields: z.array(nonEmptyStringSchema),
+      canonical: mergePlanEntityRefSchema,
+      owner: mergePlanEntityRefSchema,
+      loser: mergePlanEntityRefSchema,
+      members: z.array(mergePlanEntityRefSchema),
+      assertionIds: z.array(nonEmptyStringSchema),
+      branches: z.array(nonEmptyStringSchema),
+    })
+    .strict(),
   // No `"provenance"` arm: `onProvenanceConflict` has no reporting
   // disposition that could ever place one on this array (see the matching
   // note on `IdentityUnresolvedConflict` in types.ts).

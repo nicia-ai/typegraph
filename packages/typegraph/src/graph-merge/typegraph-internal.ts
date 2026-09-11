@@ -77,6 +77,10 @@ export {
   importGraphStream,
   summarizeImportErrors,
 } from "../interchange/import";
+export {
+  RESOLVED_NODE_UNIQUENESS_UNSUPPORTED_CODE,
+  type ResolvedNodeClaimConflict,
+} from "../store/claims/resolved-node-claims";
 export { getEdgeRowsByIds } from "../store/edge-fetch";
 export { getNodeRowsByIds } from "../store/node-fetch";
 // The provenance ownership probe needs graph-scoped raw SQL to look for rows

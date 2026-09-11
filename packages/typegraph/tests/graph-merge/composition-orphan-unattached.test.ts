@@ -47,7 +47,13 @@
  * legitimate, and the simplest way to guarantee the target's copy shares
  * the fork point's exact ids too.
  */
-import type { GraphBackend, Store } from "@nicia-ai/typegraph";
+import type {
+  EdgeId,
+  GraphBackend,
+  NodeId,
+  NodeType,
+  Store,
+} from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
   defineEdge,
@@ -60,10 +66,17 @@ import { z } from "zod";
 
 import { rowPropsToObject } from "../../src/backend/types";
 import { computeBaseVersion } from "../../src/graph-merge/base-version";
+import type { CanonicalEntity } from "../../src/graph-merge/canonicalize";
+import type { MergedEdge } from "../../src/graph-merge/edge-repoint";
 import {
   applyMergePlan,
+  type MergePlan,
   planMergeIncremental,
+  requiredExistenceOrphanCandidates,
+  resolvedMergeWrites,
 } from "../../src/graph-merge/merge";
+import { mergeKey } from "../../src/graph-merge/node-key";
+import { mergePlanArtifactV2Schema } from "../../src/graph-merge/plan-schema";
 import { isErr, isOk } from "../../src/graph-merge/result";
 import { asBranchId, type GraphBranch } from "../../src/graph-merge/types";
 import { storeBackend } from "../../src/store/runtime-port";
@@ -93,6 +106,39 @@ const graph = defineGraph({
 type G = typeof graph;
 
 const BRANCH_A = asBranchId("branch-a");
+
+function nodeId(value: string): NodeId<NodeType> {
+  return value as NodeId<NodeType>;
+}
+
+/** An empty plan; the candidate-walk test overrides only the slices it exercises. */
+function emptyPlan(): MergePlan<G> {
+  return {
+    canonicalEntities: [],
+    survivingModifications: [],
+    nodeDeletions: new Map(),
+    edgeDeletions: new Map(),
+    mergedEdges: [],
+    inheritedEdgeBaseProps: new Map(),
+    retypeMap: new Map(),
+    nodeValidityEnds: new Map(),
+    edgeValidityEnds: new Map(),
+    validityEnds: [],
+    resolutions: [],
+    propertyConflicts: [],
+    deleteModifyConflicts: [],
+    typeReconciliations: [],
+    dropped: [],
+    baseAmbiguities: [],
+    provenanceRecords: [],
+    warnings: [],
+    identityAssertions: [],
+    identityRetractions: [],
+    identityReconciliations: [],
+    identityConflicts: [],
+    canonicalOf: new Map(),
+  };
+}
 
 describe.each(backendMatrix())(
   "composition orphan conflict — unattached required part [$name]",
@@ -277,5 +323,108 @@ describe.each(backendMatrix())(
     // refusal is what the final `find({})` assertion actually pins, not
     // this fix's own code; the `compositionOrphans` assertion is this
     // test's load-bearing check on the NEW code.)
+
+    it("finds a candidate reachable through each of the three write sources from the live plan's view and from the wire artifact's view alike", async () => {
+      cleanups = [];
+      const target = await makeStore();
+      await target.nodes.UWhole.create({}, { id: "w1" });
+      for (const id of ["p-written", "p-detached", "p-ended"]) {
+        await target.nodes.UPart.create(
+          {},
+          { id, partOf: { kind: "UWhole", id: "w1" } },
+        );
+      }
+      const edgeOf = async (partId: string): Promise<EdgeId> => {
+        const [edge] = await storeBackend(target).findEdgesConnectedTo({
+          graphId: graph.id,
+          nodeKind: "UPart",
+          nodeId: partId,
+        });
+        return requireDefined(edge, `uHolds edge of ${partId}`).id as EdgeId;
+      };
+      const detachedEdgeId = await edgeOf("p-detached");
+      const endedEdgeId = await edgeOf("p-ended");
+
+      // Source 1: the plan WRITES the part's own row (a canonical upsert).
+      const written: CanonicalEntity = {
+        canonicalId: nodeId("p-written"),
+        kind: "UPart",
+        props: {},
+        resolution: {
+          canonicalId: nodeId("p-written"),
+          memberIds: [nodeId("p-written")],
+          kind: "UPart",
+          branchOrigins: [],
+          decisiveEdges: [],
+        },
+        conflicts: [],
+      };
+      // Source 3: the plan CLOSES the validity window of the part's edge.
+      const ended: MergedEdge = {
+        id: endedEdgeId,
+        kind: "uHolds",
+        fromId: nodeId("p-ended"),
+        toId: nodeId("w1"),
+        fromKind: "UPart",
+        toKind: "UWhole",
+        props: {},
+        mergedIds: [endedEdgeId],
+        validTo: "2026-01-01T00:00:00.000Z",
+      };
+      const plan: MergePlan<G> = {
+        ...emptyPlan(),
+        canonicalEntities: [written],
+        // Source 2: the plan DELETES the part's edge outright.
+        edgeDeletions: new Map([
+          [mergeKey("uHolds", detachedEdgeId), "uHolds"],
+        ]),
+        mergedEdges: [ended],
+      };
+      const ctx = { graphId: target.graphId, registry: target.registry };
+      const backend = storeBackend(target);
+
+      // The live-plan entry point (`applyInternalMergePlan` and the plan-time
+      // preview): the plan's own normalized write view.
+      const liveWrites = resolvedMergeWrites(plan);
+      const fromLivePlan = await requiredExistenceOrphanCandidates(
+        ctx,
+        backend,
+        liveWrites,
+      );
+
+      // The replayed-artifact entry point (`applyWireMergeWrites`): the same
+      // writes after the wire round trip the artifact's `writes` field takes.
+      const wireWrites = mergePlanArtifactV2Schema.shape.writes.parse(
+        JSON.parse(JSON.stringify(liveWrites)),
+      );
+      const fromWireArtifact = await requiredExistenceOrphanCandidates(
+        ctx,
+        backend,
+        wireWrites,
+      );
+
+      const sortedIds = (
+        candidates: readonly Readonly<{ kind: string; id: string }>[],
+      ): readonly string[] =>
+        candidates
+          .map((candidate) => `${candidate.kind}/${candidate.id}`)
+          .sort();
+      console.info(
+        `[${entry.name}] candidates — live plan:`,
+        sortedIds(fromLivePlan),
+        "wire artifact:",
+        sortedIds(fromWireArtifact),
+      );
+      expect(sortedIds(fromLivePlan)).toEqual([
+        "UPart/p-detached",
+        "UPart/p-ended",
+        "UPart/p-written",
+      ]);
+      expect(sortedIds(fromWireArtifact)).toEqual(sortedIds(fromLivePlan));
+    });
+    // MUTATION CHECK: delete any one of the three source loops in
+    // `requiredExistenceOrphanCandidates` (src/graph-merge/merge.ts) — the
+    // matching `UPart/p-*` entry disappears from BOTH views above, since
+    // both entry points now share that one walk.
   },
 );

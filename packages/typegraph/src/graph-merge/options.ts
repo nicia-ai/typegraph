@@ -49,6 +49,8 @@ export const MERGE_OPTION_DEFAULTS = {
     pairing: "off",
     onAssertionConflict: "refuse",
     onProvenanceConflict: "keepBoth",
+    onEdgeConflict: "repoint",
+    onUniquenessConflict: "refuse",
   },
 } as const satisfies Readonly<{
   reconcileTypes: ReconcileTypesMode;
@@ -62,6 +64,8 @@ export const MERGE_OPTION_DEFAULTS = {
     pairing: "off";
     onAssertionConflict: "refuse";
     onProvenanceConflict: "keepBoth";
+    onEdgeConflict: "repoint";
+    onUniquenessConflict: "refuse";
   }>;
 }>;
 
@@ -104,6 +108,12 @@ const identityOptionsScalarSchema = z
     onProvenanceConflict: z
       .enum(["keepBoth", "refuse"])
       .default(MERGE_OPTION_DEFAULTS.identity.onProvenanceConflict),
+    onEdgeConflict: z
+      .enum(["repoint", "flag"])
+      .default(MERGE_OPTION_DEFAULTS.identity.onEdgeConflict),
+    onUniquenessConflict: z
+      .enum(["refuse", "flag"])
+      .default(MERGE_OPTION_DEFAULTS.identity.onUniquenessConflict),
   })
   .strict();
 
@@ -245,6 +255,8 @@ function validateIdentityOptions(
       onAssertionConflict ?? MERGE_OPTION_DEFAULTS.identity.onAssertionConflict,
     ),
     onProvenanceConflict: scalar.onProvenanceConflict,
+    onEdgeConflict: scalar.onEdgeConflict,
+    onUniquenessConflict: scalar.onUniquenessConflict,
   };
 }
 
