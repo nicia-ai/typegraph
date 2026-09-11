@@ -14,6 +14,7 @@ pnpm-workspace.yaml
 src/routeTree.gen.ts
 worker-configuration.d.ts
 dist/
+.declaration-emit/
 node_modules
 
 # Vendor analytics bootstrap: minified is:inline snippet that prettier-plugin-astro cannot parse

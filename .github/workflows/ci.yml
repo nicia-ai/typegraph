@@ -17,7 +17,7 @@ permissions:
 # Declaration bundling traverses the full public backend and store type graph.
 # Keep its worker above Node's default old-space ceiling as that API grows.
 env:
-  NODE_OPTIONS: --max-old-space-size=12288
+  NODE_OPTIONS: --max-old-space-size=8192
 
 jobs:
   detect-release-metadata-push:

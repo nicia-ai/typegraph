@@ -43,10 +43,16 @@ export const CLAIM_PHRASE_PATTERN = new RegExp(
   "i",
 );
 
-/** Directories the scan never descends into. */
+/**
+ * Directories the scan never descends into — build outputs and tool state, all
+ * of them gitignored. `.declaration-emit` is the declaration tree
+ * `scripts/build.ts` emits for the declaration rollup: it mirrors `src`, so
+ * every claim site in a source doc comment appears there a second time.
+ */
 export const EXCLUDED_DIRECTORY_NAMES: readonly string[] = [
   "node_modules",
   "dist",
+  ".declaration-emit",
   ".git",
   ".turbo",
   "coverage",
