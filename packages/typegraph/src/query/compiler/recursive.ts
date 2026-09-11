@@ -620,15 +620,10 @@ function compileRecursiveCte(
    * term whose self-reference appears more than once, even split across a
    * `UNION ALL` of two otherwise-independent branches — PostgreSQL raises
    * "recursive reference to query \"recursive_cte\" must not appear within
-   * its non-recursive term" for this shape (verified against the base
-   * revision on PGlite; not the "must not appear more than once" wording
-   * this comment previously quoted).
-   * SQLite's recursive-CTE implementation is looser and would have
-   * accepted two self-joining branches, but a mechanism this lane exists to
-   * cross backends with is not sound if only one dialect can run it — see
-   * the composition-navigation lane's mixed-orientation `parts()`/`wholes()`
-   * test, the first caller to combine `.recursive()` with a mixed-direction
-   * union end to end.
+   * its non-recursive term" for this shape. SQLite's recursive-CTE
+   * implementation is looser and would have accepted two self-joining
+   * branches, but a mechanism that has to behave identically on both
+   * backends is not sound if only one dialect can run it.
    *
    * A single JOIN also makes the old per-branch duplicate guard structurally
    * unnecessary at the JOIN level: two UNIONed self-joins could each match
@@ -658,14 +653,12 @@ function compileRecursiveCte(
 
     // `e.*` materializes every edge column (props included) into this CTE
     // on every execution — measured to switch SQLite from a covering-index
-    // seek to a full MATERIALIZE + automatic index build (Ed-04). The
-    // recursive term only ever reads graph_id/kind (structural filters),
-    // the temporal columns — including `recorded_from`/`recorded_to` on a
-    // recorded-pinned read, per `temporalFilterPass.recordedColumns`, whose
-    // one spelling of that decision is what a recorded-pinned mixed-
-    // orientation traversal's `e.recorded_from`/`e.recorded_to` reference
-    // (emitted by `edgeTemporalFilter` below) depends on projecting here
-    // (Ed-r2-1) — and the four tg_source_*/tg_target_* aliases derived
+    // seek to a full MATERIALIZE + automatic index build. The recursive term
+    // only ever reads graph_id/kind (structural filters), the temporal
+    // columns — including `recorded_from`/`recorded_to` on a recorded-pinned
+    // read, which `temporalFilterPass.recordedColumns` is the one owner of,
+    // so that `edgeTemporalFilter`'s references to them below always have a
+    // column to read — and the four tg_source_*/tg_target_* aliases derived
     // below — UNLESS a predicate on this edge alias or the identity
     // frontier widening can reference an arbitrary column (e.g. `e.props`
     // via `whereEdge`), in which case only `e.*` is guaranteed to carry
@@ -686,12 +679,14 @@ function compileRecursiveCte(
           sql`, `,
         );
 
-    // Both arms also filter on `e.graph_id` — not only the recursive term
-    // downstream — so a multi-graph database normalizes only the current
-    // graph's edges of these kinds into this CTE rather than every graph's
-    // (Ed-r2-4). The result is unchanged either way (the recursive term
-    // already requires `graph_id = ${graphId}`); this only bounds what gets
-    // normalized before that filter runs.
+    // Both arms also filter on `e.graph_id` and on the edge temporal filter —
+    // not only the recursive term downstream — so this CTE normalizes just the
+    // current graph's currently-visible edge versions of these kinds instead
+    // of every graph's every version, which SQLite would MATERIALIZE and index
+    // on every execution. The result is unchanged either way (the recursive
+    // term applies both again, and `edgeTemporalFilter` is row-local over
+    // `e`'s own temporal columns); this only bounds what gets normalized
+    // before those filters run.
     const directArm = sql`
       SELECT ${directedEdgeBaseColumns},
         e.${sql.raw(directJoinField)} AS tg_source_id,
@@ -699,7 +694,7 @@ function compileRecursiveCte(
         e.${sql.raw(directTargetField)} AS tg_target_id,
         e.${sql.raw(directTargetKindField)} AS tg_target_kind
       FROM ${ctx.schema.edgesTable} e
-      WHERE e.graph_id = ${graphId} AND ${compileKindFilter(directEdgeKinds, "e.kind")}
+      WHERE e.graph_id = ${graphId} AND ${compileKindFilter(directEdgeKinds, "e.kind")} AND ${edgeTemporalFilter}
     `;
     const inverseArm = sql`
       SELECT ${directedEdgeBaseColumns},
@@ -708,7 +703,7 @@ function compileRecursiveCte(
         e.${sql.raw(inverseTargetField)} AS tg_target_id,
         e.${sql.raw(inverseTargetKindField)} AS tg_target_kind
       FROM ${ctx.schema.edgesTable} e
-      WHERE e.graph_id = ${graphId} AND ${compileKindFilter(inverseEdgeKinds, "e.kind")}${
+      WHERE e.graph_id = ${graphId} AND ${compileKindFilter(inverseEdgeKinds, "e.kind")} AND ${edgeTemporalFilter}${
         duplicateGuard === undefined ? sql`` : sql` AND ${duplicateGuard}`
       }
     `;
@@ -739,7 +734,7 @@ function compileRecursiveCte(
         // Both inputs are already deduped individually (above); the union
         // is not automatically, so a kind present in both — the ordinary
         // `direction: "both"` case on one symmetric kind — would otherwise
-        // bind a duplicate parameter in the emitted `IN` list (Ed-09).
+        // bind a duplicate parameter in the emitted `IN` list.
         edgeKinds: [...new Set([...directEdgeKinds, ...inverseEdgeKinds])],
         edgeSource: sql.raw(directedEdgesCteName),
       });

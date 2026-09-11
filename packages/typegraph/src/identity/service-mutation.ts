@@ -1250,6 +1250,43 @@ export async function mergeCurrentClasses(
   ];
 }
 
+/**
+ * The derived-state effect of a CURRENT pair assertion: a `same` FUSES the two
+ * classes and notes the resulting class transitions, a `different` re-projects
+ * the separation relation for the pair. One owner of the relation → effect
+ * mapping, and of what a fusion notes, for every path that writes a current
+ * assertion row.
+ */
+async function applyPairRelationEffect(
+  ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
+  target: Backend,
+  relation: IdentityRelation,
+  a: PlainNodeRef,
+  b: PlainNodeRef,
+  noteTransition: IdentityTransitionNoteFunction,
+  common: Readonly<{
+    cause: IdentityTransitionCause;
+    assertionIds: readonly string[];
+    validAt: string;
+  }>,
+): Promise<void> {
+  if (relation !== "same") {
+    await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
+      a,
+      b,
+    ]);
+    return;
+  }
+  const transitions = await mergeCurrentClasses(
+    target,
+    ctx.schema,
+    ctx.graphId,
+    a,
+    b,
+  );
+  noteClassTransitions(ctx.graphId, noteTransition, transitions, common);
+}
+
 export async function assertPair<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   target: Backend,
@@ -1301,25 +1338,11 @@ export async function assertPair<G extends GraphDef>(
       touch,
     );
     windowValidator?.record(row);
-    if (relation === "same") {
-      const transitions = await mergeCurrentClasses(
-        target,
-        ctx.schema,
-        ctx.graphId,
-        a,
-        b,
-      );
-      noteClassTransitions(ctx.graphId, noteTransition, transitions, {
-        cause: "assert",
-        assertionIds: [row.id],
-        validAt: operationInstant,
-      });
-    } else {
-      await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
-        a,
-        b,
-      ]);
-    }
+    await applyPairRelationEffect(ctx, target, relation, a, b, noteTransition, {
+      cause: "assert",
+      assertionIds: [row.id],
+      validAt: operationInstant,
+    });
     return assertionResult(publicAssertion(row), "created");
   }
   const window = resolveIdentityValidityWindow(windowInput, operationInstant);
@@ -1392,24 +1415,10 @@ export async function assertPair<G extends GraphDef>(
   if (window.effective !== "current") {
     return assertionResult(publicAssertion(row), "created");
   }
-  if (relation === "same") {
-    const transitions = await mergeCurrentClasses(
-      target,
-      ctx.schema,
-      ctx.graphId,
-      a,
-      b,
-    );
-    noteClassTransitions(ctx.graphId, noteTransition, transitions, {
-      cause: "assert",
-      assertionIds: [row.id],
-      validAt: operationInstant,
-    });
-  } else {
-    await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
-      a,
-      b,
-    ]);
-  }
+  await applyPairRelationEffect(ctx, target, relation, a, b, noteTransition, {
+    cause: "assert",
+    assertionIds: [row.id],
+    validAt: operationInstant,
+  });
   return assertionResult(publicAssertion(row), "created");
 }

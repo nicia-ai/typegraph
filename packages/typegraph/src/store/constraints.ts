@@ -81,7 +81,7 @@ export type ConstraintContext = Readonly<{
  * test.
  *
  * Composition is reported first of all: a composition edge kind ALWAYS
- * declares a constrained whole-side cardinality (§2.5 of the design note), so
+ * declares a constrained whole-side cardinality, so
  * it always also qualifies as `"edgeCardinality"` — reporting the narrower
  * reason first is what lets a backend that cannot hold the fence give advice
  * that names the `partOf`/`hasPart` declaration rather than a generic
@@ -178,17 +178,12 @@ export function nodeWriteNeedsConstraintFence(
  * own function rather than a third value in that one's `operation` union so
  * a delete's very different reason ("this kind cascades") is never confused
  * with a create/update's ("this kind claims a scope").
- *
- * `"edgeComposition"` is E-b's eventual constant; until it lands this
- * reports the existing `"edgeCardinality"` reason (both name the same
- * remediation class to `CONSTRAINT_FENCE_ADVICE`: declare cardinality on
- * the realizing edge).
  */
 export function nodeDeleteNeedsConstraintFence(
   registry: KindRegistry,
   kind: string,
 ): ConstraintFenceReason | undefined {
-  return registry.isCompositionWhole(kind) ? "edgeCardinality" : undefined;
+  return registry.isCompositionWhole(kind) ? "edgeComposition" : undefined;
 }
 
 /**
@@ -243,20 +238,10 @@ export function graphOwesClaims(
     // Routed through `edgeWriteNeedsConstraintFence` — the one owner of
     // "which reason does this edge kind's declaration qualify under, and in
     // what preference order" — rather than re-spelling the cardinality-only
-    // half of that fold here. Fields are passed explicitly, `acyclic`
-    // omitted, rather than spreading `registration` (which carries its own
-    // `acyclic` field): this predicate asks about cardinality alone (see the
-    // docblock above), and `edgeWriteNeedsConstraintFence` only ever falls
-    // through to `"edgeAcyclicity"` when neither composition nor an ordinary
-    // axis qualifies, so leaving it out cannot manufacture a cardinality
-    // answer that is not there.
+    // half of that fold here. An acyclicity-only answer is filtered out
+    // below.
     const reason = edgeWriteNeedsConstraintFence({
-      ...(registration.cardinality === undefined ?
-        {}
-      : { cardinality: registration.cardinality }),
-      ...(registration.targetCardinality === undefined ?
-        {}
-      : { targetCardinality: registration.targetCardinality }),
+      ...registration,
       composition: registry.isCompositionEdge(kind),
     });
     if (reason === "edgeComposition" || reason === "edgeCardinality") {
@@ -269,8 +254,8 @@ export function graphOwesClaims(
 /**
  * Whether `importGraph` must take the per-graph write lock per chunk: the
  * graph declares at least one `acyclic: true` edge kind, or any
- * `partOf`/`hasPart` pair — item E's composition relation is D-10's oriented
- * union over the SAME acyclicity check, with the same `lockOnly` backing.
+ * `partOf`/`hasPart` pair — the composition relation is an oriented union
+ * over the SAME acyclicity check, with the same `lockOnly` backing.
  *
  * Import takes no per-graph lock by design (`graphOwesClaims`'s docblock) and
  * is fenced instead by the claim rows its constrained writes issue —

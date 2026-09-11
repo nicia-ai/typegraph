@@ -1,3 +1,5 @@
+export { bindExtraIfReachable } from "../backend/capabilities/bind";
+export { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
 export { requireLineage } from "../backend/capabilities/lineage";
 export {
   batchPointReadVerdict,
@@ -50,9 +52,9 @@ export {
 } from "../errors";
 export {
   bulkIsSeparated,
-  hasLiveDifferentAssertions,
   IDENTITY_STORAGE_MISSING_CODE,
-  separationFactsKnownEmpty,
+  separationClassPairKey,
+  separationFactsEmpty,
 } from "../identity/separation";
 export type { IdentityTransferAssertion } from "../identity/service";
 export { currentClassKey } from "../identity/service-mutation";

@@ -319,6 +319,15 @@ export async function withImportStreamLease<G extends GraphDef, T>(
  * alone, because it is a property of the frame, not of the leg. It takes the
  * READS to answer; the executor owns decorating its own target with them.
  */
+/**
+ * One required-existence part THIS import created, pending the composition edge
+ * that attaches it.
+ */
+type PendingRequiredPart = Readonly<{ kind: string; id: string }>;
+
+/** Pending required parts by `makeNodeKey`, cleared as their edges arrive. */
+type PendingRequiredParts = Map<string, PendingRequiredPart>;
+
 type ImportWriteFrame = Readonly<{
   session: WriteSession;
   target: WriteTarget;
@@ -416,16 +425,13 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   lock: GraphWriteLock,
 ): Promise<ImportAttemptState> {
   const { result, errors, importedNodeIds } = createImportAttemptState();
-  // Item E.2. Every required-existence part THIS import creates, keyed by
+  // Every required-existence part THIS import creates, keyed by
   // `makeNodeKey`, removed as soon as the SAME batch's composition edge for
   // it is accepted (`processEdgeSlice`'s `record`). Frame-scoped, like
   // `pendingMatchIdentityOwners`: nodes are written before any edge is even
   // seen (`processNodes` then `processEdges`), so "the edge in the same
   // batch" can only be decided once the whole edge set is known.
-  const pendingRequiredParts = new Map<
-    string,
-    Readonly<{ kind: string; id: string }>
-  >();
+  const pendingRequiredParts: PendingRequiredParts = new Map();
   let nextEdgeSavepointId = 0;
   const frame: ImportWriteFrame = {
     session,
@@ -473,7 +479,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     importedNodeIds,
     pendingRequiredParts,
   );
-  // Item E.2. What remains in `pendingRequiredParts` after every edge in the
+  // What remains in `pendingRequiredParts` after every edge in the
   // payload is seen is either attached on the TARGET from before this
   // import, or genuinely orphaned. Runs AFTER `foldImportedIdentityNodes`
   // above (which needs the full node batch, before edges can clear any
@@ -1078,24 +1084,10 @@ function assertIdentityImportSupported<G extends GraphDef>(
 }
 
 /**
- * Whether an identity payload's ARCHIVAL fields ask the destination to
- * restore transition-log rows: a non-empty `transitions` array (or, before
- * that array has arrived, a streaming header's `hasTransitions`
- * announcement) or a non-zero retention watermark. The one owner both
- * {@link assertIdentityTransitionsRestoreSupported} call sites below
- * consult, so an atomic `importGraph` and a streamed `importGraphStream`
- * refuse the exact same documents.
- */
-function identityArchivalRestoreRequested(
-  hasTransitions: boolean,
-  retention: Readonly<{ prunedBeforeRevision: number }> | undefined,
-): boolean {
-  return hasTransitions || (retention?.prunedBeforeRevision ?? 0) > 0;
-}
-
-/**
  * Rejects an archival transitions/retention payload aimed at a history-off
- * store BEFORE any entity write.
+ * store BEFORE any entity write. A non-zero retention watermark counts as an
+ * archival restore on its own, exactly as a non-empty `transitions` array does,
+ * so both call sites refuse the same documents.
  *
  * `importIdentityTransitionsAtTarget` (`store.ts`) raises the same
  * `IdentityReplayError` / `IDENTITY_REPLAY_REQUIRES_HISTORY` as a backstop,
@@ -1116,7 +1108,7 @@ function assertIdentityTransitionsRestoreSupported<G extends GraphDef>(
   retention: Readonly<{ prunedBeforeRevision: number }> | undefined,
 ): void {
   if (
-    identityArchivalRestoreRequested(hasTransitions, retention) &&
+    (hasTransitions || (retention?.prunedBeforeRevision ?? 0) > 0) &&
     !store.historyEnabled
   ) {
     throw identityReplayRequiresHistoryError(store.graphId);
@@ -1592,7 +1584,7 @@ async function processNodes(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
+  pendingRequiredParts: PendingRequiredParts,
 ): Promise<void> {
   const batchSize = options.batchSize;
 
@@ -1681,11 +1673,11 @@ async function processNodeSlice(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
+  pendingRequiredParts: PendingRequiredParts,
 ): Promise<void> {
   const record = (node: InterchangeNode, outcome: ProcessResult): void => {
     recordNodeOutcome(node, outcome, result, errors, importedNodeIds);
-    // Item E.2: a freshly created required-existence part owes a
+    // A freshly created required-existence part owes a
     // composition edge before this import commits — tracked here, cleared
     // by `clearAttachedRequiredPart` the moment the edge for it lands.
     if (
@@ -2722,7 +2714,7 @@ async function processEdges(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
+  pendingRequiredParts: PendingRequiredParts,
 ): Promise<void> {
   const batchSize = options.batchSize;
   // A slice flush makes its accepted keys visible to later database reads, but
@@ -2751,7 +2743,7 @@ async function processEdges(
 }
 
 /**
- * Item E.2. Removes `key` from `pendingRequiredParts` when the just-accepted
+ * Removes `key` from `pendingRequiredParts` when the just-accepted
  * write attaches its part: a fresh composition edge create (`processEdgeSlice`)
  * naming a pending required part on either endpoint. The ONE place both
  * directions of "this write closed the gap" are decided, so the two callers
@@ -2761,7 +2753,7 @@ async function processEdges(
 function clearAttachedRequiredPart(
   registry: KindRegistry,
   edge: InterchangeEdge,
-  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
+  pendingRequiredParts: PendingRequiredParts,
 ): void {
   const partSide = registry.compositionPartSide(edge.kind);
   if (partSide === undefined) return;
@@ -2770,7 +2762,7 @@ function clearAttachedRequiredPart(
 }
 
 /**
- * Item E.2. What remains in `pendingRequiredParts` after every node AND
+ * What remains in `pendingRequiredParts` after every node AND
  * every edge in the payload has been processed: for each, whether the
  * target ALREADY carried a live whole for it before this import (via
  * {@link findLiveCompositionWhole} — the same predicate the write-path
@@ -2813,10 +2805,7 @@ async function assertImportedRequiredPartsAttached<G extends GraphDef>(
   graphId: string,
   registry: KindRegistry,
   runtime: ReturnType<typeof storeRuntime<G>>,
-  pendingRequiredParts: ReadonlyMap<
-    string,
-    Readonly<{ kind: string; id: string }>
-  >,
+  pendingRequiredParts: ReadonlyMap<string, PendingRequiredPart>,
   result: ImportResult,
   importedNodeIds: Set<string>,
   errors: ImportError[],
@@ -3119,11 +3108,11 @@ async function processEdgeSlice(
   errors: ImportError[],
   importedNodeIds: Set<string>,
   pendingMatchIdentityOwners: Set<string>,
-  pendingRequiredParts: Map<string, Readonly<{ kind: string; id: string }>>,
+  pendingRequiredParts: PendingRequiredParts,
 ): Promise<void> {
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
-    // Item E.2: a composition edge accepted this import closes the gap for
+    // A composition edge accepted this import closes the gap for
     // whichever endpoint is its part, when that part is itself pending from
     // `processNodes` (same batch) — see `clearAttachedRequiredPart`.
     if (outcome.status === "created" && registry.isCompositionEdge(edge.kind)) {

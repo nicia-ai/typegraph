@@ -147,19 +147,19 @@ export function edgeCardinalitySpec(
   return EDGE_CARDINALITY_SPECS[edgeCardinalityAxisName(ref)];
 }
 
-/** Parses one spec-table key back into the ref it names. */
-function edgeCardinalityAxisRefFromName(
-  axisName: EdgeCardinalityAxisName,
-): EdgeCardinalityAxisRef {
-  const [direction, cardinality] = axisName.split(":");
-  if (direction === "source") {
-    return { direction, cardinality: cardinality as ConstrainedCardinality };
-  }
-  return {
-    direction: "target",
-    cardinality: cardinality as ConstrainedTargetCardinality,
-  };
-}
+/**
+ * Every ordinary cardinality axis this library has, as the refs themselves —
+ * the same fixed set {@link EDGE_CARDINALITY_SPECS} is keyed by, so a caller
+ * that needs the axes rather than their specs never parses a spec key back
+ * into the ref it was built from.
+ */
+const EDGE_CARDINALITY_AXIS_REFS = [
+  { direction: "source", cardinality: "one" },
+  { direction: "source", cardinality: "unique" },
+  { direction: "source", cardinality: "oneActive" },
+  { direction: "target", cardinality: "one" },
+  { direction: "target", cardinality: "oneActive" },
+] as const satisfies readonly EdgeCardinalityAxisRef[];
 
 /**
  * Every axis an edge kind's claims can sit on, for housekeeping reaps.
@@ -181,10 +181,8 @@ function edgeCardinalityAxisRefFromName(
 export function edgeCardinalityAxesForKind(
   edgeKind: string,
 ): readonly string[] {
-  return (
-    Object.keys(EDGE_CARDINALITY_SPECS) as readonly EdgeCardinalityAxisName[]
-  ).map((axisName) =>
-    edgeCardinalityAxis(edgeCardinalityAxisRefFromName(axisName), edgeKind),
+  return EDGE_CARDINALITY_AXIS_REFS.map((ref) =>
+    edgeCardinalityAxis(ref, edgeKind),
   );
 }
 
@@ -206,11 +204,11 @@ export function edgeCardinalityAxesForKind(
  * under different kinds.
  *
  * **Composition (`params.scope`)**: the axis is the one reserved,
- * relation-wide string instead of `<cardinality>:<edgeKind>` — R4 is a single
- * invariant over every declared `partOf`/`hasPart` pair, so two different
+ * relation-wide string instead of `<cardinality>:<edgeKind>` — one whole per
+ * part is a single invariant over every declared `partOf`/`hasPart` pair, so two different
  * realizing edge kinds must collide on one row. The key is unaffected: it is
  * still whichever endpoint {@link edgeCardinalitySpec}'s `keyShape` names,
- * which for a composition claim is always the PART endpoint (R5: `direction:
+ * which for a composition claim is always the PART endpoint (`direction:
  * "source"` when the part is `from`, `"target"` when it is `to`), so a
  * `from`-side pair and a `to`-side pair attaching the same part still compute
  * the same key.
@@ -312,6 +310,21 @@ export function activeOnlyAxisReferences(
 }
 
 /**
+ * Claim targets in {@link compareClaimTargets} order — the canonical claim
+ * order, and the reason claim order has one owner: claim order IS lock order,
+ * so a caller that assembles its own claim set sorts it through this function
+ * rather than re-spelling the map/sort/map fold inline.
+ */
+export function sortedByClaimTarget(
+  claims: readonly ClaimEdgeCardinalityParams[],
+): readonly ClaimEdgeCardinalityParams[] {
+  return claims
+    .map((claim) => ({ claim, target: edgeCardinalityClaimTarget(claim) }))
+    .toSorted((left, right) => compareClaimTargets(left.target, right.target))
+    .map((entry) => entry.claim);
+}
+
+/**
  * THE claims an edge write owes, in CLAIM order.
  *
  * Takes the AXIS LIST, the same one {@link checkEdgeCardinalityConstraints}
@@ -355,10 +368,7 @@ export function edgeCardinalityClaims(
       toKind: subject.toKind,
       toId: subject.toId,
     }));
-  return claims
-    .map((claim) => ({ claim, target: edgeCardinalityClaimTarget(claim) }))
-    .toSorted((left, right) => compareClaimTargets(left.target, right.target))
-    .map((entry) => entry.claim);
+  return sortedByClaimTarget(claims);
 }
 
 /**
@@ -649,19 +659,15 @@ export async function claimEdgeCardinalityBatch(
   if (claims.length === 0) return;
   const support = claimSupport(backend, verdict);
   if (!support.supported) return;
-  const ordered = claims
-    .map((claim) => ({ claim, target: edgeCardinalityClaimTarget(claim) }))
-    .toSorted((left, right) => compareClaimTargets(left.target, right.target));
-  const graphId = ordered[0]?.claim.graphId ?? "";
+  const ordered = sortedByClaimTarget(claims);
+  const graphId = ordered[0]?.graphId ?? "";
   const outcomes = await withEdgeClaimRelationPrecondition(graphId, () =>
-    support.claims.claimEdgeCardinalityBatch(
-      ordered.map((entry) => entry.claim),
-    ),
+    support.claims.claimEdgeCardinalityBatch(ordered),
   );
   for (const [index, outcome] of outcomes.entries()) {
-    const entry = ordered[index];
-    if (entry !== undefined && outcome.status === "refused") {
-      throw claimRefusalFor(entry.claim, outcome.holderEdgeId);
+    const claim = ordered[index];
+    if (claim !== undefined && outcome.status === "refused") {
+      throw claimRefusalFor(claim, outcome.holderEdgeId);
     }
   }
 }

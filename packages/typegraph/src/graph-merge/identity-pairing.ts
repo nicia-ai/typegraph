@@ -37,16 +37,16 @@
  * never a re-derivation of what "class-lifted difference" means.
  */
 import type { MergeKey } from "./node-key";
-import { compareStrings, idOf, kindOf } from "./node-key";
+import { idOf, kindOf } from "./node-key";
 import type { GraphDef, PlainNodeRef, Store } from "./typegraph-internal";
 import {
   bulkIsSeparated,
   currentClassKey,
-  hasLiveDifferentAssertions,
   identityReferenceKeyOf,
   loadCurrentStructuralClasses,
   loadSpanningDifferentAssertion,
-  separationFactsKnownEmpty,
+  separationClassPairKey,
+  separationFactsEmpty,
   storeRuntime,
 } from "./typegraph-internal";
 
@@ -82,18 +82,6 @@ export const NO_IDENTITY_SEPARATION_FACTS: IdentitySeparationFacts = {
 };
 
 /**
- * The single spelling of an ordered class-key pair, shared by the capture and
- * every lookup so the two can never key the same separation differently. NUL
- * joins the halves: a class key is JSON, which escapes NUL, so no two distinct
- * pairs can collide on the joined string.
- */
-function classPairKey(first: string, second: string): string {
-  return compareStrings(first, second) <= 0 ?
-      `${first}\u0000${second}`
-    : `${second}\u0000${first}`;
-}
-
-/**
  * Every distinct unordered pair of participants that could FUSE, grouped so the
  * probe stays bounded by what the plan can actually merge.
  *
@@ -115,7 +103,7 @@ function fusionPairs(
         const second = classKeyOf.get(right);
         if (first === undefined || second === undefined) continue;
         if (first === second) continue;
-        const key = classPairKey(first, second);
+        const key = separationClassPairKey(first, second);
         if (seen.has(key)) continue;
         seen.add(key);
         pairs.push({ first, second });
@@ -149,20 +137,14 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   const ctx = storeRuntime(target).identityContext();
   // A graph holding no `different` assertion can separate nothing, so the whole
   // capture — the class resolution AND the within-component pair enumeration,
-  // which is quadratic in component size — is skipped for one indexed
+  // which is quadratic in component size — is skipped for one memoized
   // existence probe. That is the STEADY state of every graph that uses only
   // `assertSame`, and the state where the veto's cost would otherwise be pure
-  // waste. The predicate is the identity module's own
-  // (`hasLiveDifferentAssertions`), never a second spelling of "is anything
-  // separated here": it is the same fact `bulkIsSeparated` consults to decide
-  // that an EMPTY separation relation is correct rather than unfilled.
-  //
-  // `separationFactsKnownEmpty` is asked FIRST, never a second decision: it is
-  // the read side of the identical per-(registry, graphId) proof
-  // `bulkIsSeparated`'s own zero-rows branch maintains, so a graph an earlier
+  // waste. The decision is the identity module's own `separationFactsEmpty`,
+  // the same owner `bulkIsSeparated` consults to decide that an EMPTY
+  // separation relation is correct rather than unfilled, so a graph an earlier
   // `assertSame`/`assertDifferent` on this Store handle already proved
-  // separates-nothing skips the round trip here entirely rather than paying it
-  // again on every merge.
+  // separates-nothing pays nothing here.
   //
   // Consequence, deliberately: a legacy store whose separation relation was
   // never provisioned no longer refuses a stated `identity.pairing` when it
@@ -171,13 +153,12 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   // treats "no live `different` assertion" as proof that an empty relation is
   // correct. A store that does hold one still reaches the refusal below.
   if (
-    separationFactsKnownEmpty(ctx.registry, ctx.graphId) ||
-    !(await hasLiveDifferentAssertions(
+    await separationFactsEmpty(
       ctx.backend,
       ctx.schema,
       ctx.graphId,
       ctx.registry,
-    ))
+    )
   ) {
     return NO_IDENTITY_SEPARATION_FACTS;
   }
@@ -219,7 +200,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   const separated: Readonly<{ first: string; second: string }>[] = [];
   for (const [index, pair] of pairs.entries()) {
     if (verdicts[index] !== true) continue;
-    separatedClassPairs.add(classPairKey(pair.first, pair.second));
+    separatedClassPairs.add(separationClassPairKey(pair.first, pair.second));
     separated.push(pair);
   }
   const separatingAssertionIdOf = new Map<string, string>();
@@ -233,7 +214,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
     );
     if (witness !== undefined) {
       separatingAssertionIdOf.set(
-        classPairKey(pair.first, pair.second),
+        separationClassPairKey(pair.first, pair.second),
         witness.id,
       );
     }
@@ -255,7 +236,7 @@ export function separatingAssertionIds(
   const second = facts.classKeyOf.get(b);
   if (first === undefined || second === undefined) return [];
   const witness = facts.separatingAssertionIdOf.get(
-    classPairKey(first, second),
+    separationClassPairKey(first, second),
   );
   return witness === undefined ? [] : [witness];
 }
@@ -275,5 +256,5 @@ export function isSeparatedPair(
   if (first === undefined || second === undefined || first === second) {
     return false;
   }
-  return facts.separatedClassPairs.has(classPairKey(first, second));
+  return facts.separatedClassPairs.has(separationClassPairKey(first, second));
 }

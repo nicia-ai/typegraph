@@ -1,9 +1,9 @@
 /**
- * Composition claims (item E) — what a `partOf`/`hasPart` realizing edge
- * write reserves, on top of whatever ordinary cardinality axis it already
+ * Composition claims — what a `partOf`/`hasPart` realizing edge write
+ * reserves, on top of whatever ordinary cardinality axis it already
  * reserves.
  *
- * R4 is one invariant, relation-wide: a part holds exactly one whole across
+ * "A part holds exactly one whole" is one invariant, relation-wide: across
  * EVERY declared composition pair, not one whole per realizing edge kind. It
  * therefore cannot be an ordinary per-edge-kind cardinality claim — two
  * different edge kinds attaching the same part must collide on one row. This
@@ -21,15 +21,14 @@ import {
 import { type CompositionPartSide } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
-import { compareClaimTargets } from "./axis";
 import {
   type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
-  edgeCardinalityClaimTarget,
   type EdgeCardinalityDeclarations,
   edgeCardinalitySpec,
   type EdgeClaimSubject,
+  sortedByClaimTarget,
 } from "./edge-claims";
 
 /**
@@ -54,15 +53,19 @@ function compositionHolders(
 }
 
 /**
- * R5's orientation, translated into the vocabulary an ordinary edge
- * cardinality claim already understands: the part's side is the DIRECTION
- * (`"source"` when the part is `from`, `"target"` when it is `to`), and the
- * whole-side population (§2.6) is the CARDINALITY. This is what lets a
- * composition claim reuse {@link edgeCardinalitySpec}'s `keyShape` and
+ * THE translation of composition orientation into the vocabulary an ordinary
+ * edge cardinality claim already understands: the part's side is the
+ * DIRECTION (`"source"` when the part is `from`, `"target"` when it is
+ * `to`), and the whole-side population is the CARDINALITY. This is what lets
+ * a composition claim reuse {@link edgeCardinalitySpec}'s `keyShape` and
  * `holderLiveness` with no new table: `edgeCardinalitySpec` already answers
  * both for every `(direction, cardinality)` pair, composition or not.
+ *
+ * Exported as the one owner of that mapping: the cascade's membership
+ * population predicate (`src/store/operations/composition-cascade.ts`) reads
+ * its spec through this function rather than re-spelling the orientation fold.
  */
-function compositionAxisRef(
+export function compositionAxisRef(
   partSide: CompositionPartSide,
   population: "one" | "oneActive",
 ): EdgeCardinalityAxisRef {
@@ -104,22 +107,6 @@ function compositionClaim(
 }
 
 /**
- * Claim targets in {@link compareClaimTargets} order — the canonical claim
- * order. Exported so a caller that assembles its own claim set outside
- * {@link edgeInsertClaims} (today, `performEdgeUpdate`'s reentry set in
- * `src/store/operations/edge-operations.ts`) sorts it through the same
- * function rather than re-spelling the map/sort/map fold inline.
- */
-export function sortedByClaimTarget(
-  claims: readonly ClaimEdgeCardinalityParams[],
-): readonly ClaimEdgeCardinalityParams[] {
-  return claims
-    .map((claim) => ({ claim, target: edgeCardinalityClaimTarget(claim) }))
-    .toSorted((left, right) => compareClaimTargets(left.target, right.target))
-    .map((entry) => entry.claim);
-}
-
-/**
  * THE claims one edge insert owes: every declared cardinality axis, plus the
  * composition claim when the edge kind realizes one, in claim order
  * ({@link compareClaimTargets}) — not declaration order and not insertion
@@ -152,6 +139,23 @@ export function edgeInsertClaims(
       subject.validTo === undefined);
   return sortedByClaimTarget(
     owesComposition ? [...ordinary, composition] : ordinary,
+  );
+}
+
+/**
+ * Whether an edge of this kind takes ANY claim row — the release side's
+ * question, answered by the same module that decides what an insert
+ * acquires, so a hard delete can never stop purging a row kind
+ * {@link edgeInsertClaims} still takes.
+ */
+export function edgeKindOwesAnyClaim(
+  registry: KindRegistry,
+  declarations: EdgeCardinalityDeclarations,
+  edgeKind: string,
+): boolean {
+  return (
+    edgeCardinalityAxisReferences(declarations).length > 0 ||
+    registry.isCompositionEdge(edgeKind)
   );
 }
 

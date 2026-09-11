@@ -34,15 +34,16 @@ import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 import {
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
-  isSqliteDuplicateIdentityTransitionsRestoredAtColumnError,
+  isSqliteDuplicateColumnError,
   isSqliteMissingEdgeMatchIdentityColumnError,
 } from "../../utils/sql-errors";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
 import { CURRENT_BASE_SCHEMA_VERSION } from "../drizzle/base-schema";
 import {
+  EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
   generateSqliteMigrationSQL,
+  IDENTITY_TRANSITIONS_ADOPTION_COLUMNS,
   planSqliteEdgeMatchIdentityAdoption,
   planSqliteIdentityTransitionsRestoredAtAdoption,
   quoteDdlIdentifier,
@@ -87,45 +88,45 @@ const nodeRequire = createRequire(import.meta.url);
  * the v4 adoption step. Unlike v1's edge-match-identity `ADD COLUMN`
  * migration, nothing in `installationSql` references this column, so a
  * missing one on an existing v3 table raises no exception to catch: this is
- * called unconditionally after `installationSql` runs, exactly mirroring
+ * called unconditionally after `installationSql` runs, mirroring
  * `ensureIdentityTransitionsRestoredAtColumn` in `drizzle/sqlite.ts`'s async
- * engine profile (the same plan function, the same duplicate-column retry
- * shape) for this synchronous, exception-free path.
+ * engine profile (the same plan function, the same duplicate-column
+ * classification) for this synchronous, exception-free path.
+ *
+ * One pass, no retry: a concurrent adopter that wins the race leaves exactly
+ * the post-state this call wanted, so a precisely classified
+ * duplicate-column failure IS success.
  */
 function ensureLocalSqliteIdentityTransitionsRestoredAtColumn(
   sqlite: Database.Database,
   tables: SqliteTables,
 ): void {
   const identityTransitionsTableName = getTableName(tables.identityTransitions);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const rows = sqlite
-      .prepare(
-        `PRAGMA table_info(${quoteDdlIdentifier(identityTransitionsTableName)})`,
+  const rows = sqlite
+    .prepare(
+      `PRAGMA table_info(${quoteDdlIdentifier(identityTransitionsTableName)})`,
+    )
+    .all() as readonly Readonly<{ name?: unknown }>[];
+  const columns = new Set(
+    rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
+  );
+  const statements = planSqliteIdentityTransitionsRestoredAtAdoption(
+    identityTransitionsTableName,
+    columns,
+  );
+  if (statements.length === 0) return;
+  try {
+    sqlite.exec(statements.join("\n"));
+  } catch (error) {
+    if (
+      !isSqliteDuplicateColumnError(
+        error,
+        IDENTITY_TRANSITIONS_ADOPTION_COLUMNS,
       )
-      .all() as readonly Readonly<{ name?: unknown }>[];
-    const columns = new Set(
-      rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
-    );
-    const statements = planSqliteIdentityTransitionsRestoredAtAdoption(
-      identityTransitionsTableName,
-      columns,
-    );
-    if (statements.length === 0) return;
-    try {
-      sqlite.exec(statements.join("\n"));
-      return;
-    } catch (error) {
-      if (
-        attempt === 1 ||
-        !isSqliteDuplicateIdentityTransitionsRestoredAtColumnError(error)
-      ) {
-        throw error;
-      }
+    ) {
+      throw error;
     }
   }
-  throw new CompilerInvariantError(
-    "Local SQLite identity-transitions restored_at adoption exhausted its retry loop without returning or throwing.",
-  );
 }
 
 function installLocalSqliteBaseSchema(
@@ -174,7 +175,10 @@ function installLocalSqliteBaseSchema(
       } catch (repairError) {
         if (
           attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(repairError)
+          !isSqliteDuplicateColumnError(
+            repairError,
+            EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
+          )
         ) {
           throw repairError;
         }

@@ -130,6 +130,37 @@ export function quotedColumn(column: { name: string }): SQL {
 }
 
 /**
+ * The predicate a CURRENT read applies to one temporal relation: not
+ * tombstoned, and `now` inside the row's validity window — the same window
+ * `compileTemporalFilter({ mode: "current" })` compiles for an ordinary read
+ * (`src/query/compiler/temporal.ts`), NOT `valid_to IS NULL`: a
+ * currently-valid row may carry a bounded FUTURE `valid_to`.
+ *
+ * The one owner of "what counts as a currently-valid row" for hand-rendered
+ * statements, so a change to the window's boundaries cannot reach some of them
+ * and miss others. `now` stays a bound parameter, so every statement a caller
+ * renders from one sample reads against the same instant.
+ */
+export function currentWindowPredicate(
+  relation: string,
+  columns: Pick<Tables["nodes"], "deletedAt" | "validFrom" | "validTo">,
+  now: string,
+): SQL {
+  const deletedAt = qualifiedColumn(relation, columns.deletedAt);
+  const validFrom = qualifiedColumn(relation, columns.validFrom);
+  const validTo = qualifiedColumn(relation, columns.validTo);
+  return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${now}) AND (${validTo} IS NULL OR ${validTo} > ${now})`;
+}
+
+/** Qualifies a column with a relation name, the rendering both dialects read. */
+function qualifiedColumn(
+  relation: string,
+  column: Readonly<{ name: string }>,
+): SQL {
+  return sql`${quotedTableName(relation)}.${quotedColumn(column)}`;
+}
+
+/**
  * Returns a quoted SQL identifier for a bare table name string.
  * Use when the operation targets a table that isn't represented as a
  * Drizzle table object (e.g. the FTS5 virtual table).
@@ -184,7 +215,10 @@ export function existingColumn(
  * Forcing the `C` collation on Postgres makes all three agree. The ranking is
  * sorted anyway (no index supplies the order), so this costs nothing.
  */
-export function codePointOrderKey(column: SqlFragment, dialect: SqlDialect): SQL {
+export function codePointOrderKey(
+  column: SqlFragment,
+  dialect: SqlDialect,
+): SQL {
   return toDrizzleSql(getDialect(dialect).binaryText(column), dialect);
 }
 
@@ -196,7 +230,7 @@ export function codePointOrderKey(column: SqlFragment, dialect: SqlDialect): SQL
  * tombstoned/expired nodes after (which silently shrinks results below
  * `limit` under index drift).
  *
- * Currency matches a `current` read: non-tombstoned AND inside the
+ * Currency is {@link currentWindowPredicate}: non-tombstoned AND inside the
  * validity window. The instant is BOUND as a parameter (the backend's
  * clock, same source as its write timestamps) rather than compiled as a
  * per-row SQL now() call — on SQLite a per-row strftime() across two
@@ -208,7 +242,7 @@ export function liveNodeIdsSubquery(
   nodeKind: string,
   nowIso: string,
 ): SQL {
-  return sql`SELECT ${nodes.id} AS node_id FROM ${nodes} WHERE ${nodes.graphId} = ${graphId} AND ${nodes.kind} = ${nodeKind} AND ${nodes.deletedAt} IS NULL AND (${nodes.validFrom} IS NULL OR ${nodes.validFrom} <= ${nowIso}) AND (${nodes.validTo} IS NULL OR ${nodes.validTo} > ${nowIso})`;
+  return sql`SELECT ${nodes.id} AS node_id FROM ${nodes} WHERE ${nodes.graphId} = ${graphId} AND ${nodes.kind} = ${nodeKind} AND ${currentWindowPredicate(getTableName(nodes), nodes, nowIso)}`;
 }
 
 export function nodeColumnList(nodes: Tables["nodes"]): SQL {

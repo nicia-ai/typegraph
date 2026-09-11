@@ -379,12 +379,12 @@ describe("compileVariableLengthQuery", () => {
       // `edgeKinds` and `inverseEdgeKinds` both name "RELATES_TO" here (an
       // ordinary symmetric `direction: "both"` traversal on one edge kind):
       // the merged kind filter must dedupe the union, not bind the same
-      // kind twice in one IN list (Ed-09).
+      // kind twice in one IN list.
       expect(sql).not.toContain("'RELATES_TO', 'RELATES_TO'");
       // No edge predicate and no identity frontier widening on this
       // traversal, so the directed-edges CTE projects only the columns the
-      // recursive term structurally needs — not `e.*` (Ed-04's
-      // materialization regression).
+      // recursive term structurally needs — not `e.*` (guarding the
+      // materialization regression a wildcard caused).
       expect(sql).not.toContain("SELECT e.*");
       expect(sql).toContain(
         "SELECT e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at,",
@@ -392,8 +392,8 @@ describe("compileVariableLengthQuery", () => {
     });
 
     it("adds recorded_from/recorded_to to the narrowed directed-edges projection under a recorded-pinned read", () => {
-      // MUTATION CHECK: reverting Ed-r2-1 (dropping the
-      // `temporalFilterPass.recordedColumns` spread, restoring the bare
+      // MUTATION CHECK: dropping the
+      // `temporalFilterPass.recordedColumns` spread (restoring the bare
       // `e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at` list)
       // makes this assertion fail while the recursive term's
       // `e.recorded_from`/`e.recorded_to` reference (below) still compiles
@@ -428,8 +428,8 @@ describe("compileVariableLengthQuery", () => {
     });
 
     it("pushes graph_id into both arms of the directed-edges CTE", () => {
-      // MUTATION CHECK: reverting Ed-r2-4 (dropping the `e.graph_id =
-      // ${graphId} AND` prefix from both arms' WHERE clauses) makes this
+      // MUTATION CHECK: dropping the `e.graph_id =
+      // ${graphId} AND` prefix from both arms' WHERE clauses makes this
       // assertion fail — the two arms would filter on `e.kind` alone —
       // verified and reverted. Functional behavior is unchanged either way
       // (the recursive term already requires `graph_id = ${graphId}`), so
@@ -452,6 +452,32 @@ describe("compileVariableLengthQuery", () => {
       expect(
         directedEdgesCte.match(/WHERE e\.graph_id = 'test-graph' AND/g),
       ).toHaveLength(2);
+    });
+
+    it("pushes the edge temporal filter into both arms of the directed-edges CTE", () => {
+      // MUTATION CHECK: dropping `AND ${edgeTemporalFilter}` from the two arms
+      // makes this assertion fail (each arm would filter on `graph_id` and
+      // `kind` only) — verified and reverted. The predicate is row-local over
+      // `e`'s own temporal columns and the recursive term applies it again, so
+      // this guards the normalization cost: without it the CTE materializes
+      // every soft-deleted and superseded edge version of these kinds.
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const directedEdgesCte = requireDefined(
+        requireDefined(
+          getSqlString(ast).split("_directed_edges AS (")[1],
+        ).split("recursive_cte AS (")[0],
+      );
+
+      expect(directedEdgesCte.match(/e\.deleted_at IS NULL/g)).toHaveLength(2);
     });
 
     it("keeps the full e.* projection when an edge predicate targets a mixed-orientation traversal", () => {
@@ -480,7 +506,7 @@ describe("compileVariableLengthQuery", () => {
       const sql = getSqlString(ast);
 
       // The predicate reads `e.props`, which the narrowed column list
-      // (Ed-04) does not carry — the safe fallback keeps `e.*` whenever an
+      // does not carry — the safe fallback keeps `e.*` whenever an
       // edge predicate is present, so the property is still readable.
       expect(sql).toContain("SELECT e.*,");
       expect(sql).toContain("weight");

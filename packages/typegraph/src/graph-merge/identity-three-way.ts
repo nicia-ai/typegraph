@@ -1,24 +1,16 @@
 /**
- * The identity survivor rule and semantic pair key, and the THREE-WAY
- * classifier built on top of them: one classifier absorbing what used to be
- * three separate inline arbitrations in `merge-identity.ts` —
- * `dedupeIdentityAssertions`, `assertNoOpposingIdentityRelations`, and
- * `assertNoRetractReassertRace`. Every arm keeps today's behavior verbatim
- * under the default `"refuse"` policy, WITH ONE DECLARED EXCEPTION: when two
- * branches end the same base identity assertion at different valid-time
- * instants, {@link reduceIdentityRetraction} now picks the EARLIEST staged
- * `validTo` — deterministic and order-independent — where the inline code it
- * replaced let whichever retraction was staged LAST win, a branch-order
- * dependency no caller could rely on. See "ending a doubly-retracted base row
- * picks the EARLIEST end" in `identity-three-way.test.ts`. A caller-supplied
- * resolving policy (`"assertWins"` / `"retractWins"` / `"flag"` / a function)
- * turns a subset of the classifier's refusals into a recorded resolution
- * instead of a thrown error.
+ * The identity survivor rule, the semantic and window-aware dedupe keys, and
+ * the THREE-WAY classifier built on them: ONE classifier for duplicate
+ * assertions, opposing relations and retract/reassert races, keyed by the
+ * caller's {@link IdentityAssertionConflictPolicy}. The default `"refuse"`
+ * throws {@link IdentityMergeConflictError}; a resolving policy
+ * (`"assertWins"` / `"retractWins"` / `"flag"` / a function) turns a subset of
+ * those refusals into a recorded resolution instead.
  *
- * Extracted out of `merge-identity.ts` so both the plan-time dedupe and the
- * post-remap re-dedupe it runs after endpoint canonicalization call the SAME
- * comparator — a second inline copy of the survivor rule is exactly the kind
- * of decision this repository's contract discipline forbids re-spelling.
+ * The plan-time dedupe and the post-remap re-dedupe that runs after endpoint
+ * canonicalization call the SAME comparator — a second copy of the survivor
+ * rule is exactly the kind of decision this repository's contract discipline
+ * forbids re-spelling.
  */
 import { identityAssertionSemanticKey } from "../identity/assertion-key";
 import type { IdentityRelation } from "../identity/types";
@@ -38,6 +30,7 @@ import {
   type IdentityTransferAssertion,
 } from "./typegraph-internal";
 import type {
+  BranchId,
   DroppedItem,
   IdentityAssertionConflictReason,
   IdentityReconciliation,
@@ -213,6 +206,87 @@ function entityRefOf(ref: Readonly<{ kind: string; id: string }>): EntityRef {
 }
 
 /**
+ * One endpoint pair whose staged claims OPPOSE each other: the `same` side, the
+ * `different` side, and the first pair of the two whose validity windows
+ * actually overlap — the witness a refusal names.
+ */
+type OpposingRelationGroup<T> = Readonly<{
+  endpoint: string;
+  items: readonly T[];
+  same: readonly T[];
+  different: readonly T[];
+  overlap: Readonly<{ same: T; different: T }>;
+}>;
+
+function firstOverlappingOpposingPair<T>(
+  same: readonly T[],
+  different: readonly T[],
+  assertionOf: (item: T) => IdentityTransferAssertion,
+): Readonly<{ same: T; different: T }> | undefined {
+  for (const sameItem of same) {
+    for (const differentItem of different) {
+      if (
+        identityValidityWindowsOverlap(
+          assertionOf(sameItem),
+          assertionOf(differentItem),
+        )
+      ) {
+        return { same: sameItem, different: differentItem };
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * THE "do these staged claims oppose each other" decision: groups items by
+ * endpoint pair, splits each group into `same` and `different`, and keeps only
+ * the groups where the two sides overlap in valid time. Both dispositions — the
+ * policy-keyed classifier and the unconditional post-remap re-validation —
+ * read their groups from here, so neither can spell its own overlap rule or
+ * group the endpoints its own way.
+ */
+function opposingRelationGroups<T>(
+  items: readonly T[],
+  assertionOf: (item: T) => IdentityTransferAssertion,
+): readonly OpposingRelationGroup<T>[] {
+  const byEndpoint = new Map<string, T[]>();
+  for (const item of items) {
+    const assertion = assertionOf(item);
+    const key = pairEndpointKey({
+      a: entityRefOf(assertion.a),
+      b: entityRefOf(assertion.b),
+    });
+    const group = byEndpoint.get(key) ?? [];
+    group.push(item);
+    byEndpoint.set(key, group);
+  }
+  const groups: OpposingRelationGroup<T>[] = [];
+  for (const [endpoint, group] of byEndpoint) {
+    const same = group.filter((item) => assertionOf(item).relation === "same");
+    const different = group.filter(
+      (item) => assertionOf(item).relation === "different",
+    );
+    const overlap = firstOverlappingOpposingPair(same, different, assertionOf);
+    if (overlap === undefined) continue;
+    groups.push({ endpoint, items: group, same, different, overlap });
+  }
+  return groups;
+}
+
+/** The one refusal every opposing-relations disposition throws. */
+function opposingRelationsConflictError(
+  same: IdentityTransferAssertion,
+  different: IdentityTransferAssertion,
+  endpoint: string,
+): IdentityMergeConflictError {
+  return new IdentityMergeConflictError(
+    "Branches asserted opposing identity relations for one endpoint pair.",
+    { details: { endpoint, assertions: [same, different] } },
+  );
+}
+
+/**
  * One irreconcilable identity-assertion disagreement, fully populated so a
  * resolving policy (a `"flag"` classification or a function callback) has
  * everything it needs to decide, and so `"refuse"` can report exactly what
@@ -308,7 +382,11 @@ function reduceIdentitySurvivor(
   return { survivor, superseded, rule };
 }
 
-/** Reduces N staged retractions of the SAME base row to one: earliest end wins. */
+/**
+ * Reduces N staged retractions of the SAME base row to one: the EARLIEST
+ * staged `validTo` wins, so two branches ending the same base assertion at
+ * different instants settle deterministically rather than on staging order.
+ */
 function reduceIdentityRetraction(
   candidates: readonly StagedRetraction[],
 ): StagedRetraction {
@@ -326,9 +404,8 @@ function reduceIdentityRetraction(
 
 /**
  * Builds an {@link IdentityReconciliation} for a duplicate-assertion survivor
- * pick, when the merge is configured to make one visible (§3.2:
- * `policy !== "refuse"` — a plain default-policy merge stays byte-identical
- * to today, which never recorded this).
+ * pick, when the merge is configured to make one visible
+ * (`policy !== "refuse"`; the default policy records none).
  */
 function buildReconciliation(
   semanticKey: string,
@@ -388,12 +465,71 @@ function policyReconciliation(
     ),
     rule: "policy",
     policy: identityPolicyLabel(policy),
-    branches: [
-      ...new Set([
-        ...conflict.asserted.map((staged) => staged.branchId),
-        ...conflict.retracted.map((staged) => staged.branchId),
-      ]),
-    ].toSorted(compareStrings),
+    branches: conflictBranches(conflict),
+  };
+}
+
+/** Every branch that staged any side of one conflict, in code-point order. */
+function conflictBranches(
+  conflict: IdentityAssertionConflict,
+): readonly BranchId[] {
+  return [
+    ...new Set([
+      ...conflict.asserted.map((staged) => staged.branchId),
+      ...conflict.retracted.map((staged) => staged.branchId),
+    ]),
+  ].toSorted(compareStrings);
+}
+
+/**
+ * THE report projection of a conflict a policy KEPT rather than refused — one
+ * owner, so the arms that can produce one cannot describe the same conflict
+ * differently. Retracted ids lead, then the assertions.
+ */
+function unresolvedFromConflict(
+  conflict: IdentityAssertionConflict,
+): IdentityUnresolvedConflict {
+  return {
+    kind: "assertion",
+    reason: conflict.reason,
+    semanticKey: conflict.semanticKey,
+    a: conflict.a,
+    b: conflict.b,
+    relation: conflict.relation,
+    assertionIds: [
+      ...conflict.retracted.map((staged) => staged.assertion.id),
+      ...conflict.asserted.map((staged) => staged.assertion.id),
+    ],
+    branches: conflictBranches(conflict),
+  };
+}
+
+/**
+ * Applies an `"assert"` decision: the named reassertion survives and every
+ * OTHER staged assertion for the conflict is dropped under `reason`. The
+ * caller plans the winner and names the displaced ids in its reconciliation.
+ */
+function resolveAssertWinner(
+  conflict: IdentityAssertionConflict,
+  assertionId: string,
+  reason: string,
+): Readonly<{
+  winner: StagedIdentityAssertion;
+  dropped: readonly DroppedItem[];
+  supersededAssertionIds: readonly string[];
+}> {
+  const winner = requireDefined(
+    conflict.asserted.find((staged) => staged.assertion.id === assertionId),
+  );
+  const displaced = conflict.asserted.filter(
+    (staged) => staged.assertion.id !== winner.assertion.id,
+  );
+  return {
+    winner,
+    dropped: displaced.map((staged) =>
+      droppedIdentityAssertion(staged.assertion, reason),
+    ),
+    supersededAssertionIds: displaced.map((staged) => staged.assertion.id),
   };
 }
 
@@ -404,11 +540,9 @@ function policyReconciliation(
  * {@link classifyIdentityPair}'s absent-pair arm applies, generalized to a
  * flat list spanning multiple pairs.
  *
- * The single owner `remapIdentityAssertionEndpoints` (`merge-identity.ts`)
- * calls for its post-remap re-dedupe: node-reconciliation canonicalization
- * can collapse two previously-distinct pairs onto one semantic key AFTER
- * the plan-time classification above already ran, so that re-dedupe must
- * call the identical comparator rather than re-spell the survivor rule.
+ * `remapIdentityAssertionEndpoints` (`merge-identity.ts`) re-dedupes through
+ * here after canonicalization, which can collapse two previously-distinct
+ * pairs onto one semantic key after the plan-time classification already ran.
  */
 export function dedupeIdentityAssertionsRaw(
   assertions: readonly IdentityTransferAssertion[],
@@ -459,47 +593,19 @@ export function dedupeIdentityAssertionsRaw(
 export function assertNoOpposingIdentityRelationsRaw(
   assertions: readonly IdentityTransferAssertion[],
 ): void {
-  const byEndpoint = new Map<string, IdentityTransferAssertion[]>();
-  for (const assertion of assertions) {
-    const key = pairEndpointKey({
-      a: entityRefOf(assertion.a),
-      b: entityRefOf(assertion.b),
-    });
-    const group = byEndpoint.get(key) ?? [];
-    group.push(assertion);
-    byEndpoint.set(key, group);
-  }
-  for (const [endpoint, group] of byEndpoint) {
-    const same = group.filter((assertion) => assertion.relation === "same");
-    const different = group.filter(
-      (assertion) => assertion.relation === "different",
-    );
-    for (const sameAssertion of same) {
-      for (const differentAssertion of different) {
-        if (
-          !identityValidityWindowsOverlap(sameAssertion, differentAssertion)
-        ) {
-          continue;
-        }
-        throw new IdentityMergeConflictError(
-          "Branches asserted opposing identity relations for one endpoint pair.",
-          {
-            details: {
-              endpoint,
-              assertions: [sameAssertion, differentAssertion],
-            },
-          },
-        );
-      }
-    }
-  }
+  const [group] = opposingRelationGroups(assertions, (assertion) => assertion);
+  if (group === undefined) return;
+  throw opposingRelationsConflictError(
+    group.overlap.same,
+    group.overlap.different,
+    group.endpoint,
+  );
 }
 
 /**
  * The `"asserted"` outcome for a pair with at least one surviving assertion:
- * reduces to one survivor (skipping the reduction machinery entirely when
- * there is nothing to reduce) and attaches whatever reconciliation the
- * survivor pick earns. The one place `classifyIdentityPair`'s three
+ * reduces to one survivor and attaches whatever reconciliation the survivor
+ * pick earns. The one place `classifyIdentityPair`'s three
  * asserted-outcome arms (base absent, retracted-empty, convergent) reduce
  * through, so they cannot drift on how a survivor is picked or reported.
  */
@@ -509,14 +615,10 @@ function assertedOutcome(
   committedIds: ReadonlySet<string>,
   policy: IdentityAssertionConflictPolicy,
 ): IdentityPairOutcome {
-  const { survivor, superseded, rule } =
-    asserted.length === 1 ?
-      {
-        survivor: requireDefined(asserted[0]),
-        superseded: [] as readonly DroppedItem[],
-        rule: "code-point-id" as const,
-      }
-    : reduceIdentitySurvivor(asserted, committedIds);
+  const { survivor, superseded, rule } = reduceIdentitySurvivor(
+    asserted,
+    committedIds,
+  );
   return {
     kind: "asserted",
     survivor: survivor.assertion,
@@ -538,7 +640,7 @@ function assertedOutcome(
  * this pair at staging time (empty when the pair has none); `asserted` /
  * `retracted` are every branch's staged claims for it.
  *
- * The four table arms this absorbs, arm-for-arm (design §4.2 / plan §1.4):
+ * The four arms, arm-for-arm:
  *
  *  - base absent, one branch asserts → `asserted`.
  *  - base absent, ≥2 branches assert under different ids → `asserted`, with
@@ -671,6 +773,7 @@ function resolveConflict(
  * scope `assertNoOpposingIdentityRelations` always had.
  */
 type OpposingRelationsGroup = Readonly<{
+  endpoint: string;
   sameKey: string;
   differentKey: string;
   a: EntityRef;
@@ -682,45 +785,21 @@ type OpposingRelationsGroup = Readonly<{
 function detectOpposingRelationsConflicts(
   staging: StagingSet,
 ): readonly OpposingRelationsGroup[] {
-  const byEndpoint = new Map<string, StagedIdentityAssertion[]>();
-  for (const staged of staging.newIdentityAssertions) {
-    const key = pairEndpointKey({
-      a: entityRefOf(staged.assertion.a),
-      b: entityRefOf(staged.assertion.b),
-    });
-    const group = byEndpoint.get(key) ?? [];
-    group.push(staged);
-    byEndpoint.set(key, group);
-  }
-  const conflicts: OpposingRelationsGroup[] = [];
-  for (const group of byEndpoint.values()) {
-    const same = group.filter((staged) => staged.assertion.relation === "same");
-    const different = group.filter(
-      (staged) => staged.assertion.relation === "different",
-    );
-    const overlaps = same.some((sameStaged) =>
-      different.some((differentStaged) =>
-        identityValidityWindowsOverlap(
-          sameStaged.assertion,
-          differentStaged.assertion,
-        ),
-      ),
-    );
-    if (!overlaps) continue;
-    const anchor = requireDefined(group[0]);
-    conflicts.push({
-      sameKey: identitySemanticKey({ ...anchor.assertion, relation: "same" }),
-      differentKey: identitySemanticKey({
-        ...anchor.assertion,
-        relation: "different",
-      }),
-      a: entityRefOf(anchor.assertion.a),
-      b: entityRefOf(anchor.assertion.b),
-      same,
-      different,
-    });
-  }
-  return conflicts;
+  return opposingRelationGroups(
+    staging.newIdentityAssertions,
+    (staged) => staged.assertion,
+  ).map((group) => {
+    const anchor = requireDefined(group.items[0]).assertion;
+    return {
+      endpoint: group.endpoint,
+      sameKey: identitySemanticKey({ ...anchor, relation: "same" }),
+      differentKey: identitySemanticKey({ ...anchor, relation: "different" }),
+      a: entityRefOf(anchor.a),
+      b: entityRefOf(anchor.b),
+      same: group.same,
+      different: group.different,
+    };
+  });
 }
 
 /**
@@ -770,13 +849,9 @@ function detectRetractReassertRaces(staging: StagingSet): ReadonlyMap<
 
 /**
  * Three-way classifies every staged identity pair against the staged base
- * slice: absorbs `dedupeIdentityAssertions`, `assertNoOpposingIdentityRelations`,
- * and `assertNoRetractReassertRace` into arms of ONE classifier, keyed by the
- * `IdentityAssertionConflictPolicy` a caller may supply. Under the default
- * `"refuse"` policy every arm reproduces today's behavior byte-for-byte —
- * same thrown errors, same drop reasons, same survivor rule — EXCEPT the
- * doubly-retracted-base-row ending, which now picks the earliest staged end
- * rather than the last one staged (module docblock above).
+ * slice: duplicate assertions, opposing relations and retract/reassert races
+ * are arms of this one classifier, each decided by the supplied
+ * {@link IdentityAssertionConflictPolicy}.
  */
 export function planIdentityThreeWay(
   staging: StagingSet,
@@ -803,29 +878,12 @@ export function planIdentityThreeWay(
     baseBySemanticKey.set(key, group);
   }
 
-  const refuseOpposing = (
-    same: StagedIdentityAssertion,
-    different: StagedIdentityAssertion,
-    endpoint: string,
-  ): never => {
-    throw new IdentityMergeConflictError(
-      "Branches asserted opposing identity relations for one endpoint pair.",
-      {
-        details: {
-          endpoint,
-          assertions: [same.assertion, different.assertion],
-        },
-      },
-    );
-  };
-
   const opposing = detectOpposingRelationsConflicts(staging);
   const handledOpposingKeys = new Set<string>();
   for (const group of opposing) {
     const semanticKey = group.sameKey;
     handledOpposingKeys.add(group.sameKey);
     handledOpposingKeys.add(group.differentKey);
-    const endpoint = pairEndpointKey(group);
     const anchorSame = group.same[0];
     const anchorDifferent = group.different[0];
     const conflict: IdentityAssertionConflict = {
@@ -841,26 +899,15 @@ export function planIdentityThreeWay(
       asserted: [...group.same, ...group.different],
       retracted: [],
     };
-    const decision = resolveConflict(conflict, policy, committedIds, () =>
-      refuseOpposing(
-        requireDefined(anchorSame),
-        requireDefined(anchorDifferent),
-        endpoint,
-      ),
-    );
+    const decision = resolveConflict(conflict, policy, committedIds, () => {
+      throw opposingRelationsConflictError(
+        requireDefined(anchorSame).assertion,
+        requireDefined(anchorDifferent).assertion,
+        group.endpoint,
+      );
+    });
     if (decision.kind === "unresolved") {
-      unresolved.push({
-        kind: "assertion",
-        reason: "opposing-relations",
-        semanticKey,
-        a: group.a,
-        b: group.b,
-        relation: "same",
-        assertionIds: conflict.asserted.map((staged) => staged.assertion.id),
-        branches: [
-          ...new Set(conflict.asserted.map((staged) => staged.branchId)),
-        ].toSorted(compareStrings),
-      });
+      unresolved.push(unresolvedFromConflict(conflict));
       continue;
     }
     if (decision.kind === "retract") {
@@ -885,29 +932,19 @@ export function planIdentityThreeWay(
       );
       continue;
     }
-    const winner = requireDefined(
-      conflict.asserted.find(
-        (staged) => staged.assertion.id === decision.assertionId,
-      ),
+    const resolved = resolveAssertWinner(
+      conflict,
+      decision.assertionId,
+      OPPOSING_RELATIONS_OVERRULED_DROP_REASON,
     );
-    assertions.push(winner.assertion);
-    for (const staged of conflict.asserted) {
-      if (staged.assertion.id === winner.assertion.id) continue;
-      dropped.push(
-        droppedIdentityAssertion(
-          staged.assertion,
-          OPPOSING_RELATIONS_OVERRULED_DROP_REASON,
-        ),
-      );
-    }
+    assertions.push(resolved.winner.assertion);
+    dropped.push(...resolved.dropped);
     reconciliations.push(
       policyReconciliation(
         conflict,
         policy,
-        winner.assertion.id,
-        conflict.asserted
-          .filter((staged) => staged.assertion.id !== winner.assertion.id)
-          .map((staged) => staged.assertion.id),
+        resolved.winner.assertion.id,
+        resolved.supersededAssertionIds,
       ),
     );
   }
@@ -951,24 +988,7 @@ export function planIdentityThreeWay(
       refuseRace,
     );
     if (decision.kind === "unresolved") {
-      unresolved.push({
-        kind: "assertion",
-        reason: "retract-reassert",
-        semanticKey,
-        a: conflict.a,
-        b: conflict.b,
-        relation: conflict.relation,
-        assertionIds: [
-          ...race.retracted.map((staged) => staged.assertion.id),
-          ...race.asserted.map((staged) => staged.assertion.id),
-        ],
-        branches: [
-          ...new Set([
-            ...race.retracted.map((staged) => staged.branchId),
-            ...race.asserted.map((staged) => staged.branchId),
-          ]),
-        ].toSorted(compareStrings),
-      });
+      unresolved.push(unresolvedFromConflict(conflict));
       continue;
     }
     if (decision.kind === "retract") {
@@ -994,21 +1014,14 @@ export function planIdentityThreeWay(
       );
       continue;
     }
-    const winner = requireDefined(
-      race.asserted.find(
-        (staged) => staged.assertion.id === decision.assertionId,
-      ),
+    const resolved = resolveAssertWinner(
+      conflict,
+      decision.assertionId,
+      REASSERT_OVERRULED_DROP_REASON,
     );
+    const winner = resolved.winner;
     assertions.push(winner.assertion);
-    for (const staged of race.asserted) {
-      if (staged.assertion.id === winner.assertion.id) continue;
-      dropped.push(
-        droppedIdentityAssertion(
-          staged.assertion,
-          REASSERT_OVERRULED_DROP_REASON,
-        ),
-      );
-    }
+    dropped.push(...resolved.dropped);
     for (const staged of race.retracted) {
       dropped.push(
         droppedIdentityAssertion(
@@ -1028,9 +1041,7 @@ export function planIdentityThreeWay(
     });
     reconciliations.push(
       policyReconciliation(conflict, policy, winner.assertion.id, [
-        ...race.asserted
-          .filter((staged) => staged.assertion.id !== winner.assertion.id)
-          .map((staged) => staged.assertion.id),
+        ...resolved.supersededAssertionIds,
         ...race.retracted.map((staged) => staged.assertion.id),
       ]),
     );
@@ -1124,25 +1135,7 @@ export function planIdentityThreeWay(
     // no group reaching here can still be conflicted. Converted defensively
     // rather than asserted away, so a future arm that DOES return one here
     // degrades to a typed report entry instead of a silent drop.
-    const { conflict } = outcome;
-    unresolved.push({
-      kind: "assertion",
-      reason: conflict.reason,
-      semanticKey: conflict.semanticKey,
-      a: conflict.a,
-      b: conflict.b,
-      relation: conflict.relation,
-      assertionIds: [
-        ...conflict.asserted.map((staged) => staged.assertion.id),
-        ...conflict.retracted.map((staged) => staged.assertion.id),
-      ],
-      branches: [
-        ...new Set([
-          ...conflict.asserted.map((staged) => staged.branchId),
-          ...conflict.retracted.map((staged) => staged.branchId),
-        ]),
-      ].toSorted(compareStrings),
-    });
+    unresolved.push(unresolvedFromConflict(outcome.conflict));
   }
 
   return {

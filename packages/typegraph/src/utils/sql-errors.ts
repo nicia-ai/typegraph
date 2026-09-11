@@ -577,32 +577,28 @@ export function isSqliteMissingEdgeMatchIdentityColumnError(
   return false;
 }
 
-/** Whether a concurrent SQLite adopter already added the column we planned. */
-export function isSqliteDuplicateEdgeMatchIdentityColumnError(
+/**
+ * Whether a concurrent SQLite adopter already added one of the columns we
+ * planned to `ADD`.
+ *
+ * `columnNames` is the adoption's own column list, so one predicate serves
+ * every additive column rather than one hand-written predicate per column.
+ * Deliberately narrow — an exact `duplicate column name: <column>` message on
+ * a `SQLITE_ERROR` — because provisioning treats a match as "the post-state I
+ * wanted is already there" and must not swallow any other DDL failure.
+ */
+export function isSqliteDuplicateColumnError(
   error: unknown,
+  columnNames: readonly string[],
 ): boolean {
+  const duplicateMessages = new Set(
+    columnNames.map((column) => `duplicate column name: ${column}`),
+  );
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) continue;
     if (Reflect.get(link, "code") !== "SQLITE_ERROR") continue;
     const message = sqliteErrorMessage(link);
-    if (
-      message === "duplicate column name: match_identity_name" ||
-      message === "duplicate column name: match_identity_key"
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** Whether a concurrent SQLite adopter already added the identity-transitions table's `restored_at` column we planned. */
-export function isSqliteDuplicateIdentityTransitionsRestoredAtColumnError(
-  error: unknown,
-): boolean {
-  for (const link of errorChain(error)) {
-    if (!canReadProperty(link)) continue;
-    if (Reflect.get(link, "code") !== "SQLITE_ERROR") continue;
-    if (sqliteErrorMessage(link) === "duplicate column name: restored_at") {
+    if (typeof message === "string" && duplicateMessages.has(message)) {
       return true;
     }
   }

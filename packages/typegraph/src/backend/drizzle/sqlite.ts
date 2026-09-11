@@ -51,9 +51,7 @@ import {
 import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
-import {
-  sinceIndexAdoptionDdl,
-} from "../../indexes/system";
+import { sinceIndexAdoptionDdl } from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -74,8 +72,7 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
-  isSqliteDuplicateIdentityTransitionsRestoredAtColumnError,
+  isSqliteDuplicateColumnError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
 import {
@@ -178,9 +175,11 @@ import {
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
+  EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
   generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
+  IDENTITY_TRANSITIONS_ADOPTION_COLUMNS,
   planSqliteEdgeMatchIdentityAdoption,
   planSqliteIdentityTransitionsRestoredAtAdoption,
   sqliteContributions,
@@ -1517,7 +1516,10 @@ export function buildSqliteEngineProfile(
       } catch (error) {
         if (
           attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(error)
+          !isSqliteDuplicateColumnError(
+            error,
+            EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
+          )
         ) {
           throw error;
         }
@@ -1529,41 +1531,39 @@ export function buildSqliteEngineProfile(
   }
 
   async function ensureIdentityTransitionsRestoredAtColumn(): Promise<void> {
-    const identityTransitionsTableName = getTableName(tables.identityTransitions);
+    const identityTransitionsTableName = getTableName(
+      tables.identityTransitions,
+    );
     // Same "no ADD COLUMN IF NOT EXISTS" shape as `ensureEdgeMatchIdentityStorage`
-    // above, narrowed to one column and one retry: a concurrent cold start
-    // can race at most once here.
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const columnRows = await executionAdapter.execute<{
-        name?: unknown;
-      }>(sql`PRAGMA table_info(${sql.identifier(identityTransitionsTableName)})`);
-      const columns = new Set(
-        columnRows.flatMap((row) =>
-          typeof row.name === "string" ? [row.name] : [],
-        ),
-      );
-      const statements = planSqliteIdentityTransitionsRestoredAtAdoption(
-        identityTransitionsTableName,
-        columns,
-      );
-      if (statements.length === 0) return;
-      try {
-        for (const statement of statements) {
-          await db.run(sql.raw(statement));
-        }
-        return;
-      } catch (error) {
-        if (
-          attempt === 1 ||
-          !isSqliteDuplicateIdentityTransitionsRestoredAtColumnError(error)
-        ) {
-          throw error;
-        }
+    // above, narrowed to one column. One pass, no retry: a concurrent adopter
+    // that wins the race leaves exactly the post-state this call wanted, so a
+    // precisely classified duplicate-column failure IS success.
+    const columnRows = await executionAdapter.execute<{
+      name?: unknown;
+    }>(sql`PRAGMA table_info(${sql.identifier(identityTransitionsTableName)})`);
+    const columns = new Set(
+      columnRows.flatMap((row) =>
+        typeof row.name === "string" ? [row.name] : [],
+      ),
+    );
+    const statements = planSqliteIdentityTransitionsRestoredAtAdoption(
+      identityTransitionsTableName,
+      columns,
+    );
+    try {
+      for (const statement of statements) {
+        await db.run(sql.raw(statement));
+      }
+    } catch (error) {
+      if (
+        !isSqliteDuplicateColumnError(
+          error,
+          IDENTITY_TRANSITIONS_ADOPTION_COLUMNS,
+        )
+      ) {
+        throw error;
       }
     }
-    throw new CompilerInvariantError(
-      "SQLite identity-transitions restored_at adoption exhausted its retry loop without returning or throwing.",
-    );
   }
 
   async function readBaseSchemaVersion(): Promise<number | undefined> {

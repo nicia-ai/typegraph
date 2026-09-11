@@ -28,16 +28,16 @@ import { type KindRegistry } from "./kind-registry";
 // Types
 // ============================================================
 
-/** Which endpoint of the realizing edge carries the PART. R5's orientation. */
+/** Which endpoint of the realizing edge carries the PART. */
 export type CompositionPartSide = "from" | "to";
 
 /**
- * Item E.2: whether a composition part can exist with no whole.
+ * Whether a composition part can exist with no whole.
  * `"required"` — the part cannot exist without a live whole, enforced at
  * create (a bare create is refused; `partOf` must name a legal whole) and at
  * detach (ending, soft-deleting, or hard-deleting the composition edge is
- * refused while the part is live). Default `"optional"` — every declaration
- * written before E.2 keeps its semantics.
+ * refused while the part is live). Default `"optional"`, so a declaration
+ * that states no existence keeps its semantics.
  */
 export type CompositionExistence = "optional" | "required";
 
@@ -46,7 +46,7 @@ export type CompositionPair = Readonly<{
   partKind: string;
   wholeKind: string;
   viaEdgeKind: string;
-  /** R5: inferred from the pair against the edge's endpoints, or declared. */
+  /** Inferred from the pair against the edge's endpoints, or declared. */
   partSide: CompositionPartSide;
   /**
    * The WHOLE-side cardinality of the realizing edge: `cardinality` when
@@ -55,10 +55,10 @@ export type CompositionPair = Readonly<{
    */
   population: "one" | "oneActive";
   /**
-   * Item E.2. Total, not optional: the registry resolves the default
-   * (`"optional"`) once here so no consumer re-spells `?? "optional"`. See
-   * {@link KindRegistry.compositionExistence}, the one reader every E.2
-   * decision goes through.
+   * Total, not optional: the registry resolves the default (`"optional"`)
+   * once here so no consumer re-spells `?? "optional"`. See
+   * {@link KindRegistry.compositionExistence}, the one reader every
+   * existence decision goes through.
    */
   existence: CompositionExistence;
 }>;
@@ -100,26 +100,6 @@ export type CompositionIssue = Readonly<{
 // ============================================================
 
 /**
- * `facts.pairs` — the edge's admitted `(from, to)` pairs, already resolved
- * (source-dependent target map or plain Cartesian product) by the one site
- * that builds it — asserted present. `pairs` is typed optional only because
- * `EdgeKindFacts` is shared with older, pre-pairs consumers; composition's
- * two construction sites (`buildGraphEdgeKindFacts`, the deserializer's)
- * always populate it, so a missing one here is a builder defect, not a shape
- * this function should quietly re-derive a Cartesian product for (a second,
- * driftable spelling of the same value). The two call sites below share one
- * message for that defect.
- */
-function requireEdgePairs(
-  facts: EdgeKindFacts,
-): readonly Readonly<{ from: string; to: string }>[] {
-  return requireDefined(
-    facts.pairs,
-    "EdgeKindFacts.pairs must be populated for composition validation",
-  );
-}
-
-/**
  * Whether the realizing edge admits an instance whose `from` endpoint is
  * (assignable to) `fromCandidate` and whose `to` endpoint is (assignable to)
  * `toCandidate`, against `EdgeKindFacts.pairs`.
@@ -130,12 +110,20 @@ function edgeAdmitsPair(
   facts: EdgeKindFacts,
   registry: KindRegistry,
 ): boolean {
-  return requireEdgePairs(facts).some(
+  return facts.pairs.some(
     (pair) =>
       registry.isAssignableTo(fromCandidate, pair.from) &&
       registry.isAssignableTo(toCandidate, pair.to),
   );
 }
+
+/** The subset of {@link CompositionIssueCode} `inferCompositionPartSide` can return. */
+type InferenceIssueCode = Extract<
+  CompositionIssueCode,
+  | "ONTOLOGY_COMPOSITION_VIA_ENDPOINTS"
+  | "ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED"
+  | "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID"
+>;
 
 /**
  * Infers which side of the realizing edge carries the PART, for one declared
@@ -159,7 +147,7 @@ export function inferCompositionPartSide(
   registry: KindRegistry,
 ):
   | Readonly<{ partSide: CompositionPartSide }>
-  | Readonly<{ code: CompositionIssueCode }> {
+  | Readonly<{ code: InferenceIssueCode }> {
   const forwardOk = edgeAdmitsPair(
     pair.partKind,
     pair.wholeKind,
@@ -204,10 +192,9 @@ export function inferCompositionPartSide(
  * closure — derives its traversal direction through
  * {@link partitionCompositionEdgeKindsByDirection} below, which is the one
  * caller of this mapping, so the two paths cannot drift on which way an
- * edge is walked (see the composition-navigation lane's Ed-01 finding:
- * `subgraph` once re-derived this as a flat direction: "both", which climbs
- * to ancestors and re-descends into siblings instead of reaching only the
- * descendants).
+ * edge is walked. A flat direction: "both" is not a sound substitute — it
+ * climbs to ancestors and re-descends into siblings instead of reaching only
+ * the descendants.
  */
 function compositionTraversalDirection(
   partSide: CompositionPartSide,
@@ -229,10 +216,9 @@ function compositionTraversalDirection(
  * re-spelling the loop, so they cannot disagree on what happens when an
  * edge kind returned by `compositionEdgeKindsUnder`/`compositionEdgeKindsOver`
  * turns out to have no entry in `partSideByEdgeKind` — a registry-build
- * defect, or an ontology loaded from a persisted schema. Both callers now
- * throw the same named-invariant message instead of one refusing loudly and
- * the other silently defaulting to `"from"` and walking the wrong direction
- * (Ed-r2-3).
+ * defect, or an ontology loaded from a persisted schema. Both callers throw
+ * the same named-invariant message rather than one refusing loudly and the
+ * other silently defaulting to `"from"` and walking the wrong direction.
  */
 export function partitionCompositionEdgeKindsByDirection(
   registry: KindRegistry,
@@ -263,7 +249,7 @@ export function partitionCompositionEdgeKindsByDirection(
  * Whether `metaEdge` is one of the two composition meta-edges (`partOf` /
  * `hasPart`). Exported so every site that needs "is this relation a
  * composition relation" calls one predicate instead of re-spelling the
- * `=== META_EDGE_PART_OF || === META_EDGE_HAS_PART` pair (E-a-7).
+ * `=== META_EDGE_PART_OF || === META_EDGE_HAS_PART` pair.
  */
 export function isCompositionMetaEdge(metaEdge: string): boolean {
   return metaEdge === META_EDGE_PART_OF || metaEdge === META_EDGE_HAS_PART;
@@ -273,7 +259,7 @@ export function isCompositionMetaEdge(metaEdge: string): boolean {
  * Normalizes a `partOf` or `hasPart` relation to `(partKind, wholeKind)`.
  * Exported so the registry's declaration-closure collector
  * (`kind-registry.ts`'s `partOf`/`hasPart` closure) shares this decision
- * instead of re-spelling the same from/to flip (E-a-7).
+ * instead of re-spelling the same from/to flip.
  */
 export function normalizePartWhole(
   relation: NamedOntologyRelation,
@@ -309,36 +295,43 @@ export function compositionRelationFields(
     ...(source.partSide === undefined ? {} : { partSide: source.partSide }),
     // Stronger than `via`/`partSide`: an explicit `existence: "optional"` is
     // ALSO omitted, because it is the default — emitting it would change the
-    // hash of a graph whose author merely spelled the default out (E.2's
-    // D.1/D.2-precedent serializer rule).
+    // hash of a graph whose author merely spelled the default out.
     ...(source.existence === undefined || source.existence === "optional" ?
       {}
     : { existence: source.existence }),
   };
 }
 
-/** The subset of {@link CompositionIssueCode} `inferCompositionPartSide` can return. */
-type InferenceIssueCode = Extract<
-  CompositionIssueCode,
-  | "ONTOLOGY_COMPOSITION_VIA_ENDPOINTS"
-  | "ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED"
-  | "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID"
->;
-
 /**
- * Narrows `inferCompositionPartSide`'s widened public return type back to
- * the codes it can actually produce, so the message builder's switch stays
- * exhaustive without a defensive `default` for a state the function cannot
- * reach.
+ * THE identity of an ontology relation: which declaration it IS, as an
+ * injective key. `via`/`partSide` are part of it so two realizing edges can
+ * hold the same (part, whole) pair without colliding; `existence` is
+ * deliberately NOT, because it names the same declared pair whichever way it
+ * reads (see {@link CompositionExistence}).
+ *
+ * One owner, so the duplicate-declaration check
+ * (`validateOntologyRelations`) and the before/after relation diff
+ * (`src/schema/ontology-change.ts`) cannot disagree about when two
+ * declarations are the same relation — a field added to one copy and not the
+ * other would make the diff report remove + add for a relation the duplicate
+ * check still treats as one, or the reverse.
  */
-function isInferenceIssueCode(
-  code: CompositionIssueCode,
-): code is InferenceIssueCode {
-  return (
-    code === "ONTOLOGY_COMPOSITION_VIA_ENDPOINTS" ||
-    code === "ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED" ||
-    code === "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID"
-  );
+export function ontologyRelationIdentityKey(
+  relation: Readonly<{
+    metaEdge: string;
+    from: string;
+    to: string;
+    via?: string | undefined;
+    partSide?: CompositionPartSide | undefined;
+  }>,
+): string {
+  return encodeTupleKey([
+    relation.metaEdge,
+    relation.from,
+    relation.to,
+    relation.via ?? "",
+    relation.partSide ?? "",
+  ]);
 }
 
 function inferenceIssueMessage(
@@ -366,6 +359,39 @@ function inferenceIssueMessage(
       return `Composition relation ${relationLabel} declares a \`partSide\` that contradicts edge "${viaEdgeKind}"'s endpoints.`;
     }
   }
+}
+
+/**
+ * The refusal a part kind earns when the composition pairs that can hold it
+ * disagree on a fact that holds relation-wide. One owner for the population and
+ * the existence check, which differ only in the pair field they read and in
+ * how the message names it.
+ */
+function mixedPartKindFactIssue(
+  kind: string,
+  applicable: readonly CompositionPair[],
+  select: (pair: CompositionPair) => string,
+  code: CompositionIssueCode,
+  valueLabel: string,
+  requirementLabel: string,
+): CompositionIssue | undefined {
+  const values = new Set(applicable.map((pair) => select(pair)));
+  if (values.size <= 1) return undefined;
+  const representative = requireDefined(applicable[0]);
+  return {
+    code,
+    message:
+      `Node kind "${kind}" is a composition part under edges declaring different ${valueLabel} ` +
+      `(${[...values].toSorted((left, right) => compareStrings(left, right)).join(", ")}); ` +
+      `every composition edge that can hold "${kind}" as a part must declare the same ${requirementLabel}.`,
+    relation: {
+      metaEdge: META_EDGE_PART_OF,
+      from: representative.partKind,
+      to: representative.wholeKind,
+      via: representative.viaEdgeKind,
+      partSide: representative.partSide,
+    },
+  };
 }
 
 /**
@@ -424,16 +450,13 @@ export function buildCompositionRelation(
     if ("code" in inference) {
       issues.push({
         code: inference.code,
-        message:
-          isInferenceIssueCode(inference.code) ?
-            inferenceIssueMessage(
-              inference.code,
-              relation,
-              partKind,
-              wholeKind,
-              viaEdgeKind,
-            )
-          : `Composition relation ${relation.metaEdge}(${relation.from}, ${relation.to}) is invalid ("${inference.code}").`,
+        message: inferenceIssueMessage(
+          inference.code,
+          relation,
+          partKind,
+          wholeKind,
+          viaEdgeKind,
+        ),
         relation,
       });
       continue;
@@ -518,7 +541,7 @@ export function buildCompositionRelation(
       representativeByEdgeKind.get(edgeKind),
       `Composition edge "${edgeKind}" has an orientation with no declaring relation.`,
     );
-    for (const { from, to } of requireEdgePairs(facts)) {
+    for (const { from, to } of facts.pairs) {
       if (!declaredTuples.has(encodeTupleKey([from, to]))) {
         issues.push({
           code: "ONTOLOGY_COMPOSITION_VIA_MIXED",
@@ -531,9 +554,6 @@ export function buildCompositionRelation(
     }
   }
 
-  // Uniform population: every composition edge that can hold a given node
-  // kind as its part must agree on the whole-side cardinality, because R4's
-  // claim axis is relation-wide, not per-edge.
   const candidateKinds = new Set<string>();
   for (const pair of pairs) {
     candidateKinds.add(pair.partKind);
@@ -542,59 +562,49 @@ export function buildCompositionRelation(
       candidateKinds.add(descendant);
     }
   }
-  for (const kind of candidateKinds) {
-    const applicable = pairs.filter(
-      (pair) =>
-        kind === pair.partKind || registry.isAssignableTo(kind, pair.partKind),
+  // Which declared pairs can hold each candidate kind as their part, resolved
+  // once for both uniformity checks below.
+  const applicablePairsByPartKind = new Map<string, readonly CompositionPair[]>(
+    [...candidateKinds].map((kind) => [
+      kind,
+      pairs.filter(
+        (pair) =>
+          kind === pair.partKind ||
+          registry.isAssignableTo(kind, pair.partKind),
+      ),
+    ]),
+  );
+
+  // Uniform population: every composition edge that can hold a given node
+  // kind as its part must agree on the whole-side cardinality, because the
+  // claim axis is relation-wide, not per-edge.
+  for (const [kind, applicable] of applicablePairsByPartKind) {
+    const issue = mixedPartKindFactIssue(
+      kind,
+      applicable,
+      (pair) => pair.population,
+      "ONTOLOGY_COMPOSITION_POPULATION_MIXED",
+      "populations",
+      "cardinality",
     );
-    const populations = new Set(applicable.map((pair) => pair.population));
-    if (populations.size > 1) {
-      const representative = requireDefined(applicable[0]);
-      issues.push({
-        code: "ONTOLOGY_COMPOSITION_POPULATION_MIXED",
-        message:
-          `Node kind "${kind}" is a composition part under edges declaring different populations ` +
-          `(${[...populations].toSorted((left, right) => compareStrings(left, right)).join(", ")}); ` +
-          `every composition edge that can hold "${kind}" as a part must declare the same cardinality.`,
-        relation: {
-          metaEdge: META_EDGE_PART_OF,
-          from: representative.partKind,
-          to: representative.wholeKind,
-          via: representative.viaEdgeKind,
-          partSide: representative.partSide,
-        },
-      });
-    }
+    if (issue !== undefined) issues.push(issue);
   }
 
-  // Item E.2's mixed-existence refusal: R4 gives a part one whole across
-  // every declared composition relation, so "must this part have one" is a
-  // property of the part kind, not of a pair — the same argument
+  // The mixed-existence refusal: a part has one whole across every declared
+  // composition relation, so "must this part have one" is a property of the
+  // part kind, not of a pair — the same argument
   // `ONTOLOGY_COMPOSITION_POPULATION_MIXED` already makes for population.
   // This is what makes `KindRegistry.compositionExistence` total.
-  for (const kind of candidateKinds) {
-    const applicable = pairs.filter(
-      (pair) =>
-        kind === pair.partKind || registry.isAssignableTo(kind, pair.partKind),
+  for (const [kind, applicable] of applicablePairsByPartKind) {
+    const issue = mixedPartKindFactIssue(
+      kind,
+      applicable,
+      (pair) => pair.existence,
+      "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED",
+      "`existence`",
+      "existence",
     );
-    const existenceValues = new Set(applicable.map((pair) => pair.existence));
-    if (existenceValues.size > 1) {
-      const representative = requireDefined(applicable[0]);
-      issues.push({
-        code: "ONTOLOGY_COMPOSITION_EXISTENCE_MIXED",
-        message:
-          `Node kind "${kind}" is a composition part under edges declaring different \`existence\` ` +
-          `(${[...existenceValues].toSorted((left, right) => compareStrings(left, right)).join(", ")}); ` +
-          `every composition edge that can hold "${kind}" as a part must declare the same existence.`,
-        relation: {
-          metaEdge: META_EDGE_PART_OF,
-          from: representative.partKind,
-          to: representative.wholeKind,
-          via: representative.viaEdgeKind,
-          partSide: representative.partSide,
-        },
-      });
-    }
+    if (issue !== undefined) issues.push(issue);
   }
 
   const sortedPairs = pairs.toSorted(

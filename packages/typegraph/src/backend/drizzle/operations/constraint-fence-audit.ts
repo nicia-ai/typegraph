@@ -19,11 +19,12 @@ import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
   type EdgeCardinalityAxisRef,
+  type EdgeCardinalitySpec,
   edgeCardinalitySpec,
 } from "../../../store/claims/edge-claims";
 import type { CompositionClaimScope } from "../../types";
-import { claimHolderTerms } from "./edge-claims";
-import { quotedColumn, type Tables } from "./shared";
+import { claimHolderTerms, endpointTerms } from "./edge-claims";
+import { currentWindowPredicate, quotedColumn, type Tables } from "./shared";
 
 /** The alias the correlated subquery reads the same relation under. */
 const PEER = "peer";
@@ -42,6 +43,40 @@ function inList(values: readonly string[]): SQL {
     values.map((value) => sql`${value}`),
     sql`, `,
   );
+}
+
+/**
+ * The row every edge-family audit reports, in one place: the edge's identity
+ * and both endpoints, named as the caller's row type spells them
+ * ({@link file://../../operation-backend-core.ts readConstraintFenceViolations}).
+ * An added audit column is then one edit here and one in that row type, rather
+ * than one per statement.
+ */
+function edgeAuditProjection(edges: Tables["edges"]): SQL {
+  return sql`
+    ${quotedColumn(edges.id)} as edge_id,
+    ${quotedColumn(edges.kind)} as edge_kind,
+    ${quotedColumn(edges.fromKind)} as from_kind,
+    ${quotedColumn(edges.fromId)} as from_id,
+    ${quotedColumn(edges.toKind)} as to_kind,
+    ${quotedColumn(edges.toId)} as to_id
+  `;
+}
+
+/**
+ * What a member of a cardinality population must still BE, read off the axis's
+ * {@link edgeCardinalitySpec}: `"liveAndActive"` additionally requires an open
+ * validity window. Rendered for the outer row and for the correlated peer from
+ * the same ternary, so the two sides of one statement cannot disagree.
+ */
+function holderLivenessTerm(
+  holderLiveness: EdgeCardinalitySpec["holderLiveness"],
+  relation: string,
+  edges: Tables["edges"],
+): SQL {
+  return holderLiveness === "liveAndActive" ?
+      sql` AND ${qualified(relation, edges.validTo)} IS NULL`
+    : sql.empty();
 }
 
 /**
@@ -109,37 +144,21 @@ export function buildContendedEdgeRowAudit(
   const { edges } = tables;
   const relation = getTableName(edges);
   const spec = edgeCardinalitySpec(ref);
-  const activeOnly =
-    spec.holderLiveness === "liveAndActive" ?
-      sql` AND ${qualified(relation, edges.validTo)} IS NULL`
-    : sql.empty();
-  const peerActiveOnly =
-    spec.holderLiveness === "liveAndActive" ?
-      sql` AND ${qualified(PEER, edges.validTo)} IS NULL`
-    : sql.empty();
-  const peerFromEndpoints =
-    spec.keyShape === "from" || spec.keyShape === "fromAndTo" ?
-      sql`
-        AND ${qualified(PEER, edges.fromKind)} = ${qualified(relation, edges.fromKind)}
-                  AND ${qualified(PEER, edges.fromId)} = ${qualified(relation, edges.fromId)}
-      `
-    : sql.empty();
-  const peerToEndpoints =
-    spec.keyShape === "to" || spec.keyShape === "fromAndTo" ?
-      sql`
-        AND ${qualified(PEER, edges.toKind)} = ${qualified(relation, edges.toKind)}
-                  AND ${qualified(PEER, edges.toId)} = ${qualified(relation, edges.toId)}
-      `
-    : sql.empty();
+  const activeOnly = holderLivenessTerm(spec.holderLiveness, relation, edges);
+  const peerActiveOnly = holderLivenessTerm(spec.holderLiveness, PEER, edges);
+  // The endpoint fold belongs to `endpointTerms` — the same renderer the
+  // write-path fence reads it through — given the OUTER row's own qualified
+  // columns in place of a write's bound literals, so the audit cannot key the
+  // population on a different subset of endpoints than the fence does.
+  const peerEndpoints = endpointTerms(PEER, edges, spec.keyShape, {
+    fromKind: qualified(relation, edges.fromKind),
+    fromId: qualified(relation, edges.fromId),
+    toKind: qualified(relation, edges.toKind),
+    toId: qualified(relation, edges.toId),
+  });
 
   return sql`
-    SELECT
-      ${quotedColumn(edges.id)} as edge_id,
-      ${quotedColumn(edges.kind)} as edge_kind,
-      ${quotedColumn(edges.fromKind)} as from_kind,
-      ${quotedColumn(edges.fromId)} as from_id,
-      ${quotedColumn(edges.toKind)} as to_kind,
-      ${quotedColumn(edges.toId)} as to_id
+    SELECT${edgeAuditProjection(edges)}
     FROM ${edges}
     WHERE ${qualified(relation, edges.graphId)} = ${graphId}
       AND ${qualified(relation, edges.kind)} IN (${inList(edgeKinds)})
@@ -147,7 +166,7 @@ export function buildContendedEdgeRowAudit(
       AND EXISTS (
         SELECT 1 FROM ${edges} AS ${sql.raw(`"${PEER}"`)}
         WHERE ${qualified(PEER, edges.graphId)} = ${qualified(relation, edges.graphId)}
-          AND ${qualified(PEER, edges.kind)} = ${qualified(relation, edges.kind)}${peerFromEndpoints}${peerToEndpoints}
+          AND ${qualified(PEER, edges.kind)} = ${qualified(relation, edges.kind)}${peerEndpoints}
           AND ${qualified(PEER, edges.deletedAt)} IS NULL${peerActiveOnly}
           AND ${qualified(PEER, edges.id)} <> ${qualified(relation, edges.id)}
       )
@@ -159,7 +178,7 @@ export function buildContendedEdgeRowAudit(
  * edge, across every realizing edge kind and orientation.
  *
  * `buildContendedEdgeRowAudit`'s peer test (`peer.kind = relation.kind`) is
- * wrong for R4: the composition claim's axis is relation-wide, so a `Chapter`
+ * wrong here: the composition claim's axis is relation-wide, so a `Chapter`
  * attached via `chapterOf` (`partSide: "from"`) and the SAME `Chapter`
  * attached via `includedIn` (`partSide: "to"`) must be found contending even
  * though they are different edge kinds in different orientations. The peer
@@ -189,14 +208,8 @@ export function buildContendedCompositionEdgeRowAudit(
     spec.keyShape === "from" ? edges.fromKind : edges.toKind;
   const outerPartIdColumn =
     spec.keyShape === "from" ? edges.fromId : edges.toId;
-  const activeOnly =
-    spec.holderLiveness === "liveAndActive" ?
-      sql` AND ${qualified(relation, edges.validTo)} IS NULL`
-    : sql.empty();
-  const peerActiveOnly =
-    spec.holderLiveness === "liveAndActive" ?
-      sql` AND ${qualified(PEER, edges.validTo)} IS NULL`
-    : sql.empty();
+  const activeOnly = holderLivenessTerm(spec.holderLiveness, relation, edges);
+  const peerActiveOnly = holderLivenessTerm(spec.holderLiveness, PEER, edges);
 
   // The composition overload of `claimHolderTerms`: given a part identity in
   // place of a claim value source, it needs nothing beyond the axis ref and
@@ -215,13 +228,7 @@ export function buildContendedCompositionEdgeRowAudit(
   );
 
   return sql`
-    SELECT
-      ${quotedColumn(edges.id)} as edge_id,
-      ${quotedColumn(edges.kind)} as edge_kind,
-      ${quotedColumn(edges.fromKind)} as from_kind,
-      ${quotedColumn(edges.fromId)} as from_id,
-      ${quotedColumn(edges.toKind)} as to_kind,
-      ${quotedColumn(edges.toId)} as to_id
+    SELECT${edgeAuditProjection(edges)}
     FROM ${edges}
     WHERE ${qualified(relation, edges.graphId)} = ${graphId}
       AND ${qualified(relation, edges.kind)} IN (${inList(reportedEdgeKinds)})
@@ -286,15 +293,13 @@ export function buildDisjointOverlapAudit(
  * intersects the per-chunk results, because that budget (not expression
  * depth) is what an unbounded pair count can still exceed on every dialect.
  *
- * "Live" is `caller.now` bound against the same current-window predicate
- * `compileTemporalFilter({ mode: "current" })` compiles for an ordinary read
- * (`src/query/compiler/temporal.ts`) — `deleted_at IS NULL AND (valid_from IS
- * NULL OR valid_from <= now) AND (valid_to IS NULL OR valid_to > now)` — not
- * `valid_to IS NULL`. A currently-valid edge can carry a bounded FUTURE
- * `valid_to` (e.g. a term appointment); it is what every current-coordinate
- * read returns today, so it is exactly what this audit must not miss. `now`
- * is a parameter, not `nowIso()` sampled here, so every chunk of every
- * allowance in one audit call reads against the same instant.
+ * "Live" is {@link currentWindowPredicate} — the same window an ordinary
+ * current read applies — not `valid_to IS NULL`. A currently-valid edge can
+ * carry a bounded FUTURE `valid_to` (e.g. a term appointment); it is what
+ * every current-coordinate read returns today, so it is exactly what this
+ * audit must not miss. `now` is a parameter, not `nowIso()` sampled here, so
+ * every chunk of every allowance in one audit call reads against the same
+ * instant.
  */
 export function buildMisassignedEdgeEndpointAudit(
   tables: Tables,
@@ -321,18 +326,10 @@ export function buildMisassignedEdgeEndpointAudit(
            )
     `;
   return sql`
-    SELECT
-      ${quotedColumn(edges.id)} as edge_id,
-      ${quotedColumn(edges.kind)} as edge_kind,
-      ${quotedColumn(edges.fromKind)} as from_kind,
-      ${quotedColumn(edges.fromId)} as from_id,
-      ${quotedColumn(edges.toKind)} as to_kind,
-      ${quotedColumn(edges.toId)} as to_id
+    SELECT${edgeAuditProjection(edges)}
     FROM ${edges}
     WHERE ${qualified(relation, edges.graphId)} = ${graphId}
       AND ${qualified(relation, edges.kind)} = ${edgeKind}
-      AND ${qualified(relation, edges.deletedAt)} IS NULL
-      AND (${qualified(relation, edges.validFrom)} IS NULL OR ${qualified(relation, edges.validFrom)} <= ${now})
-      AND (${qualified(relation, edges.validTo)} IS NULL OR ${qualified(relation, edges.validTo)} > ${now})${admittedPredicate}
+      AND ${currentWindowPredicate(relation, edges, now)}${admittedPredicate}
   `;
 }

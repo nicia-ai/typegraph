@@ -61,7 +61,9 @@ type ClaimValueSource = Readonly<{
   toId: SQL;
 }>;
 
-function boundClaimValues(params: ClaimEdgeCardinalityParams): ClaimValueSource {
+function boundClaimValues(
+  params: ClaimEdgeCardinalityParams,
+): ClaimValueSource {
   return {
     graphId: sql`${params.graphId}`,
     edgeId: sql`${params.edgeId}`,
@@ -166,9 +168,9 @@ function proposedRelationCte(
 ): SQL {
   const columnTypes = proposedColumnTypeSources(tables);
   const header = sql.raw(
-    PROPOSED_COLUMN_ORDER.map(
-      (column) => `"${PROPOSED_COLUMNS[column]}"`,
-    ).join(", "),
+    PROPOSED_COLUMN_ORDER.map((column) => `"${PROPOSED_COLUMNS[column]}"`).join(
+      ", ",
+    ),
   );
   const rows = entries.map((entry) => {
     const target = edgeCardinalityClaimTarget(entry);
@@ -272,17 +274,29 @@ function axisOf(
 }
 
 /**
+ * The endpoint columns an endpoint term compares against: a write's bound
+ * literals, a batch statement's `proposed` columns, or — for the read-only
+ * audit — the outer row's own qualified columns. Narrower than
+ * {@link ClaimValueSource} so the compiler, not a comment, is what proves this
+ * fold reads no other field.
+ */
+export type EndpointValueSource = Pick<
+  ClaimValueSource,
+  "fromKind" | "fromId" | "toKind" | "toId"
+>;
+
+/**
  * The endpoint terms {@link EdgeCardinalitySpec.keyShape} says a predicate
  * must read: from-terms for `"from"`, to-terms for `"to"`, both for
- * `"fromAndTo"`. The one renderer of that fold, so a source-axis predicate and
- * a target-axis predicate cannot spell two different subsets of these
- * columns.
+ * `"fromAndTo"`. The one renderer of that fold, so a source-axis predicate, a
+ * target-axis predicate and the read-only audit's correlated peer test cannot
+ * spell two different subsets of these columns.
  */
-function endpointTerms(
+export function endpointTerms(
   edgesName: string,
   edges: Tables["edges"],
   keyShape: EdgeCardinalitySpec["keyShape"],
-  values: ClaimValueSource,
+  values: EndpointValueSource,
 ): SQL {
   const fromTerms =
     keyShape === "from" || keyShape === "fromAndTo" ?
@@ -374,39 +388,33 @@ export function claimHolderTerms(
     return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, bound)}`;
   }
   const part =
-    "part" in values ? values.part
+    "part" in values ?
+      values.part
     : {
         kind: spec.keyShape === "from" ? values.fromKind : values.toKind,
         id: spec.keyShape === "from" ? values.fromId : values.toId,
       };
-  const fromSideKinds = axis.scope.holders
-    .filter((holder) => holder.partSide === "from")
-    .map((holder) => holder.edgeKind);
-  const toSideKinds = axis.scope.holders
-    .filter((holder) => holder.partSide === "to")
-    .map((holder) => holder.edgeKind);
+  // One arm per ORIENTED side, always `from` before `to`, so two axes whose
+  // holders agree render the identical statement text regardless of the order
+  // `scope.holders` lists them in.
+  const sides = [
+    { partSide: "from", kindColumn: edges.fromKind, idColumn: edges.fromId },
+    { partSide: "to", kindColumn: edges.toKind, idColumn: edges.toId },
+  ] as const;
   const arms: SQL[] = [];
-  if (fromSideKinds.length > 0) {
+  for (const side of sides) {
+    const sideKinds = axis.scope.holders
+      .filter((holder) => holder.partSide === side.partSide)
+      .map((holder) => holder.edgeKind);
+    if (sideKinds.length === 0) continue;
     arms.push(sql`
       (
             ${qualified(edgesName, edges.kind)} IN (${sql.join(
-              fromSideKinds.map((kind) => sql`${kind}`),
+              sideKinds.map((kind) => sql`${kind}`),
               sql`, `,
             )})
-            AND ${qualified(edgesName, edges.fromKind)} = ${part.kind}
-            AND ${qualified(edgesName, edges.fromId)} = ${part.id}
-          )
-    `);
-  }
-  if (toSideKinds.length > 0) {
-    arms.push(sql`
-      (
-            ${qualified(edgesName, edges.kind)} IN (${sql.join(
-              toSideKinds.map((kind) => sql`${kind}`),
-              sql`, `,
-            )})
-            AND ${qualified(edgesName, edges.toKind)} = ${part.kind}
-            AND ${qualified(edgesName, edges.toId)} = ${part.id}
+            AND ${qualified(edgesName, side.kindColumn)} = ${part.kind}
+            AND ${qualified(edgesName, side.idColumn)} = ${part.id}
           )
     `);
   }

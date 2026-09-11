@@ -122,6 +122,16 @@ function orderedPair(first: string, second: string): SeparationPair {
 }
 
 /**
+ * The single spelling of an ordered class-key pair, for a caller that keys its
+ * own map or set of separations. Same encoding and same ordering the relation's
+ * `low`/`high` columns are written in, so a key minted outside this module can
+ * never disagree with one minted inside it.
+ */
+export function separationClassPairKey(first: string, second: string): string {
+  return pairKey(orderedPair(first, second));
+}
+
+/**
  * Projects `different` assertions onto their endpoints' identity classes.
  *
  * Duplicate pairs collapse to one row: several assertions can separate the same
@@ -291,20 +301,17 @@ export async function bulkIsSeparated(
   const anyUnresolved = [...uniqueNonTrivial.keys()].some(
     (key) => !separated.has(key),
   );
+  // Zero rows is not an exceptional state: it is the STEADY state of every
+  // graph that holds only `same` assertions, so this is the path whose cost
+  // decides whether the guard is affordable. The proof runs at most once per
+  // Store handle, and once per call here regardless of how many pairs it
+  // covers — the fact it settles is about the graph, not any one pair.
   if (
     !graphHasRows &&
     anyUnresolved &&
-    !separationReadinessProven(registry, graphId)
+    !(await separationFactsEmpty(target, schema, graphId, registry))
   ) {
-    // Zero rows is not an exceptional state: it is the STEADY state of every
-    // graph that holds only `same` assertions, so this is the path whose cost
-    // decides whether the guard is affordable. The proof runs at most once per
-    // Store handle, and once per call here regardless of how many pairs it
-    // covers — the fact it settles is about the graph, not any one pair.
-    if (await hasLiveDifferentAssertions(target, schema, graphId, registry)) {
-      throw separationUnfilledError(graphId, schema);
-    }
-    proveSeparationReadiness(registry, graphId);
+    throw separationUnfilledError(graphId, schema);
   }
   return ordered.map(
     (pair) => pair.low !== pair.high && separated.has(pairKey(pair)),
@@ -388,24 +395,33 @@ function separationReadinessProven(
 }
 
 /**
- * The public read of {@link separationReadinessProven}, for a caller that
- * wants to SKIP its own "has this graph anything to separate" round trip
- * rather than decide readiness itself.
+ * Whether this graph separates NOTHING — the memo read, the ledger probe, and
+ * the memo write as one decision, so no caller assembles its own.
  *
- * `graph-merge/identity-pairing.ts`'s plan-time capture asks the identical
- * per-(registry, graphId) question `hasLiveDifferentAssertions` answers here —
- * before this seam existed, it asked it with its own direct call, paying the
- * round trip again even when an earlier `assertSame`/`assertDifferent` on the
- * same Store handle had already proven it. One owner, two readers: this
- * function never writes the memo — only {@link bulkIsSeparated}'s own
- * zero-rows branch does that, so "true" here always traces back to a real
- * probe this module ran itself.
+ * `true` means the ledger owes the relation no row: an empty relation is then
+ * CORRECT rather than unfilled, and a caller whose only question is "can
+ * anything here be separated" may stop. `false` means a live `different`
+ * assertion exists — which {@link bulkIsSeparated} reads, together with the
+ * relation holding no row for the graph, as proof that this graph's fill never
+ * ran.
+ *
+ * The proof is memoized per (registry, graphId), so a graph that uses only
+ * `assertSame` pays the ledger probe once per Store handle instead of once per
+ * caller. Both readers — the batch probe's zero-rows branch and the merge's
+ * plan-time separation capture — settle the fact through here.
  */
-export function separationFactsKnownEmpty(
-  registry: KindRegistry,
+export async function separationFactsEmpty(
+  target: IdentityTarget,
+  schema: SqlSchema,
   graphId: string,
-): boolean {
-  return separationReadinessProven(registry, graphId);
+  registry: KindRegistry,
+): Promise<boolean> {
+  if (separationReadinessProven(registry, graphId)) return true;
+  if (await hasLiveDifferentAssertions(target, schema, graphId, registry)) {
+    return false;
+  }
+  proveSeparationReadiness(registry, graphId);
+  return true;
 }
 
 function proveSeparationReadiness(
@@ -689,7 +705,7 @@ async function hasSeparationRows(
  * a database whose closure is corrupt, which `validateIdentity()` reports and
  * which the CHECK still refuses at the next fusing write.
  */
-export async function hasLiveDifferentAssertions(
+async function hasLiveDifferentAssertions(
   target: IdentityTarget,
   schema: SqlSchema,
   graphId: string,

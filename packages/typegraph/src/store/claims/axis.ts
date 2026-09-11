@@ -331,6 +331,25 @@ export function compareClaimTargets(
 }
 
 /**
+ * A claim target keyed as ONE map entry — the identity a grouping or a
+ * duplicate refusal keys on, so every consumer groups the same rows together.
+ * {@link encodeTupleKey} rather than a delimiter join, for the reason that
+ * module states: a delimiter is also a legal value character.
+ *
+ * `graphId` is deliberately absent: every caller groups within one graph, and
+ * including it would make the key say nothing the caller does not already
+ * know.
+ */
+export function targetIdentity(target: ClaimTarget): string {
+  return encodeTupleKey([
+    target.relation,
+    target.axis,
+    target.constraintName ?? "",
+    target.key,
+  ]);
+}
+
+/**
  * WHO holds a claim. A node, not an id: ids are unique only per kind, so
  * `(concrete_kind, node_id)` is the smallest thing that identifies a claimant.
  */

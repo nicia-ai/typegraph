@@ -238,6 +238,7 @@ import {
   loadAndVerifyGraph,
   parseSerializedSchema,
   requiresMigration as requiresMigrationImpl,
+  schemaCommitCapabilityError,
   type SchemaManagerOptions,
   type SchemaValidationResult,
 } from "../schema/manager";
@@ -5024,12 +5025,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             ),
           ]),
           storedSchema,
-          (
-            identityCandidate === undefined &&
-              schemaTighteningPreflight !== undefined
-          ) ?
-            schemaTighteningPreflight.capabilityError
-          : undefined,
+          schemaCommitCapabilityError(
+            identityCandidate !== undefined,
+            schemaTighteningPreflight,
+          ),
         );
     // Provision per-field vector tables + durable markers for any embedding
     // fields this evolution introduced (idempotent for fields that already

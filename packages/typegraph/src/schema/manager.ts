@@ -66,6 +66,7 @@ import {
 import {
   type AtomicPreflightCapabilityError,
   prepareSchemaTighteningPreflight,
+  type SchemaTighteningPreflight,
 } from "./tightening-preflight";
 import { type SerializedSchema, serializedSchemaZod } from "./types";
 
@@ -557,12 +558,10 @@ export async function ensureSchemaInternal<G extends GraphDef>(
             activeSchema.version,
             preflight,
             storedSchema,
-            (
-              identityPreflight === undefined &&
-                schemaTighteningPreflight !== undefined
-            ) ?
-              schemaTighteningPreflight.capabilityError
-            : undefined,
+            schemaCommitCapabilityError(
+              identityPreflight !== undefined,
+              schemaTighteningPreflight,
+            ),
           );
       await options?.onAfterMigrate?.(hookContext);
       return {
@@ -864,6 +863,27 @@ function requireCommitWithPreflight(
 /** One step of a composed schema-commit preflight; `undefined` drops out. */
 type SchemaCommitPreflightStep =
   ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined;
+
+/**
+ * THE atomic-preflight capability error a commit owes, given whether identity
+ * contributed a preflight step of its own and which tightening preflight (if
+ * any) this commit carries.
+ *
+ * Identity's error wins whenever identity contributed a step, because its
+ * preflight is the one that cannot be split from the commit; a
+ * tightening-only commit names the axis it is actually about (see
+ * {@link SchemaTighteningPreflight.capabilityError}). One owner, because all
+ * three commit paths (`ensureSchema`'s auto-migrate branch, `migrateSchema`,
+ * `Store.evolve`) owe the same decision and a copy that drifts would blame
+ * the wrong subsystem in an operator-facing refusal.
+ */
+export function schemaCommitCapabilityError(
+  hasIdentityPreflight: boolean,
+  tightening: SchemaTighteningPreflight | undefined,
+): AtomicPreflightCapabilityError | undefined {
+  if (hasIdentityPreflight || tightening === undefined) return undefined;
+  return tightening.capabilityError;
+}
 
 /**
  * THE order a schema-commit preflight runs its steps in, and the one place
@@ -1294,12 +1314,10 @@ export async function migrateSchema<G extends GraphDef>(
           identityPreflight,
         ]),
         storedSchema,
-        (
-          identityPreflight === undefined &&
-            schemaTighteningPreflight !== undefined
-        ) ?
-          schemaTighteningPreflight.capabilityError
-        : undefined,
+        schemaCommitCapabilityError(
+          identityPreflight !== undefined,
+          schemaTighteningPreflight,
+        ),
       );
   return committed.version;
 }

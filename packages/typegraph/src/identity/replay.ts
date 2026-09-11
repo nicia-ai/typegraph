@@ -620,7 +620,21 @@ export async function identityReplay<G extends GraphDef>(
   // never overwrite `previousAfter` with a reconstruction at a foreign
   // revision, and the next NATIVE boundary's `before` stays sound.
   const nativeRows = rows.filter((row) => !isRestoredTransitionRow(row));
-  const boundaries = distinctBoundaries(nativeRows);
+  // Grouped in ONE pass: a boundary's rows are read from the map rather than
+  // re-scanning the whole lineage per boundary, which a wide page (up to
+  // `IDENTITY_REPLAY_MAX_LIMIT` boundaries, each with unbounded rows) pays for
+  // quadratically. Insertion order within a revision is preserved, so each
+  // boundary emits its steps in the order the rows arrived, and the sorted keys
+  // ARE the boundary list.
+  const rowsByBoundary = new Map<number, IdentityTransitionRow[]>();
+  for (const row of nativeRows) {
+    const group = rowsByBoundary.get(row.recorded_revision) ?? [];
+    group.push(row);
+    rowsByBoundary.set(row.recorded_revision, group);
+  }
+  const boundaries = [...rowsByBoundary.keys()].toSorted(
+    (left, right) => left - right,
+  );
 
   const steps: IdentityReplayStep<G>[] = [];
   let previousAfter: readonly IdentityNodeReference<G>[] | undefined;
@@ -629,8 +643,7 @@ export async function identityReplay<G extends GraphDef>(
       previousAfter ?? (await reconstructAt(ctx, seed, boundary - 1));
     const after = await reconstructAt(ctx, seed, boundary);
     previousAfter = after;
-    for (const row of nativeRows) {
-      if (row.recorded_revision !== boundary) continue;
+    for (const row of rowsByBoundary.get(boundary) ?? []) {
       steps.push({
         transition: publicTransition<G>(row),
         before,

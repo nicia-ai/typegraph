@@ -779,6 +779,58 @@ export function partitionRetractedEndpoints(
   return { closureReferences, separationReferences };
 }
 
+/**
+ * What a retraction's closure notes carry beyond the ended rows' own ids: the
+ * cause vocabulary stays owned by {@link noteClassTransitions}, never
+ * re-spelled here (this module must not reach the transition log itself).
+ */
+type RetractionAftermathNote = Omit<
+  Parameters<typeof noteClassTransitions>[3],
+  "assertionIds"
+>;
+
+/**
+ * The AFTERMATH of a retraction, for every path that ends identity assertions:
+ * repair the derived relations the ended rows governed — the closure for a
+ * `same`, the separation for a `different` — and note the closure transitions
+ * the repair produced under one cause.
+ *
+ * One owner, so a new repair, a different `validAt` source, or a note on the
+ * separation side cannot be added to some retraction paths and missed by the
+ * rest. Every caller hands the rows it actually ended: `assertionIds` on the
+ * notes are exactly those rows' ids.
+ */
+async function applyRetractionAftermath<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  target: Backend,
+  retracted: readonly IdentityAssertionStorageRow[],
+  noteTransition: IdentityTransitionNoteFunction,
+  common: RetractionAftermathNote,
+): Promise<void> {
+  const { closureReferences, separationReferences } =
+    partitionRetractedEndpoints(retracted);
+  if (closureReferences.length > 0) {
+    const transitions = await replaceAffectedClosure(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      closureReferences,
+      ctx.sameIdAcrossKinds,
+    );
+    noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+      cause: common.cause,
+      assertionIds: retracted.map((assertion) => assertion.id),
+      validAt: common.validAt,
+    });
+  }
+  await replaceSeparationForReferences(
+    target,
+    ctx.schema,
+    ctx.graphId,
+    separationReferences,
+  );
+}
+
 export function createIdentityFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
 ): IdentityFacade<G> {
@@ -885,34 +937,12 @@ export function createIdentityFacade<G extends GraphDef>(
         async (target, touch, _markWritten, noteTransition) => {
           const operationInstant = nowIso();
           const ended = await retractById(ctx, target, id, touch);
-          if (ended !== undefined) {
-            const endpoints = [
-              { kind: ended.a_kind, id: ended.a_id },
-              { kind: ended.b_kind, id: ended.b_id },
-            ];
-            if (ended.rel === "same") {
-              const transitions = await replaceAffectedClosure(
-                target,
-                ctx.schema,
-                ctx.graphId,
-                endpoints,
-                ctx.sameIdAcrossKinds,
-              );
-              noteClassTransitions(ctx.graphId, noteTransition, transitions, {
-                cause: "retract",
-                assertionIds: [ended.id],
-                validAt: operationInstant,
-              });
-            } else {
-              await replaceSeparationForReferences(
-                target,
-                ctx.schema,
-                ctx.graphId,
-                endpoints,
-              );
-            }
-          }
-          return ended === undefined ? undefined : publicAssertion<G>(ended);
+          if (ended === undefined) return;
+          await applyRetractionAftermath(ctx, target, [ended], noteTransition, {
+            cause: "retract",
+            validAt: operationInstant,
+          });
+          return publicAssertion<G>(ended);
         },
       );
     },
@@ -936,45 +966,50 @@ export function createIdentityFacade<G extends GraphDef>(
           );
           if (existing === undefined) return;
           const ended = await retractById(ctx, target, existing.id, touch);
-          const transitions = await replaceAffectedClosure(
+          // The row the lookup found, never `ended`: the closure must be
+          // repaired even for an id another writer ended first, and both carry
+          // the same endpoints.
+          await applyRetractionAftermath(
+            ctx,
             target,
-            ctx.schema,
-            ctx.graphId,
-            [a, b],
-            ctx.sameIdAcrossKinds,
+            [existing],
+            noteTransition,
+            { cause: "retract", validAt: operationInstant },
           );
-          noteClassTransitions(ctx.graphId, noteTransition, transitions, {
-            cause: "retract",
-            assertionIds: [existing.id],
-            validAt: operationInstant,
-          });
           return ended === undefined ? undefined : publicAssertion<G>(ended);
         },
       );
     },
 
     retractDifferentAssertion(firstInput, secondInput) {
-      return runIdentityMutation(ctx, async (target, touch) => {
-        const [a, b] = normalizePair(
-          registeredPlainRef(ctx, firstInput),
-          registeredPlainRef(ctx, secondInput),
-        );
-        const existing = await currentAssertionForPair(
-          target,
-          ctx.schema,
-          ctx.graphId,
-          "different",
-          a,
-          b,
-        );
-        if (existing === undefined) return;
-        const ended = await retractById(ctx, target, existing.id, touch);
-        await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
-          a,
-          b,
-        ]);
-        return ended === undefined ? undefined : publicAssertion<G>(ended);
-      });
+      return runIdentityMutation(
+        ctx,
+        async (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          const [a, b] = normalizePair(
+            registeredPlainRef(ctx, firstInput),
+            registeredPlainRef(ctx, secondInput),
+          );
+          const existing = await currentAssertionForPair(
+            target,
+            ctx.schema,
+            ctx.graphId,
+            "different",
+            a,
+            b,
+          );
+          if (existing === undefined) return;
+          const ended = await retractById(ctx, target, existing.id, touch);
+          await applyRetractionAftermath(
+            ctx,
+            target,
+            [existing],
+            noteTransition,
+            { cause: "retract", validAt: operationInstant },
+          );
+          return ended === undefined ? undefined : publicAssertion<G>(ended);
+        },
+      );
     },
 
     bulkRetractAssertions(ids) {
@@ -983,27 +1018,12 @@ export function createIdentityFacade<G extends GraphDef>(
         async (target, touch, _markWritten, noteTransition) => {
           const operationInstant = nowIso();
           const retracted = await retractByIds(ctx, target, ids, touch);
-          const { closureReferences, separationReferences } =
-            partitionRetractedEndpoints(retracted);
-          if (closureReferences.length > 0) {
-            const transitions = await replaceAffectedClosure(
-              target,
-              ctx.schema,
-              ctx.graphId,
-              closureReferences,
-              ctx.sameIdAcrossKinds,
-            );
-            noteClassTransitions(ctx.graphId, noteTransition, transitions, {
-              cause: "retract",
-              assertionIds: retracted.map((assertion) => assertion.id),
-              validAt: operationInstant,
-            });
-          }
-          await replaceSeparationForReferences(
+          await applyRetractionAftermath(
+            ctx,
             target,
-            ctx.schema,
-            ctx.graphId,
-            separationReferences,
+            retracted,
+            noteTransition,
+            { cause: "retract", validAt: operationInstant },
           );
           return retracted.map((assertion) => publicAssertion<G>(assertion));
         },

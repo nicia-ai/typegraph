@@ -43,7 +43,10 @@ const deleteBehaviorZod = z.enum(["restrict", "cascade", "disconnect"]);
 
 const cardinalityZod = z.enum(["many", "one", "unique", "oneActive"]);
 
-const targetCardinalityZod = z.enum(["many", "one", "oneActive"]);
+// A target cardinality is every cardinality except `"unique"`, which is a
+// source-side-only declaration. Excluding from the shared enum (rather than a
+// second hand-written list) keeps the two in sync as the union evolves.
+const targetCardinalityZod = cardinalityZod.exclude(["unique"]);
 
 const endpointExistenceZod = z.enum(["notDeleted", "currentlyValid", "ever"]);
 

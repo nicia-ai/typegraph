@@ -104,6 +104,7 @@ import type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
   CompareAndSetNodeParams,
+  CompositionClaimScope,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
   CountEdgesAtEndpointParams,
@@ -1094,6 +1095,40 @@ function misassignedEdgeEndpointPairChunkSize(
 }
 
 /**
+ * The projection every edge-family fence-audit statement returns
+ * (`src/backend/drizzle/operations/constraint-fence-audit.ts`
+ * `edgeAuditProjection`). One declaration, so an added audit column is a type
+ * error at every reader rather than an `undefined` field on a reported row.
+ */
+type EdgeAuditRow = Readonly<{
+  edge_id: string;
+  edge_kind: string;
+  from_kind: string;
+  from_id: string;
+  to_kind: string;
+  to_id: string;
+}>;
+
+/** The audit row's snake_case columns as the reported row names them. */
+function edgeAuditRowFields(row: EdgeAuditRow): Readonly<{
+  edgeKind: string;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}> {
+  return {
+    edgeKind: row.edge_kind,
+    edgeId: row.edge_id,
+    fromKind: row.from_kind,
+    fromId: row.from_id,
+    toKind: row.to_kind,
+    toId: row.to_id,
+  };
+}
+
+/**
  * The live edges of one edge kind whose endpoints match none of its
  * allowance's admitted pairs, chunking the pairs across several statements
  * when the allowance exceeds `pairChunkSize`.
@@ -1113,21 +1148,13 @@ async function readMisassignedEdgeEndpointRows(
   now: string,
   pairChunkSize: number,
 ): Promise<readonly MisassignedEdgeEndpointRow[]> {
-  type Row = Readonly<{
-    edge_id: string;
-    edge_kind: string;
-    from_kind: string;
-    from_id: string;
-    to_kind: string;
-    to_id: string;
-  }>;
   const pairChunks =
     allowance.allowedPairs.length === 0 ?
       [[]]
     : chunkArray(allowance.allowedPairs, pairChunkSize);
-  let candidates: Map<string, Row> | undefined;
+  let candidates: Map<string, EdgeAuditRow> | undefined;
   for (const pairChunk of pairChunks) {
-    const rows = await execution.execAll<Row>(
+    const rows = await execution.execAll<EdgeAuditRow>(
       operationStrategy.buildMisassignedEdgeEndpointAudit(
         graphId,
         allowance.edgeKind,
@@ -1142,14 +1169,9 @@ async function readMisassignedEdgeEndpointRows(
       );
     if (candidates.size === 0) break;
   }
-  return [...(candidates?.values() ?? [])].map((row) => ({
-    edgeKind: row.edge_kind,
-    edgeId: row.edge_id,
-    fromKind: row.from_kind,
-    fromId: row.from_id,
-    toKind: row.to_kind,
-    toId: row.to_id,
-  }));
+  return [...(candidates?.values() ?? [])].map((row) =>
+    edgeAuditRowFields(row),
+  );
 }
 
 function assembleAtomicResolvedMutationSet<TRow>(
@@ -5400,105 +5422,60 @@ export function createCommonOperationBackend(
       }));
 
       // One statement per declared axis, because that is the granularity at
-      // which the population's key and liveness differ. Composition
-      // declarations (item E, `declaration.scope !== undefined`) are grouped
-      // and audited separately: R4's axis is relation-wide, so the peer test
-      // is the oriented two-arm union, not exact-kind equality — see
-      // `buildContendedCompositionEdgeRowAudit`.
-      const edgeKindsByAxis = new Map<
-        EdgeCardinalityAxisName,
-        Readonly<{ ref: EdgeCardinalityAxisRef; edgeKinds: string[] }>
-      >();
-      const compositionEdgeKindsByAxis = new Map<
-        EdgeCardinalityAxisName,
+      // which the population's key and liveness differ — and a composition
+      // declaration (`declaration.scope !== undefined`) is its own axis even
+      // under the same axis name, because its population is relation-wide:
+      // the peer test is the oriented two-arm union, not exact-kind equality
+      // (see `buildContendedCompositionEdgeRowAudit`).
+      const edgeAxes = new Map<
+        string,
         Readonly<{
           ref: EdgeCardinalityAxisRef;
           edgeKinds: string[];
-          holders: NonNullable<EdgeCardinalityDeclaration["scope"]>["holders"];
+          scope: CompositionClaimScope | undefined;
         }>
       >();
       for (const declaration of params.edgeCardinalities) {
-        const axisName = edgeCardinalityAxisName(declaration);
-        if (declaration.scope === undefined) {
-          const entry = edgeKindsByAxis.get(axisName) ?? {
-            // Narrowed to the axis ref alone: `declaration` also carries
-            // `edgeKind`, and keeping that field on `ref` would let a later
-            // `{...ref, edgeKind: row.edge_kind}` merge silently depend on
-            // spread ORDER to discard it instead of the type excluding it.
-            ref: axisRefFromDeclaration(declaration),
-            edgeKinds: [],
-          };
-          entry.edgeKinds.push(declaration.edgeKind);
-          edgeKindsByAxis.set(axisName, entry);
-          continue;
-        }
-        const entry = compositionEdgeKindsByAxis.get(axisName) ?? {
+        const axisName: EdgeCardinalityAxisName =
+          edgeCardinalityAxisName(declaration);
+        const scope: CompositionClaimScope | undefined =
+          declaration.scope === undefined ?
+            undefined
+          : { kind: "composition", holders: declaration.scope.holders };
+        const axisKey = `${axisName}|${scope === undefined ? "" : "composition"}`;
+        const entry = edgeAxes.get(axisKey) ?? {
+          // Narrowed to the axis ref alone: `declaration` also carries
+          // `edgeKind`, and keeping that field on `ref` would let a later
+          // `{...ref, edgeKind: row.edge_kind}` merge silently depend on
+          // spread ORDER to discard it instead of the type excluding it.
           ref: axisRefFromDeclaration(declaration),
           edgeKinds: [],
-          holders: declaration.scope.holders,
+          scope,
         };
         entry.edgeKinds.push(declaration.edgeKind);
-        compositionEdgeKindsByAxis.set(axisName, entry);
+        edgeAxes.set(axisKey, entry);
       }
       const contendedEdgeRows: ContendedEdgeRow[] = [];
-      for (const { ref, edgeKinds } of edgeKindsByAxis.values()) {
-        const rows = await execution.execAll<{
-          edge_id: string;
-          edge_kind: string;
-          from_kind: string;
-          from_id: string;
-          to_kind: string;
-          to_id: string;
-        }>(
-          operationStrategy.buildContendedEdgeRowAudit(
-            params.graphId,
-            ref,
-            edgeKinds,
-          ),
+      for (const { ref, edgeKinds, scope } of edgeAxes.values()) {
+        const rows = await execution.execAll<EdgeAuditRow>(
+          scope === undefined ?
+            operationStrategy.buildContendedEdgeRowAudit(
+              params.graphId,
+              ref,
+              edgeKinds,
+            )
+          : operationStrategy.buildContendedCompositionEdgeRowAudit(
+              params.graphId,
+              ref,
+              scope.holders,
+              edgeKinds,
+            ),
         );
         for (const row of rows) {
           contendedEdgeRows.push({
             ...ref,
-            edgeKind: row.edge_kind,
-            edgeId: row.edge_id,
-            fromKind: row.from_kind,
-            fromId: row.from_id,
-            toKind: row.to_kind,
-            toId: row.to_id,
-            scope: undefined,
-          });
-        }
-      }
-      for (const {
-        ref,
-        edgeKinds,
-        holders,
-      } of compositionEdgeKindsByAxis.values()) {
-        const rows = await execution.execAll<{
-          edge_id: string;
-          edge_kind: string;
-          from_kind: string;
-          from_id: string;
-          to_kind: string;
-          to_id: string;
-        }>(
-          operationStrategy.buildContendedCompositionEdgeRowAudit(
-            params.graphId,
-            ref,
-            holders,
-            edgeKinds,
-          ),
-        );
-        for (const row of rows) {
-          contendedEdgeRows.push({
-            ...ref,
-            edgeKind: row.edge_kind,
-            edgeId: row.edge_id,
-            fromKind: row.from_kind,
-            fromId: row.from_id,
-            toKind: row.to_kind,
-            toId: row.to_id,
-            scope: { kind: "composition", holders },
+            ...edgeAuditRowFields(row),
+            scope,
           });
         }
       }

@@ -575,12 +575,8 @@ export type IdentityTransitionReadScope = Readonly<{
  * caller (`walkClassLineage`, replay.ts) reads one fixed-point round to
  * exhaustion by re-issuing this call with `after` set to the previous page's
  * last row until a page comes back shorter than `scope.limit`, rather than
- * capping the round at a fixed row ceiling. The tie-break column
- * (`transition_id`) goes through the same `binaryText` collation-safety seam
- * `readIdentityTransitionPageForInterchange` uses, for the same reason: left
- * bare, `>` on that column would compare under the column's collation, which
- * is locale-dependent on PostgreSQL and would disagree with the ORDER BY's
- * own comparison of the same rows on some inputs.
+ * capping the round at a fixed row ceiling. Keyset-pages and orders through
+ * {@link identityTransitionCursorSeam}.
  */
 export async function readIdentityTransitions(
   target: IdentityTarget,
@@ -663,11 +659,8 @@ export type IdentityTransitionPage = Readonly<{
  * `nodeKinds`-filtered archival export; a `nodeKinds`-filtered archival
  * export therefore still carries transitions naming excluded kinds (see
  * `export.ts`'s call site and identity.md's "Archival transitions and the
- * retention watermark"). `transition_id` is a random nanoid, so the tie-break
- * goes through the same `binaryText` collation-safety seam that reader uses
- * for assertion ids: left bare, `ORDER BY transition_id` sorts under the
- * column's collation, which is locale-dependent on PostgreSQL and would page
- * mixed-case ids differently than SQLite's code-point order.
+ * retention watermark"). Keyset-pages and orders through
+ * {@link identityTransitionCursorSeam}.
  */
 export async function readIdentityTransitionPageForInterchange(
   target: IdentityTarget,

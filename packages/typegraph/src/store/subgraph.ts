@@ -342,7 +342,7 @@ export type SubgraphOptions<
   cyclePolicy?: RecursiveCyclePolicy;
   /**
    * Close the selected root over its declared composition parts — the
-   * whole-plus-parts export unit (roadmap item E). When `true`, every
+   * whole-plus-parts export unit. When `true`, every
    * composition edge kind transitively under the root's actual kind
    * (`registry.compositionEdgeKindsUnder`) is added to the traversal and to
    * the hydrated edge set, in addition to whatever `edges` already lists.
@@ -685,9 +685,9 @@ export async function executeSubgraph<
    * The composition closure's own reachable CTE: walks toward PARTS only,
    * with each realizing edge kind's direction derived through the same
    * `partitionCompositionEdgeKindsByDirection` helper `parts()`/`wholes()`
-   * use, never a flat `"both"` (Ed-01). `"both"` would also climb from a
+   * use, never a flat `"both"`. `"both"` would also climb from a
    * mid-tree root to its ancestors and re-descend into every sibling
-   * subtree — R4 (one whole per part) makes the upward walk deterministic,
+   * subtree — one whole per part makes the upward walk deterministic,
    * which is exactly what lets the downward re-descent pick up siblings
    * undetected.
    *
@@ -704,8 +704,7 @@ export async function executeSubgraph<
    * Termination is structural rather than numeric, and there is NO hop
    * ceiling: the closure is `buildExhaustiveDirectedReachableCte`, whose
    * recursive term is `UNION` over a `(id, kind)` frontier, so it reaches a
-   * fixpoint on any finite graph exactly the way item D.2's acyclicity probe
-   * does. `MAX_EXPLICIT_RECURSIVE_DEPTH` — the ceiling every explicit
+   * fixpoint on any finite graph exactly the way the acyclicity probe does. `MAX_EXPLICIT_RECURSIVE_DEPTH` — the ceiling every explicit
    * traversal is capped at, and the one caveat this closure used to carry —
    * does not apply: a part chain of any depth comes back whole, rather than
    * silently losing its tail past 1000 hops. The caller's `cyclePolicy`, like
@@ -762,10 +761,10 @@ export async function executeSubgraph<
   // (`has_*`) edges — so it is walked as its OWN closure, each realizing
   // edge kind in the direction that reaches PARTS
   // (`buildSubgraphCompositionReachableCte`, never a flat `"both"`, which
-  // would also reach ancestors and siblings — Ed-01), and the two closures'
+  // would also reach ancestors and siblings), and the two closures'
   // ids are unioned in JS. That union is computed portably (through the
   // dialect's single-parameter `inListParameter` seam, not a raw per-id `IN`
-  // list — Ed-03) rather than through either dialect's normal membership
+  // list) rather than through either dialect's normal membership
   // strategy, since Postgres's `unnest` path takes one array and SQLite's
   // inline-CTE path takes one embedded CTE — neither has a "two closures"
   // shape.
@@ -1036,7 +1035,7 @@ function textArrayParam(values: readonly string[]): SqlFragment {
  * fetch), so binding one parameter per id here would bind 2N parameters
  * with no bind-budget check — exactly the pressure the module's embedded-CTE
  * design otherwise avoids, and enough to exceed a Worker/D1-class backend's
- * `maxBindParameters` on an ordinary whole-plus-parts export (Ed-03). The
+ * `maxBindParameters` on an ordinary whole-plus-parts export. The
  * dialect's `inListParameter`/`packListValue` seam (the same one
  * `IN`-predicate compilation already uses for a parameterized list) packs
  * the whole id list into ONE bound value per call instead, so this binds a
@@ -1071,7 +1070,7 @@ function idListMembership(
  * declares) and returns the composition edge kinds transitively under it —
  * empty when the root does not exist, is not visible at this coordinate, or
  * its kind declares no composition parts. `subgraph({ composition: true })`
- * is set-level (§5.2 of the composition design): a root kind with no parts
+ * is set-level: a root kind with no parts
  * contributes nothing rather than failing the whole read.
  */
 async function fetchCompositionEdgeKindsForRoot(input: {

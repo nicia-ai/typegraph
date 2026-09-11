@@ -23,6 +23,7 @@ import { type OntologyRelation } from "../ontology/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
 import { compareCodePoints } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
+import { encodeTupleKey } from "../utils/tuple-key";
 import {
   type CompositionExistence,
   type CompositionPair,
@@ -31,6 +32,9 @@ import {
   EMPTY_COMPOSITION_RELATION,
   normalizePartWhole,
 } from "./composition-relation";
+
+/** Which end of a composition pair a traversal moves toward. */
+type CompositionSide = "part" | "whole";
 
 const DISJOINT_PAIR_SEPARATOR = "|";
 const ENCODED_DISJOINT_PAIR_PREFIX = "\u001Epair\u001E";
@@ -207,6 +211,25 @@ export class KindRegistry {
    */
   readonly #composition: CompositionRelation;
 
+  /**
+   * Pure caches over {@link #composition}, which is immutable for the life of
+   * the registry: every literal kind name a declared pair names (either
+   * endpoint), and per concrete kind the derived answers the composition
+   * readers below would otherwise recompute on every call. The readers stay
+   * the single owners of their decisions — only the repetition is removed.
+   */
+  readonly #compositionDeclaredKinds: readonly string[];
+  readonly #compositionDeclaredKindsByKind = new Map<
+    string,
+    readonly string[]
+  >();
+  readonly #compositionKindsCache = new Map<string, readonly string[]>();
+  readonly #compositionEdgeKindsCache = new Map<string, readonly string[]>();
+  readonly #compositionFirstPairByPartKind = new Map<
+    string,
+    CompositionPair | undefined
+  >();
+
   // === Edge Relationships ===
   readonly edgeInverses: ReadonlyMap<string, string>;
   readonly edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
@@ -223,6 +246,11 @@ export class KindRegistry {
     this.edgeKinds = edgeKinds;
     this.identity = identity;
     this.#composition = composition;
+    this.#compositionDeclaredKinds = [
+      ...new Set(
+        composition.pairs.flatMap((pair) => [pair.partKind, pair.wholeKind]),
+      ),
+    ];
     this.subClassAncestors = closures.subClassAncestors;
     this.subClassDescendants = closures.subClassDescendants;
     this.#subClassComponents = computeSubClassComponents(
@@ -479,14 +507,95 @@ export class KindRegistry {
   private compositionDeclaredKindsAssignableFrom(
     concreteKind: string,
   ): readonly string[] {
-    const declaredKinds = new Set<string>();
-    for (const pair of this.#composition.pairs) {
-      declaredKinds.add(pair.partKind);
-      declaredKinds.add(pair.wholeKind);
-    }
-    return [...declaredKinds].filter((declaredKind) =>
+    const cached = this.#compositionDeclaredKindsByKind.get(concreteKind);
+    if (cached !== undefined) return cached;
+    const assignable = this.#compositionDeclaredKinds.filter((declaredKind) =>
       this.isAssignableTo(concreteKind, declaredKind),
     );
+    this.#compositionDeclaredKindsByKind.set(concreteKind, assignable);
+    return assignable;
+  }
+
+  /**
+   * The kinds transitively reachable from `kind`'s declared composition kinds
+   * along one direction: `"part"` descends the `hasPart` closure, `"whole"`
+   * climbs the `partOf` one. The single traversal
+   * {@link compositionPartKindsUnder} and {@link compositionWholeKindsOver}
+   * are projections of, so the two mirrors cannot drift.
+   */
+  #compositionKindsAlong(
+    kind: string,
+    side: CompositionSide,
+  ): readonly string[] {
+    const cacheKey = encodeTupleKey([side, kind]);
+    const cached = this.#compositionKindsCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const reachable = new Set<string>();
+    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
+      kind,
+    )) {
+      const step =
+        side === "part" ?
+          this.getParts(declaredKind)
+        : this.getWholes(declaredKind);
+      for (const reachedKind of step) reachable.add(reachedKind);
+    }
+    const ordered = [...reachable].toSorted((left, right) =>
+      compareCodePoints(left, right),
+    );
+    this.#compositionKindsCache.set(cacheKey, ordered);
+    return ordered;
+  }
+
+  /**
+   * The realizing edge kinds reachable from `kind` along one direction: the
+   * pairs whose opposite endpoint is `kind` itself, a declared kind `kind` is
+   * assignable to, or any kind transitively reachable from one of those. The
+   * single traversal {@link compositionEdgeKindsUnder} and
+   * {@link compositionEdgeKindsOver} are projections of.
+   */
+  #compositionEdgeKindsAlong(
+    kind: string,
+    side: CompositionSide,
+  ): readonly string[] {
+    const cacheKey = encodeTupleKey([side, kind]);
+    const cached = this.#compositionEdgeKindsCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const reachableKinds = new Set<string>([
+      kind,
+      ...this.compositionDeclaredKindsAssignableFrom(kind),
+      ...this.#compositionKindsAlong(kind, side),
+    ]);
+    const edgeKinds = new Set<string>();
+    for (const pair of this.#composition.pairs) {
+      const anchor = side === "part" ? pair.wholeKind : pair.partKind;
+      if (reachableKinds.has(anchor)) edgeKinds.add(pair.viaEdgeKind);
+    }
+    const ordered = [...edgeKinds].toSorted((left, right) =>
+      compareCodePoints(left, right),
+    );
+    this.#compositionEdgeKindsCache.set(cacheKey, ordered);
+    return ordered;
+  }
+
+  /**
+   * The first declared pair that can hold a node of this concrete kind as its
+   * part, memoized. `ONTOLOGY_COMPOSITION_POPULATION_MIXED` and
+   * `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED` refuse any graph where the pairs
+   * that can hold one kind disagree, so the FIRST applicable pair carries the
+   * answer for all of them.
+   */
+  #firstCompositionPairFor(
+    concretePartKind: string,
+  ): CompositionPair | undefined {
+    if (this.#compositionFirstPairByPartKind.has(concretePartKind)) {
+      return this.#compositionFirstPairByPartKind.get(concretePartKind);
+    }
+    const applicable = this.#composition.pairs.find((pair) =>
+      this.isAssignableTo(concretePartKind, pair.partKind),
+    );
+    this.#compositionFirstPairByPartKind.set(concretePartKind, applicable);
+    return applicable;
   }
 
   /**
@@ -547,62 +656,22 @@ export class KindRegistry {
    * path.
    */
   compositionEdgeKindsUnder(wholeKind: string): readonly string[] {
-    const wholeKinds = new Set([wholeKind]);
-    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
-      wholeKind,
-    )) {
-      wholeKinds.add(declaredKind);
-      for (const part of this.getParts(declaredKind)) wholeKinds.add(part);
-    }
-    const edgeKinds = new Set<string>();
-    for (const pair of this.#composition.pairs) {
-      if (wholeKinds.has(pair.wholeKind)) edgeKinds.add(pair.viaEdgeKind);
-    }
-    return [...edgeKinds].toSorted((left, right) =>
-      compareCodePoints(left, right),
-    );
+    return this.#compositionEdgeKindsAlong(wholeKind, "part");
   }
 
   /** The wholes mirror of {@link compositionEdgeKindsUnder}. */
   compositionEdgeKindsOver(partKind: string): readonly string[] {
-    const partKinds = new Set([partKind]);
-    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
-      partKind,
-    )) {
-      partKinds.add(declaredKind);
-      for (const whole of this.getWholes(declaredKind)) partKinds.add(whole);
-    }
-    const edgeKinds = new Set<string>();
-    for (const pair of this.#composition.pairs) {
-      if (partKinds.has(pair.partKind)) edgeKinds.add(pair.viaEdgeKind);
-    }
-    return [...edgeKinds].toSorted((left, right) =>
-      compareCodePoints(left, right),
-    );
+    return this.#compositionEdgeKindsAlong(partKind, "whole");
   }
 
   /** Every part kind transitively under `wholeKind`, across every composition relation. */
   compositionPartKindsUnder(wholeKind: string): readonly string[] {
-    const parts = new Set<string>();
-    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
-      wholeKind,
-    )) {
-      for (const part of this.getParts(declaredKind)) parts.add(part);
-    }
-    return [...parts].toSorted((left, right) => compareCodePoints(left, right));
+    return this.#compositionKindsAlong(wholeKind, "part");
   }
 
   /** Every whole kind transitively over `partKind`, across every composition relation. */
   compositionWholeKindsOver(partKind: string): readonly string[] {
-    const wholes = new Set<string>();
-    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
-      partKind,
-    )) {
-      for (const whole of this.getWholes(declaredKind)) wholes.add(whole);
-    }
-    return [...wholes].toSorted((left, right) =>
-      compareCodePoints(left, right),
-    );
+    return this.#compositionKindsAlong(partKind, "whole");
   }
 
   /**
@@ -614,12 +683,7 @@ export class KindRegistry {
   compositionPopulation(
     concretePartKind: string,
   ): "one" | "oneActive" | undefined {
-    for (const pair of this.#composition.pairs) {
-      if (this.isAssignableTo(concretePartKind, pair.partKind)) {
-        return pair.population;
-      }
-    }
-    return undefined;
+    return this.#firstCompositionPairFor(concretePartKind)?.population;
   }
 
   /**
@@ -630,12 +694,9 @@ export class KindRegistry {
    * one function.
    */
   compositionExistence(concretePartKind: string): CompositionExistence {
-    for (const pair of this.#composition.pairs) {
-      if (this.isAssignableTo(concretePartKind, pair.partKind)) {
-        return pair.existence;
-      }
-    }
-    return "optional";
+    return (
+      this.#firstCompositionPairFor(concretePartKind)?.existence ?? "optional"
+    );
   }
 
   // === Edge Relationship Methods ===

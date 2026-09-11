@@ -798,17 +798,6 @@ export class QueryBuilder<
    * data that may span more than one node kind with different schemas, not a
    * single kind the graph's static type can name.
    *
-   * Deviation from the design ruling (composition-contract-design.md Q1,
-   * plan-E-d §5.1): the ruling calls for the alias to be typed when the
-   * closure resolves to a single kind. This implementation always returns
-   * `DynamicNodeType` — the conservative side, matching `wholes()` and never
-   * misrepresenting a multi-kind closure — because typing the single-kind
-   * case requires a conditional return type keyed on a set computed inside
-   * this method's body (`targetKinds.size === 1`), which the generic
-   * signature above cannot see before the call resolves. Recorded here
-   * rather than implemented silently; a future pass can add the
-   * single-kind-typed overload without changing this one's behavior.
-   *
    * Refuses rather than silently returning zero rows: an alias whose kind
    * declares no composition parts throws `ConfigurationError` with code
    * `COMPOSITION_NO_PARTS_DECLARED`; an `{ from }` naming an alias this
@@ -966,15 +955,15 @@ export class QueryBuilder<
     }
 
     // The registry's `*KindsUnder`/`*KindsOver` readers return only the
-    // literal kinds a `partOf`/`hasPart` declaration named (Ed-a-r2-1's
-    // subclass-assignable rule applies to which PAIR matches, not to which
-    // concrete kinds the pair's declared endpoint admits at read time).
-    // Edge-endpoint validation accepts any subclass of a declared endpoint
+    // literal kinds a `partOf`/`hasPart` declaration named: the
+    // subclass-assignable rule decides which PAIR matches, not which concrete
+    // kinds the pair's declared endpoint admits at read time. Edge-endpoint
+    // validation accepts any subclass of a declared endpoint
     // (`isAssignableToAny`), so a live row's actual kind can be an
     // undeclared subclass of a declared target kind — expand through the
     // same subclass closure `to(kind, alias, { expansion: "subclasses" })`
     // applies, or a real row is silently dropped from the result instead of
-    // refused or returned (Ed-02).
+    // refused or returned.
     const targetKinds = new Set<string>();
     for (const kind of sourceKinds) {
       for (const targetKind of targetKindsUnder(kind)) {
@@ -984,11 +973,11 @@ export class QueryBuilder<
       }
     }
 
-    // §1.7 orientation table, derived through the one shared partition
+    // The orientation table, derived through the one shared partition
     // (`partitionCompositionEdgeKindsByDirection`) `subgraph({ composition:
     // true })` also uses, so the two navigators cannot drift on which way
-    // an edge is walked (Ed-01) or on what happens when an edge kind has no
-    // recorded part side (Ed-r2-3): a `part -> whole` edge ("from") reaches
+    // an edge is walked or on what happens when an edge kind has no
+    // recorded part side: a `part -> whole` edge ("from") reaches
     // its parts reversed ("in") and its wholes forward ("out"); a
     // `whole -> part` edge ("to") is the mirror.
     const { outEdgeKinds, inEdgeKinds } =
@@ -1012,7 +1001,7 @@ export class QueryBuilder<
 
     // The derived edge alias is not caller-chosen the way `.traverse()`'s
     // is, so a collision is invisible to the caller until it silently
-    // merges two different edge types under one alias (Ed-11) — refuse
+    // merges two different edge types under one alias — refuse
     // rather than let `whereEdge(edgeAlias, ...)` later target an
     // ambiguous traversal.
     if (this.#getEdgeKindNamesForAlias(edgeAlias) !== undefined) {
@@ -1057,11 +1046,10 @@ export class QueryBuilder<
       false,
     );
 
-    const targetKindList = [...targetKinds].toSorted((left, right) =>
-      left < right ? -1
-      : left > right ? 1
-      : 0,
-    );
+    // `toSorted()`'s default order IS `utils/compare`'s `compareStrings` —
+    // deterministic UTF-16 code-unit order — and determinism is all this list
+    // needs.
+    const targetKindList = [...targetKinds].toSorted();
 
     // Recurse by default (the value proposition versus `traverse`): skip only
     // when the caller both asked for exactly one hop and requested neither a
@@ -1076,7 +1064,7 @@ export class QueryBuilder<
     // (`runRecursiveTraversalSelectionPass`). Refuse here, naming the step
     // and the `maxHops: 1` escape hatch, rather than letting the query build
     // successfully and fail deep in the compiler with a message that names
-    // neither (Ed-05).
+    // neither.
     if (willRecurse && this.#state.traversals.length > 0) {
       throw new UnsupportedPredicateError(
         `.${relation}("${nodeAlias}") recurses by default and compiles to a variable-length traversal, but this query already has ${this.#state.traversals.length} traversal(s) before it. A query may contain only one recursive traversal.`,
@@ -1091,9 +1079,8 @@ export class QueryBuilder<
       );
     }
 
-    return (options?.maxHops === 1 && !wantsRecursiveOutput ?
-      traversalBuilder.toKindSet(targetKindList, nodeAlias)
-    : traversalBuilder
+    return (willRecurse ?
+      traversalBuilder
         .recursive({
           ...(options?.maxHops === undefined ?
             {}
@@ -1101,7 +1088,11 @@ export class QueryBuilder<
           ...(options?.depth === undefined ? {} : { depth: options.depth }),
           ...(options?.path === undefined ? {} : { path: options.path }),
         })
-        .toKindSet(targetKindList, nodeAlias)) as unknown as QueryBuilder<
+        .toKindSet(targetKindList, nodeAlias)
+    : traversalBuilder.toKindSet(
+        targetKindList,
+        nodeAlias,
+      )) as unknown as QueryBuilder<
       G,
       AliasMap,
       EdgeAliasMap,

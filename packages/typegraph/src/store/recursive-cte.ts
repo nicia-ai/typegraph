@@ -211,7 +211,7 @@ function prepareReachableCte(
 /**
  * The EXHAUSTIVE preparation: `(id, kind)` and nothing else — no `depth`, no
  * `path` — so the recursive term can be `UNION` and the visited set itself is
- * the bound. This is the same device item D.2's acyclicity probe uses
+ * the bound. This is the same device the acyclicity probe uses
  * ({@link buildEdgeAcyclicityProbe}): set semantics on the frontier's full
  * column list is what makes an unbounded recursion terminate on a finite
  * graph with no depth ceiling and no cycle check, and it is why a `depth`
@@ -276,12 +276,12 @@ type BuildExhaustiveDirectedReachableCteOptions = ReachableCteFiltersCore &
  * that mixes `part -> whole` and `whole -> part` (`has_*`) realizing edges
  * across levels of the same tree, without walking `direction: "both"` — which
  * would also climb from a mid-tree root to its ancestors and re-descend into
- * siblings (Ed-01). A uniform `edgeKinds`+`direction` traversal
+ * siblings. A uniform `edgeKinds`+`direction` traversal
  * ({@link buildReachableCte}) cannot express "these kinds forward, those kinds
  * reversed" in one term.
  *
  * `UNION`, never `UNION ALL`, over a frontier of exactly `(id, kind)` — the
- * device item D.2's acyclicity probe uses
+ * device the acyclicity probe uses
  * ({@link buildEdgeAcyclicityProbe}): set semantics on the frontier's whole
  * column list makes the recursion reach a fixpoint on any finite graph, so
  * there is no depth ceiling to exceed and no cycle check to carry. A cyclic
@@ -366,6 +366,37 @@ function compileRecursiveBranch(
   }
 }
 
+type RecursiveFrontierBranchOptions = Readonly<{
+  selectClause: SqlFragment;
+  /** How an edge row matches the frontier row `r`. */
+  joinCondition: SqlFragment;
+  /** The nodes-table join that resolves the matched row's far endpoint. */
+  nodeJoin: SqlFragment;
+  whereClauses: readonly SqlFragment[];
+  forceWorktableOuterJoinOrder: boolean;
+  schema: SqlSchema;
+}>;
+
+/**
+ * THE recursive term every frontier traversal emits: the one owner of the
+ * `forceWorktableOuterJoinOrder` fork, so each branch builder supplies only
+ * its own `joinCondition` and `nodeJoin`.
+ *
+ * A dialect that forces worktable-outer join order cannot take the frontier
+ * join as a `JOIN ... ON`; the condition moves into the `WHERE` list behind a
+ * `CROSS JOIN` instead, which is semantically the same predicate and leaves
+ * the planner the order it requires.
+ */
+function recursiveFrontierBranch(
+  options: RecursiveFrontierBranchOptions,
+): SqlFragment {
+  if (options.forceWorktableOuterJoinOrder) {
+    const allWhere = [...options.whereClauses, options.joinCondition];
+    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.schema.edgesTable} e ${options.nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
+  }
+  return sql`${options.selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON ${options.joinCondition} ${options.nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+}
+
 type DirectionalBranchOptions = Readonly<{
   selectClause: SqlFragment;
   whereClauses: readonly SqlFragment[];
@@ -381,15 +412,14 @@ function buildDirectionalBranch(
 ): SqlFragment {
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(options.targetField)} AND n.kind = e.${sql.raw(options.targetKindField)}`;
 
-  if (options.forceWorktableOuterJoinOrder) {
-    const allWhere = [
-      ...options.whereClauses,
-      sql`e.${sql.raw(options.joinField)} = r.id`,
-    ];
-    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.schema.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
-  }
-
-  return sql`${options.selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON e.${sql.raw(options.joinField)} = r.id ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  return recursiveFrontierBranch({
+    selectClause: options.selectClause,
+    joinCondition: sql`e.${sql.raw(options.joinField)} = r.id`,
+    nodeJoin,
+    whereClauses: options.whereClauses,
+    forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
+    schema: options.schema,
+  });
 }
 
 type BidirectionalBranchOptions = Readonly<{
@@ -406,15 +436,14 @@ function buildBidirectionalBranch(
   // folded into a single UNION ALL branch via an OR on the join condition.
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.to_id = r.id AND n.id = e.from_id AND n.kind = e.from_kind) OR (e.from_id = r.id AND n.id = e.to_id AND n.kind = e.to_kind))`;
 
-  if (options.forceWorktableOuterJoinOrder) {
-    const allWhere = [
-      ...options.whereClauses,
-      sql`(e.from_id = r.id OR e.to_id = r.id)`,
-    ];
-    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.schema.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
-  }
-
-  return sql`${options.selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON (e.from_id = r.id OR e.to_id = r.id) ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  return recursiveFrontierBranch({
+    selectClause: options.selectClause,
+    joinCondition: sql`(e.from_id = r.id OR e.to_id = r.id)`,
+    nodeJoin,
+    whereClauses: options.whereClauses,
+    forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
+    schema: options.schema,
+  });
 }
 
 type DirectedGroupsBranchOptions = Readonly<{
@@ -451,16 +480,18 @@ function buildDirectedGroupsBranch(
   const joinCondition = sql`((e.from_id = r.id AND (${outKindFilter})) OR (e.to_id = r.id AND (${inKindFilter})))`;
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.from_id = r.id AND (${outKindFilter}) AND n.id = e.to_id AND n.kind = e.to_kind) OR (e.to_id = r.id AND (${inKindFilter}) AND n.id = e.from_id AND n.kind = e.from_kind))`;
 
-  if (options.forceWorktableOuterJoinOrder) {
-    const allWhere = [...options.whereClauses, joinCondition];
-    return sql`${selectClause} FROM reachable r CROSS JOIN ${options.schema.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
-  }
-
-  return sql`${selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON ${joinCondition} ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  return recursiveFrontierBranch({
+    selectClause,
+    joinCondition,
+    nodeJoin,
+    whereClauses: options.whereClauses,
+    forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
+    schema: options.schema,
+  });
 }
 
 // ============================================================
-// Edge-acyclicity probe (item D.2)
+// Edge-acyclicity probe
 // ============================================================
 
 /**
@@ -537,10 +568,11 @@ type OrientedEndpointColumns = Readonly<{
 /**
  * The ONE owner of "which stored endpoint (`from` or `to`) is the relation's
  * part (`match`) and which is the whole (`next`), for a table-aliased edges
- * row." Every member forward — the only shape D.2 itself ever produces — is
- * a plain column pair with no `CASE`, byte-identical to a hand-written
- * `SELECT` (the benchmark's index-only-scan assumption, §7.6, depends on
- * this). A relation with a reversed member (item E) instead needs a `CASE`
+ * row." Every member forward — the only shape a standalone `acyclic: true`
+ * relation ever produces — is a plain column pair with no `CASE`,
+ * byte-identical to a hand-written `SELECT` (the benchmark's
+ * index-only-scan assumption depends on this). A relation with a reversed
+ * member instead needs a `CASE`
  * on the row's own `kind` to pick the pair per row.
  *
  * `buildAcyclicitySeed`'s `"relation"` form, `buildLiveEdgeCandidates`, and
@@ -650,10 +682,10 @@ function buildLiveEdgeCandidates(
   ];
 
   // `orientedEndpointColumns` returns plain columns (no CASE, no OR) when
-  // every member is forward — the common case, and the only one D.2 itself
-  // ever produces — so this stays byte-identical to what the benchmark's
-  // index-only scan assumption (§7.6) requires. A relation composed of both
-  // part->whole and whole->part realizing edges (item E) instead gets a
+  // every member is forward — the common case, and the only one a standalone
+  // `acyclic: true` relation produces — so this stays byte-identical to what
+  // the benchmark's index-only scan assumption requires. A relation composed
+  // of both part->whole and whole->part realizing edges instead gets a
   // CASE picking which pair of columns is the "part" and which is the
   // "whole" per row; each member still seeks its OWN natural endpoint
   // column.
@@ -729,18 +761,18 @@ function buildAcyclicityAncestryStepViaCandidates(
  * forms: one hop DIRECTLY against `typegraph_edges`, with no `candidates`
  * CTE in between. This is what keeps every real write's probe an index
  * seek — see {@link AcyclicityProbeSeed}'s docblock for the flattener
- * defect this restores the pre-D-4 shape to avoid.
+ * defect this shape avoids.
  *
- * The common case (no `reversed` member — the only shape D.2 itself ever
- * produces) is a plain equality join on `from_kind`/`from_id`, seekable by
+ * The common case (no `reversed` member — the only shape a standalone
+ * `acyclic: true` relation ever produces) is a plain equality join on `from_kind`/`from_id`, seekable by
  * `typegraph_edges_from_idx`. `forceWorktableOuterJoinOrder` moves the join
- * field predicate into the `WHERE` clause behind a `CROSS JOIN`, mirroring
- * `buildDirectionalBranch` above — every other predicate (`graph_id`, the
+ * field predicate into the `WHERE` clause behind a `CROSS JOIN`, the same fork
+ * {@link recursiveFrontierBranch} owns above — every other predicate (`graph_id`, the
  * edge-kind filter, `deleted_at`) always lives in `WHERE` regardless.
  *
- * A relation with a `reversed` member (item E's mixed orientation — D.2
- * itself never produces one, but the type and this code path are exercised
- * by the mixed-orientation fixture) is still ONE join, never a compound: an
+ * A relation with a `reversed` member (the composition relation's mixed
+ * orientation — a standalone `acyclic: true` relation never produces one, but
+ * the type and this code path are exercised by the mixed-orientation fixture) is still ONE join, never a compound: an
  * OR of two index-seekable arms, one per orientation —
  * `(e.kind IN (forward) AND e.from_kind = a.node_kind AND e.from_id =
  * a.node_id) OR (e.kind IN (reversed) AND e.to_kind = a.node_kind AND
@@ -834,8 +866,8 @@ function buildProbeBodyDirect(
 }
 
 /**
- * Builds the exhaustive, set-semantics reachability probe item D.2's
- * acyclicity check runs: "does `from` lie in the reflexive-transitive
+ * Builds the exhaustive, set-semantics reachability probe the acyclicity
+ * check runs: "does `from` lie in the reflexive-transitive
  * closure of `to`" over one acyclic relation's live edges.
  *
  * Deliberately a sibling export in this file rather than a new emitter: the
@@ -858,7 +890,7 @@ function buildProbeBodyDirect(
  *
  * For the `"planned"` seed form, `ancestry` hops through TWO sources folded
  * into one `candidates` CTE — the relation's live edges AND the writer's
- * not-yet-written rows (D-4) — so a cycle closed entirely by rows in that
+ * not-yet-written rows — so a cycle closed entirely by rows in that
  * set is found even though none of them exist yet. See
  * {@link buildPlannedAcyclicityCandidates}'s docblock for why this is one
  * joined source rather than a second recursive term, and why it is the only

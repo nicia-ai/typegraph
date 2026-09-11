@@ -146,30 +146,33 @@ function assertStructuralSubsumption(
   );
 }
 
+/** Everything {@link buildValidatedKindRegistry} needs to build a registry. */
+type ValidatedKindRegistryInput = Readonly<{
+  nodeKinds: ReadonlyMap<string, NodeType>;
+  edgeKinds: ReadonlyMap<string, AnyEdgeType>;
+  ontology: readonly NamedOntologyRelation[];
+  edgeFacts: ReadonlyMap<string, EdgeKindFacts>;
+  identity?: GraphIdentityConfig;
+  /**
+   * How to tell a registered node kind from a registered edge kind, for the
+   * equivalence-class check. Defaults to this input's own kind maps; the
+   * schema deserializer supplies its own because it builds a registry with
+   * EMPTY kind maps (it has no Zod schemas) and would otherwise classify
+   * every name as neither.
+   */
+  kindClassification?: OntologyKindClassification;
+  /**
+   * Projects a registered node kind's properties to JSON Schema for the
+   * structural-subsumption check. Required — not optional — so no
+   * construction can silently skip the check.
+   */
+  nodePropertySchemas: (kind: string) => JsonSchema | undefined;
+  /** See {@link StructuralSubsumptionMode}. Required for the same reason. */
+  structuralSubsumption: StructuralSubsumptionMode;
+}>;
+
 export function buildValidatedKindRegistry(
-  input: Readonly<{
-    nodeKinds: ReadonlyMap<string, NodeType>;
-    edgeKinds: ReadonlyMap<string, AnyEdgeType>;
-    ontology: readonly NamedOntologyRelation[];
-    edgeFacts: ReadonlyMap<string, EdgeKindFacts>;
-    identity?: GraphIdentityConfig;
-    /**
-     * How to tell a registered node kind from a registered edge kind, for the
-     * equivalence-class check. Defaults to this input's own kind maps; the
-     * schema deserializer supplies its own because it builds a registry with
-     * EMPTY kind maps (it has no Zod schemas) and would otherwise classify
-     * every name as neither.
-     */
-    kindClassification?: OntologyKindClassification;
-    /**
-     * Projects a registered node kind's properties to JSON Schema for the
-     * C.2 structural-subsumption check. Required — not optional — so no
-     * construction can silently skip the check.
-     */
-    nodePropertySchemas: (kind: string) => JsonSchema | undefined;
-    /** See {@link StructuralSubsumptionMode}. Required for the same reason. */
-    structuralSubsumption: StructuralSubsumptionMode;
-  }>,
+  input: ValidatedKindRegistryInput,
 ): KindRegistry {
   const kindClassification: OntologyKindClassification =
     input.kindClassification ?? {
@@ -217,15 +220,7 @@ export function buildValidatedKindRegistry(
  * its `composition` field, is what every caller gets back.
  */
 function buildRegistryWithComposition(
-  input: Readonly<{
-    nodeKinds: ReadonlyMap<string, NodeType>;
-    edgeKinds: ReadonlyMap<string, AnyEdgeType>;
-    ontology: readonly NamedOntologyRelation[];
-    edgeFacts: ReadonlyMap<string, EdgeKindFacts>;
-    identity?: GraphIdentityConfig;
-    nodePropertySchemas: (kind: string) => JsonSchema | undefined;
-    structuralSubsumption: StructuralSubsumptionMode;
-  }>,
+  input: Omit<ValidatedKindRegistryInput, "kindClassification">,
   closures: RegistryClosures,
 ): KindRegistry {
   const registryForValidation = new KindRegistry(
