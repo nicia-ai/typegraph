@@ -252,6 +252,19 @@ Consequences worth knowing:
   server carries no state a run depends on — the per-suite databases are
   dropped and recreated — but leftovers from inspection do accumulate until
   the container is recreated.
+- **`DROP DATABASE` is a cluster-wide checkpoint, so it belongs in a hook, not
+  in a test body.** PostgreSQL forces an immediate checkpoint and waits for it
+  before removing a database's files, so the statement's duration is set by how
+  much every *other* suite in the lane has written since the last checkpoint —
+  not by the size of the database being dropped. Measured mid-run on the
+  PostgreSQL 18 lane server: 13.7 s to drop a 7 MB database, 12.3 s of it the
+  checkpoint's fsync phase, against 0.1 s for the same drop on an idle server.
+  A suite that creates a database of its own (only
+  `tests/backends/postgres/forked-working-copy.test.ts` does) therefore runs
+  both its drops in `beforeAll`/`afterAll` under an explicit hook timeout and
+  keeps the timed test body to the statement it is actually about. Raising the
+  test budget instead would only move the same unbounded wait behind a larger
+  number.
 
 The lane runs its suites **file-parallel**, and the worker count follows who
 provisioned the server. The bundled `docker-compose.yml` starts PostgreSQL
