@@ -2752,7 +2752,7 @@ export type GraphIdentityConfig = Readonly<{
 export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
 
 // @public
-export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findEdgesByHeterogeneousEndpointSet" | "findEdgesConnectedTo">;
+export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getNodes" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findEdgesByHeterogeneousEndpointSet" | "findEdgesConnectedTo">;
 
 // @public
 type GraphTemplateRow = Readonly<{

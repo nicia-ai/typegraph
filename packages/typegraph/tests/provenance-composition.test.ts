@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -17,7 +18,9 @@ import {
   type HistoryStore,
   partOf,
 } from "../src";
+import { type GraphBackend } from "../src/backend/types";
 import { createRetractionCapability } from "../src/provenance";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const PcSource = defineNode("PcSource", {
@@ -129,15 +132,14 @@ type CompositionGraph = ReturnType<typeof buildGraph>;
 
 async function createCompositionStore(
   id: string,
-): Promise<HistoryStore<CompositionGraph>> {
-  const [store] = await createStoreWithSchema(
-    buildGraph(id),
-    createTestBackend(),
-    {
-      history: true,
-    },
-  );
-  return store;
+): Promise<
+  Readonly<{ store: HistoryStore<CompositionGraph>; backend: GraphBackend }>
+> {
+  const backend = createTestBackend();
+  const [store] = await createStoreWithSchema(buildGraph(id), backend, {
+    history: true,
+  });
+  return { store, backend };
 }
 
 /**
@@ -186,17 +188,106 @@ async function seedComposedReport(store: HistoryStore<CompositionGraph>) {
   return { reportSource, partSource, report, section, paragraph, annex };
 }
 
+/**
+ * The non-fact-whole shape: a dossier that carries no belief status, a required
+ * exhibit under it, and TWO independent sources supporting that exhibit, so a
+ * transition can reach the exhibit without removing its own grounding.
+ */
+async function seedExhibitUnderDossier(
+  store: HistoryStore<CompositionGraph>,
+  dossierWindow?: Readonly<{ validFrom: string; validTo: string }>,
+) {
+  const sourceOne = await store.nodes.PcSource.create(
+    { label: "scanner", retracted: false },
+    { id: "exhibit-source-1" },
+  );
+  const sourceTwo = await store.nodes.PcSource.create(
+    { label: "vendor", retracted: false },
+    { id: "exhibit-source-2" },
+  );
+  const dossier = await store.nodes.PcDossier.create(
+    {},
+    { id: "dossier-1", ...dossierWindow },
+  );
+  const exhibit = await store.nodes.PcExhibit.create(
+    {},
+    { id: "exhibit-1", partOf: { kind: "PcDossier", id: dossier.id } },
+  );
+  const attachments = await store.edges.pcExhibitOf.find({});
+  const attachment = requireDefined(
+    attachments[0],
+    "the exhibit's composition edge",
+  );
+  for (const [index, source] of [sourceOne, sourceTwo].entries()) {
+    const justification = await store.nodes.PcJustification.create(
+      { label: `exhibits-${index}` },
+      { id: `exhibit-justification-${index}` },
+    );
+    await store.edges.pcPremiseOf.create(source, justification);
+    await store.edges.pcDerives.create(justification, exhibit);
+  }
+  return { sourceOne, sourceTwo, dossier, exhibit, attachment };
+}
+
+/** Every currently live fact, as the report spells a fact reference. */
+async function liveFacts(
+  store: HistoryStore<CompositionGraph>,
+): Promise<readonly Readonly<{ kind: string; id: string }>[]> {
+  const byKind = await Promise.all([
+    store.nodes.PcReport.find({}),
+    store.nodes.PcSection.find({}),
+    store.nodes.PcParagraph.find({}),
+    store.nodes.PcAnnex.find({}),
+    store.nodes.PcExhibit.find({}),
+  ]);
+  return byKind
+    .flat()
+    .map((row) => ({ kind: row.kind, id: row.id }))
+    .toSorted((left, right) =>
+      `${left.kind}/${left.id}`.localeCompare(`${right.kind}/${right.id}`),
+    );
+}
+
+/**
+ * Runs `transition` and returns which facts it actually tombstoned, so a case
+ * can assert the report NAMES every close. A close the report cannot mention is
+ * invisible data loss — the defect the whole-liveness predicate must not
+ * reintroduce.
+ */
+async function closedFactsDuring<T>(
+  store: HistoryStore<CompositionGraph>,
+  transition: () => Promise<T>,
+): Promise<Readonly<{ result: T; closed: readonly string[] }>> {
+  const before = await liveFacts(store);
+  const result = await transition();
+  const factsAfter = await liveFacts(store);
+  const after = new Set(factsAfter.map((fact) => `${fact.kind}/${fact.id}`));
+  return {
+    result,
+    closed: before
+      .map((fact) => `${fact.kind}/${fact.id}`)
+      .filter((key) => !after.has(key)),
+  };
+}
+
 describe("provenance composition existence", () => {
   it("closes the required parts of a closed whole and leaves the optional part believed", async () => {
-    const store = await createCompositionStore("provenance_composition_close");
+    const { store } = await createCompositionStore(
+      "provenance_composition_close",
+    );
     const seeded = await seedComposedReport(store);
     const provenance = createRetractionCapability(store, config);
 
-    const report = await provenance.retract(seeded.reportSource);
+    const { result: report, closed } = await closedFactsDuring(store, () =>
+      provenance.retract(seeded.reportSource),
+    );
 
     // Leaf-first is irrelevant here (no edge is touched), but every closed
     // part must be NAMED: a part that died invisibly would be data loss the
     // report cannot explain.
+    expect(closed).toEqual(
+      report.died.map((fact) => `${fact.kind}/${fact.id}`).toSorted(),
+    );
     expect(report.died).toEqual([
       { kind: "PcParagraph", id: "paragraph-1" },
       { kind: "PcReport", id: "report-1" },
@@ -240,7 +331,9 @@ describe("provenance composition existence", () => {
   // assertions fail.
 
   it("reopens the parts its close closed once the whole is supported again", async () => {
-    const store = await createCompositionStore("provenance_composition_reopen");
+    const { store } = await createCompositionStore(
+      "provenance_composition_reopen",
+    );
     const { reportSource } = await seedComposedReport(store);
     const provenance = createRetractionCapability(store, config);
 
@@ -278,7 +371,7 @@ describe("provenance composition existence", () => {
   // and `holding()` returns the annex and the report alone.
 
   it("keeps a part closed while its own source is retracted and its whole is not", async () => {
-    const store = await createCompositionStore(
+    const { store } = await createCompositionStore(
       "provenance_composition_part_source",
     );
     const { partSource } = await seedComposedReport(store);
@@ -301,7 +394,7 @@ describe("provenance composition existence", () => {
   // every fact. The report closes too and `holding()` comes back empty.
 
   it("holds a required part whose whole is a live node that carries no belief status", async () => {
-    const store = await createCompositionStore(
+    const { store } = await createCompositionStore(
       "provenance_composition_nonfact",
     );
     const source = await store.nodes.PcSource.create(
@@ -330,4 +423,145 @@ describe("provenance composition existence", () => {
   // MUTATION CHECK: make the non-fact arm of `compositionExistenceSupported`
   // return `false` (or skip the `liveWholeKeys` read in
   // `readCompositionExistenceDependencies`). The exhibit is never held.
+
+  it("keeps holding a required part whose non-fact whole has an ENDED validity window", async () => {
+    const { store } = await createCompositionStore(
+      "provenance_composition_ended_window",
+    );
+    const { sourceOne } = await seedExhibitUnderDossier(store, {
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2021-01-01T00:00:00.000Z",
+    });
+    const provenance = createRetractionCapability(store, config);
+
+    // A whole whose window has closed is still a LIVE row, and the write path
+    // would accept it as a whole today, so the part is still held up. Judging
+    // it dead here made the part unbelieved BEFORE a transition and tombstoned
+    // BY one, a close no report could name.
+    await expect(provenance.holding()).resolves.toEqual([
+      { kind: "PcExhibit", id: "exhibit-1" },
+    ]);
+
+    const { result: report, closed } = await closedFactsDuring(store, () =>
+      provenance.retract(sourceOne),
+    );
+
+    expect(closed).toEqual([]);
+    expect(report.died).toEqual([]);
+    expect(report.survivedVia).toEqual([
+      {
+        fact: { kind: "PcExhibit", id: "exhibit-1" },
+        via: [{ kind: "PcJustification", id: "exhibit-justification-1" }],
+      },
+    ]);
+  });
+  // MUTATION CHECK: restore the validity-window conjunct in
+  // `readCompositionExistenceDependencies` (reject a whole row whose window
+  // does not contain the read instant). `holding()` comes back empty, `closed`
+  // names the exhibit, and `died` stays empty — the unnamed close.
+
+  it("stops holding a required part whose non-fact whole is tombstoned", async () => {
+    const { store, backend } = await createCompositionStore(
+      "provenance_composition_dead_whole",
+    );
+    const { dossier } = await seedExhibitUnderDossier(store);
+    const provenance = createRetractionCapability(store, config);
+    await expect(provenance.holding()).resolves.toEqual([
+      { kind: "PcExhibit", id: "exhibit-1" },
+    ]);
+
+    // Tombstoned through the backend, which is what leaves the part behind:
+    // the store's own delete would cascade to it.
+    await backend.deleteNode({
+      graphId: store.graphId,
+      kind: "PcDossier",
+      id: dossier.id,
+    });
+
+    await expect(provenance.holding()).resolves.toEqual([]);
+    // The same state the audit reports, from the same liveness verdict.
+    const violations = await store.verifyConstraintFences();
+    expect(
+      violations.filter(
+        (violation) => violation.family === "compositionExistence",
+      ),
+    ).toEqual([
+      {
+        family: "compositionExistence",
+        partKind: "PcExhibit",
+        parts: [{ kind: "PcExhibit", id: "exhibit-1" }],
+      },
+    ]);
+  });
+  // MUTATION CHECK: drop the `isLiveNodeRow` check in
+  // `readLiveCompositionWholes` (treat every read row as live). The exhibit is
+  // still held after its whole is tombstoned, and the audit reports nothing.
+
+  it("stops holding a required part whose composition edge is gone", async () => {
+    const { store, backend } = await createCompositionStore(
+      "provenance_composition_no_edge",
+    );
+    const { attachment } = await seedExhibitUnderDossier(store);
+    const provenance = createRetractionCapability(store, config);
+    await expect(provenance.holding()).resolves.toEqual([
+      { kind: "PcExhibit", id: "exhibit-1" },
+    ]);
+
+    // Hard-deleted through the backend: detaching a live required part is
+    // refused by the write path, which is the point — only a direct write can
+    // reach this state, and support must not pretend the part still hangs
+    // from something.
+    await backend.hardDeleteEdge({
+      graphId: store.graphId,
+      kind: "pcExhibitOf",
+      id: attachment.id,
+    });
+
+    await expect(provenance.holding()).resolves.toEqual([]);
+  });
+  // MUTATION CHECK: in `compositionExistenceSupported`, return `true` when
+  // `wholeKey === undefined`. The exhibit is held with no whole at all.
+
+  it("refuses a configuration whose fact kind owns a required part that is not a fact", async () => {
+    const { store } = await createCompositionStore(
+      "provenance_composition_unreachable_part",
+    );
+
+    // PcSection and PcParagraph are required parts under fact wholes, so a
+    // configuration that tracks the wholes without them could close a whole
+    // and leave a live required part hanging from it.
+    expect(() =>
+      createRetractionCapability(store, {
+        source: { kind: "PcSource" },
+        justification: { kind: "PcJustification" },
+        fact: { kinds: ["PcReport"] },
+        premiseOf: { kind: "pcPremiseOf" },
+        derives: { kind: "pcDerives" },
+      }),
+    ).toThrow(/PcSection.*is not a fact kind/);
+
+    const error = (() => {
+      try {
+        createRetractionCapability(store, {
+          source: { kind: "PcSource" },
+          justification: { kind: "PcJustification" },
+          fact: { kinds: ["PcReport", "PcAnnex"] },
+          premiseOf: { kind: "pcPremiseOf" },
+          derives: { kind: "pcDerives" },
+        });
+      } catch (error_) {
+        return error_;
+      }
+      return;
+    })();
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as ConfigurationError).details).toMatchObject({
+      code: "PROVENANCE_REQUIRED_PART_NOT_A_FACT",
+      wholeKind: "PcReport",
+      partKind: "PcSection",
+    });
+  });
+  // MUTATION CHECK: delete the
+  // `assertRequiredPartsOfFactWholesAreFacts(store.registry, normalized)` call
+  // in `createRetractionCapability`. Both configurations above are accepted.
 });

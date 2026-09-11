@@ -1355,6 +1355,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend: this.#backend,
       captureEnabled: this.#captureEnabled,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
+      batchPointRead: this.#batchPointRead,
       // The query path's own construction, not a second spelling of it: a
       // caller that could only rebuild this object could not observe the one
       // the queries actually run on.
@@ -5489,6 +5490,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       registry,
       graphId: this.graphId,
       backend: this.#baseBackend,
+      batchPointRead: this.#batchPointRead,
     });
   }
 

@@ -8542,5 +8542,61 @@
     "kind": "required-member-added",
     "reason": "`EdgeCardinalityAxisRef` is the new named `(direction, cardinality)` axis reference that target-side cardinality introduces; the checker reports its two members once as members of the new named type, and nothing authors one \u2014 it is derived from an edge registration's declarations. Declared in .changeset/edge-target-cardinality.md.",
     "issue": "#639"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreRuntime",
+    "member": "batchPointRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#675"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreRuntime",
+    "member": "batchPointRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#675"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreRuntime",
+    "member": "batchPointRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#675"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreRuntime",
+    "member": "batchPointRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#675"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreRuntime",
+    "member": "batchPointRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#675"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreRuntime",
+    "member": "batchPointRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#675"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreRuntime",
+    "member": "batchPointRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#675"
   }
 ]

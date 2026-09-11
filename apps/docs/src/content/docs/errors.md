@@ -999,6 +999,24 @@ check applies to node kinds whose schema exposes an object shape; edge `unique`
 constraints are not validated here. Statically typed callers were already unable
 to name an undeclared field, so this bites untyped or generated definitions.
 
+#### Provenance fact kinds and required composition parts
+
+`createRetractionCapability` refuses a configuration whose fact kinds own
+required composition parts it cannot reach, with
+`PROVENANCE_REQUIRED_PART_NOT_A_FACT`. A required part's belief status follows
+its whole's, and the close that enforces that runs over facts, so a fact kind
+that is the whole of an `existence: "required"` pair whose part kind is missing
+from `fact.kinds` is a hole no transition can fill: closing the whole would
+leave a live required part hanging from a closed whole. `details` names the
+`wholeKind` and the `partKind`, and `requiredParts` lists every such pair.
+
+Both sides are read through subsumption, so a fact kind that is a subclass of
+the kind a pair declared its whole against counts, and so does a subclass of a
+declared required part kind. Fix it by adding the part kind to `fact.kinds`
+(with a `derives` endpoint for it) or by declaring the pair
+`existence: "optional"`. See [Composition and
+retraction](/provenance#composition-and-retraction).
+
 #### Definition-time `__proto__` property refusal
 
 `defineNode()` / `defineEdge()` refuse a schema that declares a property named
@@ -1879,6 +1897,7 @@ try {
 | `RESTRICTED_DELETE` | `RestrictedDeleteError` | constraint | Delete blocked by existing edges |
 | `COMPOSITION_CYCLE_DETECTED` | `CompositionCycleError` | constraint | An instance-level composition cycle survives from rows that bypassed the write-time acyclicity fence |
 | `CONFIGURATION_ERROR` | `ConfigurationError` | system | Invalid configuration |
+| `PROVENANCE_REQUIRED_PART_NOT_A_FACT` | `ConfigurationError` | system | A `createRetractionCapability` fact kind is the whole of an `existence: "required"` composition pair whose part kind is not itself a fact kind |
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
 | `BASE_SCHEMA_MIGRATION_REQUIRED` | `BaseSchemaMigrationError` | system | Deployment-wide base storage requires privileged adoption |

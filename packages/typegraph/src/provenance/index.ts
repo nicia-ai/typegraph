@@ -1,4 +1,8 @@
-import { createClaimsVerdictThunk } from "../backend/capabilities/resolve";
+import type { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import {
+  type BundleVerdictOf,
+  createClaimsVerdictThunk,
+} from "../backend/capabilities/resolve";
 import {
   type EdgeRow,
   type GraphReadBackend,
@@ -15,7 +19,11 @@ import { projectTargetKinds } from "../core/edge-endpoints";
 import type { NodeRegistration } from "../core/types";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
 import type { KindRegistry } from "../registry";
-import { findLiveCompositionWhole } from "../store/operations/composition-create";
+import {
+  COMPOSITION_ATTACHMENT_PAGE_SIZE,
+  readCompositionAttachmentsForPage,
+  readLiveCompositionWholes,
+} from "../store/operations/composition-create";
 import {
   applyNodeResurrect,
   applyNodeSoftDelete,
@@ -38,6 +46,7 @@ import { compareStrings } from "../utils/compare";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { isPlainObject } from "../utils/object";
 import { requireDefined } from "../utils/presence";
+import { encodeTupleKey } from "../utils/tuple-key";
 
 export type {
   ContributionDiagnostic,
@@ -185,6 +194,9 @@ type SupportEdges = Readonly<{
  * composition edge or a non-fact node's liveness, so the pre- and
  * post-transition snapshots share this view exactly as they share the support
  * edges.
+ *
+ * `liveWholeKeys` covers only the wholes that are NOT fact rows; a fact whole
+ * is judged by the snapshot's own support instead.
  *
  * `requiredPartFactKeys` holds every fact row whose kind is a required part,
  * including one whose whole could not be found: that fact is unsupported (the
@@ -626,6 +638,7 @@ async function loadSupportGraph(
   registry: KindRegistry,
   graphId: string,
   config: NormalizedConfig,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<SupportGraph> {
   // One read instant for every role read, so the whole snapshot shares a
   // single "currently valid" coordinate.
@@ -638,7 +651,7 @@ async function loadSupportGraph(
       registry,
       graphId,
       roles.facts,
-      asOf,
+      batchPointRead,
     ),
     Promise.all(
       config.sourceKinds.map((kind) =>
@@ -659,25 +672,30 @@ async function loadSupportGraph(
 
 /**
  * Reads which fact rows are required composition parts and which whole each
- * currently hangs from, through `findLiveCompositionWhole` — the same owner the
- * write path, the import assertion, and `verifyConstraintFences` read, so
- * provenance never re-spells composition orientation or the whole-side
- * population predicate.
+ * currently hangs from, through `readCompositionAttachmentsForPage` — the same
+ * owner `verifyConstraintFences`' `compositionExistence` family reads, one
+ * bounded candidate read per page per orientation with a per-row confirmation
+ * for a negative — so provenance re-spells neither composition orientation nor
+ * the whole-side population predicate, nor the shape of that read.
  *
  * A graph that declares no required part costs no read at all: the registry
  * answers `compositionExistence` per kind from its memoized relation.
  *
  * A whole that is itself a fact carries a belief status, so its support decides
- * its parts'; any other whole (a plain node, or a source — whose retraction is
- * a property flip, not a liveness change) is read here and judged live exactly
- * as the role reads judge currency: not tombstoned, and currently valid.
+ * its parts'. Any other whole (a plain node, or a source — whose retraction is
+ * a property flip, not a liveness change) is judged by `readLiveCompositionWholes`,
+ * the whole-endpoint liveness owner: present and not tombstoned. Deliberately
+ * NOT a validity-window question. A whole whose window has closed is still a
+ * live row that the write path would accept as a whole, so treating it as dead
+ * here would make a part unbelieved before a transition and tombstoned by it —
+ * a close the report could not even name, since the fact was never believed.
  */
 async function readCompositionExistenceDependencies(
   backend: GraphReadBackend,
   registry: KindRegistry,
   graphId: string,
   facts: ReadonlyMap<string, NodeRow>,
-  asOf: string,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<CompositionExistenceDependencies> {
   const requiredPartRows = [...facts].filter(
     ([, row]) => registry.compositionExistence(row.kind) === "required",
@@ -686,45 +704,44 @@ async function readCompositionExistenceDependencies(
     return NO_COMPOSITION_EXISTENCE_DEPENDENCIES;
   }
 
-  const attachments = await Promise.all(
-    requiredPartRows.map(async ([factKey, row]) => ({
-      factKey,
-      whole: await findLiveCompositionWhole(
-        registry,
-        backend,
-        graphId,
-        row.kind,
-        row.id,
-      ),
-    })),
-  );
-
   const requiredPartFactKeys = new Set<string>();
   const wholeKeyByPartKey = new Map<string, string>();
   const partKeysByWholeKey = new Map<string, string[]>();
-  for (const { factKey, whole } of attachments) {
-    requiredPartFactKeys.add(factKey);
-    if (whole === undefined) continue;
-    const wholeKey = refKey({ kind: whole.kind, id: whole.id });
-    wholeKeyByPartKey.set(factKey, wholeKey);
-    appendGroupedValue(partKeysByWholeKey, wholeKey, factKey);
+  for (const [factKey] of requiredPartRows) requiredPartFactKeys.add(factKey);
+
+  for (const page of chunked(
+    requiredPartRows,
+    COMPOSITION_ATTACHMENT_PAGE_SIZE,
+  )) {
+    const attachments = await readCompositionAttachmentsForPage(
+      registry,
+      backend,
+      graphId,
+      page.map(([, row]) => row),
+    );
+    for (const [factKey, row] of page) {
+      const attachment = attachments.get(encodeTupleKey([row.kind, row.id]));
+      if (attachment === undefined) continue;
+      const wholeKey = refKey({
+        kind: attachment.whole.kind,
+        id: attachment.whole.id,
+      });
+      wholeKeyByPartKey.set(factKey, wholeKey);
+      appendGroupedValue(partKeysByWholeKey, wholeKey, factKey);
+    }
   }
 
-  const liveWholeKeys = new Set<string>();
-  await Promise.all(
-    [...new Set(wholeKeyByPartKey.values())]
-      .filter((wholeKey) => !facts.has(wholeKey))
-      .map(async (wholeKey) => {
-        const ref = keyToRef(wholeKey);
-        const row = await backend.getNode(graphId, ref.kind, ref.id);
-        if (row === undefined || !isLiveNodeRow(row)) return;
-        if (
-          !validityWindowContainsInstant(row.valid_from, row.valid_to, asOf)
-        ) {
-          return;
-        }
-        liveWholeKeys.add(wholeKey);
-      }),
+  const nonFactWholeKeys = [...new Set(wholeKeyByPartKey.values())].filter(
+    (wholeKey) => !facts.has(wholeKey),
+  );
+  const liveWholes = await readLiveCompositionWholes(
+    backend,
+    graphId,
+    nonFactWholeKeys.map((wholeKey) => keyToRef(wholeKey)),
+    batchPointRead,
+  );
+  const liveWholeKeys = new Set(
+    liveWholes.map((whole) => refKey({ kind: whole.kind, id: whole.id })),
   );
 
   return {
@@ -733,6 +750,15 @@ async function readCompositionExistenceDependencies(
     partKeysByWholeKey,
     liveWholeKeys,
   };
+}
+
+/** Fixed-size slices of `values`, in order. */
+function chunked<T>(values: readonly T[], size: number): readonly T[][] {
+  const pages: T[][] = [];
+  for (let start = 0; start < values.length; start += size) {
+    pages.push(values.slice(start, start + size));
+  }
+  return pages;
 }
 
 function availableSourceKeys(
@@ -842,8 +868,15 @@ async function computeSupport(
   registry: KindRegistry,
   graphId: string,
   config: NormalizedConfig,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<SupportSnapshot> {
-  const graph = await loadSupportGraph(backend, registry, graphId, config);
+  const graph = await loadSupportGraph(
+    backend,
+    registry,
+    graphId,
+    config,
+    batchPointRead,
+  );
   return computeSupportSnapshot(
     graph,
     availableSourceKeys(graph.sourceRows, config.retractedField),
@@ -1156,6 +1189,7 @@ async function runTransition<
   config: NormalizedConfig,
   sources: readonly ProvenanceNodeRef<G, SourceKind>[],
   retracted: boolean,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<RetractionReport<G, FactKind, JustificationKind>> {
   const uniqueSources = uniqueNodeReferences(sources);
   for (const source of uniqueSources) {
@@ -1197,6 +1231,7 @@ async function runTransition<
       store.registry,
       store.graphId,
       config,
+      batchPointRead,
     );
     const availableBefore = availableSourceKeys(
       supportGraph.sourceRows,
@@ -1258,6 +1293,13 @@ export function createRetractionCapability<
 > {
   assertRetractionHistoryEnabled(store);
   const normalized = normalizeConfig(store.graph, config);
+  assertRequiredPartsOfFactWholesAreFacts(store.registry, normalized);
+  // The store's OWN verdict, minted once at its construction — never a second
+  // resolution for the same backend — and BOUND per read against the object
+  // that read runs on (`bindExtraIfReachable`, inside
+  // `readLiveCompositionWholes`), so a transaction target that implements less
+  // than the root still falls back instead of reaching a member it lacks.
+  const batchPointRead = storeRuntime(store).batchPointRead;
 
   // The four retract verbs differ only in one/many source shape and the target
   // retracted flag; the generics are fixed by the config, so hoist one call.
@@ -1270,7 +1312,7 @@ export function createRetractionCapability<
       SourceKindsFromConfig<G, C>,
       FactKindsFromConfig<G, C>,
       JustificationKindFromConfig<G, C>
-    >(store, normalized, sources, retracted);
+    >(store, normalized, sources, retracted, batchPointRead);
 
   return {
     retract: (source) => transition([source], true),
@@ -1291,6 +1333,7 @@ export function createRetractionCapability<
           store.registry,
           store.graphId,
           normalized,
+          batchPointRead,
         );
         return sortedReferences<G, FactKindsFromConfig<G, C>>(
           snapshot.believedFactKeys,
@@ -1298,6 +1341,62 @@ export function createRetractionCapability<
       });
     },
   };
+}
+
+/**
+ * Refuses a configuration whose fact kinds own required composition parts the
+ * capability cannot reach.
+ *
+ * A required part's belief status follows its whole's, and the close that
+ * enforces that runs over FACTS. So a fact kind that is the whole of a
+ * required pair whose part kind is not itself a fact kind is a hole no
+ * transition can fill: closing the whole would leave a live required part
+ * hanging from a closed whole, exactly the state this capability exists to
+ * prevent. Refused at configuration time, where the graph's author can fix it,
+ * rather than at the first retraction that happens to reach such a whole.
+ *
+ * Both sides are read through the registry's composition readers and expanded
+ * through subsumption: the whole side because a fact kind may be a SUBCLASS of
+ * the kind a pair declared its whole against, the part side because a subclass
+ * of a declared required part kind is exactly as required as the declared kind
+ * (`requiredCompositionPartKinds` expands the same way).
+ */
+function assertRequiredPartsOfFactWholesAreFacts(
+  registry: KindRegistry,
+  config: NormalizedConfig,
+): void {
+  const factKinds = new Set(config.factKinds);
+  const offenders: Readonly<{ wholeKind: string; partKind: string }>[] = [];
+  for (const pair of registry.compositionRelation().pairs) {
+    if (registry.compositionExistence(pair.partKind) !== "required") continue;
+    for (const wholeKind of config.factKinds) {
+      if (!registry.isAssignableTo(wholeKind, pair.wholeKind)) continue;
+      for (const partKind of registry.expandSubClasses(pair.partKind)) {
+        if (factKinds.has(partKind)) continue;
+        offenders.push({ wholeKind, partKind });
+      }
+    }
+  }
+  if (offenders.length === 0) return;
+
+  const ordered = offenders.toSorted((left, right) =>
+    left.wholeKind === right.wholeKind ?
+      compareStrings(left.partKind, right.partKind)
+    : compareStrings(left.wholeKind, right.wholeKind),
+  );
+  const first = requireDefined(ordered[0], "a non-empty offender list");
+  throw new ConfigurationError(
+    `Provenance fact kind "${first.wholeKind}" is the whole of required composition part kind "${first.partKind}", which is not a fact kind.`,
+    {
+      code: "PROVENANCE_REQUIRED_PART_NOT_A_FACT",
+      wholeKind: first.wholeKind,
+      partKind: first.partKind,
+      requiredParts: ordered,
+    },
+    {
+      suggestion: `Add "${first.partKind}" to fact.kinds (and give it a \`derives\` endpoint), or declare that composition pair \`existence: "optional"\`.`,
+    },
+  );
 }
 
 function assertRetractionHistoryEnabled(

@@ -152,6 +152,24 @@ No edge is deleted by any of this, so `store.verifyConstraintFences()`'s
 `compositionExistence` family reports nothing after a close: a closed required
 part is tombstoned, not an orphan.
 
+A whole that is not a fact is held to the same liveness the write path holds an
+attachment's whole to: present and not tombstoned. A closed validity window does
+not make it dead, because the write path would still accept it as a whole. A
+whole that IS tombstoned leaves its live required parts unsupported, which is
+also what the `compositionExistence` audit reports for that state.
+
+Each closed fact fires its own `delete` operation hook, parts included — unlike
+the delete cascade, which emits one event for the whole. A belief close has no
+cascade to report: every part reaching the close is a fact of its own, closed by
+its own support verdict, so its hook is its own too.
+
+A configuration that cannot reach a required part is refused when the capability
+is created. If a fact kind is the whole of an `existence: "required"` pair whose
+part kind is not itself in `fact.kinds`, `createRetractionCapability` throws
+`ConfigurationError` (`PROVENANCE_REQUIRED_PART_NOT_A_FACT`) naming both kinds —
+closing such a whole would leave a live required part hanging from it, and no
+transition could fix that.
+
 Use `retractMany(sources)` or `unRetractMany(sources)` to change several source
 flags in one recorded transaction:
 

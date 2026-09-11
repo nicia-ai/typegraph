@@ -249,8 +249,9 @@ are not what happens:
   transition because support treats a required part as dependent on its
   whole, not because a delete cascade ran: no edge is touched, an optional
   part is left believed, and reopening the whole reopens the parts that are
-  otherwise supported. See
-  [Composition and retraction](/provenance#composition-and-retraction).
+  otherwise supported. Each closed part fires its own `delete` operation hook,
+  rather than folding into one event for the whole the way this cascade does.
+  See [Composition and retraction](/provenance#composition-and-retraction).
 - **The cascade emits one operation-hook event, for the whole.** Each
   cascaded part delete runs through its own node-delete pipeline but is not
   itself a caller-issued operation, so `onOperationEnd` fires exactly once —
