@@ -287,17 +287,30 @@ const [store] = await createAdapterStoreWithSchema(graph, backend, {
 });
 ```
 
-`store.identity.transitionsOf(ref)` returns every transition touching
-`ref`'s class lineage, oldest first — an assertion, a retraction, a same-ID
-fold, a delete or restore, a validity-window end, a kind drop, a schema
-transition, or a reconciliation decision made by a governed graph merge:
+`store.identity.transitionsOf(ref)` returns a **page** of the transitions
+touching `ref`'s class lineage, oldest first — an assertion, a retraction, a
+same-ID fold, a delete or restore, a validity-window end, a kind drop, a
+schema transition, or a reconciliation decision made by a governed graph
+merge. A page holds at most `limit` transitions (default 200); when the
+lineage has more, the page carries `nextFrom`, and passing it back as
+`fromRecorded` reads the next one. Reading the whole lineage is therefore a
+loop, not a call:
 
 ```typescript
-const { transitions } = await store.identity.transitionsOf(alice);
-for (const transition of transitions) {
-  console.log(transition.cause, transition.recorded, transition.assertionIds);
-}
+let cursor: RecordedInstant | undefined;
+do {
+  const page = await store.identity.transitionsOf(alice, {
+    ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+  });
+  for (const transition of page.transitions) {
+    console.log(transition.cause, transition.recorded, transition.assertionIds);
+  }
+  cursor = page.nextFrom;
+} while (cursor !== undefined);
 ```
+
+A single call without the loop reads only the first page; a lineage short
+enough to fit in one page returns no `nextFrom`, which is what ends the loop.
 
 A transition that an archival restore brought into this graph — rather than
 this graph's own history capture recording it — carries `restored`, whose
@@ -361,17 +374,9 @@ it names was minted by the *source* graph's clock, not this graph's — pass it
 only as the next call's `fromRecorded`, and never to `store.asOfRecorded`,
 which anchors a historical read on this graph's own recorded axis.
 
-```typescript
-let cursor: RecordedInstant | undefined;
-do {
-  const page = await store.identity.transitionsOf(alice, {
-    limit: 50,
-    ...(cursor === undefined ? {} : { fromRecorded: cursor }),
-  });
-  render(page.transitions);
-  cursor = page.nextFrom;
-} while (cursor !== undefined);
-```
+The same loop drives `replay`: pass `page.nextFrom` back as `fromRecorded`
+until it comes back `undefined`, choosing `limit` per page as the consumer
+needs (the loop above takes the default).
 
 Both `replay` and `transitionsOf` throw `IDENTITY_REPLAY_REQUIRES_HISTORY` on
 a store opened without `history: true` — there is nothing for them to

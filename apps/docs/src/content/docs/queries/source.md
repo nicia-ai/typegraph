@@ -75,7 +75,10 @@ const allMedia = await store
   .query()
   .from("Media", "m")
   .select((ctx) => ({
-    kind: ctx.m.kind,   // "Media" | "Podcast" | "Article" | "Video"
+    // Runtime values: "Media", "Podcast", "Article", or "Video" — the row's
+    // actual kind. Static type: `string`, because the alias is widened for a
+    // kind the ontology can affect (see below).
+    kind: ctx.m.kind,
     title: ctx.m.title,
   }))
   .execute();
