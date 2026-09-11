@@ -135,6 +135,10 @@ import {
   NO_IDENTITY_SEPARATION_FACTS,
   separatingAssertionIds,
 } from "./identity-pairing";
+import {
+  connectedWithoutIdentity,
+  identityAssertionsOnPaths,
+} from "./identity-pairing-paths";
 import { identitySemanticKey } from "./identity-three-way";
 import { unwrapMergeBranches } from "./ingestion-branch";
 import {
@@ -2149,6 +2153,25 @@ function buildInternalMergePlan<G extends GraphDef>(
     canonicalOf,
     reconciliation.retypeMap,
     staging,
+    (member) => {
+      // A staged member's OWN write: the singleton cluster it would form with
+      // no pairing, canonicalized by the same rule its cluster went through.
+      // A committed base member writes nothing unfused.
+      if (!newNodesById.has(member)) return;
+      const singleton: ClusterResult = { members: [member] };
+      const entity = canonicalizeCluster(
+        singleton,
+        clusterMembersFor(singleton, newNodesById, baseMembersById),
+        options.onPropertyConflict as PropertyConflictPolicy,
+        branchRank,
+        weights,
+        undefined,
+        options.onBasePropertyConflict as PropertyConflictPolicy,
+        preferKind,
+        preferredBranchId,
+      );
+      return { kind: entity.kind, id: entity.canonicalId, props: entity.props };
+    },
   );
   const inducedEdgeConflicts =
     options.identity?.onEdgeConflict === "flag" ?
@@ -2288,8 +2311,9 @@ function sortIdentityConflicts(
 /**
  * A cluster an `identity` match source actually pulled together, with what a
  * policy needs to judge — or drop — that pairing: its members, the surviving
- * identity-sourced edges and the rest, the `same` assertions behind the
- * identity edges, and the branches that staged them.
+ * identity-sourced edges and the rest, which branches staged each assertion,
+ * and the write each STAGED member would carry on its own if the pairing were
+ * not there (the counterfactual `onUniquenessConflict: "flag"` probes).
  */
 type IdentityPairedCluster = Readonly<{
   /** The canonical survivor's staged `(kind, id)` — the key `canonicalOf` maps to. */
@@ -2299,10 +2323,21 @@ type IdentityPairedCluster = Readonly<{
   members: readonly MergeKey[];
   identityEdges: readonly CandidateEdge[];
   nonIdentityEdges: readonly CandidateEdge[];
-  /** Every `same` assertion an identity edge of this cluster carries, sorted. */
-  assertionIds: readonly string[];
-  /** Every branch that staged one of `assertionIds`, sorted. */
-  branches: readonly BranchId[];
+  /** The branches that staged each assertion an identity edge carries. */
+  branchesByAssertionId: ReadonlyMap<string, readonly BranchId[]>;
+  /**
+   * Each staged member canonicalized as a SINGLETON cluster — the row it
+   * would write with no pairing at all. A committed base member writes nothing
+   * unfused (it holds its own claims already), so it has no entry.
+   */
+  memberWrites: readonly MemberOwnWrite[];
+}>;
+
+/** One staged member's own resolved write, as a singleton cluster would emit it. */
+type MemberOwnWrite = Readonly<{
+  kind: string;
+  id: string;
+  props: Readonly<Record<string, unknown>>;
 }>;
 
 /**
@@ -2311,6 +2346,11 @@ type IdentityPairedCluster = Readonly<{
  * diameter guards carries an `identity` match source. Every other cluster's
  * fusion is the ordinary similarity case the merge has always produced, and no
  * identity policy re-classifies it.
+ *
+ * `memberWriteOf` is the plan builder's own singleton canonicalization of a
+ * staged member — the same `canonicalizeCluster` the cluster went through,
+ * over one member — so the counterfactual the uniqueness probe reads is the
+ * write the plan itself would have produced.
  */
 function identityPairedClusters(
   clusters: readonly ClusterResult[],
@@ -2318,6 +2358,7 @@ function identityPairedClusters(
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
   retypeMap: ReadonlyMap<MergeKey, string>,
   staging: StagingSet,
+  memberWriteOf: (member: MergeKey) => MemberOwnWrite | undefined,
 ): ReadonlyMap<MergeKey, IdentityPairedCluster> {
   const edgesByCanonical = new Map<MergeKey, CandidateEdge[]>();
   for (const edge of survivingEdges) {
@@ -2326,12 +2367,12 @@ function identityPairedClusters(
     if (edges === undefined) edgesByCanonical.set(canonical, [edge]);
     else edges.push(edge);
   }
-  const branchesByAssertionId = new Map<string, Set<BranchId>>();
+  const stagedBranches = new Map<string, Set<BranchId>>();
   for (const staged of staging.newIdentityAssertions) {
     const branches =
-      branchesByAssertionId.get(staged.assertion.id) ?? new Set<BranchId>();
+      stagedBranches.get(staged.assertion.id) ?? new Set<BranchId>();
     branches.add(staged.branchId);
-    branchesByAssertionId.set(staged.assertion.id, branches);
+    stagedBranches.set(staged.assertion.id, branches);
   }
   const paired = new Map<MergeKey, IdentityPairedCluster>();
   for (const cluster of clusters) {
@@ -2345,17 +2386,18 @@ function identityPairedClusters(
       ),
     );
     if (identityEdges.size === 0) continue;
-    const assertionIds = new Set<string>();
+    const branchesByAssertionId = new Map<string, readonly BranchId[]>();
     for (const edge of identityEdges) {
       for (const source of edge.evidence.sources) {
         if (source.kind !== "identity") continue;
-        for (const id of source.assertionIds) assertionIds.add(id);
-      }
-    }
-    const branches = new Set<BranchId>();
-    for (const id of assertionIds) {
-      for (const branch of branchesByAssertionId.get(id) ?? []) {
-        branches.add(branch);
+        for (const id of source.assertionIds) {
+          branchesByAssertionId.set(
+            id,
+            [...(stagedBranches.get(id) ?? [])].sort((left, right) =>
+              compareStrings(left, right),
+            ),
+          );
+        }
       }
     }
     paired.set(canonical, {
@@ -2367,37 +2409,39 @@ function identityPairedClusters(
       members: cluster.members,
       identityEdges: [...identityEdges],
       nonIdentityEdges: edges.filter((edge) => !identityEdges.has(edge)),
-      assertionIds: [...assertionIds].sort((left, right) =>
-        compareStrings(left, right),
-      ),
-      branches: [...branches].sort((left, right) =>
-        compareStrings(left, right),
-      ),
+      branchesByAssertionId,
+      memberWrites: cluster.members.flatMap((member) => {
+        const write = memberWriteOf(member);
+        return write === undefined ? [] : [write];
+      }),
     });
   }
   return paired;
 }
 
 /**
- * Whether the pairing that put `a` and `b` in one cluster was the IDENTITY
- * pairing: the cluster's non-identity surviving edges alone do not connect
- * them. When they do, similarity (or a shared unique value, or a retype)
- * would have fused the two anyway, and whatever that fusion induced is the
- * merge's ordinary behavior rather than something an identity policy owns.
+ * The pairing one conflict drops: the assertions on the identity paths between
+ * the entities it names ({@link identityAssertionsOnPaths}) and the branches
+ * that staged them — never the whole cluster's pairing.
  */
-function fusedOnlyByIdentity(
+function droppedPairingFor(
   cluster: IdentityPairedCluster,
-  a: MergeKey,
-  b: MergeKey,
-): boolean {
-  const componentOf = new Map<MergeKey, number>();
-  for (const [index, component] of connectedComponents(
-    cluster.nonIdentityEdges,
-    cluster.members,
-  ).entries()) {
-    for (const member of component.members) componentOf.set(member, index);
+  endpoints: readonly MergeKey[],
+): Readonly<{
+  assertionIds: readonly string[];
+  branches: readonly BranchId[];
+}> {
+  const assertionIds = identityAssertionsOnPaths(cluster, endpoints);
+  const branches = new Set<BranchId>();
+  for (const id of assertionIds) {
+    for (const branch of cluster.branchesByAssertionId.get(id) ?? []) {
+      branches.add(branch);
+    }
   }
-  return componentOf.get(a) !== componentOf.get(b);
+  return {
+    assertionIds,
+    branches: [...branches].sort((left, right) => compareStrings(left, right)),
+  };
 }
 
 /**
@@ -2405,7 +2449,9 @@ function fusedOnlyByIdentity(
  * across distinct pre-repoint relationships ({@link EdgeFoldCollapse}) whose
  * collapsing endpoints an identity pairing — and only an identity pairing —
  * fused. One conflict per endpoint pair per side, so a collapse of three
- * relationships reports each pairing that induced it.
+ * relationships reports each pairing that induced it. A pair the cluster's
+ * non-identity edges connect on their own was fused by similarity, a shared
+ * unique value or a retype, and its collapse is the merge's ordinary repoint.
  */
 function pairingInducedEdgeConflicts(
   collapsed: readonly EdgeFoldCollapse[],
@@ -2424,7 +2470,7 @@ function pairingInducedEdgeConflicts(
       ].sort((left, right) => compareMergeKeys(left, right));
       for (const [index, a] of endpoints.entries()) {
         for (const b of endpoints.slice(index + 1)) {
-          if (!fusedOnlyByIdentity(cluster, a, b)) continue;
+          if (connectedWithoutIdentity(cluster, a, b)) continue;
           conflicts.push({
             kind: "edge",
             edgeKind: collapse.kind,
@@ -2436,8 +2482,7 @@ function pairingInducedEdgeConflicts(
               .filter((row) => endpointOf(row) === a || endpointOf(row) === b)
               .map((row) => row.id as string)
               .sort((left, right) => compareStrings(left, right)),
-            assertionIds: cluster.assertionIds,
-            branches: cluster.branches,
+            ...droppedPairingFor(cluster, [a, b]),
           });
         }
       }
@@ -2461,51 +2506,39 @@ type BuiltMergePlan<G extends GraphDef> = Readonly<{
 /** The exclusion set of a first plan build: no pairing dropped yet. */
 const NO_EXCLUDED_ASSERTIONS: ReadonlySet<string> = new Set();
 
+/** The plan's node upserts in the shape the uniqueness probe reads. */
+function probeUpsertsOf(
+  writes: readonly Readonly<{
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+  }>[],
+): readonly MemberOwnWrite[] {
+  return writes.map((write) => ({
+    kind: write.kind,
+    id: write.id,
+    props: write.props,
+  }));
+}
+
 /**
- * `onUniquenessConflict: "flag"`'s detection: the resolved node write set —
- * the SAME after-images and releases `applyNodeRows` hands the commit — probed
- * through the store's own resolved-claim decision, narrowed to the findings an
- * identity-paired canonical entity is party to (as the write refused, or as
- * the in-set holder the refused write competes with). A finding on a write no
- * identity pairing fused is not this policy's to drop: it stays where it is
- * today, the commit's own constraint refusal.
- *
- * Plan time is best-effort in one documented way, exactly like the
- * composition-orphan preview: the after-image here is the plan's resolved
- * props, which the commit patch-merges over the target's current row, so a
- * key the target's row carries that no branch restated is invisible here and
- * still refused authoritatively at apply.
+ * One call of the store's resolved-claim decision for the planner, translating
+ * the one refusal an accepted `"flag"` cannot be honored under: a backend that
+ * does not serve the batched probe is refused as that option, never surfaced
+ * as an opaque capability fault the caller cannot connect to the policy they
+ * stated.
  */
-async function pairingInducedUniquenessConflicts<G extends GraphDef>(
+async function probePlannedUniqueness<G extends GraphDef>(
   target: Store<G>,
-  built: BuiltMergePlan<G>,
-): Promise<readonly IdentityUnresolvedConflict[]> {
-  const pairedByWriteIdentity = new Map<MergeKey, IdentityPairedCluster>();
-  for (const cluster of built.pairedClusters.values()) {
-    pairedByWriteIdentity.set(cluster.writeIdentity, cluster);
-  }
-  if (pairedByWriteIdentity.size === 0) return [];
-  const { plan } = built;
-  let findings: readonly ResolvedNodeClaimConflict[];
+  upserts: readonly MemberOwnWrite[],
+  releases: readonly MergePlanEntityRef[],
+): Promise<readonly ResolvedNodeClaimConflict[]> {
   try {
-    findings = await storeRuntime(target).probeResolvedNodeUniqueness(
+    return await storeRuntime(target).probeResolvedNodeUniqueness(
       storeBackend(target),
-      {
-        upserts: plannedNodeUpserts(plan).map((upsert) => ({
-          kind: upsert.kind,
-          id: upsert.id,
-          props: upsert.props,
-        })),
-        releases: [...plan.nodeDeletions].map(([identity, kind]) => ({
-          kind,
-          id: idOf(identity),
-        })),
-      },
+      { upserts, releases },
     );
   } catch (error) {
-    // An accepted option the backend cannot honor is refused as that option,
-    // never surfaced as an opaque capability fault the caller cannot connect
-    // to the policy they stated.
     if (
       error instanceof ConfigurationError &&
       error.details["code"] === RESOLVED_NODE_UNIQUENESS_UNSUPPORTED_CODE
@@ -2525,29 +2558,130 @@ async function pairingInducedUniquenessConflicts<G extends GraphDef>(
     }
     throw error;
   }
-  const conflicts: IdentityUnresolvedConflict[] = [];
-  for (const finding of findings) {
-    const claimantKey = mergeKey(finding.claimant.kind, finding.claimant.id);
-    const holderKey = mergeKey(finding.holder.kind, finding.holder.id);
-    const claimantCluster = pairedByWriteIdentity.get(claimantKey);
-    const holderCluster =
+}
+
+/** A `(constraintName, key)` claim, the unit two findings collide on. */
+function claimKey(finding: ResolvedNodeClaimConflict): string {
+  return `${finding.constraintName}\u0000${finding.key}`;
+}
+
+/**
+ * `onUniquenessConflict: "flag"`'s detection, with INDUCTION decided up front
+ * through the same store seam, before any rebuild:
+ *
+ * 1. Probe the resolved node write set — the SAME after-images and releases
+ *    `applyNodeRows` hands the commit — and keep the findings an
+ *    identity-paired canonical entity is party to (as the write refused, or as
+ *    the in-set holder it competes with).
+ * 2. Probe the COUNTERFACTUAL once: the same set with every party cluster's
+ *    fused write replaced by its staged members' own singleton writes
+ *    ({@link IdentityPairedCluster.memberWrites}). A finding is pairing-induced
+ *    for a cluster only when NO member of that cluster claims the same
+ *    `(constraint, key)` on its own there — otherwise the collision is the
+ *    member's, the pairing merely relabelled it, and dropping the pairing would
+ *    change nothing but the report. Keys stay store-owned throughout.
+ *
+ * A finding that is not induced stays where it is today, the commit's own
+ * constraint refusal, and drops nothing. Deciding induction before the rebuild
+ * is what makes the exclusion set exact: the rebuild cannot surface a second
+ * pairing for a key a member already held, so the non-convergence backstop is
+ * unreachable on ordinary input.
+ *
+ * Plan time is best-effort in two documented ways, exactly like the
+ * composition-orphan preview: the after-image here is the plan's resolved
+ * props, which the commit patch-merges over the target's current row, so a key
+ * the target's row carries that no branch restated is invisible here and still
+ * refused authoritatively at apply; and the probe is a lock-free read of the
+ * target, so a row committed between plan and apply can make this drop a
+ * pairing the commit would have allowed — the safe direction.
+ */
+async function pairingInducedUniquenessConflicts<G extends GraphDef>(
+  target: Store<G>,
+  built: BuiltMergePlan<G>,
+): Promise<readonly IdentityUnresolvedConflict[]> {
+  const pairedByWriteIdentity = new Map<MergeKey, IdentityPairedCluster>();
+  for (const cluster of built.pairedClusters.values()) {
+    pairedByWriteIdentity.set(cluster.writeIdentity, cluster);
+  }
+  if (pairedByWriteIdentity.size === 0) return [];
+  const { plan } = built;
+  const upserts = probeUpsertsOf(plannedNodeUpserts(plan));
+  const releases = plannedNodeReleases(plan);
+  const findings = await probePlannedUniqueness(target, upserts, releases);
+
+  const clustersOf = (
+    finding: ResolvedNodeClaimConflict,
+  ): readonly IdentityPairedCluster[] => {
+    const claimant = pairedByWriteIdentity.get(
+      mergeKey(finding.claimant.kind, finding.claimant.id),
+    );
+    const holder =
       finding.holder.origin === "set" ?
-        pairedByWriteIdentity.get(holderKey)
+        pairedByWriteIdentity.get(
+          mergeKey(finding.holder.kind, finding.holder.id),
+        )
       : undefined;
-    const cluster = claimantCluster ?? holderCluster;
-    if (cluster === undefined) continue;
-    conflicts.push({
-      kind: "uniqueness",
-      constraintName: finding.constraintName,
-      fields: finding.fields,
-      canonical: entityRef(cluster.writeIdentity),
-      holder: entityRef(
-        claimantCluster === undefined ? claimantKey : holderKey,
+    return [claimant, holder].filter(
+      (cluster): cluster is IdentityPairedCluster => cluster !== undefined,
+    );
+  };
+  const party = findings.filter((finding) => clustersOf(finding).length > 0);
+  if (party.length === 0) return [];
+
+  const partyClusters = new Map<MergeKey, IdentityPairedCluster>();
+  for (const finding of party) {
+    for (const cluster of clustersOf(finding)) {
+      partyClusters.set(cluster.writeIdentity, cluster);
+    }
+  }
+  const counterfactual = await probePlannedUniqueness(
+    target,
+    [
+      ...upserts.filter(
+        (upsert) => !partyClusters.has(mergeKey(upsert.kind, upsert.id)),
       ),
-      members: cluster.members.map((member) => entityRef(member)),
-      assertionIds: cluster.assertionIds,
-      branches: cluster.branches,
-    });
+      ...[...partyClusters.values()].flatMap((cluster) => cluster.memberWrites),
+    ],
+    releases,
+  );
+  const memberOwnedClaims = new Map<MergeKey, Set<string>>();
+  for (const finding of counterfactual) {
+    for (const cluster of partyClusters.values()) {
+      const members = new Set(cluster.members);
+      const touches = [
+        mergeKey(finding.claimant.kind, finding.claimant.id),
+        ...(finding.holder.origin === "set" ?
+          [mergeKey(finding.holder.kind, finding.holder.id)]
+        : []),
+      ].some((key) => members.has(key));
+      if (!touches) continue;
+      const claims =
+        memberOwnedClaims.get(cluster.writeIdentity) ?? new Set<string>();
+      claims.add(claimKey(finding));
+      memberOwnedClaims.set(cluster.writeIdentity, claims);
+    }
+  }
+
+  const conflicts: IdentityUnresolvedConflict[] = [];
+  for (const finding of party) {
+    for (const cluster of clustersOf(finding)) {
+      if (
+        memberOwnedClaims.get(cluster.writeIdentity)?.has(claimKey(finding)) ===
+        true
+      ) {
+        continue;
+      }
+      conflicts.push({
+        kind: "uniqueness",
+        constraintName: finding.constraintName,
+        fields: finding.fields,
+        canonical: entityRef(cluster.writeIdentity),
+        owner: entityRef(mergeKey(finding.holder.kind, finding.holder.id)),
+        loser: entityRef(mergeKey(finding.claimant.kind, finding.claimant.id)),
+        members: cluster.members.map((member) => entityRef(member)),
+        ...droppedPairingFor(cluster, cluster.members),
+      });
+    }
   }
   return conflicts;
 }
@@ -2559,17 +2693,19 @@ async function pairingInducedUniquenessConflicts<G extends GraphDef>(
  * for the pairing-induced conflicts a `"flag"` policy must drop
  * (`onEdgeConflict` — a collapse of distinct relationships;
  * `onUniquenessConflict` — a fused entity violating a unique constraint), and
- * if there are any, rebuild ONCE with the identity assertions behind those
- * pairings removed from candidate generation, carrying the dropped conflicts
- * forward on the plan's report. Every other cluster is byte-identical across
- * the two builds.
+ * if there are any, rebuild ONCE with the identity assertions on the paths
+ * behind those pairings removed from candidate generation, carrying the
+ * dropped conflicts forward on the plan's report. Every other cluster is
+ * byte-identical across the two builds.
  *
- * One rebuild converges because removing candidate edges only ever reduces
- * fusions: a conflicted cluster loses every identity edge it had, so what it
- * splits into is no longer identity-paired and nothing an identity policy
- * judges remains there. A second build that still reports a pairing-induced
- * conflict therefore violates that invariant, and the merge refuses with a
- * typed error rather than looping.
+ * Why one rebuild is enough differs per arm. Edge: removing candidate edges
+ * only ever shrinks fusions, so the rebuilt plan collapses a subset of what
+ * the first did and nothing new can appear. Uniqueness: induction is decided
+ * per member up front ({@link pairingInducedUniquenessConflicts}), so every
+ * dropped pairing is one whose members claim no such key on their own, and
+ * the writes the split adds back cannot claim it either. A second build that
+ * still reports a pairing-induced conflict therefore violates one of those two
+ * arguments, and the merge refuses with a typed error rather than looping.
  */
 async function resolvePairingInducedConflicts<G extends GraphDef>(
   target: Store<G>,
@@ -2607,16 +2743,17 @@ async function resolvePairingInducedConflicts<G extends GraphDef>(
       },
     );
   }
-  // The rebuild is the ground truth of WHICH suspected conflicts the pairing
-  // induced: a pair (or a member set) the rebuilt plan fused anyway — through
-  // similarity, a shared unique value, or a retype — was never held together by
-  // the identity pairing, so its collision is the merge's ordinary behavior and
-  // is not reported against the pairing. The first pass is deliberately
-  // over-inclusive (any identity-sourced edge in the cluster) because dropping
-  // a pairing whose pair re-fuses changes nothing about that pair.
+  // The edge arm's first pass counts an edge carrying identity AND another
+  // source as identity (a forced pairing a block source also proposed is never
+  // scored, so whether similarity alone would fuse the pair is unknowable
+  // before the rebuild). The rebuild answers it: a pair the rebuilt plan fused
+  // anyway was never held together by the pairing, so its collapse is the
+  // merge's ordinary repoint and is not reported against the pairing. The
+  // uniqueness arm decided induction up front and passes through unchanged.
   const induced = suspected.filter(
     (conflict) => !stillFusedWithoutPairing(rebuilt.plan, conflict),
   );
+  if (induced.length === 0) return first.plan;
   return {
     ...rebuilt.plan,
     identityConflicts: sortIdentityConflicts([
@@ -2627,32 +2764,20 @@ async function resolvePairingInducedConflicts<G extends GraphDef>(
 }
 
 /**
- * Whether the entities a suspected pairing-induced conflict names still share
- * one canonical survivor in the plan rebuilt WITHOUT that pairing.
+ * Whether the two entities an `"edge"` conflict names still share one canonical
+ * survivor in the plan rebuilt WITHOUT the pairing. Every other arm decided its
+ * attribution before the rebuild.
  */
 function stillFusedWithoutPairing<G extends GraphDef>(
   rebuilt: MergePlan<G>,
   conflict: IdentityUnresolvedConflict,
 ): boolean {
+  if (conflict.kind !== "edge") return false;
   const canonicalKeyOf = (entity: EntityRef): MergeKey => {
     const key = mergeKey(entity.kind, entity.id);
     return rebuilt.canonicalOf.get(key) ?? key;
   };
-  switch (conflict.kind) {
-    case "edge": {
-      return canonicalKeyOf(conflict.a) === canonicalKeyOf(conflict.b);
-    }
-    case "uniqueness": {
-      const [first, ...rest] = conflict.members.map((member) =>
-        canonicalKeyOf(member),
-      );
-      return first !== undefined && rest.every((key) => key === first);
-    }
-    case "assertion":
-    case "separation": {
-      return false;
-    }
-  }
+  return canonicalKeyOf(conflict.a) === canonicalKeyOf(conflict.b);
 }
 
 /**
@@ -2779,7 +2904,7 @@ function identityUnresolvedConflictSortKey(
       return {
         semanticKey: `${conflict.kind}\u0000${conflict.constraintName}`,
         a: conflict.canonical,
-        b: conflict.holder,
+        b: conflict.owner,
       };
     }
   }
@@ -3080,6 +3205,16 @@ type MechanicalEdgeWrite = Readonly<{
   item: EdgeUpsert;
 }>;
 
+/** The node rows a plan deletes — the claims it releases — as `applyNodeRows` receives them. */
+function plannedNodeReleases<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly MergePlanEntityRef[] {
+  return [...plan.nodeDeletions].map(([identity, kind]) => ({
+    kind,
+    id: idOf(identity),
+  }));
+}
+
 /**
  * The node rows a plan writes, as `applyNodeRows` receives them: every planned
  * write with its resolved after-image props (a modification's base keys the
@@ -3265,10 +3400,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
-  const nodeDeletions = [...plan.nodeDeletions].map(([identity, kind]) => ({
-    kind,
-    id: idOf(identity),
-  }));
+  const nodeDeletions = plannedNodeReleases(plan);
   const nodeUpserts = plannedNodeUpserts(plan);
   const validityEndedNodes = new Set(
     nodeUpserts
@@ -4223,9 +4355,7 @@ export function resolvedMergeWrites<G extends GraphDef>(
   plan: MergePlan<G>,
 ): MergePlanWrites {
   return {
-    nodeDeletes: [...plan.nodeDeletions].map(([identity, kind]) =>
-      wireEntityRef(kind, idOf(identity)),
-    ),
+    nodeDeletes: plannedNodeReleases(plan),
     nodeUpserts: resolvedNodeUpserts(plan),
     edgeDeletes: [...plan.edgeDeletions].map(([identity, kind]) =>
       wireEntityRef(kind, idOf(identity)),
@@ -4737,9 +4867,7 @@ async function resolvedMergeArtifact<G extends GraphDef>(
           entity: wireEntityRef(kindOf(entity), idOf(entity)),
           toKind,
         })),
-      deletedNodes: [...plan.nodeDeletions].map(([identity, kind]) =>
-        wireEntityRef(kind, idOf(identity)),
-      ),
+      deletedNodes: plannedNodeReleases(plan),
       ...(resolved.incrementalGuard === undefined ?
         {}
       : {

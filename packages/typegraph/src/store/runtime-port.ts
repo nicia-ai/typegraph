@@ -232,6 +232,18 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * the same claim writer an ordinary create uses rather than a uniqueness-only
    * insert. See `store/claims/resolved-node-claims.ts`.
    */
+  applyResolvedNodeUniqueness: <Output>(
+    target: TransactionBackend,
+    writes: Readonly<{
+      upserts: readonly Readonly<{
+        kind: string;
+        id: string;
+        props: Readonly<Record<string, unknown>>;
+      }>[];
+      releases: readonly Readonly<{ kind: string; id: string }>[];
+    }>,
+    apply: () => Promise<Output>,
+  ) => Promise<Output>;
   /**
    * THE plan-time half of `applyResolvedNodeUniqueness`: every uniqueness
    * collision the same resolved write set would be refused for, as decisions
@@ -251,18 +263,6 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       releases: readonly Readonly<{ kind: string; id: string }>[];
     }>,
   ) => Promise<readonly ResolvedNodeClaimConflict[]>;
-  applyResolvedNodeUniqueness: <Output>(
-    target: TransactionBackend,
-    writes: Readonly<{
-      upserts: readonly Readonly<{
-        kind: string;
-        id: string;
-        props: Readonly<Record<string, unknown>>;
-      }>[];
-      releases: readonly Readonly<{ kind: string; id: string }>[];
-    }>,
-    apply: () => Promise<Output>,
-  ) => Promise<Output>;
   /**
    * @internal Reads the graph's identity assertions in transfer shape, honoring
    * this store's SQL binding. Used by interchange export, base-version

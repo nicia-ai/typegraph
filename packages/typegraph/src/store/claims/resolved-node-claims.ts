@@ -94,6 +94,8 @@ function claimRowKey(entry: UniquenessClaimEntry): string {
 export type ResolvedNodeClaimConflict = Readonly<{
   constraintName: string;
   fields: readonly string[];
+  /** The constraint's computed key both parties claim — store-owned, opaque to consumers. */
+  key: string;
   claimant: Readonly<{ kind: string; id: string }>;
   holder: Readonly<{ kind: string; id: string; origin: "set" | "persisted" }>;
 }>;
@@ -138,6 +140,7 @@ function proposedClaimConflict(
   return {
     constraintName: challenger.entry.constraintName,
     fields: challenger.entry.refusal.constraint.fields,
+    key: challenger.entry.key,
     claimant: {
       kind: challenger.owner.concreteKind,
       id: challenger.owner.nodeId,
@@ -298,35 +301,32 @@ function requireBatchProbe(
 }
 
 /**
- * THE uniqueness decision over the FINAL state of a resolved write set: every
- * collision the set would commit, in-set competitions first (upsert order),
- * then persisted holders (probe-group order).
- *
- * All proposed after-images are compared together before persisted claim rows
- * are consulted. Owners the set itself releases or replaces are ignored, which
- * permits atomic swaps and handoffs while still reporting every owner outside
- * the set. The probe is batch-only by contract: a caller that needs this set
- * semantic must not quietly degrade to sequential checks.
- *
- * Read-only. {@link validateResolvedNodeClaims} refuses on the first finding;
- * the merge planner reports the findings an identity pairing induced.
+ * The claim owners the set itself writes or releases: a persisted row among
+ * them is being replaced or given back, so its claim is available to the set.
  */
-export async function findResolvedNodeClaimConflicts(
-  ctx: UniquenessContext,
+function affectedOwnerKeys(
   upserts: readonly ResolvedNodeUpsert[],
-  releases: readonly ResolvedNodeRelease[] = [],
-): Promise<readonly ResolvedNodeClaimConflict[]> {
-  const checkUniqueBatch = requireBatchProbe(ctx);
-  const claims = proposedClaims(ctx, upserts);
-  const conflicts = [...claims.conflicts];
-  if (claims.accepted.length === 0) return conflicts;
-
-  const affectedOwners = new Set(
+  releases: readonly ResolvedNodeRelease[],
+): ReadonlySet<string> {
+  return new Set(
     [...upserts, ...releases].map((reference) =>
       claimOwnerKey({ concreteKind: reference.kind, nodeId: reference.id }),
     ),
   );
-  for (const group of groupClaimsForProbe(claims.accepted)) {
+}
+
+/**
+ * The collisions between the set's ACCEPTED claims and persisted rows outside
+ * the set, one batched probe per `(kind in scope, constraint)` group.
+ */
+async function persistedClaimConflicts(
+  ctx: UniquenessContext,
+  claims: readonly ProposedClaim[],
+  affectedOwners: ReadonlySet<string>,
+): Promise<readonly ResolvedNodeClaimConflict[]> {
+  const checkUniqueBatch = requireBatchProbe(ctx);
+  const conflicts: ResolvedNodeClaimConflict[] = [];
+  for (const group of groupClaimsForProbe(claims)) {
     const existingRows = await checkUniqueBatch({
       graphId: ctx.graphId,
       nodeKind: group.probeKind,
@@ -349,6 +349,7 @@ export async function findResolvedNodeClaimConflicts(
       conflicts.push({
         constraintName: group.constraintName,
         fields: claim.entry.refusal.constraint.fields,
+        key: claim.entry.key,
         claimant: {
           kind: claim.owner.concreteKind,
           id: claim.owner.nodeId,
@@ -368,16 +369,59 @@ export async function findResolvedNodeClaimConflicts(
 }
 
 /**
+ * THE uniqueness decision over the FINAL state of a resolved write set: every
+ * collision the set would commit, in-set competitions first (upsert order),
+ * then persisted holders (probe-group order).
+ *
+ * All proposed after-images are compared together before persisted claim rows
+ * are consulted. Owners the set itself releases or replaces are ignored, which
+ * permits atomic swaps and handoffs while still reporting every owner outside
+ * the set. The probe is batch-only by contract: a caller that needs this set
+ * semantic must not quietly degrade to sequential checks.
+ *
+ * Read-only. {@link validateResolvedNodeClaims} refuses on the first finding;
+ * the merge planner reports the findings an identity pairing induced.
+ */
+export async function findResolvedNodeClaimConflicts(
+  ctx: UniquenessContext,
+  upserts: readonly ResolvedNodeUpsert[],
+  releases: readonly ResolvedNodeRelease[] = [],
+): Promise<readonly ResolvedNodeClaimConflict[]> {
+  requireBatchProbe(ctx);
+  const claims = proposedClaims(ctx, upserts);
+  if (claims.accepted.length === 0) return claims.conflicts;
+  return [
+    ...claims.conflicts,
+    ...(await persistedClaimConflicts(
+      ctx,
+      claims.accepted,
+      affectedOwnerKeys(upserts, releases),
+    )),
+  ];
+}
+
+/**
  * Validates node uniqueness against the FINAL state of a resolved write set:
- * {@link findResolvedNodeClaimConflicts}'s first finding, thrown.
+ * {@link findResolvedNodeClaimConflicts}'s first finding, thrown — the two
+ * halves read in the same order, and an in-set competition the set already
+ * decided is refused before the persisted probe's round trip is paid.
  */
 export async function validateResolvedNodeClaims(
   ctx: UniquenessContext,
   upserts: readonly ResolvedNodeUpsert[],
   releases: readonly ResolvedNodeRelease[] = [],
 ): Promise<void> {
-  const [first] = await findResolvedNodeClaimConflicts(ctx, upserts, releases);
-  if (first !== undefined) throw resolvedNodeClaimRefusal(first);
+  requireBatchProbe(ctx);
+  const claims = proposedClaims(ctx, upserts);
+  const [inSet] = claims.conflicts;
+  if (inSet !== undefined) throw resolvedNodeClaimRefusal(inSet);
+  if (claims.accepted.length === 0) return;
+  const [persisted] = await persistedClaimConflicts(
+    ctx,
+    claims.accepted,
+    affectedOwnerKeys(upserts, releases),
+  );
+  if (persisted !== undefined) throw resolvedNodeClaimRefusal(persisted);
 }
 
 /**

@@ -818,28 +818,38 @@ const result = await merge(base, branches, {
 `onUniquenessConflict: "flag"` the merge builds its plan, looks for the
 collisions an identity pairing induced, and — if it finds any — rebuilds the
 plan **once** with the `same` assertions behind those pairings removed from
-candidate generation. Only the pairing is dropped: the assertion itself still
-lands in the identity ledger, so the two rows stay in one identity class (every
-identity-aware read still sees them as one entity) — they are simply not
-consolidated into a single row by this merge, and every relationship each row
-carried lands as it was staged. A collision that similarity, a shared unique
-value or an ontology retype would have produced without the assertion is not
-the pairing's doing and is not reported against it; the rebuild itself is what
-decides that. One rebuild is always enough — removing candidate edges only
-ever reduces fusions, so a second pass can find nothing new; the merge refuses
-with a `GRAPH_MERGE_ERROR` rather than looping if that invariant were ever
-violated. Two things stay where they are today: a uniqueness collision a
-member carries **on its own** (not one the fusion created) is still refused by
-the commit, flag or not; and the plan-time probe reads the plan's resolved
-properties, so a key the target's row carries that no branch restated is
-caught by the commit's authoritative check rather than at plan time.
+candidate generation — only the assertions on the identity path between the
+entities the conflict names, never every assertion the cluster holds. Only the
+pairing is dropped: the assertion itself still lands in the identity ledger, so
+the two rows stay in one identity class (every identity-aware read still sees
+them as one entity) — they are simply not consolidated into a single row by
+this merge, and every relationship each row carried lands as it was staged. A
+collision that similarity, a shared unique value or an ontology retype would
+have produced without the assertion is not the pairing's doing and is not
+reported against it. One rebuild is always enough, for a different reason per
+arm: an **edge** collapse can only disappear when candidate edges are removed,
+since fusions only shrink; a **uniqueness** collision is attributed *before*
+the rebuild, member by member — the planner probes the same store decision a
+second time over the members' own unfused writes, and drops a pairing only when
+no member claims that key on its own, so the writes the split adds back cannot
+claim it either. The merge refuses with a `GRAPH_MERGE_ERROR` rather than
+looping if a rebuilt plan ever reports a pairing-induced conflict again. Three
+things stay where they are today: a uniqueness collision a member carries **on
+its own** (not one the fusion created) is still refused by the commit, flag or
+not, and drops no pairing; the plan-time probe reads the plan's resolved
+properties, so a key the target's row carries that no branch restated is caught
+by the commit's authoritative check rather than at plan time; and, in the
+converse direction, the probe is a lock-free read of the target, so a row
+committed between planning and apply can make the planner drop a pairing the
+commit would have allowed — the safe direction, since the plan stays
+applicable and the report says what was dropped.
 
 The two arms carry what a reviewer needs to act on the dropped pairing:
 
 | Arm | Fields |
 | --- | --- |
 | `kind: "edge"` | `edgeKind`; `a` and `b`, the two pre-repoint endpoints whose pairing collapsed the rows; `canonical`, the survivor both repointed onto; `side` (`"from"` or `"to"`); `edgeIds`, the rows that would have folded; `assertionIds`, the `same` assertions whose pairing was dropped; `branches`, the branches that staged them. |
-| `kind: "uniqueness"` | `constraintName` and `fields`; `canonical`, the fused entity; `holder`, the current owner of the key — another write of the same plan, or a row the target already holds (reported under its **own** kind, the subclass row a `kindWithSubClasses` scope reached, say); `members`, the fused cluster; `assertionIds` and `branches` as above. |
+| `kind: "uniqueness"` | `constraintName` and `fields`; `canonical`, the fused entity whose pairing was dropped; `owner`, the current holder of the key — another write of the same plan, or a row the target already holds (reported under its **own** kind, the subclass row a `kindWithSubClasses` scope reached, say); `loser`, the write the store refused for it (`canonical` is one of the two); `members`, the fused cluster; `assertionIds` and `branches` as above. |
 
 **A plan carrying an `IdentityUnresolvedConflict` is still applicable.**
 `"flag"` means "keep the base truth, keep the data, tell the caller" — the

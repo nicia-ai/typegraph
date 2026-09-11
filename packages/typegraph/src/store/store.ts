@@ -1569,6 +1569,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Refuses an identity operation on a graph that never declared
    * `identity: { ... }`, where none of the identity tables exist.
    */
+  #requireIdentityEnabled(suggestion?: string): void {
+    if (this.#graph.identity !== undefined) return;
+    throw new ConfigurationError(
+      "Identity is not enabled for this graph.",
+      { code: "IDENTITY_NOT_ENABLED", graphId: this.graphId },
+      suggestion === undefined ? undefined : { suggestion },
+    );
+  }
+
   /**
    * The resolved write set as the claim layer reads it: every upsert carrying
    * its kind's registered unique constraints, and the releases narrowed to the
@@ -1624,15 +1633,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return constrainedKinds.has(release.kind);
     });
     return { upserts, releases };
-  }
-
-  #requireIdentityEnabled(suggestion?: string): void {
-    if (this.#graph.identity !== undefined) return;
-    throw new ConfigurationError(
-      "Identity is not enabled for this graph.",
-      { code: "IDENTITY_NOT_ENABLED", graphId: this.graphId },
-      suggestion === undefined ? undefined : { suggestion },
-    );
   }
 
   /** @internal Builds the identity read facade for a pinned StoreView. */

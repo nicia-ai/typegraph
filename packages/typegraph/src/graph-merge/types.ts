@@ -691,16 +691,18 @@ export type IdentityUnresolvedConflict =
   /**
    * `onUniquenessConflict: "flag"` dropped an identity pairing because the
    * entity it fused (`canonical`, out of `members`) would have violated
-   * `constraintName` over `fields` against `holder` — another write of the same
-   * plan, or a row the target already holds. `assertionIds` and `branches` name
-   * the dropped pairing exactly as the `"edge"` arm does.
+   * `constraintName` over `fields`: `owner` holds the key — another write of the
+   * same plan, or a row the target already holds — and `loser` is the write the
+   * store refused for it; `canonical` is one of the two. `assertionIds` and
+   * `branches` name the dropped pairing exactly as the `"edge"` arm does.
    */
   | Readonly<{
       kind: "uniqueness";
       constraintName: string;
       fields: readonly string[];
       canonical: EntityRef;
-      holder: EntityRef;
+      owner: EntityRef;
+      loser: EntityRef;
       members: readonly EntityRef[];
       assertionIds: readonly string[];
       branches: readonly BranchId[];

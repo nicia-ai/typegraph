@@ -104,6 +104,7 @@ const uniqueGraph = defineGraph({
 type UniqueGraph = typeof uniqueGraph;
 
 const BRANCH_A = asBranchId("branch-a");
+const BRANCH_B = asBranchId("branch-b");
 
 /** Every staged Person lands in one bucket, so `exactKey` proposes all pairs. */
 const ONE_BUCKET = { block: () => "all" } as const;
@@ -401,8 +402,10 @@ describe.each(backendMatrix())(
           constraintName: "full_name",
           fields: ["first", "last"],
           canonical: { kind: "NamedPerson", id: "a1" },
-          // The holder's OWN kind — the subclass row the scope reached.
-          holder: { kind: "NamedEmployee", id: "emp" },
+          // The owner's OWN kind — the subclass row the scope reached — and
+          // the fused write the store refused for it.
+          owner: { kind: "NamedEmployee", id: "emp" },
+          loser: { kind: "NamedPerson", id: "a1" },
           members: [
             { kind: "NamedPerson", id: "a1" },
             { kind: "NamedPerson", id: "b1" },
@@ -450,5 +453,214 @@ describe.each(backendMatrix())(
     // collision, the pairing is dropped and `toEqual([])` fails. (Spelling the
     // key in the planner would have left this test green while the write path
     // disagreed; the probe reaches the store's own key computation.)
+
+    /**
+     * A collision a MEMBER carries on its own is not the pairing's doing: `b1`
+     * alone claims the full key `e1` also claims, and the assertion merely
+     * fused `a1` (no key) onto it. `"flag"` must leave that collision to the
+     * commit's refusal — exactly the default's outcome — and drop nothing,
+     * rather than blame the pairing and hand back a plan that cannot apply.
+     */
+    it("leaves a member-owned collision to the commit's refusal instead of blaming the pairing", async () => {
+      const [base] = await createStoreWithSchema(
+        uniqueGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      const sourceA = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await sourceA.store.nodes.NamedPerson.create(
+        { name: "Ada", first: "Ada" },
+        { id: "a1" },
+      );
+      await sourceA.store.nodes.NamedPerson.create(
+        { name: "Ada Lovelace", first: "Ada", last: "Lovelace" },
+        { id: "b1" },
+      );
+      await sourceA.store.identity.assertSame(
+        { kind: "NamedPerson", id: "a1" },
+        { kind: "NamedPerson", id: "b1" },
+      );
+      const sourceB = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_B }),
+      );
+      await sourceB.store.nodes.NamedPerson.create(
+        { name: "Ada Lovelace", first: "Ada", last: "Lovelace" },
+        { id: "e1" },
+      );
+
+      // The plan blames nothing: no pairing is dropped, no conflict reported …
+      const artifact = unwrap(
+        await planMerge(base, [sourceA, sourceB], {
+          branchOrder: [BRANCH_A, BRANCH_B],
+          identity: { pairing: "definitional", onUniquenessConflict: "flag" },
+        }),
+      );
+      console.info(
+        `[${entry.name}] member-owned review:`,
+        artifact.review.identityConflicts,
+      );
+      expect(artifact.review.identityConflicts ?? []).toEqual([]);
+      // … and the fused write meets the commit's own refusal, exactly as the
+      // default policy's would.
+      const applied = await applyMergePlan(base, artifact);
+      if (isOk(applied)) throw new Error("expected a constraint refusal");
+      expect(applied.error.code).toBe("GRAPH_MERGE_CONSTRAINT_CONFLICT");
+      expect(applied.error.details["constraintName"]).toBe("full_name");
+      const byDefault = await merge(base, [sourceA, sourceB], {
+        branchOrder: [BRANCH_A, BRANCH_B],
+        identity: { pairing: "definitional" },
+      });
+      if (isOk(byDefault)) throw new Error("expected a constraint refusal");
+      expect(byDefault.error.code).toBe("GRAPH_MERGE_CONSTRAINT_CONFLICT");
+      expect(await base.nodes.NamedPerson.find()).toEqual([]);
+    });
+    // MUTATION CHECK: in `pairingInducedUniquenessConflicts` treat every party
+    // finding as induced (skip the counterfactual, or never record a
+    // member-owned claim) — the plan above then reports a `uniqueness`
+    // conflict blaming the pairing and `toEqual([])` fails, while applying it
+    // still refuses `b1` vs `e1`: a dropped pairing that bought nothing.
+
+    /**
+     * Two pairings, two full keys: each branch stages a row carrying the whole
+     * key on its own plus a keyless partner it asserts `same`. Neither
+     * collision is the pairing's — the two key-carrying members collide with
+     * each other unfused — so `"flag"` drops nothing and refuses exactly as the
+     * default does, instead of dropping one pairing, rebuilding, meeting the
+     * other, and failing the rebuild's invariant.
+     */
+    it("refuses two member-owned collisions the same way the default does, without a rebuild invariant failure", async () => {
+      const [base] = await createStoreWithSchema(
+        uniqueGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      const sourceA = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await sourceA.store.nodes.NamedPerson.create(
+        { name: "Ada Lovelace", first: "Ada", last: "Lovelace" },
+        { id: "a-full" },
+      );
+      await sourceA.store.nodes.NamedPerson.create(
+        { name: "Ada" },
+        { id: "a-partner" },
+      );
+      await sourceA.store.identity.assertSame(
+        { kind: "NamedPerson", id: "a-full" },
+        { kind: "NamedPerson", id: "a-partner" },
+      );
+      const sourceB = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_B }),
+      );
+      await sourceB.store.nodes.NamedPerson.create(
+        { name: "Ada Lovelace", first: "Ada", last: "Lovelace" },
+        { id: "b-full" },
+      );
+      await sourceB.store.nodes.NamedPerson.create(
+        { name: "Ada" },
+        { id: "b-partner" },
+      );
+      await sourceB.store.identity.assertSame(
+        { kind: "NamedPerson", id: "b-full" },
+        { kind: "NamedPerson", id: "b-partner" },
+      );
+
+      for (const identity of [
+        { pairing: "definitional" as const },
+        {
+          pairing: "definitional" as const,
+          onUniquenessConflict: "flag" as const,
+        },
+      ]) {
+        const result = await merge(base, [sourceA, sourceB], {
+          branchOrder: [BRANCH_A, BRANCH_B],
+          identity,
+        });
+        if (isOk(result)) throw new Error("expected a constraint refusal");
+        console.info(
+          `[${entry.name}] two pairings:`,
+          identity,
+          result.error.code,
+        );
+        expect(result.error.code).toBe("GRAPH_MERGE_CONSTRAINT_CONFLICT");
+        expect(result.error.message).not.toContain("did not converge");
+      }
+    });
+    // MUTATION CHECK: decide induction from the fused probe alone (never
+    // record a member-owned claim) AND blame only the claimant's cluster
+    // (`[claimant ?? holder]` in `clustersOf`) — the flag run drops one
+    // pairing, the rebuild surfaces the other, and the merge fails with the
+    // "did not converge" GRAPH_MERGE_ERROR instead of the constraint refusal.
+
+    /**
+     * The dropped pairing is the one on the PATH between the collapsed
+     * endpoints, not the cluster's whole pairing: `x`–`y`–`z`–`w` chained by
+     * three assertions, with only `x` and `z` carrying edges that collapse.
+     * `A1(x,y)` and `A2(y,z)` are on the `x`–`z` path and are dropped;
+     * `A3(z,w)` hangs off it and still fuses `z` with `w`.
+     */
+    it("drops only the assertions on the path between the collapsed endpoints", async () => {
+      const [base] = await createStoreWithSchema(
+        edgeGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      await base.nodes.Company.create({ name: "C" }, { id: "c" });
+      const source = unwrap(
+        await branch(base, () => makeBackend(), { id: BRANCH_A }),
+      );
+      for (const id of ["x1", "y1", "z1", "z2"]) {
+        await source.store.nodes.Person.create({ name: "Ada" }, { id });
+      }
+      await source.store.edges.worksAt.create(
+        { kind: "Person", id: "x1" },
+        { kind: "Company", id: "c" },
+        { role: "engineer" },
+        { id: "edge-x" },
+      );
+      await source.store.edges.worksAt.create(
+        { kind: "Person", id: "z1" },
+        { kind: "Company", id: "c" },
+        { role: "engineer" },
+        { id: "edge-z" },
+      );
+      const assertionId = async (a: string, b: string): Promise<string> =>
+        (
+          await source.store.identity.assertSame(
+            { kind: "Person", id: a },
+            { kind: "Person", id: b },
+          )
+        ).assertion.id;
+      const a1 = await assertionId("x1", "y1");
+      const a2 = await assertionId("y1", "z1");
+      await assertionId("z1", "z2");
+
+      const result = await merge(base, [source], {
+        branchOrder: [BRANCH_A],
+        identity: { pairing: "definitional", onEdgeConflict: "flag" },
+      });
+      if (isErr(result)) throw result.error;
+      const conflicts = conflictsOfKind(result.data as never, "edge");
+      expect(conflicts).toHaveLength(1);
+      expect(requireDefined(conflicts[0]).assertionIds).toEqual(
+        [a1, a2].toSorted(),
+      );
+      // x, y and z land separately; A3 still folds z2 into z1.
+      expect(
+        (await base.nodes.Person.find())
+          .map((row) => row.id as string)
+          .toSorted(),
+      ).toEqual(["x1", "y1", "z1"]);
+      expect(
+        (await base.edges.worksAt.find())
+          .map((edge) => edge.id as string)
+          .toSorted(),
+      ).toEqual(["edge-x", "edge-z"]);
+    });
+    // MUTATION CHECK: have `droppedPairingFor` return every assertion of the
+    // cluster (`cluster.branchesByAssertionId.keys()`) — `assertionIds` then
+    // lists A3 too and `z2` survives as its own row, failing both assertions.
   },
 );

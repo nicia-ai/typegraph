@@ -347,6 +347,9 @@ type RepointedEdge = Readonly<{
   staged: StagedEdge;
   fromKey: MergeKey;
   toKey: MergeKey;
+  /** The PRE-repoint endpoint keys, as {@link EdgeFoldRow} reports them. */
+  sourceFromKey: MergeKey;
+  sourceToKey: MergeKey;
   sourcePair: string;
   dedupeKey: string;
 }>;
@@ -372,24 +375,42 @@ function rowsById(
 }
 
 /**
- * The pre-repoint relationship of each ROW: the minimal {@link sourcePairKey} its
- * members named. A row normally names exactly one pair; the minimum keeps the choice
- * total (and order-independent) for the chosen-id case where two branches staged the
- * same edge id from different endpoints, which is still ONE row and so must land in
- * exactly one fold set.
+ * The pre-repoint relationship of each ROW: the member with the minimal
+ * {@link sourcePairKey} among the row's staged copies, read as an
+ * {@link EdgeFoldRow}. A row normally names exactly one pair; the minimum keeps
+ * the choice total (and order-independent) for the chosen-id case where two
+ * branches staged the same edge id from different endpoints, which is still
+ * ONE row and so must land in exactly one fold set.
  */
 function sourcePairByRow(
   rows: ReadonlyMap<EdgeId, readonly RepointedEdge[]>,
-): ReadonlyMap<EdgeId, string> {
-  const pairs = new Map<EdgeId, string>();
+): ReadonlyMap<EdgeId, EdgeFoldRow> {
+  const pairs = new Map<EdgeId, EdgeFoldRow>();
   for (const [id, members] of rows) {
-    const sorted = members
-      .map((member) => member.sourcePair)
-      .sort((left, right) => compareStrings(left, right));
-    pairs.set(id, requireDefined(sorted[0]));
+    const minimal = requireDefined(
+      [...members].sort((left, right) =>
+        compareStrings(left.sourcePair, right.sourcePair),
+      )[0],
+    );
+    pairs.set(id, {
+      id,
+      fromKey: minimal.sourceFromKey,
+      toKey: minimal.sourceToKey,
+    });
   }
   return pairs;
 }
+
+/**
+ * One `(from', type, to')` collision group partitioned into the member sets
+ * that each commit as a single row, together with the pre-repoint pair of
+ * every row — the partition's own input, handed out so the collapse report
+ * reads the decision rather than re-deriving it.
+ */
+type FoldPartition = Readonly<{
+  sets: readonly (readonly RepointedEdge[])[];
+  sourcePairByRow: ReadonlyMap<EdgeId, EdgeFoldRow>;
+}>;
 
 /**
  * Partitions one `(from', type, to')` collision group into the member sets that each
@@ -420,13 +441,14 @@ function sourcePairByRow(
  * Determinism: the partition derives only from the staged ids and their pre-repoint
  * pairs — never from input order — and the sets are emitted in id order.
  */
-function foldSets(
-  groupEdges: readonly RepointedEdge[],
-): readonly (readonly RepointedEdge[])[] {
+function foldSets(groupEdges: readonly RepointedEdge[]): FoldPartition {
   const rows = rowsById(groupEdges);
   const sourcePairs = sourcePairByRow(rows);
+  const pairKeyOf = (row: EdgeFoldRow): string =>
+    sourcePairKey(row.fromKey, row.toKey);
   const representatives = new Map<string, EdgeId>();
-  for (const [id, pair] of sourcePairs) {
+  for (const [id, row] of sourcePairs) {
+    const pair = pairKeyOf(row);
     const representative = representatives.get(pair);
     if (
       representative === undefined ||
@@ -442,14 +464,14 @@ function foldSets(
     compareStrings(left, right),
   )) {
     const members = requireDefined(rows.get(id));
-    const pair = requireDefined(sourcePairs.get(id));
+    const pair = pairKeyOf(requireDefined(sourcePairs.get(id)));
     if (representatives.get(pair) === id) {
       collapsed.push(...members);
     } else {
       parallel.push(members);
     }
   }
-  return [collapsed, ...parallel];
+  return { sets: [collapsed, ...parallel], sourcePairByRow: sourcePairs };
 }
 
 /**
@@ -874,6 +896,8 @@ export function repointEdges<G extends GraphDef = GraphDef>(
       staged,
       fromKey,
       toKey,
+      sourceFromKey,
+      sourceToKey,
       sourcePair: sourcePairKey(sourceFromKey, sourceToKey),
       dedupeKey: dedupeKey(fromKey, staged.kind, toKey, staged.props),
     };
@@ -907,7 +931,8 @@ export function repointEdges<G extends GraphDef = GraphDef>(
 
   for (const group of sortedGroups) {
     const groupEdges = requireDefined(liveByGroup.get(group));
-    for (const foldSet of foldSets(groupEdges)) {
+    const partition = foldSets(groupEdges);
+    for (const foldSet of partition.sets) {
       const folded = foldEdgeSet(
         foldSet,
         context,
@@ -918,7 +943,11 @@ export function repointEdges<G extends GraphDef = GraphDef>(
       for (const conflict of folded.conflicts) {
         conflicts.push(conflict as PropertyConflict<G>);
       }
-      const collapse = foldCollapse(folded.edge, foldSet);
+      const collapse = foldCollapse(
+        folded.edge,
+        foldSet,
+        partition.sourcePairByRow,
+      );
       if (collapse !== undefined) collapsed.push(collapse);
     }
   }
@@ -962,33 +991,22 @@ export function repointEdges<G extends GraphDef = GraphDef>(
 /**
  * The {@link EdgeFoldCollapse} a fold set reports, or `undefined` when the set
  * is a single row (nothing folded) or every row named one pre-repoint pair.
- * The fold set's rows are already one per pre-repoint pair (`foldSets` keeps a
- * pair's representative row and commits the rest as parallel rows), so
- * distinct source pairs are counted over the set's distinct edge ids.
+ * Reads each row's pre-repoint pair off the partition that folded it
+ * ({@link FoldPartition.sourcePairByRow}) — the same map that decided which
+ * rows collapse — so the report cannot disagree with the fold.
  */
 function foldCollapse(
   edge: MergedEdge,
   foldSet: readonly RepointedEdge[],
+  sourcePairByRow: ReadonlyMap<EdgeId, EdgeFoldRow>,
 ): EdgeFoldCollapse | undefined {
-  // A row two branches staged from different endpoints (a chosen id) keeps
-  // its minimal pair — the same choice `sourcePairByRow` made for the fold.
-  const sourcePairById = new Map<EdgeId, string>();
-  for (const member of foldSet) {
-    const existing = sourcePairById.get(member.staged.id);
-    if (
-      existing === undefined ||
-      compareStrings(member.sourcePair, existing) < 0
-    ) {
-      sourcePairById.set(member.staged.id, member.sourcePair);
-    }
-  }
-  if (new Set(sourcePairById.values()).size < 2) return undefined;
-  const rows = [...sourcePairById]
-    .sort(([left], [right]) => compareStrings(left, right))
-    .map(([id, sourcePair]): EdgeFoldRow => {
-      const [fromKey, toKey] = JSON.parse(sourcePair) as [MergeKey, MergeKey];
-      return { id, fromKey, toKey };
-    });
+  const rows = [...new Set(foldSet.map((member) => member.staged.id))]
+    .sort((left, right) => compareStrings(left, right))
+    .map((id) => requireDefined(sourcePairByRow.get(id)));
+  const distinctPairs = new Set(
+    rows.map((row) => sourcePairKey(row.fromKey, row.toKey)),
+  );
+  if (distinctPairs.size < 2) return undefined;
   return {
     kind: edge.kind,
     survivorId: edge.id,
