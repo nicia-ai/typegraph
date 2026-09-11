@@ -177,6 +177,7 @@ import {
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
+  generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
   planSqliteEdgeMatchIdentityAdoption,
@@ -1638,13 +1639,17 @@ export function buildSqliteEngineProfile(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generateSqliteCreateTableSQL(tables.fences),
-    sinceIndexDdl: sinceIndexAdoptionDdl({
-      recordedNodes: getTableName(tables.recordedNodes),
-      recordedEdges: getTableName(tables.recordedEdges),
-      recordedIdentityAssertions: getTableName(
-        tables.recordedIdentityAssertions,
-      ),
-    }),
+    sinceIndexDdl: [
+      generateSqliteCreateTableSQL(tables.recordedIdentityAssertions),
+      ...generateSqliteCreateIndexSQL(tables.recordedIdentityAssertions),
+      ...sinceIndexAdoptionDdl({
+        recordedNodes: getTableName(tables.recordedNodes),
+        recordedEdges: getTableName(tables.recordedEdges),
+        recordedIdentityAssertions: getTableName(
+          tables.recordedIdentityAssertions,
+        ),
+      }),
+    ],
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`
