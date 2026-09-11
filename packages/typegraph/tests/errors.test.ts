@@ -6,6 +6,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import type {
   CardinalityErrorDetails,
   CompositionCycleErrorDetails,
+  CompositionExistenceErrorDetails,
   ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
   DisjointErrorDetails,
@@ -33,6 +34,7 @@ import {
   CardinalityError,
   CompilerInvariantError,
   CompositionCycleError,
+  CompositionExistenceError,
   ConfigurationError,
   ContributionUnavailableError,
   DatabaseOperationError,
@@ -382,6 +384,76 @@ describe("CompositionCycleError", () => {
     expectTypeOf(error.details).toEqualTypeOf<CompositionCycleErrorDetails>();
     expectTypeOf(error.details.wholeKind).toBeString();
     expectTypeOf(error.details.revisitedId).toBeString();
+  });
+});
+
+describe("CompositionExistenceError", () => {
+  it("carries a code per situation, each with its own message and way out", () => {
+    const create = new CompositionExistenceError({
+      partKind: "Segment",
+      situation: "create",
+    });
+    expect(create.code).toBe("COMPOSITION_WHOLE_REQUIRED");
+    expect(create.message).toContain("no `partOf` was given");
+
+    const detach = new CompositionExistenceError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "detach",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+    });
+    expect(detach.code).toBe("COMPOSITION_DETACH_REFUSED");
+    expect(detach.suggestion).toContain("reparent");
+
+    const existing = new CompositionExistenceError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "existing",
+      currentWhole: { kind: "Episode", id: "episode-1" },
+      requestedWhole: { kind: "Episode", id: "episode-2" },
+      requestedVia: "segmentOf",
+    });
+    expect(existing.code).toBe("COMPOSITION_WHOLE_CONFLICT");
+    expect(existing.message).toContain("Episode/episode-2");
+
+    const props = new CompositionExistenceError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "props",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+      currentProps: { order: 1 },
+      requestedProps: { order: 2 },
+    });
+    expect(props.code).toBe("COMPOSITION_PROPS_CONFLICT");
+    expect(props.suggestion).toContain("store.edges.segmentOf.update");
+
+    // Four situations, four codes — no two share one.
+    expect(
+      new Set([create.code, detach.code, existing.code, props.code]).size,
+    ).toBe(4);
+    for (const error of [create, detach, existing, props]) {
+      expect(error.name).toBe("CompositionExistenceError");
+      expect(error.category).toBe("constraint");
+    }
+  });
+  // MUTATION: return one shared code from any arm of
+  // `describeCompositionExistenceRefusal` (src/errors/index.ts) — the
+  // distinctness assertion drops to 3 and that arm's own expectation fails.
+
+  it("keeps situation as the discriminant for the populated details", () => {
+    const error = new CompositionExistenceError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "detach",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+    });
+    expectTypeOf(
+      error.details,
+    ).toEqualTypeOf<CompositionExistenceErrorDetails>();
+    expect(error.details.situation).toBe("detach");
   });
 });
 

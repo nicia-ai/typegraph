@@ -35,9 +35,17 @@ import {
   hasPart,
   partOf,
 } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+} from "../src/backend/derive-backend";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
-import { type EdgeRow, type GraphBackend } from "../src/backend/types";
+import {
+  type EdgeRow,
+  type GraphBackend,
+  type TransactionBackend,
+} from "../src/backend/types";
 import { buildKindRegistry } from "../src/registry";
 import {
   compositionEdgeCounts,
@@ -382,6 +390,49 @@ describe("composition cascade — delete", () => {
     const reusedTitle = await store.nodes.Episode.create({ title: "Pilot" });
     expect(reusedTitle.title).toBe("Pilot");
   });
+
+  it("reads each cascade member's row ONCE: the soft delete writes against the row the plan proved live", async () => {
+    const graph = buildPodcastGraph("cascade-member-row-reuse");
+    const raw = createTestBackend();
+    const reads: string[] = [];
+    function countReads<T extends GraphBackend | TransactionBackend>(
+      target: T,
+    ): T {
+      return deriveBackend<T, Partial<T>>(target, {
+        getNode: async (graphId: string, kind: string, id: string) => {
+          reads.push(`${kind}/${id}`);
+          return target.getNode(graphId, kind, id);
+        },
+      } as ExactBackendOverlay<T, Partial<T>>);
+    }
+    const backend = deriveBackend(countReads(raw), {
+      transaction: (fn, options) =>
+        raw.transaction((target) => fn(countReads(target)), options),
+    });
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const podcast = await store.nodes.Podcast.create({ title: "My Show" });
+    const episode = await store.nodes.Episode.create({ title: "Pilot" });
+    const segment = await store.nodes.Segment.create({});
+    await store.edges.episodeOf.create(episode, podcast, {});
+    await store.edges.segmentOf.create(segment, episode, {});
+
+    reads.length = 0;
+    await store.nodes.Podcast.delete(podcast.id);
+
+    // One read per member, taken by `planCompositionCascade`'s liveness pass;
+    // the delete of each member writes against THAT row.
+    expect(
+      reads.filter((read) => read === `Episode/${episode.id}`),
+    ).toHaveLength(1);
+    expect(
+      reads.filter((read) => read === `Segment/${segment.id}`),
+    ).toHaveLength(1);
+  });
+  // MUTATION: stop passing `member.row` as `deleteNodeRowInFrame`'s `existing`
+  // in `runCompositionCascade` (src/store/operations/node-operations.ts) —
+  // each member is then read a second time for its own pre-image and both
+  // filters find 2 reads.
 
   it("aborts a restricting grandchild's delete ATOMICALLY — zero rows changed", async () => {
     const graph = buildPodcastGraph("cascade-restrict-abort");

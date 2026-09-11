@@ -479,7 +479,8 @@ one is stated) is accepted as a **no-op** — no write, no history — so a
 caller converging on a destination need not first ask where the part is.
 Stated `props` are still checked on that no-op: valid and canonically equal
 to the realizing edge's live stored props, the no-op stands; valid but
-different raises `CompositionExistenceError` (`situation: "props"`) rather
+different raises `CompositionExistenceError` (`situation: "props"`,
+`COMPOSITION_PROPS_CONFLICT`) rather
 than being silently dropped, since the no-op performs no write to apply it —
 `store.edges.<via>.update(...)` changes the edge directly. A kind that
 declares no `partOf`/`hasPart` pair at all raises
@@ -498,9 +499,9 @@ optional and required parts alike, and most of its outcomes are successes:
 | no match | — | created with the attachment, exactly as `create` with `partOf` | `"created"` |
 | a soft-deleted match | — | restored, and attached in the same transaction | `"resurrected"` |
 | a live match | holds this whole through the resolved pair's realizing edge | **satisfied**: no write, no history; with `ifExists: "update"` the property update alone runs | `"found"` / `"updated"` |
-| a live match | holds this whole, but stated `props` differ from the edge's live stored props | refused: `CompositionExistenceError` (`situation: "props"`) — a satisfied match writes no edge, so a different value cannot be applied silently | — |
+| a live match | holds this whole, but stated `props` differ from the edge's live stored props | refused: `CompositionExistenceError` (`situation: "props"`, `COMPOSITION_PROPS_CONFLICT`) — a satisfied match writes no edge, so a different value cannot be applied silently | — |
 | a live match | has no live whole | **attached now**, required or optional alike; with `ifExists: "update"` the attachment and the property update are one write plan | `"found"` / `"updated"` |
-| a live match | holds a **different** whole, or the same whole through another realizing edge | refused: `CompositionExistenceError` (`situation: "existing"`), naming the held and the requested attachment | — |
+| a live match | holds a **different** whole, or the same whole through another realizing edge | refused: `CompositionExistenceError` (`situation: "existing"`, `COMPOSITION_WHOLE_CONFLICT`), naming the held and the requested attachment | — |
 
 "Satisfied" means the whole matches, the realizing edge matches the resolved
 pair, and any stated `props` are valid and canonically equal to the edge's
@@ -540,8 +541,9 @@ Two refusals follow from that one declaration:
   aborts the create too.
 - **Detaching a live part is refused.** Ending, soft-deleting, or
   hard-deleting the composition edge of a LIVE required part throws the same
-  error with `situation: "detach"`. A part that is already retired (soft- or
-  hard-deleted) is not orphaned by losing its edge, so that case is allowed.
+  error with `situation: "detach"` (`COMPOSITION_DETACH_REFUSED`). A part that
+  is already retired (soft- or hard-deleted) is not orphaned by losing its
+  edge, so that case is allowed.
   The two ways out are deleting the part itself (which frees its edge) and
   [`reparent`](#reparent-moving-a-part-to-a-new-whole), which retires the old
   attachment and creates the new one in one transaction so the part is never

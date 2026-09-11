@@ -13,6 +13,7 @@ import {
   type EdgeRow,
   type GraphReadBackend,
   isLiveNodeRow,
+  type LiveNodeRow,
 } from "../../backend/types";
 import { CompilerInvariantError, CompositionCycleError } from "../../errors";
 import {
@@ -27,13 +28,16 @@ import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type CompositionNodeRef } from "../types";
 
 /**
- * One node the cascade will delete, with the composition edge that binds it.
+ * One node the walk discovered, with the composition edge that binds it —
+ * before its own row has been read. {@link liveDiscoveredMembers} turns it
+ * into a {@link CompositionCascadeMember} by attaching that row (and drops it
+ * when the row is not live).
  *
- * Not exported beyond this module: every consumer reaches it only through
- * `CompositionCascadePlan.members`, structurally — exporting it separately
- * would be a public name nothing outside this file names.
+ * Not exported beyond this module: every consumer reaches a member only
+ * through `CompositionCascadePlan.members`, structurally — exporting either
+ * shape separately would be a public name nothing outside this file names.
  */
-type CompositionCascadeMember = Readonly<{
+type DiscoveredCascadeMember = Readonly<{
   kind: string;
   id: string;
   /** The composition edge id binding this member to its whole in this cascade. */
@@ -52,6 +56,21 @@ type CompositionCascadeMember = Readonly<{
    */
   whole: CascadeNode;
 }>;
+
+/**
+ * One node the cascade will delete: a discovered member plus the LIVE row
+ * proving it is still there.
+ *
+ * The row is the one {@link liveDiscoveredMembers} read under the cascade's
+ * own per-graph write lock — the fenced pre-image the runtime cascade's soft
+ * delete writes against (`deleteNodeRowInFrame`'s `existing`,
+ * `node-operations.ts`), so no member is read twice for one delete. Carried on
+ * the member rather than returned beside it because the row and the
+ * membership are established by the same read: a member present in `members`
+ * IS a row this plan proved live.
+ */
+type CompositionCascadeMember = DiscoveredCascadeMember &
+  Readonly<{ row: LiveNodeRow }>;
 
 export type CompositionCascadePlan = Readonly<{
   /**
@@ -324,7 +343,8 @@ function requirePartSide(
 }
 
 /**
- * Drops discovered members whose node row is no longer live.
+ * Drops discovered members whose node row is no longer live, and attaches the
+ * live row to every member it keeps.
  *
  * A composition edge row and its endpoint's node row can go stale relative
  * to each other: a direct part delete cleans up its OWN composition edges
@@ -336,9 +356,10 @@ function requirePartSide(
  * before a member is reported: both the runtime cascade (which retires/
  * purges each `members` entry) and merge's plan/apply-time orphan reports
  * read the SAME filtered closure, rather than each re-deriving "is this
- * member actually still there" on its own. (The runtime cascade's own
- * `target.getNode` preflight per member is therefore a guard against a TRUE
- * concurrent delete racing the walk itself, not this steady-state gap.)
+ * member actually still there" on its own. The rows this read produces travel
+ * ON the members it keeps, so the runtime cascade's soft delete writes against
+ * them rather than reading each member again — both reads are taken under the
+ * same per-graph write lock, so the second could only return the first.
  *
  * One batched read: `discoveryOrder` is already the complete, deduplicated
  * closure, so a single parallel round of `getNode` calls suffices — no need
@@ -350,16 +371,17 @@ function requirePartSide(
 async function liveDiscoveredMembers(
   ctx: Readonly<{ graphId: string }>,
   backend: GraphReadBackend,
-  discoveryOrder: readonly CompositionCascadeMember[],
+  discoveryOrder: readonly DiscoveredCascadeMember[],
 ): Promise<readonly CompositionCascadeMember[]> {
   const nodeRows = await Promise.all(
     discoveryOrder.map((member) =>
       backend.getNode(ctx.graphId, member.kind, member.id),
     ),
   );
-  return discoveryOrder.filter((_member, index) => {
+  return discoveryOrder.flatMap((member, index) => {
     const row = nodeRows[index];
-    return row !== undefined && isLiveNodeRow(row);
+    if (row === undefined || !isLiveNodeRow(row)) return [];
+    return [{ ...member, row }];
   });
 }
 
@@ -406,7 +428,7 @@ export async function planCompositionCascade(
 
   const root: CascadeNode = { kind: wholeKind, id: wholeId };
   const visited = new Set<string>([memberKey(root)]);
-  const discoveryOrder: CompositionCascadeMember[] = [];
+  const discoveryOrder: DiscoveredCascadeMember[] = [];
   const consumedEdgeIds = new Set<string>();
 
   let frontier: readonly CascadeNode[] = [root];

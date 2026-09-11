@@ -12,15 +12,23 @@
  * split, alongside the behavioral semantics that must not drift:
  * in-batch conflicts, conflicts with existing rows, and create-over-
  * tombstone.
+ *
+ * The same accounting covers a batch whose items carry `partOf`: the whole
+ * rows go through one getNodes per kind (never one getNode per item, and never
+ * a read of the part row the batch's own insert just wrote), and the
+ * acyclicity relation is walked once for the whole batch rather than once per
+ * attaching item.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   embedding,
+  partOf,
   searchable,
 } from "../src";
 import {
@@ -30,6 +38,7 @@ import {
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { UniquenessError } from "../src/errors";
+import * as acyclicityModule from "../src/store/acyclicity";
 import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
@@ -43,6 +52,27 @@ const Document = defineNode("Doc", {
     embedding: embedding(4),
   }),
 });
+
+/** A reflexive composition pair: the only shape in which a create batch's own items can close a cycle. */
+const Folder = defineNode("Folder", { schema: z.object({ name: z.string() }) });
+const folderOf = defineEdge("folderOf", { schema: z.object({}) });
+
+function buildCompositionGraph() {
+  return defineGraph({
+    id: "bulk-batching-composition",
+    nodes: { Folder: { type: Folder } },
+    edges: {
+      folderOf: {
+        type: folderOf,
+        from: [Folder],
+        to: [Folder],
+        cardinality: "one",
+      },
+    },
+    // Reflexive, so the orientation must be stated explicitly.
+    ontology: [partOf(Folder, Folder, { via: folderOf, partSide: "from" })],
+  });
+}
 
 function buildGraph() {
   return defineGraph({
@@ -124,6 +154,33 @@ function withCallCounts(backend: GraphBackend): {
   return { backend: counted, counts };
 }
 
+/**
+ * The counted backend and a store on it, with every call the store's own boot
+ * made already discounted — so a test's assertions describe only what its own
+ * `run` body triggered. Shared by both graphs' helpers below, which differ
+ * only in the graph they build (and so in the store type they hand back).
+ */
+async function withCountedBackend<T>(
+  run: (
+    backend: GraphBackend,
+    counts: CallCounts,
+    raw: GraphBackend,
+  ) => Promise<T>,
+): Promise<T> {
+  const { backend: raw } = createLocalSqliteBackend();
+  try {
+    const { backend, counts } = withCallCounts(raw);
+    return await run(backend, counts, raw);
+  } finally {
+    await raw.close();
+  }
+}
+
+function resetCounts(counts: CallCounts): void {
+  for (const name of COUNTED_METHODS) counts[name] = 0;
+  counts["transaction"] = 0;
+}
+
 async function withCountedStore<T>(
   run: (
     store: Awaited<
@@ -133,17 +190,33 @@ async function withCountedStore<T>(
     raw: GraphBackend,
   ) => Promise<T>,
 ): Promise<T> {
-  const { backend: raw } = createLocalSqliteBackend();
-  try {
-    const { backend, counts } = withCallCounts(raw);
+  return withCountedBackend(async (backend, counts, raw) => {
     const [store] = await createStoreWithSchema(buildGraph(), backend);
     // Boot traffic is not under test — count only what `run` triggers.
-    for (const name of COUNTED_METHODS) counts[name] = 0;
-    counts["transaction"] = 0;
-    return await run(store, counts, raw);
-  } finally {
-    await raw.close();
-  }
+    resetCounts(counts);
+    return run(store, counts, raw);
+  });
+}
+
+async function withCountedCompositionStore<T>(
+  run: (
+    store: Awaited<
+      ReturnType<
+        typeof createStoreWithSchema<ReturnType<typeof buildCompositionGraph>>
+      >
+    >[0],
+    counts: CallCounts,
+    raw: GraphBackend,
+  ) => Promise<T>,
+): Promise<T> {
+  return withCountedBackend(async (backend, counts, raw) => {
+    const [store] = await createStoreWithSchema(
+      buildCompositionGraph(),
+      backend,
+    );
+    resetCounts(counts);
+    return run(store, counts, raw);
+  });
 }
 
 const BATCH_SIZE = 40;
@@ -361,6 +434,78 @@ describe("bulkCreate batching semantics (must not drift)", () => {
         originalValidFrom,
       );
       expect(requireDefined(resurrected).meta.validTo).toBeUndefined();
+    });
+  });
+});
+
+describe("bulkCreate composition attach batching", () => {
+  const ATTACHING_BATCH_SIZE = 8;
+
+  it("reads the whole rows once per kind, and never re-reads the part rows it just wrote", async () => {
+    await withCountedCompositionStore(async (store, counts) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      resetCounts(counts);
+
+      const parts = await store.nodes.Folder.bulkCreate(
+        Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({
+          props: { name: `part-${index}` },
+          partOf: { kind: "Folder" as const, id: whole.id },
+        })),
+      );
+      expect(parts).toHaveLength(ATTACHING_BATCH_SIZE);
+
+      // One getNodes for the single distinct whole; zero getNode, which is
+      // what rules out both a per-item whole probe and a part-row re-read
+      // (the items' own ids are generated, so nothing else reads a node).
+      expect(counts["getNodes"]).toBe(1);
+      expect(counts["getNode"]).toBe(0);
+    });
+  });
+  // MUTATION CHECK: have `attachBatchCompositionCreateEdges`
+  // (src/store/operations/node-operations.ts) prepare each item with
+  // `endpoints: { source: "read" }` instead of the primed whole. Both endpoint
+  // rows are then read per item and `getNode` counts 16 instead of 0.
+
+  it("walks the acyclicity relation once for the whole batch", async () => {
+    await withCountedCompositionStore(async (store) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      const probe = vi.spyOn(acyclicityModule, "assertEdgeRelationsAcyclic");
+      try {
+        await store.nodes.Folder.bulkCreate(
+          Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({
+            props: { name: `part-${index}` },
+            partOf: { kind: "Folder" as const, id: whole.id },
+          })),
+        );
+        expect(probe).toHaveBeenCalledTimes(1);
+        expect(probe.mock.calls[0]?.[1]).toHaveLength(ATTACHING_BATCH_SIZE);
+      } finally {
+        probe.mockRestore();
+      }
+    });
+  });
+  // MUTATION CHECK: restore the per-item probe (prepare with
+  // `validateAcyclicity: true` and drop the single
+  // `assertPreparedEdgeCreatesAcyclic` call) — the probe is then entered 8
+  // times, once per attaching item, each with a single proposed edge.
+
+  it("attaches every item of the batch", async () => {
+    await withCountedCompositionStore(async (store) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      const parts = await store.nodes.Folder.bulkCreate(
+        Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({
+          props: { name: `part-${index}` },
+          partOf: { kind: "Folder" as const, id: whole.id },
+        })),
+      );
+      const edges = await store.edges.folderOf.find({});
+      expect(edges).toHaveLength(ATTACHING_BATCH_SIZE);
+      expect(new Set(edges.map((edge) => edge.fromId))).toEqual(
+        new Set(parts.map((part) => part.id)),
+      );
+      expect(new Set(edges.map((edge) => edge.toId))).toEqual(
+        new Set([whole.id]),
+      );
     });
   });
 });

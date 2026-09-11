@@ -243,6 +243,7 @@ import {
 } from "./composition-cascade";
 import {
   assertCompositionExistencePreserved,
+  assertCompositionWholeEndpointLive,
   buildCompositionCreateEdgeInput,
   type CompositionAttachmentRequest,
   type CompositionCreateWork,
@@ -257,6 +258,7 @@ import {
 } from "./composition-create";
 import { createRetiringEdgeValidationBackend } from "./edge-batch-validation";
 import {
+  assertPreparedEdgeCreatesAcyclic,
   edgeCardinalityDeclarations,
   type EdgeCreatePrepared,
   edgeInsertWork,
@@ -532,10 +534,13 @@ function withCascadeConsumedEdges(
  * deletes, the batch, and each cascade member — runs through this, so what one
  * node's delete owes has a single owner.
  *
- * `existing` is a live pre-image the caller has already read (the top-level
- * soft delete reads it before planning the cascade and must not read it
- * twice). Returns whether a row was written: `false` only on the soft path,
- * for a row that is already gone.
+ * `existing` is a live pre-image the caller has already read under this
+ * frame's own write lock, and so must not read again: the top-level soft
+ * delete reads it before planning the cascade, and each cascade member's row
+ * comes off the plan that proved the member live
+ * (`planCompositionCascade`'s `members`). Returns whether a row was written:
+ * `false` only on the soft path, for a row that is already gone — which a
+ * caller supplying `existing` has already ruled out.
  */
 async function deleteNodeRowInFrame<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -621,9 +626,12 @@ async function runCompositionCascade<G extends GraphDef>(
     cascadeComposition: false,
   };
   for (const member of plan.members) {
-    // A member already gone (concurrently deleted, or already visited via
-    // another path through the closure) has nothing to retire, but the edges
-    // this cascade consumed still get cleaned up below.
+    // The soft path writes against the row the PLAN read, not a fresh one:
+    // both reads happen under this frame's per-graph write lock, so the
+    // plan's row IS the fenced pre-image, and a second read could only
+    // return it again. (A member the plan found dead is never in
+    // `plan.members` at all — `liveDiscoveredMembers` drops it — while the
+    // edges this cascade consumed are still cleaned up below.)
     await deleteNodeRowInFrame(
       ctx,
       session,
@@ -632,6 +640,7 @@ async function runCompositionCascade<G extends GraphDef>(
       member.kind,
       member.id,
       memberPolicy,
+      member.row,
     );
   }
   // The explicit cleanup that guarantees no composition edge row survives
@@ -2657,10 +2666,36 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
     work,
     partId,
     temporal,
-    { validateEndpoints: true },
+    { endpoints: { source: "read" }, validateAcyclicity: true },
   );
   await insertPreparedCompositionEdge(ctx, session, prepared);
 }
+
+/**
+ * What a composition edge's preparation already HOLDS about its two endpoint
+ * rows, and therefore what it still owes — stated as the evidence rather than
+ * as a "skip the reads" flag, so each arm is bound to the proof that earned
+ * it:
+ *
+ * - `"read"` — nothing is known; the ordinary edge-create preparation reads
+ *   both endpoint rows in their public order (`assertLiveEdgeEndpoints`,
+ *   `edge-operations.ts`). Every single-row create path.
+ * - `"primedWhole"` — the WHOLE's row was already read by the caller (one
+ *   `getNodes` per kind for a whole batch) and travels here to be judged by
+ *   {@link assertCompositionWholeEndpointLive}; the PART's liveness is proven
+ *   by the insert this same frame just issued for it, so its row is never
+ *   re-read. The batch create attach loop
+ *   ({@link attachBatchCompositionCreateEdges}).
+ * - `"restoredByUpdate"` — the part row is a tombstone at read time and a
+ *   later statement of this same frame restores it (the get-or-create
+ *   resurrection leg); the whole was already refused-or-passed at decide time
+ *   by `decideCompositionAttachmentUnderFence`, through the same
+ *   {@link assertCompositionWholeEndpointLive} owner.
+ */
+type CompositionEndpointEvidence =
+  | Readonly<{ source: "read" }>
+  | Readonly<{ source: "primedWhole"; wholeRow: BackendNodeRow | undefined }>
+  | Readonly<{ source: "restoredByUpdate" }>;
 
 /**
  * The READ half of {@link attachCompositionCreateEdge}: every
@@ -2681,12 +2716,10 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
  * constraint-fence audit all read — rather than a second, drift-prone
  * spelling of "does this edge attach".
  *
- * `validateEndpoints: false` is for the one caller whose PART row is a
- * tombstone at read time and is restored by a later statement of the same
- * frame (the get-or-create resurrection leg): that caller has already
- * refused a dead whole through `decideCompositionAttachmentUnderFence`'s
- * own `assertEndpointRowLive` call, and the restoring update is itself the
- * proof the part is live before the insert runs.
+ * `endpoints` says what this call still owes on the endpoint rows, and
+ * `validateAcyclicity` whether it owes the relation walk — see
+ * {@link CompositionEndpointEvidence} and
+ * {@link attachBatchCompositionCreateEdges}.
  */
 async function prepareCompositionCreateEdge<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -2695,7 +2728,10 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
   work: CompositionCreateWork,
   partId: string,
   temporal: Readonly<{ validFrom?: string | null; validTo?: string }>,
-  options: Readonly<{ validateEndpoints: boolean }>,
+  options: Readonly<{
+    endpoints: CompositionEndpointEvidence;
+    validateAcyclicity: boolean;
+  }>,
 ): Promise<EdgeCreatePrepared> {
   if (
     ctx.registry.compositionExistence(work.partKind) === "required" &&
@@ -2711,11 +2747,14 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
       situation: "create",
     });
   }
+  if (options.endpoints.source === "primedWhole") {
+    assertCompositionWholeEndpointLive(work, options.endpoints.wholeRow);
+  }
   const edgeInput = buildCompositionCreateEdgeInput(work, partId, temporal);
   return validateAndPrepareEdgeCreate(ctx, edgeInput, generateId(), target, {
-    validateEndpoints: options.validateEndpoints,
+    validateEndpoints: options.endpoints.source === "read",
     validateCardinality: true,
-    validateAcyclicity: true,
+    validateAcyclicity: options.validateAcyclicity,
     lock,
   });
 }
@@ -2804,16 +2843,116 @@ function compositionBatchConstraintProbes<G extends GraphDef>(
     .map((work) => compositionEdgeConstraintFence(ctx, work));
 }
 
+/** One batch item that owes a composition edge: the written row and its work. */
+type BatchCompositionAttachment = Readonly<{
+  prepared: NodeCreatePrepared;
+  work: CompositionCreateWork;
+}>;
+
 /**
- * After every node row in a batch exists (inserted or
- * resurrected), attaches each item's composition edge — one owner reached
- * from every prepared row by its id, so a mixed batch of
- * required/optional/no-`partOf` items each takes exactly the edge it owes.
+ * The batch's items that owe a composition edge, in input order.
+ *
  * `preparedCreates` preserves `inputs`' order (see `prepareBatchCreates`), so
  * zipping it against `compositionWorks` (index-aligned with the ORIGINAL
  * `inputs`, from {@link resolveBatchCompositionWorks}) is the one place a
- * resolved id and its composition work are joined. Shared by both batch
- * create paths so neither re-spells the zip or the attach loop.
+ * resolved id and its composition work are joined.
+ */
+function batchCompositionAttachments(
+  preparedCreates: readonly NodeCreatePrepared[],
+  compositionWorks: readonly (CompositionCreateWork | undefined)[],
+): readonly BatchCompositionAttachment[] {
+  return preparedCreates.flatMap((prepared, index) => {
+    const work = compositionWorks[index];
+    return work === undefined ? [] : [{ prepared, work }];
+  });
+}
+
+/**
+ * Every WHOLE row a batch's attachments name, read once per kind through
+ * `getNodes` — one round trip per distinct whole kind rather than one per
+ * item, the same priming `primeBatchValidationCaches` performs for a batch's
+ * own ids. Keyed by `refKey` so a `(kind, id)` named by two items is read
+ * once.
+ *
+ * A backend without the batch point read keeps the per-`(kind, id)` `getNode`
+ * fallback (still deduplicated), for the same reason `primeBatchValidationCaches`
+ * does: the port is an optimization, never a requirement, and the refusal a
+ * missing or dead whole produces must be identical either way.
+ *
+ * Read AFTER the batch's node rows land, which is what makes a whole created
+ * by the SAME batch visible to the item that attaches to it.
+ */
+async function readBatchCompositionWholeRows<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: WriteTarget,
+  attachments: readonly BatchCompositionAttachment[],
+): Promise<ReadonlyMap<string, BackendNodeRow | undefined>> {
+  const idsByKind = new Map<string, Set<string>>();
+  for (const { work } of attachments) {
+    const ids = idsByKind.get(work.whole.kind) ?? new Set<string>();
+    ids.add(work.whole.id);
+    idsByKind.set(work.whole.kind, ids);
+  }
+
+  const boundGetNodes = bindExtraIfReachable(
+    target,
+    ctx.batchPointRead.extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
+  const wholeRows = new Map<string, BackendNodeRow | undefined>();
+  for (const [kind, ids] of idsByKind) {
+    const orderedIds = [...ids];
+    if (boundGetNodes === undefined) {
+      for (const id of orderedIds) {
+        wholeRows.set(
+          refKey({ kind, id }),
+          await target.getNode(ctx.graphId, kind, id),
+        );
+      }
+      continue;
+    }
+    const rows = await boundGetNodes.getNodes(ctx.graphId, kind, orderedIds);
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    for (const id of orderedIds) {
+      wholeRows.set(refKey({ kind, id }), rowsById.get(id));
+    }
+  }
+  return wholeRows;
+}
+
+/**
+ * After every node row in a batch exists (inserted or
+ * resurrected), attaches each item's composition edge — one owner reached
+ * from every prepared row, so a mixed batch of required/optional/no-`partOf`
+ * items each takes exactly the edge it owes. Shared by both batch create
+ * paths so neither re-spells the join, the attach loop, or the probe below.
+ *
+ * Three reads a per-item attach would repeat are folded to one per batch:
+ *
+ * - The WHOLE rows are read once per kind ({@link readBatchCompositionWholeRows})
+ *   and judged per item by {@link assertCompositionWholeEndpointLive} — the
+ *   same owner the fenced attachment decision uses, so a dead or missing
+ *   whole refuses with the identical `EndpointNotFoundError` on the identical
+ *   endpoint side, in input order, as it did per item.
+ * - The PART row is not read at all: this frame's own insert (or the
+ *   resurrection update that preceded this call) is the proof it is live, and
+ *   a read of it could only confirm a row nothing has had the chance to
+ *   change.
+ * - ACYCLICITY is probed ONCE, after every one of the batch's composition
+ *   edges is inserted ({@link assertPreparedEdgeCreatesAcyclic}), instead of
+ *   once per item before its own insert. The probe is order-insensitive with
+ *   respect to the rows it is given (see `assertEdgeRelationsAcyclic`), so
+ *   combining them answers the same question in one walk per relation — and
+ *   the combined set is what makes an in-batch cycle among two items' own
+ *   edges visible regardless of which of them is inserted first. The refusal
+ *   still names a concrete offending edge: a self-loop is attributed to the
+ *   item that states it, and a cycle to the first of the batch's own edges
+ *   that lies on it.
+ *
+ * Each item's prepare-then-insert stays interleaved: a later item's
+ * CARDINALITY probe must see the rows the earlier items wrote, which for
+ * composition edges is the `one`/`oneActive` whole-side count their inserts
+ * already carry.
  */
 async function attachBatchCompositionCreateEdges<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -2823,25 +2962,44 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
   preparedCreates: readonly NodeCreatePrepared[],
   compositionWorks: readonly (CompositionCreateWork | undefined)[],
 ): Promise<void> {
-  const compositionWorkByPreparedId = new Map(
-    preparedCreates
-      .map((prepared, index) => [prepared.id, compositionWorks[index]] as const)
-      .filter(
-        (entry): entry is [string, CompositionCreateWork] =>
-          entry[1] !== undefined,
-      ),
+  const attachments = batchCompositionAttachments(
+    preparedCreates,
+    compositionWorks,
   );
-  for (const prepared of preparedCreates) {
-    await attachCompositionCreateEdge(
+  if (attachments.length === 0) return;
+
+  const wholeRows = await readBatchCompositionWholeRows(
+    ctx,
+    target,
+    attachments,
+  );
+  const preparedEdges: EdgeCreatePrepared[] = [];
+  for (const { prepared, work } of attachments) {
+    const preparedEdge = await prepareCompositionCreateEdge(
       ctx,
-      session,
       target,
       lock,
-      compositionWorkByPreparedId.get(prepared.id),
+      work,
       prepared.id,
       compositionTemporalFromInsertParams(prepared.insertParams),
+      {
+        endpoints: {
+          source: "primedWhole",
+          wholeRow: wholeRows.get(refKey(work.whole)),
+        },
+        validateAcyclicity: false,
+      },
     );
+    preparedEdges.push(preparedEdge);
+    await insertPreparedCompositionEdge(ctx, session, preparedEdge);
   }
+  await assertPreparedEdgeCreatesAcyclic(
+    ctx,
+    target,
+    lock,
+    "nodes.bulkCreate",
+    preparedEdges,
+  );
 }
 
 /**
@@ -2938,7 +3096,7 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
     work,
     partId,
     { validFrom: moveInstant },
-    { validateEndpoints: true },
+    { endpoints: { source: "read" }, validateAcyclicity: true },
   );
   const incumbentPair = requireCompositionPairVia(
     ctx.registry,
@@ -3038,7 +3196,13 @@ async function prepareCompositionAttachmentDecision<G extends GraphDef>(
         decided.request.work,
         partId,
         {},
-        { validateEndpoints: !options.partRowRestoredByUpdate },
+        {
+          endpoints:
+            options.partRowRestoredByUpdate ?
+              { source: "restoredByUpdate" }
+            : { source: "read" },
+          validateAcyclicity: true,
+        },
       );
     }
     case "replace": {

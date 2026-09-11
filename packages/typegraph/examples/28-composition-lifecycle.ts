@@ -271,6 +271,11 @@ export async function main(): Promise<void> {
       "existing",
       "refusal situation is 'existing'",
     );
+    assertEqual(
+      (movedElsewhereError as CompositionExistenceError).code,
+      "COMPOSITION_WHOLE_CONFLICT",
+      "refusal code is COMPOSITION_WHOLE_CONFLICT",
+    );
     const interviewEdgesAfterRefusal = await store.edges.segmentOf.findFrom(
       firstCall.node,
     );
