@@ -127,6 +127,31 @@ The report partitions facts relative to the retracted source:
 `unRetract(source)` clears the source flag, recomputes support, and reopens
 facts that regain support.
 
+## Composition and retraction
+
+A [required composition part](/ontology#composition) cannot exist without a
+live whole, so its belief status follows its whole's. Support treats the
+dependency as part of the fact's grounding: a required part is supported only
+while the whole it currently hangs from is itself supported (a whole that is
+also a fact kind) or live (any other whole, including a plain node that carries
+no belief status at all).
+
+Closing a whole therefore closes its required parts in the same transition,
+transitively through a part that is itself a whole, and the report names every
+one of them in `died`. Reopening the whole reopens the parts that are otherwise
+supported, because a reopen is driven by support rather than by a ledger of
+what a close closed: a part whose own justification no longer fires stays
+closed. A required part is closed even when a different source supports it —
+the existence dependency dominates its own grounding.
+
+An optional part is untouched. It can exist with no whole, so it keeps both its
+attachment to the closed whole and its own belief status; the composition claim
+still stops a second whole from taking it.
+
+No edge is deleted by any of this, so `store.verifyConstraintFences()`'s
+`compositionExistence` family reports nothing after a close: a closed required
+part is tombstoned, not an orphan.
+
 Use `retractMany(sources)` or `unRetractMany(sources)` to change several source
 flags in one recorded transaction:
 

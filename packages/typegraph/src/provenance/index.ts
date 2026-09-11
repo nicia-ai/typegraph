@@ -14,6 +14,8 @@ import type { GraphDef } from "../core/define-graph";
 import { projectTargetKinds } from "../core/edge-endpoints";
 import type { NodeRegistration } from "../core/types";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
+import type { KindRegistry } from "../registry";
+import { findLiveCompositionWhole } from "../store/operations/composition-create";
 import {
   applyNodeResurrect,
   applyNodeSoftDelete,
@@ -174,6 +176,37 @@ type SupportEdges = Readonly<{
   factsByJustification: ReadonlyMap<string, readonly string[]>;
   justificationsByPremise: ReadonlyMap<string, readonly string[]>;
 }>;
+
+/**
+ * The existence dependency composition adds to the support computation: a
+ * REQUIRED composition part cannot exist without a live whole, so its belief
+ * status follows the whole's. The maps are read once per transition alongside
+ * the role rows — a transition flips source properties only, never a
+ * composition edge or a non-fact node's liveness, so the pre- and
+ * post-transition snapshots share this view exactly as they share the support
+ * edges.
+ *
+ * `requiredPartFactKeys` holds every fact row whose kind is a required part,
+ * including one whose whole could not be found: that fact is unsupported (the
+ * same verdict `verifyConstraintFences`' `compositionExistence` family reports
+ * as a violation while the part is live), which is why the set is kept
+ * separately from `wholeKeyByPartKey` rather than inferred from it.
+ */
+type CompositionExistenceDependencies = Readonly<{
+  requiredPartFactKeys: ReadonlySet<string>;
+  wholeKeyByPartKey: ReadonlyMap<string, string>;
+  partKeysByWholeKey: ReadonlyMap<string, readonly string[]>;
+  /** Whole keys that are not fact rows and are live at the snapshot instant. */
+  liveWholeKeys: ReadonlySet<string>;
+}>;
+
+const NO_COMPOSITION_EXISTENCE_DEPENDENCIES: CompositionExistenceDependencies =
+  {
+    requiredPartFactKeys: new Set<string>(),
+    wholeKeyByPartKey: new Map<string, string>(),
+    partKeysByWholeKey: new Map<string, readonly string[]>(),
+    liveWholeKeys: new Set<string>(),
+  };
 
 type SupportSnapshot = Readonly<{
   facts: ReadonlyMap<string, NodeRow>;
@@ -584,11 +617,13 @@ function buildSupportEdges(
 type SupportGraph = Readonly<{
   roles: ProvenanceRows;
   supportEdges: SupportEdges;
+  compositionDependencies: CompositionExistenceDependencies;
   sourceRows: readonly NodeRow[];
 }>;
 
 async function loadSupportGraph(
   backend: GraphReadBackend,
+  registry: KindRegistry,
   graphId: string,
   config: NormalizedConfig,
 ): Promise<SupportGraph> {
@@ -597,12 +632,107 @@ async function loadSupportGraph(
   const asOf = nowIso();
   const roles = await readRoles(backend, graphId, config, asOf);
   const supportEdges = buildSupportEdges(config, roles);
-  const sourceRowsByKind = await Promise.all(
-    config.sourceKinds.map((kind) =>
-      findNodeRows(backend, graphId, kind, { includeTombstones: false, asOf }),
+  const [compositionDependencies, sourceRowsByKind] = await Promise.all([
+    readCompositionExistenceDependencies(
+      backend,
+      registry,
+      graphId,
+      roles.facts,
+      asOf,
     ),
+    Promise.all(
+      config.sourceKinds.map((kind) =>
+        findNodeRows(backend, graphId, kind, {
+          includeTombstones: false,
+          asOf,
+        }),
+      ),
+    ),
+  ]);
+  return {
+    roles,
+    supportEdges,
+    compositionDependencies,
+    sourceRows: sourceRowsByKind.flat(),
+  };
+}
+
+/**
+ * Reads which fact rows are required composition parts and which whole each
+ * currently hangs from, through `findLiveCompositionWhole` — the same owner the
+ * write path, the import assertion, and `verifyConstraintFences` read, so
+ * provenance never re-spells composition orientation or the whole-side
+ * population predicate.
+ *
+ * A graph that declares no required part costs no read at all: the registry
+ * answers `compositionExistence` per kind from its memoized relation.
+ *
+ * A whole that is itself a fact carries a belief status, so its support decides
+ * its parts'; any other whole (a plain node, or a source — whose retraction is
+ * a property flip, not a liveness change) is read here and judged live exactly
+ * as the role reads judge currency: not tombstoned, and currently valid.
+ */
+async function readCompositionExistenceDependencies(
+  backend: GraphReadBackend,
+  registry: KindRegistry,
+  graphId: string,
+  facts: ReadonlyMap<string, NodeRow>,
+  asOf: string,
+): Promise<CompositionExistenceDependencies> {
+  const requiredPartRows = [...facts].filter(
+    ([, row]) => registry.compositionExistence(row.kind) === "required",
   );
-  return { roles, supportEdges, sourceRows: sourceRowsByKind.flat() };
+  if (requiredPartRows.length === 0) {
+    return NO_COMPOSITION_EXISTENCE_DEPENDENCIES;
+  }
+
+  const attachments = await Promise.all(
+    requiredPartRows.map(async ([factKey, row]) => ({
+      factKey,
+      whole: await findLiveCompositionWhole(
+        registry,
+        backend,
+        graphId,
+        row.kind,
+        row.id,
+      ),
+    })),
+  );
+
+  const requiredPartFactKeys = new Set<string>();
+  const wholeKeyByPartKey = new Map<string, string>();
+  const partKeysByWholeKey = new Map<string, string[]>();
+  for (const { factKey, whole } of attachments) {
+    requiredPartFactKeys.add(factKey);
+    if (whole === undefined) continue;
+    const wholeKey = refKey({ kind: whole.kind, id: whole.id });
+    wholeKeyByPartKey.set(factKey, wholeKey);
+    appendGroupedValue(partKeysByWholeKey, wholeKey, factKey);
+  }
+
+  const liveWholeKeys = new Set<string>();
+  await Promise.all(
+    [...new Set(wholeKeyByPartKey.values())]
+      .filter((wholeKey) => !facts.has(wholeKey))
+      .map(async (wholeKey) => {
+        const ref = keyToRef(wholeKey);
+        const row = await backend.getNode(graphId, ref.kind, ref.id);
+        if (row === undefined || !isLiveNodeRow(row)) return;
+        if (
+          !validityWindowContainsInstant(row.valid_from, row.valid_to, asOf)
+        ) {
+          return;
+        }
+        liveWholeKeys.add(wholeKey);
+      }),
+  );
+
+  return {
+    requiredPartFactKeys,
+    wholeKeyByPartKey,
+    partKeysByWholeKey,
+    liveWholeKeys,
+  };
 }
 
 function availableSourceKeys(
@@ -625,10 +755,13 @@ function availableSourceKeys(
  * snapshots with different availability sets.
  */
 function computeSupportSnapshot(
-  graph: Pick<SupportGraph, "roles" | "supportEdges">,
+  graph: Pick<
+    SupportGraph,
+    "roles" | "supportEdges" | "compositionDependencies"
+  >,
   available: ReadonlySet<string>,
 ): SupportSnapshot {
-  const { roles, supportEdges } = graph;
+  const { roles, supportEdges, compositionDependencies } = graph;
   const supported = new Set<string>();
   const inSet = new Set<string>(available);
   const firingJustifications = new Set<string>();
@@ -644,6 +777,7 @@ function computeSupportSnapshot(
       if (!allPremisesSupported(premises, inSet)) continue;
 
       firingJustifications.add(justificationKey);
+      changed = true;
       const derivedFacts =
         supportEdges.factsByJustification.get(justificationKey) ?? [];
       for (const factKey of derivedFacts) {
@@ -653,11 +787,29 @@ function computeSupportSnapshot(
           factKey,
           justificationKey,
         );
-        if (supported.has(factKey)) continue;
-        supported.add(factKey);
-        inSet.add(factKey);
-        changed = true;
       }
+    }
+    // A derived fact is supported only once its composition existence
+    // dependency also holds, so a required part whose whole is unsupported
+    // stays out of the set even while its own justification fires. Both
+    // conjuncts only ever grow, so this remains the least fixpoint; the
+    // dependency is re-checked every round because a whole that becomes
+    // supported later admits the parts an earlier round held back.
+    for (const factKey of firingJustificationKeysByFact.keys()) {
+      if (supported.has(factKey)) continue;
+      if (
+        !compositionExistenceSupported(
+          compositionDependencies,
+          roles,
+          supported,
+          factKey,
+        )
+      ) {
+        continue;
+      }
+      supported.add(factKey);
+      inSet.add(factKey);
+      changed = true;
     }
   }
 
@@ -675,17 +827,23 @@ function computeSupportSnapshot(
     affectedFactKeys(
       targets: readonly ProvenanceNodeRef[],
     ): ReadonlySet<string> {
-      return computeAffectedFactKeys(targets, roles, supportEdges);
+      return computeAffectedFactKeys(
+        targets,
+        roles,
+        supportEdges,
+        compositionDependencies,
+      );
     },
   };
 }
 
 async function computeSupport(
   backend: GraphReadBackend,
+  registry: KindRegistry,
   graphId: string,
   config: NormalizedConfig,
 ): Promise<SupportSnapshot> {
-  const graph = await loadSupportGraph(backend, graphId, config);
+  const graph = await loadSupportGraph(backend, registry, graphId, config);
   return computeSupportSnapshot(
     graph,
     availableSourceKeys(graph.sourceRows, config.retractedField),
@@ -706,10 +864,33 @@ function allPremisesSupported(
   return true;
 }
 
+/**
+ * THE support question composition adds: may this fact be supported at all,
+ * given that a required composition part cannot exist without its whole?
+ *
+ * A fact that is not a required part always may. A required part may only
+ * while the whole it currently hangs from is itself supported (a whole that is
+ * a fact carries its own belief status) or live (any other whole). A required
+ * part with no current whole may not: nothing holds it up.
+ */
+function compositionExistenceSupported(
+  dependencies: CompositionExistenceDependencies,
+  roles: ProvenanceRows,
+  supported: ReadonlySet<string>,
+  factKey: string,
+): boolean {
+  if (!dependencies.requiredPartFactKeys.has(factKey)) return true;
+  const wholeKey = dependencies.wholeKeyByPartKey.get(factKey);
+  if (wholeKey === undefined) return false;
+  if (roles.facts.has(wholeKey)) return supported.has(wholeKey);
+  return dependencies.liveWholeKeys.has(wholeKey);
+}
+
 function computeAffectedFactKeys(
   sources: readonly ProvenanceNodeRef[],
   roles: ProvenanceRows,
   supportEdges: SupportEdges,
+  compositionDependencies: CompositionExistenceDependencies,
 ): ReadonlySet<string> {
   const affected = new Set<string>();
   // Seed the BFS with every source at once: the union of facts reachable from
@@ -733,6 +914,23 @@ function computeAffectedFactKeys(
         seen.add(factKey);
         frontier.push(factKey);
       }
+    }
+
+    // A whole whose own belief status this transition can change carries its
+    // required parts into scope — they cannot stay believed without it, and a
+    // part that is itself a whole folds out of the same walk. Only a fact
+    // whole propagates: a transition flips source properties, so a non-fact
+    // whole's liveness (and with it its parts' existence dependency) is the
+    // same before and after.
+    if (!roles.facts.has(current)) continue;
+    const requiredParts =
+      compositionDependencies.partKeysByWholeKey.get(current) ?? [];
+    for (const partKey of requiredParts) {
+      if (!roles.facts.has(partKey)) continue;
+      affected.add(partKey);
+      if (seen.has(partKey)) continue;
+      seen.add(partKey);
+      frontier.push(partKey);
     }
   }
 
@@ -870,9 +1068,12 @@ async function closeFactCurrency<G extends GraphDef>(
     // removed (`cascade` / `disconnect`). Every edge survives untouched,
     // making a later reopen an exact inverse of this close.
     //
-    // A belief-status close likewise runs no composition cascade: the parts
-    // of a closed whole keep their attachment. Whether that exemption is the
-    // final contract is tracked separately.
+    // A belief-status close likewise runs no composition cascade — every
+    // part keeps its attachment — because the REQUIRED parts of a closed
+    // whole are closed by this same transition instead: the support
+    // computation makes a required part support-dependent on its whole, so
+    // they arrive here as facts of their own and an optional part is left
+    // alone.
     await applyNodeSoftDelete(
       createNodeWriteContext(
         store.graphId,
@@ -991,7 +1192,12 @@ async function runTransition<
     // premise/derive edges) is identical before and after the transition — only
     // source availability changes — so the pre- and post-flip snapshots share
     // this read instead of scanning the whole graph twice per retraction.
-    const supportGraph = await loadSupportGraph(backend, store.graphId, config);
+    const supportGraph = await loadSupportGraph(
+      backend,
+      store.registry,
+      store.graphId,
+      config,
+    );
     const availableBefore = availableSourceKeys(
       supportGraph.sourceRows,
       config.retractedField,
@@ -1082,6 +1288,7 @@ export function createRetractionCapability<
         await lockRecordedGraphWrite(backend, store.graphId);
         const snapshot = await computeSupport(
           backend,
+          store.registry,
           store.graphId,
           normalized,
         );
