@@ -2346,6 +2346,14 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "StoreRuntime",
+    "member": "probeResolvedNodeUniqueness",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value. `probeResolvedNodeUniqueness` is the plan-time half of `applyResolvedNodeUniqueness`, read by the merge planner under `identity.onUniquenessConflict: \"flag\"`. Declared in .changeset/identity-reconciliation.md.",
+    "issue": "#657"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreRuntime",
     "member": "detachDeletedImportedIdentityNode",
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
@@ -3186,6 +3194,14 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "StoreRuntime",
+    "member": "probeResolvedNodeUniqueness",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value. `probeResolvedNodeUniqueness` is the plan-time half of `applyResolvedNodeUniqueness`, read by the merge planner under `identity.onUniquenessConflict: \"flag\"`. Declared in .changeset/identity-reconciliation.md.",
+    "issue": "#657"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreRuntime",
     "member": "detachDeletedImportedIdentityNode",
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
@@ -4026,6 +4042,14 @@
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "StoreRuntime",
+    "member": "probeResolvedNodeUniqueness",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value. `probeResolvedNodeUniqueness` is the plan-time half of `applyResolvedNodeUniqueness`, read by the merge planner under `identity.onUniquenessConflict: \"flag\"`. Declared in .changeset/identity-reconciliation.md.",
+    "issue": "#657"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreRuntime",
     "member": "detachDeletedImportedIdentityNode",
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
@@ -4866,6 +4890,14 @@
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "StoreRuntime",
+    "member": "probeResolvedNodeUniqueness",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value. `probeResolvedNodeUniqueness` is the plan-time half of `applyResolvedNodeUniqueness`, read by the merge planner under `identity.onUniquenessConflict: \"flag\"`. Declared in .changeset/identity-reconciliation.md.",
+    "issue": "#657"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreRuntime",
     "member": "detachDeletedImportedIdentityNode",
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
@@ -5702,6 +5734,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#640"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreRuntime",
+    "member": "probeResolvedNodeUniqueness",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value. `probeResolvedNodeUniqueness` is the plan-time half of `applyResolvedNodeUniqueness`, read by the merge planner under `identity.onUniquenessConflict: \"flag\"`. Declared in .changeset/identity-reconciliation.md.",
+    "issue": "#657"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
@@ -6986,6 +7026,14 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "StoreRuntime",
+    "member": "probeResolvedNodeUniqueness",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value. `probeResolvedNodeUniqueness` is the plan-time half of `applyResolvedNodeUniqueness`, read by the merge planner under `identity.onUniquenessConflict: \"flag\"`. Declared in .changeset/identity-reconciliation.md.",
+    "issue": "#657"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreRuntime",
     "member": "detachDeletedImportedIdentityNode",
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
@@ -7902,6 +7950,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#640"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreRuntime",
+    "member": "probeResolvedNodeUniqueness",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value. `probeResolvedNodeUniqueness` is the plan-time half of `applyResolvedNodeUniqueness`, read by the merge planner under `identity.onUniquenessConflict: \"flag\"`. Declared in .changeset/identity-reconciliation.md.",
+    "issue": "#657"
   },
   {
     "entrypoint": "typegraph.api.md",

@@ -18,21 +18,18 @@ import {
   requireStructuralEndpoints,
 } from "./service-components";
 import {
-  partitionRetractedEndpoints,
+  applyRetractionAftermath,
   retractPlannedAssertions,
   runIdentityMutation,
 } from "./service-facade";
 import {
+  applyPairRelationEffect,
   assertionForExactWindow,
   createIdentityWindowValidator,
   currentAssertionForPair,
   insertAssertion,
   insertAssertionRows,
   loadAssertionsByIds,
-  mergeCurrentClasses,
-  noteClassTransitions,
-  replaceAffectedClosure,
-  replaceSeparationForReferences,
   requireEndpointsCoverIdentityWindow,
   validateCurrentRelation,
 } from "./service-mutation";
@@ -450,27 +447,19 @@ export async function importIdentityAssertionsIntoTarget(
             existingById.set(inserted.id, inserted);
             windowValidator.record(inserted);
             created += 1;
-            if (assertion.relation === "same") {
-              const transitions = await mergeCurrentClasses(
-                rawTarget,
-                ctx.schema,
-                ctx.graphId,
-                a,
-                b,
-              );
-              noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+            await applyPairRelationEffect(
+              ctx,
+              rawTarget,
+              assertion.relation,
+              a,
+              b,
+              noteTransition,
+              {
                 cause,
                 assertionIds: [inserted.id],
                 validAt: operationInstant,
-              });
-            } else {
-              await replaceSeparationForReferences(
-                rawTarget,
-                ctx.schema,
-                ctx.graphId,
-                [a, b],
-              );
-            }
+              },
+            );
             continue;
           }
 
@@ -692,32 +681,14 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
           retractions,
           touch,
         );
-        const { closureReferences, separationReferences } =
-          partitionRetractedEndpoints(retracted);
         // Repair the closure from the retractions BEFORE importing: a batch that
         // retracts same(a,b) and then asserts different(a,b) must validate the new
         // assertion against a closure that already reflects the split, not the
         // stale merged class the import validation would otherwise reject against.
-        if (closureReferences.length > 0) {
-          const transitions = await replaceAffectedClosure(
-            target,
-            ctx.schema,
-            ctx.graphId,
-            closureReferences,
-            ctx.sameIdAcrossKinds,
-          );
-          noteClassTransitions(ctx.graphId, noteTransition, transitions, {
-            cause: closureRepairCause,
-            assertionIds: retracted.map((assertion) => assertion.id),
-            validAt: operationInstant,
-          });
-        }
-        await replaceSeparationForReferences(
-          target,
-          ctx.schema,
-          ctx.graphId,
-          separationReferences,
-        );
+        await applyRetractionAftermath(ctx, target, retracted, noteTransition, {
+          cause: closureRepairCause,
+          validAt: operationInstant,
+        });
         const summary = await importIdentityAssertionsIntoTarget(
           ctx,
           target,

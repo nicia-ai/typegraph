@@ -3266,6 +3266,8 @@ export type IdentityReconciliationOptions = Readonly<{
     pairing?: "off" | "candidate" | "definitional";
     onAssertionConflict?: IdentityAssertionConflictPolicy;
     onProvenanceConflict?: "keepBoth" | "refuse";
+    onEdgeConflict?: "repoint" | "flag";
+    onUniquenessConflict?: "refuse" | "flag";
 }>;
 
 // @public
@@ -3394,6 +3396,44 @@ export type IdentityUnresolvedConflict = Readonly<{
     b: EntityRef;
     assertionIds: readonly string[];
     source?: MatchSource | undefined;
+}>
+/**
+* `onEdgeConflict: "flag"` dropped an identity pairing because the repoint it
+* induced collapsed two distinct pre-repoint relationships onto one edge
+* slot. `a` and `b` are the two pre-repoint endpoints on `side` whose pairing
+* fused them into `canonical`; `edgeIds` are the rows that would have folded;
+* `assertionIds` are the `same` assertions whose pairing the rebuild dropped,
+* and `branches` the branches that staged them.
+*/
+| Readonly<{
+    kind: "edge";
+    edgeKind: string;
+    a: EntityRef;
+    b: EntityRef;
+    canonical: EntityRef;
+    side: "from" | "to";
+    edgeIds: readonly string[];
+    assertionIds: readonly string[];
+    branches: readonly BranchId[];
+}>
+/**
+* `onUniquenessConflict: "flag"` dropped an identity pairing because the
+* entity it fused (`canonical`, out of `members`) would have violated
+* `constraintName` over `fields`: `owner` holds the key — another write of the
+* same plan, or a row the target already holds — and `loser` is the write the
+* store refused for it; `canonical` is one of the two. `assertionIds` and
+* `branches` name the dropped pairing exactly as the `"edge"` arm does.
+*/
+| Readonly<{
+    kind: "uniqueness";
+    constraintName: string;
+    fields: readonly string[];
+    canonical: EntityRef;
+    owner: EntityRef;
+    loser: EntityRef;
+    members: readonly EntityRef[];
+    assertionIds: readonly string[];
+    branches: readonly BranchId[];
 }>;
 
 // @public
@@ -4172,6 +4212,8 @@ export const MERGE_OPTION_DEFAULTS: {
         readonly pairing: "off";
         readonly onAssertionConflict: "refuse";
         readonly onProvenanceConflict: "keepBoth";
+        readonly onEdgeConflict: "repoint";
+        readonly onUniquenessConflict: "refuse";
     };
 };
 
@@ -6020,6 +6062,22 @@ export type ResolvedCluster = Readonly<{
 // @public
 type ResolveDepthAlias<DC, A extends string> = DC extends string ? DC : DC extends true ? `${A}_depth` : never;
 
+// @public
+type ResolvedNodeClaimConflict = Readonly<{
+    constraintName: string;
+    fields: readonly string[];
+    key: string;
+    claimant: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    holder: Readonly<{
+        kind: string;
+        id: string;
+        origin: "set" | "persisted";
+    }>;
+}>;
+
 // @public (undocumented)
 type ResolvedSqlTableNames = Readonly<{
     nodes: string;
@@ -6780,6 +6838,17 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }>[];
     }>, apply: () => Promise<Output>) => Promise<Output>;
+    probeResolvedNodeUniqueness: (target: GraphBackend | TransactionBackend, writes: Readonly<{
+        upserts: readonly Readonly<{
+            kind: string;
+            id: string;
+            props: Readonly<Record<string, unknown>>;
+        }>[];
+        releases: readonly Readonly<{
+            kind: string;
+            id: string;
+        }>[];
+    }>) => Promise<readonly ResolvedNodeClaimConflict[]>;
     readCurrentIdentityAssertions: (mode: "state" | "archival", options?: Readonly<{
         nodeKinds?: readonly string[];
         includeDeleted?: boolean;

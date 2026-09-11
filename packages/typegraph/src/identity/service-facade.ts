@@ -757,7 +757,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
  * `same` retraction splits identity classes (closure repair, which carries the
  * separation repair with it), a `different` retraction removes a separation.
  */
-export function partitionRetractedEndpoints(
+function partitionRetractedEndpoints(
   retracted: readonly IdentityAssertionStorageRow[],
 ): Readonly<{
   closureReferences: readonly PlainNodeRef[];
@@ -800,7 +800,7 @@ type RetractionAftermathNote = Omit<
  * rest. Every caller hands the rows it actually ended: `assertionIds` on the
  * notes are exactly those rows' ids.
  */
-async function applyRetractionAftermath<G extends GraphDef>(
+export async function applyRetractionAftermath<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   target: Backend,
   retracted: readonly IdentityAssertionStorageRow[],

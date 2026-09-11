@@ -791,8 +791,9 @@ const result = await merge(base, branches, {
 ### Identity conflicts
 
 The `identity` options bag (see also [Identity-driven pairing](#identity-driven-pairing)
-above) also governs two conflict shapes a three-way classification against
-the staged base identity assertions cannot resolve by rule alone:
+above) also governs the conflict shapes a three-way classification against
+the staged base identity assertions cannot resolve by rule alone, and the two
+collisions an identity **pairing** can induce once it fuses rows:
 
 ```typescript
 const result = await merge(base, branches, {
@@ -800,6 +801,8 @@ const result = await merge(base, branches, {
     pairing: "candidate",
     onAssertionConflict: "flag",
     onProvenanceConflict: "refuse",
+    onEdgeConflict: "flag",
+    onUniquenessConflict: "flag",
   },
 });
 ```
@@ -808,6 +811,56 @@ const result = await merge(base, branches, {
 | --- | --- | --- |
 | `onAssertionConflict` | `"refuse"` | How to arbitrate a `same`/`different` opposing-relations collision, or a retract/reassert race, that the classifier cannot resolve by rule alone. `"refuse"` fails the merge, byte-identical to today. `"assertWins"` / `"retractWins"` resolve a retract/reassert race specifically — refused as an invalid option against any other conflict shape, which has no assert/retract axis to decide. `"flag"` keeps base truth and records a typed `IdentityUnresolvedConflict` on the merge report; a function receives the fully-populated conflict and returns the decision itself. |
 | `onProvenanceConflict` | `"keepBoth"` | How contradictory source attribution across the members an identity assertion fused is handled — `"keepBoth"` keeps every contribution, exactly as the merge always has; `"refuse"` fails the plan with `GRAPH_MERGE_IDENTITY_PROVENANCE_CONFLICT`, naming the canonical entity and the branches that disagree. "Contradictory" means two different BRANCHES independently authored the paired rows — a single branch asserting `same` over two rows it created itself is not a contradiction. |
+| `onEdgeConflict` | `"repoint"` | What happens when an identity pairing collapses two **distinct** pre-repoint relationships onto one edge slot — `x → a` and `x → b` both landing on the fused survivor. `"repoint"` folds them into one edge, exactly as the ordinary repoint always has. `"flag"` drops the pairing that induced the collision, rebuilds the plan once without it, and records an `IdentityUnresolvedConflict` of kind `"edge"` (see below). |
+| `onUniquenessConflict` | `"refuse"` | What happens when an identity pairing fuses members into one entity whose **unioned** properties violate a unique constraint — a compound key completed by `first` from one member and `last` from the other, say. `"refuse"` leaves the collision to the commit's own constraint refusal (`GRAPH_MERGE_CONSTRAINT_CONFLICT`), exactly as today. `"flag"` probes the resolved write set at plan time through the store's own constraint decision — the same key computation, `where` filter, scope and collation the write path enforces — drops the pairing that induced each collision, rebuilds once, and records an `IdentityUnresolvedConflict` of kind `"uniqueness"`. The constraint itself is never relaxed. |
+
+**What `"flag"` drops, and what it keeps.** Under `onEdgeConflict: "flag"` and
+`onUniquenessConflict: "flag"` the merge builds its plan, looks for the
+collisions an identity pairing induced, and — if it finds any — rebuilds the
+plan **once** with the `same` assertions behind those pairings removed from
+candidate generation — only the assertions on the identity path between the
+entities the conflict names, never every assertion the cluster holds. Only the
+pairing is dropped: the assertion itself still lands in the identity ledger, so
+the two rows stay in one identity class (every identity-aware read still sees
+them as one entity) — they are simply not consolidated into a single row by
+this merge, and every relationship each row carried lands as it was staged. A
+collision that similarity, a shared unique value or an ontology retype would
+have produced without the assertion is not the pairing's doing and is not
+reported against it. Attribution happens *before* each rebuild: an **edge**
+collapse is induced when the cluster's non-identity edges alone do not connect
+the two endpoints (and confirmed by the rebuild, since fusions only shrink); a
+**uniqueness** collision is attributed against the cluster's own unfused
+writes — the planner probes the same store decision a second time over the
+writes the plan would carry with that cluster's identity edges removed (each
+component its similarity, unique-value or retype edges still hold together,
+canonicalized, retyped and modification-folded exactly as the plan does), and
+drops a pairing only when no such write claims that key on its own. A cluster
+whose non-identity edges already connect every member has no pairing to drop
+and is never induced. The decision then iterates to a fixpoint: splitting a fused entity puts its
+members' own writes back into the plan, and a member's own key the fused union
+had discarded can meet a *different* induced pairing the fused plan never met,
+so each pass inspects the rebuilt plan and drops what it newly induces, and
+every pass's conflicts are carried on the report. It terminates because every
+pass must drop at least one assertion no earlier pass dropped and the staged
+assertions are finite; a pass that named nothing new while still reporting an
+induced conflict would contradict its own counterfactual, and only that is
+refused with a `GRAPH_MERGE_ERROR` instead of looped on. Three things stay
+where they are today: a uniqueness collision a member carries **on
+its own** (not one the fusion created) is still refused by the commit, flag or
+not, and drops no pairing; the plan-time probe reads the plan's resolved
+properties, so a key the target's row carries that no branch restated is caught
+by the commit's authoritative check rather than at plan time; and, in the
+converse direction, the probe is a lock-free read of the target, so a row
+committed between planning and apply can make the planner drop a pairing the
+commit would have allowed — the safe direction, since the plan stays
+applicable and the report says what was dropped.
+
+The two arms carry what a reviewer needs to act on the dropped pairing:
+
+| Arm | Fields |
+| --- | --- |
+| `kind: "edge"` | `edgeKind`; `a` and `b`, the two pre-repoint endpoints whose pairing collapsed the rows; `canonical`, the survivor both repointed onto; `side` (`"from"` or `"to"`); `edgeIds`, the rows that would have folded; `assertionIds`, the `same` assertions whose pairing was dropped; `branches`, the branches that staged them. |
+| `kind: "uniqueness"` | `constraintName` and `fields`; `canonical`, the fused entity whose pairing was dropped; `owner`, the current holder of the key — another write of the same plan, or a row the target already holds (reported under its **own** kind, the subclass row a `kindWithSubClasses` scope reached, say); `loser`, the write the store refused for it (`canonical` is one of the two); `members`, the fused cluster; `assertionIds` and `branches` as above. |
 
 **A plan carrying an `IdentityUnresolvedConflict` is still applicable.**
 `"flag"` means "keep the base truth, keep the data, tell the caller" — the
@@ -1029,6 +1082,10 @@ reconciliation.
 A same-id ontology retype remains a `TypeReconciliation`, rather than creating
 an id-merge resolution. Its optional `decisiveEdges` carries the accepted retype
 witness without changing the meaning of the existing resolution collection.
+When a retype cluster also spans several ids, the id-merge resolution it does
+produce names the **reconciled** kind in `EntityResolution.kind` — the kind the
+canonical row is written under, the same value `TypeReconciliation.toType`
+records — never the staged survivor's pre-retype kind.
 
 Each edge records every candidate source that proposed the pair in stable order.
 Definitional evidence names the trusted rule, such as a unique constraint, and

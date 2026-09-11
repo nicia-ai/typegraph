@@ -50,12 +50,21 @@ assertion now vetoes a match at plan time instead of aborting at commit,
 `onAssertionConflict` makes retract/reassert races and independently duplicated
 assertions resolvable by policy instead of only refusable, and
 `onProvenanceConflict` states how contradictory branch attribution across a
-fused cluster is handled. Every unresolved case is reported as a typed
+fused cluster is handled, `onEdgeConflict: "flag"` drops an identity pairing
+whose repoint collapsed two distinct relationships onto one edge instead of
+folding them, and `onUniquenessConflict: "flag"` drops an identity pairing
+whose fused entity would violate a unique constraint — detected at plan time
+through the store's own constraint decision, never a second spelling of the
+key — instead of failing at commit. Both `"flag"` dispositions rebuild the plan
+once without the dropped pairings and leave it applicable; the assertion itself
+still lands in the identity ledger, only its use as a candidate pairing is
+dropped. Every unresolved case is reported as a typed
 `IdentityUnresolvedConflict` on the merge report and inside the durable plan,
 and the policy bag is part of the review digest, so a plan cannot be applied
 under policies its reviewer did not approve. Defaults preserve current
-behavior exactly: `pairing: "off"`, `onAssertionConflict: "refuse"`, and
-`onProvenanceConflict: "keepBoth"`.
+behavior exactly: `pairing: "off"`, `onAssertionConflict: "refuse"`,
+`onProvenanceConflict: "keepBoth"`, `onEdgeConflict: "repoint"`, and
+`onUniquenessConflict: "refuse"`.
 
 One narrow, deliberate behavior change ships under the default policy: when
 two branches end the same base identity assertion at different valid-time
@@ -75,6 +84,12 @@ transaction's flush wrote, an annotation of the assertion/retraction writes
 `total` already counts rather than a fourth kind of write.
 
 ### Breaking changes
+
+- `IdentityUnresolvedConflict` gains two arms, `kind: "edge"` and
+  `kind: "uniqueness"`, reported when `identity.onEdgeConflict: "flag"` or
+  `identity.onUniquenessConflict: "flag"` drops an identity pairing. An
+  exhaustive `switch` over `conflict.kind` must handle both; the durable plan
+  artifact's strict `review.identityConflicts` schema admits both.
 
 - `store.identity.transitionsOf` returns `{ transitions, nextFrom? }` rather
   than a bare array, so a capped page can carry its continuation cursor.

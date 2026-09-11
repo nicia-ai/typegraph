@@ -1172,7 +1172,7 @@ export async function replaceAffectedClosure(
  * `priorClassRef` names it (`undefined` when that side was a singleton with
  * no real closure row to absorb).
  */
-export async function mergeCurrentClasses(
+async function mergeCurrentClasses(
   target: Backend,
   schema: SqlSchema,
   graphId: string,
@@ -1257,7 +1257,7 @@ export async function mergeCurrentClasses(
  * mapping, and of what a fusion notes, for every path that writes a current
  * assertion row.
  */
-async function applyPairRelationEffect(
+export async function applyPairRelationEffect(
   ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
   target: Backend,
   relation: IdentityRelation,
