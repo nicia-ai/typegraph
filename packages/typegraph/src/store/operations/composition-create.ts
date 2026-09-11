@@ -41,6 +41,7 @@ import { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type EdgeRow,
+  type GraphBackend,
   type GraphReadBackend,
   isLiveNodeRow,
   type LiveNodeRow,
@@ -1150,11 +1151,77 @@ export async function readCompositionAttachmentsForPage(
 }
 
 /**
+ * The read surface a whole-row read needs: the point read every backend has,
+ * plus the batch extra when the port carries it. Narrow on purpose — a write
+ * frame's transaction target and a read-only audit backend both satisfy it.
+ */
+type CompositionWholeRowReader = Readonly<Pick<GraphBackend, "getNode">> &
+  Readonly<Partial<Pick<GraphBackend, "getNodes">>>;
+
+/**
+ * THE whole-row read: every `(kind, id)` these wholes name, deduplicated, read
+ * once per kind through the batch point read when the caller hands over the
+ * verdict that reaches `getNodes`, and through the per-id `getNode` the bundle
+ * declares as that extra's fallback when it does not. Keyed by the `(kind, id)`
+ * tuple key, with an explicit `undefined` for a whole that has no row at all,
+ * so a caller can tell "absent" from "not asked for".
+ *
+ * One owner, two consumers that would otherwise spell the same dedupe, the same
+ * binding and the same fallback twice: the node-create batch's attach loop
+ * (`attachBatchCompositionCreateEdges`, `node-operations.ts`), which judges each
+ * row through {@link assertCompositionWholeEndpointLive} and carries it as the
+ * preparation's `"primedWhole"` evidence, and {@link readLiveCompositionWholes}
+ * below. The port is an optimization, never a requirement: the verdict a caller
+ * reaches must be identical either way.
+ */
+export async function readCompositionWholeRows(
+  port: CompositionWholeRowReader,
+  graphId: string,
+  wholes: readonly CompositionWholeRef[],
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
+): Promise<ReadonlyMap<string, NodeRow | undefined>> {
+  const idsByKind = new Map<string, Set<string>>();
+  for (const whole of wholes) {
+    const ids = idsByKind.get(whole.kind) ?? new Set<string>();
+    ids.add(whole.id);
+    idsByKind.set(whole.kind, ids);
+  }
+  const boundGetNodes =
+    batchPointRead === undefined ? undefined : (
+      bindExtraIfReachable(
+        port,
+        batchPointRead.extras.getNodes,
+        BATCH_POINT_READ.id,
+      )
+    );
+
+  const rowsByWhole = new Map<string, NodeRow | undefined>();
+  for (const [kind, ids] of idsByKind) {
+    const orderedIds = [...ids];
+    if (boundGetNodes === undefined) {
+      for (const id of orderedIds) {
+        rowsByWhole.set(
+          encodeTupleKey([kind, id]),
+          await port.getNode(graphId, kind, id),
+        );
+      }
+      continue;
+    }
+    const rows = await boundGetNodes.getNodes(graphId, kind, orderedIds);
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    for (const id of orderedIds) {
+      rowsByWhole.set(encodeTupleKey([kind, id]), rowsById.get(id));
+    }
+  }
+  return rowsByWhole;
+}
+
+/**
  * Which of these wholes are LIVE rows, as the whole-endpoint refusal judges
- * liveness ({@link assertEndpointRowLive}: present and not tombstoned — a
- * tombstone is the whole of the question, valid-time is not). Read once per
- * kind through the batch point read where the backend has it, falling back to
- * the per-id read the bundle declares.
+ * liveness ({@link isEndpointRowLive}: present and not tombstoned — a tombstone
+ * is the whole of the question, valid time is not). The filtering projection of
+ * {@link readCompositionWholeRows}, so it shares that read's dedupe, binding and
+ * fallback rather than repeating them.
  *
  * Separate from {@link selectLiveCompositionAttachment} on purpose: the write
  * path's incumbent decision must keep seeing a tombstoned whole's attachment,
@@ -1166,36 +1233,16 @@ export async function readLiveCompositionWholes(
   wholes: readonly CompositionWholeRef[],
   batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<readonly CompositionWholeRef[]> {
-  const idsByKind = new Map<string, Set<string>>();
-  for (const whole of wholes) {
-    const ids = idsByKind.get(whole.kind) ?? new Set<string>();
-    ids.add(whole.id);
-    idsByKind.set(whole.kind, ids);
-  }
-  // One statement per kind where the caller handed us the bundle verdict that
-  // reaches `getNodes`, and the per-id read the bundle itself declares as that
-  // extra's fallback where it did not.
-  const boundGetNodes =
-    batchPointRead === undefined ? undefined : (
-      bindExtraIfReachable(
-        backend,
-        batchPointRead.extras.getNodes,
-        BATCH_POINT_READ.id,
-      )
-    );
+  const rowsByWhole = await readCompositionWholeRows(
+    backend,
+    graphId,
+    wholes,
+    batchPointRead,
+  );
   const live: CompositionWholeRef[] = [];
-  for (const [kind, ids] of idsByKind) {
-    const orderedIds = [...ids];
-    const rows =
-      boundGetNodes === undefined ?
-        await Promise.all(
-          orderedIds.map((id) => backend.getNode(graphId, kind, id)),
-        )
-      : await boundGetNodes.getNodes(graphId, kind, orderedIds);
-    for (const row of rows) {
-      if (!isEndpointRowLive(row)) continue;
-      live.push({ kind: row.kind, id: row.id });
-    }
+  for (const row of rowsByWhole.values()) {
+    if (!isEndpointRowLive(row)) continue;
+    live.push({ kind: row.kind, id: row.id });
   }
   return live;
 }
