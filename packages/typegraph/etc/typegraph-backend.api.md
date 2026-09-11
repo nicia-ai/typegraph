@@ -4407,7 +4407,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "heterogeneousEndpointSetRead";
-        readonly ceiling: 5;
+        readonly ceiling: 6;
     };
     readonly fulltextSearch: {
         readonly kind: "deferred";
