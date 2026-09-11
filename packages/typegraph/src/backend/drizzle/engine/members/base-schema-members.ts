@@ -79,17 +79,17 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    */
   ensureEdgeMatchIdentityStorage: () => Promise<void>;
   /**
-   * `CREATE INDEX IF NOT EXISTS` for the base-schema release's three
-   * `since_idx` indexes (the lineage capability's changed-since scan), in
-   * `(recordedNodes, recordedEdges, recordedIdentityAssertions)` order —
-   * the version-3 adoption step, built once by the caller via
-   * `sinceIndexAdoptionDdl` (`../../../indexes/system`) from its own
-   * dialect's physical table names. All three indexes already exist after
-   * a fresh bootstrap (the schema factories derive them from the same
-   * declarations), so this dep is only exercised by the offline `adopt()`
-   * path, the same way `fencesTableDdl` is for version 2.
+   * DDL for version-3 adoption: ensure recorded identity-assertions storage
+   * and its structural indexes before creating the three changed-since indexes.
+   * Older installations can lack the identity-assertions relation even with a
+   * version-1 or version-2 marker: it originally shipped only in bootstrap DDL.
+   * Dialect factories generate its table and index DDL from the same schema
+   * definition as bootstrap, then append `sinceIndexAdoptionDdl` for the
+   * `(recordedNodes, recordedEdges, recordedIdentityAssertions)` since indexes.
+   * Fresh bootstrap already creates all of this storage, so the statements
+   * are only exercised by offline `adopt()`.
    */
-  sinceIndexDdl: readonly [string, string, string];
+  sinceIndexDdl: readonly string[];
 }>;
 
 export type BaseSchemaMembers = Readonly<{

@@ -396,7 +396,10 @@ export function generateSystemIndexDDL(
  * carries all three indexes through the schema factories' own index
  * builders, but a database that reaches adoption without re-running
  * bootstrap DDL (a reopen of an already-provisioned installation) needs
- * this explicit `CREATE INDEX IF NOT EXISTS` triple. One owner for the
+ * this explicit `CREATE INDEX IF NOT EXISTS` triple. The adoption step must
+ * first ensure recorded identity-assertions storage: older provisioned
+ * installations can predate that table, which originally shipped only in
+ * bootstrap DDL. One owner for the
  * declaration lookup and the identity-assertions index's own name (both
  * routed through {@link systemIndexName}, the single naming choke point)
  * keeps the two dialect factories from re-spelling either and risking

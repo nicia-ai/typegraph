@@ -577,6 +577,126 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
+  describe.each([1, 2])(
+    "pre-identity storage at base version %i",
+    (version) => {
+      it.each([false, true])(
+        "adopts missing SQLite identity storage (custom names: %s)",
+        async (customNames) => {
+          const tableName =
+            customNames ?
+              "legacy_identity_assertions"
+            : "typegraph_recorded_identity_assertions";
+          const tables = createSqliteTables({
+            recordedIdentityAssertions: tableName,
+          });
+          const { backend, db } = createLocalSqliteBackend({ tables });
+          const client = sqliteClient(db);
+          try {
+            const [store] = await createStoreWithSchema(graph, backend);
+            const person = await store.nodes.Person.create({
+              name: "Preserved",
+            });
+            client.exec(`DROP TABLE "${tableName}"`);
+            client
+              .prepare(
+                "UPDATE typegraph_base_schema_versions SET version = ? WHERE installation = 1",
+              )
+              .run(version);
+
+            // Exercise offline adoption first: bootstrap must not conceal a missing step.
+            await requireDefined(backend.adoptBaseSchema)();
+            await requireDefined(backend.adoptBaseSchema)();
+
+            expect(
+              markerVersion(client, "typegraph_base_schema_versions"),
+            ).toBe(CURRENT_BASE_SCHEMA_VERSION);
+            for (const suffix of [
+              "entity_idx",
+              "a_idx",
+              "b_idx",
+              "since_idx",
+            ]) {
+              expect(
+                client
+                  .prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+                  )
+                  .get(systemIndexName(tableName, suffix)),
+              ).toEqual({ name: systemIndexName(tableName, suffix) });
+            }
+            expect(
+              client.prepare(`SELECT * FROM "${tableName}"`).all(),
+            ).toEqual([]);
+            const [reopened] = await createStoreWithSchema(graph, backend);
+            expect(await reopened.nodes.Person.getById(person.id)).toEqual(
+              person,
+            );
+          } finally {
+            await backend.close();
+          }
+        },
+      );
+
+      it.each([false, true])(
+        "adopts missing PostgreSQL identity storage (custom names: %s)",
+        async (customNames) => {
+          const tableName =
+            customNames ?
+              "legacy_identity_assertions"
+            : "typegraph_recorded_identity_assertions";
+          const tables = createPostgresTables({
+            recordedIdentityAssertions: tableName,
+          });
+          const { backend, client } = await createLocalPgliteBackend({
+            tables,
+            vector: false,
+          });
+          try {
+            const [store] = await createStoreWithSchema(graph, backend);
+            const person = await store.nodes.Person.create({
+              name: "Preserved",
+            });
+            await client.exec(`DROP TABLE "${tableName}"`);
+            await client.query(
+              "UPDATE typegraph_base_schema_versions SET version = $1 WHERE installation = 1",
+              [version],
+            );
+
+            await requireDefined(backend.adoptBaseSchema)();
+            await requireDefined(backend.adoptBaseSchema)();
+
+            const marker = await client.query<{ version: number }>(
+              "SELECT version FROM typegraph_base_schema_versions WHERE installation = 1",
+            );
+            expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+            const indexes = await client.query<{ indexname: string }>(
+              "SELECT indexname FROM pg_indexes WHERE tablename = $1",
+              [tableName],
+            );
+            expect(indexes.rows.map((row) => row.indexname)).toEqual(
+              expect.arrayContaining(
+                ["entity_idx", "a_idx", "b_idx", "since_idx"].map((suffix) =>
+                  systemIndexName(tableName, suffix),
+                ),
+              ),
+            );
+            const assertions = await client.query(
+              `SELECT * FROM "${tableName}"`,
+            );
+            expect(assertions.rows).toEqual([]);
+            const [reopened] = await createStoreWithSchema(graph, backend);
+            expect(await reopened.nodes.Person.getById(person.id)).toEqual(
+              person,
+            );
+          } finally {
+            await backend.close();
+          }
+        },
+      );
+    },
+  );
+
   it("catches an installed version-2 SQLite database up to version 3, gaining the since_idx indexes", async () => {
     const { backend, db } = createLocalSqliteBackend();
     const client = sqliteClient(db);
