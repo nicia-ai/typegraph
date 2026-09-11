@@ -4,6 +4,7 @@
 .vinxi
 .wrangler
 dist/
+.declaration-emit/
 .turbo
 tmp
 /out-tsc
