@@ -25,6 +25,8 @@
  * so a live-graph audit and a proposed-schema probe can never disagree about
  * what counts as a violation.
  */
+import type { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import type {
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
@@ -140,6 +142,16 @@ export type VerifyConstraintFencesContext = Readonly<{
   registry: KindRegistry;
   graphId: string;
   backend: GraphBackend;
+  /**
+   * The store's own `batchPointRead` verdict, minted once at construction and
+   * threaded here rather than re-resolved: the `compositionExistence` family
+   * reads each page's whole rows through it. It is BOUND against the backend
+   * this audit actually reads from (`bindExtraIfReachable`, inside
+   * `readLiveCompositionWholes`), so a target that implements less than the
+   * object the verdict was resolved against falls back to the per-id read the
+   * bundle declares instead of reaching a member it lacks.
+   */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
 }>;
 
 /**
@@ -639,6 +651,7 @@ export async function verifyConstraintFences(
     context.backend,
     context.graphId,
     requiredCompositionPartKinds(context.registry),
+    context.batchPointRead,
   );
 
   return [...claimBacked, ...acyclicity, ...compositionExistence].toSorted(
@@ -657,6 +670,7 @@ async function compositionExistenceViolations(
   backend: GraphReadBackend,
   graphId: string,
   partKinds: readonly string[],
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<readonly ConstraintFenceViolation[]> {
   if (partKinds.length === 0) return [];
   const unattached = await readCompositionUnattachedParts(
@@ -664,6 +678,7 @@ async function compositionExistenceViolations(
     backend,
     graphId,
     partKinds,
+    batchPointRead,
   );
   const byPartKind = groupBy(unattached, (part) => part.kind);
   return [...byPartKind.entries()]

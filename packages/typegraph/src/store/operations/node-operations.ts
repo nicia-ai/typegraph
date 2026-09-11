@@ -254,6 +254,7 @@ import {
   type FencedCompositionAttachment,
   findLiveCompositionAttachment,
   incumbentSatisfiesRequestedAttachment,
+  readCompositionWholeRows,
   resolveCompositionAttachmentRequest,
   resolveCompositionCreate,
 } from "./composition-create";
@@ -2879,59 +2880,6 @@ function batchCompositionAttachments(
 }
 
 /**
- * Every WHOLE row a batch's attachments name, read once per kind through
- * `getNodes` — one round trip per distinct whole kind rather than one per
- * item, the same priming `primeBatchValidationCaches` performs for a batch's
- * own ids. Keyed by `refKey` so a `(kind, id)` named by two items is read
- * once.
- *
- * A backend without the batch point read keeps the per-`(kind, id)` `getNode`
- * fallback (still deduplicated), for the same reason `primeBatchValidationCaches`
- * does: the port is an optimization, never a requirement, and the refusal a
- * missing or dead whole produces must be identical either way.
- *
- * Read AFTER the batch's node rows land, which is what makes a whole created
- * by the SAME batch visible to the item that attaches to it.
- */
-async function readBatchCompositionWholeRows<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  target: WriteTarget,
-  attachments: readonly BatchCompositionAttachment[],
-): Promise<ReadonlyMap<string, BackendNodeRow | undefined>> {
-  const idsByKind = new Map<string, Set<string>>();
-  for (const { work } of attachments) {
-    const ids = idsByKind.get(work.whole.kind) ?? new Set<string>();
-    ids.add(work.whole.id);
-    idsByKind.set(work.whole.kind, ids);
-  }
-
-  const boundGetNodes = bindExtraIfReachable(
-    target,
-    ctx.batchPointRead.extras.getNodes,
-    BATCH_POINT_READ.id,
-  );
-  const wholeRows = new Map<string, BackendNodeRow | undefined>();
-  for (const [kind, ids] of idsByKind) {
-    const orderedIds = [...ids];
-    if (boundGetNodes === undefined) {
-      for (const id of orderedIds) {
-        wholeRows.set(
-          refKey({ kind, id }),
-          await target.getNode(ctx.graphId, kind, id),
-        );
-      }
-      continue;
-    }
-    const rows = await boundGetNodes.getNodes(ctx.graphId, kind, orderedIds);
-    const rowsById = new Map(rows.map((row) => [row.id, row]));
-    for (const id of orderedIds) {
-      wholeRows.set(refKey({ kind, id }), rowsById.get(id));
-    }
-  }
-  return wholeRows;
-}
-
-/**
  * After every node row in a batch exists (inserted or
  * resurrected), attaches each item's composition edge — one owner reached
  * from every prepared row, so a mixed batch of required/optional/no-`partOf`
@@ -2985,10 +2933,16 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
   );
   if (attachments.length === 0) return;
 
-  const wholeRows = await readBatchCompositionWholeRows(
-    ctx,
+  // One round trip per distinct whole kind, through the owner the
+  // `compositionExistence` audit reads as well — and read AFTER the batch's
+  // node rows land, which is what makes a whole created by the SAME batch
+  // visible to the item attaching to it. `refKey` below is the tuple key that
+  // read returns its rows under.
+  const wholeRows = await readCompositionWholeRows(
     target,
-    attachments,
+    ctx.graphId,
+    attachments.map(({ work }) => work.whole),
+    ctx.batchPointRead,
   );
   const preparedEdges: EdgeCreatePrepared[] = [];
   for (const { prepared, work } of attachments) {

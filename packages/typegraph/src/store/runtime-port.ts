@@ -1,4 +1,7 @@
-import { type UNIQUE_SIDECAR_BATCH } from "../backend/capabilities/bundle-registry";
+import {
+  type BATCH_POINT_READ,
+  type UNIQUE_SIDECAR_BATCH,
+} from "../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   type BackendIdentity,
@@ -99,6 +102,16 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * shimmed. Kept as is so its consumer's assertion stays truthful.
    */
   uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
+  /**
+   * @internal The `batchPointRead` bundle's verdict, minted once at store
+   * construction and exposed for the same reason `uniqueSidecarBatch` is: a
+   * Store-owned view (provenance's support computation, which reads the whole
+   * rows its required parts hang from) must not re-resolve a second verdict for
+   * the same backend. Bound per read against the object that read runs on, so a
+   * transaction target implementing less than the store's backend falls back to
+   * the per-id read the bundle declares.
+   */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   /**
    * @internal The backend this Store's queries actually execute through for
    * `target` — the Store's own backend when `target` is omitted.

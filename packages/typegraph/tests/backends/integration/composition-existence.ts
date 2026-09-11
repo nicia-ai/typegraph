@@ -573,6 +573,83 @@ export function registerCompositionExistenceIntegrationTests(
     // `verifyConstraintFences` even though `EeSegment`'s own orphan (case
     // 11) still reports.
 
+    it("case 11c: verifyConstraintFences reports a live required part whose whole is tombstoned", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const segment = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { kind: "EeEpisode", id: episode.id } },
+      );
+      // Tombstoned through the RAW backend member, bypassing the cascade that
+      // would otherwise take the part with it — the state a dirty database, a
+      // custom port, or a bypassed import can leave behind. The composition
+      // edge stays live, so judging attachment by the edge alone declared this
+      // part attached and the audit reported nothing.
+      await store.backend.deleteNode({
+        graphId: store.graphId,
+        kind: "EeEpisode",
+        id: episode.id,
+      });
+      expect(await store.edges.eeSegmentOf.find({})).toHaveLength(1);
+
+      const violations = await store.verifyConstraintFences();
+      const violation = violations.find(
+        (candidate) =>
+          candidate.family === "compositionExistence" &&
+          candidate.partKind === "EeSegment",
+      );
+      expect(violation).toBeDefined();
+      if (violation?.family !== "compositionExistence") {
+        throw new Error("expected a compositionExistence violation");
+      }
+      expect(violation.parts).toEqual([{ kind: "EeSegment", id: segment.id }]);
+    });
+    // MUTATION CHECK: drop the whole-liveness conjunct in
+    // `readCompositionUnattachedParts` (treat any attachment returned by
+    // `readCompositionAttachmentsForPage` as enough). The tombstoned whole
+    // above goes unreported, while case 11's unattached orphan still reports.
+
+    it("case 11d: the write path still sees a tombstoned whole's incumbent attachment", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const episode = await store.nodes.EeEpisode.create({});
+      const segment = await store.nodes.EeSegment.create(
+        {},
+        { partOf: { kind: "EeEpisode", id: episode.id } },
+      );
+      const other = await store.nodes.EeEpisode.create({});
+      await store.backend.deleteNode({
+        graphId: store.graphId,
+        kind: "EeEpisode",
+        id: episode.id,
+      });
+      // The audit's stronger verdict must NOT leak into the incumbent
+      // decision: the tombstoned whole still holds this part's attachment, so
+      // the move RETIRES that edge rather than treating the part as
+      // unattached and adding a second live one.
+      await store.nodes.EeSegment.reparent(segment.id, {
+        kind: "EeEpisode",
+        id: other.id,
+      });
+      const live = await store.edges.eeSegmentOf.find({});
+      expect(live).toHaveLength(1);
+      expect(requireDefined(live[0], "the moved attachment").toId).toBe(
+        other.id,
+      );
+      // `population: "one"` binds for the row's whole life, so the move
+      // REMOVES the incumbent row rather than ending its window: one row
+      // total, not a second one beside it.
+      expect(
+        await store.edges.eeSegmentOf.find(
+          {},
+          { temporalMode: "includeEnded" },
+        ),
+      ).toHaveLength(1);
+    });
+    // MUTATION CHECK: make the incumbent read whole-liveness-aware — in
+    // `findLiveCompositionAttachment`, drop a selected attachment whose whole
+    // `readLiveCompositionWholes` does not return. The move then finds no
+    // incumbent to retire and leaves TWO rows behind.
+
     it("case 12: a create whose `oneActive` composition edge would be born already-ended (unattaching) is refused, and writes no row", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const show = await store.nodes.EeShow.create({});
