@@ -44,14 +44,13 @@ const sidebar = [
   {
     label: "Guides",
     items: [
+      { label: "Backend Setup", slug: "backend-setup" },
       { label: "Schemas & Types", slug: "core-concepts" },
       { label: "Ontology & Reasoning", slug: "ontology" },
       { label: "Operational Identity", slug: "identity" },
       { label: "Semantic Search", slug: "semantic-search" },
       { label: "Fulltext Search", slug: "fulltext-search" },
       { label: "Graph Algorithms", slug: "graph-algorithms" },
-      { label: "Backend Setup", slug: "backend-setup" },
-      { label: "Authoring an engine profile", slug: "backend-authoring" },
       { label: "Schema Migrations", slug: "schema-management" },
       { label: "Evolving Schemas", slug: "schema-evolution" },
       { label: "Graph Extensions", slug: "graph-extensions" },
@@ -156,6 +155,7 @@ const sidebar = [
       { label: "Troubleshooting", slug: "troubleshooting" },
       { label: "Limitations", slug: "limitations" },
       { label: "Architecture", slug: "architecture" },
+      { label: "Authoring an engine profile", slug: "backend-authoring" },
       { label: "LLM Support", slug: "llm-support" },
     ],
   },

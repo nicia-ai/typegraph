@@ -2,6 +2,7 @@
 import Default from "@astrojs/starlight/components/Head.astro";
 
 import Analytics from "../Analytics.astro";
+import StructuredData from "../StructuredData.astro";
 
 const ogImageUrl = new URL("/og-image.png", Astro.site).href;
 const ogImageAlt =
@@ -18,4 +19,5 @@ const ogImageAlt =
 <meta name="twitter:image:alt" content={ogImageAlt} />
 <meta name="twitter:site" content="@pdlug" />
 <meta name="twitter:creator" content="@pdlug" />
+<StructuredData />
 <Analytics />
