@@ -291,9 +291,10 @@ const [store] = await createAdapterStoreWithSchema(graph, backend, {
 touching `ref`'s class lineage, oldest first — an assertion, a retraction, a
 same-ID fold, a delete or restore, a validity-window end, a kind drop, a
 schema transition, or a reconciliation decision made by a governed graph
-merge. A page holds at most `limit` transitions (default 200); when the
-lineage has more, the page carries `nextFrom`, and passing it back as
-`fromRecorded` reads the next one. Reading the whole lineage is therefore a
+merge. A page covers at most `limit` recorded boundaries (default 200), and
+one boundary can hold several transitions, so a page's `transitions` can be
+longer than `limit`; when the lineage has more boundaries, the page carries
+`nextFrom`, and passing it back as `fromRecorded` reads the next one. Reading the whole lineage is therefore a
 loop, not a call:
 
 ```typescript
