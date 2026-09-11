@@ -61,7 +61,7 @@
  *    reading. A `searchable()` field's `_searchableField` tag
  *    (src/core/searchable.ts:120) and an arbitrary `.meta()` key both fall
  *    out of this rule with no special case. `format` is NOT covered by this
- *    rule — see rule 8 below for why it is compared as a constraint instead.
+ *    rule — it is compared as a constraint, see {@link COMPARABLE_KEYWORDS}.
  * 6. If the two schemas are identical once irrelevant keywords are dropped,
  *    they are mutual subtypes — a NARROWER identity check than rule 2 above
  *    (it tolerates schemas that differ only in an annotation/unrecognized
@@ -100,11 +100,9 @@
  *    no `items` — additionally requires the child be bounded to the same
  *    arity, since the Zod tuple projection encodes "no rest element" only by
  *    omitting `items`, not with an explicit length bound), strings compare
- *    length bounds, `pattern`, and `format` (`format` carries a real
- *    constraint here, not merely an annotation: `z.url()` and `z.jwt()`
- *    project `format` with no accompanying `pattern`, so treating it as
- *    decoration would accept a bare `z.string()` as a subtype of either),
- *    and numbers compare bounds folding `exclusiveMinimum` /
+ *    length bounds, `pattern`, and `format` (a constraint, not an
+ *    annotation — see {@link COMPARABLE_KEYWORDS}), and numbers compare
+ *    bounds folding `exclusiveMinimum` /
  *    `exclusiveMaximum` in.
  *
  * An unmodeled construct always yields `{ verdict: "incomparable" }` and is
@@ -320,8 +318,8 @@ const NULL_TYPE_TOKEN = "null";
  * treating them as decoration would accept subtype verdicts that are not
  * actually sound (e.g. reading `z.never()`'s `not: {}` as "no constraint"
  * would make every schema a subtype of the bottom type). `allOf`
- * (`z.intersection`) is named explicitly per the lead's ruling: intersection
- * subtyping is real and deliberately deferred, not merely undecorated.
+ * (`z.intersection`) is named explicitly because intersection subtyping is
+ * real and deliberately deferred, not merely undecorated.
  *
  * The remaining entries are standard JSON Schema 2020-12 vocabulary keywords
  * this predicate's rule set does not model at all, even though the Zod
@@ -452,10 +450,9 @@ function unmodeledConstruct(
 /**
  * `schema` reduced to only the keywords this predicate compares — migration
  * metadata (description/title/default/$schema) and any keyword outside
- * `COMPARABLE_KEYWORDS` (an annotation like `format`, or an arbitrary
- * unrecognized key such as `_searchableField` or a user `.meta()` entry) are
- * dropped. Used only for the equality fast path below; the per-construct
- * comparison functions read the original schema directly.
+ * {@link COMPARABLE_KEYWORDS} are dropped. Used only for the equality fast
+ * path below; the per-construct comparison functions read the original schema
+ * directly.
  */
 function comparableKeywords(schema: JsonSchema): Record<string, unknown> {
   const stripped = stripSchemaMetadata(schema);
@@ -987,9 +984,7 @@ function compareStringConstraints(
     return notSubtype("pattern-mismatch", path);
   }
 
-  // `format` carries a real constraint, mirroring `pattern`: `z.url()` and
-  // `z.jwt()` project `format` with no accompanying `pattern`, so a parent
-  // format with no matching child format is not narrowed by anything else.
+  // `format` is a constraint, not an annotation — see COMPARABLE_KEYWORDS.
   if (parent.format !== undefined && child.format !== parent.format) {
     return notSubtype("format-mismatch", path);
   }

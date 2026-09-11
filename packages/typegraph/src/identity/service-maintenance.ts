@@ -35,6 +35,7 @@ import {
   identityActiveKinds,
   loadLiveReferences,
   loadSnapshot,
+  readClosureRowsForGraph,
   validateSnapshotIntegrity,
 } from "./service-components";
 import { runIdentityMutation } from "./service-facade";
@@ -607,13 +608,6 @@ export async function purgeAssertionsWithUnregisteredKinds(
   );
 }
 
-type RawClosureRow = Readonly<{
-  member_kind: string;
-  member_id: string;
-  class_kind: string;
-  class_id: string;
-}>;
-
 /**
  * A full graph-wide snapshot of the materialized closure, keyed by member —
  * the "before" and "after" `diffClosureTransitions` needs around a FULL
@@ -627,13 +621,7 @@ export async function snapshotIdentityClosureClasses(
   schema: SqlSchema,
   graphId: string,
 ): Promise<ReadonlyMap<string, readonly PlainNodeRef[]>> {
-  const rows = await target.execute<RawClosureRow>(
-    asCompiledRowsSql(sql`
-      SELECT member_kind, member_id, class_kind, class_id
-      FROM ${schema.identityClosureTable}
-      WHERE graph_id = ${graphId}
-    `),
-  );
+  const rows = await readClosureRowsForGraph(target, schema, graphId);
   const groups = new Map<
     string,
     Readonly<{ classRef: PlainNodeRef; members: PlainNodeRef[] }>
@@ -1039,6 +1027,22 @@ export async function requireNodeValidityEndCompatible(
           },
           endpointWindow: { validTo },
         });
+      }
+      // A node in no real (>= 2 member) class can produce no `window-end`
+      // transition at all: no closure row means a singleton under every source
+      // of identity, which is exactly the `currentClass.length < 2` return
+      // below. One indexed seek on the closure primary key therefore replaces
+      // the node seek AND the closure join in the steady state — the same gate
+      // `detachIdentityForNode` takes, for the same reason.
+      if (
+        !(await hasMaterializedIdentityClass(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          ref,
+        ))
+      ) {
+        return;
       }
       const currentValidTo = await readNodeValidTo(
         rawTarget,

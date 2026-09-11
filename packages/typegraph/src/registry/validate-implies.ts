@@ -66,18 +66,13 @@ export function validateImpliesEndpointCompatibility(
         registry,
       );
 
-      if (
-        implyingFacts.pairs !== undefined &&
-        impliedFacts.pairs !== undefined
-      ) {
-        assertPairsCompatible(
-          implyingEdgeKind,
-          implyingFacts.pairs,
-          impliedEdgeKind,
-          impliedFacts.pairs,
-          registry,
-        );
-      }
+      assertPairsCompatible(
+        implyingEdgeKind,
+        implyingFacts.pairs,
+        impliedEdgeKind,
+        impliedFacts.pairs,
+        registry,
+      );
     }
   }
 }

@@ -3,13 +3,13 @@ import {
   type CompositionPartSide,
   isCompositionMetaEdge,
   normalizePartWhole,
+  ontologyRelationIdentityKey,
 } from "../registry/composition-relation";
 import {
   computeDisjointExpansionClosures,
   computeEquivalenceClasses,
   expandDisjointSide,
 } from "../registry/kind-registry";
-import { encodeTupleKey } from "../utils/tuple-key";
 import { computeTransitiveClosure } from "./closures";
 import {
   META_EDGE_BROADER,
@@ -98,6 +98,33 @@ const HIERARCHICAL_NORMALIZATION: ReadonlyMap<
   [META_EDGE_BROADER, { canonical: META_EDGE_BROADER, flip: false }],
   [META_EDGE_NARROWER, { canonical: META_EDGE_BROADER, flip: true }],
 ]);
+
+/**
+ * The relation fields only `partOf`/`hasPart` may carry, and the refusal each
+ * one earns on any other meta-edge. One table rather than three near-identical
+ * blocks, so a fourth composition qualifier is refused by adding an entry.
+ */
+const COMPOSITION_ONLY_FIELDS = [
+  {
+    field: "via",
+    label: "a `via` edge kind",
+    code: "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN",
+  },
+  {
+    field: "partSide",
+    label: "a `partSide`",
+    code: "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN",
+  },
+  {
+    field: "existence",
+    label: "an `existence`",
+    code: "ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN",
+  },
+] as const satisfies readonly Readonly<{
+  field: keyof NamedOntologyRelation;
+  label: string;
+  code: OntologyValidationIssueCode;
+}>[];
 
 type NormalizedHierarchicalEdge = Readonly<{
   from: string;
@@ -192,17 +219,7 @@ function validateSelfLoopsAndDuplicates(
       }
     }
 
-    // `via`/`partSide` join the key so two realizing edges can hold the
-    // same (part, whole) pair — the heterogeneous-edge shape
-    // `compositionEdgeKindsUnder` exists to serve — without colliding as
-    // duplicates.
-    const key = encodeTupleKey([
-      relation.metaEdge,
-      relation.from,
-      relation.to,
-      relation.via ?? "",
-      relation.partSide ?? "",
-    ]);
+    const key = ontologyRelationIdentityKey(relation);
     if (seenKeys.has(key)) {
       issues.push({
         relationIndex: index,
@@ -469,28 +486,14 @@ function validateCompositionShape(
       continue;
     }
 
-    if (relation.via !== undefined) {
+    for (const { field, label, code } of COMPOSITION_ONLY_FIELDS) {
+      const value = relation[field];
+      if (value === undefined) continue;
       issues.push({
         relationIndex: index,
-        message: `Meta-edge "${relation.metaEdge}" cannot carry a \`via\` edge kind; only partOf/hasPart may.`,
-        code: "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN",
-        details: { metaEdge: relation.metaEdge, via: relation.via },
-      });
-    }
-    if (relation.partSide !== undefined) {
-      issues.push({
-        relationIndex: index,
-        message: `Meta-edge "${relation.metaEdge}" cannot carry a \`partSide\`; only partOf/hasPart may.`,
-        code: "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN",
-        details: { metaEdge: relation.metaEdge, partSide: relation.partSide },
-      });
-    }
-    if (relation.existence !== undefined) {
-      issues.push({
-        relationIndex: index,
-        message: `Meta-edge "${relation.metaEdge}" cannot carry an \`existence\`; only partOf/hasPart may.`,
-        code: "ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN",
-        details: { metaEdge: relation.metaEdge, existence: relation.existence },
+        message: `Meta-edge "${relation.metaEdge}" cannot carry ${label}; only partOf/hasPart may.`,
+        code,
+        details: { metaEdge: relation.metaEdge, [field]: value },
       });
     }
   }

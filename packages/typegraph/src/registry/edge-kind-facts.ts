@@ -18,7 +18,13 @@ import { type Cardinality, type TargetCardinality } from "../core/types";
 export type EdgeKindFacts = Readonly<{
   from: readonly string[];
   to: readonly string[];
-  pairs?: readonly Readonly<{ from: string; to: string }>[];
+  /**
+   * The `(from, to)` pairs the declaration admits, already resolved from a
+   * source-dependent target map or a plain Cartesian product by whichever
+   * builder read the declaration — so no consumer re-derives a second,
+   * driftable spelling of the same value.
+   */
+  pairs: readonly Readonly<{ from: string; to: string }>[];
   cardinality: Cardinality;
   targetCardinality: TargetCardinality;
 }>;

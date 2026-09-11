@@ -55,23 +55,21 @@ export function validateInverseEndpointCompatibility(
       );
     }
 
-    if (left.pairs !== undefined && right.pairs !== undefined) {
+    assertInversePairsCompatible(
+      relation.from,
+      left.pairs,
+      relation.to,
+      right.pairs,
+      registry,
+    );
+    if (relation.from !== relation.to) {
       assertInversePairsCompatible(
-        relation.from,
-        left.pairs,
         relation.to,
         right.pairs,
+        relation.from,
+        left.pairs,
         registry,
       );
-      if (relation.from !== relation.to) {
-        assertInversePairsCompatible(
-          relation.to,
-          right.pairs,
-          relation.from,
-          left.pairs,
-          registry,
-        );
-      }
     }
   }
 }

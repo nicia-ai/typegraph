@@ -432,16 +432,6 @@ export function createUniquenessError(
 }
 
 // ============================================================
-// Cardinality Validation
-// ============================================================
-//
-// Cardinality's refusal is built by `edgeCardinalityViolation`
-// (`store/claims/edge-claims.ts`), the one owner both the write-time probe
-// (`store/constraints.ts`) and the claim fence's refusal translation call —
-// so the fence's error is `instanceof` the same class and carries the same
-// payload as the probe's for the same violation.
-
-// ============================================================
 // Endpoint Validation
 // ============================================================
 

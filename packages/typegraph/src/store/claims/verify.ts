@@ -63,6 +63,7 @@ import {
   DISJOINT_CONSTRAINT_NAME,
   disjointnessClaimAxis,
   isSameClaimOwner,
+  targetIdentity,
   uniquenessAxisOfKinds,
   uniquenessClaimTarget,
 } from "./axis";
@@ -98,10 +99,10 @@ export type ConstraintFenceViolation =
     }>
   | Readonly<{
       /**
-       * Item E: two or more live edges — of any realizing kind, in either
+       * Two or more live edges — of any realizing kind, in either
        * orientation — hold the SAME part's reserved composition axis. Its
        * own family rather than folding into `edgeCardinality`, even though
-       * the row shape is identical, because the axis it names is R4's
+       * the row shape is identical, because the axis it names is the
        * relation-wide one, not a per-edge-kind one, and a caller branching on
        * `family` should not have to inspect `target.axis` to tell them apart.
        */
@@ -111,9 +112,9 @@ export type ConstraintFenceViolation =
     }>
   | Readonly<{
       /**
-       * Item E.2: one or more LIVE nodes of a required-existence composition
-       * part kind currently have no live whole. Its own family — the same
-       * reason E-b's `composition` splits off `edgeCardinality`: a caller
+       * One or more LIVE nodes of a required-existence composition part kind
+       * currently have no live whole. Its own family — the same reason
+       * `composition` splits off `edgeCardinality`: a caller
        * branching on `family` should not have to inspect the target to tell
        * "two wholes" (`composition`) from "no whole" (this). There is no
        * `ClaimTarget` and no `edgeIds`: the violation is the ABSENCE of an
@@ -248,16 +249,6 @@ function sortedOwners(owners: readonly ClaimOwner[]): readonly ClaimOwner[] {
       compareStrings(left.concreteKind, right.concreteKind) ||
       compareStrings(left.nodeId, right.nodeId),
   );
-}
-
-/** A claim target keyed as one map entry, for grouping rows onto axes. */
-function targetIdentity(target: ClaimTarget): string {
-  return [
-    target.relation,
-    target.axis,
-    target.constraintName ?? "",
-    target.key,
-  ].join("\u0000");
 }
 
 /**
@@ -641,8 +632,8 @@ export async function verifyConstraintFences(
         acyclicRelations,
       );
 
-  // Item E.2, graph-wide (not delta-scoped: this is a live-graph audit, not
-  // a commit preflight).
+  // Required-existence parts, graph-wide (not delta-scoped: this is a
+  // live-graph audit, not a commit preflight).
   const compositionExistence = await compositionExistenceViolations(
     context.registry,
     context.backend,

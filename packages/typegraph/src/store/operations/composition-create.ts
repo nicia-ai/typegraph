@@ -1,5 +1,5 @@
 /**
- * Item E.2 — `existence: "required"`: a composition part that cannot exist
+ * `existence: "required"`: a composition part that cannot exist
  * without a live whole.
  *
  * THE two owners this lane adds, in one module because both directions of
@@ -20,7 +20,8 @@
  *   resolve no schema and no constraints (see that module's docblock).
  *
  * Neither function issues a claim: `edgeInsertClaims`
- * (`src/store/claims/composition-claims.ts`) remains the one owner of R4's
+ * (`src/store/claims/composition-claims.ts`) remains the one owner of the
+ * one-whole-per-part invariant's
  * "at most one whole" claim, unchanged by this lane.
  *
  * Alongside them, the DISPOSITION owner every attachment against an
@@ -38,6 +39,7 @@
 import {
   type EdgeRow,
   type GraphReadBackend,
+  isLiveNodeRow,
   type NodeRow,
   rowPropsToObject,
 } from "../../backend/types";
@@ -51,6 +53,7 @@ import { type CompositionPair } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { requireDefined } from "../../utils/presence";
+import { encodeTupleKey } from "../../utils/tuple-key";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   type CompositionAttachment,
@@ -59,7 +62,11 @@ import {
   type CreateEdgeInput,
   type CreateNodeInput,
 } from "../types";
-import { compositionEdgeCounts } from "./composition-cascade";
+import {
+  compositionEdgeCounts,
+  compositionRowEndpoints,
+  wholeSide,
+} from "./composition-cascade";
 
 /**
  * What one node create owes on the composition axis: the declared pair and
@@ -355,10 +362,7 @@ export async function assertCompositionExistencePreserved(
   const partSide = ctx.registry.compositionPartSide(edge.kind);
   if (partSide === undefined) return;
 
-  const part =
-    partSide === "from" ?
-      { kind: edge.from_kind, id: edge.from_id }
-    : { kind: edge.to_kind, id: edge.to_id };
+  const { part } = compositionRowEndpoints(partSide, edge);
 
   if (ctx.registry.compositionExistence(part.kind) !== "required") return;
 
@@ -378,8 +382,7 @@ export async function assertCompositionExistencePreserved(
   if (!edgeCurrentlyAttachesPart(ctx.registry, part.kind, edge)) return;
 
   const partRow = await backend.getNode(ctx.graphId, part.kind, part.id);
-  const partIsLive = partRow !== undefined && partRow.deleted_at === undefined;
-  if (!partIsLive) return;
+  if (partRow === undefined || !isLiveNodeRow(partRow)) return;
 
   throw new CompositionExistenceError({
     partKind: part.kind,
@@ -426,20 +429,38 @@ export async function findLiveCompositionAttachment(
     nodeKind: concreteKind,
     nodeId: concreteId,
   });
-  for (const edge of connected) {
+  return selectLiveCompositionAttachment(
+    registry,
+    concreteKind,
+    concreteId,
+    connected,
+    excludeEdgeIds,
+  );
+}
+
+/**
+ * The in-memory half of {@link findLiveCompositionAttachment}: given the
+ * candidate edges incident to one part, the one that currently attaches it.
+ *
+ * Split out so a caller that already read a SET of parts' candidate edges in
+ * one statement ({@link readCompositionUnattachedParts}) reaches the identical
+ * verdict as the per-part reader, rather than re-spelling the orientation
+ * match and the population predicate over its own rows.
+ */
+function selectLiveCompositionAttachment(
+  registry: KindRegistry,
+  concreteKind: string,
+  concreteId: string,
+  candidateEdges: readonly EdgeRow[],
+  excludeEdgeIds?: ReadonlySet<string>,
+): Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }> | undefined {
+  for (const edge of candidateEdges) {
     if (excludeEdgeIds?.has(edge.id) === true) continue;
     const partSide = registry.compositionPartSide(edge.kind);
     if (partSide === undefined) continue;
-    const isPartHere =
-      partSide === "from" ?
-        edge.from_kind === concreteKind && edge.from_id === concreteId
-      : edge.to_kind === concreteKind && edge.to_id === concreteId;
-    if (!isPartHere) continue;
+    const { part, whole } = compositionRowEndpoints(partSide, edge);
+    if (part.kind !== concreteKind || part.id !== concreteId) continue;
     if (!edgeCurrentlyAttachesPart(registry, concreteKind, edge)) continue;
-    const whole =
-      partSide === "from" ?
-        { kind: edge.to_kind, id: edge.to_id }
-      : { kind: edge.from_kind, id: edge.from_id };
     return { edge, whole };
   }
   return undefined;
@@ -581,31 +602,17 @@ export type CompositionAttachmentRequest = Readonly<{
 }>;
 
 /**
- * Pairs a resolved {@link CompositionCreateWork} with the attachment it came
- * from and the disposition the calling surface declares. The one constructor
- * of {@link CompositionAttachmentRequest}, so no call site can assemble a
- * request whose `work` and `attachment` describe different wholes.
- */
-function compositionAttachmentRequest(
-  work: CompositionCreateWork,
-  attachment: CompositionAttachment,
-  onIncumbent: CompositionIncumbentDisposition,
-): CompositionAttachmentRequest {
-  return { attachment, work, onIncumbent };
-}
-
-/**
  * THE resolution of one caller-stated `partOf` into the request a fenced
  * attachment frame runs: `resolveCompositionCreate`'s read-free refusals (an
  * undeclared pair, an unknown or ambiguous `via`, a required part with no
- * `partOf`) followed by {@link compositionAttachmentRequest}'s single
- * construction. `undefined` means this frame owes no attachment at all.
+ * `partOf`). `undefined` means this frame owes no attachment at all.
  *
  * Every surface that attaches a part against a row that ALREADY exists comes
  * through here — `nodes.<Kind>.reparent(...)` with `"replace"`, every
  * get-or-create leg with `"refuse"` — so no surface resolves a pair a caller
- * above it already resolved, and the `work`/`attachment` pairing stays the one
- * thing {@link compositionAttachmentRequest} builds.
+ * above it already resolved, and this is the ONE place a
+ * {@link CompositionAttachmentRequest} is built, so no call site can assemble
+ * one whose `work` and `attachment` describe different wholes.
  */
 export function resolveCompositionAttachmentRequest(
   registry: KindRegistry,
@@ -631,14 +638,14 @@ export function resolveCompositionAttachmentRequest(
     ...(partOf === undefined ? {} : { partOf }),
   });
   if (work === undefined) return undefined;
-  return compositionAttachmentRequest(
-    work,
-    requireDefined(
+  return {
+    attachment: requireDefined(
       partOf,
       "resolveCompositionCreate returned composition work for a call that stated no partOf",
     ),
+    work,
     onIncumbent,
-  );
+  };
 }
 
 /**
@@ -818,7 +825,7 @@ export function assertEndpointRowLive(
   nodeId: string,
   row: NodeRow | undefined,
 ): void {
-  if (row === undefined || row.deleted_at !== undefined) {
+  if (row === undefined || !isLiveNodeRow(row)) {
     throw new EndpointNotFoundError({ edgeKind, endpoint, nodeKind, nodeId });
   }
 }
@@ -880,7 +887,6 @@ export async function decideCompositionAttachmentUnderFence(
   if (disposition === "attach" || disposition === "replace") {
     const { pair } = request.work;
     const { attachment } = request;
-    const wholeSide = pair.partSide === "from" ? "to" : "from";
     const wholeRow = await target.getNode(
       graphId,
       attachment.kind,
@@ -888,7 +894,7 @@ export async function decideCompositionAttachmentUnderFence(
     );
     assertEndpointRowLive(
       pair.viaEdgeKind,
-      wholeSide,
+      wholeSide(pair.partSide),
       attachment.kind,
       attachment.id,
       wholeRow,
@@ -960,15 +966,83 @@ const UNATTACHED_PARTS_PAGE_SIZE = 500;
  * `prepareSchemaTighteningPreflight`'s third composition check
  * (delta-scoped to the part kinds a commit newly requires a whole for).
  *
- * A portable, non-pushdown scan — `findNodesByKind` paged, each row checked
- * through {@link findLiveCompositionWhole}, the SAME predicate the write-path
- * detach refusal reads — rather than a dedicated backend SQL audit member:
- * this runs at schema-tightening-commit time and at an explicit operator
- * diagnostic call, never on a write's hot path, so the O(live parts) cost is
- * the right trade against a second, dialect-specific SQL implementation of
- * "does this row have a live whole" alongside `assertCompositionExistencePreserved`'s
- * TypeScript one.
+ * A portable, non-pushdown scan — `findNodesByKind` paged, each row's verdict
+ * reached through {@link selectLiveCompositionAttachment}, the SAME predicate
+ * the write-path detach refusal reads — rather than a dedicated backend SQL
+ * audit member: a second, dialect-specific SQL implementation of "does this
+ * row have a live whole" would have to stay in step with
+ * `assertCompositionExistencePreserved`'s TypeScript one.
+ *
+ * The candidate edges of a whole PAGE of parts are read in one statement per
+ * orientation ({@link readPageAttachmentCandidateEdges}) instead of one read
+ * per row. A row the batched read finds no attachment for is confirmed
+ * through {@link findLiveCompositionWhole} before it is reported: no licensed
+ * rows is not evidence that none exist, and a wrong "unattached" here becomes
+ * a refusal at schema-commit time. Confirmation therefore costs one read per
+ * genuinely unattached row, never per attached one.
  */
+/**
+ * One page of parts' candidate composition edges, keyed by part, read with
+ * `findEdgesByHeterogeneousEndpointSet` — one statement per orientation,
+ * since one call's `side` applies uniformly to every edge kind it names.
+ * `undefined` when the backend omits that optional port, which leaves the
+ * caller on its per-row reads.
+ *
+ * The port applies no temporal filter beyond `excludeDeleted`, exactly like
+ * the `findEdgesConnectedTo` read it stands in for, so the population
+ * decision remains {@link edgeCurrentlyAttachesPart}'s alone.
+ */
+async function readPageAttachmentCandidateEdges(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  parts: readonly NodeRow[],
+): Promise<ReadonlyMap<string, readonly EdgeRow[]> | undefined> {
+  const setRead = backend.findEdgesByHeterogeneousEndpointSet;
+  if (setRead === undefined) return undefined;
+  const edgeKinds = new Set(
+    parts.flatMap((part) => [...registry.compositionEdgeKindsOver(part.kind)]),
+  );
+  const partIsFromEdgeKinds = [...edgeKinds].filter(
+    (edgeKind) => registry.compositionPartSide(edgeKind) === "from",
+  );
+  const partIsToEdgeKinds = [...edgeKinds].filter(
+    (edgeKind) => registry.compositionPartSide(edgeKind) === "to",
+  );
+  const endpoints = parts.map((part) => ({ kind: part.kind, id: part.id }));
+  const [fromSideRows, toSideRows] = await Promise.all([
+    partIsFromEdgeKinds.length === 0 ?
+      Promise.resolve<readonly EdgeRow[]>([])
+    : setRead({
+        graphId,
+        side: "from",
+        endpoints,
+        edgeKinds: partIsFromEdgeKinds,
+        excludeDeleted: true,
+      }),
+    partIsToEdgeKinds.length === 0 ?
+      Promise.resolve<readonly EdgeRow[]>([])
+    : setRead({
+        graphId,
+        side: "to",
+        endpoints,
+        edgeKinds: partIsToEdgeKinds,
+        excludeDeleted: true,
+      }),
+  ]);
+  const byPart = new Map<string, EdgeRow[]>();
+  for (const edge of [...fromSideRows, ...toSideRows]) {
+    const partSide = registry.compositionPartSide(edge.kind);
+    if (partSide === undefined) continue;
+    const { part } = compositionRowEndpoints(partSide, edge);
+    const key = encodeTupleKey([part.kind, part.id]);
+    const bucket = byPart.get(key) ?? [];
+    byPart.set(key, bucket);
+    bucket.push(edge);
+  }
+  return byPart;
+}
+
 export async function readCompositionUnattachedParts(
   registry: KindRegistry,
   backend: GraphReadBackend,
@@ -987,7 +1061,25 @@ export async function readCompositionUnattachedParts(
         limit: UNATTACHED_PARTS_PAGE_SIZE,
         ...(after === undefined ? {} : { after }),
       });
+      const candidateEdges = await readPageAttachmentCandidateEdges(
+        registry,
+        backend,
+        graphId,
+        rows,
+      );
       for (const row of rows) {
+        const batched = candidateEdges?.get(encodeTupleKey([row.kind, row.id]));
+        if (
+          batched !== undefined &&
+          selectLiveCompositionAttachment(
+            registry,
+            row.kind,
+            row.id,
+            batched,
+          ) !== undefined
+        ) {
+          continue;
+        }
         const whole = await findLiveCompositionWhole(
           registry,
           backend,

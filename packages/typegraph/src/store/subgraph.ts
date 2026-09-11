@@ -357,7 +357,7 @@ export type SubgraphOptions<
   cyclePolicy?: RecursiveCyclePolicy;
   /**
    * Close the selected root over its declared composition parts — the
-   * whole-plus-parts export unit (roadmap item E). When `true`, every
+   * whole-plus-parts export unit. When `true`, every
    * composition edge kind transitively under the root's actual kind
    * (`registry.compositionEdgeKindsUnder`) is added to the traversal and to
    * the hydrated edge set, in addition to whatever `edges` already lists.
@@ -1335,7 +1335,7 @@ function textArrayParam(values: readonly string[]): SqlFragment {
  * fetch), so binding one parameter per id here would bind 2N parameters
  * with no bind-budget check — exactly the pressure the module's embedded-CTE
  * design otherwise avoids, and enough to exceed a Worker/D1-class backend's
- * `maxBindParameters` on an ordinary whole-plus-parts export (Ed-03). The
+ * `maxBindParameters` on an ordinary whole-plus-parts export. The
  * dialect's `inListParameter`/`packListValue` seam (the same one
  * `IN`-predicate compilation already uses for a parameterized list) packs
  * the whole id list into ONE bound value per call instead, so this binds a
@@ -1370,7 +1370,7 @@ function idListMembership(
  * declares) and returns the composition edge kinds transitively under it —
  * empty when the root does not exist, is not visible at this coordinate, or
  * its kind declares no composition parts. `subgraph({ composition: true })`
- * is set-level (§5.2 of the composition design): a root kind with no parts
+ * is set-level: a root kind with no parts
  * contributes nothing rather than failing the whole read.
  */
 async function fetchCompositionEdgeKindsForRoot(input: {

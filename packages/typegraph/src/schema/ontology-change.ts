@@ -99,9 +99,10 @@ import {
   META_EDGE_SUB_CLASS_OF,
   type MetaEdgeName,
 } from "../ontology/constants";
+import { ontologyRelationIdentityKey } from "../registry/composition-relation";
 import { expandEdgeEndpointAllowance } from "../registry/edge-endpoint-allowance";
 import { type KindRegistry } from "../registry/kind-registry";
-import { compareStrings } from "../utils/compare";
+import { compareStrings, compareStringTuples } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
@@ -274,13 +275,7 @@ function relationDescription(relation: SerializedOntologyRelation): string {
  * `prepareSchemaTighteningPreflight` ever ran.
  */
 function relationMapKey(relation: SerializedOntologyRelation): string {
-  return encodeTupleKey([
-    relation.metaEdge,
-    relation.from,
-    relation.to,
-    relation.via ?? "",
-    relation.partSide ?? "",
-  ]);
+  return ontologyRelationIdentityKey(relation);
 }
 
 function keyedRelations(
@@ -917,12 +912,33 @@ export function classifyOntologyChanges(
 // The fold
 // ============================================================
 
+/**
+ * The probe families whose payload is a flat edge-kind list, in the
+ * deterministic order `ontologyTighteningProbes` emits them.
+ */
+const EDGE_KIND_PROBE_KINDS = [
+  "edgeAcyclicity",
+  "compositionSingleWhole",
+  "compositionRequiredWhole",
+] as const;
+
+type EdgeKindProbeKind = (typeof EDGE_KIND_PROBE_KINDS)[number];
+
+function pairTuple(pair: readonly [string, string]): readonly string[] {
+  return pair;
+}
+
+function groupTuple(group: UniquenessComponentProbeGroup): readonly string[] {
+  return [group.constraintName, ...group.coveredKinds];
+}
+
+/** Map identity for a probe; ordering uses {@link compareStringTuples}. */
 function pairKey(pair: readonly [string, string]): string {
-  return `${pair[0]}\0${pair[1]}`;
+  return encodeTupleKey(pairTuple(pair));
 }
 
 function groupKey(group: UniquenessComponentProbeGroup): string {
-  return `${group.constraintName}\0${group.coveredKinds.join(" ")}`;
+  return encodeTupleKey(groupTuple(group));
 }
 
 /**
@@ -945,9 +961,7 @@ export function ontologyTighteningProbes(
   const pairs = new Map<string, readonly [string, string]>();
   const groups = new Map<string, UniquenessComponentProbeGroup>();
   const allowances = new Map<string, EdgeEndpointAllowance>();
-  const acyclicEdgeKinds = new Set<string>();
-  const compositionEdgeKinds = new Set<string>();
-  const compositionRequiredWholeEdgeKinds = new Set<string>();
+  const edgeKindProbes = new Map<EdgeKindProbeKind, Set<string>>();
 
   for (const change of changes) {
     for (const probe of change.probes ?? []) {
@@ -966,19 +980,12 @@ export function ontologyTighteningProbes(
           }
           break;
         }
-        case "edgeAcyclicity": {
-          for (const edgeKind of probe.edgeKinds)
-            acyclicEdgeKinds.add(edgeKind);
-          break;
-        }
-        case "compositionSingleWhole": {
-          for (const edgeKind of probe.edgeKinds)
-            compositionEdgeKinds.add(edgeKind);
-          break;
-        }
+        case "edgeAcyclicity":
+        case "compositionSingleWhole":
         case "compositionRequiredWhole": {
-          for (const edgeKind of probe.edgeKinds)
-            compositionRequiredWholeEdgeKinds.add(edgeKind);
+          const collected = edgeKindProbes.get(probe.kind) ?? new Set<string>();
+          for (const edgeKind of probe.edgeKinds) collected.add(edgeKind);
+          edgeKindProbes.set(probe.kind, collected);
           break;
         }
       }
@@ -990,7 +997,7 @@ export function ontologyTighteningProbes(
     result.push({
       kind: "nodeDisjointness",
       pairs: [...pairs.values()].toSorted((left, right) =>
-        compareStrings(pairKey(left), pairKey(right)),
+        compareStringTuples(pairTuple(left), pairTuple(right)),
       ),
     });
   }
@@ -998,7 +1005,7 @@ export function ontologyTighteningProbes(
     result.push({
       kind: "nodeUniquenessComponent",
       groups: [...groups.values()].toSorted((left, right) =>
-        compareStrings(groupKey(left), groupKey(right)),
+        compareStringTuples(groupTuple(left), groupTuple(right)),
       ),
     });
   }
@@ -1010,24 +1017,12 @@ export function ontologyTighteningProbes(
       ),
     });
   }
-  if (acyclicEdgeKinds.size > 0) {
+  for (const kind of EDGE_KIND_PROBE_KINDS) {
+    const collected = edgeKindProbes.get(kind);
+    if (collected === undefined || collected.size === 0) continue;
     result.push({
-      kind: "edgeAcyclicity",
-      edgeKinds: [...acyclicEdgeKinds].toSorted(compareStrings),
-    });
-  }
-  if (compositionEdgeKinds.size > 0) {
-    result.push({
-      kind: "compositionSingleWhole",
-      edgeKinds: [...compositionEdgeKinds].toSorted(compareStrings),
-    });
-  }
-  if (compositionRequiredWholeEdgeKinds.size > 0) {
-    result.push({
-      kind: "compositionRequiredWhole",
-      edgeKinds: [...compositionRequiredWholeEdgeKinds].toSorted(
-        compareStrings,
-      ),
+      kind,
+      edgeKinds: [...collected].toSorted(compareStrings),
     });
   }
   return result;

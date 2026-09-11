@@ -1,5 +1,6 @@
 /**
- * Item D.2: `acyclic: true` on an edge registration.
+ * Acyclicity of an edge relation: `acyclic: true` on an edge registration,
+ * and the composition relation.
  *
  * THE acyclicity predicate: "does `from` lie in the reflexive-transitive
  * closure of `to`, over one acyclic relation's live edges". Every write path
@@ -16,7 +17,7 @@
  * that cuts the search short (statement timeout, resource exhaustion) is
  * reported as indeterminate, never as "no cycle".
  *
- * Population (§5 of the design note): every non-deleted edge of the relation
+ * Population: every non-deleted edge of the relation
  * counts, regardless of its validity window. A cycle is a property of the
  * edge relation, not of an instant, so honoring `validTo` would let a
  * future-dated edge close a cycle no write ever probed.
@@ -32,7 +33,6 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { type DialectAdapter } from "../query/dialect/types";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
-import { groupBy } from "../utils/array";
 import { compareStrings } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
 import { isStatementCutShortError } from "../utils/sql-errors";
@@ -49,12 +49,11 @@ import {
 /**
  * One member of an acyclic relation: an edge kind, and the orientation its
  * rows must be read in to walk the relation part->whole. A standalone
- * `acyclic: true` registration (D.2) is always `reversed: false` — this
- * relation IS the edge kind, read in its stored direction. Item E's
- * composition contract will later hand this builder a relation whose
- * members mix `reversed: false` (part -> whole realizing edges) and
- * `reversed: true` (whole -> part realizing edges), checked as ONE directed
- * relation; a plain edge-kind list cannot express that.
+ * `acyclic: true` registration is always `reversed: false` — that relation IS
+ * the edge kind, read in its stored direction. The composition relation mixes
+ * `reversed: false` (part -> whole realizing edges) and `reversed: true`
+ * (whole -> part realizing edges) and is checked as ONE directed relation; a
+ * plain edge-kind list cannot express that.
  */
 export type AcyclicRelationMember = Readonly<{
   edgeKind: string;
@@ -63,13 +62,14 @@ export type AcyclicRelationMember = Readonly<{
 
 /** One acyclic relation: a name, and the oriented edge kinds that form it. */
 export type AcyclicEdgeRelation = Readonly<{
-  /** The edge kind in D.2; item E's composition relation later. */
+  /** The edge kind for a standalone relation; the composition relation's
+   * reserved name for the composition union. */
   name: string;
   members: readonly AcyclicRelationMember[];
 }>;
 
 /**
- * A standalone `acyclic: true` registration's own relation (D.2): the edge
+ * A standalone `acyclic: true` registration's own relation: the edge
  * kind IS the relation, named after itself, with one `reversed: false`
  * member. The one constructor for this shape, so a caller that reasons over
  * a proposed edge kind rather than a runtime {@link GraphDef} — the
@@ -84,8 +84,7 @@ export function standaloneAcyclicRelation(
 }
 
 /**
- * Item E (D-10): the composition relation as ONE acyclic relation, oriented
- * part -> whole. `undefined` when the graph declares no composition pair —
+ * The composition relation as ONE acyclic relation, oriented part -> whole. `undefined` when the graph declares no composition pair —
  * the caller drops it from the relation list rather than probing an empty
  * one.
  *
@@ -102,8 +101,8 @@ export function standaloneAcyclicRelation(
  * Named after {@link COMPOSITION_RELATION_NAME} (the same reserved axis the
  * composition CLAIM is written at, `src/store/claims/axis.ts`) — the
  * acyclicity relation and the claim relation are two independent invariants
- * (R4 vs D-10) that happen to share one reserved string because both are
- * graph-wide, not per-edge-kind. The reserved separator is what keeps this
+ * that happen to share one reserved string because both are graph-wide, not
+ * per-edge-kind. The reserved separator is what keeps this
  * name from ever colliding with a standalone `acyclic: true` relation (which
  * is named after its own edge kind, and no edge kind may spell the
  * separator — `assertClaimAxisSafe`); every place this name reaches a public
@@ -131,7 +130,7 @@ const acyclicEdgeRelationsCache = new WeakMap<
 
 /**
  * Every acyclic relation this graph declares, in code-point order by name:
- * one standalone relation per `acyclic: true` edge kind (D.2), plus the
+ * one standalone relation per `acyclic: true` edge kind, plus the
  * composition relation ({@link compositionAcyclicRelation}) when the
  * registry declares any `partOf`/`hasPart` pair.
  *
@@ -141,7 +140,7 @@ const acyclicEdgeRelationsCache = new WeakMap<
  * built `KindRegistry` changes after construction, so rebuilding and
  * re-sorting this list per row of a large batch would be pure waste. Nested
  * rather than a single map keyed on a composite: the schema-tightening
- * preflight (item A) calls this with a PROPOSED registry built fresh per
+ * preflight calls this with a PROPOSED registry built fresh per
  * probe, so caching must never let a stale registry's relation answer for a
  * different one built from the same `GraphDef`.
  */
@@ -207,7 +206,7 @@ export function acyclicRelationForEdgeKind(
  * batching decision over more than one candidate edge) rather than the
  * relation structure itself — reading it through this function rather than
  * re-filtering `graph.edges` keeps them from drifting once a relation can
- * have more than one member (item E).
+ * have more than one member.
  */
 export function acyclicEdgeKinds(
   graph: GraphDef,
@@ -223,12 +222,10 @@ export function acyclicEdgeKinds(
  * every write-eligibility, fused-command, or import-batching decision must
  * consult instead of re-reading `registration.acyclic === true` directly
  * (AGENTS.md "one predicate, one owner": a second inline spelling of an
- * existing decision drifts even while the copies still agree). Before item E
- * this was exactly `registration.acyclic === true`, because D.2's relations
- * were all standalone singletons — item E composes an oriented union, so a
- * composition-realizing edge kind answers `true` here even though its OWN
- * registration carries no `acyclic` field, and every call site routed
- * through this function keeps answering correctly with no change of its own.
+ * existing decision drifts even while the copies still agree). This is wider
+ * than `registration.acyclic === true`: the composition relation is an
+ * oriented union, so a composition-realizing edge kind answers `true` here
+ * even though its OWN registration carries no `acyclic` field.
  */
 export function edgeKindIsInAcyclicRelation(
   graph: GraphDef,
@@ -249,6 +246,88 @@ export type ProposedRelationEdge = Readonly<{
 }>;
 
 /**
+ * A proposed edge whose endpoints are the same node: a cycle of length one,
+ * answerable without a round trip because the reflexive seed would return it.
+ */
+function proposedEdgeIsSelfLoop(edge: ProposedRelationEdge): boolean {
+  return edge.fromKind === edge.toKind && edge.fromId === edge.toId;
+}
+
+/** One acyclic relation's share of a proposed edge set. */
+type ProposedAcyclicGroup = Readonly<{
+  relation: AcyclicEdgeRelation;
+  /** The edges that still need the recursive probe. */
+  edges: readonly ProposedRelationEdge[];
+  /** Edges already decided by {@link proposedEdgeIsSelfLoop}. */
+  selfLoopEdgeIds: readonly string[];
+}>;
+
+/**
+ * The classification that decides WHAT gets probed, owned once: proposed
+ * edges whose kind is in no acyclic relation are dropped, the rest are
+ * bucketed by relation in code-point order by name, and the self-loops are
+ * separated out. `firstSelfLoop` is the earliest self-loop in `proposed`
+ * order, so the write path can refuse exactly the row its caller listed first
+ * while the plan-time preview collects every relation's self-loops.
+ */
+function groupProposedByAcyclicRelation(
+  graph: GraphDef,
+  registry: KindRegistry,
+  proposed: readonly ProposedRelationEdge[],
+): Readonly<{
+  groups: readonly ProposedAcyclicGroup[];
+  firstSelfLoop:
+    | Readonly<{ relation: AcyclicEdgeRelation; edge: ProposedRelationEdge }>
+    | undefined;
+}> {
+  const byRelationName = new Map<
+    string,
+    {
+      relation: AcyclicEdgeRelation;
+      edges: ProposedRelationEdge[];
+      selfLoopEdgeIds: string[];
+    }
+  >();
+  for (const edge of proposed) {
+    const relation = acyclicRelationForEdgeKind(graph, registry, edge.edgeKind);
+    if (relation === undefined) continue;
+    const entry = byRelationName.get(relation.name) ?? {
+      relation,
+      edges: [],
+      selfLoopEdgeIds: [],
+    };
+    byRelationName.set(relation.name, entry);
+    if (proposedEdgeIsSelfLoop(edge)) entry.selfLoopEdgeIds.push(edge.edgeId);
+    else entry.edges.push(edge);
+  }
+  const groups = [...byRelationName.keys()]
+    .toSorted((left, right) => compareStrings(left, right))
+    .map((name) => requireDefined(byRelationName.get(name)));
+  const selfLoopIds = new Set(
+    groups.flatMap((group) => [...group.selfLoopEdgeIds]),
+  );
+  const firstSelfLoopEdge = proposed.find((edge) =>
+    selfLoopIds.has(edge.edgeId),
+  );
+  return {
+    groups,
+    firstSelfLoop:
+      firstSelfLoopEdge === undefined ? undefined : (
+        {
+          relation: requireDefined(
+            acyclicRelationForEdgeKind(
+              graph,
+              registry,
+              firstSelfLoopEdge.edgeKind,
+            ),
+          ),
+          edge: firstSelfLoopEdge,
+        }
+      ),
+  };
+}
+
+/**
  * The `edgeAcyclicity` member of `ConstraintFenceViolation`
  * (`src/store/claims/verify.ts`), defined here so the shape has one owner:
  * the family carries no `ClaimTarget` — acyclicity reserves no claim row,
@@ -256,7 +335,7 @@ export type ProposedRelationEdge = Readonly<{
  */
 export type EdgeAcyclicityViolation = Readonly<{
   family: "edgeAcyclicity";
-  /** The declared relation — the edge kind in D.2. */
+  /** The declared relation's display name. */
   relation: string;
   /** Live edges of the relation whose `to` reaches their `from`. */
   edgeIds: readonly string[];
@@ -266,9 +345,9 @@ export type AcyclicityProbeContext = Readonly<{
   graphId: string;
   graph: GraphDef;
   /**
-   * Needed alongside `graph` from item E onward: whether an edge kind is IN
-   * an acyclic relation, and which one, now depends on the composition
-   * relation too — a fact `graph` alone cannot answer.
+   * Needed alongside `graph`: whether an edge kind is IN an acyclic relation,
+   * and which one, depends on the composition relation too — a fact `graph`
+   * alone cannot answer.
    */
   registry: KindRegistry;
   schema: SqlSchema;
@@ -401,43 +480,29 @@ export async function assertEdgeRelationsAcyclic(
   ctx: AcyclicityProbeContext,
   proposed: readonly ProposedRelationEdge[],
 ): Promise<void> {
-  const relevant: Readonly<{
-    relation: AcyclicEdgeRelation;
-    edge: ProposedRelationEdge;
-  }>[] = [];
-  for (const edge of proposed) {
-    const relation = acyclicRelationForEdgeKind(
-      ctx.graph,
-      ctx.registry,
-      edge.edgeKind,
-    );
-    if (relation === undefined) continue;
-    if (edge.fromKind === edge.toKind && edge.fromId === edge.toId) {
-      throw new EdgeAcyclicityError({
-        relation: displayAcyclicRelationName(relation.name),
-        edgeKind: edge.edgeKind,
-        edgeId: edge.edgeId,
-        fromKind: edge.fromKind,
-        fromId: edge.fromId,
-        toKind: edge.toKind,
-        toId: edge.toId,
-        selfLoop: true,
-      });
-    }
-    relevant.push({ relation, edge });
+  const { groups, firstSelfLoop } = groupProposedByAcyclicRelation(
+    ctx.graph,
+    ctx.registry,
+    proposed,
+  );
+  if (firstSelfLoop !== undefined) {
+    throw new EdgeAcyclicityError({
+      relation: displayAcyclicRelationName(firstSelfLoop.relation.name),
+      edgeKind: firstSelfLoop.edge.edgeKind,
+      edgeId: firstSelfLoop.edge.edgeId,
+      fromKind: firstSelfLoop.edge.fromKind,
+      fromId: firstSelfLoop.edge.fromId,
+      toKind: firstSelfLoop.edge.toKind,
+      toId: firstSelfLoop.edge.toId,
+      selfLoop: true,
+    });
   }
-  if (relevant.length === 0) return;
+  const probeable = groups.filter((group) => group.edges.length > 0);
+  if (probeable.length === 0) return;
 
   assertFreshSnapshot(ctx);
 
-  const byRelationName = groupBy(relevant, (entry) => entry.relation.name);
-  for (const relationName of [...byRelationName.keys()].toSorted(
-    compareStrings,
-  )) {
-    const entries = requireDefined(byRelationName.get(relationName));
-    const relation = entries[0]?.relation;
-    if (relation === undefined) continue;
-    const edges = entries.map((entry) => entry.edge);
+  for (const { relation, edges } of probeable) {
     const violatingOriginKeys = await runAcyclicityProbe(ctx, relation, {
       kind: "proposed",
       edges,
@@ -491,7 +556,7 @@ export async function readEdgeAcyclicityViolations(
 }
 
 /**
- * The plan-time preview (ruling D-4): every violation a caller-proposed edge
+ * The plan-time preview: every violation a caller-proposed edge
  * set would create if it were added to the relation's CURRENT live
  * population. This is what lets the graph-merge planner ask "would this
  * resolved plan's edge writes close a cycle" and surface a typed conflict
@@ -510,7 +575,7 @@ export async function readEdgeAcyclicityViolations(
  * write path and the audit reader, so a write-path refusal, a live-graph
  * audit, and a plan-time preview can never disagree about what counts as a
  * cycle. This is the ONE caller that probes rows not yet written anywhere,
- * so it is the ONE caller that passes the `"planned"` seed form (D-4): the
+ * so it is the ONE caller that passes the `"planned"` seed form: the
  * write path's own probe passes `"proposed"` (rows already inserted, or a
  * single row) precisely because it never needs to hop through a row that
  * isn't live yet — see `AcyclicityProbeSeed`'s docblock in
@@ -524,54 +589,27 @@ export async function readProposedEdgeAcyclicityViolations(
   graph: GraphDef,
   proposed: readonly ProposedRelationEdge[],
 ): Promise<readonly EdgeAcyclicityViolation[]> {
-  const proposedByRelation = new Map<
-    string,
-    Readonly<{ relation: AcyclicEdgeRelation; edges: ProposedRelationEdge[] }>
-  >();
-  const selfLoopIdsByRelation = new Map<string, string[]>();
-  for (const edge of proposed) {
-    const relation = acyclicRelationForEdgeKind(
-      graph,
-      ctx.registry,
-      edge.edgeKind,
-    );
-    if (relation === undefined) continue;
-    if (edge.fromKind === edge.toKind && edge.fromId === edge.toId) {
-      const selfLoopIds = selfLoopIdsByRelation.get(relation.name) ?? [];
-      selfLoopIds.push(edge.edgeId);
-      selfLoopIdsByRelation.set(relation.name, selfLoopIds);
-      continue;
-    }
-    const entry = proposedByRelation.get(relation.name) ?? {
-      relation,
-      edges: [],
-    };
-    entry.edges.push(edge);
-    proposedByRelation.set(relation.name, entry);
-  }
-
+  const { groups } = groupProposedByAcyclicRelation(
+    graph,
+    ctx.registry,
+    proposed,
+  );
   const violations: EdgeAcyclicityViolation[] = [];
-  const relationNames = new Set([
-    ...proposedByRelation.keys(),
-    ...selfLoopIdsByRelation.keys(),
-  ]);
-  for (const relationName of [...relationNames].toSorted(compareStrings)) {
-    const selfLoopIds = selfLoopIdsByRelation.get(relationName) ?? [];
-    const grouped = proposedByRelation.get(relationName);
+  for (const { relation, edges, selfLoopEdgeIds } of groups) {
     const probedIds =
-      grouped === undefined ?
+      edges.length === 0 ?
         []
-      : await runAcyclicityProbe(ctx, grouped.relation, {
+      : await runAcyclicityProbe(ctx, relation, {
           kind: "planned",
-          edges: grouped.edges,
+          edges,
         });
-    const edgeIds = [...new Set([...selfLoopIds, ...probedIds])].toSorted(
+    const edgeIds = [...new Set([...selfLoopEdgeIds, ...probedIds])].toSorted(
       compareStrings,
     );
     if (edgeIds.length === 0) continue;
     violations.push({
       family: "edgeAcyclicity",
-      relation: displayAcyclicRelationName(relationName),
+      relation: displayAcyclicRelationName(relation.name),
       edgeIds,
     });
   }

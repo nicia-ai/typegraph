@@ -117,77 +117,17 @@ export type SchemaTighteningPreflightParams = Readonly<{
   changes?: readonly OntologyChange[];
 }>;
 
-/** The probes grouped by kind — at most one of each, per `ontologyTighteningProbes`. */
-type GroupedProbes = Readonly<{
-  disjointness?:
-    Extract<OntologyDataProbe, { kind: "nodeDisjointness" }> | undefined;
-  uniqueness?:
-    Extract<OntologyDataProbe, { kind: "nodeUniquenessComponent" }> | undefined;
-  endpoints?:
-    | Extract<OntologyDataProbe, { kind: "edgeEndpointAssignability" }>
-    | undefined;
-  acyclicity?:
-    Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
-  composition?:
-    Extract<OntologyDataProbe, { kind: "compositionSingleWhole" }> | undefined;
-  compositionExistence?:
-    | Extract<OntologyDataProbe, { kind: "compositionRequiredWhole" }>
-    | undefined;
-}>;
-
-function groupProbesByKind(
+/**
+ * The probe of one kind, or `undefined` when this diff carries none —
+ * `ontologyTighteningProbes` emits at most one probe per kind, so the first
+ * match is the only one.
+ */
+function probeOfKind<K extends OntologyDataProbe["kind"]>(
   probes: readonly OntologyDataProbe[],
-): GroupedProbes {
-  let disjointness:
-    Extract<OntologyDataProbe, { kind: "nodeDisjointness" }> | undefined;
-  let uniqueness:
-    Extract<OntologyDataProbe, { kind: "nodeUniquenessComponent" }> | undefined;
-  let endpoints:
-    | Extract<OntologyDataProbe, { kind: "edgeEndpointAssignability" }>
-    | undefined;
-  let acyclicity:
-    Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
-  let composition:
-    Extract<OntologyDataProbe, { kind: "compositionSingleWhole" }> | undefined;
-  let compositionExistence:
-    | Extract<OntologyDataProbe, { kind: "compositionRequiredWhole" }>
-    | undefined;
-  for (const probe of probes) {
-    switch (probe.kind) {
-      case "nodeDisjointness": {
-        disjointness = probe;
-        break;
-      }
-      case "nodeUniquenessComponent": {
-        uniqueness = probe;
-        break;
-      }
-      case "edgeEndpointAssignability": {
-        endpoints = probe;
-        break;
-      }
-      case "edgeAcyclicity": {
-        acyclicity = probe;
-        break;
-      }
-      case "compositionSingleWhole": {
-        composition = probe;
-        break;
-      }
-      case "compositionRequiredWhole": {
-        compositionExistence = probe;
-        break;
-      }
-    }
-  }
-  return {
-    disjointness,
-    uniqueness,
-    endpoints,
-    acyclicity,
-    composition,
-    compositionExistence,
-  };
+  kind: K,
+): Extract<OntologyDataProbe, { kind: K }> | undefined {
+  return probes.find((probe) => probe.kind === kind) as
+    Extract<OntologyDataProbe, { kind: K }> | undefined;
 }
 
 /** The first couple of violations, rendered for a refusal message. */
@@ -360,7 +300,14 @@ export function prepareSchemaTighteningPreflight(
   // this cannot throw here for a reason the commit has not already surfaced.
   const proposedRegistry = buildRegistryFromSerializedSchema(params.after);
 
-  const grouped = groupProbesByKind(probes);
+  const grouped = {
+    disjointness: probeOfKind(probes, "nodeDisjointness"),
+    uniqueness: probeOfKind(probes, "nodeUniquenessComponent"),
+    endpoints: probeOfKind(probes, "edgeEndpointAssignability"),
+    acyclicity: probeOfKind(probes, "edgeAcyclicity"),
+    composition: probeOfKind(probes, "compositionSingleWhole"),
+    compositionExistence: probeOfKind(probes, "compositionRequiredWhole"),
+  } as const;
   const uniquenessGroups = (grouped.uniqueness?.groups ?? []).map((group) =>
     uniquenessAxisGroupFor(group.constraintName, group.coveredKinds),
   );

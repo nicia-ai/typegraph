@@ -672,12 +672,16 @@ describe("composition cascade — delete", () => {
       });
 
       // MUTATION: make `nodeDeleteConstraintProbe` always return `undefined`
-      // (drop the composition classification) and this refusal disappears.
+      // (drop the composition classification) and this refusal disappears;
+      // make `nodeDeleteNeedsConstraintFence` report `"edgeCardinality"` and
+      // the `constraint` assertion below fails, since a cascading whole
+      // delete is not remediable by declaring a cardinality on an edge.
       await expect(store.nodes.Podcast.delete(podcast.id)).rejects.toThrow(
         matchingObject({
           name: "ConfigurationError",
           details: matchingObject({
             code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
+            constraint: "edgeComposition",
           }),
         }),
       );

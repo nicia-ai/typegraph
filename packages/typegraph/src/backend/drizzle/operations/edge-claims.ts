@@ -61,7 +61,9 @@ type ClaimValueSource = Readonly<{
   toId: SQL;
 }>;
 
-function boundClaimValues(params: ClaimEdgeCardinalityParams): ClaimValueSource {
+function boundClaimValues(
+  params: ClaimEdgeCardinalityParams,
+): ClaimValueSource {
   return {
     graphId: sql`${params.graphId}`,
     edgeId: sql`${params.edgeId}`,
@@ -166,9 +168,9 @@ function proposedRelationCte(
 ): SQL {
   const columnTypes = proposedColumnTypeSources(tables);
   const header = sql.raw(
-    PROPOSED_COLUMN_ORDER.map(
-      (column) => `"${PROPOSED_COLUMNS[column]}"`,
-    ).join(", "),
+    PROPOSED_COLUMN_ORDER.map((column) => `"${PROPOSED_COLUMNS[column]}"`).join(
+      ", ",
+    ),
   );
   const rows = entries.map((entry) => {
     const target = edgeCardinalityClaimTarget(entry);
@@ -198,16 +200,103 @@ function proposedRelationCte(
 }
 
 /**
+ * The axis a claim statement's holder predicate is rendered from: the declared
+ * population, plus the composition scope when the axis is the reserved
+ * relation-wide one. Predicate SHAPE — never a per-row value — which is why it
+ * is a group key below rather than a column of the `proposed` relation.
+ */
+type ClaimHolderAxis = EdgeCardinalityAxisRef &
+  Readonly<{ scope?: CompositionClaimScope }>;
+
+/**
+ * What distinguishes two claims whose predicates cannot share one statement.
+ *
+ * The claim predicates are shaped by {@link EdgeCardinalitySpec} — which
+ * endpoints the axis key covers, and what a holder must still be, both read
+ * off the axis NAME, so a source axis and a target axis of the same
+ * cardinality are different shapes — and, for a composition claim, by the
+ * oriented holder kinds its scope names. None of that is a value, so it
+ * cannot ride in the `proposed` relation without becoming an OR-guarded term
+ * the planner can no longer seek on, which is the cost the relation shape
+ * exists to remove.
+ *
+ * The scope's holders enter the key IN ORDER, because that is the order
+ * {@link claimHolderTerms} renders its arms in: two entries share a statement
+ * only when that statement's text is the one both of them need.
+ */
+function claimPredicateShapeKey(entry: ClaimEdgeCardinalityParams): string {
+  return JSON.stringify([
+    edgeCardinalityAxisName(entry),
+    entry.scope?.kind,
+    entry.scope?.holders.map((holder) => [holder.partSide, holder.edgeKind]),
+  ]);
+}
+
+/**
+ * Splits a chunk into the groups that can share one statement.
+ *
+ * One statement per distinct predicate shape keeps every term index-seekable;
+ * a chunk of one edge kind, the ordinary case, still renders exactly one.
+ *
+ * First-appearance order, so a rendered program is deterministic.
+ */
+function groupEntriesByPredicateShape(
+  entries: readonly ClaimEdgeCardinalityParams[],
+): readonly (readonly ClaimEdgeCardinalityParams[])[] {
+  const groups = new Map<string, ClaimEdgeCardinalityParams[]>();
+  for (const entry of entries) {
+    const shapeKey = claimPredicateShapeKey(entry);
+    const group = groups.get(shapeKey);
+    if (group === undefined) groups.set(shapeKey, [entry]);
+    else group.push(entry);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * The group's shape witness: the entry whose axis ref and composition scope
+ * every other entry in the group shares by construction
+ * ({@link claimPredicateShapeKey}).
+ *
+ * The axis itself rather than a spec derived from it, because the holder
+ * predicate reads both halves of the shape — the spec's `keyShape` and
+ * `holderLiveness`, and the scope's oriented holder kinds — and
+ * {@link claimHolderTerms} is the one function allowed to fold them.
+ */
+function axisOf(
+  entries: readonly ClaimEdgeCardinalityParams[],
+): ClaimHolderAxis {
+  const [first] = entries;
+  if (first === undefined) {
+    throw new TypeError("A claim group is never empty.");
+  }
+  return first;
+}
+
+/**
+ * The endpoint columns an endpoint term compares against: a write's bound
+ * literals, a batch statement's `proposed` columns, or — for the read-only
+ * audit — the outer row's own qualified columns. Narrower than
+ * {@link ClaimValueSource} so the compiler, not a comment, is what proves this
+ * fold reads no other field.
+ */
+export type EndpointValueSource = Pick<
+  ClaimValueSource,
+  "fromKind" | "fromId" | "toKind" | "toId"
+>;
+
+/**
  * The endpoint terms {@link EdgeCardinalitySpec.keyShape} says a predicate
  * must read: from-terms for `"from"`, to-terms for `"to"`, both for
- * `"fromAndTo"`. The one renderer of that fold, so a source-axis predicate and
- * a target-axis predicate cannot spell two different subsets of these columns.
+ * `"fromAndTo"`. The one renderer of that fold, so a source-axis predicate, a
+ * target-axis predicate and the read-only audit's correlated peer test cannot
+ * spell two different subsets of these columns.
  */
-function endpointTerms(
+export function endpointTerms(
   edgesName: string,
   edges: Tables["edges"],
   keyShape: EdgeCardinalitySpec["keyShape"],
-  values: ClaimValueSource,
+  values: EndpointValueSource,
 ): SQL {
   const fromTerms =
     keyShape === "from" || keyShape === "fromAndTo" ?
@@ -361,11 +450,15 @@ export function claimHolderTerms(
     .filter((holder) => holder.partSide === "to")
     .map((holder) => holder.edgeKind);
   const arms: SQL[] = [];
-  if (fromSideKinds.length > 0) {
+  for (const side of sides) {
+    const sideKinds = axis.scope.holders
+      .filter((holder) => holder.partSide === side.partSide)
+      .map((holder) => holder.edgeKind);
+    if (sideKinds.length === 0) continue;
     arms.push(sql`
       (
             ${qualified(edgesName, edges.kind)} IN (${sql.join(
-              fromSideKinds.map((kind) => sql`${kind}`),
+              sideKinds.map((kind) => sql`${kind}`),
               sql`, `,
             )})
             AND ${qualified(edgesName, edges.fromKind)} = ${partKind}

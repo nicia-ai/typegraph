@@ -145,11 +145,11 @@ import {
   edgeKindIsInAcyclicRelation,
   type ProposedRelationEdge,
 } from "../acyclicity";
-import { compareClaimTargets } from "../claims/axis";
+import { targetIdentity } from "../claims/axis";
 import {
   compositionReentryClaim,
   edgeInsertClaims,
-  sortedByClaimTarget,
+  edgeKindOwesAnyClaim,
 } from "../claims/composition-claims";
 import {
   activeOnlyAxisReferences,
@@ -162,6 +162,7 @@ import {
   edgeCardinalityClaimTarget,
   type EdgeCardinalityDeclarations,
   type EdgeClaimSubject,
+  sortedByClaimTarget,
 } from "../claims/edge-claims";
 import {
   shouldCoalesceUpsert,
@@ -284,8 +285,8 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
   revisionSchema: SqlSchema;
   registry: KindRegistry;
   /**
-   * The `claims` bundle's memoized, at-most-once verdict thunk (ruling B7
-   * refinement 2) — threaded through to `createEdgeWriteContext` by
+   * The `claims` bundle's memoized, at-most-once verdict thunk — threaded
+   * through to `createEdgeWriteContext` by
    * `runWritePlan`'s session mint, and called at the write-session sites that
    * issue or release an edge-cardinality claim.
    */
@@ -347,7 +348,7 @@ export type EdgeCreatePrepared = Readonly<{
 /**
  * One prepared create as the session's insert unit: the row params and every
  * claim the row owes — its declared cardinality axes, plus the composition
- * claim (item E) when its edge kind realizes a `partOf`/`hasPart` pair.
+ * claim when its edge kind realizes a `partOf`/`hasPart` pair.
  *
  * ONE owner, shared by the single create and both batch shapes. The claim set
  * is a pure function of the declarations this preparation resolved (and the
@@ -634,6 +635,29 @@ function edgeComposition<G extends GraphDef>(
 }
 
 /**
+ * THE constraint-fence reason an edge write of this kind owes: the declared
+ * cardinality axes and the composition dimension — both invariant properties
+ * of the kind — folded with the acyclicity answer the CALLER decides.
+ *
+ * One assembler so a new fence dimension is added in one place rather than at
+ * every call site. `acyclic` is a parameter because it genuinely varies: a
+ * create always re-admits the row to the acyclicity population, a resurrect
+ * does so only when it clears the tombstone, and a bare window reopen never
+ * does — so each call site states the dimension it actually decides.
+ */
+function edgeWriteFenceReason<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+  acyclic: boolean,
+): ConstraintFenceReason | undefined {
+  return edgeWriteNeedsConstraintFence({
+    ...edgeCardinalityDeclarations(ctx, kind),
+    acyclic,
+    composition: edgeComposition(ctx, kind),
+  });
+}
+
+/**
  * The `AcyclicityProbeContext` every acyclicity assertion in this module
  * builds — three call sites share this exact shape (`edges.create`,
  * `edges.bulkCreate`, `edges.resurrect`), reading `graph`/`schema` from `ctx`
@@ -805,11 +829,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         kindRegistered: true,
         convergesDynamically: convergeOn !== undefined && !durableConvergence,
         constrained:
-          edgeWriteNeedsConstraintFence({
-            ...declarations,
-            acyclic: edgeAcyclic(ctx, kind),
-            composition: edgeComposition(ctx, kind),
-          }) !== undefined,
+          edgeWriteFenceReason(ctx, kind, edgeAcyclic(ctx, kind)) !== undefined,
       } as const)
     : undefined;
   const schemaFenceInFirstWrite =
@@ -821,11 +841,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     isAutocommitSingleStatementWrite({ kind: "edge", candidate });
   const plan = edgeWritePlan(
     convergeOn === undefined || durableConvergence ?
-      edgeWriteNeedsConstraintFence({
-        ...declarations,
-        acyclic: edgeAcyclic(ctx, kind),
-        composition: edgeComposition(ctx, kind),
-      })
+      edgeWriteFenceReason(ctx, kind, edgeAcyclic(ctx, kind))
     : "edgeMatchKeyConvergence",
   );
 
@@ -1426,8 +1442,7 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
     );
     preparedCreates.push(prepared);
     for (const claim of edgeInsertWork(ctx, prepared).claims) {
-      const target = edgeCardinalityClaimTarget(claim);
-      const targetKey = `${target.axis}\u0000${target.key}`;
+      const targetKey = targetIdentity(edgeCardinalityClaimTarget(claim));
       const incumbentEdgeId = claimedTargets.get(targetKey);
       if (incumbentEdgeId !== undefined) {
         throw claimRefusalFor(claim, incumbentEdgeId);
@@ -1436,15 +1451,7 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
       claims.push(claim);
     }
   }
-  return {
-    claims: claims.toSorted((left, right) =>
-      compareClaimTargets(
-        edgeCardinalityClaimTarget(left),
-        edgeCardinalityClaimTarget(right),
-      ),
-    ),
-    preparedCreates,
-  };
+  return { claims: sortedByClaimTarget(claims), preparedCreates };
 }
 
 /**
@@ -1980,11 +1987,11 @@ function batchFencesConstraintProbe<G extends GraphDef>(
   inputs: readonly CreateEdgeInput[],
 ): ConstraintFenceReason | undefined {
   for (const input of inputs) {
-    const reason = edgeWriteNeedsConstraintFence({
-      ...edgeCardinalityDeclarations(ctx, input.kind),
-      acyclic: edgeAcyclic(ctx, input.kind),
-      composition: edgeComposition(ctx, input.kind),
-    });
+    const reason = edgeWriteFenceReason(
+      ctx,
+      input.kind,
+      edgeAcyclic(ctx, input.kind),
+    );
     if (reason !== undefined) return reason;
   }
   return undefined;
@@ -2220,12 +2227,12 @@ async function performEdgeUpdate<G extends GraphDef>(
       },
       effectiveValidTo,
     );
-    // Acyclicity's population is soft-delete-only (§5): a resurrection
+    // Acyclicity's population is soft-delete-only: a resurrection
     // (`clearDeleted`) re-admits the edge and is checked; reopening an
     // `oneActive` window alone (`reentersActivePopulation` with no
     // `clearDeleted`) never removed the edge from the acyclicity
     // population in the first place, so it is deliberately NOT checked
-    // here — checking it would over-fence a path §5 rules must stay free.
+    // here — checking it would over-fence a path that must stay free.
     if (reentersLivePopulation && edgeAcyclic(ctx, input.identity.kind)) {
       await assertEdgeRelationsAcyclic(
         acyclicityProbeContext(
@@ -2268,7 +2275,7 @@ async function performEdgeUpdate<G extends GraphDef>(
       toId: existing.to_id,
       ...(effectiveValidTo === undefined ? {} : { validTo: effectiveValidTo }),
     };
-    // Composition (item E) re-enters this row's part reservation under the
+    // Composition re-enters this row's part reservation under the
     // SAME gate the ordinary axes above already applied: a resurrect
     // re-takes it unconditionally, a bare active-only window reopen only
     // when composition's own population is itself `oneActive` — see
@@ -2368,7 +2375,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     claims: reentryClaims,
   };
 
-  // Item E.2. The refusal fires only for the write that ENDS a currently
+  // The refusal fires only for the write that ENDS a currently
   // OPEN window — `existing.valid_to === undefined` — not for one that
   // merely restates or tightens an end the row already carries: the moment
   // of detachment already passed the first time the window closed, so
@@ -2610,14 +2617,11 @@ export async function executeEdgeUpdate<G extends GraphDef>(
             .length > 0
       ) ?
         // `clearValidTo` alone never re-admits an edge to the acyclicity
-        // population (§5); the axis-presence guard above already proves an
-        // active-only cardinality axis is declared, so this fold reports
-        // `"edgeCardinality"` (or, for a composition edge kind,
-        // `"edgeComposition"`) before it would ever read an `acyclic` field.
-        edgeWriteNeedsConstraintFence({
-          ...edgeCardinalityDeclarations(ctx, gate.kind),
-          composition: edgeComposition(ctx, gate.kind),
-        })
+        // population, so the acyclicity dimension is stated `false`; the
+        // axis-presence guard above already proves an active-only cardinality
+        // axis is declared, so this fold reports `"edgeCardinality"` (or, for
+        // a composition edge kind, `"edgeComposition"`) regardless.
+        edgeWriteFenceReason(ctx, gate.kind, false)
       : undefined,
     ),
     backend,
@@ -2674,16 +2678,14 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     edgeWritePlan(
       options?.coalesceUnchanged === true ? "edgeMatchKeyConvergence"
       : input.clearValidTo === true || options?.clearDeleted === true ?
-        edgeWriteNeedsConstraintFence({
-          ...edgeCardinalityDeclarations(ctx, input.identity.kind),
-          // Only a resurrection re-admits to the acyclicity population
-          // (§5); `clearValidTo` alone must not take this fence for that
-          // reason.
-          acyclic:
-            options?.clearDeleted === true &&
+        // Only a resurrection re-admits to the acyclicity population;
+        // `clearValidTo` alone must not take this fence for that reason.
+        edgeWriteFenceReason(
+          ctx,
+          input.identity.kind,
+          options?.clearDeleted === true &&
             edgeAcyclic(ctx, input.identity.kind),
-          composition: edgeComposition(ctx, input.identity.kind),
-        })
+        )
       : undefined,
     ),
     backend,
@@ -2927,11 +2929,11 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
     ctx,
     edgeWritePlan(
       needsConstraintFence ?
-        edgeWriteNeedsConstraintFence({
-          ...edgeCardinalityDeclarations(ctx, first.input.identity.kind),
-          acyclic: needsAcyclicityFence,
-          composition: edgeComposition(ctx, first.input.identity.kind),
-        })
+        edgeWriteFenceReason(
+          ctx,
+          first.input.identity.kind,
+          needsAcyclicityFence,
+        )
       : undefined,
     ),
     backend,
@@ -3118,7 +3120,7 @@ export async function executeEdgeDelete<G extends GraphDef>(
     ctx,
     opContext,
     // A soft delete decides nothing a concurrent write could invalidate —
-    // except item E.2's composition-existence check, which is a READ, not a
+    // except the composition-existence check, which is a READ, not a
     // key a write plan fences: `assertCompositionExistencePreserved`'s own
     // fast path (not a composition edge, or an optional-existence pair)
     // costs nothing for the ordinary case.
@@ -3202,7 +3204,7 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
         if (current.deleted_at) continue;
         if (scheduledIds.has(id)) continue;
         scheduledIds.add(id);
-        // Item E.2, per member — see `executeEdgeDelete`'s identical check.
+        // Per member — see `executeEdgeDelete`'s identical check.
         await assertCompositionExistencePreserved(
           { graphId: ctx.graphId, registry: ctx.registry, lock },
           current,
@@ -3303,7 +3305,7 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
     edgeWritePlan(undefined),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      // Item E.2 — see executeEdgeDelete's identical check.
+      // See executeEdgeDelete's identical check.
       await assertCompositionExistencePreserved(
         { graphId: ctx.graphId, registry: ctx.registry, lock },
         gate,
@@ -3320,10 +3322,11 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
         // row only keeps the relation from growing by one row per hard-deleted
         // constrained edge. An unconstrained kind holds no claim and pays no
         // statement for one, the same rule its create follows.
-        holdsCardinalityClaim:
-          edgeCardinalityAxisReferences(
-            edgeCardinalityDeclarations(ctx, expectedKind),
-          ).length > 0,
+        holdsCardinalityClaim: edgeKindOwesAnyClaim(
+          ctx.registry,
+          edgeCardinalityDeclarations(ctx, expectedKind),
+          expectedKind,
+        ),
       });
     },
   );

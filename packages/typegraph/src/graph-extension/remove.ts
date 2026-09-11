@@ -108,7 +108,7 @@ export function planRemovals<G extends GraphDef>(
 
   // Compile-time referent check: a graph-extension kind being removed
   // cannot remain a target of any compile-time edge or ontology relation —
-  // as an edge endpoint, or (E-a-r2-2) as the `via` a compile-time
+  // as an edge endpoint, or as the `via` a compile-time
   // composition relation realizes through — because the compile-time
   // declaration would resurrect the reference on the next deploy. Pre-build
   // an inverted index of `kindName → referents` once so the per-kind check
@@ -195,7 +195,7 @@ export function planRemovals<G extends GraphDef>(
   }
 
   // Drop ontology relations referencing any removed kind — a `from`/`to`
-  // node endpoint, or (E-a-r2-2) the edge kind a composition relation names
+  // node endpoint, or the edge kind a composition relation names
   // as its `via`: an edge cascade-dropped for losing its last endpoint
   // orphans that relation's `via` exactly as surely as removing an endpoint
   // node does. The compile-time-referent check above already rejects
@@ -354,7 +354,7 @@ function buildCompileTimeReferentIndex<G extends GraphDef>(
     append(fromName, referent);
     if (toName !== fromName) append(toName, referent);
     // A composition relation's `via` names the edge kind it is realized
-    // through — a referent exactly like an endpoint (E-a-r2-2), since
+    // through — a referent exactly like an endpoint, since
     // removing that edge would orphan the compile-time relation just the
     // same as removing one of its node endpoints would.
     if (relation.via !== undefined) append(relation.via, referent);

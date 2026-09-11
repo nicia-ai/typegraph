@@ -20,6 +20,8 @@ import {
   type CompositionPartSide,
 } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { encodeTupleKey } from "../../utils/tuple-key";
+import { compositionAxisRef } from "../claims/composition-claims";
 import { edgeCardinalitySpec } from "../claims/edge-claims";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type CompositionNodeRef } from "../types";
@@ -105,25 +107,80 @@ export function compositionEdgeCounts(
   pair: Pick<CompositionPair, "partSide" | "population">,
   row: Pick<EdgeRow, "valid_to">,
 ): boolean {
-  const ref =
-    pair.partSide === "from" ?
-      ({ direction: "source", cardinality: pair.population } as const)
-    : ({ direction: "target", cardinality: pair.population } as const);
   return (
-    edgeCardinalitySpec(ref).holderLiveness !== "liveAndActive" ||
-    row.valid_to === undefined
+    edgeCardinalitySpec(compositionAxisRef(pair.partSide, pair.population))
+      .holderLiveness !== "liveAndActive" || row.valid_to === undefined
   );
 }
 
 type CascadeNode = Readonly<{ kind: string; id: string }>;
 
+/**
+ * The visited set's key for one member. {@link encodeTupleKey} rather than a
+ * delimiter join: node ids are arbitrary caller data, and a delimiter a value
+ * may itself contain would collapse two distinct members onto one key — read
+ * here as an already-visited node, i.e. a spurious {@link CompositionCycleError}
+ * or a silently skipped member.
+ */
 function memberKey(node: CascadeNode): string {
-  return `${node.kind} ${node.id}`;
+  return encodeTupleKey([node.kind, node.id]);
 }
 
 /** Which endpoint of `edgeKind` carries the WHOLE — the mirror of `compositionPartSide`. */
-function wholeSide(partSide: CompositionPartSide): "from" | "to" {
+export function wholeSide(partSide: CompositionPartSide): "from" | "to" {
   return partSide === "from" ? "to" : "from";
+}
+
+/** A composition row's two endpoints, named by the role each one plays. */
+type CompositionRowEndpoints = Readonly<{
+  part: Readonly<{ kind: string; id: string }>;
+  whole: Readonly<{ kind: string; id: string }>;
+}>;
+
+/**
+ * THE owner of "which endpoint of this composition row is the part and which
+ * is the whole", for one row and the orientation its edge kind declares.
+ * Every consumer — the cascade's walk, the existence-preservation refusal,
+ * the live-attachment reader — reads both roles from here rather than
+ * re-spelling the orientation fold, so a change in how a row's part endpoint
+ * is chosen has one place to land.
+ */
+export function compositionRowEndpoints(
+  partSide: CompositionPartSide,
+  row: Pick<EdgeRow, "from_kind" | "from_id" | "to_kind" | "to_id">,
+): CompositionRowEndpoints {
+  const from = { kind: row.from_kind, id: row.from_id };
+  const to = { kind: row.to_kind, id: row.to_id };
+  return partSide === "from" ?
+      { part: from, whole: to }
+    : { part: to, whole: from };
+}
+
+/**
+ * The declared composition pair a live row realizes, or a
+ * should-be-impossible invariant refusal.
+ *
+ * The lookup is by `row.kind`, not "the first declared pair between these two
+ * kinds": two realizing edges may hold the same (part, whole) pair, and the
+ * pair a row is judged under must be the one the row itself realizes. The
+ * refusal is unreachable from any registry-built graph — every endpoint pair
+ * a composition edge kind admits must itself be a declared pair
+ * (`ONTOLOGY_COMPOSITION_VIA_MIXED`) — which is what makes it an invariant
+ * rather than a user-facing error. One owner so both the cascade's walk and
+ * the attachment move raise the identical message and payload.
+ */
+export function requireCompositionPairVia(
+  registry: KindRegistry,
+  partKind: string,
+  wholeKind: string,
+  edgeKind: string,
+): CompositionPair {
+  const pair = registry.compositionPairVia(partKind, wholeKind, edgeKind);
+  if (pair !== undefined) return pair;
+  throw new CompilerInvariantError(
+    `A composition read resolved composition edge "${edgeKind}" between "${partKind}" and "${wholeKind}", but the registry declares no composition pair between them realized by that edge kind.`,
+    { edgeKind, partKind, wholeKind },
+  );
 }
 
 /** {@link readWholeSideEdges}'s result: the rows, and whether the set-read port answered. */
@@ -234,11 +291,10 @@ async function readWholeSideEdges(
     for (const row of rowsPerNode[index] ?? []) {
       if (row.deleted_at !== undefined) continue;
       if (!edgeKindSet.has(row.kind)) continue;
-      const partSide = requirePartSide(ctx.registry, row.kind);
-      const wholeEndpoint =
-        wholeSide(partSide) === "from" ?
-          { kind: row.from_kind, id: row.from_id }
-        : { kind: row.to_kind, id: row.to_id };
+      const { whole: wholeEndpoint } = compositionRowEndpoints(
+        requirePartSide(ctx.registry, row.kind),
+        row,
+      );
       if (wholeEndpoint.kind !== node.kind || wholeEndpoint.id !== node.id) {
         continue;
       }
@@ -317,8 +373,8 @@ async function liveDiscoveredMembers(
  * {@link compositionEdgeCounts}, and folds newly-discovered `(kind, id)`
  * pairs into the next frontier.
  *
- * Termination is the VISITED SET, not a kind-level depth bound: §2.7 permits
- * reflexive composition, so a kind-level closure of one edge kind places no
+ * Termination is the VISITED SET, not a kind-level depth bound: composition
+ * may be reflexive, so a kind-level closure of one edge kind places no
  * bound on instance depth. The visited set is finite because the graph is; a
  * round that discovers no new member ends the walk normally. A row that
  * resolves to an ALREADY-visited member is an INSTANCE-level cycle. The
@@ -366,43 +422,20 @@ export async function planCompositionCascade(
     setReadTrusted ||= setReadAnswered;
     const nextFrontier: CascadeNode[] = [];
     for (const row of rows) {
-      const partSide = requirePartSide(ctx.registry, row.kind);
-      const part: CascadeNode =
-        partSide === "from" ?
-          { kind: row.from_kind, id: row.from_id }
-        : { kind: row.to_kind, id: row.to_id };
-      const wholeOfRow: CascadeNode =
-        partSide === "from" ?
-          { kind: row.to_kind, id: row.to_id }
-        : { kind: row.from_kind, id: row.from_id };
-      // By `row.kind`, not "the first declared pair between these two
-      // kinds": two realizing edges may hold the same (part, whole) pair
-      // (E-a-2), and the pair this row is judged under must be the one the
-      // row itself realizes. NOT a population fix — population cannot differ
-      // between two pairs applicable to one concrete part kind
-      // (`ONTOLOGY_COMPOSITION_POPULATION_MIXED` refuses that ontology) — so
-      // the verdict below is the same either way today. It is the INVARIANT
-      // below that the by-`via` lookup keeps honest: the "no declared pair"
-      // throw is reachable only from a row no declared pair admits, which
-      // `ONTOLOGY_COMPOSITION_VIA_MIXED` already rules out at registry-build
-      // time (every endpoint pair a composition edge kind admits must itself
-      // be a declared pair) — which is exactly what makes it a
-      // should-be-impossible invariant rather than a user-facing refusal.
-      const pair = ctx.registry.compositionPairVia(
+      const { part, whole: wholeOfRow } = compositionRowEndpoints(
+        requirePartSide(ctx.registry, row.kind),
+        row,
+      );
+      // Population cannot differ between two pairs applicable to one concrete
+      // part kind (`ONTOLOGY_COMPOSITION_POPULATION_MIXED` refuses that
+      // ontology), so the verdict below is the same for either; the by-`via`
+      // lookup is what keeps the invariant honest.
+      const pair = requireCompositionPairVia(
+        ctx.registry,
         part.kind,
         wholeOfRow.kind,
         row.kind,
       );
-      if (pair === undefined) {
-        throw new CompilerInvariantError(
-          `planCompositionCascade read composition edge "${row.kind}" between "${part.kind}" and "${wholeOfRow.kind}", but the registry declares no composition pair between them realized by that edge kind.`,
-          {
-            edgeKind: row.kind,
-            partKind: part.kind,
-            wholeKind: wholeOfRow.kind,
-          },
-        );
-      }
       if (!compositionEdgeCounts(pair, row)) continue;
 
       const key = memberKey(part);
