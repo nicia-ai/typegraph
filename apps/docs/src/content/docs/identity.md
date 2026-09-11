@@ -287,17 +287,35 @@ const [store] = await createAdapterStoreWithSchema(graph, backend, {
 });
 ```
 
-`store.identity.transitionsOf(ref)` returns every transition touching
-`ref`'s class lineage, oldest first — an assertion, a retraction, a same-ID
-fold, a delete or restore, a validity-window end, a kind drop, a schema
-transition, or a reconciliation decision made by a governed graph merge:
+`store.identity.transitionsOf(ref)` returns a **page** of the transitions
+touching `ref`'s class lineage, oldest first — an assertion, a retraction, a
+same-ID fold, a delete or restore, a validity-window end, a kind drop, a
+schema transition, or a reconciliation decision made by a governed graph
+merge. A page holds at most `limit` transitions (default 200); when the
+lineage has more, the page carries `nextFrom`, and passing it back as
+`fromRecorded` reads the next one. Reading the whole lineage is therefore a
+loop, not a call:
 
 ```typescript
-const { transitions } = await store.identity.transitionsOf(alice);
-for (const transition of transitions) {
-  console.log(transition.cause, transition.recorded, transition.assertionIds);
-}
+let cursor: RecordedInstant | undefined;
+do {
+  const page = await store.identity.transitionsOf(alice, {
+    ...(cursor === undefined ? {} : { fromRecorded: cursor }),
+  });
+  for (const transition of page.transitions) {
+    console.log(transition.cause, transition.recorded, transition.assertionIds);
+  }
+  cursor = page.nextFrom;
+} while (cursor !== undefined);
 ```
+
+A single call without the loop reads only the first page; a lineage short
+enough to fit in one page returns no `nextFrom`, which is what ends the loop.
+"Oldest first" is by this graph's recorded revision. A transition an
+archival restore brought in keeps the *source* graph's revision, so it can
+list before or after this graph's own rows regardless of when it happened;
+an audit timeline that mixes the two should order by `recorded` and
+`restored.at` rather than by list position.
 
 A transition that an archival restore brought into this graph — rather than
 this graph's own history capture recording it — carries `restored`, whose
@@ -310,7 +328,7 @@ watermark](#archival-transitions-and-the-retention-watermark)).
 | Cause | Fires when |
 | --- | --- |
 | `assert` | An explicit `same` assertion (or a merge's own union) fused two classes |
-| `retract` | A retraction split a class back apart |
+| `retract` | A retraction split a class back apart — one row per resulting class whose new canonical the lineage touches, so one `retract` call on a class of three or more members can record more than one transition |
 | `fold` | A same-ID fold conducted a newly created or resurrected node into a class |
 | `detach` | A same-ID fold stopped conducting (the node changed kind, or the peer was removed) |
 | `restore` | A soft-deleted node's undelete brought it back into visibility |
@@ -361,17 +379,9 @@ it names was minted by the *source* graph's clock, not this graph's — pass it
 only as the next call's `fromRecorded`, and never to `store.asOfRecorded`,
 which anchors a historical read on this graph's own recorded axis.
 
-```typescript
-let cursor: RecordedInstant | undefined;
-do {
-  const page = await store.identity.transitionsOf(alice, {
-    limit: 50,
-    ...(cursor === undefined ? {} : { fromRecorded: cursor }),
-  });
-  render(page.transitions);
-  cursor = page.nextFrom;
-} while (cursor !== undefined);
-```
+The same loop drives `replay`: pass `page.nextFrom` back as `fromRecorded`
+until it comes back `undefined`, choosing `limit` per page as the consumer
+needs (the loop above takes the default).
 
 Both `replay` and `transitionsOf` throw `IDENTITY_REPLAY_REQUIRES_HISTORY` on
 a store opened without `history: true` — there is nothing for them to
@@ -596,9 +606,12 @@ so nothing was silently dropped, but it also could not throw. Open the
 restore target with `history: true` if it needs to accept archival exports
 from a history-enabled source.
 
-Every restored row is also marked as such, regardless of what the source
-graph thought of it: a restore always inserts rows this graph did not record
-itself. The marker is public — `transitionsOf` returns it as
+Restoring an archive that carries a live identity assertion also performs
+that assertion as a real write on the target, so `history: true` records one
+native (unmarked) transition for it beside the restored rows — on an empty
+target as much as on one that already held the nodes. Every restored row is
+marked as such, regardless of what the source graph thought of it: a restore
+always inserts rows this graph did not record itself. The marker is public — `transitionsOf` returns it as
 `transition.restored.at`, the destination's wall clock at restore time — so
 an audit view can label an imported explanation. It is a wall clock and not a
 `RecordedInstant` because a restore records history without reliving it: it

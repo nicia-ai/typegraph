@@ -39,6 +39,7 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 | [05-edge-implications.ts](./05-edge-implications.ts) | Edge hierarchies with `implies` |
 | [06-inverse-edges.ts](./06-inverse-edges.ts) | Bidirectional relationships with `inverseOf` |
 | [08-custom-ontology.ts](./08-custom-ontology.ts) | The core meta-edges working together (`broader`, `equivalentTo`, `disjointWith`, `partOf`, `inverseOf`, `implies`) plus free-form type-level semantics via `defineGraph({ annotations })` — persisted, introspectable, and serialized, with the vocabulary interpreted by your application |
+| [28-composition-lifecycle.ts](./28-composition-lifecycle.ts) | Whole/part composition with `partOf` and `existence: "required"`: a bare create of a required part is refused, `getOrCreateByConstraint`'s attachment postcondition, `reparent` between wholes, `subgraph({ composition: true })` exporting the complete owned unit, and the delete cascade's `cascadedParts` on both an `onOperationEnd` hook and a `transactionWithReceipt` receipt |
 
 ### Data Management
 
@@ -61,6 +62,7 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 | [21-agent-decision-replay.ts](./21-agent-decision-replay.ts) | Reconstruct the exact knowledge graph an AI agent saw at decision time and replay the *same* `query()` / `degree()` over it — point-in-time-correct reasoning for audit, eval, and debugging |
 | [22-breach-forensics.ts](./22-breach-forensics.ts) | Bitemporal + graph: valid-time-windowed grants (`validFrom`/`validTo`), composed pins (`store.asOf(breachAt).asOfRecorded(alertAnchor)`), `reachable()` for the true blast radius, and a pinned `shortestPath()` that names the attack path incident response later deleted |
 | [26-store-views.ts](./26-store-views.ts) | Read lenses over one graph: view modes (current / includeTombstones / includeEnded), asOf-pinned edge reads, consistent snapshots, and the read-only refusal contract |
+| [29-identity-history.ts](./29-identity-history.ts) | Operational identity over time: paginated `transitionsOf` and `replay` reading a lineage a page at a time via `nextFrom`, `pruneIdentityTransitions` retention with its no-op-below-the-watermark guarantee, and the `restored` marker an archival export/import round trip stamps on a transplanted transition |
 
 ### Provenance & Retraction
 

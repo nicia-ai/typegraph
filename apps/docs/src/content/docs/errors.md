@@ -747,7 +747,9 @@ already holds — same whole, same realizing edge — whose stated `props` are
 schema-valid but canonically different from the edge's live stored props —
 carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`). `requestedVia`
 is the RESOLVED realizing edge of the pair the call's `partOf` names, so it is
-present even when the call omitted `via`.
+present even when the call omitted `via`. The error's `code` is
+`COMPOSITION_WHOLE_REQUIRED` for every shape — branch on `details.situation`,
+not on `code`, to tell a bare create from a contradicted postcondition.
 
 Pass `partOf: { kind, id, via? }` naming a live, declared whole to fix a
 create refusal; soft-delete or hard-delete the part itself (which frees its

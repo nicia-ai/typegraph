@@ -452,6 +452,10 @@ await store.nodes.Chapter.reparent(chapter.id, {
 });
 ```
 
+`reparent` writes a brand-new realizing edge, so it takes the same
+`props` as `create`'s `partOf`: a realizing edge whose schema has required
+fields needs them restated on every move.
+
 Moving a part is a first-class operation because neither half is legal on its
 own: the new attachment refuses while the old edge still holds the part's
 one-whole claim, and — under `existence: "required"` — detaching the old edge
@@ -482,6 +486,40 @@ declares no `partOf`/`hasPart` pair at all raises
 `ConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
 part raises `NodeNotFoundError`.
 
+#### `partOf` on get-or-create is a postcondition
+
+`partOf` on `getOrCreateByConstraint` / `bulkGetOrCreateByConstraint` states
+what must be true when the call returns: **the resolved node holds exactly
+this attachment**, whichever way the constraint resolved. It applies to
+optional and required parts alike, and most of its outcomes are successes:
+
+| the constraint resolved to… | and the node… | outcome | `action` |
+| --- | --- | --- | --- |
+| no match | — | created with the attachment, exactly as `create` with `partOf` | `"created"` |
+| a soft-deleted match | — | restored, and attached in the same transaction | `"resurrected"` |
+| a live match | holds this whole through the resolved pair's realizing edge | **satisfied**: no write, no history; with `ifExists: "update"` the property update alone runs | `"found"` / `"updated"` |
+| a live match | holds this whole, but stated `props` differ from the edge's live stored props | refused: `CompositionExistenceError` (`situation: "props"`) — a satisfied match writes no edge, so a different value cannot be applied silently | — |
+| a live match | has no live whole | **attached now**, required or optional alike; with `ifExists: "update"` the attachment and the property update are one write plan | `"found"` / `"updated"` |
+| a live match | holds a **different** whole, or the same whole through another realizing edge | refused: `CompositionExistenceError` (`situation: "existing"`), naming the held and the requested attachment | — |
+
+"Satisfied" means the whole matches, the realizing edge matches the resolved
+pair, and any stated `props` are valid and canonically equal to the edge's
+live stored props — so an idempotent ingest that restates the attachment on
+every run stays read-only. Moving a part is never a side effect of a lookup;
+that is [`reparent`](#reparent-moving-a-part-to-a-new-whole)'s decision, and
+two concurrent calls naming different wholes for one part end with exactly
+one attachment and one `situation: "existing"` refusal, never a silent move.
+
+The attachment is resolved before the match is read, so the
+`ConfigurationError` refusals above (`COMPOSITION_WHOLE_NOT_DECLARED`,
+`COMPOSITION_VIA_NOT_DECLARED`, `COMPOSITION_VIA_AMBIGUOUS`) fire identically
+on a found node and on a created one. On the `ifExists: "update"` and
+resurrection legs every read the attachment owes runs before the property
+update's first statement, so a refusal leaves the properties untouched — and
+a refused property update (a unique conflict, a validation error) leaves the
+attachment and its history untouched — even for a caller that catches the
+error inside an enclosing `store.transaction(...)`.
+
 #### `existence`: a part that cannot exist without a whole
 
 `existence: "required"` on a `partOf`/`hasPart` pair says a part of that kind
@@ -492,7 +530,7 @@ declaration written before this option existed.
 partOf(Segment, Episode, { via: segmentOf, existence: "required" });
 ```
 
-Three refusals follow from that one declaration:
+Two refusals follow from that one declaration:
 
 - **A bare create is refused.** `store.nodes.Segment.create({...})` with no
   `partOf` throws `CompositionExistenceError`
@@ -508,24 +546,10 @@ Three refusals follow from that one declaration:
   [`reparent`](#reparent-moving-a-part-to-a-new-whole), which retires the old
   attachment and creates the new one in one transaction so the part is never
   detached at all.
-- **`partOf` on `getOrCreateByConstraint` is a POSTCONDITION.** When the call
-  returns, the resolved node holds exactly the stated attachment. On
-  `"created"`/`"resurrected"` it is applied as a plain create's `partOf` is;
-  on `"found"`/`"updated"` it is checked — a node that already holds this
-  whole through the resolved pair's realizing edge satisfies it (idempotent
-  when stated `props` are omitted, or valid and canonically equal to the
-  edge's live stored props — a valid but DIFFERENT `props` refuses with
-  `situation: "props"` instead of being silently kept, since a satisfied
-  match writes no edge), a node with no live whole has the attachment written
-  now (required or optional alike), and a node with a **different** live
-  whole, or the same whole through another realizing edge, is refused with
-  `CompositionExistenceError` (`situation: "existing"`) naming both sides.
-  Moving a part is [`reparent`](#reparent-moving-a-part-to-a-new-whole)'s
-  decision, never a side effect of a lookup. The attachment is resolved
-  BEFORE the match is read, so the three `ConfigurationError` refusals above
-  (`COMPOSITION_WHOLE_NOT_DECLARED`, `COMPOSITION_VIA_NOT_DECLARED`,
-  `COMPOSITION_VIA_AMBIGUOUS`) fire identically on a found node and on a
-  created one.
+
+A required part found by `getOrCreateByConstraint` is held to the same
+postcondition as an optional one — see [`partOf` on get-or-create is a
+postcondition](#partof-on-get-or-create-is-a-postcondition).
 
 `existence: "required"` is about detachment and bare creation, not about
 deleting the *whole* — deleting a whole still cascades to its required parts

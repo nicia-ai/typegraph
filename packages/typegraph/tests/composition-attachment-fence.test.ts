@@ -493,9 +493,11 @@ describe("a refused attachment and the property update it came with", () => {
       expect(refusal).toBeInstanceOf(CardinalityError);
     });
 
-    const edges = (
-      await store.edges.afPartOf.find({}, { temporalMode: "includeEnded" })
-    ).filter((edge) => edge.fromId === part.id);
+    const allEdges = await store.edges.afPartOf.find(
+      {},
+      { temporalMode: "includeEnded" },
+    );
+    const edges = allEdges.filter((edge) => edge.fromId === part.id);
     expect(edges).toHaveLength(1);
     expect(requireDefined(edges[0]).toId).toBe(wholeA.id);
     expect(requireDefined(edges[0]).meta.validTo).toBeUndefined();
