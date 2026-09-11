@@ -497,6 +497,37 @@ describe("provenance composition existence", () => {
   // `readLiveCompositionWholes` (treat every read row as live). The exhibit is
   // still held after its whole is tombstoned, and the audit reports nothing.
 
+  it("names a part it closes whose whole was already tombstoned before the transition", async () => {
+    const { store, backend } = await createCompositionStore(
+      "provenance_composition_already_dead_whole",
+    );
+    const { sourceOne, dossier } = await seedExhibitUnderDossier(store);
+    const provenance = createRetractionCapability(store, config);
+
+    // The whole dies outside the store's own paths, so the part is already
+    // unsupported when the transition arrives — the state
+    // `verifyConstraintFences()` reports as a `compositionExistence`
+    // violation.
+    await backend.deleteNode({
+      graphId: store.graphId,
+      kind: "PcDossier",
+      id: dossier.id,
+    });
+
+    const { result: report, closed } = await closedFactsDuring(store, () =>
+      provenance.retract(sourceOne),
+    );
+
+    // The transition still ends this row's currency, so the report must name
+    // it: a tombstone the report cannot mention is invisible data loss, no
+    // matter what made the fact unsupported beforehand.
+    expect(closed).toEqual(["PcExhibit/exhibit-1"]);
+    expect(report.died).toEqual([{ kind: "PcExhibit", id: "exhibit-1" }]);
+  });
+  // MUTATION CHECK: restore the `believedBefore` filter in `buildReport`
+  // (`died` = believed before and unsupported after). The row is still
+  // tombstoned and `died` comes back empty.
+
   it("stops holding a required part whose composition edge is gone", async () => {
     const { store, backend } = await createCompositionStore(
       "provenance_composition_no_edge",

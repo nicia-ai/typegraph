@@ -120,9 +120,18 @@ const current = after ? store.asOfRecorded(after) : undefined;
 
 The report partitions facts relative to the retracted source:
 
-- `died`: facts that were believed before and lost grounded support
+- `died`: every fact whose currency this transition closed
 - `survivedVia`: affected facts that still have a firing justification
 - `unaffected`: previously believed facts outside the source's provenance
+
+`died` names every close, including the one case where the fact was not
+believed to begin with: a fact found live but ALREADY unsupported when the
+transition reaches it loses its currency here and is reported here. Only writes
+outside the store's own paths produce that state — a direct backend write, a
+custom port, a bypassed import — and `store.verifyConstraintFences()` reports
+it while it lasts. A tombstone the report cannot mention would be invisible
+data loss, so the pass that writes the tombstones and the report that names them
+read one set of rows.
 
 `unRetract(source)` clears the source flag, recomputes support, and reopens
 facts that regain support.
@@ -156,7 +165,9 @@ A whole that is not a fact is held to the same liveness the write path holds an
 attachment's whole to: present and not tombstoned. A closed validity window does
 not make it dead, because the write path would still accept it as a whole. A
 whole that IS tombstoned leaves its live required parts unsupported, which is
-also what the `compositionExistence` audit reports for that state.
+also what the `compositionExistence` audit reports for that state. A transition
+that reaches such a part closes it and names it in `died`, even though the part
+was already unbelieved when the transition began.
 
 Each closed fact fires its own `delete` operation hook, parts included — unlike
 the delete cascade, which emits one event for the whole. A belief close has no

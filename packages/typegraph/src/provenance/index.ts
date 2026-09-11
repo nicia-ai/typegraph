@@ -978,11 +978,14 @@ function buildReport<
   before: SupportSnapshot,
   after: SupportSnapshot,
   affected: ReadonlySet<string>,
+  closing: ReadonlyMap<string, LiveNodeRow>,
 ): RetractionReport<G, FactKind, JustificationKind> {
   const believedBefore = [...before.believedFactKeys];
-  const died = sortedReferences<G, FactKind>(
-    believedBefore.filter((key) => !after.supportedFactKeys.has(key)),
-  );
+  // Every fact the transition closes, which is what `closing` IS — not a
+  // re-derivation over what was believed beforehand. A fact that was already
+  // unsupported when this transition reached it still loses its currency here,
+  // so it is named here.
+  const died = sortedReferences<G, FactKind>(closing.keys());
   const unaffected = sortedReferences<G, FactKind>(
     believedBefore.filter((key) => !affected.has(key)),
   );
@@ -1010,6 +1013,10 @@ function buildReport<
  * Closes run before reopens: a reopen re-checks uniqueness, and the unique
  * key it needs may still be held by a fact this same transition is about to
  * close — closing first makes a legal transition order-independent.
+ *
+ * Which rows the close pass writes is NOT decided here: the caller resolves
+ * them once through {@link closingFactRows} and hands the same map to the
+ * report, so every tombstone this pass writes is named in `died`.
  */
 /**
  * Runs `action` over every fact row in `snapshot` that is both affected by the
@@ -1025,14 +1032,53 @@ async function forEachAffectedFact<T extends NodeRow>(
   isTargetRow: (row: NodeRow) => row is T,
   action: (row: T) => Promise<void>,
 ): Promise<void> {
-  const rows: T[] = [];
+  const rows = selectAffectedFactRows(
+    snapshot,
+    affected,
+    isTargetKey,
+    isTargetRow,
+  );
+  await Promise.all([...rows.values()].map((row) => action(row)));
+}
+
+/** The affected fact rows matching both predicates, keyed by fact. */
+function selectAffectedFactRows<T extends NodeRow>(
+  snapshot: SupportSnapshot,
+  affected: ReadonlySet<string>,
+  isTargetKey: (key: string) => boolean,
+  isTargetRow: (row: NodeRow) => row is T,
+): ReadonlyMap<string, T> {
+  const rows = new Map<string, T>();
   for (const [key, row] of snapshot.facts) {
     if (!affected.has(key)) continue;
     if (!isTargetKey(key)) continue;
     if (!isTargetRow(row)) continue;
-    rows.push(row);
+    rows.set(key, row);
   }
-  await Promise.all(rows.map((row) => action(row)));
+  return rows;
+}
+
+/**
+ * THE set of facts this transition closes: affected by it, unsupported in the
+ * post-transition snapshot, and still a live row.
+ *
+ * Computed ONCE per transition and handed to both consumers — the close pass
+ * that tombstones these rows and the report that names them in `died` — rather
+ * than spelled twice. A report that re-derived its own answer (previously
+ * "believed before and unsupported after") could omit a row the close pass
+ * tombstones: a fact found live but ALREADY unsupported when the transition
+ * reaches it is closed, and an unnamed close is invisible data loss.
+ */
+function closingFactRows(
+  snapshot: SupportSnapshot,
+  affected: ReadonlySet<string>,
+): ReadonlyMap<string, LiveNodeRow> {
+  return selectAffectedFactRows(
+    snapshot,
+    affected,
+    (key) => !snapshot.supportedFactKeys.has(key),
+    isLiveNodeRow,
+  );
 }
 
 /**
@@ -1055,14 +1101,15 @@ async function synchronizeFactCurrency<G extends GraphDef>(
   runHooks: RunNodeOperationHooks,
   snapshot: SupportSnapshot,
   affected: ReadonlySet<string>,
+  closing: ReadonlyMap<string, LiveNodeRow>,
   lock: GraphWriteLock,
 ): Promise<void> {
-  await forEachAffectedFact(
-    snapshot,
-    affected,
-    (key) => !snapshot.supportedFactKeys.has(key),
-    isLiveNodeRow,
-    (row) => closeFactCurrency(backend, store, runHooks, row, lock),
+  // The rows the caller already resolved through `closingFactRows`, so the
+  // pass that writes and the report that names them cannot disagree.
+  await Promise.all(
+    [...closing.values()].map((row) =>
+      closeFactCurrency(backend, store, runHooks, row, lock),
+    ),
   );
   await forEachAffectedFact(
     snapshot,
@@ -1256,15 +1303,22 @@ async function runTransition<
     }
     const after = computeSupportSnapshot(supportGraph, availableAfter);
     const affected = after.affectedFactKeys(uniqueSources);
+    const closing = closingFactRows(after, affected);
     await synchronizeFactCurrency(
       backend,
       store,
       transactionNodeOperationHookRunner(tx),
       after,
       affected,
+      closing,
       lock,
     );
-    return buildReport<G, FactKind, JustificationKind>(before, after, affected);
+    return buildReport<G, FactKind, JustificationKind>(
+      before,
+      after,
+      affected,
+      closing,
+    );
   });
 }
 
