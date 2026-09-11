@@ -2,130 +2,26 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Identity-aware Reconciliation. An identity-enabled graph with history capture
-now retains a replayable identity history: `store.identity.transitionsOf(ref)`
-returns every transition that changed a node's identity class — assertions,
-retractions, same-id folds, deletes and restores, validity-window ends, kind
-drops, schema transitions and reconciliation decisions — each carrying the
-assertion ids involved, both temporal coordinates, and, for a decision made by
-a merge, the policy arm, branch, branch ancestry and plan and review digests
-that produced it. A transition an archival restore brought in carries
-`restored.at`, the destination's wall clock at restore time, so an audit view
-can tell an imported explanation from a locally replayable event. That marker
-is a wall clock rather than a `RecordedInstant` on purpose: a restore records
-history, it does not relive it, so it never advances the destination's
-recorded-revision counter and there is no revision on the destination's own
-axis to pair the timestamp with — the retention watermark
-(`truncatedBefore`) remains the only revision-shaped signal a restore
-leaves behind.
+**Identity-aware reconciliation.** An identity-enabled graph with history capture now retains a replayable identity history: `store.identity.transitionsOf(ref)` returns every transition that changed a node's identity class — assertions, retractions, same-id folds, deletes and restores, validity-window ends, kind drops, schema transitions and reconciliation decisions — each carrying the assertion ids involved, both temporal coordinates, and, for a decision made by a merge, the policy arm, branch, branch ancestry and plan and review digests that produced it. A transition an archival restore brought in carries `restored.at`, the destination's wall clock at restore time, so an audit view can tell an imported explanation from a locally replayable event. That marker is a wall clock rather than a `RecordedInstant` because a restore never advances the destination's recorded-revision counter; the retention watermark `truncatedBefore` remains the only revision-shaped signal a restore leaves behind.
 
-`transitionsOf` and `replay` both page: `limit` caps the number of boundaries
-one page returns and a capped page hands back a `nextFrom` cursor to pass as
-the next call's `fromRecorded`. Bounding the answer with
-`fromRecorded`/`toRecorded` never bounds the lineage search — discovery walks
-the whole log, because the note naming an earlier class canonical routinely
-sits above the requested window; discovery itself keyset-pages through every
-matching row rather than capping at a fixed ceiling, so an ordinary lineage
-never needs a destructive prune to become readable again.
+`transitionsOf` and `replay` both page: `limit` caps the number of boundaries one page returns, and a capped page hands back a `nextFrom` cursor to pass as the next call's `fromRecorded`. Bounding the answer with `fromRecorded`/`toRecorded` never bounds the lineage search, so a window can never hide the note that names an earlier class canonical. `store.identity.replay(ref)` pairs each transition with the class membership before and after it, reconstructed through the same historical reader `asOf` and `asOfRecorded` reads use, so replay can never disagree with a live read. Replay requires `history: true` and refuses with `IDENTITY_REPLAY_REQUIRES_HISTORY` otherwise; Cloudflare D1 and neon-http continue to refuse identity-enabled graphs outright.
 
-`store.identity.replay(ref)` pairs each transition with the class membership
-before and after it, reconstructed through the same historical reader `asOf`
-and `asOfRecorded` reads already use, so replay can never disagree with a
-live read. `pruneIdentityTransitions(store, { beforeRecorded })` trims
-retained explanations and records a watermark that replay reports rather
-than hiding, and archival interchange carries a `transitions` section plus
-the retention watermark, bumping the interchange format to `3.0` (older
-documents still import and validate unchanged). Restoring an archive's
-transitions validates shape only and never re-derives membership; every
-restored row is marked as such so `replay` never pairs it with a fabricated
-before/after, and — when the destination has no identity transitions of its
-own yet — the restore also sets its own watermark so `replay` reports the
-pre-restore range honestly instead of claiming a complete history it cannot
-reconstruct.
+`pruneIdentityTransitions(store, { beforeRecorded })` trims retained explanations and records a watermark that replay reports rather than hiding. Archival interchange carries a `transitions` section plus the retention watermark, bumping the interchange format to `3.0`; older documents still import and validate unchanged. Restoring an archive's transitions validates shape only and never re-derives membership, every restored row is marked as such so `replay` never pairs it with a fabricated before/after, and when the destination has no identity transitions of its own yet the restore also sets its own watermark, so `replay` reports the pre-restore range honestly instead of claiming a complete history it cannot reconstruct.
 
-Graph merge gains identity reconciliation under a new `identity` merge-options
-bag: `pairing` lets an explicit `same` assertion propose or force a candidate
-match between nodes created under different ids, a class-lifted `different`
-assertion now vetoes a match at plan time instead of aborting at commit,
-`onAssertionConflict` makes retract/reassert races and independently duplicated
-assertions resolvable by policy instead of only refusable, and
-`onProvenanceConflict` states how contradictory branch attribution across a
-fused cluster is handled, `onEdgeConflict: "flag"` drops an identity pairing
-whose repoint collapsed two distinct relationships onto one edge instead of
-folding them, and `onUniquenessConflict: "flag"` drops an identity pairing
-whose fused entity would violate a unique constraint — detected at plan time
-through the store's own constraint decision, never a second spelling of the
-key — instead of failing at commit. Both `"flag"` dispositions rebuild the plan
-once without the dropped pairings and leave it applicable; the assertion itself
-still lands in the identity ledger, only its use as a candidate pairing is
-dropped. Every unresolved case is reported as a typed
-`IdentityUnresolvedConflict` on the merge report and inside the durable plan,
-and the policy bag is part of the review digest, so a plan cannot be applied
-under policies its reviewer did not approve. Defaults preserve current
-behavior exactly: `pairing: "off"`, `onAssertionConflict: "refuse"`,
-`onProvenanceConflict: "keepBoth"`, `onEdgeConflict: "repoint"`, and
-`onUniquenessConflict: "refuse"`.
+**Graph merge gains identity reconciliation under a new `identity` merge-options bag.** `pairing` lets an explicit `same` assertion propose or force a candidate match between nodes created under different ids, and a class-lifted `different` assertion now vetoes a match at plan time instead of aborting at commit. `onAssertionConflict` makes retract/reassert races and independently duplicated assertions resolvable by policy instead of only refusable, and `onProvenanceConflict` states how contradictory branch attribution across a fused cluster is handled. `onEdgeConflict: "flag"` drops an identity pairing whose repoint collapsed two distinct relationships onto one edge, and `onUniquenessConflict: "flag"` drops a pairing whose fused entity would violate a unique constraint, at plan time rather than failing at commit. Both `"flag"` dispositions rebuild the plan without the dropped pairings — repeating until no pairing-induced conflict remains, which terminates because every pass drops a pairing no earlier pass did — and leave it applicable; a collision a member would cause on its own is never blamed on a pairing and stays with the commit's refusal; the assertion still lands in the identity ledger, only its use as a candidate pairing is dropped. Every unresolved case is reported as a typed `IdentityUnresolvedConflict` on the merge report and inside the durable plan, and the policy bag is part of the review digest, so a plan cannot be applied under policies its reviewer did not approve. Defaults preserve current behavior exactly: `pairing: "off"`, `onAssertionConflict: "refuse"`, `onProvenanceConflict: "keepBoth"`, `onEdgeConflict: "repoint"`, `onUniquenessConflict: "refuse"`.
 
-One narrow, deliberate behavior change ships under the default policy: when
-two branches end the same base identity assertion at different valid-time
-instants, the merge now commits the earliest staged `validTo` rather than
-whichever branch happened to be staged last. The new rule is deterministic and
-branch-order-independent — an improvement — but it is a real change to which
-instant a default-policy merge commits, not a byte-for-byte carry-over of
-prior behavior.
+One narrow, deliberate behavior change ships under the default policy: when two branches end the same base identity assertion at different valid-time instants, the merge commits the earliest staged `validTo` rather than whichever branch happened to be staged last. The new rule is deterministic and branch-order-independent, but it is a real change to which instant a default-policy merge commits.
 
-Replay requires `history: true` and refuses with
-`IDENTITY_REPLAY_REQUIRES_HISTORY` otherwise; Cloudflare D1 and neon-http
-continue to refuse identity-enabled graphs outright.
+A durable merge plan built under `reconcileTypes: "ontology"` also no longer fails its own artifact validation ("A resolution must name its complete guarded cluster and carry exactly N-1 decisive edges") when a retype cluster spans several ids: the resolution now names the kind the canonical row is written under, the reconciled kind `TypeReconciliation.toType` records, rather than the staged survivor's pre-retype kind.
 
-A transaction receipt's `writes.identity` gains `transitions`, counted beside
-(never inside) `total`: the number of identity transition-log notes the
-transaction's flush wrote, an annotation of the assertion/retraction writes
-`total` already counts rather than a fourth kind of write.
+A transaction receipt's `writes.identity` gains `transitions`, counted beside and never inside `total`: the number of identity transition-log notes the transaction's flush wrote.
 
-### Breaking changes
+### Breaking
 
-- `IdentityUnresolvedConflict` gains two arms, `kind: "edge"` and
-  `kind: "uniqueness"`, reported when `identity.onEdgeConflict: "flag"` or
-  `identity.onUniquenessConflict: "flag"` drops an identity pairing. An
-  exhaustive `switch` over `conflict.kind` must handle both; the durable plan
-  artifact's strict `review.identityConflicts` schema admits both.
-
-- `store.identity.transitionsOf` returns `{ transitions, nextFrom? }` rather
-  than a bare array, so a capped page can carry its continuation cursor.
-  Destructure the result (`const { transitions } = await
-  store.identity.transitionsOf(ref)`).
-- `IDENTITY_REPLAY_LIMIT_EXCEEDED` is gone from `IdentityReplayErrorDetails`
-  and the error catalog. A lineage with more boundaries than `limit` now
-  pages: `replay` and `transitionsOf` return a `nextFrom` recorded instant
-  naming the first boundary the page stopped short of. Code that caught the
-  refusal and resumed from `details.resumeFromRecorded` reads `nextFrom` off
-  the successful result instead.
-- Lineage discovery no longer honors `fromRecorded`/`toRecorded`: the walk
-  reads the whole transition log and the window is applied to the converged
-  result, so a window can never hide the notes that name an earlier class
-  canonical. One consequence: a narrow-window audit read now scans the full
-  lineage on every call — narrowing the window no longer lowers the walk's
-  read volume. Discovery keyset-pages through every matching row rather than
-  capping at a fixed ceiling, so this does not turn into an unreadable
-  lineage in practice; only a single class lineage whose transition rows
-  exceed an internal total safety ceiling still hits
-  `IDENTITY_REPLAY_WALK_INCOMPLETE`, whose only remedy remains the
-  destructive `pruneIdentityTransitions`, as the error's suggestion says.
-
-- The identity transition log adds two relations, `typegraph_identity_transitions`
-  and `typegraph_identity_transition_retention`, which `ensureSchema` creates on
-  an identity-enabled graph. `createSqlSchema` accepts `identityTransitions` and
-  `identityTransitionRetention` as optional overrides alongside the existing
-  table names; a deployment whose migration tooling enumerates TypeGraph's
-  relations, or whose database role has restricted DDL, must account for both
-  before upgrading.
-- Restoring an archival export (`identityMode: "archival"`) whose source graph
-  retains identity transitions or has ever pruned them now requires the
-  restore target to be opened with `history: true`. `importGraph` and
-  `importGraphStream` refuse such a document with
-  `IDENTITY_REPLAY_REQUIRES_HISTORY` before writing anything, where they
-  previously wrote the rest of the document successfully because no
-  transitions section existed to carry the transitions in the first place.
-  Open the restore target with `history: true` to keep a backup/restore
-  pipeline that moves data out of a history-enabled graph working.
+- `IdentityUnresolvedConflict` gains two arms, `kind: "edge"` and `kind: "uniqueness"`, reported when `identity.onEdgeConflict: "flag"` or `identity.onUniquenessConflict: "flag"` drops a pairing. The `"edge"` arm names `edgeKind`, the two refs `a` and `b`, the `canonical` ref, the collapsed `side` and `edgeIds`; the `"uniqueness"` arm names `constraintName`, `fields`, `canonical`, the `owner` that holds the key, the `loser` write the store refused for it, and the cluster's `members`. Both carry the dropped pairing's `assertionIds` and `branches`. An exhaustive `switch` over `conflict.kind` must handle both; the durable plan artifact's strict `review.identityConflicts` schema admits both.
+- `EntityResolution.kind` (on `MergeReport.resolutions` and a plan artifact's `review.resolutions`) names the reconciled kind for a cluster the ontology cascade retypes. Code that joined a resolution to its staged members by the survivor's pre-retype kind should read `TypeReconciliation.fromTypes` for the staged kinds; clusters no retype touches are unchanged.
+- `store.identity.transitionsOf` returns `{ transitions, nextFrom? }` rather than a bare array. Destructure the result (`const { transitions } = await store.identity.transitionsOf(ref)`).
+- `IDENTITY_REPLAY_LIMIT_EXCEEDED` is gone from `IdentityReplayErrorDetails` and the error catalog. A lineage with more boundaries than `limit` now pages: `replay` and `transitionsOf` return a `nextFrom` recorded instant naming the first boundary the page stopped short of. Code that caught the refusal and resumed from `details.resumeFromRecorded` reads `nextFrom` off the successful result instead.
+- Lineage discovery no longer honors `fromRecorded`/`toRecorded`, so a narrow-window audit read now scans the full lineage on every call. Only a class lineage whose transition rows exceed an internal safety ceiling hits `IDENTITY_REPLAY_WALK_INCOMPLETE`, whose only remedy remains the destructive `pruneIdentityTransitions`.
+- The identity transition log adds two relations, `typegraph_identity_transitions` and `typegraph_identity_transition_retention`, which `ensureSchema` creates on an identity-enabled graph, with `createSqlSchema` accepting `identityTransitions` and `identityTransitionRetention` as optional name overrides. A deployment whose migration tooling enumerates TypeGraph's relations, or whose database role has restricted DDL, must account for both before upgrading.
+- Restoring an archival export (`identityMode: "archival"`) whose source graph retains identity transitions or has ever pruned them now requires the restore target to be opened with `history: true`. `importGraph` and `importGraphStream` refuse such a document with `IDENTITY_REPLAY_REQUIRES_HISTORY` before writing anything, where they previously wrote the rest of it successfully.
