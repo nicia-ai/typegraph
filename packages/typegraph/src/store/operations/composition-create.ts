@@ -36,10 +36,15 @@
  * beside the write plan because the decision is pure: the write plan owns the
  * lock and the statements, this module owns what they mean.
  */
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type EdgeRow,
+  type GraphBackend,
   type GraphReadBackend,
   isLiveNodeRow,
+  type LiveNodeRow,
   type NodeRow,
   rowPropsToObject,
 } from "../../backend/types";
@@ -382,7 +387,7 @@ export async function assertCompositionExistencePreserved(
   if (!edgeCurrentlyAttachesPart(ctx.registry, part.kind, edge)) return;
 
   const partRow = await backend.getNode(ctx.graphId, part.kind, part.id);
-  if (partRow === undefined || !isLiveNodeRow(partRow)) return;
+  if (!isEndpointRowLive(partRow)) return;
 
   throw new CompositionExistenceError({
     partKind: part.kind,
@@ -443,9 +448,16 @@ export async function findLiveCompositionAttachment(
  * candidate edges incident to one part, the one that currently attaches it.
  *
  * Split out so a caller that already read a SET of parts' candidate edges in
- * one statement ({@link readCompositionUnattachedParts}) reaches the identical
- * verdict as the per-part reader, rather than re-spelling the orientation
- * match and the population predicate over its own rows.
+ * one statement ({@link readCompositionAttachmentsForPage}) reaches the
+ * identical verdict as the per-part reader, rather than re-spelling the
+ * orientation match and the population predicate over its own rows.
+ *
+ * Judges the EDGE alone, which is what the write path needs: a tombstoned
+ * whole still holds its part's attachment claim, so
+ * {@link decideCompositionIncumbent} must still see that incumbent. A caller
+ * that asks the stronger question — "does this part hang from a whole that is
+ * itself live" — composes this verdict with {@link readLiveCompositionWholes},
+ * the way {@link readCompositionUnattachedParts} does.
  */
 function selectLiveCompositionAttachment(
   registry: KindRegistry,
@@ -825,9 +837,26 @@ export function assertEndpointRowLive(
   nodeId: string,
   row: NodeRow | undefined,
 ): void {
-  if (row === undefined || !isLiveNodeRow(row)) {
+  if (!isEndpointRowLive(row)) {
     throw new EndpointNotFoundError({ edgeKind, endpoint, nodeKind, nodeId });
   }
+}
+
+/**
+ * THE endpoint-liveness predicate: a row an edge may point at is present and
+ * not tombstoned. Valid time is deliberately not part of it — a row whose
+ * window has closed is still a row an attachment may name.
+ *
+ * The verdict behind {@link assertEndpointRowLive}, and behind the readers in
+ * this module that need the same answer WITHOUT a refusal
+ * ({@link readLiveCompositionWholes}, which the `compositionExistence` audit and
+ * provenance's support computation read, and the detach refusal's own part-row
+ * check). One predicate, so a reporting path and a refusing path can never judge
+ * the same row differently. Module-private: every consumer of the decision is a
+ * function here, each exported in its own right.
+ */
+function isEndpointRowLive(row: NodeRow | undefined): row is LiveNodeRow {
+  return row !== undefined && isLiveNodeRow(row);
 }
 
 /**
@@ -973,7 +1002,14 @@ export function requiredCompositionPartKinds(
   return [...partKinds];
 }
 
-const UNATTACHED_PARTS_PAGE_SIZE = 500;
+/**
+ * How many parts one attachment page resolves at a time — the `findNodesByKind`
+ * limit the audit pages on, and the chunk size every other consumer of
+ * {@link readCompositionAttachmentsForPage} (provenance's support computation)
+ * uses, so one page's candidate read stays one bounded statement per
+ * orientation on every caller.
+ */
+export const COMPOSITION_ATTACHMENT_PAGE_SIZE = 500;
 
 /**
  * Every LIVE node of a required-existence part kind that currently has no
@@ -1059,11 +1095,171 @@ async function readPageAttachmentCandidateEdges(
   return byPart;
 }
 
+/**
+ * THE page-scoped answer to "which whole does each of these parts currently
+ * hang from", keyed by part. A part with no entry has no current attachment,
+ * CONFIRMED by its own read — the batched candidate read is an optimization,
+ * never the evidence for a negative (see
+ * {@link readPageAttachmentCandidateEdges}: an absent port answers
+ * `undefined`, and a wrong "unattached" becomes a refusal at schema-commit
+ * time).
+ *
+ * One owner, two consumers: `verifyConstraintFences`' `compositionExistence`
+ * family ({@link readCompositionUnattachedParts}) and provenance's support
+ * computation (`src/provenance/index.ts`), which would otherwise re-spell the
+ * batched-then-confirmed shape over its own fact rows.
+ */
+export async function readCompositionAttachmentsForPage(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  parts: readonly NodeRow[],
+): Promise<
+  ReadonlyMap<string, Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }>>
+> {
+  const candidateEdges = await readPageAttachmentCandidateEdges(
+    registry,
+    backend,
+    graphId,
+    parts,
+  );
+  const attachments = new Map<
+    string,
+    Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }>
+  >();
+  for (const row of parts) {
+    const partKey = encodeTupleKey([row.kind, row.id]);
+    const batched = candidateEdges?.get(partKey);
+    const fromPage =
+      batched === undefined ? undefined : (
+        selectLiveCompositionAttachment(registry, row.kind, row.id, batched)
+      );
+    if (fromPage !== undefined) {
+      attachments.set(partKey, fromPage);
+      continue;
+    }
+    const confirmed = await findLiveCompositionAttachment(
+      registry,
+      backend,
+      graphId,
+      row.kind,
+      row.id,
+    );
+    if (confirmed !== undefined) attachments.set(partKey, confirmed);
+  }
+  return attachments;
+}
+
+/**
+ * The read surface a whole-row read needs: the point read every backend has,
+ * plus the batch extra when the port carries it. Narrow on purpose — a write
+ * frame's transaction target and a read-only audit backend both satisfy it.
+ */
+type CompositionWholeRowReader = Readonly<Pick<GraphBackend, "getNode">> &
+  Readonly<Partial<Pick<GraphBackend, "getNodes">>>;
+
+/**
+ * THE whole-row read: every `(kind, id)` these wholes name, deduplicated, read
+ * once per kind through the batch point read when the caller hands over the
+ * verdict that reaches `getNodes`, and through the per-id `getNode` the bundle
+ * declares as that extra's fallback when it does not. Keyed by the `(kind, id)`
+ * tuple key, with an explicit `undefined` for a whole that has no row at all,
+ * so a caller can tell "absent" from "not asked for".
+ *
+ * One owner, two consumers that would otherwise spell the same dedupe, the same
+ * binding and the same fallback twice: the node-create batch's attach loop
+ * (`attachBatchCompositionCreateEdges`, `node-operations.ts`), which judges each
+ * row through {@link assertCompositionWholeEndpointLive} and carries it as the
+ * preparation's `"primedWhole"` evidence, and {@link readLiveCompositionWholes}
+ * below. The port is an optimization, never a requirement: the verdict a caller
+ * reaches must be identical either way.
+ */
+export async function readCompositionWholeRows(
+  port: CompositionWholeRowReader,
+  graphId: string,
+  wholes: readonly CompositionWholeRef[],
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
+): Promise<ReadonlyMap<string, NodeRow | undefined>> {
+  const idsByKind = new Map<string, Set<string>>();
+  for (const whole of wholes) {
+    const ids = idsByKind.get(whole.kind) ?? new Set<string>();
+    ids.add(whole.id);
+    idsByKind.set(whole.kind, ids);
+  }
+  const boundGetNodes =
+    batchPointRead === undefined ? undefined : (
+      bindExtraIfReachable(
+        port,
+        batchPointRead.extras.getNodes,
+        BATCH_POINT_READ.id,
+      )
+    );
+
+  const rowsByWhole = new Map<string, NodeRow | undefined>();
+  for (const [kind, ids] of idsByKind) {
+    const orderedIds = [...ids];
+    if (boundGetNodes === undefined) {
+      for (const id of orderedIds) {
+        rowsByWhole.set(
+          encodeTupleKey([kind, id]),
+          await port.getNode(graphId, kind, id),
+        );
+      }
+      continue;
+    }
+    const rows = await boundGetNodes.getNodes(graphId, kind, orderedIds);
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    for (const id of orderedIds) {
+      rowsByWhole.set(encodeTupleKey([kind, id]), rowsById.get(id));
+    }
+  }
+  return rowsByWhole;
+}
+
+/**
+ * Which of these wholes are LIVE rows, as the whole-endpoint refusal judges
+ * liveness ({@link isEndpointRowLive}: present and not tombstoned — a tombstone
+ * is the whole of the question, valid time is not). The filtering projection of
+ * {@link readCompositionWholeRows}, so it shares that read's dedupe, binding and
+ * fallback rather than repeating them.
+ *
+ * Separate from {@link selectLiveCompositionAttachment} on purpose: the write
+ * path's incumbent decision must keep seeing a tombstoned whole's attachment,
+ * while a consumer asking "is this part still held up" composes the two.
+ */
+export async function readLiveCompositionWholes(
+  backend: GraphReadBackend,
+  graphId: string,
+  wholes: readonly CompositionWholeRef[],
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
+): Promise<readonly CompositionWholeRef[]> {
+  const rowsByWhole = await readCompositionWholeRows(
+    backend,
+    graphId,
+    wholes,
+    batchPointRead,
+  );
+  const live: CompositionWholeRef[] = [];
+  for (const row of rowsByWhole.values()) {
+    if (!isEndpointRowLive(row)) continue;
+    live.push({ kind: row.kind, id: row.id });
+  }
+  return live;
+}
+
+/**
+ * A part is unattached when it has no current composition edge OR the whole
+ * that edge names is not a live row. The second arm is what makes the audit
+ * report a part left hanging from a TOMBSTONED whole — a state the delete
+ * cascade cannot produce but a direct backend write, a custom port, or a
+ * belief-status close of a whole whose parts are optional can.
+ */
 export async function readCompositionUnattachedParts(
   registry: KindRegistry,
   backend: GraphReadBackend,
   graphId: string,
   partKinds: readonly string[],
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<readonly CompositionWholeRef[]> {
   const unattached: CompositionWholeRef[] = [];
   for (const partKind of partKinds) {
@@ -1074,40 +1270,37 @@ export async function readCompositionUnattachedParts(
         kind: partKind,
         excludeDeleted: true,
         orderBy: "id",
-        limit: UNATTACHED_PARTS_PAGE_SIZE,
+        limit: COMPOSITION_ATTACHMENT_PAGE_SIZE,
         ...(after === undefined ? {} : { after }),
       });
-      const candidateEdges = await readPageAttachmentCandidateEdges(
+      const attachments = await readCompositionAttachmentsForPage(
         registry,
         backend,
         graphId,
         rows,
       );
+      const liveWholes = await readLiveCompositionWholes(
+        backend,
+        graphId,
+        [...attachments.values()].map((attachment) => attachment.whole),
+        batchPointRead,
+      );
+      const liveWholeKeys = new Set(
+        liveWholes.map((whole) => encodeTupleKey([whole.kind, whole.id])),
+      );
       for (const row of rows) {
-        const batched = candidateEdges?.get(encodeTupleKey([row.kind, row.id]));
+        const attachment = attachments.get(encodeTupleKey([row.kind, row.id]));
         if (
-          batched !== undefined &&
-          selectLiveCompositionAttachment(
-            registry,
-            row.kind,
-            row.id,
-            batched,
-          ) !== undefined
+          attachment !== undefined &&
+          liveWholeKeys.has(
+            encodeTupleKey([attachment.whole.kind, attachment.whole.id]),
+          )
         ) {
           continue;
         }
-        const whole = await findLiveCompositionWhole(
-          registry,
-          backend,
-          graphId,
-          row.kind,
-          row.id,
-        );
-        if (whole === undefined) {
-          unattached.push({ kind: row.kind, id: row.id });
-        }
+        unattached.push({ kind: row.kind, id: row.id });
       }
-      if (rows.length < UNATTACHED_PARTS_PAGE_SIZE) break;
+      if (rows.length < COMPOSITION_ATTACHMENT_PAGE_SIZE) break;
       after = requireDefined(
         rows.at(-1),
         "findNodesByKind returned a full page with no last row",

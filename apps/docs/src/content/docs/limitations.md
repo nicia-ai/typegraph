@@ -233,17 +233,25 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 
 Deleting a [composition](/ontology#composition) whole cascades leaf-first
 through its live parts closure, each part going through its own node-delete
-pipeline in the same transaction. Two behaviors are easy to assume and are
-not what happens:
+pipeline in the same transaction. Several behaviors are easy to assume and
+are not what happens:
 
 - **Resurrecting a soft-deleted whole restores the whole alone.** Ownership
   of its parts ended when the cascade ran; the parts stay deleted. There is
   no opt-in to cascade a resurrection back onto them.
-- **Ending a whole's validity window is not a cascade.** Closing an
-  `oneActive` composition edge's currency (for example, a provenance
-  retraction) leaves the part node itself untouched — it is not deleted, and
-  a later reattach of the SAME part to a different whole is a reparent, not
-  a resurrection.
+- **Ending a whole's validity window is still not a cascade.** Closing an
+  `oneActive` composition edge's currency leaves the part node itself
+  untouched — it is not deleted, and a later reattach of the SAME part to a
+  different whole is a reparent, not a resurrection.
+- **A belief-status close DOES close the whole's required parts, and it is
+  not this cascade that does it.** A [provenance](/provenance) retraction
+  that closes a whole's currency closes its required parts in the same
+  transition because support treats a required part as dependent on its
+  whole, not because a delete cascade ran: no edge is touched, an optional
+  part is left believed, and reopening the whole reopens the parts that are
+  otherwise supported. Each closed part fires its own `delete` operation hook,
+  rather than folding into one event for the whole the way this cascade does.
+  See [Composition and retraction](/provenance#composition-and-retraction).
 - **The cascade emits one operation-hook event, for the whole.** Each
   cascaded part delete runs through its own node-delete pipeline but is not
   itself a caller-issued operation, so `onOperationEnd` fires exactly once —

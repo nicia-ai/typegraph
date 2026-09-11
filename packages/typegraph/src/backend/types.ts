@@ -645,6 +645,7 @@ export type GraphReadBackend = Pick<
   GraphBackend,
   | "dialect"
   | "getNode"
+  | "getNodes"
   | "getEdge"
   | "findNodesByKind"
   | "findEdgesByKind"
