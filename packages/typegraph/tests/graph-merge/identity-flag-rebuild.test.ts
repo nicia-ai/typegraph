@@ -1083,7 +1083,7 @@ describe.each(backendMatrix())(
                   (
                     [left.id as string, right.id as string]
                       .toSorted()
-                      .join(',') === "c,p"
+                      .join(",") === "c,p"
                   ) ?
                     1
                   : 0,
