@@ -103,6 +103,67 @@ function quoteIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
+/**
+ * How long to wait for the template database's last session to be reaped.
+ *
+ * `pg.Pool.end()` resolves when the client sockets are closed; the server-side
+ * backends exit independently and, on a loaded machine, a little later.
+ * `CREATE DATABASE ... TEMPLATE` refuses to copy a database that any other
+ * session is connected to, and its own tolerance for this is a FIXED
+ * five-second poll (`CountOtherDBBackends`) after which it fails with
+ * SQLSTATE 55006 — measured directly against the server: holding one idle
+ * connection open makes the statement stall 5122 ms and then error.
+ *
+ * So the interval between `end()` resolving and the backend exiting is a race
+ * this suite would otherwise run against a deadline it does not control, with
+ * a hard failure rather than a slow one on the losing side. Waiting for the
+ * observable condition instead makes the fork deterministic, costs nothing
+ * when the reap is prompt (the normal case), and outlasts PostgreSQL's own
+ * five seconds when the machine is busy.
+ */
+const TEMPLATE_DRAIN_TIMEOUT_MS = 30_000;
+const TEMPLATE_DRAIN_POLL_MS = 25;
+
+/**
+ * Resolves once no session other than this one is connected to `database`.
+ *
+ * Fails by naming the sessions that would not leave, which is the diagnosis
+ * PostgreSQL's own "is being accessed by other users" withholds.
+ */
+async function waitForNoOtherSessions(
+  admin: Pool,
+  database: string,
+  timeoutMs: number = TEMPLATE_DRAIN_TIMEOUT_MS,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const { rows } = await admin.query<{
+      pid: number;
+      application_name: string;
+      state: string;
+    }>(
+      `SELECT pid, application_name, state
+         FROM pg_stat_activity
+        WHERE datname = $1 AND pid <> pg_backend_pid()`,
+      [database],
+    );
+    if (rows.length === 0) return;
+    if (Date.now() >= deadline) {
+      const holders = rows
+        .map(
+          (row) =>
+            `pid ${row.pid} (${row.application_name || "?"}, ${row.state})`,
+        )
+        .join(", ");
+      throw new Error(
+        `Sessions still connected to template database "${database}" after ` +
+          `${timeoutMs} ms: ${holders}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, TEMPLATE_DRAIN_POLL_MS));
+  }
+}
+
 /** The bare database name `provisionPostgresTestDatabase` chose. */
 function databaseNameFromUrl(url: string): string {
   return decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
@@ -141,109 +202,182 @@ it("forkedDatabaseNameFor never collapses onto its stem, even at the identifier 
 describe.runIf(process.env["POSTGRES_URL"])(
   "forkedWorkingCopyStrategy [postgres, CREATE DATABASE ... TEMPLATE]",
   () => {
-    it("forks the base database by template, merges a fork write back to the base", async () => {
+    /**
+     * A budget sized for HOST latency, not for TypeGraph work (#655).
+     *
+     * The measured costs here are small — an 8.7 MB template copies in ~11 ms
+     * idle and ~130 ms under saturating concurrent write load — so the copy
+     * itself was never what pushed this past the project's 15 s default. What
+     * scales with how busy the machine is, is the waiting: `DROP DATABASE ...
+     * WITH (FORCE)` terminates and reaps the fork's backends, and the copy
+     * waits on the template's. This suite is the only one in the default
+     * project that asks the server to do either, so it gets the same 60 s
+     * allowance the other host-lifecycle projects (`pglite`, `graph-merge`)
+     * already give themselves, for the same reason: normal provisioning
+     * latency must not report as a correctness failure.
+     */
+    const FORK_TEST_TIMEOUT_MS = 60_000;
+
+    /**
+     * The drain is the difference between a deterministic fork and a race
+     * against PostgreSQL's own five-second poll, so it is asserted directly:
+     * a helper that returned immediately would resolve here instead of
+     * reporting the session that is still attached.
+     */
+    it("waits for the template's other sessions, and names them if they stay", async () => {
       const configuredUrl = process.env["POSTGRES_URL"];
       if (configuredUrl === undefined) throw new Error("unreachable");
       const isolatedDatabase = databaseNameFromUrl(TEST_DATABASE_URL);
-      // `branch()`'s own DROP/CREATE DATABASE ... TEMPLATE calls target this
-      // name — assert it before any DROP runs, not only inside
-      // `forkedDatabaseNameFor`'s own unit test above.
-      const forkedDatabase = forkedDatabaseNameFor(isolatedDatabase);
-      expect(forkedDatabase).not.toBe(isolatedDatabase);
-
-      async function withAdmin<T>(fn: (admin: Pool) => Promise<T>): Promise<T> {
-        const admin = new Pool({ connectionString: configuredUrl, max: 1 });
-        try {
-          return await fn(admin);
-        } finally {
-          await admin.end();
-        }
+      const admin = new Pool({ connectionString: configuredUrl, max: 1 });
+      const lingering = new Pool({
+        connectionString: TEST_DATABASE_URL,
+        max: 1,
+        application_name: "lingering-template-session",
+      });
+      // `pg.Pool.end()` refuses a second call, and the happy path below ends
+      // this pool mid-test, so the cleanup tracks whether it still owns it.
+      let lingeringOpen = true;
+      async function endLingering(): Promise<void> {
+        if (!lingeringOpen) return;
+        lingeringOpen = false;
+        await lingering.end();
       }
+      try {
+        await lingering.query("SELECT 1");
+        await expect(
+          waitForNoOtherSessions(admin, isolatedDatabase, 250),
+        ).rejects.toThrow(/lingering-template-session/);
 
-      const swappablePool = new SwappablePool(
-        new Pool({ connectionString: TEST_DATABASE_URL, max: 1 }),
-      );
-      // Cast: SwappablePool duck-types the subset of `Pool` Drizzle's
-      // node-postgres driver actually calls (see the class doc comment).
-      const baseDb = drizzle(
-        swappablePool as unknown as Pool,
-      ) as NodePgDatabase;
-      const baseBackend = createPostgresBackend(baseDb);
-      const [baseStore] = await createStoreWithSchema(graph, baseBackend);
-      const widget = await baseStore.nodes.Widget.create({ name: "Original" });
-
-      type PgTemplateFork = ForkHandle & Readonly<{ database: string }>;
-
-      const strategy = forkedWorkingCopyStrategy<G, PgTemplateFork>({
-        fork: async () => {
-          // No other session — active or idle-in-pool — may be connected to
-          // the template database while it is copied.
-          await swappablePool.current.end();
-          await withAdmin(async (admin) => {
-            await admin.query(
-              `DROP DATABASE IF EXISTS ${quoteIdentifier(forkedDatabase)} WITH (FORCE)`,
-            );
-            await admin.query(
-              `CREATE DATABASE ${quoteIdentifier(forkedDatabase)} TEMPLATE ${quoteIdentifier(isolatedDatabase)}`,
-            );
-          });
-          // Reconnect the base's pool now that the template copy is done —
-          // `baseStore` keeps working, unchanged, for the rest of the test.
-          swappablePool.current = new Pool({
-            connectionString: TEST_DATABASE_URL,
-            max: 1,
-          });
-          return {
-            database: forkedDatabase,
-            dispose: async () => {
-              await withAdmin(async (admin) => {
-                await admin.query(
-                  `DROP DATABASE IF EXISTS ${quoteIdentifier(forkedDatabase)} WITH (FORCE)`,
-                );
-              });
-            },
-          };
-        },
-        connect: (fork) => {
-          const pool = new Pool({
-            connectionString: urlForDatabase(TEST_DATABASE_URL, fork.database),
-            max: 1,
-          });
-          const forkBackend = createPostgresBackend(drizzle(pool));
-          return Promise.resolve(
-            wrapWithManagedClose(forkBackend, async () => {
-              await pool.end();
-            }),
-          );
-        },
-      });
-
-      const branchResult = await branch<G>(
-        baseStore,
-        rejectMakeBackend,
-        undefined,
-        strategy,
-      );
-      expect(isOk(branchResult)).toBe(true);
-      const forkBranch = unwrap(branchResult);
-
-      await forkBranch.store.nodes.Widget.update(widget.id, {
-        name: "Forked Edit",
-      });
-
-      // The base is unaffected before the merge commits.
-      const beforeCommit = await baseStore.nodes.Widget.getById(widget.id);
-      expect(beforeCommit?.name).toBe("Original");
-
-      const mergeResult = await merge<G>(baseStore, [forkBranch], {});
-      expect(isOk(mergeResult)).toBe(true);
-
-      // The base sees the fork's write after commit.
-      const afterCommit = await baseStore.nodes.Widget.getById(widget.id);
-      expect(afterCommit?.name).toBe("Forked Edit");
-
-      await forkBranch.close();
-      await swappablePool.current.end();
+        await endLingering();
+        // Now it resolves — within PostgreSQL's own tolerance, without having
+        // spent it.
+        await expect(
+          waitForNoOtherSessions(admin, isolatedDatabase, 5000),
+        ).resolves.toBeUndefined();
+      } finally {
+        await endLingering();
+        await admin.end();
+      }
     });
+
+    it(
+      "forks the base database by template, merges a fork write back to the base",
+      async () => {
+        const configuredUrl = process.env["POSTGRES_URL"];
+        if (configuredUrl === undefined) throw new Error("unreachable");
+        const isolatedDatabase = databaseNameFromUrl(TEST_DATABASE_URL);
+        // `branch()`'s own DROP/CREATE DATABASE ... TEMPLATE calls target this
+        // name — assert it before any DROP runs, not only inside
+        // `forkedDatabaseNameFor`'s own unit test above.
+        const forkedDatabase = forkedDatabaseNameFor(isolatedDatabase);
+        expect(forkedDatabase).not.toBe(isolatedDatabase);
+
+        async function withAdmin<T>(
+          fn: (admin: Pool) => Promise<T>,
+        ): Promise<T> {
+          const admin = new Pool({ connectionString: configuredUrl, max: 1 });
+          try {
+            return await fn(admin);
+          } finally {
+            await admin.end();
+          }
+        }
+
+        const swappablePool = new SwappablePool(
+          new Pool({ connectionString: TEST_DATABASE_URL, max: 1 }),
+        );
+        // Cast: SwappablePool duck-types the subset of `Pool` Drizzle's
+        // node-postgres driver actually calls (see the class doc comment).
+        const baseDb = drizzle(
+          swappablePool as unknown as Pool,
+        ) as NodePgDatabase;
+        const baseBackend = createPostgresBackend(baseDb);
+        const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+        const widget = await baseStore.nodes.Widget.create({
+          name: "Original",
+        });
+
+        type PgTemplateFork = ForkHandle & Readonly<{ database: string }>;
+
+        const strategy = forkedWorkingCopyStrategy<G, PgTemplateFork>({
+          fork: async () => {
+            // No other session — active or idle-in-pool — may be connected to
+            // the template database while it is copied.
+            await swappablePool.current.end();
+            await withAdmin(async (admin) => {
+              await admin.query(
+                `DROP DATABASE IF EXISTS ${quoteIdentifier(forkedDatabase)} WITH (FORCE)`,
+              );
+              // `end()` above closed the sockets; wait for the server to finish
+              // reaping the backends before asking it to copy the database they
+              // were attached to (see TEMPLATE_DRAIN_TIMEOUT_MS).
+              await waitForNoOtherSessions(admin, isolatedDatabase);
+              await admin.query(
+                `CREATE DATABASE ${quoteIdentifier(forkedDatabase)} TEMPLATE ${quoteIdentifier(isolatedDatabase)}`,
+              );
+            });
+            // Reconnect the base's pool now that the template copy is done —
+            // `baseStore` keeps working, unchanged, for the rest of the test.
+            swappablePool.current = new Pool({
+              connectionString: TEST_DATABASE_URL,
+              max: 1,
+            });
+            return {
+              database: forkedDatabase,
+              dispose: async () => {
+                await withAdmin(async (admin) => {
+                  await admin.query(
+                    `DROP DATABASE IF EXISTS ${quoteIdentifier(forkedDatabase)} WITH (FORCE)`,
+                  );
+                });
+              },
+            };
+          },
+          connect: (fork) => {
+            const pool = new Pool({
+              connectionString: urlForDatabase(
+                TEST_DATABASE_URL,
+                fork.database,
+              ),
+              max: 1,
+            });
+            const forkBackend = createPostgresBackend(drizzle(pool));
+            return Promise.resolve(
+              wrapWithManagedClose(forkBackend, async () => {
+                await pool.end();
+              }),
+            );
+          },
+        });
+
+        const branchResult = await branch<G>(
+          baseStore,
+          rejectMakeBackend,
+          undefined,
+          strategy,
+        );
+        expect(isOk(branchResult)).toBe(true);
+        const forkBranch = unwrap(branchResult);
+
+        await forkBranch.store.nodes.Widget.update(widget.id, {
+          name: "Forked Edit",
+        });
+
+        // The base is unaffected before the merge commits.
+        const beforeCommit = await baseStore.nodes.Widget.getById(widget.id);
+        expect(beforeCommit?.name).toBe("Original");
+
+        const mergeResult = await merge<G>(baseStore, [forkBranch], {});
+        expect(isOk(mergeResult)).toBe(true);
+
+        // The base sees the fork's write after commit.
+        const afterCommit = await baseStore.nodes.Widget.getById(widget.id);
+        expect(afterCommit?.name).toBe("Forked Edit");
+
+        await forkBranch.close();
+        await swappablePool.current.end();
+      },
+      FORK_TEST_TIMEOUT_MS,
+    );
   },
 );

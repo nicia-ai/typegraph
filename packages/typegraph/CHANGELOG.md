@@ -1,5 +1,695 @@
 # @nicia-ai/typegraph
 
+## 0.57.0
+
+### Highlights
+
+TypeGraph 0.57 opens the backend boundary. Until now the library shipped two backends and hardcoded what it knew about them, so reaching a third engine meant editing the query compiler. This release replaces that with a declared contract. `createPostgresBackend` and `createSqliteBackend` are now the same `createSqlBackend` applied to a bundled `SqlEngineProfile`, and a new entrypoint, `@nicia-ai/typegraph/adapters/drizzle/engine`, exports both profile builders alongside `deriveEngineProfile` — which produces a variant of a bundled profile with a bounded set of fields replaced and a typed refusal for anything else. Decisions the code used to infer from a dialect comparison are now facts a backend states: `catalog` for physical-schema introspection, `fenceSql` for the lock a fence spells, `writeFence` for the exclusion primitive the engine actually provides.
+
+Concurrency is the part of that contract with the longest reach. `capabilities.writeFence` is a discriminated union on `mechanism` — `advisory`, `engine-serialized`, `caller-serialized`, and the new `row`, a portable exclusion for an engine with no advisory-lock primitive, backed by a small `typegraph_fences` relation. An engine that resolves write conflicts at commit rather than by blocking declares `conflict: "commit-time"`, and TypeGraph then runs under an optimistic-retry tier: every store-owned transaction that takes a fence row replays as one whole unit on a real commit-time conflict, up to three attempts, invisible to hooks and to the caller. Conflicts everywhere now have one classifier and one typed error, `TransactionConflictError`, and `store.transaction()` accepts `retry: { attempts }` so an application can ask for the same replay on its own callback — under a documented replay contract, since such a callback runs more than once.
+
+The third thread is for engines that already implement, in the database, what TypeGraph otherwise implements in software. A backend can declare `lineage` — an opaque whole-database revision, plus the rows of a graph that changed since it — and graph-merge prunes its diff to that set instead of scanning. A backend can declare `recordedTime` and answer temporal reads from its own system-versioned tables, in which case TypeGraph builds no capture relations and runs no clock at all; every recorded read in the library now resolves through a single `RecordedReadSource` seam, so TypeGraph's own capture, an externally bound relation, and an engine's native history are three interchangeable bindings rather than three spellings of the same interval predicate. And `branch()` gains a second bundled strategy: where `cloneWorkingCopyStrategy` streams a base through public interchange into a fresh backend, `forkedWorkingCopyStrategy` hands off to a host that can copy a database itself — a file copy, `CREATE DATABASE ... TEMPLATE`, a provider's branch API. Because a fork is the same physical database rather than a replay, it carries what interchange cannot: soft-delete tombstones, `created_at`/`updated_at`, the `version` column, and the base's recorded history, so a fork can answer `asOfRecorded` for instants from before it was taken.
+
+Two fixes land regardless of which backend you run. `Store.clear()` now rotates the graph's durable revision-origin nonce in the same transaction as the clear. Previously a graph repopulated to look the same could mint a `base@V` token byte-identical to one from before the clear, and a branch forked against that older epoch would silently pass the merge precondition against entirely different content. And a PostgreSQL availability defect in constrained edge writes is repaired: the atomic edge-claim program built one predicate arm per proposed row, so a `bulkCreate` of a few thousand rows on a kind declaring a cardinality could run for minutes, grow past two gigabytes of server memory, and ignore cancellation. Those statements now drive from a single relation and are planned once.
+
+Both bundled backends emit the same SQL, advertise the same capabilities, and behave exactly as they did in 0.56. Every new backend member above is optional, and neither bundled profile declares `recordedTime`, so recorded time on SQLite and PostgreSQL stays TypeGraph-owned; the bundled backends continue to derive their own `lineage` from their recorded relations.
+
+### Upgrade notes
+
+**Applications**
+
+- `store.transaction()` and `store.transactionWithReceipt()` now throw `TransactionConflictError` (code `TRANSACTION_CONFLICT`) instead of the raw driver error on a serialization failure or deadlock. Replace matches on SQLSTATE, driver message, or a driver error class with `instanceof TransactionConflictError`, and read the original off its `cause`.
+- `MergeError` raised once merge retries are exhausted now carries a `TransactionConflictError` as its `cause`, one link deeper than before. Code matching `mergeError.cause` against a driver error must match `mergeError.cause.cause`.
+- Before passing `retry: { attempts }` to `store.transaction()`, check the callback against the replay contract: it must await all of its own work, read and write only values it creates fresh on each call, cause no effect outside its own transaction, and tolerate running more than once.
+- A branch forked before `Store.clear()` now fails `merge()` with `BaseVersionMismatchError` — including when the graph was repopulated to look identical. Re-branch from the post-clear store rather than reusing a pre-clear branch.
+
+**Graph-merge and working copies**
+
+- `WorkingCopyStrategy.create` takes a second required parameter: `create(baseStore)` becomes `create(baseStore, base)`. `branch()` passes it automatically; a direct caller passes `await computeBaseVersion(baseStore)`.
+- `GraphBranch` gains a required `close()`. A hand-built branch object — a structural mock or test fixture — must supply one.
+- `Store` gains a required `workingCopyOptions` getter. A structural `Store` mock or wrapper not built through `createStore` / `createAdapterStore` / `createStoreWithSchema` must implement it.
+
+**Recorded time**
+
+- `RecordedInstant` admits a second anchor form, `e1:` (engine-native), beside `r1:`. `recordedInstantRevision()` now throws a `ValidationError` on an `e1:` anchor, and `compareRecordedInstants()` throws when handed two anchors of different ownership forms. Use `recordedInstantWallTime()` wherever an instant may be of either form. Two engine-native anchors minted in the same millisecond compare equal; a TypeGraph anchor's per-commit counter is strict.
+- `ExternalRecordedReadSource` and `TypeGraphRecordedReadSource` renamed their string discriminant from `source` to `kind` (`"external"` / `"typegraph-capture"`), freeing `source` for the seam method. Update any pattern match on the old name. `RecordedReadBinding` now names the three-member binding union; `RecordedReadSource` names the shared seam the three implement.
+
+**Custom backends and engine profiles**
+
+- Replace `capabilities.recordedTimeOwnership` with `EngineProvisioning.recordedTime`: ownership is now derived from that member's presence rather than hand-declared. `ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` is removed with no replacement. A profile declaring `recordedTime` must also declare `lineage`, or `createSqlBackend` refuses with `ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE`.
+- Rename resolved-plan lock calls: `sql.advisoryLock(...)` becomes `sql.acquireKeyed(...)`, and `sql.advisoryLockWithIsolation(...)` becomes `sql.acquireKeyedWithIsolation(...)`. `sql.isolationFact(...)` is unchanged.
+- `FenceSql`'s three members are now all optional, since a `row`-mechanism target supplies a different subset than an `advisory` one. Reach a lock through the resolved plan's accessors rather than the members directly, or narrow for `undefined` first.
+- Add `fences` to any `ResolvedSqlTableNames` object literal built by hand. A caller that only overrides names through `createSqlSchema` or a bundled factory is unaffected.
+- Exhaustive switches gain new cases: `WriteFencePlan["kind"]` gains `"row"`, and `capabilities.execution.unitOfWork` gains `"optimistic-retry"`.
+- A profile that omits `provisioning.catalog` produces a backend with no `catalog`, and `store.materializeIndexes()`, `store.materializeSystemIndexes()`, the recorded-time schema check, and the recorded-time migration's column read each refuse with a `ConfigurationError` naming it. Supply `catalog`, or keep off those paths.
+- Trusted import on a custom PostgreSQL backend now refuses before any statement runs when the resolved write fence is `unfenced` or carries `drain: "none"` — which now includes an advisory-only declaration that previously took the table lock anyway. Declare `{ mechanism: "advisory", drain: "table-lock" }` to restore the lock.
+- `SqlEngineProfile` drops `firstParty` and replaces `buildOperations` / `lateMembers` with one opaque `assembly`. Build a profile through a bundled builder or `deriveEngineProfile`; a profile literal is no longer constructible, and first-party standing is bound to the object a bundled builder returned rather than to a field.
+- Supply `SqlExecutionAdapter.serializationFailure` if the engine's commit-conflict shape is not PostgreSQL's `40001` / `40P01` SQLSTATE. A registered classifier adds to the standard rules rather than replacing them.
+- An `"optimistic-retry"` backend requires `AsyncLocalStorage` to tell a nested write apart from an independent one. A runtime without `node:async_hooks` is refused with `OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT` at the first retried unit; interactive backends are unaffected.
+
+**Operators**
+
+- The base schema gains a `typegraph_fences` relation on both dialects. Run the regenerated migration SQL (`generateSqliteMigrationSQL` / `generatePostgresMigrationSQL`) against an existing database before declaring `writeFence.mechanism: "row"` against it. The two bundled mechanisms, `advisory` and `engine-serialized`, need no migration and keep working unmigrated.
+
+### Minor Changes
+
+- [#626](https://github.com/nicia-ai/typegraph/pull/626) [`9b17a68`](https://github.com/nicia-ai/typegraph/commit/9b17a689e109c84500b6faf1e087db001c6b780f) Thanks [@pdlug](https://github.com/pdlug)! - `@nicia-ai/typegraph/adapters/drizzle/engine` now exports `buildPostgresEngineProfile` and `buildSqliteEngineProfile`, the bundled `SqlEngineProfile` builders, so a caller can derive a variant of one instead of only consuming a finished backend. It also exports `deriveEngineProfile` (with `DerivableEngineProfileOverrides`, `DerivableEngineProfileKey`, and `DERIVABLE_ENGINE_PROFILE_KEYS`), which builds a fresh profile from a bundled one with a bounded set of fields overridden — a lock spelling, a declared capability, a resource-audit verdict, or a runtime dependency bag — refusing any other field with a typed error. `SqlEngineProfile.firstParty` is removed; first-party standing is now bound to the exact profile object a bundled builder returned rather than to a field, so a copy or derived profile never carries it forward. `SqlEngineProfile.buildOperations` and `.lateMembers` are replaced by one opaque `assembly` field, constructible only by the two bundled builders. `BackendResourceAudit` is now public on the engine entrypoint. A derived profile's overridden `fenceSql` now also backs PostgreSQL's fused schema-version + recorded-graph-write statement, not only its standalone lock sites. `FenceSql` itself shrinks to three author-supplied members — `advisoryLockExpression`, `isolationFactExpression`, and `lockTables` — with the standalone-statement forms every ordinary lock site calls (`advisoryLock`, `advisoryLockWithIsolation`, `isolationFact`) now derived by TypeGraph from the two expressions, so a backend author never spells both forms separately. The bags a derived profile shares with its base by reference (`declaredCapabilities`, `resourceAudit`, `autocommit`, `tableNames`, `fenceSql`) are frozen so mutating one through the derived profile can no longer corrupt the base's own. This entrypoint is unreleased, so none of the above is a breaking change; the two bundled backends' emitted SQL, capabilities, marks, and behavior are unchanged.
+  
+  See [Authoring an engine profile](https://typegraph.dev/backend-authoring) for the derivable-field table, the refusals a custom profile can hit, and a worked example.
+
+- [#625](https://github.com/nicia-ai/typegraph/pull/625) [`e34d53c`](https://github.com/nicia-ai/typegraph/commit/e34d53cbddc8d5872a778b1e473f44fb6c75b019) Thanks [@pdlug](https://github.com/pdlug)! - `GraphBackend` and `TransactionBackend` gain an optional `catalog` member (`BackendCatalogProbes`):
+  `tableExists`, `tablesExist`, `indexStates`, `dropInvalidIndex`, `columnTypes`, and an
+  `indexBehavior` bag (`concurrentBuilds`, `hasInvalidIndexState`, `supportsGinFamily`). `columnTypes`
+  reports each column as a `CatalogColumn`, `{ name, kind, declaredType }`; `declaredType` is
+  required, and every custom `columnTypes` implementation must populate it alongside the normalized
+  `kind` a comparison classifies against. `dropInvalidIndex` is a root-backend operation on an engine
+  with an invalid-index state: a `transaction()`-scoped PostgreSQL catalog refuses it with
+  `CATALOG_DROP_INVALID_INDEX_REQUIRES_ROOT_BACKEND`, since PostgreSQL refuses `DROP INDEX
+  CONCURRENTLY` inside a transaction block, while SQLite has no invalid-index state and stays a no-op
+  in both scopes. `catalog` is the one physical-schema introspection surface a store path consults
+  directly instead of compiling a portable query, and four call sites across three modules require
+  it: `store.materializeIndexes()` refuses only once its empty-candidate short circuit and the
+  status-table ensure step have already run; `store.materializeSystemIndexes()`, which has no
+  candidate short circuit, refuses only once that same status-table ensure step has run; the
+  recorded-time schema check and the recorded-time migration's column read likewise need it.
+  `EngineProvisioning` gains a matching optional `catalog` field; a profile that builds one populates
+  the backend's member, and a profile that omits it produces a backend with no `catalog` — those four
+  call sites then refuse with a `ConfigurationError` naming `catalog` instead of reaching
+  engine-specific SQL with nothing to spell it. `createPostgresBackend` and `createSqliteBackend` both
+  supply `catalog`, each transaction reading its own session's uncommitted state rather than the root
+  connection's.
+  
+  `DialectCapabilities` gains `subgraphMembershipStrategy` (`"materialized-ids" | "inline-cte"`),
+  naming the plan-shape decision `store.subgraph()`'s reachable-node filter already made per
+  dialect: fetch the traversal closure once and filter against a fixed id list, or embed the
+  recursive closure in each fetch. This capability replaces an inline dialect comparison in
+  `store/subgraph.ts`; emitted SQL, round-trip counts, and the resulting query's prepared-plan
+  shape are unchanged for both bundled backends.
+  
+  The dialect-literal ESLint ban (previously scoped to the query compiler) now also covers
+  `src/backend` and `src/store`, behind a named, ratcheted exemption inventory
+  (`DIALECT_LITERAL_EXEMPTIONS` in `eslint.config.mjs`) asserted against the tree in both
+  directions by `tests/dialect-literal-inventory.test.ts`. Every remaining exemption is a decision
+  that is not query compilation (error classification, one-shot migrations, a driver-specific
+  resource audit, a SQLite-only transaction write-lock flag, or the write-fence planner's own
+  dialect-keyed lock semantics) and carries a reason and a site count. No bundled backend's emitted
+  SQL, capabilities, or behavior changes.
+  
+  **Behavior change:** trusted import's PostgreSQL table lock now resolves the same write-fence plan
+  every other lock site does, instead of unconditionally taking `LOCK TABLE ... ACCESS EXCLUSIVE`.
+  Trusted import now refuses up front, before any statement runs, when a custom PostgreSQL backend's
+  `writeFence` declaration resolves `unfenced` (no declaration present) or resolves a `lock` plan
+  with `drain: "none"` — this now also catches an advisory-only declaration (`{ mechanism:
+  "advisory", drain: "none" }`), which previously took the table lock anyway. Every refusal names
+  the drain that could not be satisfied. `createPostgresBackend` itself rejects a `writeFence.
+  mechanism: "engine-serialized"` capability override at construction (`ConfigurationError`,
+  'PostgreSQL backend capability overrides cannot declare writeFence.mechanism: "engine-serialized"'),
+  so a declaration resolving `engine-serialized` is reachable only through a custom
+  `SqlEngineProfile` or a hand-built PostgreSQL-dialect backend for an engine that genuinely
+  serializes writers; for one, trusted import now takes no relation lock at all, where it previously
+  took `LOCK TABLE ... ACCESS EXCLUSIVE` — the declaration states the engine serializes writers, so
+  trusted import's own transaction is fence enough on its own. The `WRITE_FENCE_SQL_UNAVAILABLE`
+  code applies only to the narrower case of a `mechanism: "advisory"` declaration with no `fenceSql`
+  to spell the lock; every other refusal above is `WRITE_FENCE_UNAVAILABLE`. Declare `writeFence: {
+  mechanism: "advisory", drain: "table-lock" }` — the bundled `createPostgresBackend` default, which
+  also supplies `fenceSql` — to restore the lock.
+  
+  **Author-facing:** `CommonOperationStrategy` no longer carries `dynamicEdgeConvergence`. The flag it
+  carried — whether a convergent edge create's non-durable match may inspect JSON match fields —
+  moved onto `OperationFusionHooks.dynamicEdgeConvergence`, which the bundled dialect factories pass
+  to `buildCommonOperationOptions`. Neither `OperationFusionHooks` nor `buildCommonOperationOptions`
+  is exported from any entrypoint. No action is required of a backend author: a
+  `CommonOperationStrategy` is not author-supplyable in this release. `strategy` is absent from
+  `DERIVABLE_ENGINE_PROFILE_KEYS`, so `deriveEngineProfile` refuses it, and `SqlEngineProfile.assembly`
+  — which replaced the `buildOperations`/`lateMembers` pair, see the derivable-profiles entry below —
+  is branded with a non-exported symbol, so a profile cannot be built from a literal either. The
+  bundled builders are the only source of a strategy.
+  
+  `SqlEngineProfile.graphTemplateRuntime.instantiateStatement` is a required builder: given a
+  template and target graph's ids and schema hashes (`InstantiateGraphTemplateSqlParams` —
+  `templateId`, `templateSchemaHash`, `graphId`, `schemaHash`, and the three physical table names it
+  reads), it must return the statement that inserts the target graph's `schema_versions` row from the
+  template's stored document and copies the template's contribution-marker rows into the target
+  graph, taking the target graph's write lock — the same key the schema-commit fence takes —
+  co-atomically with the insert on an engine that fences with locks. An engine whose dialect can
+  compose a data-modifying CTE beside the schema INSERT (PostgreSQL) folds the marker copy and the
+  lock into that one statement; an engine that cannot (SQLite) instead supplies the optional
+  `copyContributionMarkers` dep, which runs the marker copy as a second statement once the schema row
+  is confirmed. The bundled `postgresInstantiateGraphTemplateStatement` and
+  `sqliteInstantiateGraphTemplateStatement` builders (`graph-template-sql.ts`) are what
+  `createPostgresBackend` and `createSqliteBackend` supply to their own profiles; neither is exported,
+  so a custom profile reaches the same shape only by copying a bundled profile and adapting its
+  statement, the same as every other engine-owned SQL a profile supplies.
+  
+  The `adapters/drizzle/engine` authoring entrypoint that carries `SqlEngineProfile` and
+  `CommonOperationStrategy` ships for the first time in this release, so neither the removed
+  `dynamicEdgeConvergence` field nor the required `graphTemplateRuntime.instantiateStatement` builder
+  ever appeared in a published version; the notes above only affect authors building a custom profile
+  against `main`.
+
+- [#656](https://github.com/nicia-ai/typegraph/pull/656) [`b32b7fc`](https://github.com/nicia-ai/typegraph/commit/b32b7fc51b626aadf8a76cb6d0b3774c9ba33b8a) Thanks [@pdlug](https://github.com/pdlug)! - `GraphBackend` gains an optional `recordedTime` member (`EngineRecordedTimeMembers`): an engine
+  that tracks recorded (system) time itself, rather than through TypeGraph's own capture relations
+  and clock. `source(table, revision)` names the table expression `"nodes"` / `"edges"` /
+  `"identityAssertions"` reads its recorded rows from AS OF an opaque `EngineRecordedRevision`
+  (`{ revision, recordedAt }`) — the engine's own temporal-table syntax, with the interval already
+  folded in — and `revisionNow(session)` reads `session`'s own recorded-time revision: the current
+  COMMITTED revision on a root backend, or the PENDING revision an open `transaction()` handle's
+  writes will land at once it commits (the position `TransactionReceipt.recorded` is stamped from).
+  `requireRecordedTime` is the typed refusal for a caller that needs it and finds it absent, in the
+  same style as `requireLineage`. `TransactionBackend`/`EngineProvisioning` gain the matching
+  optional member, threaded onto every `transaction()` handle both bundled dialects build, exactly
+  parallel to `lineage`. A profile that declares `recordedTime` must also declare `lineage`
+  (engine-native history keeps no recorded relations for TypeGraph to derive a graph-merge change
+  delta from); `createSqlBackend` refuses otherwise (`ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE`).
+  Neither bundled Drizzle profile declares `recordedTime`, so `resolveRecordedTimeOwnership` derives
+  `"typegraph-relations"` for both today, and every recorded-time integration suite and the parity
+  snapshot are unchanged — the engine-native path is proven by a PostgreSQL-family simulation
+  (`tests/backends/postgres/engine-native-recorded-time.test.ts`, `pglite-engine-native-recorded-time.test.ts`)
+  that dresses TypeGraph's own recorded relations as a temporal-table expression, labeled as a
+  simulation rather than a real third engine, since no bundled backend implements one.
+  
+  Every recorded read — the query compiler's recorded arm, `recorded-read-service.ts`'s point reads
+  and scans, the historical identity readers — now goes through one `RecordedReadSource` seam
+  (`source(table, revision)` / `predicate(prefix, revision)` / `carriesInterval`) instead of each
+  spelling the recorded relation swap and the `recorded_from <= r AND r < recorded_to` interval
+  itself. TypeGraph's own capture binding and the external `recordedRelation({ schema })` binding
+  both implement it as the recorded relation plus the interval predicate (`carriesInterval: true`);
+  a new third binding kind, built only for a store whose backend declares `recordedTime`, implements
+  it as the engine's own `source` with `predicate` always `undefined` (`carriesInterval: false`) —
+  the engine's own expression already scopes every row to exactly one revision. Emitted SQL for both
+  bundled backends is unchanged: no query-compiler behavior differs for a `typegraph-relations` or
+  external-binding store, proven by the untouched parity snapshot and the full recorded-time
+  integration and property-law suites.
+  
+  `RecordedInstant` widens to a two-form grammar: TypeGraph's own `r1:<16-digit revision>:<ISO
+  instant>`, and a new engine-native `e1:<opaque engine revision>:<ISO instant>` minted internally
+  from a `revisionNow` result. `recordedInstantWallTime` works on either form; `recordedInstantRevision`
+  and `compareRecordedInstants` are narrower — see Breaking below. Store construction derives
+  `recordedTimeOwnership` once
+  (`resolveRecordedTimeOwnership(backend)`, `"engine-native"` exactly when `backend.recordedTime` is
+  declared) and branches only where engine-native genuinely differs from TypeGraph-owned capture:
+  `history: true` builds the engine-native read binding and leaves the backend unwrapped — no
+  capture relations, no clock, no write-fence-gated clock allocation; `revisionTracking: true` is
+  refused regardless of whether `history` is also requested
+  (`ENGINE_NATIVE_REVISION_TRACKING_UNSUPPORTED` — there is no TypeGraph clock for it to advance, and
+  the engine's own revision is available only under `history: true`); an external `recordedRead`
+  binding is refused (`ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED`); `store.recordedNow()`,
+  `store.revisionNow()`, and both transaction-commit sites that stamp `TransactionReceipt.recorded`
+  now read the engine's revision through one owner, `#engineRecordedInstant(session)`, called once
+  per transaction on the actual committing handle — never once per graph, and never unless a graph
+  node/edge/identity write inside the transaction actually changed a row (a mutation witness watches
+  the write surface itself, not the collection-level write-intent counters `receipt.writes` is built
+  from, so a delete of a missing id, a found-not-created `insertNodeIfAbsent`, or a coalesced no-op
+  upsert all leave `recorded` undefined); and `store.asOfRecorded(instant)` refuses an instant minted
+  under the OTHER ownership form (`RECORDED_INSTANT_OWNERSHIP_MISMATCH`) before any read compiles.
+  `migrateLegacyRecordedTime` refuses under engine-native ownership
+  (`ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED`): it rewrites TypeGraph's own recorded
+  relations, which an engine-native backend does not have. Reconstructing identity at a recorded
+  coordinate — `store.identityAtCoordinate` at a past instant, and the query compiler's historical
+  identity traversal — is refused under engine-native ownership
+  (`ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED`): identity history reads TypeGraph's own recorded
+  relations directly, which an engine-native backend does not populate. `resolveLineage` under
+  engine-native ownership always answers with the backend's own `lineage` (the co-required member
+  above), never the recorded-relations one, since there are no recorded relations to derive it from.
+  
+  Public exports beside `LineageMembers`: `EngineRecordedTimeMembers`, `EngineRecordedRevision`,
+  `RecordedTimeSession`, `RecordedTimeBackend`, `RecordedReadSource`, `RecordedSourceTable`. `Store`
+  gains a readonly `recordedTimeOwnership` property, the store-level reader of the derived ownership.
+  Documentation: [Engine-native recorded
+  time](/queries/temporal#engine-native-recorded-time) covers the reader-facing contract and the
+  `e1:`/`r1:` rule; [Supplying `recordedTime`](/backend-authoring#supplying-recordedtime) covers what
+  a profile implements; the [SQLite ↔ PostgreSQL parity
+  matrix](/backend-setup#sqlite--postgresql-parity) and [Engine-native recorded-time
+  codes](/errors#engine-native-recorded-time-codes) round it out.
+  
+  ## Breaking
+  
+  - `capabilities.recordedTimeOwnership` is removed. It was hand-declared and could fall out of sync
+    with what a backend actually implemented; ownership is now derived from `backend.recordedTime`'s
+    presence. Declare `EngineProvisioning.recordedTime` instead — its presence alone makes
+    `resolveRecordedTimeOwnership(backend)` answer `"engine-native"`.
+  - `ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` is removed. There is no replacement code: the
+    interim refusal it named no longer applies to any reachable construction path now that
+    engine-native construction is implemented.
+  - `RecordedReadBinding` widens from a two-member union
+    (`ExternalRecordedReadSource | TypeGraphRecordedReadSource`) to three members, adding
+    `EngineRecordedReadSource`. `RecordedReadSource` is repurposed and newly exported: it no longer
+    names the binding union (that role moved to `RecordedReadBinding`) and instead names the shared
+    seam shape (`source` / `predicate` / `carriesInterval`) all three binding kinds implement.
+  - `ExternalRecordedReadSource` (the type `recordedRelation({ schema })` returns) widens: it now
+    carries the `RecordedReadSource` seam's `source` / `predicate` / `carriesInterval` members
+    alongside its existing `schema` and brand, and its string discriminant is renamed from `source`
+    to `kind` (`"external"`) — the `source` name was freed for the seam method. The binding is
+    brand-gated and built only by `recordedRelation({ schema })`, so this affects only code that
+    pattern-matched the old `source` discriminant on a value it produced.
+  - `TypeGraphRecordedReadSource` (the type `history: true` binds internally) gets the same two
+    changes: it widens with the `RecordedReadSource` seam's members, and its string discriminant is
+    renamed from `source` to `kind` (`"typegraph-capture"`). The binding is brand-gated and built
+    only internally, so this affects only code that pattern-matched the old `source` discriminant.
+  - `RecordedInstant`'s grammar widens to admit the `e1:` form alongside `r1:`, and
+    `RecordedInstantParts` becomes a discriminated union (`kind: "typegraph" | "engine"`) instead of
+    a flat `{ revision: number; recordedAt: string }`. `recordedInstantRevision(instant)` now throws
+    a `ValidationError` for an `e1:` anchor — there is no TypeGraph numeric revision to return; use
+    `recordedInstantWallTime(instant)` for a value that works on both forms.
+    `compareRecordedInstants(a, b)` now throws when the two anchors were minted by different
+    ownership forms, and compares two engine-native (`e1:`) anchors by `recordedAt` only — document
+    the same-millisecond tie as a caveat in your own code if you compare engine-native anchors: two
+    distinct engine revisions minted within the same millisecond compare equal, unlike a
+    TypeGraph-owned anchor's strict per-commit counter.
+
+- [#633](https://github.com/nicia-ai/typegraph/pull/633) [`f6d5387`](https://github.com/nicia-ai/typegraph/commit/f6d5387e5fecbea08db627c17aaeb3226e9e1db9) Thanks [@pdlug](https://github.com/pdlug)! - `@nicia-ai/typegraph/graph-merge` now exports `forkedWorkingCopyStrategy`, `ForkedWorkingCopyOptions`, and `ForkHandle` — a second bundled `WorkingCopyStrategy` for `branch()`, alongside the existing `cloneWorkingCopyStrategy`. Where the clone streams the base through public interchange into a fresh backend, `forkedWorkingCopyStrategy<G, TFork>({ fork, connect })` targets a fork-capable host: `fork(baseStore)` calls the caller's own host-level fork API (a file copy, `CREATE DATABASE ... TEMPLATE`, a hosting provider's branch call) and returns a `TFork extends ForkHandle` (an optional `dispose`), and `connect(fork)` opens a `GraphBackend` on the result. The connected backend's `close` is composed with `dispose` so the working copy's single `close()` releases both the connection and the fork, and a `connect` failure disposes the fork before rethrowing.
+  
+  `Store` gains a `workingCopyOptions` getter (returning the new `WorkingCopyOptions` type, also exported) — the one place a working-copy strategy reads a store's own hooks, upsert coalescing, SQL schema, auto-refresh-statistics threshold, query defaults, and externally-bound recorded-read relation, without re-deriving them from private state. A fork inherits the base's WHOLE such option set through it, plus `history`/`revisionTracking` matched to the base's own `historyEnabled`/`revisionTrackingEnabled`. This is safe because a fork is the SAME physical database as the base, so every one of those options names something the fork also carries. The clone strategy keeps its narrower, already-documented subset (`revisionTracking` only): its fresh backend is a distinct, empty database, so a schema naming the base's tables or an externally-bound recorded-read relation would misdirect it.
+  
+  `WorkingCopyStrategy.create` gains a second parameter, `base: BaseVersion` — the token `branch()` already stamped off the base store, passed through so a strategy that needs to re-validate its working copy (the fork strategy) compares against the caller's own token instead of computing a second one. This is an additive parameter on a callback type callers implement; existing implementations that ignore the second argument are unaffected. Code that invokes a strategy's `create` directly (rather than going through `branch()`) must now pass the base token too, e.g. `strategy.create(baseStore, await computeBaseVersion(baseStore))`.
+  
+  The strategy asserts `computeBaseVersion(forkStore) === base` right after attaching the store, and refuses with a typed `BranchError` — carrying `forkVersion`/`baseVersion` in `error.details`, closing the backend first — when they disagree; `branch()` returns that error as the `cause` of the `BranchError` it resolves with. This proves base-token equality (schema plus a revision anchor, or a live-content fingerprint) at the instant the fork was taken, not byte-for-byte physical identity — the untracked fingerprint deliberately omits tombstones, `created_at`/`updated_at`, the `version` column, and recorded history, and providing those unchanged is the fork mechanism's own contract, not something re-verified on every branch. That is still the right fence: the merge's lost-update guard reads `version` and the diff reads tombstones/timestamps straight off the fork, so a `fork` that is not a true physical copy breaks them regardless of what the content fingerprint agrees on. Unlike a clone, a fork is never rebuilt through `exportGraphStream`/`importGraphStream`, so it preserves soft-delete tombstones, `created_at`/`updated_at`, the `version` column, and — with `history: true` — the base's recorded relations, letting a fork answer `asOfRecorded` for instants before the fork was taken.
+  
+  `create()` also refuses, before ever attaching a store, when `connect()`'s backend aliases the base's own backend: the same backend object, one derived from the other through backend derivation, or two wrappers sharing one underlying connection. Only the fork is disposed in that case — never the aliased backend, which the base still owns — and the refusal is a typed `BranchError` naming `connect()`. This cannot detect a fresh backend built over the base's own connection pool when that pool audits as independent (a default-size `pg.Pool`, for example); a pooled checkout genuinely is a different connection from the pool's own perspective.
+  
+  See ["Forked working copies"](https://typegraph.dev/graph-merge#forked-working-copies) for a worked strategy and the suspend hazard on hosts that reclaim idle compute.
+  
+  ## Breaking
+  
+  - `WorkingCopyStrategy.create` now takes a second, required parameter: `create(baseStore)` becomes `create(baseStore, base)`. `branch()` passes it automatically, so this only affects code that calls a strategy's `create` directly (rather than through `branch()`) — pass `await computeBaseVersion(baseStore)` for `base`.
+  - `GraphBranch` gains a required `close: () => Promise<void>` member, releasing the branch's working-copy backend (composed with a forked working copy's host-level fork, when applicable). `branch()` and `ingestionBranch()` populate it; a hand-built `GraphBranch` object (a structural mock or test fixture) must now supply one too.
+  - `Store` gains a required `workingCopyOptions` getter (see above). A structural `Store` mock or wrapper — one that is not built through `createStore`/`createAdapterStore`/`createStoreWithSchema` — must now implement it too.
+
+- [#617](https://github.com/nicia-ai/typegraph/pull/617) [`fa6b468`](https://github.com/nicia-ai/typegraph/commit/fa6b4683e4f39b140089fe369747d76c52620092) Thanks [@pdlug](https://github.com/pdlug)! - `createPostgresBackend` and `createSqliteBackend` accept `fulltext: false`,
+  mirroring the existing `vector: false` option. The backend then advertises
+  no `capabilities.fulltext` and omits the fulltext CRUD/search members
+  (`upsertFulltext`, `deleteFulltext`, `upsertFulltextBatch`,
+  `deleteFulltextBatch`, `fulltextSearch`) along with `hybridSearch` and
+  `fulltextStrategy` instead of stubbing them, and the generated DDL and
+  runtime contributions never create a fulltext table for that backend.
+  
+  A fulltext predicate, a `searchable()` field, `store.search.fulltext`, and
+  hybrid search all refuse with `UnsupportedBackendCapabilityError` (reason
+  `fulltext_unsupported`) against a fulltext-off backend, instead of compiling
+  SQL against a table that does not exist. `hardDeleteNode`'s cascade skips
+  the fulltext delete for such a backend rather than issuing a statement
+  against a missing table; every other cascade step, and every configuration
+  that still has a fulltext strategy, is unchanged.
+  
+  This refusal is not limited to the bundled backends: any `GraphBackend` —
+  including a third-party one — that omits the optional fulltext members now
+  refuses a write to a node kind with `searchable()` fields with the same
+  typed error, rather than silently skipping the fulltext index sync as it
+  did before.
+  
+  The read path keys off `capabilities.fulltext` rather than the optional
+  members: a third-party `GraphBackend` that implements `fulltextSearch` and/or
+  sets `fulltextStrategy` but never declares `capabilities.fulltext` now has a
+  fulltext predicate and `store.search.fulltext`/hybrid refuse with
+  `UnsupportedBackendCapabilityError`, where before they compiled and ran. This
+  also replaces the `ConfigurationError` those two call sites previously threw
+  against a backend with no fulltext strategy at all — callers catching on the
+  old class or error code should switch to `UnsupportedBackendCapabilityError`.
+  
+  `capabilities.contributions.rebuild` on a fulltext-off backend tracks only
+  the transactional-fence condition — with no fulltext contribution to fail
+  the check, that condition is vacuously satisfied — and a `rebuildContribution`
+  call naming the fulltext contribution on such a backend refuses with a typed
+  `ContributionRebuildUnsupportedError` instead of running DDL against nothing.
+  
+  Soft-deleting or hard-deleting a `searchable()` node now succeeds on a
+  fulltext-off backend instead of refusing: a delete removes data rather than
+  accepting a write the backend cannot index, and this backend maintains no
+  fulltext sidecar to issue that removal against, so there is nothing to do.
+  Only create and update of a `searchable()` kind refuse.
+  
+  `createLocalSqliteBackend`, `createLocalPgliteBackend`, `createLocalSqliteStore`,
+  and `createLocalPgliteStore` accept the same `fulltext?: FulltextStrategy | false`
+  option and forward it to both their installation DDL and the underlying
+  backend factory, so a batteries-included store can skip the fulltext table
+  the same way a hand-wired one can.
+  
+  **Upgrade note:** `fulltext: false` stops creating and maintaining the
+  fulltext table; it never drops one. On a database that already has fulltext
+  rows, disabling fulltext leaves them in place and unmaintained — a hard
+  delete performed while fulltext is off leaves an orphaned row behind in the
+  fulltext table, because `hardDeleteNode`'s cascade has no active strategy to
+  build a delete statement from. Re-enabling fulltext later therefore requires
+  the destructive contribution rebuild, `store.rebuildContribution("fulltext")`
+  (which drops and recreates the fulltext table), not
+  `store.search.rebuildFulltext()`: that method pages live nodes to recompute
+  their content, and a hard-deleted node has no row left for it to page, so it
+  never revisits — and therefore never clears — the orphan.
+
+- [#630](https://github.com/nicia-ai/typegraph/pull/630) [`7bb743a`](https://github.com/nicia-ai/typegraph/commit/7bb743a5a4ad6ea1b3baf2066b3298ab07189842) Thanks [@pdlug](https://github.com/pdlug)! - A backend whose `capabilities.execution.unitOfWork` is `"batch"` (Cloudflare D1's `batch()`, Neon
+  HTTP's `transaction(queries)`) fixes every statement before the first one runs and commits them
+  together with no session in between. `resolveBatchWriteVerdict` in
+  `src/backend/capabilities/batch-write-verdict.ts` is the one place that classifies a schema-managed
+  write's fitness for that tier: given a write's already-proven need (an interactive callback, a
+  probe-then-write constraint check, Operational Identity, history, or a schema commit), it either
+  defers (any other tier) or returns a refusal carrying a stable `BATCH_WRITE_UNSUPPORTED` code, the
+  reason, and a canonical explanation. Every enforcing gate that used to word its own batch-engine
+  limitation independently — the constrained-write fence, `store.transaction`, Operational Identity's
+  atomic-backend checks, recorded-time capture's transactionability guards, and each dialect's
+  schema-commit refusal — now asks this one verdict for its phrasing and nests
+  `{ code: "BATCH_WRITE_UNSUPPORTED", reason }` under `details.batchRefusal`, so every refusal on a
+  batch-tier backend names the same reason in the same words. The portable schema-version fence keeps
+  its plain, reasonless `SCHEMA_WRITE_FENCE_UNSUPPORTED` limitation for everything it reaches that
+  isn't one of those five proven needs — an ineligible write kind, a derived backend, a provenance
+  mismatch — rather than guessing which reason, if any, applies.
+  
+  A singleton node `create` with a caller-supplied id now fuses its schema fence on a batch-tier
+  backend exactly as a generated id already did, provided the kind carries no declared unique
+  constraint: the id-generation gate that existed for an interactive root's autocommit durability no
+  longer excludes a batch program, which commits its one statement as a unit regardless of which id it
+  carries. `isAutocommitSingleStatementWrite` — the separate, stricter classifier for a bundled root's
+  transaction-free write — is deliberately not relaxed the same way: the fused supplied-id create
+  instead proves `insertNodeIfAbsentWithSchemaFence` through the ordinary hooked write plan, which
+  already selects the correct fenced statement per id. The tombstone-resurrection write a supplied id
+  can fall through to is fenced immediately before it runs, so it refuses on a batch-tier target rather
+  than writing the row unfenced.
+  
+  `tests/batch-engine-harness.ts` adds a fake D1 client and a fake Neon HTTP client, each backed by a
+  real engine (better-sqlite3, PGlite) wrapped in a real transaction, so batch atomicity — a rollback
+  on a failing statement, a stale schema version writing nothing, every refusal reason reaching its
+  gate — is now proven against real engine behavior instead of a mocked response. Bundled interactive
+  behavior, emitted SQL, and the engine-profile-parity snapshot are unchanged.
+
+- [#638](https://github.com/nicia-ai/typegraph/pull/638) [`d57098a`](https://github.com/nicia-ai/typegraph/commit/d57098a8b5fa8416842fb493de91dbd60d5ca9e6) Thanks [@pdlug](https://github.com/pdlug)! - `GraphBackend` gains an optional `lineage` member (`LineageMembers`): an opaque, whole-database
+  `revision(session)` an engine can report and compare, plus `changesSince(session, revision,
+  graphId)`, which names every node and edge of one graph that changed — inserted, updated,
+  deleted, or resurrected — since that revision, or admits `{ kind: "unbounded" }` when it cannot
+  bound the answer. It is a query surface over graph rows: a backend's own `lineage` writes nothing
+  at all, and the one carve-out on the bundled recorded-relations derivation below is a graph-identity
+  row, not a graph row. `requireLineage` is the typed refusal for a caller that needs it and finds it
+  absent, in the same style as
+  `requireCatalog`. `TransactionBackend` gains the same optional `lineage` member (through the new
+  `LineageBackend` member type, mirroring `CatalogBackend`), so a profile-supplied `lineage` is
+  visible on a `transaction()` handle exactly as `catalog` already was, not only on the root
+  backend. `EngineProvisioning` gains a matching optional `lineage` field, forwarded onto the
+  backend unchanged; neither bundled Drizzle profile supplies one, so a store's own
+  recorded-relations derivation backs the capability instead (below); the `lineage` member itself
+  emits no SQL. The recorded relations it derives from are already part of the schema regardless of
+  `history`, and a DDL-running boot (`createStoreWithSchema`, unless `systemIndexes: "skip"`) now
+  materializes two new system indexes on them, history on or off, plus a third structural index on
+  the recorded identity-assertions relation. A caller that opted out with `systemIndexes: "skip"`
+  gets the two system indexes on the next explicit `store.materializeSystemIndexes()` call instead
+  of at boot — see the parity-snapshot note below for exactly what moves.
+  
+  `recordedRelationsLineage(store)` derives `lineage` from a store's own recorded relations for any
+  store constructed with `history: true`. `revision()` reports `<origin>:<clock>` — the graph's
+  durable, random revision-origin nonce (`typegraph_revision_origins`, minted on demand through
+  `Store.revisionOriginNow()`) joined to its recorded-time clock — never the bare clock value alone:
+  two independently created stores that happen to share a `graphId`, or the SAME store across a
+  `Store.clear()` boundary, mint numerically comparable clock values, and only the origin tells them
+  apart. `changesSince` refuses (`unbounded`) outright on an origin mismatch against the graph's LIVE
+  origin row, before comparing anything numeric. Otherwise it covers every write shape a recorded
+  relation can express — inserts, updates, soft deletes, hard deletes, and resurrections —
+  deduplicated, and proves completeness directly: every integer revision between the requested one
+  and the graph's current clock must carry direct evidence (a `recorded_from` or a non-sentinel
+  `recorded_to`) in one of the three recorded relations; anything short of that — one OTHER writer
+  sharing the graph's clock, a `revisionTracking`-only `Store` with no `history`, having advanced it
+  without capturing a row, at ANY point in the span, not only the most recent one — reports
+  `unbounded` rather than a delta missing that writer's rows. `resolveLineage(store)` is the one
+  place graph-merge (and any other caller) picks a `lineage` source: the backend's own when
+  declared, else this recorded-relations one when history is on, else `undefined`. A new system index,
+  `since_idx (graph_id, recorded_from)`, backs `changesSince`'s completeness scan on the two recorded
+  relations, and the recorded identity-assertions relation gains a matching `since_idx` of its own
+  (structural, created with the table, since it is not a `materializeIndexes`-managed system index) —
+  that same completeness scan folds the identity-assertions relation in alongside the two recorded
+  relations, so a graph whose earliest captured commit only asserted an identity is never mistaken
+  for a gap. A database already open when this ships adopts all three indexes on its NEXT open,
+  through the base-schema release-3 adoption step below (`"lineage-since-index"`) — the same lazy
+  backfill machinery a missing system index already goes through for any OTHER caller (the two
+  recorded-relation indexes; the identity-assertions index is adopted only through the base-schema
+  step, never through `store.materializeSystemIndexes()`), and immediately for the two
+  recorded-relation indexes when a caller opted out of boot-time materialization with
+  `systemIndexes: "skip"`, via its own explicit `store.materializeSystemIndexes()` call. The parity
+  snapshot moves by exactly these three index declarations, plus one extra version-marker
+  `INSERT`/`SELECT` round trip on each of four capture scenarios on both bundled backends (bootstrap
+  publishing the new base-schema release below) — no other statement, and no graph-data write SQL,
+  changes.
+  
+  `GraphBackend` adopters that ship their own `EngineProvisioning` gain a required base-schema
+  release: `CURRENT_BASE_SCHEMA_VERSION` advances from 2 to 3, id `"lineage-since-index"`, adopting
+  the three `since_idx` indexes above through `CREATE INDEX IF NOT EXISTS` (idempotent, safe to run
+  concurrently, and a no-op on a fresh install whose generated DDL already carries them). The bump is
+  one-way — there is no downgrade path — and deployment-visible: a database already stamped 3 is
+  untouched, one stamped 2 is caught up in place on next open, and a store built against an
+  `EngineProvisioning` whose adoption-step registry stops at 2 fails to construct
+  (`CompilerInvariantError`, "adoption registry must end at the current version"). A zero-DDL
+  `createVerifiedStore` attach against a database still stamped 2 refuses with
+  `BaseSchemaMigrationError` until `adoptBaseSchema()` runs. A custom SQL engine profile must register
+  a version-3 adoption step (or accept the three indexes into its own fresh-install DDL and mark the
+  step `bootstrap: "covered-by-generated-ddl"`) before upgrading past this release.
+  
+  `base@V`'s anchor gains a third form, `engine:<origin>:<revision>`, chosen when a store has no
+  `revisionTracking`/`history` but its backend declares `lineage` directly (a capturing store's
+  recorded-relations lineage never reaches this form — capture also turns revision tracking on, so
+  the per-graph anchor wins first). `<origin>` is the SAME durable per-graph revision-origin nonce
+  the revision anchor carries (`typegraph_revision_origins`, ensured at mint time on the store's own
+  backend); the engine's own revision is whole-database, not per-graph, so pairing it with the
+  per-graph origin is what keeps two independent databases whose engines coincidentally report the
+  same bare revision string from minting indistinguishable anchors — without it, a branch forked
+  from one database could satisfy the base-version precondition of an unrelated database. The
+  precedence — revision anchor, then engine anchor, then the compatibility content fingerprint — is
+  documented once, in `base-version.ts`. Re-validating an engine anchor checks the live origin row
+  first (`revisionOriginMatch`, the same predicate the revision anchor's guard uses) and refuses with
+  `BaseVersionMismatchError` ("forked from a different store") on a mismatch before ever consulting
+  `changesSince`; once the origin matches, a raw revision mismatch is confirmed through `changesSince`
+  before refusing, since the engine's revision is whole-database and an unrelated graph's commit must
+  not fail this graph's merge — an empty delta is tolerated as unchanged, and a non-empty delta or
+  `unbounded` raises `BaseVersionMismatchError` with
+  `details: { expectedRevision, liveRevision, changedKeys? }`, where `changedKeys` (when present) is
+  capped to the first 20 node keys and first 20 edge keys plus each list's own total count, never the
+  raw unbounded delta. One known gap: `changesSince` names only node and edge keys, so a commit
+  touching only a graph's current identity assertions is invisible to an engine-anchored guard and
+  tolerated as unchanged — the content-fingerprint and revision-anchor forms do not share this gap.
+  
+  `GraphBranch` gains an optional `forkRevision`, the fork's own `lineage.revision(session)`
+  captured by `branch()` right after the working copy is created, with the working copy's own root
+  backend as the session — an origin-bearing token for the recorded-relations source, so clearing
+  and repopulating the FORK itself to the same revision count `forkRevision` held is caught the same
+  way a cleared BASE store already is, rather than looking unchanged. `diffAgainstBase` takes an
+  optional `pruneTo` lineage delta: when
+  present, each node/edge kind is read by id set instead of a full keyset enumeration, restricted
+  to the union of what changed on the fork since `forkRevision` and on the base since its own
+  `base@V` anchor. A key absent from both deltas cannot have moved since the fork point, so pruning
+  cannot miss a change — it only narrows how much is read. Pruning applies only when both sides can
+  supply a bounded delta; a hand-built branch, a store with no `lineage`, an `unbounded` answer on
+  either side, or either side's `changesSince` REJECTING falls back to the full diff exactly as
+  before. Pruning is a pure optimization: it never changes what a merge decides, only how much of
+  the store it reads to decide it.
+  
+  `LineageMembers`' `revision`/`changesSince` each take a **session** as their first argument — the
+  narrowest existing execution-target type a root backend and a `transaction()` handle both satisfy
+  (`LineageSession`, `Pick<TransactionBackend, "execute" | "executeRaw">`). An implementation MUST
+  run its read on the session it is given, never on a connection it closed over instead:
+  `assertTargetUnchanged` (`graph-merge/merge.ts`) is the concrete caller this exists for — it
+  reads `lineage` off the pinned transaction handle and passes that SAME handle as the session, so
+  the read observes the transaction's own snapshot. The one documented exception is the bundled
+  recorded-relations derivation's origin resolution, which is a graph-identity row rather than a
+  transaction-scoped fact and is deliberately resolved off `session` entirely (see the `lineage`
+  capability's own doc). `requireLineage` now refuses with a
+  `ConfigurationError` (`LINEAGE_UNAVAILABLE`) when the transaction handle carries no `lineage` of
+  its own, with no fallback to the root backend's `lineage`; a `lineage` a custom backend wants
+  honored at commit time must be threaded through `EngineProvisioning.lineage` so it reaches every
+  `transaction()` handle, not attached only to the root object after construction. This is not
+  listed under Breaking below: `lineage` shipped on this same unreleased branch, so its signature
+  has never been part of a published release.
+  
+  ## Breaking
+  
+  - `BaseSchemaRuntime` (and the `CreateBaseSchemaMembersDeps` it is derived from) gains a newly
+    required `sinceIndexDdl` field: `readonly [string, string, string]`, three `CREATE INDEX IF NOT
+    EXISTS` statements in `(recordedNodes, recordedEdges, recordedIdentityAssertions)` order, built
+    from a dialect's own physical table names via `sinceIndexAdoptionDdl` (`src/indexes/system.ts`).
+    A custom `SqlEngineProfile` that builds its own `baseSchemaRuntime` must supply this field.
+
+- [#638](https://github.com/nicia-ai/typegraph/pull/638) [`d57098a`](https://github.com/nicia-ai/typegraph/commit/d57098a8b5fa8416842fb493de91dbd60d5ca9e6) Thanks [@pdlug](https://github.com/pdlug)! - `Store.clear()` now rotates the graph's durable revision-origin nonce
+  (`typegraph_revision_origins`) in the same transaction as the rest of the clear, for every store
+  able to mint either origin-namespaced `base@V` anchor form — a store with `revisionTracking` or
+  `history` enabled (the TypeGraph revision anchor), AND an engine-anchored store whose backend
+  declares `lineage` directly with tracking off (the engine anchor). Previously `clear()` reseeded
+  (or, under `history`, left unseeded) only the recorded clock and left an engine-anchored store's
+  origin untouched entirely, so a graph repopulated after `clear()` to look the same — the same
+  revision COUNT for a tracked store, or a coincidentally-matching engine revision for an
+  engine-anchored one — could mint a `base@V` token byte-identical to one minted before the clear,
+  and a branch forked before the clear would silently pass the merge precondition against a base
+  whose entire content had been replaced.
+  
+  `computeBaseVersion` and `Store.revisionOriginNow()` also now read that origin row fresh on every
+  call instead of caching it per `Store` instance. Two live `Store` objects can legitimately observe
+  the same graph, and only one of them runs `clear()` at a time; the removed cache previously let the
+  OTHER instance keep minting anchors from its pre-clear origin until it happened to be recreated,
+  so every merge into it failed at commit for no reason visible to the caller.
+  
+  This closes the BASE-side half of the epoch gap; the FORK side had an equivalent one of its own —
+  `recordedRelationsLineage`'s `revision()` used to report the bare recorded-clock value with no
+  origin, so `GraphBranch.forkRevision` carried nothing to catch a cleared-and-repopulated FORK
+  either. That half is closed the same way, by embedding the origin directly in the bundled
+  `EngineRevision` token every `revision()`/`changesSince()` call now compares — see the
+  `lineage`-capability changeset for the token format.
+  
+  ## Breaking
+  
+  - A branch forked from a store BEFORE `Store.clear()` now correctly fails `merge()`'s `base@V`
+    precondition (`BaseVersionMismatchError`) once that store has been cleared, even when the
+    branch is later merged against a graph repopulated to look the same — for a revision-tracked
+    store, the same revision count; for an engine-anchored store, a coincidentally-matching engine
+    revision. This was always the documented intent — a cleared store is a new epoch a pre-clear
+    branch cannot merge into — and is now enforced for BOTH anchor forms. Re-branch from the
+    post-clear store instead of reusing one forked before the clear.
+
+- [#628](https://github.com/nicia-ai/typegraph/pull/628) [`f74582c`](https://github.com/nicia-ai/typegraph/commit/f74582c99fb3587725255959665b27da7abc9a43) Thanks [@pdlug](https://github.com/pdlug)! - Transaction conflicts (PostgreSQL serialization failures and deadlocks) are now classified by one shared predicate everywhere the store recognizes them, and reported through a new typed error, `TransactionConflictError` (code `TRANSACTION_CONFLICT`, `details: { operation, attempts }`, `cause` the driver error), exported from the package root alongside its sibling `VersionConflictError`.
+  
+  **Behavior change:** `store.transaction()` and `store.transactionWithReceipt()` now throw `TransactionConflictError` — not the raw driver error — when the backend reports a conflict, with `attempts: 1`. A caller that matched the previous driver-shaped error (by SQLSTATE, message, or `instanceof` on a driver error class) must instead match `TransactionConflictError` and read the same driver error off its `cause`.
+  
+  `store.transaction()` and `store.transactionWithReceipt()` accept a new option, `retry: { attempts: number }`, to have TypeGraph itself re-run the whole callback on a conflict, up to `attempts` times total, with no delay before the second attempt and a short capped, jittered backoff after. A retried callback must satisfy a replay contract — await all of its own work, read and write only values it creates fresh on each call, perform no effect outside its own transaction, and tolerate being invoked more than once — documented on the option and on the transactions guide. `HookContext` gains an optional 1-based `attempt` field (absent means `1`, so a hook context built outside the store still typechecks) so `onOperationStart` / `onBulkOperationStart` / `onQueryStart` / `onError` can tell a replay from a new operation; a rolled-back attempt's completed operations report neither `onOperationEnd` nor `onError` of their own, and a retried `transactionWithReceipt()`'s receipt reflects only the committed attempt's writes.
+  
+  Graph-merge's three commit paths (the public `apply`, its incremental variant, and internal plan commits) now go through the same retry owner as `store.transaction()`, with their existing budget of three attempts. `MergeError` on exhaustion now carries a `TransactionConflictError` as its `cause` (which itself carries the driver error), one link deeper than before — a caller matching `mergeError.cause` against the driver error directly must instead match `mergeError.cause.cause`.
+  
+  `capabilities.execution` gains an optional derived field, `unitOfWork?: "interactive" | "batch" | "none"`, naming how a backend groups a multi-statement write: `"interactive"` when it can hold an open callback transaction, `"batch"` when it cannot but exposes a native atomic program (an HTTP-only driver such as `drizzle-orm/neon-http`), otherwise `"none"`. Both bundled backends derive and populate it, overwriting anything a profile declared; a custom `GraphBackend` may leave it absent. Nothing in the store consumes it yet.
+
+- [#631](https://github.com/nicia-ai/typegraph/pull/631) [`aa0d599`](https://github.com/nicia-ai/typegraph/commit/aa0d5993a3f1feb4c20ae6a85a30bc13f4f71d40) Thanks [@pdlug](https://github.com/pdlug)! - `capabilities.writeFence` gains a third keyed mechanism, `"row"`: a portable exclusion for an engine with no advisory-lock primitive, backed by a new, never-dropped base-schema relation, `typegraph_fences(key TEXT PRIMARY KEY, generation BIGINT NOT NULL)` (`INTEGER NOT NULL` on SQLite). `{ mechanism: "row"; drain: "table-lock" | "quiescent" | "none"; conflict: "wait" | "commit-time" }` carries the same `drain` fact `"advisory"` already declares, plus `conflict` — the engine fact for two writers of one fence row: `"wait"` for a lock-based engine (the second acquirer's statement blocks, exactly like an advisory lock), `"commit-time"` for an optimistic-concurrency engine (both acquirers proceed and the loser's COMMIT fails). Every keyed lock site now shares one `case "lock": case "row":` body, spelling the acquisition through the resolved plan's `sql.acquireKeyed` / `sql.acquireKeyedWithIsolation` regardless of mechanism; the fences relation's key reuses each site's existing advisory namespace verbatim (`${namespace}:${key}`), so the lock-order contract carries over unchanged. The two bundled backends still resolve `"advisory"` / `"engine-serialized"` by default — emitted write SQL for both is unchanged, and only the bootstrap DDL gains the fences relation's `CREATE TABLE`. Existing databases add it by re-running the generated migration SQL (`generateSqliteMigrationSQL` / `generatePostgresMigrationSQL`), which now include it.
+  
+  `capabilities.execution.unitOfWork` gains `"optimistic-retry"`, derived (never hand-set) when the backend is interactive and its resolved write-fence plan is `"row"` with `conflict: "commit-time"`. Under that tier, every TypeGraph-owned transaction that acquires a fence row replays a real commit-time conflict as one whole unit (open, prelude, reads, writes, commit) through the retry owner introduced for `store.transaction()`, up to `OPTIMISTIC_RETRY_ATTEMPTS` (3) attempts. That covers every store-owned write — collection create/update/delete, bulk paths, `importGraph`, identity maintenance, contribution rebuild, index materialization — as well as the two backend-owned transactions that acquire the schema-commit fence row directly: graph-template instantiation and a schema commit (`commitSchemaVersion` and its three siblings). A nested write running inside an existing transaction never retries on its own (it cannot restart a transaction it does not own), so its conflict propagates unchanged to the outermost store-owned write or to `store.transaction` itself. Under `"interactive"` this changes nothing: one attempt, as before. An `"optimistic-retry"` backend requires `node:async_hooks`' `AsyncLocalStorage` to tell a nested unit apart from an independent one; a runtime without it is refused with `OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT` at the first retried unit, while interactive backends are unaffected.
+  
+  `SqlExecutionAdapter` gains an optional `serializationFailure?: (error: unknown) => boolean` for an engine whose commit-conflict shape is not PostgreSQL's `40001` / `40P01` SQLSTATE (or its fixed message fallback). `isSerializationFailure(error, target?)` — the one predicate every retry owner consults — checks a classifier registered against `target` first, but the classifier only ever ADDS to the standard SQLSTATE/message rules: a registered classifier that recognizes `error` wins outright, while one that declines still falls through to those rules rather than having the final word, so there remains one predicate rather than a second inline check per engine.
+  
+  `onOperationStart`'s `attempt` field counts caller-owned retries of `store.transaction` only. A store-owned unit's own internal replay under `"optimistic-retry"` (a create, an update, a bulk write, `importGraph`, and the rest) is invisible to that count: `onOperationStart` / `onOperationEnd` / `onError` each fire exactly once for the outer unit, for its one committed attempt, no matter how many attempts the retry owner spent internally to reach it.
+  
+  ## Breaking
+  
+  - `FenceStatements`'s derived standalone-statement members are renamed to what a lock site actually asks for: `advisoryLock` → `acquireKeyed`, `advisoryLockWithIsolation` → `acquireKeyedWithIsolation`. `isolationFact` is unchanged. A caller consuming a resolved plan's `sql.advisoryLock(...)` / `sql.advisoryLockWithIsolation(...)` must call `sql.acquireKeyed(...)` / `sql.acquireKeyedWithIsolation(...)` instead.
+  - `WriteFencePlan` gains a `"row"` arm: `{ kind: "row"; drain; conflict; sql }`. An external exhaustive `switch` on `WriteFencePlan["kind"]` (or its `default` branch, if any) now sees this case too.
+  - The base schema gains the `typegraph_fences` relation on both dialects, and `ResolvedSqlTableNames` — the fully-resolved table-name set `createSqlSchema` returns and `GraphBackend.tableNames` exposes — gains its required `fences` member. Code that builds a complete `ResolvedSqlTableNames` object literal by hand, rather than through `createSqlSchema` or a bundled backend factory, must add it; the corresponding `SqlTableNames` input field stays optional and defaults, so a caller only overriding table names is unaffected. A database migrated before this release needs the regenerated migration SQL run against it before declaring `writeFence.mechanism: "row"` (the two bundled mechanisms, `"advisory"` and `"engine-serialized"`, do not need it and keep working unmigrated).
+  - `capabilities.execution.unitOfWork` gains `"optimistic-retry"` as a possible value — an external exhaustive `switch` on it now sees this case too.
+  - `SqlExecutionAdapter` gains an optional `serializationFailure` member — additive, but an object satisfying this interface structurally (rather than by declaring it) may need updating if it re-implements the full member list explicitly.
+  - `FenceSql`'s three members — `lockTables`, `advisoryLockExpression`, `isolationFactExpression` — are now all optional: which ones a `row`-mechanism target supplies differs from an `advisory`-mechanism one. A caller that reads one of these members directly, rather than through a resolved plan's `sql.acquireKeyed` / `sql.acquireKeyedWithIsolation` / `sql.isolationFact` / `sql.lockTables`, must narrow for `undefined` before calling it; the resolved-plan accessors already refuse with a named-member error when a mechanism does not supply one.
+  
+  Bisect note: the intermediate commit adding the `row` write-fence mechanism is red on one construction-inventory ratchet, fixed by the commit that follows it in the same PR; bisecting between the two will find that known-red state.
+
+- [#607](https://github.com/nicia-ai/typegraph/pull/607) [`e966b30`](https://github.com/nicia-ai/typegraph/commit/e966b3049755fb4945a7120319f5a9726abab1b0) Thanks [@pdlug](https://github.com/pdlug)! - Add a new entrypoint, `@nicia-ai/typegraph/adapters/drizzle/engine`, exporting
+  `createSqlBackend` and the `SqlEngineProfile` types. `createPostgresBackend`
+  and `createSqliteBackend` are now each `createSqlBackend` applied to a
+  profile built by `buildPostgresEngineProfile` / `buildSqliteEngineProfile`.
+  Emitted SQL, capabilities, marks, transaction framing, and error paths are
+  unchanged for every configuration the two factories accepted before.
+  
+  Two construction-time narrowings apply to the bundled factories as well as
+  to third-party profiles, because both now run through `createSqlBackend`:
+  
+  - A backend whose resolved capabilities carry no `writeFence`
+    declaration is refused with a `ConfigurationError`
+    (`ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION`) that prints the one
+    declaration line to add. Omitting `writeFence` from a `capabilities`
+    override is unaffected (the factory's own declaration applies); passing
+    `capabilities: { writeFence: undefined }` explicitly, which previously
+    built a backend that resolved every write fence through a dialect fallback,
+    now throws at construction.
+  - A backend whose declaration resolves `unfenced` no longer earns
+    the schema-fenced-insert eligibility mark, so a schema-managed first write
+    on it now refuses with `WRITE_FENCE_UNAVAILABLE` instead of fusing the
+    insert. Schema commits on such a backend already refused, so a working
+    configuration is unaffected.
+
+- [#629](https://github.com/nicia-ai/typegraph/pull/629) [`02152da`](https://github.com/nicia-ai/typegraph/commit/02152da57cf26a00cf23c96e4e0a95e218fd1d06) Thanks [@pdlug](https://github.com/pdlug)! - `capabilities.writeFence` is the write-fence declaration, a discriminated union on `mechanism`:
+  `{ mechanism: "advisory"; drain: "table-lock" | "quiescent" | "none" }` |
+  `{ mechanism: "engine-serialized" }` | `{ mechanism: "caller-serialized" }`. `mechanism` is the
+  exclusion primitive a backend provides; `drain` — a field of the `"advisory"` shape only — is the
+  separate fact of whether a caller that already excluded other writers can additionally take a
+  relation-wide lock on a resource a few sites protect. Both bundled backends declare it directly
+  (`SQLITE_CAPABILITIES`: `{ mechanism: "engine-serialized" }`; `POSTGRES_CAPABILITIES`:
+  `{ mechanism: "advisory", drain: "table-lock" }`), so nothing built against them changes: same
+  emitted SQL, same resolved plan. `resolveWriteFencePlan` validates a declared `writeFence` at
+  runtime — an unrecognized `mechanism`, an unrecognized `drain`, or a `drain` attached to a
+  serialized mechanism — and refuses with `WRITE_FENCE_DECLARATION_INVALID` naming the field and
+  (where applicable) the accepted values, since a plain-JavaScript backend author is not held to the
+  discriminated-union type the way a TypeScript caller is.
+  
+  A new arm, `{ kind: "caller-serialized" }`, joins `WriteFencePlan`'s union for a deployment-level
+  promise that no other client writes to the backend's database while it is open.
+  `createPostgresBackend` accepts `writeFence: { mechanism: "caller-serialized" }` — a claim about
+  the deployment, not the engine — while continuing to refuse `mechanism: "engine-serialized"`
+  outright, since that claims the engine itself serializes writers. The promise splits into two
+  halves. In process, TypeGraph enforces its own half: every root member the backend classifies in a
+  mutation-capable class — graph-entity and sidecar writes, backend-owned bulk import, derived-data
+  maintenance, schema commits, table/DDL provisioning, `clearGraph`, and the raw-SQL members that can
+  carry an arbitrary write (`execute`, `executeRaw`, `executeStatement`,
+  `executeTemporaryStatement`) — plus `transaction` and `transactionWithNative`, runs through one
+  per-backend serialized queue, so two concurrent calls through the same pool cannot race each other;
+  a root write awaited from inside a `store.transaction` callback is refused
+  (`SERIALIZED_QUEUE_REENTRANT_SUBMISSION`) rather than left to deadlock. Adopting an externally
+  owned transaction (`adoptTransaction`, backing `store.withTransaction(externalTx)`) is refused
+  outright (`CALLER_SERIALIZED_REFUSES_ADOPTION`): its lifetime belongs to the caller, not to this
+  backend's queue, so there is no honest way to hold a queue slot open for it. Outside the process,
+  the deployment still has to hold up its half (no other client writing to the same database) since
+  TypeGraph cannot observe that.
+  
+  `requireWriteFence` takes `requires: "keyed" | "drain"`: `"keyed"` is satisfied by every
+  non-`unfenced` arm; `"drain"` refuses only when the resolved plan's `drain` is `"none"`, and
+  `"engine-serialized"` / `"caller-serialized"` satisfy it without consulting `drain` at all.
+  
+  ## Breaking
+  
+  - `capabilities.pessimisticLocks` and its `PessimisticLockCapabilities` type are removed — declare
+    `capabilities.writeFence` instead.
+  - `requireWriteFence`'s `requires` parameter is renamed: `"advisory-lock"` becomes `"keyed"`,
+    `"table-lock"` becomes `"drain"`.
+  - `WriteFencePlan`'s `lock` arm drops `tableLocks` and `advisoryLocks` — read `drain` instead
+    (`"table-lock"` means what `tableLocks: true` used to).
+  - `WriteFencePlan`'s `unfenced` arm drops `reason` — declaring `writeFence` leaves no shape that
+    resolves `unfenced` for a reason other than an absent declaration, so there is nothing left to
+    distinguish.
+  - `WriteFencePlan` gained the `caller-serialized` arm as a permanent part of the union — an
+    external exhaustive switch on `WriteFencePlan["kind"]` must add a case for it (or its `default`
+    branch, if any, now sees it too).
+  - `WRITE_FENCE_DECLARATION_CONFLICT` is removed — `writeFence` is the only declaration, so no two
+    declarations can conflict.
+  - `WriteFenceDeclaration` is now a discriminated union on `mechanism`, not one flat shape: `drain`
+    is a field of `{ mechanism: "advisory" }` only. Declaring `drain` alongside
+    `mechanism: "engine-serialized"` or `mechanism: "caller-serialized"` — accepted (and ignored) by
+    earlier commits on this same feature branch — is now refused with
+    `WRITE_FENCE_DECLARATION_INVALID`. Read `declaration.drain` only after narrowing
+    `declaration.mechanism === "advisory"`.
+
+- [#623](https://github.com/nicia-ai/typegraph/pull/623) [`04ce22c`](https://github.com/nicia-ai/typegraph/commit/04ce22cc87ffbf4f3cc44c47408d0ff18198dd31) Thanks [@pdlug](https://github.com/pdlug)! - `GraphBackend` gains an optional `fenceSql` member: the lock spelling a backend supplies
+  alongside `capabilities.writeFence`, as `FenceSql` — three builders,
+  `advisoryLockExpression`, `isolationFactExpression`, and `lockTables`. `resolveWriteFencePlan`'s
+  `lock` arm carries `sql: FenceStatements`: those three plus the standalone `advisoryLock`,
+  `advisoryLockWithIsolation`, and `isolationFact` statements, which `resolveFenceStatements`
+  derives from the two expressions so the portable lock sites and the fused recorded-write fence
+  always spell the same key. Every write-fence lock site consumes `fence.sql.<builder>(...)`
+  instead of hand-writing PostgreSQL lock syntax inline.
+  
+  The bundled PostgreSQL spelling is exported as `postgresFenceSql` from
+  `@nicia-ai/typegraph/adapters/drizzle/postgres`. `createPostgresBackend` supplies it
+  automatically; `createSqliteBackend` supplies no `fenceSql` since its fence is
+  `engine-serialized` and takes no lock. A backend that declares
+  `capabilities.writeFence.mechanism: "advisory"` but supplies no `fenceSql` is now refused at
+  construction with a typed `ConfigurationError` (`WRITE_FENCE_SQL_UNAVAILABLE`) naming the member
+  to supply, rather than reaching a lock site with nothing to spell the statement.
+  
+  For both bundled backends the locks taken, their order, and their modes are unchanged, and
+  the PostgreSQL statement text is equivalent: two advisory-lock sites now bind the lock
+  namespace as a parameter instead of an inline string literal (`hashtext` hashes the value
+  either way), and insignificant whitespace in three statements changed with the move.
+  
+  Two behavior changes reach custom `dialect: "postgres"` backends. A backend declaring
+  `writeFence.mechanism: "advisory"` without `fenceSql` is refused at construction (above).
+  A backend declaring only `mechanism: "engine-serialized"` and no `fenceSql` is refused when a
+  history-capturing transaction reads its isolation level, which previously ran a hard-coded
+  `current_setting('transaction_isolation')` read; supply `fenceSql` (or `postgresFenceSql`) to
+  restore it.
+
+### Patch Changes
+
+- [#662](https://github.com/nicia-ai/typegraph/pull/662) [`5fc8e84`](https://github.com/nicia-ai/typegraph/commit/5fc8e84efc9faa45a10ba49375bd211b1b05d4a7) Thanks [@pdlug](https://github.com/pdlug)! - Fix a PostgreSQL availability defect in constrained edge writes: a `bulkCreate` or `bulkInsert` on an edge kind declaring `cardinality: "one"`, `"oneActive"`, or `"unique"` could run for minutes, grow past two gigabytes of server memory, and ignore cancellation. The three statements of the atomic edge-claim program were built with one predicate arm per proposed row — each arm carrying its own two `EXISTS` and one `NOT EXISTS` subquery — so a chunk the bind budget permits (thousands of rows) asked the executor to initialize and evaluate thousands of subplans, with per-arm cost that was not constant. A 200-arm statement took seconds to plan and execute against an empty match set; a 2000-arm statement did not finish.
+  
+  Each statement now drives from a single `proposed` relation of the chunk's rows, so the engine plans it once and the per-row work is an index probe. The same shape lands on both bundled backends. The stale-claim release additionally becomes robust to the plan degradation reported under stale statistics after a bulk load: its driving relation is now the bounded proposed set joined to the claim relation on its primary key, rather than a claim scan whose correlated `NOT EXISTS` the planner could demote to a whole-graph nested-loop anti-join.
+  
+  The claim predicates — what a competing live edge is, and whether a recorded claim holder still satisfies its axis — now have one owner each, rendered from an explicit value source so the single-row and batched statements cannot drift. The conditional takeover statement, which previously spelled the holder-liveness predicate a second time inline, resolves it through that owner.
+  
+  **Author-facing:** `CommonOperationStrategy.buildDeleteStaleAtomicEdgeClaims`, `.buildAcquireAtomicEdgeClaims`, and `.buildAssertAtomicEdgeClaimsOwned` now return `readonly SQL[]` rather than `SQL`. A chunk renders one statement per distinct declared cardinality it contains — one statement in the ordinary single-kind case — because the endpoint terms an axis key covers and the liveness a holder must still satisfy are predicate shape, not values, and folding them into the relation as guarded terms would give back the index probes this change exists to gain. No action is required of a backend author: `CommonOperationStrategy` is visible on the engine entrypoint as part of `SqlEngineProfile`'s shape, but it is not author-supplyable — `strategy` is absent from `DERIVABLE_ENGINE_PROFILE_KEYS`, so `deriveEngineProfile` refuses it, and `SqlEngineProfile.assembly` is branded with a non-exported symbol, so a profile cannot be built from a literal either. The bundled builders are the only source of a strategy, and theirs changed with the code.
+
+- [#627](https://github.com/nicia-ai/typegraph/pull/627) [`4cec2b0`](https://github.com/nicia-ai/typegraph/commit/4cec2b0096d5fad833d32ce8b5ed6fb3978d1dc2) Thanks [@pdlug](https://github.com/pdlug)! - The PostgreSQL backend's database-extension install now resolves the write-fence plan and spells its advisory lock through the backend's `fenceSql`, like every other lock site, instead of hardcoding `pg_advisory_xact_lock(hashtext(...), 0)` inline. A custom or derived PostgreSQL profile whose resolved plan is `engine-serialized` or `unfenced` installs extensions without taking that lock and relies solely on the duplicate-key retry, which was already the fence's correctness owner in that case. The bundled PostgreSQL backend's behavior and emitted SQL are unchanged.
+
 ## 0.56.0
 
 ### Highlights
