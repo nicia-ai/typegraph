@@ -271,6 +271,11 @@ export async function main(): Promise<void> {
       "existing",
       "refusal situation is 'existing'",
     );
+    assertEqual(
+      (movedElsewhereError as CompositionExistenceError).code,
+      "COMPOSITION_WHOLE_CONFLICT",
+      "refusal code is COMPOSITION_WHOLE_CONFLICT",
+    );
     const interviewEdgesAfterRefusal = await store.edges.segmentOf.findFrom(
       firstCall.node,
     );
@@ -416,18 +421,28 @@ export async function main(): Promise<void> {
     );
     const endContext = requireDefined(endedOperations[0]);
     assertEqual(endContext.kind, "Podcast", "the event is the Podcast delete");
-    const expectedCascade = [
-      { kind: "Segment", id: exportSegmentOne.id },
-      { kind: "Segment", id: exportSegmentTwo.id },
-      { kind: "Episode", id: exportEpisode.id },
-    ];
     console.log(
       `  hook cascadedParts: ${JSON.stringify(endContext.cascadedParts)}`,
     );
-    assertEqual(
+    const cascadedParts = requireDefined(
       endContext.cascadedParts,
+      "the delete's cascadedParts",
+    );
+    // The cascade reports its parts leaf-first — every part before the whole it
+    // belongs to — and, within one level of the closure, ordered by kind and
+    // then id. The two segments are siblings of one episode, so their
+    // relative order is that sort, not the order they were created in; the
+    // episode follows both of them because it owns them.
+    const expectedCascade = [
+      ...[exportSegmentOne.id, exportSegmentTwo.id]
+        .toSorted()
+        .map((id) => ({ kind: "Segment", id })),
+      { kind: "Episode", id: exportEpisode.id },
+    ];
+    assertEqual(
+      cascadedParts,
       expectedCascade,
-      "onOperationEnd names the cascaded parts leaf-first",
+      "onOperationEnd names the cascaded parts leaf-first, then by kind and id",
     );
     assertTrue(
       requireDefined(startedOperations[0]).cascadedParts === undefined,
@@ -439,8 +454,8 @@ export async function main(): Promise<void> {
     );
     assertEqual(
       receipt.cascadedParts,
-      expectedCascade,
-      "the receipt reports the identical cascade",
+      cascadedParts,
+      "the receipt reports the identical cascade, in the identical order",
     );
     assertEqual(
       receipt.writes.nodes,

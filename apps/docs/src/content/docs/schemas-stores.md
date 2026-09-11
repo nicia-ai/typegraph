@@ -2162,8 +2162,13 @@ live parts — see [Composition Cascade](/limitations#composition-cascade) for
 what the cascade itself does and does not do. Both the delete's
 `onOperationEnd` hook context (see [Observability Hooks](#observability-hooks))
 and every transaction receipt that covers the delete carry the parts it
-removed, as `cascadedParts`: leaf-first `{ kind, id }` refs, taken from the
-same plan the cascade executed.
+removed, as `cascadedParts`: `{ kind, id }` refs taken from the same plan the
+cascade executed, in the order the cascade deleted them — **leaf-first, then
+deterministically by kind, then id**. Leaf-first is the part of that order with
+meaning: a part is always named before the whole it belongs to. Two sibling
+parts of one whole have no order between them to respect, so they are sorted
+rather than left in the order the cascade's reads returned them — which is what
+lets you compare `cascadedParts` for equality across runs and backends.
 
 ```typescript
 import {
@@ -2237,8 +2242,9 @@ result.receipt.writes.nodes;
 // intents and are not folded into this count.
 
 receipt.cascadedParts;
-// every cascade the transaction ran, scoped and outer alike, in the order
-// the deletes ran:
+// every cascade the transaction ran, scoped and outer alike: each delete's own
+// closure (leaf-first, then by kind and id), concatenated in the order the
+// deletes ran:
 // [
 //   { kind: "Track", id: trackOne.id },
 //   { kind: "Track", id: trackTwo.id },

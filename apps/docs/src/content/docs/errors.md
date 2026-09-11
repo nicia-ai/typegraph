@@ -747,9 +747,17 @@ already holds — same whole, same realizing edge — whose stated `props` are
 schema-valid but canonically different from the edge's live stored props —
 carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`). `requestedVia`
 is the RESOLVED realizing edge of the pair the call's `partOf` names, so it is
-present even when the call omitted `via`. The error's `code` is
-`COMPOSITION_WHOLE_REQUIRED` for every shape — branch on `details.situation`,
-not on `code`, to tell a bare create from a contradicted postcondition.
+present even when the call omitted `via`.
+
+The error's `code` names the same four shapes, so a handler that routes on
+`code` alone can tell them apart:
+
+| `details.situation` | `code` |
+| --- | --- |
+| `"create"` | `COMPOSITION_WHOLE_REQUIRED` |
+| `"detach"` | `COMPOSITION_DETACH_REFUSED` |
+| `"existing"` | `COMPOSITION_WHOLE_CONFLICT` |
+| `"props"` | `COMPOSITION_PROPS_CONFLICT` |
 
 Pass `partOf: { kind, id, via? }` naming a live, declared whole to fix a
 create refusal; soft-delete or hard-delete the part itself (which frees its
@@ -1858,7 +1866,10 @@ try {
 | `EDGE_ACYCLICITY_ERROR` | `EdgeAcyclicityError` | constraint | A write would give a declared-acyclic edge relation a cycle |
 | `EDGE_ACYCLICITY_INDETERMINATE` | `EdgeAcyclicityIndeterminateError` | system | The engine cut an acyclicity search short before it could prove or refute a cycle |
 | `COMPOSITION_WHOLE_OCCUPIED` | `CompositionError` | constraint | A `partOf`/`hasPart` write would give a part a second whole |
-| `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A write would leave an `existence: "required"` composition part with no live whole |
+| `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
+| `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
+| `COMPOSITION_WHOLE_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |
+| `COMPOSITION_PROPS_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf.props` differs from the already-satisfied attachment's stored props |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |
