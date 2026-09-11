@@ -43,6 +43,7 @@ import {
   type EdgeRow,
   type GraphReadBackend,
   isLiveNodeRow,
+  type LiveNodeRow,
   type NodeRow,
   rowPropsToObject,
 } from "../../backend/types";
@@ -385,7 +386,7 @@ export async function assertCompositionExistencePreserved(
   if (!edgeCurrentlyAttachesPart(ctx.registry, part.kind, edge)) return;
 
   const partRow = await backend.getNode(ctx.graphId, part.kind, part.id);
-  if (partRow === undefined || !isLiveNodeRow(partRow)) return;
+  if (!isEndpointRowLive(partRow)) return;
 
   throw new CompositionExistenceError({
     partKind: part.kind,
@@ -835,9 +836,26 @@ export function assertEndpointRowLive(
   nodeId: string,
   row: NodeRow | undefined,
 ): void {
-  if (row === undefined || !isLiveNodeRow(row)) {
+  if (!isEndpointRowLive(row)) {
     throw new EndpointNotFoundError({ edgeKind, endpoint, nodeKind, nodeId });
   }
+}
+
+/**
+ * THE endpoint-liveness predicate: a row an edge may point at is present and
+ * not tombstoned. Valid time is deliberately not part of it — a row whose
+ * window has closed is still a row an attachment may name.
+ *
+ * The verdict behind {@link assertEndpointRowLive}, and behind the readers in
+ * this module that need the same answer WITHOUT a refusal
+ * ({@link readLiveCompositionWholes}, which the `compositionExistence` audit and
+ * provenance's support computation read, and the detach refusal's own part-row
+ * check). One predicate, so a reporting path and a refusing path can never judge
+ * the same row differently. Module-private: every consumer of the decision is a
+ * function here, each exported in its own right.
+ */
+function isEndpointRowLive(row: NodeRow | undefined): row is LiveNodeRow {
+  return row !== undefined && isLiveNodeRow(row);
 }
 
 /**
@@ -1175,7 +1193,7 @@ export async function readLiveCompositionWholes(
         )
       : await boundGetNodes.getNodes(graphId, kind, orderedIds);
     for (const row of rows) {
-      if (row === undefined || !isLiveNodeRow(row)) continue;
+      if (!isEndpointRowLive(row)) continue;
       live.push({ kind: row.kind, id: row.id });
     }
   }

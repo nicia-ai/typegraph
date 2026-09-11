@@ -17,6 +17,7 @@ import {
   defineNode,
   type HistoryStore,
   partOf,
+  subClassOf,
 } from "../src";
 import { type GraphBackend } from "../src/backend/types";
 import { createRetractionCapability } from "../src/provenance";
@@ -112,6 +113,61 @@ function buildGraph(id: string) {
       partOf(PcAnnex, PcReport, { via: pcAnnexOf }),
       partOf(PcExhibit, PcDossier, {
         via: pcExhibitOf,
+        existence: "required",
+      }),
+    ],
+  });
+}
+
+/** A whole base kind no configuration names, with a fact kind beneath it. */
+const PcDocument = defineNode("PcDocument", { schema: z.object({}) });
+const PcDocumentReport = defineNode("PcDocReport", { schema: z.object({}) });
+/** A declared required part kind, and a subclass that inherits that existence. */
+const PcClause = defineNode("PcClause", { schema: z.object({}) });
+const PcSubClause = defineNode("PcSubClause", { schema: z.object({}) });
+const pcClauseOf = defineEdge("pcClauseOf");
+
+const SUBSUMPTION_FACT_TYPES = [PcDocumentReport, PcClause, PcSubClause];
+
+/**
+ * Both subsumption arms of the configuration refusal in one graph: the fact
+ * kind is a SUBCLASS of the kind the pair declared as its whole, and the
+ * declared part kind has a subclass that is required purely by inheritance.
+ */
+function buildSubsumptionGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: {
+      PcSource: { type: PcSource },
+      PcJustification: { type: PcJustification },
+      PcDocument: { type: PcDocument },
+      PcDocReport: { type: PcDocumentReport },
+      PcClause: { type: PcClause },
+      PcSubClause: { type: PcSubClause },
+    },
+    edges: {
+      pcPremiseOf: {
+        type: pcPremiseOf,
+        from: [PcSource, ...SUBSUMPTION_FACT_TYPES],
+        to: [PcJustification],
+      },
+      pcDerives: {
+        type: pcDerives,
+        from: [PcJustification],
+        to: SUBSUMPTION_FACT_TYPES,
+      },
+      pcClauseOf: {
+        type: pcClauseOf,
+        from: [PcClause],
+        to: [PcDocument],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      subClassOf(PcDocumentReport, PcDocument),
+      subClassOf(PcSubClause, PcClause),
+      partOf(PcClause, PcDocument, {
+        via: pcClauseOf,
         existence: "required",
       }),
     ],
@@ -268,6 +324,16 @@ async function closedFactsDuring<T>(
       .map((fact) => `${fact.kind}/${fact.id}`)
       .filter((key) => !after.has(key)),
   };
+}
+
+/** What `run` threw, or `undefined` when it returned. */
+function captureThrown(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
 }
 
 describe("provenance composition existence", () => {
@@ -571,20 +637,15 @@ describe("provenance composition existence", () => {
       }),
     ).toThrow(/PcSection.*is not a fact kind/);
 
-    const error = (() => {
-      try {
-        createRetractionCapability(store, {
-          source: { kind: "PcSource" },
-          justification: { kind: "PcJustification" },
-          fact: { kinds: ["PcReport", "PcAnnex"] },
-          premiseOf: { kind: "pcPremiseOf" },
-          derives: { kind: "pcDerives" },
-        });
-      } catch (error_) {
-        return error_;
-      }
-      return;
-    })();
+    const error = captureThrown(() =>
+      createRetractionCapability(store, {
+        source: { kind: "PcSource" },
+        justification: { kind: "PcJustification" },
+        fact: { kinds: ["PcReport", "PcAnnex"] },
+        premiseOf: { kind: "pcPremiseOf" },
+        derives: { kind: "pcDerives" },
+      }),
+    );
     expect(error).toBeInstanceOf(ConfigurationError);
     expect((error as ConfigurationError).details).toMatchObject({
       code: "PROVENANCE_REQUIRED_PART_NOT_A_FACT",
@@ -595,4 +656,76 @@ describe("provenance composition existence", () => {
   // MUTATION CHECK: delete the
   // `assertRequiredPartsOfFactWholesAreFacts(store.registry, normalized)` call
   // in `createRetractionCapability`. Both configurations above are accepted.
+
+  it("refuses when the fact kind SUBCLASSES the kind the pair declared as its whole", async () => {
+    const [store] = await createStoreWithSchema(
+      buildSubsumptionGraph("provenance_composition_whole_subclass"),
+      createTestBackend(),
+      { history: true },
+    );
+
+    // The pair names PcDocument as its whole; the configuration tracks
+    // PcDocReport, which IS a PcDocument, so its rows are wholes of required
+    // PcClause parts this configuration could never close.
+    const error = captureThrown(() =>
+      createRetractionCapability(store, {
+        source: { kind: "PcSource" },
+        justification: { kind: "PcJustification" },
+        fact: { kinds: ["PcDocReport"] },
+        premiseOf: { kind: "pcPremiseOf" },
+        derives: { kind: "pcDerives" },
+      }),
+    );
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as ConfigurationError).details).toMatchObject({
+      code: "PROVENANCE_REQUIRED_PART_NOT_A_FACT",
+      wholeKind: "PcDocReport",
+      partKind: "PcClause",
+    });
+  });
+  // MUTATION CHECK: in `assertRequiredPartsOfFactWholesAreFacts`, replace
+  // `registry.isAssignableTo(wholeKind, pair.wholeKind)` with
+  // `wholeKind === pair.wholeKind`. PcDocReport stops matching the pair's
+  // declared PcDocument whole and this configuration is accepted.
+
+  it("refuses when only a SUBCLASS of the declared part kind is missing from the fact kinds", async () => {
+    const [store] = await createStoreWithSchema(
+      buildSubsumptionGraph("provenance_composition_part_subclass"),
+      createTestBackend(),
+      { history: true },
+    );
+
+    // PcClause is tracked, so the declared part kind itself is reachable — but
+    // PcSubClause is a required part too, purely by inheriting PcClause's
+    // existence, and a row of it would be just as stranded.
+    const error = captureThrown(() =>
+      createRetractionCapability(store, {
+        source: { kind: "PcSource" },
+        justification: { kind: "PcJustification" },
+        fact: { kinds: ["PcDocReport", "PcClause"] },
+        premiseOf: { kind: "pcPremiseOf" },
+        derives: { kind: "pcDerives" },
+      }),
+    );
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as ConfigurationError).details).toMatchObject({
+      code: "PROVENANCE_REQUIRED_PART_NOT_A_FACT",
+      wholeKind: "PcDocReport",
+      partKind: "PcSubClause",
+    });
+
+    // With every required part kind tracked, the same graph configures.
+    expect(() =>
+      createRetractionCapability(store, {
+        source: { kind: "PcSource" },
+        justification: { kind: "PcJustification" },
+        fact: { kinds: ["PcDocReport", "PcClause", "PcSubClause"] },
+        premiseOf: { kind: "pcPremiseOf" },
+        derives: { kind: "pcDerives" },
+      }),
+    ).not.toThrow();
+  });
+  // MUTATION CHECK: in `assertRequiredPartsOfFactWholesAreFacts`, replace
+  // `registry.expandSubClasses(pair.partKind)` with `[pair.partKind]`. Only
+  // PcClause is checked, it is a fact kind, and this configuration is accepted.
 });

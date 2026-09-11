@@ -124,14 +124,17 @@ The report partitions facts relative to the retracted source:
 - `survivedVia`: affected facts that still have a firing justification
 - `unaffected`: previously believed facts outside the source's provenance
 
-`died` names every close, including the one case where the fact was not
-believed to begin with: a fact found live but ALREADY unsupported when the
-transition reaches it loses its currency here and is reported here. Only writes
-outside the store's own paths produce that state — a direct backend write, a
-custom port, a bypassed import — and `store.verifyConstraintFences()` reports
-it while it lasts. A tombstone the report cannot mention would be invisible
-data loss, so the pass that writes the tombstones and the report that names them
-read one set of rows.
+`died` names every close, including a fact that was not believed to begin with.
+A live fact is unsupported whenever no justification of it fires, and a
+transition that reaches such a fact closes it and reports it. Ordinary store
+calls reach that state: a justification with two premises, one of them a source
+created with its retracted flag already set, leaves the fact it derives live and
+unsupported from the moment it is linked, with no constraint violated and
+nothing for `store.verifyConstraintFences()` to report. The composition case is
+narrower — a required part whose whole was tombstoned outside the store's own
+paths — and that one the fence audit does report. Either way a tombstone the
+report cannot mention would be invisible data loss, so the pass that writes the
+tombstones and the report that names them read one set of rows.
 
 `unRetract(source)` clears the source flag, recomputes support, and reopens
 facts that regain support.
