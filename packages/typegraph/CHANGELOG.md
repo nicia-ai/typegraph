@@ -1,5 +1,26 @@
 # @nicia-ai/typegraph
 
+## 0.58.0
+
+### Highlights
+
+TypeGraph 0.58 reduces database round trips in graph read paths. `store.bulkFindEdgesTo` and its pinned-view counterpart resolve inbound edges for a set of targets across node and edge kinds, mirroring `bulkFindEdgesFrom`. Callers can replace per-target lookups with a set-oriented read while retaining input order, repeated and empty target buckets, temporal visibility, and per-input limits. For a single edge kind, the existing `edges.Kind.bulkFindTo` remains available.
+
+Whole-node and whole-edge selections now choose a full-row fetch before executing SQL, including nested and spread selections detected during planning. Previously, a fresh query instance could issue a projected query, discover that the selector needed the complete entity, and fetch again. These selections now avoid that extra statement without requiring applications to retain query instances between requests. Selectors whose field needs depend on row values keep the existing fallback.
+
+`executeChecked(expectedSchemaVersion)` combines a relational read with an active schema-version check in one statement snapshot. It offers an explicit alternative to probing the committed version before fetching data: a mismatch raises `SchemaChangedError` before the selector runs, even when the query returns no rows. Applications can then reload the schema and rebuild the query before retrying. The check covers that statement; it does not pin later reads in the request or replace write fences.
+
+### Upgrade notes
+
+- Update hand-built `Store` mocks and wrappers exposing the full store surface with `bulkFindEdgesTo`; query wrappers exposing the full executable-query surface must also forward `executeChecked`. Library-created stores, pinned views, and queries provide the new methods automatically.
+- When adopting `executeChecked`, catch `SchemaChangedError`, reload the reconciled schema, and rebuild the query before retrying. Start a new transaction if the old transaction holds a repeatable-read snapshot. An expected version of `undefined` means no active schema and is distinct from version zero.
+- Use checked reads for relational queries with ordinary bound values. They fetch full rows and support traversals, ordering, offsets, and limits; recursive and relevance-ranked queries require a separate schema probe. Replace named `param()` references with bound values before building a checked query.
+- Custom backends adopting checked reads must supply `tableNames.schemaVersions`, naming a relation with `graph_id`, `version`, and `is_active` columns whose active row agrees with `getActiveSchema`. A missing binding raises `ConfigurationError` before SQL execution. Bundled SQLite and PostgreSQL backends supply it automatically; this release requires no database migration.
+
+### Minor Changes
+
+- [#683](https://github.com/nicia-ai/typegraph/pull/683) [`ce35043`](https://github.com/nicia-ai/typegraph/commit/ce35043aa9356317229d85d0c4b9998284a36e1a) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.bulkFindEdgesTo` and its pinned-view counterpart for set-oriented inbound reads across edge kinds. Detect whole-node and whole-edge selections before issuing a projected query, avoiding a redundant fetch for fresh query instances. Add `executeChecked(expectedSchemaVersion)` for a relational read and committed-schema check in one statement, with `SchemaChangedError` on mismatch, including empty results.
+
 ## 0.57.1
 
 ### Patch Changes
