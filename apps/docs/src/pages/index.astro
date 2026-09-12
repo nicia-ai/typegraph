@@ -4,15 +4,64 @@ import FeatureIcon from "../components/landing/FeatureIcon.astro";
 import HeroIllustration from "../components/landing/HeroIllustration.astro";
 import NewsletterSignup from "../components/landing/NewsletterSignup.astro";
 import Layout from "../layouts/Landing.astro";
+import { AUTHOR_ID, ORGANIZATION_ID, WEBSITE_ID } from "../lib/structured-data";
 
 const version = package_.version;
+
+const faqs = [
+  {
+    question: "What is TypeGraph?",
+    answer:
+      "TypeGraph is a TypeScript-first embedded knowledge graph library. It brings property graph modeling and practical ontology support to your existing SQLite or PostgreSQL database — define nodes and edges with Zod, query with a fluent TypeScript API, and keep graph and app data in one deployment.",
+  },
+  {
+    question: "Do I need a separate graph database to use TypeGraph?",
+    answer:
+      "No. TypeGraph runs on the SQL database you already have — SQLite or PostgreSQL — instead of a dedicated graph service. You can start on SQLite and move to PostgreSQL later without changing your graph definition.",
+  },
+  {
+    question: "Does TypeGraph support vector or hybrid search?",
+    answer:
+      "Yes. TypeGraph runs vector and hybrid (BM25 + vector) search across every backend it supports — pgvector and libSQL/Turso native vectors on PostgreSQL and SQLite respectively.",
+  },
+  {
+    question: "Can I change the schema at runtime?",
+    answer:
+      "Yes. TypeGraph supports runtime schema evolution, including agent-proposed changes submitted as JSON, without a redeploy. See the Graph Extensions guide for details.",
+  },
+  {
+    question: "Does TypeGraph support historical or temporal queries?",
+    answer:
+      "Yes. TypeGraph reconstructs valid-time and recorded-time history with bitemporal reads, which is useful for auditable agent memory, decision replay, and forensics.",
+  },
+  {
+    question: "What license is TypeGraph released under?",
+    answer: "TypeGraph is open source under the MIT license.",
+  },
+];
+
+const faqPageSchema = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "@id": new URL("/#faq", Astro.site).href,
+  isPartOf: { "@id": WEBSITE_ID },
+  about: { "@id": ORGANIZATION_ID },
+  author: { "@id": AUTHOR_ID },
+  publisher: { "@id": ORGANIZATION_ID },
+  mainEntity: faqs.map((faq) => ({
+    "@type": "Question",
+    name: faq.question,
+    acceptedAnswer: {
+      "@type": "Answer",
+      text: faq.answer,
+    },
+  })),
+};
 ---
 
 <Layout title="TypeGraph - The Knowledge Graph for TypeScript">
   <main class="max-w-[1200px] mx-auto px-8">
-    <section
-      class="grid grid-cols-1 md:grid-cols-[1.2fr_1fr] gap-16 items-center py-24 md:py-32"
-    >
+    <section class="grid grid-cols-1 md:grid-cols-[1.2fr_1fr] gap-16 items-center py-24 md:py-32">
       <div class="text-left">
         <a
           href="/changelog"
@@ -21,15 +70,18 @@ const version = package_.version;
         >
           <span
             class="inline-block w-2 h-2 rounded-full bg-primary"
-            aria-hidden="true"></span>
+            aria-hidden="true"
+          ></span>
           v{version} · Bitemporal history
-          <span class="opacity-70" aria-hidden="true">→</span>
+          <span class="opacity-70" aria-hidden="true">
+            →
+          </span>
         </a>
         <h1 class="text-5xl font-extrabold leading-[1.1] mb-6 tracking-tight">
-          The Knowledge Graph for <span
-            class="bg-linear-to-br from-primary to-accent bg-clip-text text-transparent"
-            >TypeScript</span
-          >
+          The Knowledge Graph for{" "}
+          <span class="bg-linear-to-br from-primary to-accent bg-clip-text text-transparent">
+            TypeScript
+          </span>
         </h1>
         <p class="text-xl text-text-muted mb-10 max-w-[500px]">
           Define your ontology with Zod. Query with a fluent builder. Extend it
@@ -39,13 +91,15 @@ const version = package_.version;
           <a
             href="/getting-started"
             class="inline-flex items-center justify-center px-6 py-3 rounded-lg text-white bg-primary font-semibold hover:bg-primary-dark hover:-translate-y-px transition-all duration-200"
-            >Get Started</a
           >
+            Get Started
+          </a>
           <a
             href="https://github.com/nicia-ai/typegraph"
             class="inline-flex items-center justify-center px-6 py-3 rounded-lg text-text-main border border-border bg-transparent font-semibold hover:border-primary hover:text-primary transition-all duration-200"
-            >View on GitHub</a
           >
+            View on GitHub
+          </a>
         </div>
       </div>
       <div class="flex justify-center items-center relative">
@@ -98,12 +152,9 @@ const version = package_.version;
           <label for="ctab-temporal">Bitemporal</label>
         </div>
 
-        <div
-          class="code-tab-panels bg-[#1e1e1e] border border-t-0 border-[#333] rounded-b-xl shadow-2xl overflow-hidden"
-        >
+        <div class="code-tab-panels bg-[#1e1e1e] border border-t-0 border-[#333] rounded-b-xl shadow-2xl overflow-hidden">
           <div class="code-panel code-panel-basic p-6 overflow-x-auto">
-            <pre
-              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, defineEdge, defineGraph, createStore } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, defineEdge, defineGraph, createStore } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
 <span class="hl-keyword">import</span> { z } <span class="hl-keyword">from</span> <span class="hl-string">"zod"</span>;
 
 <span class="hl-comment">// 1. Define your ontology</span>
@@ -132,8 +183,7 @@ const version = package_.version;
           </div>
 
           <div class="code-panel code-panel-hybrid p-6 overflow-x-auto">
-            <pre
-              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, searchable, embedding } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, searchable, embedding } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
 <span class="hl-keyword">import</span> { z } <span class="hl-keyword">from</span> <span class="hl-string">"zod"</span>;
 
 <span class="hl-comment">// 1. Declare semantic + fulltext fields right in the Zod schema</span>
@@ -162,8 +212,7 @@ const version = package_.version;
           </div>
 
           <div class="code-panel code-panel-evolve p-6 overflow-x-auto">
-            <pre
-              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineGraphExtension } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineGraphExtension } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
 
 <span class="hl-comment">// 1. An agent proposes a typed kind from observed data.</span>
 <span class="hl-keyword">const</span> <span class="hl-type">proposal</span> = defineGraphExtension({
@@ -193,8 +242,7 @@ const version = package_.version;
           </div>
 
           <div class="code-panel code-panel-temporal p-6 overflow-x-auto">
-            <pre
-              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { createStore, asRecordedInstant } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { createStore, asRecordedInstant } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
 
 <span class="hl-comment">// 1. Turn on recorded/system-time capture for committed writes.</span>
 <span class="hl-keyword">const</span> <span class="hl-type">store</span> = createStore(graph, backend, { history: <span class="hl-keyword">true</span> });
@@ -223,9 +271,7 @@ const version = package_.version;
 
     <section class="py-24">
       <div class="text-center mb-14">
-        <p
-          class="text-sm font-mono uppercase tracking-[0.24em] text-primary mb-4"
-        >
+        <p class="text-sm font-mono uppercase tracking-[0.24em] text-primary mb-4">
           The graph lifecycle
         </p>
         <h2 class="text-4xl font-extrabold mb-4">
@@ -244,20 +290,18 @@ const version = package_.version;
             class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
           >
             <div class="flex items-center justify-between gap-3 mb-5">
-              <span
-                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
-                >01</span
-              >
+              <span class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors">
+                01
+              </span>
               <FeatureIcon icon="code" />
             </div>
             <h3 class="text-xl font-bold text-text-main mb-3">Define</h3>
             <p class="text-text-muted leading-relaxed mb-6 grow">
               Zod schemas for compile time type safety and runtime validation.
             </p>
-            <code
-              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
-              >defineGraph</code
-            >
+            <code class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono">
+              defineGraph
+            </code>
           </a>
 
           <a
@@ -265,10 +309,9 @@ const version = package_.version;
             class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
           >
             <div class="flex items-center justify-between gap-3 mb-5">
-              <span
-                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
-                >02</span
-              >
+              <span class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors">
+                02
+              </span>
               <FeatureIcon icon="search" />
             </div>
             <h3 class="text-xl font-bold text-text-main mb-3">Retrieve</h3>
@@ -276,10 +319,9 @@ const version = package_.version;
               Typed query builders plus BM25, vector, graph, and hybrid
               retrieval.
             </p>
-            <code
-              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
-              >search.hybrid</code
-            >
+            <code class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono">
+              search.hybrid
+            </code>
           </a>
 
           <a
@@ -287,10 +329,9 @@ const version = package_.version;
             class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
           >
             <div class="flex items-center justify-between gap-3 mb-5">
-              <span
-                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
-                >03</span
-              >
+              <span class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors">
+                03
+              </span>
               <FeatureIcon icon="tree" />
             </div>
             <h3 class="text-xl font-bold text-text-main mb-3">Reason</h3>
@@ -298,10 +339,9 @@ const version = package_.version;
               Ontology powered reasoning plus graph algorithms over the same
               graph.
             </p>
-            <code
-              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
-              >store.algorithms</code
-            >
+            <code class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono">
+              store.algorithms
+            </code>
           </a>
 
           <a
@@ -309,10 +349,9 @@ const version = package_.version;
             class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
           >
             <div class="flex items-center justify-between gap-3 mb-5">
-              <span
-                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
-                >04</span
-              >
+              <span class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors">
+                04
+              </span>
               <FeatureIcon icon="sparkles" />
             </div>
             <h3 class="text-xl font-bold text-text-main mb-3">Evolve</h3>
@@ -320,10 +359,9 @@ const version = package_.version;
               Update schema at runtime, or have agents propose the change for
               review.
             </p>
-            <code
-              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
-              >store.evolve</code
-            >
+            <code class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono">
+              store.evolve
+            </code>
           </a>
 
           <a
@@ -331,10 +369,9 @@ const version = package_.version;
             class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
           >
             <div class="flex items-center justify-between gap-3 mb-5">
-              <span
-                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
-                >05</span
-              >
+              <span class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors">
+                05
+              </span>
               <FeatureIcon icon="branch" />
             </div>
             <h3 class="text-xl font-bold text-text-main mb-3">Merge</h3>
@@ -342,10 +379,9 @@ const version = package_.version;
               Branch and merge safely with entity resolution, conflicts, and
               provenance.
             </p>
-            <code
-              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
-              >merge</code
-            >
+            <code class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono">
+              merge
+            </code>
           </a>
 
           <a
@@ -353,20 +389,18 @@ const version = package_.version;
             class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
           >
             <div class="flex items-center justify-between gap-3 mb-5">
-              <span
-                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
-                >06</span
-              >
+              <span class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors">
+                06
+              </span>
               <FeatureIcon icon="shield" />
             </div>
             <h3 class="text-xl font-bold text-text-main mb-3">Replay</h3>
             <p class="text-text-muted leading-relaxed mb-6 grow">
               Valid time and recorded time show who knew what when.
             </p>
-            <code
-              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
-              >asOfRecorded</code
-            >
+            <code class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono">
+              asOfRecorded
+            </code>
           </a>
         </div>
       </div>
@@ -376,9 +410,7 @@ const version = package_.version;
       <div class="max-w-[1200px] mx-auto">
         <div class="mb-8">
           <div>
-            <p
-              class="text-sm font-mono uppercase tracking-[0.24em] text-primary mb-4"
-            >
+            <p class="text-sm font-mono uppercase tracking-[0.24em] text-primary mb-4">
               Example showcase
             </p>
             <h2 class="text-4xl font-extrabold mb-4">
@@ -395,9 +427,7 @@ const version = package_.version;
             <h3 class="text-3xl font-extrabold text-text-main mb-4">
               Research Copilot
             </h3>
-            <p
-              class="text-lg text-text-muted leading-relaxed max-w-[720px] mb-8"
-            >
+            <p class="text-lg text-text-muted leading-relaxed max-w-[720px] mb-8">
               A literature-review assistant over landmark ML papers. It blends
               semantic retrieval, topic hierarchy expansion, citation-authority
               ranking, shortest-path lineage, and collaborator discovery in one
@@ -437,10 +467,9 @@ const version = package_.version;
                 </p>
               </div>
             </div>
-            <span
-              class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1"
-              >See the example →</span
-            >
+            <span class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1">
+              See the example →
+            </span>
           </a>
 
           <div class="grid grid-cols-1 gap-4">
@@ -452,10 +481,9 @@ const version = package_.version;
                 <h3 class="text-xl font-bold text-text-main">
                   FHIR Graph Merge
                 </h3>
-                <span
-                  class="shrink-0 text-xs font-mono text-primary bg-primary/10 rounded-full px-3 py-1"
-                  >Merge</span
-                >
+                <span class="shrink-0 text-xs font-mono text-primary bg-primary/10 rounded-full px-3 py-1">
+                  Merge
+                </span>
               </div>
               <p class="text-text-muted leading-relaxed mb-5">
                 Two ingestion agents disagree on patient identity. Branches
@@ -463,23 +491,19 @@ const version = package_.version;
                 edges, and reports provenance.
               </p>
               <div class="flex flex-wrap gap-2 mb-5">
-                <span
-                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
-                  >Branch stores</span
-                >
-                <span
-                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
-                  >Entity resolution</span
-                >
-                <span
-                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
-                  >Conflict report</span
-                >
+                <span class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1">
+                  Branch stores
+                </span>
+                <span class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1">
+                  Entity resolution
+                </span>
+                <span class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1">
+                  Conflict report
+                </span>
               </div>
-              <span
-                class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1"
-                >See the example →</span
-              >
+              <span class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1">
+                See the example →
+              </span>
             </a>
 
             <a
@@ -490,33 +514,28 @@ const version = package_.version;
                 <h3 class="text-xl font-bold text-text-main">
                   Agent Decision Replay
                 </h3>
-                <span
-                  class="shrink-0 text-xs font-mono text-primary bg-primary/10 rounded-full px-3 py-1"
-                  >Replay</span
-                >
+                <span class="shrink-0 text-xs font-mono text-primary bg-primary/10 rounded-full px-3 py-1">
+                  Replay
+                </span>
               </div>
               <p class="text-text-muted leading-relaxed mb-5">
                 Save a recorded-time anchor when the agent decides, then rerun
                 the same reasoning code against the exact graph it saw.
               </p>
               <div class="flex flex-wrap gap-2 mb-5">
-                <span
-                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
-                  >Recorded time</span
-                >
-                <span
-                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
-                  >Agent audit</span
-                >
-                <span
-                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
-                  >Graph algorithms</span
-                >
+                <span class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1">
+                  Recorded time
+                </span>
+                <span class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1">
+                  Agent audit
+                </span>
+                <span class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1">
+                  Graph algorithms
+                </span>
               </div>
-              <span
-                class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1"
-                >See the example →</span
-              >
+              <span class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1">
+                See the example →
+              </span>
             </a>
 
             <a
@@ -527,56 +546,102 @@ const version = package_.version;
                 <h3 class="text-xl font-bold text-text-main">
                   Breach Forensics
                 </h3>
-                <span
-                  class="shrink-0 text-xs font-mono text-primary bg-primary/10 rounded-full px-3 py-1"
-                  >Forensics</span
-                >
+                <span class="shrink-0 text-xs font-mono text-primary bg-primary/10 rounded-full px-3 py-1">
+                  Forensics
+                </span>
               </div>
               <p class="text-text-muted leading-relaxed mb-5">
                 Pin the access graph to the compromise instant and traverse the
                 real blast radius after risky edges were revoked or deleted.
               </p>
               <div class="flex flex-wrap gap-2 mb-5">
-                <span
-                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
-                  >Bitemporal</span
-                >
-                <span
-                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
-                  >Reachability</span
-                >
-                <span
-                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
-                  >Access graph</span
-                >
+                <span class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1">
+                  Bitemporal
+                </span>
+                <span class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1">
+                  Reachability
+                </span>
+                <span class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1">
+                  Access graph
+                </span>
               </div>
-              <span
-                class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1"
-                >See the example →</span
-              >
+              <span class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1">
+                See the example →
+              </span>
             </a>
           </div>
         </div>
       </div>
     </section>
 
+    <section class="py-20">
+      <div class="text-center mb-12">
+        <p class="text-sm font-mono uppercase tracking-[0.24em] text-primary mb-4">
+          FAQ
+        </p>
+        <h2 class="text-4xl font-extrabold mb-4">Frequently asked questions</h2>
+      </div>
+      <div class="max-w-[800px] mx-auto flex flex-col gap-3">
+        {
+          /* eslint-disable @typescript-eslint/no-unsafe-return -- astro-eslint-parser
+             can't resolve the type of a template expression returned from `.map()`,
+             so typed-linting flags every line of the JSX below even though `astro
+             check` type-checks this file cleanly. */
+          faqs.map((faq) => (
+            <details class="group bg-bg-card border border-border rounded-lg p-5 open:border-primary/50 transition-colors">
+              <summary class="cursor-pointer list-none flex items-center justify-between gap-4 font-semibold text-lg text-text-main">
+                {faq.question}
+                <span
+                  class="shrink-0 text-primary transition-transform duration-200 group-open:rotate-45"
+                  aria-hidden="true"
+                >
+                  +
+                </span>
+              </summary>
+              <p class="text-text-muted leading-relaxed mt-4">{faq.answer}</p>
+            </details>
+          ))
+          /* eslint-enable @typescript-eslint/no-unsafe-return */
+        }
+      </div>
+    </section>
+
     <NewsletterSignup />
 
-    <footer
-      class="text-center py-16 mt-16 border-t border-border text-text-muted"
-    >
+    <footer class="text-center py-16 mt-16 border-t border-border text-text-muted">
+      <p class="flex flex-wrap justify-center gap-x-6 gap-y-2 mb-4">
+        <a
+          href="/overview"
+          class="text-text-muted hover:text-primary transition-colors"
+        >
+          About
+        </a>
+        <a
+          href="https://github.com/nicia-ai/typegraph/issues"
+          class="text-text-muted hover:text-primary transition-colors"
+        >
+          Contact
+        </a>
+      </p>
       <p>
         &copy; {new Date().getFullYear()}
         <a
           href="https://nicia.ai"
           class="text-primary hover:text-primary-dark transition-colors"
-          >Nicia AI, Inc.</a
-        > Open source software.
+        >
+          Nicia AI, Inc.
+        </a>{" "}
+        Open source software.
       </p>
     </footer>
   </main>
 </Layout>
 
+<script
+  type="application/ld+json"
+  is:inline
+  set:html={JSON.stringify(faqPageSchema)}
+></script>
 <style is:global>
   @reference "tailwindcss";
 

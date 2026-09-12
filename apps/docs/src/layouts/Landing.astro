@@ -2,6 +2,7 @@
 import "../styles/tailwind.css";
 
 import Analytics from "../components/Analytics.astro";
+import StructuredData from "../components/StructuredData.astro";
 
 interface Props {
   title: string;
@@ -51,12 +52,11 @@ const ogImageAlt =
     <meta name="twitter:image" content={ogImageUrl} />
     <meta name="twitter:image:alt" content={ogImageAlt} />
 
+    <StructuredData />
     <Analytics />
   </head>
   <body>
-    <nav
-      class="flex flex-wrap justify-center sm:justify-between items-center gap-4 sm:gap-8 py-6 px-4 sm:px-8 max-w-[1200px] mx-auto"
-    >
+    <nav class="flex flex-wrap justify-center sm:justify-between items-center gap-4 sm:gap-8 py-6 px-4 sm:px-8 max-w-[1200px] mx-auto">
       <a
         href="/"
         class="text-xl sm:text-2xl font-extrabold text-text-main no-underline flex items-center gap-3"
@@ -64,24 +64,25 @@ const ogImageAlt =
         <img src="/favicon.svg" alt="" class="w-10 h-10 sm:w-14 sm:h-14" />
         TypeGraph
       </a>
-      <div
-        class="flex flex-wrap justify-center gap-4 sm:gap-8 text-sm sm:text-base"
-      >
+      <div class="flex flex-wrap justify-center gap-4 sm:gap-8 text-sm sm:text-base">
         <a
           href="/overview"
           class="text-text-muted font-semibold hover:text-primary transition-colors"
-          >Docs</a
         >
+          Docs
+        </a>
         <a
           href="/getting-started"
           class="text-text-muted font-semibold hover:text-primary transition-colors"
-          >Get Started</a
         >
+          Get Started
+        </a>
         <a
           href="https://github.com/nicia-ai/typegraph"
           class="text-text-muted font-semibold hover:text-primary transition-colors"
-          >GitHub</a
         >
+          GitHub
+        </a>
       </div>
     </nav>
     <slot />

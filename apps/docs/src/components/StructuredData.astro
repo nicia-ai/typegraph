@@ -1,0 +1,14 @@
+---
+// Site-wide entity graph (Organization, WebSite, Person) for AI/answer-engine
+// structured data. Entity ids and the graph itself live in
+// `../lib/structured-data` (not exported from here) so pages with their own
+// JSON-LD, like the homepage FAQPage, can reference these entities by @id
+// without instantiating this component.
+import { buildEntityGraph } from "../lib/structured-data";
+---
+
+<script
+  type="application/ld+json"
+  is:inline
+  set:html={JSON.stringify(buildEntityGraph())}
+></script>
