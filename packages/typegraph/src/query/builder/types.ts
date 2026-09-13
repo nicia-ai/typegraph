@@ -83,9 +83,11 @@ export type BatchableQuery<R = unknown> = Readonly<{
   ) => Promise<readonly R[]>;
 }>;
 
-/** A relational query that can be embedded in an exact-one-statement batch. */
+/** A read whose result can be embedded in an exact-one-statement batch. */
 export type OneStatementBatchableQuery<R = unknown> = Readonly<{
-  compileOneStatementBatchItem: () => Readonly<{
+  execute?: () => Promise<R>;
+  /** @internal Resolved by `store.batchOnce()` before execution. */
+  compileOneStatementBatchItem?: () => Readonly<{
     query: CompiledSelectSql;
     outputNames: readonly string[];
     orderBy: readonly Readonly<{
@@ -93,18 +95,31 @@ export type OneStatementBatchableQuery<R = unknown> = Readonly<{
       direction: "asc" | "desc";
       nulls: "first" | "last";
     }>[];
-    mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
+    mapRows: (rows: readonly Record<string, unknown>[]) => R;
   }>;
 }>;
 
+/** A read that can be embedded in an exact-one-statement batch. */
+export type EmbeddableOneStatementRead<R> = OneStatementBatchableQuery<R> &
+  (
+    | BatchableQuery<unknown>
+    | Required<
+        Pick<OneStatementBatchableQuery<R>, "compileOneStatementBatchItem">
+      >
+  );
+
+/** An embeddable one-statement read that can also execute independently. */
+export type ExecutableOneStatementRead<R> = EmbeddableOneStatementRead<R> &
+  Required<Pick<OneStatementBatchableQuery<R>, "execute">>;
+
 /** Preserves each input query's result type in an exact-one-statement batch. */
 export type OneStatementBatchResults<
-  Queries extends readonly OneStatementBatchableQuery<unknown>[],
+  Queries extends readonly EmbeddableOneStatementRead<unknown>[],
 > = {
   -readonly [K in keyof Queries]: Queries[K] extends (
-    OneStatementBatchableQuery<infer R>
+    EmbeddableOneStatementRead<infer R>
   ) ?
-    readonly R[]
+    R
   : never;
 };
 

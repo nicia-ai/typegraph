@@ -2294,7 +2294,7 @@ when the schema-version guarantee is required.
 
 #### `store.batchOnce(...queries)`
 
-Executes two or more independent relational queries as exactly one SQL statement. Each query is
+Executes two or more independent reads as exactly one SQL statement. Each read is
 embedded as a CTE, and one JSON envelope carries the independently typed result sets back in input
 order. This is the batch surface for latency-bound page assembly: dozens of independent reads still
 form one statement and one database round trip. Each query's explicit `.orderBy()` is preserved even
@@ -2312,10 +2312,11 @@ const [people, recentCompanies] = await store.batchOnce(
 );
 ```
 
-`batchOnce()` has no sequential fallback. It accepts fluent relational queries and set operations;
-prepared queries and edge collection `batchFind*` values are excluded because they cannot be
-embedded without changing their execution contract. Use `batch()` when those deferred collection
-reads or transaction-backed serialization are the goal.
+`batchOnce()` has no sequential fallback. It accepts fluent relational queries, set operations, and
+the values returned by `neighborsQuery()`, `countNeighborsQuery()`, and `subgraphQuery()`. Prepared
+queries and edge collection `batchFind*` values are excluded because they cannot be embedded
+without changing their execution contract. Use `batch()` when those deferred collection reads or
+transaction-backed serialization are the goal.
 
 #### `store.batch(...queries)`
 
@@ -2461,7 +2462,7 @@ const [skills, employer, colleague] = await store.batch(
 
 | Pattern | Use |
 |---------|-----|
-| Independent fluent queries that must use one statement | `store.batchOnce()` |
+| Independent embeddable reads that must use one statement | `store.batchOnce()` |
 | Mixed fluent and deferred collection queries | `store.batch()` |
 | Load entity with all relationships (uniform) | `store.subgraph()` |
 | Fixing an N+1 / reducing round trips | `.traverse()` or `store.batchOnce()` (one statement), `store.subgraph()` (2–3), `getByIds()` (chunked) |
@@ -2499,6 +2500,10 @@ Both methods accept `direction: "out" | "in" | "both"` and the Store's temporal 
 positive integer `limit`. Null metadata sorts last on both dialects, and ties are resolved by edge
 ID so a bounded read is deterministic.
 
+Set `orderBy.by` to `"node"` to order by a schema-declared adjacent-node property instead. Omit it
+or use `"edge"` for edge metadata. Use `neighborsQuery()` and `countNeighborsQuery()` when the read
+must compose with other independent reads inside `batchOnce()`.
+
 ### Schema-Checked Read Scopes
 
 `store.withCheckedReads(expectedVersion, fn)` binds one expected active schema version to every
@@ -2528,7 +2533,7 @@ Extracts a typed subgraph by performing a BFS traversal from a root node, follow
 the specified edge kinds. Returns an indexed result with adjacency maps for immediate
 traversal.
 
-Use `edgeWindows` to cap an append-only edge kind per source at every traversal hop.
+Use `edgeWindows` to choose direction and cap an append-only edge kind per source at every traversal hop.
 The ranking is applied inside the recursive traversal and again during edge hydration,
 so omitted targets are not loaded and do not remain as orphan nodes.
 
@@ -2538,6 +2543,7 @@ const detail = await store.subgraph(document.id, {
   maxDepth: 3,
   edgeWindows: {
     hasVersion: {
+      direction: "in",
       limit: 1,
       orderBy: { field: "createdAt", direction: "desc" },
     },
@@ -2545,8 +2551,12 @@ const detail = await store.subgraph(document.id, {
 });
 ```
 
-Per-kind windows require the default `direction: "out"`; `direction: "both"` is refused because
-one edge has two endpoint partitions and “top N per current endpoint” would otherwise be ambiguous.
+Each window accepts `direction: "out" | "in" | "both"`; when omitted it inherits the traversal's
+global direction. Ranking is partitioned by the oriented source endpoint, so bidirectional windows
+have an unambiguous top N for each endpoint.
+
+`subgraphQuery()` has the same options and result as `subgraph()`, but compiles hydration and
+traversal into one statement so it can be passed to `batchOnce()`. It is also executable directly.
 
 Under the hood the traversal is a `WITH RECURSIVE` CTE and all the filtering and
 hydration happen in the database. The cost is a fixed 2 statements on SQLite
@@ -2829,7 +2839,7 @@ const results = await store
 
 #### `store.batchOnce(...queries)` and `store.batch(...queries)`
 
-Use `batchOnce()` to embed independent fluent queries in one statement. Use `batch()` for mixed
+Use `batchOnce()` to embed independent fluent and set-oriented query values in one statement. Use `batch()` for mixed
 fluent and deferred collection reads that may run sequentially. See
 [Batch Query Execution](#batch-query-execution) for the exact contracts.
 

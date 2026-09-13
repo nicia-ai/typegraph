@@ -4,6 +4,7 @@ import { getDialect } from "../dialect";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledRowsSql } from "../sql-intent";
 import type {
+  EmbeddableOneStatementRead,
   OneStatementBatchableQuery,
   OneStatementBatchResults,
 } from "./types";
@@ -18,7 +19,9 @@ export function oneStatementBatchOrderColumn(index: number): string {
 function buildOrdinalOrder(
   rowAlias: string,
   orderBy: ReturnType<
-    OneStatementBatchableQuery<unknown>["compileOneStatementBatchItem"]
+    NonNullable<
+      OneStatementBatchableQuery<unknown>["compileOneStatementBatchItem"]
+    >
   >["orderBy"],
 ): SqlFragment {
   if (orderBy.length === 0) return sql.empty();
@@ -42,13 +45,26 @@ type BatchEnvelopeRow = Readonly<{
 
 /** Executes independent relational reads through one database statement. */
 export async function executeOneStatementBatch<
-  const Queries extends readonly OneStatementBatchableQuery<unknown>[],
+  const Queries extends readonly EmbeddableOneStatementRead<unknown>[],
 >(
   backend: GraphBackend | TransactionBackend,
   queries: Queries,
 ): Promise<OneStatementBatchResults<Queries>> {
   const dialect = getDialect(backend.dialect);
-  const items = queries.map((query) => query.compileOneStatementBatchItem());
+  const items = queries.map((query) => {
+    const compile = query.compileOneStatementBatchItem;
+    if (compile === undefined) {
+      throw new ConfigurationError(
+        "Read cannot be embedded in store.batchOnce().",
+        { operation: "batchOnce" },
+        {
+          suggestion:
+            "Pass a fluent relational query or a set-oriented read returned by the store's query helpers.",
+        },
+      );
+    }
+    return compile.call(query);
+  });
   const ctes: SqlFragment[] = [];
   const branches: SqlFragment[] = [];
 

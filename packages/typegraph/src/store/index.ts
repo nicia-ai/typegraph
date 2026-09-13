@@ -7,7 +7,10 @@ export type {
 } from "../core/runtime-kind";
 export type {
   EdgeReadWindow,
+  NeighborNodeOrderField,
+  NeighborOrder,
   NeighborOrderField,
+  NeighborRead,
   NeighborReadOptions,
   NeighborResult,
 } from "./neighbors";
@@ -120,6 +123,7 @@ export type {
   AnyEdge,
   AnyNode,
   SubgraphOptions,
+  SubgraphRead,
   SubgraphResult,
   SubsetEdge,
   SubsetNode,

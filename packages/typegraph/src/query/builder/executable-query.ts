@@ -713,7 +713,7 @@ export class ExecutableQuery<
   }
 
   /** @internal Embedding contract consumed by `store.batchOnce()`. */
-  compileOneStatementBatchItem(): Readonly<{
+  compileOneStatementBatchItem?(): Readonly<{
     query: CompiledSelectSql;
     outputNames: readonly string[];
     orderBy: readonly Readonly<{

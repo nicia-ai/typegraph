@@ -312,15 +312,16 @@ When the source node is already available, `store.neighbors()` is the direct one
 ```typescript
 const [latest] = await store.neighbors(document, {
   edges: ["hasVersion"],
-  orderBy: { field: "createdAt", direction: "desc" },
+  orderBy: { by: "node", field: "sequence", direction: "desc" },
   limit: 1,
 });
 ```
 
-Use a fluent traversal when ordering depends on a target property rather than edge metadata.
+Use `by: "edge"` (or omit `by`) for edge metadata and `by: "node"` for an adjacent-node property.
+Both forms sort nulls last and use the edge ID as the deterministic final tie-breaker.
 
-Traverse to the target, sort by its version sequence (or timestamp), and limit the result.
-This reads the edge and target together in one statement:
+The equivalent fluent traversal is useful when additional target predicates or projections are
+needed:
 
 ```typescript
 const [newest] = await store.query()

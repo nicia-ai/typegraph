@@ -2,14 +2,21 @@ import type { GraphBackend, RowProps } from "../backend/types";
 import type { AllNodeTypes, EdgeKinds, GraphDef } from "../core/define-graph";
 import type { TemporalMode } from "../core/types";
 import { ValidationError } from "../errors";
+import type { ExecutableOneStatementRead } from "../query/builder/types";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import type { SqlSchema } from "../query/compiler/schema";
 import {
   compileTemporalFilter,
   currentReadInstant,
 } from "../query/compiler/temporal";
+import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
+import { getDialect } from "../query/dialect";
+import { jsonPointer } from "../query/json-pointer";
+import type { FieldTypeInfo } from "../query/schema-introspector";
+import { createSchemaIntrospector } from "../query/schema-introspector";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import type { KindRegistry } from "../registry";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import type {
   Edge,
@@ -21,6 +28,27 @@ import type {
 /** Edge metadata fields accepted by bounded neighbor and subgraph reads. */
 export type NeighborOrderField =
   "createdAt" | "id" | "updatedAt" | "validFrom" | "validTo";
+
+/** Node property names accepted by adjacent-node ordering. */
+export type NeighborNodeOrderField<G extends GraphDef> = {
+  [K in keyof G["nodes"] & string]: Exclude<
+    keyof Node<G["nodes"][K]["type"]>,
+    "id" | "kind" | "meta"
+  > &
+    string;
+}[keyof G["nodes"] & string];
+
+export type NeighborOrder<G extends GraphDef> =
+  | Readonly<{
+      by?: "edge";
+      field: NeighborOrderField;
+      direction?: "asc" | "desc";
+    }>
+  | Readonly<{
+      by: "node";
+      field: NeighborNodeOrderField<G>;
+      direction?: "asc" | "desc";
+    }>;
 
 const NEIGHBOR_ORDER_FIELDS = [
   "createdAt",
@@ -40,6 +68,8 @@ function isNeighborOrderField(field: string): field is NeighborOrderField {
 /** Per-edge-kind ordering and bound applied before traversal expands an edge. */
 export type EdgeReadWindow = Readonly<{
   limit: number;
+  /** Direction for this edge kind; defaults to the traversal direction. */
+  direction?: "both" | "in" | "out";
   orderBy?: Readonly<{
     field: NeighborOrderField;
     direction?: "asc" | "desc";
@@ -47,20 +77,23 @@ export type EdgeReadWindow = Readonly<{
 }>;
 
 /** Options for reading adjacent edge-node pairs without hydrating all targets. */
-export type NeighborReadOptions<
+type NeighborReadOptionsBoundary<
   G extends GraphDef,
   K extends EdgeKinds<G>,
 > = Readonly<{
-  edges: readonly K[];
+  edges?: readonly K[];
   direction?: "both" | "in" | "out";
-  orderBy?: Readonly<{
-    field: NeighborOrderField;
-    direction?: "asc" | "desc";
-  }>;
+  orderBy?: NeighborOrder<G>;
   limit?: number;
   temporalMode?: TemporalMode;
   asOf?: string;
 }>;
+
+export type NeighborReadOptions<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = NeighborReadOptionsBoundary<G, K> &
+  Required<Pick<NeighborReadOptionsBoundary<G, K>, "edges">>;
 
 /** One edge and the node it reaches from the requested source and direction. */
 export type NeighborResult<
@@ -73,26 +106,60 @@ export type NeighborResult<
 
 type NeighborRow = Readonly<Record<string, unknown>>;
 
+function mapNeighborCountRows(rows: readonly NeighborRow[]): number {
+  return Number(rows[0]?.["count"] ?? 0);
+}
+
 type NeighborContext = Readonly<{
   graphId: string;
   backend: GraphBackend;
   schema: SqlSchema;
   defaultTemporalMode: TemporalMode;
+  registry: KindRegistry;
 }>;
+
+export type NeighborRead<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = ExecutableOneStatementRead<readonly NeighborResult<G, K>[]>;
+
+export function createNeighborRead<G extends GraphDef, K extends EdgeKinds<G>>(
+  ctx: NeighborContext,
+  source: GraphNodeReference<G>,
+  options: NeighborReadOptions<G, K>,
+): NeighborRead<G, K> {
+  validateOptions(ctx, options);
+  const query = buildNeighborQuery(ctx, source, options, false);
+  function mapRows(
+    rows: readonly NeighborRow[],
+  ): readonly NeighborResult<G, K>[] {
+    return rows.map((row) => ({
+      edge: mapEdge(row) as GraphEdgeForKinds<G, K>,
+      node: mapNode(row) as Node<AllNodeTypes<G>>,
+    }));
+  }
+  return {
+    execute: async () => {
+      if (options.edges.length === 0) return [];
+      return mapRows(
+        await ctx.backend.execute<NeighborRow>(asCompiledRowsSql(query)),
+      );
+    },
+    compileOneStatementBatchItem: () => ({
+      query: asCompiledRowsSql(query),
+      outputNames: neighborOutputNames(),
+      orderBy: neighborBatchOrder(options.orderBy),
+      mapRows,
+    }),
+  };
+}
 
 export async function readNeighbors<G extends GraphDef, K extends EdgeKinds<G>>(
   ctx: NeighborContext,
   source: GraphNodeReference<G>,
   options: NeighborReadOptions<G, K>,
 ): Promise<readonly NeighborResult<G, K>[]> {
-  validateOptions(options);
-  if (options.edges.length === 0) return [];
-  const query = buildNeighborQuery(ctx, source, options, false);
-  const rows = await ctx.backend.execute<NeighborRow>(asCompiledRowsSql(query));
-  return rows.map((row) => ({
-    edge: mapEdge(row) as GraphEdgeForKinds<G, K>,
-    node: mapNode(row) as Node<AllNodeTypes<G>>,
-  }));
+  return createNeighborRead(ctx, source, options).execute();
 }
 
 export async function countNeighbors<
@@ -103,11 +170,33 @@ export async function countNeighbors<
   source: GraphNodeReference<G>,
   options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
 ): Promise<number> {
-  if (options.edges.length === 0) return 0;
-  const rows = await ctx.backend.execute<Readonly<{ count: number | string }>>(
-    asCompiledRowsSql(buildNeighborQuery(ctx, source, options, true)),
-  );
-  return Number(rows[0]?.count ?? 0);
+  return createNeighborCountRead(ctx, source, options).execute();
+}
+
+export function createNeighborCountRead<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+>(
+  ctx: NeighborContext,
+  source: GraphNodeReference<G>,
+  options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+): ExecutableOneStatementRead<number> {
+  validateEdgeReadBounds(options, "countNeighbors");
+  const query = buildNeighborQuery(ctx, source, options, true);
+  return {
+    execute: async () => {
+      if (options.edges.length === 0) return 0;
+      return mapNeighborCountRows(
+        await ctx.backend.execute<NeighborRow>(asCompiledRowsSql(query)),
+      );
+    },
+    compileOneStatementBatchItem: () => ({
+      query: asCompiledRowsSql(query),
+      outputNames: ["count"],
+      orderBy: [],
+      mapRows: mapNeighborCountRows,
+    }),
+  };
 }
 
 function buildNeighborQuery<G extends GraphDef, K extends EdgeKinds<G>>(
@@ -146,10 +235,11 @@ function buildNeighborQuery<G extends GraphDef, K extends EdgeKinds<G>>(
   if (aggregate) {
     return sql`SELECT COUNT(DISTINCT e.id) AS count FROM ${ctx.schema.edgesTable} e JOIN ${ctx.schema.nodesTable} n ON ${endpoint.join} WHERE ${where}`;
   }
-  const order = buildOrder(options.orderBy);
+  const orderValue = buildOrderValue(ctx, options.orderBy);
+  const order = buildOrder(options.orderBy, orderValue);
   const limit =
     options.limit === undefined ? sql.empty() : sql` LIMIT ${options.limit}`;
-  return sql`SELECT ${neighborColumns()} FROM ${ctx.schema.edgesTable} e JOIN ${ctx.schema.nodesTable} n ON ${endpoint.join} WHERE ${where} ORDER BY ${order}${limit}`;
+  return sql`SELECT ${neighborColumns()}, ${orderValue} AS typegraph_neighbor_order FROM ${ctx.schema.edgesTable} e JOIN ${ctx.schema.nodesTable} n ON ${endpoint.join} WHERE ${where} ORDER BY ${order}${limit}`;
 }
 
 function endpointClauses(
@@ -200,22 +290,78 @@ export function edgeOrderColumnName(field: NeighborOrderField): string {
   }
 }
 
-function buildOrder(
+function buildOrderValue(
+  ctx: NeighborContext,
   orderBy: NeighborReadOptions<GraphDef, string>["orderBy"],
 ): SqlFragment {
-  const direction = orderBy?.direction ?? "asc";
-  const column = edgeOrderColumnName(orderBy?.field ?? "id");
-  return sql`CASE WHEN e.${sql.raw(column)} IS NULL THEN 1 ELSE 0 END ASC, e.${sql.raw(column)} ${sql.raw(direction.toUpperCase())}, e.id ASC`;
+  if (orderBy?.by !== "node") {
+    return sql`e.${sql.raw(edgeOrderColumnName(orderBy?.field ?? "id"))}`;
+  }
+  return compileTypedJsonExtract({
+    column: sql.raw("n.props"),
+    dialect: getDialect(ctx.backend.dialect),
+    fallback: "text",
+    pointer: jsonPointer([orderBy.field]),
+    valueType: resolveNodeOrderFieldType(ctx, orderBy.field)?.valueType,
+  });
 }
 
-function validateOptions(options: Readonly<{ limit?: number }>): void {
+function buildOrder(
+  orderBy: NeighborReadOptions<GraphDef, string>["orderBy"],
+  value: SqlFragment,
+): SqlFragment {
+  const direction = orderBy?.direction ?? "asc";
+  return sql`CASE WHEN ${value} IS NULL THEN 1 ELSE 0 END ASC, ${value} ${sql.raw(direction.toUpperCase())}, e.id ASC`;
+}
+
+function neighborBatchOrder(
+  orderBy: NeighborReadOptions<GraphDef, string>["orderBy"],
+): readonly Readonly<{
+  column: string;
+  direction: "asc" | "desc";
+  nulls: "last";
+}>[] {
+  return [
+    {
+      column: "typegraph_neighbor_order",
+      direction: orderBy?.direction ?? "asc",
+      nulls: "last",
+    },
+    { column: "edge_id", direction: "asc", nulls: "last" },
+  ];
+}
+
+function validateOptions(
+  ctx: NeighborContext,
+  options: NeighborReadOptions<GraphDef, string>,
+): void {
   validateEdgeReadBounds(options, "neighbors");
+  if (options.orderBy?.by !== "node") return;
+  resolveNodeOrderFieldType(ctx, options.orderBy.field);
+}
+
+function resolveNodeOrderFieldType(
+  ctx: NeighborContext,
+  field: string,
+): FieldTypeInfo | undefined {
+  const nodeKinds = [...ctx.registry.nodeKinds.keys()];
+  const introspector = createSchemaIntrospector(ctx.registry.nodeKinds);
+  const declaringKinds = nodeKinds.filter(
+    (kind) => introspector.getFieldTypeInfo(kind, field) !== undefined,
+  );
+  if (declaringKinds.length === 0) {
+    throw new ValidationError("Unknown adjacent-node ordering field", {
+      issues: [{ path: "neighbors.orderBy.field", message: "Invalid field" }],
+    });
+  }
+  return introspector.getSharedFieldTypeInfo(declaringKinds, field);
 }
 
 export function validateEdgeReadBounds(
   options: Readonly<{
     limit?: number;
-    orderBy?: Readonly<{ field: string; direction?: string }>;
+    direction?: string;
+    orderBy?: Readonly<{ by?: string; field: string; direction?: string }>;
   }>,
   path: string,
 ): void {
@@ -230,8 +376,22 @@ export function validateEdgeReadBounds(
       },
     );
   }
+  if (
+    options.direction !== undefined &&
+    options.direction !== "both" &&
+    options.direction !== "in" &&
+    options.direction !== "out"
+  ) {
+    throw new ValidationError("Unknown edge traversal direction", {
+      issues: [{ path: `${path}.direction`, message: "Invalid direction" }],
+    });
+  }
   const field = options.orderBy?.field;
-  if (field !== undefined && !isNeighborOrderField(field)) {
+  if (
+    field !== undefined &&
+    options.orderBy?.by !== "node" &&
+    !isNeighborOrderField(field)
+  ) {
     throw new ValidationError("Unknown edge ordering field", {
       issues: [{ path: `${path}.orderBy.field`, message: "Invalid field" }],
     });
@@ -287,6 +447,34 @@ function neighborColumns(): SqlFragment {
     ],
     sql`, `,
   );
+}
+
+function neighborOutputNames(): readonly string[] {
+  return [
+    "edge_graph_id",
+    "edge_id",
+    "edge_kind",
+    "edge_from_kind",
+    "edge_from_id",
+    "edge_to_kind",
+    "edge_to_id",
+    "edge_props",
+    "edge_valid_from",
+    "edge_valid_to",
+    "edge_created_at",
+    "edge_updated_at",
+    "edge_deleted_at",
+    "node_graph_id",
+    "node_id",
+    "node_kind",
+    "node_props",
+    "node_version",
+    "node_valid_from",
+    "node_valid_to",
+    "node_created_at",
+    "node_updated_at",
+    "node_deleted_at",
+  ];
 }
 
 function mapEdge(row: NeighborRow): Edge {

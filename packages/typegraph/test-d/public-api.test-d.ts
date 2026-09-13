@@ -399,6 +399,31 @@ expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
 );
 
 declare const store: Store<typeof graph>;
+const neighborSource = {
+  kind: "Person",
+  id: "person-1" as NodeId<typeof Person>,
+} as const;
+const neighborQuery = store.neighborsQuery(neighborSource, {
+  edges: ["knows"],
+  orderBy: { by: "node", field: "name", direction: "desc" },
+});
+expectType<Promise<number>>(
+  store.countNeighborsQuery(neighborSource, { edges: ["knows"] }).execute(),
+);
+expectError(
+  store.neighborsQuery(neighborSource, {
+    edges: ["knows"],
+    orderBy: { by: "node", field: "missing" },
+  }),
+);
+const subgraphQuery = store.subgraphQuery("person-1" as NodeId<typeof Person>, {
+  edges: ["knows", "worksAt"],
+  edgeWindows: {
+    knows: { direction: "both", limit: 1 },
+    worksAt: { direction: "out", limit: 2 },
+  },
+});
+store.batchOnce(neighborQuery, subgraphQuery);
 declare const backend: GraphBackend;
 type NativeTransaction = Readonly<{
   executeNative: (statement: string) => void;

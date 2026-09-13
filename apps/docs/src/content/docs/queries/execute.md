@@ -275,14 +275,16 @@ async function exportAllUsers(): Promise<void> {
 
 ## Batch Execution
 
-When independent fluent queries must share one database round trip, use `store.batchOnce()`.
-It embeds each query as a CTE and returns the independently typed result sets in input order. An
-explicit `.orderBy()` remains effective even when the sort field is not selected:
+When independent reads must share one database round trip, use `store.batchOnce()`.
+It embeds each read as a CTE and returns the independently typed results in input order. Fluent
+queries preserve explicit ordering even when the sort field is not selected. Set-oriented graph
+reads use their deferred `*Query()` forms:
 
 ```typescript
-const [people, companies] = await store.batchOnce(
+const [people, neighbors, neighborhood] = await store.batchOnce(
   store.query().from("Person", "p").select((ctx) => ctx.p),
-  store.query().from("Company", "c").select((ctx) => ctx.c),
+  store.neighborsQuery(person, { edges: ["knows"], limit: 5 }),
+  store.subgraphQuery(person.id, { edges: ["knows"], maxDepth: 2 }),
 );
 ```
 
@@ -299,9 +301,11 @@ Connection reuse is the adapter's business either way.
 Whole-node, whole-edge, and spread selections detected during planning use a full fetch from
 the start. A selector branch that depends on actual row values can still trigger the fallback.
 
-It will not fix an N+1. For that, fold the work into one query: `batchOnce()` for independent fluent
-reads, a `.traverse()` chain, `store.neighbors()`, or `store.countNeighbors()` (one statement each),
-`store.subgraph()` (2 statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
+It will not merge arbitrary promises or collection calls. Use fluent queries or deferred
+`neighborsQuery()`, `countNeighborsQuery()`, and `subgraphQuery()` reads when independent result
+shapes must share its one statement. Other alternatives are a `.traverse()` chain,
+`store.neighbors()` or `store.countNeighbors()` (one statement each), `store.subgraph()` (2
+statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
 `bulkFindByIndex()`, which are chunked rather than fixed-cost.
 
 It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can

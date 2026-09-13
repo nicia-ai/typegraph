@@ -4,7 +4,6 @@ import {
 } from "../backend/capabilities/recursive-traversal";
 import { type RecordedInstant } from "../core/temporal";
 import { type TemporalMode } from "../core/types";
-import { ConfigurationError } from "../errors";
 import { type RecursiveCyclePolicy } from "../query/ast";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import {
@@ -93,16 +92,6 @@ export function buildReachableCte(
   const edgeWindows = Object.entries(options.edgeWindows ?? {}).filter(
     (entry): entry is [string, EdgeReadWindow] => entry[1] !== undefined,
   );
-  if (edgeWindows.length > 0 && options.direction === "both") {
-    throw new ConfigurationError(
-      "Per-edge-kind traversal windows do not support direction: both.",
-      { operation: options.operation, direction: options.direction },
-      {
-        suggestion:
-          "Use direction: out or direction: in so each edge has one unambiguous endpoint partition.",
-      },
-    );
-  }
 
   const initialPath =
     trackPath ? options.dialect.initializePath(sql.raw("n.id")) : undefined;
@@ -143,25 +132,30 @@ export function buildReachableCte(
   const forceWorktableOuterJoinOrder =
     options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
 
+  const usesOrientedEdges = edgeWindows.length > 0;
   const recursiveCase = compileRecursiveBranch({
     recursiveColumns,
     whereClauses: recursiveWhere,
-    direction: options.direction,
+    direction: usesOrientedEdges ? "out" : options.direction,
     forceWorktableOuterJoinOrder,
     schema,
     edgesTable:
-      edgeWindows.length === 0 ?
-        schema.edgesTable
-      : sql.identifier("typegraph_windowed_edges"),
+      usesOrientedEdges ?
+        sql.identifier("typegraph_windowed_edges")
+      : schema.edgesTable,
+    ...(usesOrientedEdges && {
+      joinField: "typegraph_source_id",
+      targetField: "typegraph_target_id",
+      targetKindField: "typegraph_target_kind",
+    }),
   });
 
   const windowedEdges =
-    edgeWindows.length === 0 ?
-      undefined
-    : buildWindowedEdgesCte(
+    usesOrientedEdges ?
+      buildWindowedEdgesCte(
         schema.edgesTable,
-        options.direction as Exclude<TraversalDirection, "both">,
-        edgeWindows,
+        options.direction,
+        options.edgeKinds.map((kind) => [kind, options.edgeWindows?.[kind]]),
         sql.join(
           [
             sql`e.graph_id = ${options.graphId}`,
@@ -170,7 +164,8 @@ export function buildReachableCte(
           ],
           sql` AND `,
         ),
-      );
+      )
+    : undefined;
   return windowedEdges === undefined ?
       sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`
     : sql`WITH RECURSIVE typegraph_windowed_edges AS (${windowedEdges}), reachable AS (${baseCase} UNION ALL ${recursiveCase})`;
@@ -183,6 +178,9 @@ type CompileRecursiveBranchOptions = Readonly<{
   forceWorktableOuterJoinOrder: boolean;
   schema: SqlSchema;
   edgesTable: SqlFragment;
+  joinField?: "from_id" | "to_id" | "typegraph_source_id";
+  targetField?: "from_id" | "to_id" | "typegraph_target_id";
+  targetKindField?: "from_kind" | "to_kind" | "typegraph_target_kind";
 }>;
 
 function compileRecursiveBranch(
@@ -195,9 +193,9 @@ function compileRecursiveBranch(
       return buildDirectionalBranch({
         selectClause,
         whereClauses: options.whereClauses,
-        joinField: "from_id",
-        targetField: "to_id",
-        targetKindField: "to_kind",
+        joinField: options.joinField ?? "from_id",
+        targetField: options.targetField ?? "to_id",
+        targetKindField: options.targetKindField ?? "to_kind",
         forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
         schema: options.schema,
         edgesTable: options.edgesTable,
@@ -230,9 +228,9 @@ function compileRecursiveBranch(
 type DirectionalBranchOptions = Readonly<{
   selectClause: SqlFragment;
   whereClauses: readonly SqlFragment[];
-  joinField: "from_id" | "to_id";
-  targetField: "from_id" | "to_id";
-  targetKindField: "from_kind" | "to_kind";
+  joinField: "from_id" | "to_id" | "typegraph_source_id";
+  targetField: "from_id" | "to_id" | "typegraph_target_id";
+  targetKindField: "from_kind" | "to_kind" | "typegraph_target_kind";
   forceWorktableOuterJoinOrder: boolean;
   schema: SqlSchema;
   edgesTable: SqlFragment;
@@ -282,23 +280,33 @@ function buildBidirectionalBranch(
 
 export function buildWindowedEdgesCte(
   edgesTable: SqlFragment,
-  direction: Exclude<TraversalDirection, "both">,
-  windows: readonly [string, EdgeReadWindow][],
+  defaultDirection: TraversalDirection,
+  edgeKinds: readonly [string, EdgeReadWindow | undefined][],
   where: SqlFragment,
 ): SqlFragment {
-  const endpointKind = direction === "out" ? "from_kind" : "to_kind";
-  const endpointId = direction === "out" ? "from_id" : "to_id";
-  const orderTerms = windows.flatMap(([kind, window]) => {
-    const column = edgeOrderColumnName(window.orderBy?.field ?? "id");
-    const orderDirection = window.orderBy?.direction ?? "asc";
-    return [
-      sql`CASE WHEN e.kind = ${kind} AND e.${sql.raw(column)} IS NULL THEN 1 ELSE 0 END ASC`,
-      sql`CASE WHEN e.kind = ${kind} THEN e.${sql.raw(column)} END ${sql.raw(orderDirection.toUpperCase())}`,
-      sql`CASE WHEN e.kind = ${kind} THEN e.id END ASC`,
-    ];
+  const branches = edgeKinds.flatMap(([kind, window]) => {
+    const direction = window?.direction ?? defaultDirection;
+    const directions: readonly Exclude<TraversalDirection, "both">[] =
+      direction === "both" ? ["out", "in"] : [direction];
+    return directions.map((orientedDirection) => {
+      const sourceKind = orientedDirection === "out" ? "from_kind" : "to_kind";
+      const sourceId = orientedDirection === "out" ? "from_id" : "to_id";
+      const targetKind = orientedDirection === "out" ? "to_kind" : "from_kind";
+      const targetId = orientedDirection === "out" ? "to_id" : "from_id";
+      const column = edgeOrderColumnName(window?.orderBy?.field ?? "id");
+      const orderDirection = window?.orderBy?.direction ?? "asc";
+      const omitReverseSelfLoop =
+        direction === "both" && orientedDirection === "in" ?
+          sql` AND NOT (e.from_kind = e.to_kind AND e.from_id = e.to_id)`
+        : sql.empty();
+      const oriented = sql`SELECT e.*, e.${sql.raw(sourceKind)} AS typegraph_source_kind, e.${sql.raw(sourceId)} AS typegraph_source_id, e.${sql.raw(targetKind)} AS typegraph_target_kind, e.${sql.raw(targetId)} AS typegraph_target_id`;
+      if (window === undefined) {
+        return sql`${oriented}, 1 AS typegraphedgerank FROM ${edgesTable} e WHERE ${where} AND e.kind = ${kind}${omitReverseSelfLoop}`;
+      }
+      const rank = sql`ROW_NUMBER() OVER (PARTITION BY e.kind, e.${sql.raw(sourceKind)}, e.${sql.raw(sourceId)} ORDER BY CASE WHEN e.${sql.raw(column)} IS NULL THEN 1 ELSE 0 END ASC, e.${sql.raw(column)} ${sql.raw(orderDirection.toUpperCase())}, e.id ASC)`;
+      const ranked = sql`${oriented}, ${rank} AS typegraphedgerank FROM ${edgesTable} e WHERE ${where} AND e.kind = ${kind}${omitReverseSelfLoop}`;
+      return sql`SELECT * FROM (${ranked}) ranked WHERE ranked.typegraphedgerank <= ${window.limit}`;
+    });
   });
-  const limitCases = windows.map(
-    ([kind, window]) => sql`WHEN ranked.kind = ${kind} THEN ${window.limit}`,
-  );
-  return sql`SELECT * FROM (SELECT e.*, ROW_NUMBER() OVER (PARTITION BY e.kind, e.${sql.raw(endpointKind)}, e.${sql.raw(endpointId)} ORDER BY ${sql.join(orderTerms, sql`, `)}) AS typegraphedgerank FROM ${edgesTable} e WHERE ${where}) ranked WHERE ranked.typegraphedgerank <= CASE ${sql.join(limitCases, sql` `)} ELSE 2147483647 END`;
+  return sql.join(branches, sql` UNION ALL `);
 }

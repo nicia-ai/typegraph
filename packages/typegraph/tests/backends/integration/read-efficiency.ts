@@ -102,5 +102,44 @@ export function registerReadEfficiencyIntegrationTests(
 
       expect(neighbors[0]?.edge.id).toBe(boundedEdge.id);
     });
+
+    it("orders neighbors by adjacent-node properties", async () => {
+      const store = await context.createStore(integrationTestGraph);
+      const root = await store.nodes.Person.create({ name: "root" });
+      const older = await store.nodes.Person.create({ name: "older", age: 2 });
+      const newer = await store.nodes.Person.create({ name: "newer", age: 10 });
+      await store.edges.knows.create(root, older, {}, { id: "edge-a" });
+      await store.edges.knows.create(root, newer, {}, { id: "edge-b" });
+
+      const neighbors = await store.neighbors(root, {
+        edges: ["knows"],
+        orderBy: { by: "node", field: "age", direction: "desc" },
+        limit: 1,
+      });
+
+      expect(neighbors[0]?.node.id).toBe(newer.id);
+    });
+
+    it("composes neighbor aggregates and subgraphs into one statement", async () => {
+      const statements: string[] = [];
+      const store = await context.createStore(integrationTestGraph, {
+        hooks: { onQueryStart: (ctx) => statements.push(ctx.sql) },
+      });
+      const root = await store.nodes.Person.create({ name: "root" });
+      const target = await store.nodes.Person.create({ name: "target" });
+      await store.edges.knows.create(root, target, {});
+      statements.length = 0;
+
+      const [neighbors, count, subgraph] = await store.batchOnce(
+        store.neighborsQuery(root, { edges: ["knows"] }),
+        store.countNeighborsQuery(root, { edges: ["knows"] }),
+        store.subgraphQuery(root.id, { edges: ["knows"], maxDepth: 1 }),
+      );
+
+      expect(neighbors).toHaveLength(1);
+      expect(count).toBe(1);
+      expect(subgraph.nodes.has(target.id)).toBe(true);
+      expect(statements).toHaveLength(1);
+    });
   });
 }

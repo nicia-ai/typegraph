@@ -83,8 +83,9 @@ This holds for all query types:
 
 The fluent query needs no dataloader for that joined read because the database handles its entire
 join graph in one execution. Separate reads can still form an N+1; use a traversal, `batchOnce()`,
-`neighbors()` / `countNeighbors()`, `subgraph()`, or the chunked collection reads described below
-instead of looping them or wrapping them in `store.batch()`.
+`neighbors()` / `countNeighbors()`, `subgraph()`, or the deferred `neighborsQuery()` /
+`countNeighborsQuery()` / `subgraphQuery()` forms when unlike result shapes must share one
+statement. Chunked collection reads remain useful for homogeneous ID and endpoint sets.
 
 ## Batch Write Patterns
 
@@ -449,7 +450,7 @@ queries. Results are returned in input order with `undefined` for missing entrie
 const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 ```
 
-For multiple independent fluent queries with different shapes and filters, use
+For multiple independent embeddable reads with different shapes and filters, use
 [`store.batchOnce()`](/schemas-stores#batch-query-execution) to execute exactly one statement:
 
 ```typescript
@@ -468,6 +469,20 @@ const [activeUsers, recentOrders] = await store.batchOnce(
 );
 ```
 
+Deferred set-oriented reads compose in the same call:
+
+```typescript
+const [latest, versionCount, detail] = await store.batchOnce(
+  store.neighborsQuery(document, {
+    edges: ["hasVersion"],
+    orderBy: { by: "node", field: "sequence", direction: "desc" },
+    limit: 1,
+  }),
+  store.countNeighborsQuery(document, { edges: ["hasVersion"] }),
+  store.subgraphQuery(document.id, { edges: ["hasSection"], maxDepth: 2 }),
+);
+```
+
 Use `store.batch()` when deferred edge collection reads must participate. It runs them in sequence.
 On a transactional backend it still issues at least one statement per query plus
 `begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no
@@ -478,7 +493,7 @@ Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFind
 participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
 into one transaction — the statement count is unchanged either way. If the round trips are what
 hurt, replace the calls with `store.neighbors()` / `store.countNeighbors()` or a traversal (one
-statement), or `store.subgraph()` (a fixed 2 on SQLite, 3 on PostgreSQL, however large the result).
+statement), or compose their deferred query forms and `subgraphQuery()` in `batchOnce()`.
 
 To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
 [Edge Collections](/schemas-stores#edge-collections)).

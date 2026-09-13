@@ -154,7 +154,7 @@ export function registerSubgraphIntegrationTests(
       expect(result.adjacency.get(ids.bobId)?.get("knows")).toHaveLength(1);
     });
 
-    it("keeps unwindowed edge kinds and refuses ambiguous windows", async () => {
+    it("keeps unwindowed kinds and supports per-kind traversal directions", async () => {
       const store = context.getStore();
       const result = await store.subgraph(ids.aliceId as never, {
         edges: ["knows", "worksAt"],
@@ -164,13 +164,23 @@ export function registerSubgraphIntegrationTests(
 
       expect(result.nodes.has(ids.bobId)).toBe(true);
       expect(result.nodes.has(ids.acmeId)).toBe(true);
-      await expect(
-        store.subgraph(ids.aliceId as never, {
-          edges: ["knows"],
-          direction: "both",
-          edgeWindows: { knows: { limit: 1 } },
-        }),
-      ).rejects.toThrow("do not support direction: both");
+      const incoming = await store.subgraph(ids.bobId as never, {
+        edges: ["knows", "worksAt"],
+        edgeWindows: {
+          knows: { direction: "in", limit: 1 },
+          worksAt: { direction: "out", limit: 1 },
+        },
+      });
+      expect(incoming.nodes.has(ids.aliceId)).toBe(true);
+      expect(incoming.nodes.has(ids.acmeId)).toBe(true);
+
+      const both = await store.subgraph(ids.bobId as never, {
+        edges: ["knows"],
+        direction: "both",
+        edgeWindows: { knows: { limit: 1 } },
+      });
+      expect(both.nodes.has(ids.aliceId)).toBe(true);
+      expect(both.nodes.has(ids.charlieId)).toBe(true);
       await expect(
         store.subgraph(ids.aliceId as never, {
           edges: ["knows"],
