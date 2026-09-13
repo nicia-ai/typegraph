@@ -36,6 +36,13 @@ await store.edges.knows.create(alice, bob);
 await store.close();
 ```
 
+For latency-sensitive reads, `store.batchOnce()` combines independent fluent
+queries into one statement. `store.neighbors()` and `store.countNeighbors()`
+read through selected edge kinds without first hydrating every target, while
+`subgraph({ edgeWindows })` applies per-kind ordering and limits during
+traversal. See [Schemas and Stores](https://typegraph.dev/schemas-stores) for
+examples and constraints.
+
 Use the explicit `/adapters/drizzle/...` entrypoints when your application owns
 the database connection or needs adapter-native transaction handles.
 

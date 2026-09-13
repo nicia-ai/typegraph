@@ -2,6 +2,7 @@
  * ExecutableAggregateQuery - A query with aggregate functions that can be executed.
  */
 import { type GraphDef } from "../../core/define-graph";
+import { ConfigurationError } from "../../errors";
 import { createDataKeyedBag } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -14,6 +15,7 @@ import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
+import { getQueryBuilderInternalContext } from "./internal-context";
 import { hasParameterReferences } from "./prepared-query";
 import {
   buildQueryTemplate,
@@ -186,6 +188,15 @@ export class ExecutableAggregateQuery<
    * @throws Error if no backend is configured
    */
   async execute(): Promise<readonly AggregateResult<R>[]> {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
+      undefined
+    ) {
+      throw new ConfigurationError(
+        "Aggregate queries are unavailable inside withCheckedReads().",
+        { operation: "withCheckedReads.aggregate" },
+      );
+    }
     const backend = this.#config.backend;
     if (!backend) {
       throw new Error(

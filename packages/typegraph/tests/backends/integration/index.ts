@@ -46,6 +46,7 @@ export { registerPaginationIntegrationTests } from "./pagination";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
 export { registerQueryHookIntegrationTests } from "./query-hooks";
+export { registerReadEfficiencyIntegrationTests } from "./read-efficiency";
 export { registerReconciledSchemaIntegrationTests } from "./reconciled-schema";
 export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-binding";
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";

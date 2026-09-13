@@ -1,4 +1,4 @@
-import type { GraphBackend } from "../../backend/types";
+import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import {
   ConfigurationError,
   SchemaChangedError,
@@ -15,7 +15,7 @@ import { sql } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 
 export type SchemaCheckedReadInput = Readonly<{
-  backend: GraphBackend;
+  backend: GraphBackend | TransactionBackend;
   ast: QueryAst;
   graphId: string;
   expectedVersion: number | undefined;

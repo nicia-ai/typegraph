@@ -68,6 +68,8 @@ export type {
   InitialQueryBuilder,
   NodeAccessor,
   NodeAlias,
+  OneStatementBatchableQuery,
+  OneStatementBatchResults,
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,

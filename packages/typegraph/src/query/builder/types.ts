@@ -45,6 +45,7 @@ import type {
   SimilarToOptions,
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+import type { CompiledSelectSql } from "../sql-intent";
 import {
   type DynamicEdgeAccessor,
   type DynamicNodeAccessor,
@@ -81,6 +82,31 @@ export type BatchableQuery<R = unknown> = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<readonly R[]>;
 }>;
+
+/** A relational query that can be embedded in an exact-one-statement batch. */
+export type OneStatementBatchableQuery<R = unknown> = Readonly<{
+  compileOneStatementBatchItem: () => Readonly<{
+    query: CompiledSelectSql;
+    outputNames: readonly string[];
+    orderBy: readonly Readonly<{
+      column: string;
+      direction: "asc" | "desc";
+      nulls: "first" | "last";
+    }>[];
+    mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
+  }>;
+}>;
+
+/** Preserves each input query's result type in an exact-one-statement batch. */
+export type OneStatementBatchResults<
+  Queries extends readonly OneStatementBatchableQuery<unknown>[],
+> = {
+  -readonly [K in keyof Queries]: Queries[K] extends (
+    OneStatementBatchableQuery<infer R>
+  ) ?
+    readonly R[]
+  : never;
+};
 
 /**
  * Maps a tuple of BatchableQuery types to their result types.

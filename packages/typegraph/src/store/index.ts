@@ -5,6 +5,13 @@ export type {
   RuntimeNodeKind,
   RuntimeNodeTypeFor,
 } from "../core/runtime-kind";
+export type {
+  EdgeReadWindow,
+  NeighborOrderField,
+  NeighborReadOptions,
+  NeighborResult,
+} from "./neighbors";
+export type { CheckedReadScope } from "./store";
 export {
   type AdapterTransactionContext,
   type BaseStoreOptions,

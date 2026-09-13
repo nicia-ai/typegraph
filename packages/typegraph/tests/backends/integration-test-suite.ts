@@ -74,6 +74,7 @@ import {
   registerPredicateIntegrationTests,
   registerProvenanceIntegrationTests,
   registerQueryHookIntegrationTests,
+  registerReadEfficiencyIntegrationTests,
   registerReconciledSchemaIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
@@ -294,6 +295,7 @@ export function createIntegrationTestSuite<
     registerPredicateIntegrationTests(context);
     registerProvenanceIntegrationTests(context);
     registerQueryHookIntegrationTests(context);
+    registerReadEfficiencyIntegrationTests(context);
     registerOrderingIntegrationTests(context);
     registerLateMaterializationIntegrationTests(context);
     registerTemporalIntegrationTests(context);

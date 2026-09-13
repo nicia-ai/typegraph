@@ -15,6 +15,8 @@ export type QueryBuilderInternalContext = Readonly<{
   recordedReadBinding?: RecordedReadBinding | undefined;
   sealedCoordinate?: ReadCoordinate | undefined;
   runtimeKindTokenResolver?: RuntimeKindTokenResolver | undefined;
+  /** Expected active schema version applied automatically by a checked scope. */
+  expectedSchemaVersion?: Readonly<{ value: number | undefined }>;
 }>;
 
 const contexts = new WeakMap<QueryBuilderConfig, QueryBuilderInternalContext>();
@@ -26,7 +28,8 @@ export function registerQueryBuilderInternalContext(
   if (
     context.recordedReadBinding === undefined &&
     context.sealedCoordinate === undefined &&
-    context.runtimeKindTokenResolver === undefined
+    context.runtimeKindTokenResolver === undefined &&
+    context.expectedSchemaVersion === undefined
   ) {
     return;
   }

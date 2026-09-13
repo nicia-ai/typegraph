@@ -30,6 +30,7 @@ import { createSchemaIntrospector } from "./schema-introspector";
 export {
   ExecutableAggregateQuery,
   ExecutableQuery,
+  executeOneStatementBatch,
   QueryBuilder,
 } from "./builder/index";
 
@@ -74,6 +75,8 @@ export type {
   IdentityTraversalOption,
   NodeAccessor,
   NodeAlias,
+  OneStatementBatchableQuery,
+  OneStatementBatchResults,
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
@@ -213,6 +216,9 @@ function createQueryBuilderWithContext<
     }),
     ...(options?.runtimeKindTokenResolver !== undefined && {
       runtimeKindTokenResolver: options.runtimeKindTokenResolver,
+    }),
+    ...(options?.expectedSchemaVersion !== undefined && {
+      expectedSchemaVersion: options.expectedSchemaVersion,
     }),
   });
 

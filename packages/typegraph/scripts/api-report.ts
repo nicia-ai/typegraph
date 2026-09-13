@@ -501,6 +501,11 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // bulkFindEdgesTo adds BulkFindEdgesToParams and BulkFindEdgesToResult to the
 // six Store-bearing secondary entrypoints (+2 each). Both are directly
 // exported from the root entrypoint; no other symbol sets changed.
+// Set-oriented read APIs add seven root-exported supporting types to
+// `StoreCore`: CheckedReadScope, EdgeReadWindow, NeighborOrderField,
+// NeighborReadOptions, NeighborResult, OneStatementBatchResults, and
+// OneStatementBatchableQuery. The same six Store-bearing secondary
+// entrypoints render those names without exporting them directly (+7 each).
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 402,
@@ -550,36 +555,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 744,
-    sha256: "08ed999989966b51f9226dd641c17f2b6015468d167c6cb75e6d481ff96b8da0",
+    count: 751,
+    sha256: "50d77b0198fd9e9d229fa6d6b1fae2563366c70d2b99d26b0b6aca09f028113b",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 727,
-    sha256: "52bd6b7505a1fc7184315b3cfaffa75ea99336701f0b48d0e35fbba442c54fb4",
+    count: 734,
+    sha256: "9b6b39258c98c3798e94bb6b0320eac8d622af95014eb11cc9d24f34fed41436",
   },
   "./postgres/pglite": {
-    count: 724,
-    sha256: "8863e8d0d78fdd28fc62415c8c3498ef0dbd132650942e51f707f9dc0f54ce12",
+    count: 731,
+    sha256: "8b3b937baf2203efe4857d752c5b905665e44fc93cebefb14585451d6777b826",
   },
   "./profiler": {
-    count: 729,
-    sha256: "ee83c569323e624916f1a0e9b1b5f791c2e513da44e506eebda50a9d5d67c9f3",
+    count: 736,
+    sha256: "bfe143206c5a6dd1ccf8a8737b9df837c50df4dc036865ea98dc92f6c740c6f3",
   },
   "./provenance": {
-    count: 735,
-    sha256: "4f4aa90127b14ee9756f4fe78bfe2f4b9dcb1462b803a2a48273380117122738",
+    count: 742,
+    sha256: "9b138709b47b1ceeb08eb1bd8a15c4bb02abd6ed2b361d7ae7fea35d1641239e",
   },
   "./schema": {
     count: 282,
     sha256: "912798b14b4548dc5f66ce6ff9db71dd7561b7d0f1303fd165aa9f58b37390de",
   },
   "./sqlite/local": {
-    count: 724,
-    sha256: "8863e8d0d78fdd28fc62415c8c3498ef0dbd132650942e51f707f9dc0f54ce12",
+    count: 731,
+    sha256: "8b3b937baf2203efe4857d752c5b905665e44fc93cebefb14585451d6777b826",
   },
 };
 

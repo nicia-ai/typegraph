@@ -125,6 +125,12 @@ export const postgresDialect: DialectAdapter = {
     return sql`SELECT set_config('work_mem', ${workingMemory}, true)`;
   },
 
+  orderedRowsJsonArray(rowAlias, _columns, orderColumn) {
+    const row = sql.identifier(rowAlias);
+    const order = sql`${row}.${sql.identifier(orderColumn)}`;
+    return sql`(SELECT COALESCE(jsonb_agg(to_jsonb(${row}) - ${orderColumn} ORDER BY ${order}), '[]'::jsonb) FROM ${row})`;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

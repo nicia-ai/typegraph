@@ -2161,7 +2161,8 @@ that stays with you.
 ### SQLite ↔ PostgreSQL parity
 
 The **query language is fully portable** between SQLite and PostgreSQL. Predicates (comparison, string/`ILIKE`,
-null, `between`, array, object, JSON-path), fixed and variable-length (recursive) traversals, aggregates
+null, `between`, array, object, JSON-path), fixed and variable-length (recursive) traversals, bounded
+neighbor reads, per-edge-kind subgraph windows, one-statement query batches, aggregates
 (`count`/`sum`/`avg`/`min`/`max` with `groupBy`/`having`), set operations (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`,
 including traversal, subquery, `GROUP BY`/`HAVING`, and per-leaf `ORDER BY`/`LIMIT`/`OFFSET` leaves), ordering with
 `NULLS FIRST`/`LAST`, cursor pagination, temporal queries, and the fulltext query modes (`websearch`, `phrase`,

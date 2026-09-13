@@ -2292,6 +2292,31 @@ when the schema-version guarantee is required.
 
 ### Batch Query Execution
 
+#### `store.batchOnce(...queries)`
+
+Executes two or more independent relational queries as exactly one SQL statement. Each query is
+embedded as a CTE, and one JSON envelope carries the independently typed result sets back in input
+order. This is the batch surface for latency-bound page assembly: dozens of independent reads still
+form one statement and one database round trip. Each query's explicit `.orderBy()` is preserved even
+when its sort fields are not part of the public projection.
+
+```typescript
+const [people, recentCompanies] = await store.batchOnce(
+  store.query().from("Person", "p").select((ctx) => ctx.p),
+  store
+    .query()
+    .from("Company", "c")
+    .orderBy("c", "createdAt", "desc")
+    .limit(5)
+    .select((ctx) => ctx.c),
+);
+```
+
+`batchOnce()` has no sequential fallback. It accepts fluent relational queries and set operations;
+prepared queries and edge collection `batchFind*` values are excluded because they cannot be
+embedded without changing their execution contract. Use `batch()` when those deferred collection
+reads or transaction-backed serialization are the goal.
+
 #### `store.batch(...queries)`
 
 Runs several independent queries in sequence and returns a typed tuple of results preserving input
@@ -2436,9 +2461,10 @@ const [skills, employer, colleague] = await store.batch(
 
 | Pattern | Use |
 |---------|-----|
-| Multiple queries with different shapes/filters | `store.batch()` |
+| Independent fluent queries that must use one statement | `store.batchOnce()` |
+| Mixed fluent and deferred collection queries | `store.batch()` |
 | Load entity with all relationships (uniform) | `store.subgraph()` |
-| Fixing an N+1 / reducing round trips | `.traverse()` (one statement), `store.subgraph()` (2–3), `getByIds()` (chunked) — not `batch()` |
+| Fixing an N+1 / reducing round trips | `.traverse()` or `store.batchOnce()` (one statement), `store.subgraph()` (2–3), `getByIds()` (chunked) |
 | Single query | `.execute()` directly |
 | Writes interleaved with reads | `store.transaction()` |
 | Same-shape queries merged into one result | `.union()` / `.intersect()` / `.except()` |
@@ -2448,6 +2474,52 @@ const [skills, employer, colleague] = await store.batch(
 operations in a `store.transaction()`.
 :::
 
+### Neighbor Reads
+
+`store.neighbors(source, options)` joins visible relationships to their adjacent nodes in one
+statement. Ordering and limiting happen before hydration, so append-only relationship histories can
+fetch only their newest target.
+
+```typescript
+const [latest] = await store.neighbors(document, {
+  edges: ["hasVersion"],
+  direction: "out",
+  orderBy: { field: "createdAt", direction: "desc" },
+  limit: 1,
+});
+
+console.log(latest?.edge, latest?.node);
+```
+
+Use `store.countNeighbors(source, options)` for the matching aggregate-only read. It counts visible
+relationships through the selected edge kinds without hydrating edge or node objects.
+
+Both methods accept `direction: "out" | "in" | "both"` and the Store's temporal read options.
+`neighbors()` can order by edge `id`, `createdAt`, `updatedAt`, `validFrom`, or `validTo`, with a
+positive integer `limit`. Null metadata sorts last on both dialects, and ties are resolved by edge
+ID so a bounded read is deterministic.
+
+### Schema-Checked Read Scopes
+
+`store.withCheckedReads(expectedVersion, fn)` binds one expected active schema version to every
+fluent query created through the callback scope. Calling `.execute()` on those queries automatically
+uses the same statement-level schema check as `.executeChecked(expectedVersion)`.
+
+```typescript
+const page = await store.withCheckedReads(schemaVersion, async (reads) => {
+  const people = await reads.query().from("Person", "p").select((ctx) => ctx.p).execute();
+  const teams = await reads.query().from("Team", "t").select((ctx) => ctx.t).execute();
+  return { people, teams };
+});
+```
+
+A mismatch throws `SchemaChangedError` from the read block, giving the caller one boundary at which
+to reload the store/schema cache and retry the whole block.
+
+The scope currently accepts ordinary `.execute()` fluent selects only. Prepared queries, aggregates,
+set operations, pagination, streaming, and `batchOnce()` refuse with `ConfigurationError` rather
+than silently running without the schema check.
+
 ### Subgraph Extraction
 
 #### `store.subgraph(rootId, options)`
@@ -2455,6 +2527,26 @@ operations in a `store.transaction()`.
 Extracts a typed subgraph by performing a BFS traversal from a root node, following
 the specified edge kinds. Returns an indexed result with adjacency maps for immediate
 traversal.
+
+Use `edgeWindows` to cap an append-only edge kind per source at every traversal hop.
+The ranking is applied inside the recursive traversal and again during edge hydration,
+so omitted targets are not loaded and do not remain as orphan nodes.
+
+```typescript
+const detail = await store.subgraph(document.id, {
+  edges: ["hasVersion", "hasSection"],
+  maxDepth: 3,
+  edgeWindows: {
+    hasVersion: {
+      limit: 1,
+      orderBy: { field: "createdAt", direction: "desc" },
+    },
+  },
+});
+```
+
+Per-kind windows require the default `direction: "out"`; `direction: "both"` is refused because
+one edge has two endpoint partitions and “top N per current endpoint” would otherwise be ambiguous.
 
 Under the hood the traversal is a `WITH RECURSIVE` CTE and all the filtering and
 hydration happen in the database. The cost is a fixed 2 statements on SQLite
@@ -2735,10 +2827,11 @@ const results = await store
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
 | `prepare()` | `PreparedQuery<T>` | Validate query AST once for repeated execution with different parameters |
 
-#### `store.batch(...queries)`
+#### `store.batchOnce(...queries)` and `store.batch(...queries)`
 
-Run several queries in sequence — at least a statement each, never one round trip. See
-[Batch Query Execution](#batch-query-execution).
+Use `batchOnce()` to embed independent fluent queries in one statement. Use `batch()` for mixed
+fluent and deferred collection reads that may run sequentially. See
+[Batch Query Execution](#batch-query-execution) for the exact contracts.
 
 ### Dynamic Collection Access
 

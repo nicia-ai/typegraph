@@ -52,8 +52,18 @@ async function seedSubgraphData(
     industry: "Tech",
   });
 
-  await store.edges.knows.create(alice, bob, { since: "2020" });
-  await store.edges.knows.create(bob, charlie, { since: "2021" });
+  await store.edges.knows.create(
+    alice,
+    bob,
+    { since: "2020" },
+    { id: "knows-alice-bob" },
+  );
+  await store.edges.knows.create(
+    bob,
+    charlie,
+    { since: "2021" },
+    { id: "knows-bob-charlie" },
+  );
   await store.edges.worksAt.create(alice, acme, { role: "Engineer" });
   await store.edges.worksAt.create(bob, acme, { role: "Manager" });
 
@@ -101,6 +111,72 @@ export function registerSubgraphIntegrationTests(
       expect(result.nodes.has(ids.aliceId)).toBe(true);
       expect(result.nodes.has(ids.bobId)).toBe(true);
       expect(result.nodes.has(ids.charlieId)).toBe(true);
+    });
+
+    it("applies per-edge-kind ordering and limits during traversal", async () => {
+      const store = context.getStore();
+      const dave = await store.nodes.Person.create({ name: "Dave" });
+      await store.edges.knows.create(
+        { kind: "Person", id: ids.aliceId },
+        dave,
+        {},
+        { id: "zzzz-alice-dave" },
+      );
+
+      const result = await store.subgraph(ids.aliceId as never, {
+        edges: ["knows"],
+        maxDepth: 2,
+        edgeWindows: {
+          knows: {
+            limit: 1,
+            orderBy: { field: "id", direction: "desc" },
+          },
+        },
+      });
+
+      expect(result.nodes.has(dave.id)).toBe(true);
+      expect(result.nodes.has(ids.bobId)).toBe(false);
+      expect(result.adjacency.get(ids.aliceId)?.get("knows")).toHaveLength(1);
+    });
+
+    it("partitions edge windows independently at later hops", async () => {
+      const store = context.getStore();
+      const result = await store.subgraph(ids.aliceId as never, {
+        edges: ["knows"],
+        maxDepth: 2,
+        edgeWindows: {
+          knows: { limit: 1, orderBy: { field: "id", direction: "asc" } },
+        },
+      });
+
+      expect(result.nodes.has(ids.bobId)).toBe(true);
+      expect(result.nodes.has(ids.charlieId)).toBe(true);
+      expect(result.adjacency.get(ids.bobId)?.get("knows")).toHaveLength(1);
+    });
+
+    it("keeps unwindowed edge kinds and refuses ambiguous windows", async () => {
+      const store = context.getStore();
+      const result = await store.subgraph(ids.aliceId as never, {
+        edges: ["knows", "worksAt"],
+        maxDepth: 1,
+        edgeWindows: { knows: { limit: 1 } },
+      });
+
+      expect(result.nodes.has(ids.bobId)).toBe(true);
+      expect(result.nodes.has(ids.acmeId)).toBe(true);
+      await expect(
+        store.subgraph(ids.aliceId as never, {
+          edges: ["knows"],
+          direction: "both",
+          edgeWindows: { knows: { limit: 1 } },
+        }),
+      ).rejects.toThrow("do not support direction: both");
+      await expect(
+        store.subgraph(ids.aliceId as never, {
+          edges: ["knows"],
+          edgeWindows: { worksAt: { limit: 1 } } as never,
+        }),
+      ).rejects.toThrow("must name a traversed edge kind");
     });
 
     it("follows multiple edge kinds", async () => {

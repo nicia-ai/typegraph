@@ -22,6 +22,7 @@ import type {
   NodeType,
   TemporalMode,
 } from "../core/types";
+import { ValidationError } from "../errors";
 import type { RecursiveCyclePolicy } from "../query/ast";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../query/compiler/recursive";
@@ -50,7 +51,8 @@ import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
 import { hasOwnKey } from "../utils/object";
-import { buildReachableCte } from "./recursive-cte";
+import { type EdgeReadWindow, validateEdgeReadBounds } from "./neighbors";
+import { buildReachableCte, buildWindowedEdgesCte } from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
 import {
   type EdgeRow,
@@ -348,6 +350,12 @@ export type SubgraphOptions<
    * projection keys. Specifying a kind outside those sets is a compile-time error.
    */
   project?: P;
+  /**
+   * Per-edge-kind windows applied while traversing and hydrating. Each limit
+   * is partitioned by the current endpoint, so append-only edge histories can
+   * contribute only their newest N targets at every hop.
+   */
+  edgeWindows?: Readonly<Partial<Record<EK, EdgeReadWindow>>>;
 }>;
 
 /**
@@ -430,6 +438,7 @@ type SubgraphContext = Readonly<{
   schema: SqlSchema;
   recordedReadBinding: RecordedReadBinding | undefined;
   backend: GraphBackend;
+  edgeWindows: Readonly<Record<string, EdgeReadWindow | undefined>> | undefined;
 }>;
 
 type SubgraphNodeFetchRow = Readonly<
@@ -491,6 +500,7 @@ export async function executeSubgraph<
     options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
     MAX_EXPLICIT_RECURSIVE_DEPTH,
   );
+  validateEdgeWindows(options.edgeWindows, options.edges);
 
   const ctx: SubgraphContext = {
     graphId: params.graphId,
@@ -513,6 +523,7 @@ export async function executeSubgraph<
     ),
     recordedReadBinding: params.recordedReadBinding,
     backend: params.backend,
+    edgeWindows: options.edgeWindows,
   };
 
   const schemaIntrospector = getSubgraphSchemaIntrospector(params.graph);
@@ -548,6 +559,9 @@ export async function executeSubgraph<
     : { recordedReadBinding: ctx.recordedReadBinding }),
     recursiveTraversal: resolveRecursiveTraversal(params.backend.capabilities),
     operation: "subgraph",
+    ...(options.edgeWindows === undefined ?
+      {}
+    : { edgeWindows: options.edgeWindows }),
   });
   const includedIdsCte = buildIncludedIdsCte(ctx);
 
@@ -878,12 +892,56 @@ async function fetchSubgraphEdges(
     ...buildProjectedPropertyColumns("e", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.edgesTable} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND ${membership.idFilter(sql.raw("e.from_id"))} AND ${membership.idFilter(sql.raw("e.to_id"))}`;
+  const edgeWindows = Object.entries(ctx.edgeWindows ?? {}).filter(
+    (entry): entry is [string, EdgeReadWindow] => entry[1] !== undefined,
+  );
+  const edgesSource =
+    edgeWindows.length === 0 ?
+      ctx.schema.edgesTable
+    : sql`(${buildWindowedEdgesCte(
+        ctx.schema.edgesTable,
+        "out",
+        edgeWindows,
+        sql.join(
+          [
+            sql`e.graph_id = ${ctx.graphId}`,
+            edgeKindFilter,
+            edgeTemporalFilter,
+          ],
+          sql` AND `,
+        ),
+      )})`;
+
+  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${edgesSource} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND ${membership.idFilter(sql.raw("e.from_id"))} AND ${membership.idFilter(sql.raw("e.to_id"))}`;
   if (membership.parameterDependentPlan) markForceCustomPlan(query);
 
   return ctx.backend.execute<SubgraphEdgeFetchRow>(
     asCompiledRowsSql(query),
   ) as Promise<SubgraphEdgeFetchRow[]>;
+}
+
+function validateEdgeWindows(
+  windows: Readonly<Record<string, EdgeReadWindow | undefined>> | undefined,
+  selectedEdgeKinds: readonly string[],
+): void {
+  for (const [kind, window] of Object.entries(windows ?? {})) {
+    if (!selectedEdgeKinds.includes(kind)) {
+      throw new ValidationError(
+        "Subgraph edge windows must name a traversed edge kind",
+        {
+          issues: [
+            {
+              path: `edgeWindows.${kind}`,
+              message: "Edge kind is not present in options.edges",
+            },
+          ],
+        },
+      );
+    }
+    if (window !== undefined) {
+      validateEdgeReadBounds(window, `edgeWindows.${kind}`);
+    }
+  }
 }
 
 function buildMetadataColumns(

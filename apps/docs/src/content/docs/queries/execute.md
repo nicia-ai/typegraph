@@ -275,8 +275,19 @@ async function exportAllUsers(): Promise<void> {
 
 ## Batch Execution
 
-When you need multiple independent queries with different result types, use `store.batch()` to run
-them in sequence against one target.
+When independent fluent queries must share one database round trip, use `store.batchOnce()`.
+It embeds each query as a CTE and returns the independently typed result sets in input order. An
+explicit `.orderBy()` remains effective even when the sort field is not selected:
+
+```typescript
+const [people, companies] = await store.batchOnce(
+  store.query().from("Person", "p").select((ctx) => ctx.p),
+  store.query().from("Company", "c").select((ctx) => ctx.c),
+);
+```
+
+Use `store.batch()` when the batch includes deferred edge collection `batchFind*` reads or when
+sequential execution is the intended connection profile.
 
 `batch()` does not batch round trips. The portable guarantee is that at most one query is in flight
 at a time — at least one statement each, and two for a query whose selective-field mapping falls
@@ -288,8 +299,9 @@ Connection reuse is the adapter's business either way.
 Whole-node, whole-edge, and spread selections detected during planning use a full fetch from
 the start. A selector branch that depends on actual row values can still trigger the fallback.
 
-It will not fix an N+1. For that, fold the work into one query: a `.traverse()` chain (one
-statement), `store.subgraph()` (2 statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
+It will not fix an N+1. For that, fold the work into one query: `batchOnce()` for independent fluent
+reads, a `.traverse()` chain, `store.neighbors()`, or `store.countNeighbors()` (one statement each),
+`store.subgraph()` (2 statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
 `bulkFindByIndex()`, which are chunked rather than fixed-cost.
 
 It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can

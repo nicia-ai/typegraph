@@ -33,7 +33,7 @@ type RecordedClaimSite = Readonly<{
 const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   {
     file: "README.md",
-    line: 118,
+    line: 119,
     text:
       "strategy authors can use the complete " +
       CLAIM_WORD +
@@ -64,15 +64,23 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
     text: "from the " + CLAIM_WORD + "-free backend-authoring entrypoint.",
   },
   {
+    file: "docs/design/version-controlled-backends-plan-review.md",
+    line: 333,
+    text:
+      "a " +
+      CLAIM_WORD +
+      "-free execution adapter over `db.query`, all-refuse write",
+  },
+  {
     file: "packages/typegraph/README.md",
-    line: 43,
+    line: 50,
     text:
       CLAIM_WORD +
       "-free `@nicia-ai/typegraph/core` entrypoint. Custom backend, dialect, and",
   },
   {
     file: "packages/typegraph/README.md",
-    line: 44,
+    line: 51,
     text:
       "search-strategy authors can import the complete " +
       CLAIM_WORD +
@@ -162,18 +170,18 @@ describe("drizzle claim-site inventory", () => {
     }
   });
 
-  it("has the recorded shape: 13 occurrences across 11 files", () => {
-    expect(RECORDED_CLAIM_SITES.length).toBe(13);
+  it("has the recorded shape: 14 occurrences across 12 files", () => {
+    expect(RECORDED_CLAIM_SITES.length).toBe(14);
     expect(new Set(RECORDED_CLAIM_SITES.map((site) => site.file)).size).toBe(
-      11,
+      12,
     );
   });
 
   it("matches scanClaimSites() both directions", () => {
     const scanned = scanClaimSites();
 
-    expect(scanned.length).toBe(13);
-    expect(new Set(scanned.map((site) => site.file)).size).toBe(11);
+    expect(scanned.length).toBe(14);
+    expect(new Set(scanned.map((site) => site.file)).size).toBe(12);
 
     for (const site of scanned) {
       expect(
