@@ -143,5 +143,58 @@ export function registerReadEfficiencyIntegrationTests(
       expect(subgraph.nodes.has(target.id)).toBe(true);
       expect(statements).toHaveLength(1);
     });
+
+    it("binds composable graph reads to the current transaction", async () => {
+      const statements: string[] = [];
+      const attempts: number[] = [];
+      const store = await context.createStore(integrationTestGraph, {
+        hooks: {
+          onQueryStart: (ctx) => {
+            statements.push(ctx.sql);
+            attempts.push(ctx.attempt ?? -1);
+          },
+        },
+      });
+
+      await store.transaction(async (tx) => {
+        const root = await tx.nodes.Person.create({ name: "root" });
+        const target = await tx.nodes.Person.create({ name: "target" });
+        await tx.edges.knows.create(root, target, {});
+
+        const neighbors = await tx.neighbors(root, { edges: ["knows"] });
+        await expect(
+          tx.countNeighbors(root, { edges: ["knows"] }),
+        ).resolves.toBe(1);
+        const directSubgraph = await tx.subgraph(root.id, {
+          edges: ["knows"],
+          maxDepth: 1,
+        });
+
+        expect(neighbors[0]?.node.id).toBe(target.id);
+        expect(directSubgraph.nodes.has(target.id)).toBe(true);
+        expect(statements).toHaveLength(3);
+
+        statements.length = 0;
+        attempts.length = 0;
+        const [people, batchedNeighbors, count, batchedSubgraph] =
+          await tx.batchOnce((read) => [
+            tx
+              .query()
+              .from("Person", "person")
+              .orderBy("person", "name", "asc")
+              .select((ctx) => ctx.person.name),
+            read.neighbors(root, { edges: ["knows"] }),
+            read.countNeighbors(root, { edges: ["knows"] }),
+            read.subgraph(root.id, { edges: ["knows"], maxDepth: 1 }),
+          ]);
+
+        expect(people).toEqual(["root", "target"]);
+        expect(batchedNeighbors).toEqual(neighbors);
+        expect(count).toBe(1);
+        expect(batchedSubgraph.nodes.has(target.id)).toBe(true);
+        expect(statements).toHaveLength(1);
+        expect(attempts).toEqual([1]);
+      });
+    });
   });
 }

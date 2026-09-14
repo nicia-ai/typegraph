@@ -42,6 +42,9 @@ batch-scoped builder with `neighbors()`, `countNeighbors()`, and `subgraph()`
 methods. Direct `store.subgraph()` and batch-scoped `read.subgraph()` return the
 same result shape and semantics; the direct form retains backend-tuned hydration
 while the batch-scoped form guarantees one statement.
+Transaction contexts expose the same `query()`, `neighbors()`,
+`countNeighbors()`, `subgraph()`, and `batchOnce()` reads, all bound to the open
+transaction so read-modify-write paths see their uncommitted changes.
 `store.neighbors()` can order by edge metadata or adjacent-node properties,
 while `subgraph({ edgeWindows })` applies per-kind direction, ordering, and
 limits during traversal. See

@@ -6002,7 +6002,17 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
 }> : Readonly<Record<never, never>>);
 
 // @public
-type TransactionContext<G extends GraphDef> = TransactionCollections<G>;
+type TransactionContext<G extends GraphDef> = TransactionCollections<G> & Readonly<{
+    query: () => InitialQueryBuilder<G, "open">;
+    batchOnce: <const Queries extends readonly [
+    EmbeddableOneStatementRead<unknown>,
+    EmbeddableOneStatementRead<unknown>,
+    ...EmbeddableOneStatementRead<unknown>[]
+    ]>(build: (read: BatchReadBuilder<G>) => Queries) => Promise<OneStatementBatchResults<Queries>>;
+    neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
+    countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
+    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
+}>;
 
 // @public
 type TransactionOptions = Readonly<{
