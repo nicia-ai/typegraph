@@ -83,6 +83,19 @@ function thrownBy(fn: () => unknown): unknown {
   }
 }
 
+function expectTransactionReadSurface(tx: object): void {
+  for (const method of [
+    "query",
+    "neighbors",
+    "countNeighbors",
+    "subgraph",
+    "batchOnce",
+  ]) {
+    expect(typeof Reflect.get(tx, method)).toBe("function");
+  }
+  expect(Reflect.get(tx, "withCheckedReads")).toBeUndefined();
+}
+
 describe("#254 tx.sqlAvailability discriminant", () => {
   it("reports 'available' with a usable tx.sql on a plain transactional store", async () => {
     const store = await createInitializedStore(graph, createTestBackend());
@@ -143,6 +156,30 @@ describe("#254 tx.sqlAvailability discriminant", () => {
 });
 
 describe("portable runtime capability boundaries", () => {
+  it("keeps graph reads on plain and measurable transaction contexts", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+
+    await store.transaction(async (tx) => {
+      expectTransactionReadSurface(tx);
+      await tx
+        .query()
+        .from("Person", "person")
+        .select((ctx) => ctx.person)
+        .execute();
+    });
+    await store.transactionWithReceipt(async (tx) => {
+      expectTransactionReadSurface(tx);
+      await tx.measure(async (scoped) => {
+        expectTransactionReadSurface(scoped);
+        await scoped
+          .query()
+          .from("Person", "person")
+          .select((ctx) => ctx.person)
+          .execute();
+      });
+    });
+  });
+
   it("does not expose adapter capabilities through a portable Store", async () => {
     const adapterBackend = createTestBackend();
     const store = createStore(graph, adapterBackend);

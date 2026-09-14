@@ -66,6 +66,7 @@ import {
   type Store,
   type StoreOptions,
   type StoreRef,
+  type TransactionContext,
   type TransactionOutcome,
   type TransactionReceipt,
   type TransactionReadBackend,
@@ -429,6 +430,30 @@ const oneStatementBatch = store.batchOnce((read) => {
 expectType<Promise<number>>(
   oneStatementBatch.then(([neighbors]) => neighbors.length),
 );
+
+declare const transactionContext: TransactionContext<typeof graph>;
+expectType<Promise<number>>(
+  transactionContext
+    .neighbors(neighborSource, { edges: ["knows"] })
+    .then((neighbors) => neighbors.length),
+);
+expectType<Promise<number>>(
+  transactionContext.countNeighbors(neighborSource, { edges: ["knows"] }),
+);
+expectType<Promise<number>>(
+  transactionContext
+    .subgraph(neighborSource.id, { edges: ["knows"] })
+    .then((subgraph) => subgraph.nodes.size),
+);
+const transactionBatch = transactionContext.batchOnce((read) => [
+  transactionContext
+    .query()
+    .from("Person", "person")
+    .select((ctx) => ctx.person.name),
+  read.countNeighbors(neighborSource, { edges: ["knows"] }),
+]);
+expectType<Promise<number>>(transactionBatch.then(([, count]) => count));
+expectError(transactionContext.withCheckedReads);
 expectError(store.neighborsQuery);
 expectError(store.countNeighborsQuery);
 expectError(store.subgraphQuery);

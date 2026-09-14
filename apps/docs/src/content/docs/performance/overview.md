@@ -496,6 +496,13 @@ hurt, replace the calls with `store.neighbors()` / `store.countNeighbors()` or a
 statement), or compose the batch-scoped `read.neighbors()`, `read.countNeighbors()`, and
 `read.subgraph()` forms in `batchOnce()`.
 
+The same read family is available on `TransactionContext`. Use `tx.neighbors()`,
+`tx.countNeighbors()`, or `tx.subgraph()` for a direct read that must see earlier writes in the
+callback. Use `tx.batchOnce()` to combine independent transaction-bound reads into exactly one
+statement on the held connection; fluent items in that batch start from `tx.query()`. Direct
+`tx.subgraph()` also uses its one-statement plan so it never submits concurrent statements to the
+held transaction connection.
+
 Direct `store.subgraph()` and batch-scoped `read.subgraph()` share one semantic planner and produce the
 same result, but intentionally use different physical plans. The direct form uses 2 statements
 on SQLite and 3 on PostgreSQL so each backend can hydrate a closure efficiently. The scoped form

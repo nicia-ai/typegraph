@@ -759,8 +759,8 @@ await store.transaction(async (tx) => {
 Custom `AdapterBackend<TNativeTransaction>` implementations determine the
 inferred native handle through their generic parameter. Managed
 `/sqlite/local` and `/postgres/pglite` entrypoints return `Store`, whose
-transaction context exposes only TypeGraph collections and backend ports—no
-adapter-native `tx.sql` handle. Use an adapter entrypoint when application
+transaction context exposes TypeGraph collections, graph reads, and backend
+ports—but no adapter-native `tx.sql` handle. Use an adapter entrypoint when application
 tables must share the transaction.
 On **Postgres / libsql** this is mandatory for correctness — using the outer
 `db` would write on a *different* connection and silently escape the

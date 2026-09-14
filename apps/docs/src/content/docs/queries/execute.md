@@ -314,12 +314,12 @@ direct read uses backend-tuned hydration, while the batch-scoped read is embedde
 single statement.
 
 It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can
-observe a commit the earlier ones did not. There is no way to fix that for fluent queries today —
-`store.transaction()` accepts an `isolationLevel`, but its context exposes only `nodes` / `edges`,
-so a query builder cannot run inside it. Collection reads can get a snapshot via
-`store.transaction(fn, { isolationLevel: "repeatable_read" })` and `tx.nodes` / `tx.edges` — but
-only where the backend has transactions (other backends refuse before invoking `fn`), and a history-enabled store on
-PostgreSQL additionally requires `accessMode: "read_only"` or the call throws.
+observe a commit the earlier ones did not. When several reads need one stable snapshot, run
+`tx.query()`, `tx.neighbors()`, `tx.countNeighbors()`, `tx.subgraph()`, or `tx.batchOnce()` inside
+`store.transaction(fn, { isolationLevel: "repeatable_read" })`. These reads are bound to the open
+transaction and see its earlier uncommitted writes. Transactions require a backend with interactive
+transaction support; a history-enabled store on PostgreSQL additionally requires
+`accessMode: "read_only"` for a read-only transaction.
 
 ```typescript
 const [people, companies] = await store.batch(
@@ -357,8 +357,10 @@ queries against a pool with idle capacity, but it does not necessarily hold N co
 against a single client or a saturated pool it queues. `batch()` keeps at most one query in flight,
 so it pays the sum of their latencies — but it can still come out ahead where connection
 acquisition dominates. Measure rather than assume.
-**vs `transaction()`**: same transaction, lighter API — no callback, typed tuple return. But
-`transaction()` is the only one that takes an `isolationLevel`, and it cannot run fluent queries.
+**vs `transaction()`**: `batch()` may open an internal transaction only to serialize its statements.
+Use `transaction()` when reads must share an explicit isolation level or see writes made earlier in
+the callback. Its context supports fluent and set-oriented reads; `tx.batchOnce()` still emits
+exactly one statement.
 
 See [Batch Query Execution](/schemas-stores#batch-query-execution) for full API reference.
 

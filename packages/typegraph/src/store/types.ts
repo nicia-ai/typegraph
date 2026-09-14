@@ -11,6 +11,7 @@ import {
   type TransactionReadBackend,
 } from "../backend/types";
 import {
+  type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
   type GraphIdentityConfig,
@@ -42,8 +43,14 @@ import type {
   DynamicNodeAccessor,
   DynamicNodeKind,
   DynamicNodeType,
+  InitialQueryBuilder,
 } from "../query/builder";
-import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
+import type {
+  BatchableQuery,
+  EmbeddableOneStatementRead,
+  NodeAccessor,
+  OneStatementBatchResults,
+} from "../query/builder/types";
 import {
   type ExternalRecordedReadSource,
   type SqlSchema,
@@ -59,10 +66,17 @@ import type {
   NODE_WRITE_NAMES,
   RECORDED_POINT_READ_NAMES,
 } from "./collection-surface";
+import type { NeighborReadOptions, NeighborResult } from "./neighbors";
 import type {
+  BatchReadBuilder,
   EdgeCollectionLookup,
   RequiredEdgeCollectionLookup,
 } from "./store";
+import type {
+  SubgraphOptions,
+  SubgraphProject,
+  SubgraphResult,
+} from "./subgraph";
 
 /**
  * An explicit validity-end mutation. Omission preserves the stored end,
@@ -2246,11 +2260,39 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
   : Readonly<Record<never, never>>);
 
 /**
- * A portable transaction context containing only TypeGraph-owned graph
- * operations. Managed Stores use this surface so adapter-native handles never
- * enter their public contract.
+ * A portable transaction context containing TypeGraph-owned collections and
+ * transaction-bound graph reads. Managed Stores use this surface so
+ * adapter-native handles never enter their public contract.
  */
-export type TransactionContext<G extends GraphDef> = TransactionCollections<G>;
+export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
+  Readonly<{
+    query: () => InitialQueryBuilder<G, "open">;
+    batchOnce: <
+      const Queries extends readonly [
+        EmbeddableOneStatementRead<unknown>,
+        EmbeddableOneStatementRead<unknown>,
+        ...EmbeddableOneStatementRead<unknown>[],
+      ],
+    >(
+      build: (read: BatchReadBuilder<G>) => Queries,
+    ) => Promise<OneStatementBatchResults<Queries>>;
+    neighbors: <const K extends EdgeKinds<G>>(
+      source: GraphNodeReference<G>,
+      options: NeighborReadOptions<G, K>,
+    ) => Promise<readonly NeighborResult<G, K>[]>;
+    countNeighbors: <const K extends EdgeKinds<G>>(
+      source: GraphNodeReference<G>,
+      options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+    ) => Promise<number>;
+    subgraph: <
+      const EK extends EdgeKinds<G>,
+      const NK extends NodeKinds<G> = NodeKinds<G>,
+      const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    >(
+      rootId: NodeId<AllNodeTypes<G>>,
+      options: SubgraphOptions<G, EK, NK, P>,
+    ) => Promise<SubgraphResult<G, NK, EK, P>>;
+  }>;
 
 /**
  * A transaction context exposed by an {@link AdapterStore}. In addition to the
@@ -2262,7 +2304,7 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G>;
 export type AdapterTransactionContext<
   G extends GraphDef,
   TNativeTransaction,
-> = TransactionCollections<G> & AdapterTransactionSqlAccess<TNativeTransaction>;
+> = TransactionContext<G> & AdapterTransactionSqlAccess<TNativeTransaction>;
 
 /**
  * Scoped write measurement, available only on the receipt-enabled transaction

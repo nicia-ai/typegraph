@@ -907,6 +907,35 @@ export type BatchReadBuilder<G extends GraphDef> = Readonly<{
   ) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
 }>;
 
+type TransactionReadMethods<G extends GraphDef> = Readonly<{
+  query: () => InitialQueryBuilder<G, "open">;
+  batchOnce: <
+    const Queries extends readonly [
+      EmbeddableOneStatementRead<unknown>,
+      EmbeddableOneStatementRead<unknown>,
+      ...EmbeddableOneStatementRead<unknown>[],
+    ],
+  >(
+    build: (read: BatchReadBuilder<G>) => Queries,
+  ) => Promise<OneStatementBatchResults<Queries>>;
+  neighbors: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: NeighborReadOptions<G, K>,
+  ) => Promise<readonly NeighborResult<G, K>[]>;
+  countNeighbors: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ) => Promise<number>;
+  subgraph: <
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: SubgraphOptions<G, EK, NK, P>,
+  ) => Promise<SubgraphResult<G, NK, EK, P>>;
+}>;
+
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
   withCheckedReads?: <T>(
     expectedSchemaVersion: number | undefined,
@@ -3067,17 +3096,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * adapter may reuse one client there too. The portable guarantee is only
    * that at most one query is in flight at a time.
    *
-   * **Not a snapshot — and there is no way to make it one.** PostgreSQL
-   * defaults to read-committed isolation, so a later query can observe a
-   * commit the earlier ones did not. `store.transaction()` takes an
-   * `isolationLevel`, but its context exposes only `nodes` / `edges`: there is
-   * no public way to run a fluent query or a batch inside a transaction, so a
-   * snapshot across fluent queries is not available today. Collection reads
-   * can have one — `store.transaction(fn, { isolationLevel: "repeatable_read" })`
-   * reading through `tx.nodes` / `tx.edges` — but only where the backend has
-   * transactions (other backends refuse before invoking the callback), and a history-enabled
-   * store on PostgreSQL additionally requires `accessMode: "read_only"` or the
-   * call throws.
+   * **Not a snapshot by default.** PostgreSQL defaults to read-committed
+   * isolation, so a later query can observe a commit the earlier ones did not.
+   * When multiple reads need one stable snapshot, use `tx.query()` or the
+   * transaction's set-oriented reads inside `store.transaction(fn, {
+   * isolationLevel: "repeatable_read" })`. `tx.batchOnce()` is one statement
+   * regardless of isolation level. Transaction reads require a backend with
+   * interactive transactions, and a history-enabled store on PostgreSQL
+   * additionally requires `accessMode: "read_only"` for a read-only transaction.
    *
    * **Will not fix an N+1.** Serializing N queries does not reduce their
    * number. The alternatives are set-oriented or chunked rather than
@@ -3158,23 +3184,49 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   >(
     build: (read: BatchReadBuilder<G>) => Queries,
   ): Promise<OneStatementBatchResults<Queries>> {
-    const queries = build({
+    return this.#batchOnceForBackend(this.#baseBackend, 1, build);
+  }
+
+  #createBatchReadBuilder(
+    backend: GraphBackend | TransactionBackend,
+    attempt: number,
+  ): BatchReadBuilder<G> {
+    return {
       neighbors: (source, options) => {
         this.#assertNeighborKinds(source, options.edges);
-        return createNeighborRead(this.#neighborContext(), source, options);
-      },
-      countNeighbors: (source, options) => {
-        this.#assertNeighborKinds(source, options.edges);
-        return createNeighborCountRead(
-          this.#neighborContext(),
+        return createNeighborRead(
+          this.#neighborContext(backend, attempt),
           source,
           options,
         );
       },
-      subgraph: (rootId, options) => this.#createSubgraphRead(rootId, options),
-    });
+      countNeighbors: (source, options) => {
+        this.#assertNeighborKinds(source, options.edges);
+        return createNeighborCountRead(
+          this.#neighborContext(backend, attempt),
+          source,
+          options,
+        );
+      },
+      subgraph: (rootId, options) =>
+        this.#createSubgraphRead(rootId, options, backend, attempt),
+    };
+  }
+
+  async #batchOnceForBackend<
+    const Queries extends readonly [
+      EmbeddableOneStatementRead<unknown>,
+      EmbeddableOneStatementRead<unknown>,
+      ...EmbeddableOneStatementRead<unknown>[],
+    ],
+  >(
+    backend: GraphBackend | TransactionBackend,
+    attempt: number,
+    build: (read: BatchReadBuilder<G>) => Queries,
+  ): Promise<OneStatementBatchResults<Queries>> {
+    const queries = build(this.#createBatchReadBuilder(backend, attempt));
     return executeOneStatementBatch(
-      this.#createHookedQueryBackend(this.#baseBackend),
+      this.#createHookedQueryBackend(backend, attempt),
       queries,
     );
   }
@@ -3197,10 +3249,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return countNeighborsImpl(this.#neighborContext(), source, options);
   }
 
-  #neighborContext(): Parameters<typeof readNeighbors<G, EdgeKinds<G>>>[0] {
+  #neighborContext(
+    backend: GraphBackend | TransactionBackend = this.#backend,
+    attempt = 1,
+  ): Parameters<typeof readNeighbors<G, EdgeKinds<G>>>[0] {
     return {
       graphId: this.graphId,
-      backend: this.#createHookedQueryBackend(this.#backend),
+      backend: this.#createHookedQueryBackend(backend, attempt),
       schema: this.#sqlSchema(),
       defaultTemporalMode: this.#graph.defaults.temporalMode,
       registry: this.#registry,
@@ -3431,13 +3486,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // Guard JS callers who bypass the type so a leaked recorded pin can't
     // silently switch this read onto the recorded relation; recorded subgraph
     // reads come through subgraphAtCoordinate (store.asOfRecorded(...).subgraph).
-    assertNoRecordedCoordinate(options, {
-      code: "SUBGRAPH_RECORDED_ASOF_INTERNAL_ONLY",
-      message:
-        "recordedAsOf is only available through store.asOfRecorded(...).subgraph(...).",
-      suggestion:
-        "Use store.asOfRecorded(recordedAt).subgraph(rootId, options) instead of passing recordedAsOf directly.",
-    });
+    this.#assertPublicSubgraphOptions(options);
     // After the guard, the public read is just the coordinate path with no
     // recorded pin — delegate so the executeSubgraph wiring lives in one place.
     return this.subgraphAtCoordinate(rootId, options);
@@ -3450,23 +3499,29 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   >(
     rootId: NodeId<AllNodeTypes<G>>,
     options: SubgraphOptions<G, EK, NK, P>,
+    backend: GraphBackend | TransactionBackend = this.#baseBackend,
+    attempt = 1,
   ): SubgraphRead<G, NK, EK, P> {
+    this.#assertPublicSubgraphOptions(options);
+    return createSubgraphRead({
+      graph: this.#graph,
+      graphId: this.graphId,
+      rootId,
+      backend: this.#createHookedQueryBackend(backend, attempt),
+      dialect: getDialect(backend.dialect),
+      schema: this.#schema,
+      recordedReadBinding: this.#recordedReadBinding,
+      options,
+    });
+  }
+
+  #assertPublicSubgraphOptions(options: unknown): void {
     assertNoRecordedCoordinate(options, {
       code: "SUBGRAPH_RECORDED_ASOF_INTERNAL_ONLY",
       message:
         "recordedAsOf is only available through store.asOfRecorded(...).subgraph(...).",
       suggestion:
         "Use store.asOfRecorded(recordedAt).subgraph(rootId, options) instead of passing recordedAsOf directly.",
-    });
-    return createSubgraphRead({
-      graph: this.#graph,
-      graphId: this.graphId,
-      rootId,
-      backend: this.#createHookedQueryBackend(this.#baseBackend),
-      dialect: getDialect(this.#backend.dialect),
-      schema: this.#schema,
-      recordedReadBinding: this.#recordedReadBinding,
-      options,
     });
   }
 
@@ -4311,9 +4366,40 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return overlayPropertyDescriptors(context, { measure });
   }
 
+  /** Builds graph reads that execute through one already-open transaction. */
+  #createTransactionReadSurface(
+    txBackend: TransactionBackend,
+    attempt: number,
+  ): TransactionReadMethods<G> {
+    return {
+      query: () => this.#createQueryForBackend(txBackend, undefined, attempt),
+      batchOnce: (build) =>
+        this.#batchOnceForBackend(txBackend, attempt, build),
+      neighbors: (source, options) => {
+        this.#assertNeighborKinds(source, options.edges);
+        return readNeighbors(
+          this.#neighborContext(txBackend, attempt),
+          source,
+          options,
+        );
+      },
+      countNeighbors: (source, options) => {
+        this.#assertNeighborKinds(source, options.edges);
+        return countNeighborsImpl(
+          this.#neighborContext(txBackend, attempt),
+          source,
+          options,
+        );
+      },
+      subgraph: (rootId, options) =>
+        this.#createSubgraphRead(rootId, options, txBackend, attempt).execute(),
+    };
+  }
+
   /**
-   * Builds the `{ nodes, edges, sql }` projection bound to a
-   * transaction-scoped backend. Shared verbatim by {@link transaction}
+   * Builds the transaction context bound to a transaction-scoped backend.
+   * Collections, fluent queries, and set-oriented reads all use that same
+   * backend. Shared verbatim by {@link transaction}
    * (TypeGraph opens the tx) and {@link withTransaction} (#134 — the
    * caller opened it) so both surfaces resolve collections, query
    * factories, and the reused graph/registry identically. When history capture
@@ -4410,6 +4496,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const base = {
       nodes,
       edges,
+      ...this.#createTransactionReadSurface(txBackend, attempt),
       ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
       backend: createTransactionReadBackend(txBackend),
       [TRANSACTION_RUNTIME]: { backend: txBackend, runNodeOperationHooks },

@@ -2033,8 +2033,9 @@ const colleague = await store.edges.knows.findByEndpoints(alice, bob, {
 #### `store.transaction(fn)`
 
 Executes a callback within an atomic transaction. All operations succeed together or are
-rolled back together. The transaction context (`tx`) provides the same `nodes.*` and
-`edges.*` collection API as the store itself.
+rolled back together. The transaction context (`tx`) provides the same `nodes.*` and `edges.*`
+collection API as the store, plus transaction-bound `query()`, `neighbors()`, `countNeighbors()`,
+`subgraph()`, and `batchOnce()` reads. Those reads see writes made earlier in the callback.
 
 ```typescript
 await store.transaction(async (tx) => {
@@ -2311,12 +2312,26 @@ const [people, neighbors] = await store.batchOnce((read) => [
 ]);
 ```
 
+The same API is available on a transaction context. Both the fluent query and the callback's read
+builder execute through the already-open transaction, so they see writes made earlier in the
+callback while the combined batch remains exactly one statement:
+
+```typescript
+await store.transaction(async (tx) => {
+  const alice = await tx.nodes.Person.create({ name: "Alice" });
+
+  const [people, neighborCount] = await tx.batchOnce((read) => [
+    tx.query().from("Person", "p").select((ctx) => ctx.p),
+    read.countNeighbors(alice, { edges: ["knows"] }),
+  ]);
+});
+```
+
 `batchOnce()` has no sequential fallback. Its callback returns fluent relational queries, set
 operations, and batch-scoped composable reads built through the callback's `read.neighbors()`,
 `read.countNeighbors()`, and `read.subgraph()` methods. Prepared queries and edge collection
 `batchFind*` values are excluded because they cannot be embedded without changing their execution
-contract. Use `batch()` when those queued collection reads or transaction-backed serialization
-are the goal.
+contract. Use `batch()` when those queued collection reads or sequential execution are the goal.
 
 #### `store.batch(...queries)`
 
@@ -2339,15 +2354,13 @@ question from transaction support: the no-transaction path passes the same backe
 adapter may reuse one client there too (see [Limitations](/limitations)). The portable guarantee is
 only that at most one query is in flight at a time.
 
-**Not a snapshot — and there is no way to make it one.** PostgreSQL defaults to read-committed
-isolation, so a later query in the batch can observe a commit the earlier ones did not.
-`store.transaction()` takes an `isolationLevel`, but its context exposes only `nodes` / `edges`:
-there is no public way to run a fluent query or a batch inside a transaction, so a snapshot across
-fluent queries is **not available today**. Collection reads can have one —
-`store.transaction(fn, { isolationLevel: "repeatable_read" })` reading through `tx.nodes` /
-`tx.edges` — but only where the backend has transactions (other backends refuse before invoking the callback), and a
-history-enabled store on PostgreSQL additionally requires `accessMode: "read_only"` or the call
-throws.
+**Not a snapshot by default.** PostgreSQL defaults to read-committed isolation, so a later query in
+the batch can observe a commit the earlier ones did not. For one stable snapshot, call `tx.query()`
+or the transaction's set-oriented reads inside
+`store.transaction(fn, { isolationLevel: "repeatable_read" })`. `tx.batchOnce()` is already one
+statement and preserves that physical shape inside the transaction. Transactions require a backend
+with interactive transaction support; a history-enabled store on PostgreSQL additionally requires
+`accessMode: "read_only"` for a read-only transaction.
 
 **Will not fix an N+1.** Serializing N queries does not reduce their number. The alternatives are
 set-oriented or chunked rather than fixed-cost: `.traverse()` compiles a whole chain to one
@@ -2462,12 +2475,12 @@ const [skills, employer, colleague] = await store.batch(
 
 | Pattern | Use |
 |---------|-----|
-| Independent embeddable reads that must use one statement | `store.batchOnce()` |
+| Independent embeddable reads that must use one statement | `store.batchOnce()` / `tx.batchOnce()` |
 | Mixed fluent and queued collection queries | `store.batch()` |
 | Load entity with all relationships (uniform) | `store.subgraph()` |
 | Fixing an N+1 / reducing round trips | `.traverse()` or `store.batchOnce()` (one statement), `store.subgraph()` (2–3), `getByIds()` (chunked) |
 | Single query | `.execute()` directly |
-| Writes interleaved with reads | `store.transaction()` |
+| Writes interleaved with fluent or set-oriented reads | `store.transaction()` |
 | Same-shape queries merged into one result | `.union()` / `.intersect()` / `.except()` |
 
 :::note
@@ -3196,9 +3209,9 @@ Query hooks describe SQL statements submitted by Store read APIs, not logical AP
 backend-internal setup statements. Fluent queries, `batchOnce()`, `neighbors()`,
 `countNeighbors()`, and `subgraph()` all use this observed execution path. A logical read that
 submits more than one statement fires one start/end pair per statement: direct `subgraph()` emits
-two pairs on SQLite and three on PostgreSQL, while the same subgraph embedded in `batchOnce()` emits
-one. A fluent query that retries with a different projection likewise fires a pair for each
-statement it submits.
+two pairs on SQLite and three on PostgreSQL, while `tx.subgraph()` and the same subgraph embedded in
+`batchOnce()` emit one. A fluent query that retries with a different projection likewise fires a
+pair for each statement it submits.
 
 ### `StoreHooks`
 
