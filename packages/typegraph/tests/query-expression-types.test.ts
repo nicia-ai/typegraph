@@ -82,6 +82,32 @@ test("recursive path options preserve legacy IDs and infer qualified references"
     });
 });
 
+test("mixed stages preserve fixed edge types and optional recursive outputs", () => {
+  createQueryBuilder<typeof graph>(graph.id, registry)
+    .from("Person", "person")
+    .optionalTraverse("worksAt", "employment")
+    .recursive({
+      depth: "depth",
+      path: { format: "qualified", alias: "route" },
+      maxHops: 2,
+    })
+    .to("Company", "company")
+    .optionalTraverse("worksAt", "colleagueEmployment", { direction: "in" })
+    .to("Person", "colleague")
+    .select((context) => {
+      expectTypeOf(context.company?.name).toEqualTypeOf<string | undefined>();
+      expectTypeOf(context.colleague?.age).toEqualTypeOf<number | undefined>();
+      expectTypeOf(context.colleagueEmployment?.role).toEqualTypeOf<
+        string | undefined
+      >();
+      expectTypeOf(context.depth).toEqualTypeOf<number | undefined>();
+      expectTypeOf(context.route).toEqualTypeOf<
+        QualifiedRecursivePath | undefined
+      >();
+      return context.route;
+    });
+});
+
 test("project and map infer database and JavaScript result types", () => {
   const projected = createQueryBuilder<typeof graph>(graph.id, registry)
     .from("Person", "person")

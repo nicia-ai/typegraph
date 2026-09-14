@@ -1,6 +1,25 @@
 # Query DSL consolidation plan
 
-Status: phases 1–4 implemented in the working tree on 2026-09-14. Phases 5–6 remain proposals.
+Status: phases 1–5, mixed traversal composition, optional first recursive stages, and qualified paths are implemented
+in PR #691. Phase 6 implementation and local benchmarks are complete; real remote PostgreSQL measurements remain
+outstanding. The completion audit below records the final scope; further capabilities belong in separate PRs.
+
+## Delivery status
+
+| Area | Current state |
+| --- | --- |
+| Phase 1: contracts | Implemented, including terminal semantics and applied-or-refused options. |
+| Phase 2: independent reads | Implemented: tuple/array batches, multiple subgraphs, one-statement checks. |
+| Phase 3: expressions | Implemented: typed SQL expressions, projections, scalar and existence subqueries. |
+| Phase 4: relations | Implemented within the explicit preparation, equality, and pagination boundaries below. |
+| Phase 5: match/result semantics | Implemented: completed-row filters, recursive stopping, and candidate-limit semantics. |
+| Phase 6: shared subgraphs | Implemented as opt-in sharing, with SQLite and local PostgreSQL benchmarks. |
+| Recursive composition | Fixed/recursive chains, optional first stages, and qualified path references implemented. |
+| Performance evidence still due | Real remote PostgreSQL latency; simulated delay is not equivalent evidence. |
+
+The final composition work includes formatting/lint, type contracts, API compatibility/reports, examples, documentation,
+Knip, and full default/PostgreSQL test runs. Their camelCase optional-root failure was corrected and reverified in the
+complete affected traversal matrix: 52 checks across SQLite, PGlite, and both PostgreSQL drivers.
 
 ## Objective
 
@@ -266,19 +285,92 @@ Multiple recursive stages compose in one statement. Each later stage expands ups
 them to prior match rows, preserving multiplicity. Per-stage depth, cycle, path, and stop state stay separate; completed-row
 filters and output ranges apply after the composed match. Branching from an earlier materialized alias is supported.
 Optional later stages preserve unmatched prior rows and expose missing nodes, paths, and depths as `undefined`.
-Mixed fixed-hop/recursive chains, an optional first stage, in-place grouping/aggregation, and scalar recursive-edge
-projections remain explicit refusals. Project node columns into a relation before aggregating them.
+Fixed hops now compose before and after recursive stages and retain selectable edge bindings. The first stage can be
+optional, preserving roots without eligible endpoints. In-place grouping/aggregation and scalar recursive-edge projections
+remain explicit refusals. Project node columns into a relation before aggregating them.
 
 Regression coverage includes overlapping and missing subgraph roots, per-root windows and projections, pinned clocks,
 independent nested results, qualified directions and delimiter-bearing IDs, ordered batch envelopes, optional path
 mapping, output collisions, and recursive-stage multiplicity. A witnessed mutation that deduplicates prior completed
 rows loses a legitimate diamond-path result; the restored rejoin preserves both rows.
 
+## Final composition scope for PR #691
+
+The following additions complete traversal composition within this PR. Fixed and recursive expansion retain their
+existing compiler owners; stage boundaries carry explicit columns and kind-qualified source identities. PostgreSQL
+identifier case is preserved when composed rows are projected, filtered, or ordered.
+
+### 1. Fixed-hop and recursive stages: implemented
+
+Support fixed → recursive, recursive → fixed, and fixed → recursive → fixed chains, including branches from an earlier
+alias. Reuse the existing fixed-hop and recursive compilation owners through a common stage boundary; do not implement
+another dialect-specific traversal compiler or turn fixed hops into recursion merely to bypass the refusal.
+
+Carry kind-qualified source identities into each stage and rejoin every upstream match row. Preserve multiplicity,
+edge bindings for fixed hops, temporal coordinates, ontology expansion, and optional-match behavior. Apply completed-row
+filters, projection, ordering, and range only at their defined final stage. Keep each recursive stage's path, depth,
+cycle, and stop state separate. Scalar edge projection is valid for fixed hops; recursive edges remain path references.
+
+Completion requires shared backend cases for all three chain shapes, earlier-alias branching, duplicate upstream
+matches, optional fixed hops, fixed-edge projection, per-hop versus result filters, and temporal/identity expansion.
+Exercise direct execution, preparation, batching, and projection into a relation. Witness a regression test failing when
+upstream multiplicity or fixed-edge binding is lost.
+
+### 2. Optional first recursive stage: implemented
+
+Seed the first stage from the source relation and preserve a source row when no eligible recursive endpoint matches,
+using the same optional-stage semantics as later stages. This should be a small extension of the common stage boundary
+from item 1, not a separate recursive query implementation.
+
+Define eligibility after minimum depth and stopping-node emission rules. With `minHops: 0`, an eligible seed is a real
+zero-hop match: depth zero and a one-node path. If no eligible endpoint remains, target, depth, and path are `undefined`.
+Match constraints preserve the absent row; a completed-row comparison can remove it. A required later traversal from an
+absent alias yields no match; an optional later traversal preserves absence. Branches from a present earlier alias still
+work. Types must reflect optional target/path/depth values throughout.
+
+Completion requires zero-hop and positive-minimum cases, no edges, all matches pruned, both stopping-node emission
+settings, and optional-to-required/optional stage composition. Verify legacy and qualified paths, scalar terminals,
+prepared execution, and batches on every backend. Witness the absent-row regression by temporarily removing the
+preserving join.
+
+### 3. Composition contracts and documentation
+
+After those additions, audit the shared stage contract's consumers: direct SQL compilation, SQL projection, compatibility
+selection, derived relations, terminals, preparation, batch envelopes, transaction reads, and supported temporal views.
+Every touched option must still be applied or explicitly refused. Test meaningful boundary combinations rather than
+creating a duplicate suite for every compiler helper.
+
+Staged match predicates reference only the alias they constrain. Cross-alias match conditions, including correlated
+references to another stage alias, are explicitly refused; use completed-row `where()` for cross-alias comparisons, with
+its documented optional-row filtering semantics. Raw composed `resultPredicate` ASTs must use database-expression
+predicates (optionally combined with AND/OR/NOT); legacy direct-field predicate shapes are refused. Typed `where()` already
+builds the supported representation. Existing SQL fragment composition preserves approximate-search execution metadata.
+
+Regression coverage includes camelCase node/edge aliases, fixed-edge objects and scalar properties, relation aggregation,
+prepared and batched optional paths, transaction-visible writes, and recorded identity expansion after retraction.
+The decoder uses the shared field-value extraction owner for both ordinary and explicitly qualified physical columns.
+
+Update the recursive guide, runnable example, API reports, changeset, and this plan together. Keep qualified paths as
+references and retain explicit refusals for direct recursive aggregation and scalar recursive-edge projection. Run the
+canonical checks, server PostgreSQL tests, and `test:unused`, then simplify and review the final diff. This is the stopping
+point for feature additions to PR #691.
+
 ## Follow-on capabilities
 
-After typed expressions and derived relations are established, add collection aggregation/nested relationship results,
-window functions, and general top-N-per-group queries. Existing `edgeWindows` remains the bounded graph-read feature; do
-not replace it merely to match a relational API shape.
+Keep the following out of PR #691:
+
+- Hydrated path objects and path property expressions. They need explicit identity, temporal, repeated-entity, and
+  projection semantics; qualified references already provide a useful complete path representation.
+- Collection aggregation/nested relationship results, window functions, and general top-N-per-group queries. These are
+  new relational capabilities with their own typing and cardinality contracts. Existing `edgeWindows` remains the bounded
+  graph-read feature; do not replace it merely to match a relational API shape.
+- Direct grouping over recursive graph bindings. Projecting node columns into `asRelation()` already provides an explicit
+  aggregation boundary; verify that composition instead of adding a second aggregation path.
+- Automatic shared-subgraph selection, streaming batch envelopes, or a response-byte budget. Current evidence supports
+  opt-in sharing, and these changes need separate execution and resource contracts.
+- Real remote PostgreSQL benchmarking. Run the existing harness when a disposable remote target is available, recording
+  network placement and workload. This evidence is still due for phase 6, but does not block the opt-in implementation or
+  justify changing defaults before it exists.
 
 Recorded-time batch composition needs an explicit view-bound builder and compatible recorded coordinates. Do not expose
 a raw `recordedAsOf` option or weaken the current recorded-read boundary to make batching convenient.
@@ -298,14 +390,10 @@ a raw `recordedAsOf` option or weaken the current recorded-read boundary to make
 - Update API reports, examples, query docs, and changesets in the same implementation change. Preserve unrelated
   working-tree changes.
 
-## Recommended implementation order
+## Remaining delivery order
 
-1. Contract corrections and truthful documentation.
-2. Runtime-array `batchOnce()` and multi-subgraph contract coverage.
-3. Typed expressions and explicit SQL projection.
-4. Relational composition, deduplication, and shared execution.
-5. Match/result filtering and advanced recursion.
-6. Measured shared-root execution and richer relational features.
+1. Keep PR #691 aligned with the final implementation, documented restrictions, and CI results.
+2. Close feature scope; pursue the listed follow-ons separately.
 
-The first two items give immediate value. The expression and relation work supplies the durable foundation; the final
-optimization remains conditional on measured benefit.
+Do not expand this PR into general path hydration or new relational operators. Its final additions complete the
+composition contracts of the APIs it already introduces.

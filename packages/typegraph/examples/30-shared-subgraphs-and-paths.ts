@@ -62,6 +62,29 @@ async function main(): Promise<void> {
     assert.equal(path.secondDepth, 1);
     assert.equal(path.firstPath.length, 3);
     assert.equal(path.secondPath.length, 3);
+    // Fixed hops and recursion share one completed-match pipeline.
+    const mixed = await store.query().from("Person", "root")
+      .whereNode("root", (person) => person.id.eq(ada.id))
+      .traverse("knows", "directEdge", { expand: "none" })
+      .to("Person", "directFriend")
+      .traverse("knows", "pathEdge", { expand: "none" })
+      .recursive({ minHops: 1, maxHops: 2, depth: true })
+      .to("Person", "friend")
+      .select((row) => ({ name: row.friend.name, directEdgeId: row.directEdge.id, depth: row.friend_depth }))
+      .execute();
+    assert.equal(mixed.length, 1);
+    assert.equal(mixed[0]?.name, "Cara");
+
+    // Cara has no outgoing path; the optional first stage still returns her.
+    const optional = await store.query().from("Person", "root")
+      .whereNode("root", (person) => person.id.eq(cara.id))
+      .optionalTraverse("knows", "pathEdge", { expand: "none" })
+      .recursive({ minHops: 1, maxHops: 2, path: { format: "qualified" }, depth: true })
+      .to("Person", "friend")
+      .select((row) => ({ name: row.root.name, friend: row.friend?.name, path: row.friend_path, depth: row.friend_depth }))
+      .execute();
+    assert.deepEqual(optional, [{ name: "Cara", friend: undefined, path: undefined, depth: undefined }]);
+
     console.log({ roots: subgraphs.map((subgraph) => subgraph.root?.name), paths });
   } finally {
     await backend.close();

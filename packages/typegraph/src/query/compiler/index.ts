@@ -446,7 +446,7 @@ function compileQueryInExpressionContext(
       return finish(compileStandardQuery(loweredRecursive, graphId, ctx));
     }
     return finish(
-      ast.traversals.length > 1 ?
+      ast.traversals.length > 1 || ast.traversals[0]?.optional === true ?
         compileMultiStageRecursiveQuery(ast, graphId, ctx)
       : compileVariableLengthQuery(ast, graphId, ctx),
     );

@@ -53,6 +53,7 @@ import { validateAggregateOperand } from "./aggregate-validation";
 import {
   compileDatabaseExpression,
   compileLegacyAggregateExpression,
+  type DatabaseExpressionCompilerContext,
 } from "./database-expressions";
 import {
   type RecordedReadBinding,
@@ -187,8 +188,25 @@ export function compileFieldValue(
   pointerOverride?: JsonPointer,
   cteColumnPrefix?: string,
 ): SqlFragment {
-  const resolved = normalizeValueType(valueType);
   const column = compileFieldColumn(field, cteAlias, cteColumnPrefix);
+  return compileFieldValueFromColumn(
+    field,
+    dialect,
+    valueType,
+    column,
+    pointerOverride,
+  );
+}
+
+/** Applies a field's JSON/value decoding to an already-resolved column token. */
+export function compileFieldValueFromColumn(
+  field: FieldRef,
+  dialect: DialectAdapter,
+  valueType: ValueType | undefined,
+  column: SqlFragment,
+  pointerOverride?: JsonPointer,
+): SqlFragment {
+  const resolved = normalizeValueType(valueType);
 
   if (!isJsonField(field)) {
     return column;
@@ -519,6 +537,7 @@ export type PredicateCompilerContext = Readonly<{
   recordedReadBinding?: RecordedReadBinding;
   /** Equal-id behavior for historical identity traversal reconstruction. */
   identitySameIdAcrossKinds?: "fold" | "ignore";
+  compileFieldExpression?: DatabaseExpressionCompilerContext["compileFieldExpression"];
   /**
    * Whether the active backend can compute a bounded transitive closure in
    * one round trip. Optional per Contract E: a required member here would
@@ -723,6 +742,9 @@ export function compilePredicateExpression(
         ...(ctx.compileExpressionOuterReference === undefined ?
           {}
         : { compileOuterReference: ctx.compileExpressionOuterReference }),
+        ...(ctx.compileFieldExpression === undefined ?
+          {}
+        : { compileFieldExpression: ctx.compileFieldExpression }),
         resolveFieldCteAlias(field) {
           if (ctx.resolveFieldCteAlias !== undefined)
             return ctx.resolveFieldCteAlias(field);

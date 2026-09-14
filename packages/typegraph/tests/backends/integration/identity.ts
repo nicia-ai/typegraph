@@ -1956,6 +1956,51 @@ export function registerIdentityIntegrationTests(
 
         expect(current).toEqual([]);
         expect([...recorded].toSorted()).toEqual([bob.id, carol.id]);
+
+        const mixedRecorded = await store
+          .asOfRecorded(requireDefined(beforeRetraction))
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .optionalTraverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .recursive({ minHops: 1, maxHops: 2, depth: "depth" })
+          .to("Person", "friend")
+          .traverse("link", "nextEdge", { expand: "none" })
+          .to("Person", "next")
+          .select((row) => ({
+            id: row.next.id,
+            edge: row.nextEdge.id,
+            depth: row.depth,
+          }))
+          .execute();
+        expect(mixedRecorded).toEqual([
+          { id: carol.id, edge: "bob-carol", depth: 1 },
+        ]);
+
+        const mixedCurrent = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .optionalTraverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .recursive({ minHops: 1, maxHops: 2, depth: "depth" })
+          .to("Person", "friend")
+          .optionalTraverse("link", "nextEdge", { expand: "none" })
+          .to("Person", "next")
+          .select((row) => ({
+            id: row.next?.id,
+            edge: row.nextEdge?.id,
+            depth: row.depth,
+          }))
+          .execute();
+        expect(mixedCurrent).toEqual([
+          { id: undefined, edge: undefined, depth: undefined },
+        ]);
       });
     });
 

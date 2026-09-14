@@ -242,9 +242,9 @@ Each route alternates node and edge references, starting and ending with a node:
 do not hydrate node or edge properties. Legacy `path: true` and `path: "alias"` continue to return
 node ID arrays.
 
-## Chaining Recursive Traversals
+## Chaining Fixed and Recursive Traversals
 
-Two or more recursive traversals compose from left to right. Each later stage expands from the
+Fixed-hop and recursive traversals compose from left to right. Each later stage expands from the
 completed identities produced by its `from` alias, then rejoins those results to the earlier rows.
 This preserves upstream multiplicity while avoiding repeated expansion of the same `(kind, id)`
 source within a stage.
@@ -272,18 +272,56 @@ const routes = await store
 ```
 
 The `minHops`, `maxHops`, `cyclePolicy`, `stopExpansion`, `path`, and `depth` settings apply to
-their own stage. A later `optionalTraverse()` retains the earlier row when it finds no match; its
+their own recursive stage. An `optionalTraverse()`, including the first stage, retains the earlier row
+when it finds no match; its
 target, path, and depth values are `undefined`. A completed `.where()`, final ordering, and final
 limit apply after every stage. The `from` option may also branch from any earlier materialized node
 alias.
 
+### Mixing fixed hops with recursion
+
+A fixed hop can precede or follow recursion. Fixed-hop edges retain their ordinary property bindings;
+recursive edges are represented by path references.
+
+```typescript
+const reports = await store.query()
+  .from("Person", "root")
+  .traverse("manages", "directManagement")
+  .to("Person", "directReport")
+  .traverse("manages", "management")
+  .recursive({ minHops: 0, maxHops: 3, depth: "depth" })
+  .to("Person", "report")
+  .traverse("worksAt", "employment")
+  .to("Organization", "organization")
+  .select((ctx) => ({
+    report: ctx.report.name,
+    organization: ctx.organization.name,
+    employment: ctx.employment,
+    depth: ctx.depth,
+  }))
+  .execute();
+```
+
+### An optional first recursive stage
+
+Use `optionalTraverse()` before `.recursive()` to retain roots that have no eligible endpoint.
+With a positive `minHops`, a root with no matching path returns `undefined` for its target, depth,
+and path. With `minHops: 0`, an eligible root is a real zero-hop match: depth `0` and a one-node
+path. Endpoint eligibility includes `stopExpansion()` and its `emitStopNode` setting.
+
+Match constraints can remove every endpoint while retaining the optional row. A completed `.where()`
+comparison against the absent target removes that row unless its predicate explicitly allows absence.
+A subsequent required traversal from an absent target produces no match; a subsequent optional traversal
+preserves absence. You can still branch from a present earlier alias using the `from` option.
+
 ### Boolean shorthand
 
-Pass `true` instead of a string to use the default alias names:
+Pass `true` instead of a string to derive output names from the target alias:
 
 ```typescript
 .recursive({ depth: true, path: true })
-// ctx.depth and ctx.path are available in select()
+.to("Person", "target")
+// ctx.target_depth and ctx.target_path are available in select()
 ```
 
 ## Cycle Detection
@@ -469,14 +507,15 @@ implicit 100-hop cap, add `.recursive({ maxHops: 100 })`.
 
 ## Limitations
 
-- **Every traversal in a recursive chain must be recursive.** Mixing fixed-hop and recursive
-  stages is refused. The first recursive stage must be required; later stages may be optional.
+- **Match predicates in a staged query can reference only the alias they constrain.** Cross-alias match
+  predicates are refused before execution. Use completed-row `.where()` for comparisons between aliases;
+  remember that a completed-row comparison can remove an unmatched optional row.
+
 - **Recursive queries cannot be aggregated in place yet.** `groupBy()`, aggregate projections,
   aggregate ordering, and `having()` are refused. Project node columns with `project()`, then use
   `asRelation()` to aggregate that completed relation.
-- **Edge properties are not projected** in recursive results. You can filter on edge properties
-  with `whereEdge()`, but the `select()` context only exposes the start node, target node, and
-  any depth/path aliases.
+- **Recursive edge properties are not projected.** You can filter them with `whereEdge()`. Fixed-hop
+  edge properties remain selectable when fixed hops and recursion appear in the same query.
 - **Recursive edges are not materialized in the result.** Qualified paths expose edge references,
   but selected recursive edge fields are refused.
 

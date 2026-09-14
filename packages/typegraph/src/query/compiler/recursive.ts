@@ -9,7 +9,7 @@ import {
   UnsupportedPredicateError,
 } from "../../errors";
 import { IDENTITY_PATH_TOKEN_SEPARATOR } from "../../utils/path";
-import { type QueryAst, type SelectiveField } from "../ast";
+import { type FieldRef, type QueryAst, type SelectiveField } from "../ast";
 import {
   type DialectAdapter,
   type DialectRecursiveQueryStrategy,
@@ -36,6 +36,7 @@ import { compileKindFilter as sharedCompileKindFilter } from "./predicate-utils"
 import {
   assertRecursiveTraversalSupported,
   compileFieldValue,
+  compileFieldValueFromColumn,
   compilePredicateExpression,
   type PredicateCompilerContext,
 } from "./predicates";
@@ -233,10 +234,6 @@ export function compileVariableLengthQuery(
 
 /** Applies the shared output contract to single and composed recursion. */
 export function assertRecursiveOutputSupported(ast: QueryAst): void {
-  if (ast.traversals[0]?.optional === true)
-    throw new UnsupportedPredicateError(
-      "An optional first recursive traversal is not yet supported",
-    );
   if (
     ast.groupBy !== undefined ||
     ast.having !== undefined ||
@@ -950,28 +947,12 @@ function compileRecursiveProjection(
         undefined,
         new Set([traversal.edgeAlias]),
       )
-    : [
-        // Start alias fields with metadata
-        sql`${sql.raw(startAlias)}_id`,
-        sql`${sql.raw(startAlias)}_kind`,
-        sql`${sql.raw(startAlias)}_props`,
-        sql`${sql.raw(startAlias)}_version`,
-        sql`${sql.raw(startAlias)}_valid_from`,
-        sql`${sql.raw(startAlias)}_valid_to`,
-        sql`${sql.raw(startAlias)}_created_at`,
-        sql`${sql.raw(startAlias)}_updated_at`,
-        sql`${sql.raw(startAlias)}_deleted_at`,
-        // Node alias fields with metadata
-        sql`${sql.raw(nodeAlias)}_id`,
-        sql`${sql.raw(nodeAlias)}_kind`,
-        sql`${sql.raw(nodeAlias)}_props`,
-        sql`${sql.raw(nodeAlias)}_version`,
-        sql`${sql.raw(nodeAlias)}_valid_from`,
-        sql`${sql.raw(nodeAlias)}_valid_to`,
-        sql`${sql.raw(nodeAlias)}_created_at`,
-        sql`${sql.raw(nodeAlias)}_updated_at`,
-        sql`${sql.raw(nodeAlias)}_deleted_at`,
-      ];
+    : [startAlias, nodeAlias].flatMap((alias) =>
+        NODE_COLUMNS.map((column) => {
+          const name = `${alias}_${column}`;
+          return sql`${sql.raw(name)} AS ${quoteIdentifier(name)}`;
+        }),
+      );
 
   if (vl.depthAlias !== undefined) {
     fields.push(sql`depth AS ${quoteIdentifier(vl.depthAlias)}`);
@@ -1114,7 +1095,9 @@ export function compileAdditionalRecursiveProjectionFields(
             resultAlias,
             "recursive projection",
           )
-        : compileFieldValue(source, ctx.dialect, source.valueType, resultAlias);
+        : resultAlias === undefined ?
+          compileFieldValue(source, ctx.dialect, source.valueType)
+        : compileRecursiveResultField(source, ctx.dialect, resultAlias);
       return sql`${value} AS ${quoteIdentifier(field.outputName)}`;
     });
 }
@@ -1137,8 +1120,31 @@ function compileRecursiveDatabaseExpression(
     : { compileOuterReference: ctx.compileExpressionOuterReference }),
     ...(resultAlias === undefined ?
       {}
-    : { resolveFieldCteAlias: () => resultAlias }),
+    : {
+        compileFieldExpression(field, fieldExpression) {
+          return compileRecursiveResultField(
+            field,
+            ctx.dialect,
+            resultAlias,
+            fieldExpression.valueType,
+          );
+        },
+      }),
   });
+}
+
+export function compileRecursiveResultField(
+  field: FieldRef,
+  dialect: DialectAdapter,
+  resultAlias: string,
+  valueType = field.valueType,
+): SqlFragment {
+  const baseColumn =
+    field.path[0] === "props" ?
+      `${field.alias}_props`
+    : `${field.alias}_${field.path.join("_")}`;
+  const column = sql`${sql.identifier(resultAlias)}.${sql.identifier(baseColumn)}`;
+  return compileFieldValueFromColumn(field, dialect, valueType, column);
 }
 
 /**
@@ -1170,7 +1176,14 @@ export function compileRecursiveOrderBy(
           resultAlias,
           "recursive ORDER BY",
         )
-      : compileFieldValue(orderSpec.field, ctx.dialect, valueType, resultAlias);
+      : resultAlias === undefined ?
+        compileFieldValue(orderSpec.field, ctx.dialect, valueType)
+      : compileRecursiveResultField(
+          orderSpec.field,
+          ctx.dialect,
+          resultAlias,
+          valueType,
+        );
     const direction = sql.raw(orderSpec.direction.toUpperCase());
     const nulls =
       orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");

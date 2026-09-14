@@ -21,6 +21,7 @@ import {
   MAX_EXPLICIT_RECURSIVE_DEPTH,
   MAX_RECURSIVE_DEPTH,
 } from "../src/query/compiler/recursive";
+import { compileMultiStageRecursiveQuery } from "../src/query/compiler/recursive-chain";
 import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
 import { postgresDialect, sqliteDialect } from "../src/query/dialect";
 import { sql } from "../src/query/sql-fragment";
@@ -1085,5 +1086,20 @@ describe("MAX_EXPLICIT_RECURSIVE_DEPTH", () => {
 
   it("is exported and accessible", () => {
     expect(typeof MAX_EXPLICIT_RECURSIVE_DEPTH).toBe("number");
+  });
+});
+
+describe("composed recursive raw result predicates", () => {
+  it("refuses legacy direct-field filters instead of emitting invalid materialized references", () => {
+    const ast = createAst({
+      resultPredicate: {
+        __type: "null_check",
+        field: createFieldRef("target", ["id"]),
+        op: "isNotNull",
+      },
+    });
+    expect(() =>
+      compileMultiStageRecursiveQuery(ast, "graph", createContext()),
+    ).toThrow("Completed recursive match filters require database expressions");
   });
 });
