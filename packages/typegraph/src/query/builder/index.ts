@@ -23,6 +23,7 @@ export {
   ExecutableAggregateQuery,
 } from "./executable-aggregate-query";
 export { ExecutableQuery } from "./executable-query";
+export { executeOneStatementBatch } from "./one-statement-batch";
 export { PreparedQuery } from "./prepared-query";
 export { type IdentityTraversalOption, QueryBuilder } from "./query-builder";
 export { TraversalBuilder } from "./traversal-builder";
@@ -70,18 +71,23 @@ export {
   type BatchableQuery,
   type BatchResults,
   type BooleanFieldAccessor,
+  type CompiledOneStatementRead,
   type CreateQueryBuilderOptions,
   type DateFieldAccessor,
   type EdgeAccessor,
+  type EmbeddableOneStatementRead,
   type EmbeddingFieldAccessor,
   type EmptyAliasMap,
   type EmptyEdgeAliasMap,
   type EmptyRecursiveAliasMap,
+  type ExecutableOneStatementRead,
   type FieldAccessor,
   type NodeAccessor,
   type NodeAlias,
   type NumberFieldAccessor,
   type ObjectFieldAccessor,
+  type OneStatementBatchableQuery,
+  type OneStatementBatchResults,
   type PaginatedResult,
   type PaginateOptions,
   type PropsAccessor,

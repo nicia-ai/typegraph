@@ -399,6 +399,51 @@ expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
 );
 
 declare const store: Store<typeof graph>;
+const neighborSource = {
+  kind: "Person",
+  id: "person-1" as NodeId<typeof Person>,
+} as const;
+const oneStatementBatch = store.batchOnce((read) => {
+  const neighbors = read.neighbors(neighborSource, {
+    edges: ["knows"],
+    orderBy: { by: "node", field: "name", direction: "desc" },
+  });
+  expectError(
+    read.countNeighbors(neighborSource, { edges: ["knows"] }).execute(),
+  );
+  expectError(
+    read.neighbors(neighborSource, {
+      edges: ["knows"],
+      orderBy: { by: "node", field: "missing" },
+    }),
+  );
+  const subgraph = read.subgraph("person-1" as NodeId<typeof Person>, {
+    edges: ["knows", "worksAt"],
+    edgeWindows: {
+      knows: { direction: "both", limit: 1 },
+      worksAt: { direction: "out", limit: 2 },
+    },
+  });
+  return [neighbors, subgraph] as const;
+});
+expectType<Promise<number>>(
+  oneStatementBatch.then(([neighbors]) => neighbors.length),
+);
+expectError(store.neighborsQuery);
+expectError(store.countNeighborsQuery);
+expectError(store.subgraphQuery);
+expectError(
+  store.batchOnce(
+    store
+      .query()
+      .from("Person", "p")
+      .select((ctx) => ctx.p),
+    store
+      .query()
+      .from("Company", "c")
+      .select((ctx) => ctx.c),
+  ),
+);
 declare const backend: GraphBackend;
 type NativeTransaction = Readonly<{
   executeNative: (statement: string) => void;

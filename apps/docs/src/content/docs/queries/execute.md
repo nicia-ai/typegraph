@@ -275,8 +275,22 @@ async function exportAllUsers(): Promise<void> {
 
 ## Batch Execution
 
-When you need multiple independent queries with different result types, use `store.batch()` to run
-them in sequence against one target.
+When independent reads must share one database round trip, use `store.batchOnce()`.
+It embeds each read as a CTE and returns the independently typed results in input order. Fluent
+queries preserve explicit ordering even when the sort field is not selected. The callback's scoped
+builder creates batch-scoped composable graph reads without adding parallel `*Query` methods to the
+executing Store API:
+
+```typescript
+const [people, neighbors, neighborhood] = await store.batchOnce((read) => [
+  store.query().from("Person", "p").select((ctx) => ctx.p),
+  read.neighbors(person, { edges: ["knows"], limit: 5 }),
+  read.subgraph(person.id, { edges: ["knows"], maxDepth: 2 }),
+]);
+```
+
+Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
+sequential execution is the intended connection profile.
 
 `batch()` does not batch round trips. The portable guarantee is that at most one query is in flight
 at a time — at least one statement each, and two for a query whose selective-field mapping falls
@@ -288,9 +302,16 @@ Connection reuse is the adapter's business either way.
 Whole-node, whole-edge, and spread selections detected during planning use a full fetch from
 the start. A selector branch that depends on actual row values can still trigger the fallback.
 
-It will not fix an N+1. For that, fold the work into one query: a `.traverse()` chain (one
-statement), `store.subgraph()` (2 statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
+It will not merge arbitrary promises or collection calls. Use fluent queries or the callback's
+`read.neighbors()`, `read.countNeighbors()`, and `read.subgraph()` methods when independent result
+shapes must share its one statement. Other alternatives are a `.traverse()` chain,
+`store.neighbors()` or `store.countNeighbors()` (one statement each), `store.subgraph()` (2
+statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
 `bulkFindByIndex()`, which are chunked rather than fixed-cost.
+Direct `store.subgraph()` and batch-scoped `read.subgraph()` share validation, traversal,
+projection, and result semantics. The call context selects the physical execution contract: the
+direct read uses backend-tuned hydration, while the batch-scoped read is embedded into the batch's
+single statement.
 
 It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can
 observe a commit the earlier ones did not. There is no way to fix that for fluent queries today —

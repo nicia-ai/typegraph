@@ -179,6 +179,21 @@ export interface DialectAdapter {
     workingMemory: string,
   ) => SqlFragment | undefined;
 
+  /**
+   * Aggregates an ordered derived-table row set into one JSON array value.
+   *
+   * `columns` are the public columns to retain; `orderColumn` is an internal
+   * ordinal and must not appear in the JSON objects. This is the token-level
+   * dialect seam used by one-statement batches: PostgreSQL can convert a whole
+   * record to JSON, while SQLite must spell every `json_object` key.
+   */
+  readonly orderedRowsJsonArray: (
+    this: void,
+    rowAlias: string,
+    columns: readonly string[],
+    orderColumn: string,
+  ) => SqlFragment;
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

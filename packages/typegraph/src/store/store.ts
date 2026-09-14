@@ -189,8 +189,12 @@ import type { TraversalExpansion } from "../query/ast";
 import {
   type BatchableQuery,
   type BatchResults,
+  type CompiledOneStatementRead,
   createInternalQueryBuilder,
+  type EmbeddableOneStatementRead,
+  executeOneStatementBatch,
   type InitialQueryBuilder,
+  type OneStatementBatchResults,
   type QueryCoordinateState,
 } from "../query/builder";
 import {
@@ -272,6 +276,14 @@ import {
   type MaterializeRemovalsResult,
 } from "./materialize-removals";
 import { ensureFocusedStatusTable } from "./materialize-shared";
+import {
+  countNeighbors as countNeighborsImpl,
+  createNeighborCountRead,
+  createNeighborRead,
+  type NeighborReadOptions,
+  type NeighborResult,
+  readNeighbors,
+} from "./neighbors";
 import {
   type EdgeOperationContext,
   edgeUpsertDirtyCheck,
@@ -360,10 +372,12 @@ import {
   type StoreViewCoordinate,
 } from "./store-view";
 import {
+  createSubgraphRead,
   executeSubgraph,
   type InternalSubgraphOptions,
   type SubgraphOptions,
   type SubgraphProject,
+  type SubgraphRead,
   type SubgraphResult,
 } from "./subgraph";
 import {
@@ -695,6 +709,14 @@ export interface RequiredEdgeCollectionLookup<G extends GraphDef = GraphDef> {
   (kind: string): DynamicEdgeCollection;
 }
 
+type CheckedReadScopeBoundary<G extends GraphDef> = Readonly<{
+  query?: () => InitialQueryBuilder<G, "open">;
+}>;
+
+/** Read scope whose fluent-query executions all verify one schema version. */
+export type CheckedReadScope<G extends GraphDef> = CheckedReadScopeBoundary<G> &
+  Required<Pick<CheckedReadScopeBoundary<G>, "query">>;
+
 type StoreCore<G extends GraphDef> = Readonly<{
   [STORE_RUNTIME]: StoreRuntime<G>;
   graph: G;
@@ -737,6 +759,10 @@ type StoreCore<G extends GraphDef> = Readonly<{
   schemaChanges: () => Promise<SchemaDiff | undefined>;
   requiresMigration: () => Promise<boolean>;
   query: () => InitialQueryBuilder<G, "open">;
+  withCheckedReads?: <T>(
+    expectedSchemaVersion: number | undefined,
+    fn: (reads: CheckedReadScope<G>) => Promise<T>,
+  ) => Promise<T>;
   asOf: (asOf: string) => StoreView<G>;
   asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
   recordedNow: () => Promise<RecordedInstant | undefined>;
@@ -753,6 +779,23 @@ type StoreCore<G extends GraphDef> = Readonly<{
   >(
     ...queries: Queries
   ) => Promise<BatchResults<Queries>>;
+  batchOnce?: <
+    const Queries extends readonly [
+      EmbeddableOneStatementRead<unknown>,
+      EmbeddableOneStatementRead<unknown>,
+      ...EmbeddableOneStatementRead<unknown>[],
+    ],
+  >(
+    build: (read: BatchReadBuilder<G>) => Queries,
+  ) => Promise<OneStatementBatchResults<Queries>>;
+  neighbors?: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: NeighborReadOptions<G, K>,
+  ) => Promise<readonly NeighborResult<G, K>[]>;
+  countNeighbors?: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ) => Promise<number>;
   bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(
     params: BulkFindEdgesFromParams<G, K>,
     options?: EdgeBulkFindEndpointOptions,
@@ -844,6 +887,57 @@ type StoreTransactions<G extends GraphDef> = Readonly<{
   ) => Promise<TransactionOutcome<T>>;
 }>;
 
+/** Builds cold reads that {@link Store.batchOnce} can compose in one statement. */
+export type BatchReadBuilder<G extends GraphDef> = Readonly<{
+  neighbors: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: NeighborReadOptions<G, K>,
+  ) => CompiledOneStatementRead<readonly NeighborResult<G, K>[]>;
+  countNeighbors: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ) => CompiledOneStatementRead<number>;
+  subgraph: <
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: SubgraphOptions<G, EK, NK, P>,
+  ) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
+}>;
+
+type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+  withCheckedReads?: <T>(
+    expectedSchemaVersion: number | undefined,
+    fn: (reads: CheckedReadScope<G>) => Promise<T>,
+  ) => Promise<T>;
+  batchOnce?: <
+    const Queries extends readonly [
+      EmbeddableOneStatementRead<unknown>,
+      EmbeddableOneStatementRead<unknown>,
+      ...EmbeddableOneStatementRead<unknown>[],
+    ],
+  >(
+    build: (read: BatchReadBuilder<G>) => Queries,
+  ) => Promise<OneStatementBatchResults<Queries>>;
+  neighbors?: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: NeighborReadOptions<G, K>,
+  ) => Promise<readonly NeighborResult<G, K>[]>;
+  countNeighbors?: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ) => Promise<number>;
+}>;
+
+type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;
+
+type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
+  Required<Pick<AddedStoreReadsBoundary<G>, AddedStoreReadKey>>;
+
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
+
 interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
   readonly evolve: <TRefStore extends StoreCore<G> = TStore>(
     extension: GraphExtension,
@@ -889,7 +983,7 @@ function syncStoreReplacementRef<
  * graph-owned transactions while keeping adapter-native handles, backend
  * internals, and caller-owned transaction adoption out of the public surface.
  */
-export type Store<G extends GraphDef> = StoreCore<G> &
+export type Store<G extends GraphDef> = ResolvedStoreCore<G> &
   StoreTransactions<G> &
   StoreEvolution<G, Store<G>>;
 
@@ -959,7 +1053,7 @@ interface AdapterStoreReconciliation<
 export type AdapterStore<
   G extends GraphDef,
   TNativeTransaction,
-> = StoreCore<G> &
+> = ResolvedStoreCore<G> &
   StoreEvolution<G, AdapterStore<G, TNativeTransaction>> &
   AdapterStoreTransactions<G, TNativeTransaction> &
   AdapterStoreReconciliation<
@@ -2572,6 +2666,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * Runs a read block whose fluent queries automatically use
+   * `executeChecked(expectedSchemaVersion)` when `.execute()` is called.
+   * A schema mismatch aborts the block with `SchemaChangedError`, so callers
+   * can put one reload-and-retry boundary around the whole block.
+   */
+  withCheckedReads<T>(
+    expectedSchemaVersion: number | undefined,
+    fn: (reads: CheckedReadScope<G>) => Promise<T>,
+  ): Promise<T> {
+    const reads: CheckedReadScope<G> = {
+      query: () =>
+        this.#createQueryForBackend(this.#backend, undefined, 1, {
+          value: expectedSchemaVersion,
+        }),
+    };
+    return fn(reads);
+  }
+
+  /**
    * Internal seam for {@link StoreView.query}: a query builder pinned to a
    * view's {@link ReadCoordinate} with its temporal axis sealed
    * (`.temporal()` throws). Not part of the stable public API — construct a
@@ -3027,6 +3140,92 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * Executes two or more independent relational queries as exactly one SQL
+   * statement and returns their typed results in input order.
+   *
+   * Each read is embedded as a CTE and its rows are returned through a JSON
+   * envelope. Unlike {@link batch}, this method opens no transaction and has
+   * no sequential fallback: one call means one statement on every supported
+   * backend. Fluent queries and the reads built by the callback are composable
+   * here.
+   */
+  async batchOnce<
+    const Queries extends readonly [
+      EmbeddableOneStatementRead<unknown>,
+      EmbeddableOneStatementRead<unknown>,
+      ...EmbeddableOneStatementRead<unknown>[],
+    ],
+  >(
+    build: (read: BatchReadBuilder<G>) => Queries,
+  ): Promise<OneStatementBatchResults<Queries>> {
+    const queries = build({
+      neighbors: (source, options) => {
+        this.#assertNeighborKinds(source, options.edges);
+        return createNeighborRead(this.#neighborContext(), source, options);
+      },
+      countNeighbors: (source, options) => {
+        this.#assertNeighborKinds(source, options.edges);
+        return createNeighborCountRead(
+          this.#neighborContext(),
+          source,
+          options,
+        );
+      },
+      subgraph: (rootId, options) => this.#createSubgraphRead(rootId, options),
+    });
+    return executeOneStatementBatch(
+      this.#createHookedQueryBackend(this.#baseBackend),
+      queries,
+    );
+  }
+
+  /** Reads hydrated adjacent nodes and their connecting edges in one statement. */
+  async neighbors<const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: NeighborReadOptions<G, K>,
+  ): Promise<readonly NeighborResult<G, K>[]> {
+    this.#assertNeighborKinds(source, options.edges);
+    return readNeighbors(this.#neighborContext(), source, options);
+  }
+
+  /** Counts visible relationships to adjacent nodes without hydrating them. */
+  async countNeighbors<const K extends EdgeKinds<G>>(
+    source: GraphNodeReference<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ): Promise<number> {
+    this.#assertNeighborKinds(source, options.edges);
+    return countNeighborsImpl(this.#neighborContext(), source, options);
+  }
+
+  #neighborContext(): Parameters<typeof readNeighbors<G, EdgeKinds<G>>>[0] {
+    return {
+      graphId: this.graphId,
+      backend: this.#createHookedQueryBackend(this.#backend),
+      schema: this.#sqlSchema(),
+      defaultTemporalMode: this.#graph.defaults.temporalMode,
+      registry: this.#registry,
+    };
+  }
+
+  #assertNeighborKinds(
+    source: GraphNodeReference<G>,
+    edgeKinds: readonly EdgeKinds<G>[],
+  ): void {
+    if (!Object.hasOwn(this.#graph.nodes, source.kind)) {
+      throw new KindNotFoundError(source.kind, "node", {
+        graphId: this.graphId,
+      });
+    }
+    for (const edgeKind of edgeKinds) {
+      if (!Object.hasOwn(this.#graph.edges, edgeKind)) {
+        throw new KindNotFoundError(edgeKind, "edge", {
+          graphId: this.graphId,
+        });
+      }
+    }
+  }
+
+  /**
    * Reads several edge kinds from heterogeneous source nodes with round trips
    * independent of the number of licensed edge/source-kind combinations.
    *
@@ -3242,6 +3441,33 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // After the guard, the public read is just the coordinate path with no
     // recorded pin — delegate so the executeSubgraph wiring lives in one place.
     return this.subgraphAtCoordinate(rootId, options);
+  }
+
+  #createSubgraphRead<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: SubgraphOptions<G, EK, NK, P>,
+  ): SubgraphRead<G, NK, EK, P> {
+    assertNoRecordedCoordinate(options, {
+      code: "SUBGRAPH_RECORDED_ASOF_INTERNAL_ONLY",
+      message:
+        "recordedAsOf is only available through store.asOfRecorded(...).subgraph(...).",
+      suggestion:
+        "Use store.asOfRecorded(recordedAt).subgraph(rootId, options) instead of passing recordedAsOf directly.",
+    });
+    return createSubgraphRead({
+      graph: this.#graph,
+      graphId: this.graphId,
+      rootId,
+      backend: this.#createHookedQueryBackend(this.#baseBackend),
+      dialect: getDialect(this.#backend.dialect),
+      schema: this.#schema,
+      recordedReadBinding: this.#recordedReadBinding,
+      options,
+    });
   }
 
   /**
@@ -6240,6 +6466,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     backend: GraphBackend | TransactionBackend,
     sealedCoordinate?: ReadCoordinate,
     attempt = 1,
+    expectedSchemaVersion?: Readonly<{ value: number | undefined }>,
   ): InitialQueryBuilder<G, CoordinateState> {
     const queryBackend = this.#createHookedQueryBackend(backend, attempt);
     return createInternalQueryBuilder<G, CoordinateState>(
@@ -6258,6 +6485,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           recordedReadBinding: this.#recordedReadBinding,
         }),
         ...(sealedCoordinate !== undefined && { sealedCoordinate }),
+        ...(expectedSchemaVersion !== undefined && { expectedSchemaVersion }),
       },
     );
   }
@@ -6492,7 +6720,7 @@ export type MeasurableAdapterHistoryTransactionContext<
 export type AdapterRecordedReadStore<
   G extends GraphDef,
   TNativeTransaction,
-> = StoreCore<G> &
+> = ResolvedStoreCore<G> &
   StoreEvolution<G, AdapterRecordedReadStore<G, TNativeTransaction>> &
   AdapterStoreTransactions<G, TNativeTransaction> &
   AdapterStoreReconciliation<
@@ -6505,12 +6733,12 @@ export type AdapterRecordedReadStore<
     recordedReadBound: true;
   }>;
 
-export type RecordedReadStore<G extends GraphDef> = StoreCore<G> &
+export type RecordedReadStore<G extends GraphDef> = ResolvedStoreCore<G> &
   StoreTransactions<G> &
   StoreEvolution<G, RecordedReadStore<G>> &
   Readonly<{ recordedReadBound: true }>;
 
-export type HistoryStore<G extends GraphDef> = StoreCore<G> &
+export type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> &
   StoreTransactions<G> &
   StoreEvolution<G, HistoryStore<G>> &
   Readonly<{
@@ -6521,7 +6749,7 @@ export type HistoryStore<G extends GraphDef> = StoreCore<G> &
 export type AdapterHistoryStore<
   G extends GraphDef,
   TNativeTransaction,
-> = StoreCore<G> &
+> = ResolvedStoreCore<G> &
   StoreEvolution<G, AdapterHistoryStore<G, TNativeTransaction>> &
   AdapterHistoryStoreTransactions<G, TNativeTransaction> &
   AdapterStoreReconciliation<

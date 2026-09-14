@@ -29,6 +29,8 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type { CompiledOneStatementRead } from "../query";
+export type { BatchReadBuilder } from "../store";
 
 // ============================================================
 // Types & Schemas

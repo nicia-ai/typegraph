@@ -30,6 +30,7 @@ import { createSchemaIntrospector } from "./schema-introspector";
 export {
   ExecutableAggregateQuery,
   ExecutableQuery,
+  executeOneStatementBatch,
   QueryBuilder,
 } from "./builder/index";
 
@@ -58,6 +59,7 @@ export type {
   AliasMap,
   BatchableQuery,
   BatchResults,
+  CompiledOneStatementRead,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,
@@ -67,13 +69,17 @@ export type {
   DynamicSelectableEdge,
   DynamicSelectableNode,
   EdgeAccessor,
+  EmbeddableOneStatementRead,
   EmptyAliasMap,
   EmptyEdgeAliasMap,
   EmptyRecursiveAliasMap,
+  ExecutableOneStatementRead,
   FieldAccessor,
   IdentityTraversalOption,
   NodeAccessor,
   NodeAlias,
+  OneStatementBatchableQuery,
+  OneStatementBatchResults,
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
@@ -213,6 +219,9 @@ function createQueryBuilderWithContext<
     }),
     ...(options?.runtimeKindTokenResolver !== undefined && {
       runtimeKindTokenResolver: options.runtimeKindTokenResolver,
+    }),
+    ...(options?.expectedSchemaVersion !== undefined && {
+      expectedSchemaVersion: options.expectedSchemaVersion,
     }),
   });
 

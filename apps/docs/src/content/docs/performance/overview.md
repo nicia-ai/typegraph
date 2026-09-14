@@ -82,9 +82,10 @@ This holds for all query types:
 - [Set operations](/queries/combine) (UNION/INTERSECT/EXCEPT of CTEs, 1 statement)
 
 The fluent query needs no dataloader for that joined read because the database handles its entire
-join graph in one execution. Separate reads can still form an N+1; use a traversal, `subgraph()`, or
-the chunked collection reads described below instead of looping them or wrapping them in
-`store.batch()`.
+join graph in one execution. Separate reads can still form an N+1; use a traversal, `batchOnce()`,
+`neighbors()` / `countNeighbors()`, or `subgraph()`. Inside `batchOnce()`, its batch-scoped `read` builder
+creates composable versions of the set-oriented reads when unlike result shapes must share one
+statement. Chunked collection reads remain useful for homogeneous ID and endpoint sets.
 
 ## Batch Write Patterns
 
@@ -449,15 +450,11 @@ queries. Results are returned in input order with `undefined` for missing entrie
 const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 ```
 
-For multiple independent queries with different shapes and filters, use
-[`store.batch()`](/schemas-stores#batch-query-execution) to run them in sequence against one target.
-Note the cost: on a transactional backend it still issues at least one statement per query plus
-`begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no
-framing. It buys a connection profile that never peaks at N — not lower latency, and not a snapshot
-(PostgreSQL's default read-committed isolation lets a later query see a newer commit):
+For multiple independent embeddable reads with different shapes and filters, use
+[`store.batchOnce()`](/schemas-stores#batch-query-execution) to execute exactly one statement:
 
 ```typescript
-const [activeUsers, recentOrders] = await store.batch(
+const [activeUsers, recentOrders] = await store.batchOnce(() => [
   store
     .query()
     .from("User", "u")
@@ -469,14 +466,42 @@ const [activeUsers, recentOrders] = await store.batch(
     .select((ctx) => ({ id: ctx.o.id, total: ctx.o.total }))
     .orderBy("o", "createdAt", "desc")
     .limit(20),
-);
+]);
 ```
+
+The callback's batch-scoped builder composes set-oriented reads in the same call:
+
+```typescript
+const [latest, versionCount, detail] = await store.batchOnce((read) => [
+  read.neighbors(document, {
+    edges: ["hasVersion"],
+    orderBy: { by: "node", field: "sequence", direction: "desc" },
+    limit: 1,
+  }),
+  read.countNeighbors(document, { edges: ["hasVersion"] }),
+  read.subgraph(document.id, { edges: ["hasSection"], maxDepth: 2 }),
+]);
+```
+
+Use `store.batch()` when queued edge collection reads must participate. It runs them in sequence.
+On a transactional backend it still issues at least one statement per query plus
+`begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no
+framing. It buys a connection profile that never peaks at N — not lower latency, and not a snapshot
+(PostgreSQL's default read-committed isolation lets a later query see a newer commit).
 
 Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
 participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
 into one transaction — the statement count is unchanged either way. If the round trips are what
-hurt, replace the calls with a traversal (one statement) or `store.subgraph()` (a fixed 2 on
-SQLite, 3 on PostgreSQL, however large the result).
+hurt, replace the calls with `store.neighbors()` / `store.countNeighbors()` or a traversal (one
+statement), or compose the batch-scoped `read.neighbors()`, `read.countNeighbors()`, and
+`read.subgraph()` forms in `batchOnce()`.
+
+Direct `store.subgraph()` and batch-scoped `read.subgraph()` share one semantic planner and produce the
+same result, but intentionally use different physical plans. The direct form uses 2 statements
+on SQLite and 3 on PostgreSQL so each backend can hydrate a closure efficiently. The scoped form
+uses 1 statement everywhere to make cross-shape composition possible. On PostgreSQL, prefer the
+direct form for a standalone large closure; use the batch-scoped form when eliminating network round
+trips across several independent reads matters more than optimizing that closure in isolation.
 
 To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
 [Edge Collections](/schemas-stores#edge-collections)).

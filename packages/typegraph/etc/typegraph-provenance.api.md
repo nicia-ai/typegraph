@@ -15,6 +15,24 @@ const __identityAssertionId: unique symbol;
 // @public
 const __nodeId: unique symbol;
 
+// @public (undocumented)
+type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;
+
+// @public (undocumented)
+type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required<Pick<AddedStoreReadsBoundary<G>, AddedStoreReadKey>>;
+
+// @public (undocumented)
+type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+    withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
+    batchOnce?: <const Queries extends readonly [
+    EmbeddableOneStatementRead<unknown>,
+    EmbeddableOneStatementRead<unknown>,
+    ...EmbeddableOneStatementRead<unknown>[]
+    ]>(build: (read: BatchReadBuilder<G>) => Queries) => Promise<OneStatementBatchResults<Queries>>;
+    neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
+    countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
+}>;
+
 // @public
 type AggregateComparisonPredicate = Readonly<{
     __type: "aggregate_comparison";
@@ -301,6 +319,13 @@ type BatchableQuery<R = unknown> = Readonly<{
 }>;
 
 // @public
+export type BatchReadBuilder<G extends GraphDef> = Readonly<{
+    neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => CompiledOneStatementRead<readonly NeighborResult<G, K>[]>;
+    countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => CompiledOneStatementRead<number>;
+    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
+}>;
+
+// @public
 type BatchResults<Queries extends readonly BatchableQuery<unknown>[]> = {
     -readonly [K in keyof Queries]: Queries[K] extends BatchableQuery<infer R> ? readonly R[] : never;
 };
@@ -484,6 +509,14 @@ type ChangeSeverity = "safe" | "warning" | "breaking";
 type ChangeType = "added" | "removed" | "modified" | "renamed";
 
 // @public
+type CheckedReadScope<G extends GraphDef> = CheckedReadScopeBoundary<G> & Required<Pick<CheckedReadScopeBoundary<G>, "query">>;
+
+// @public (undocumented)
+type CheckedReadScopeBoundary<G extends GraphDef> = Readonly<{
+    query?: () => InitialQueryBuilder<G, "open">;
+}>;
+
+// @public
 type CheckUniqueBatchParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -605,6 +638,9 @@ type ComparisonPredicate = Readonly<{
     left: FieldRef;
     right: LiteralValue | LiteralValue[] | ParameterRef;
 }>;
+
+// @public
+export type CompiledOneStatementRead<R> = Required<Pick<OneStatementBatchableQuery<R>, "compileOneStatementBatchItem">>;
 
 // @public (undocumented)
 type CompiledRowsSql = IntentSql<"rows">;
@@ -1445,6 +1481,16 @@ type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
 }>;
 
 // @public
+type EdgeReadWindow = Readonly<{
+    limit: number;
+    direction?: "both" | "in" | "out";
+    orderBy?: Readonly<{
+        field: NeighborOrderField;
+        direction?: "asc" | "desc";
+    }>;
+}>;
+
+// @public
 type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends NodeType = NodeType, ToTypes extends NodeType = NodeType, ToDef extends EdgeTargets = [NodeType] extends [ToTypes] ? EdgeTargets : readonly ToTypes[]> = Readonly<{
     type: E;
     from: readonly FromTypes[];
@@ -1498,6 +1544,9 @@ type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = 
 
 // @public
 type EdgeTypeForKey<G extends GraphDef, EK> = string extends EK ? DynamicEdgeType : EK extends keyof G["edges"] & string ? G["edges"][EK]["type"] : DynamicEdgeType;
+
+// @public
+type EmbeddableOneStatementRead<R> = OneStatementBatchableQuery<R> & (BatchableQuery<unknown> | CompiledOneStatementRead<R>);
 
 // @public
 const EMBEDDING_BRAND: unique symbol;
@@ -1598,6 +1647,17 @@ class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AliasMap, R e
 class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = {}, RecursiveAliases extends RecursiveAliasMap = {}, R = unknown> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R);
     compile(): CompiledSelectSql;
+    // @internal
+    compileOneStatementBatchItem?(): Readonly<{
+        query: CompiledSelectSql;
+        outputNames: readonly string[];
+        orderBy: readonly Readonly<{
+            column: string;
+            direction: "asc" | "desc";
+            nulls: "first" | "last";
+        }>[];
+        mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
+    }>;
     except(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R>;
     execute(): Promise<readonly R[]>;
     executeChecked(expectedSchemaVersion: number | undefined): Promise<readonly R[]>;
@@ -2464,7 +2524,7 @@ type HardDeleteUniquesByNodeIdsParams = Readonly<{
 type HasMeta<Selection extends readonly string[] | undefined> = Selection extends readonly string[] ? "meta" extends Selection[number] ? true : false : false;
 
 // @public (undocumented)
-type HistoryStore<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
+type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> & StoreTransactions<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
     historyEnabled: true;
     recordedReadBound: true;
 }>;
@@ -3262,6 +3322,44 @@ type MetaEdgeProperties = Readonly<{
 }>;
 
 // @public
+type NeighborNodeOrderField<G extends GraphDef> = {
+    [K in keyof G["nodes"] & string]: Exclude<keyof Node<G["nodes"][K]["type"]>, "id" | "kind" | "meta"> & string;
+}[keyof G["nodes"] & string];
+
+// @public (undocumented)
+type NeighborOrder<G extends GraphDef> = Readonly<{
+    by?: "edge";
+    field: NeighborOrderField;
+    direction?: "asc" | "desc";
+}> | Readonly<{
+    by: "node";
+    field: NeighborNodeOrderField<G>;
+    direction?: "asc" | "desc";
+}>;
+
+// @public
+type NeighborOrderField = "createdAt" | "id" | "updatedAt" | "validFrom" | "validTo";
+
+// @public (undocumented)
+type NeighborReadOptions<G extends GraphDef, K extends EdgeKinds<G>> = NeighborReadOptionsBoundary<G, K> & Required<Pick<NeighborReadOptionsBoundary<G, K>, "edges">>;
+
+// @public
+type NeighborReadOptionsBoundary<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
+    edges?: readonly K[];
+    direction?: "both" | "in" | "out";
+    orderBy?: NeighborOrder<G>;
+    limit?: number;
+    temporalMode?: TemporalMode;
+    asOf?: string;
+}>;
+
+// @public
+type NeighborResult<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
+    edge: GraphEdgeForKinds<G, K>;
+    node: Node<AllNodeTypes<G>>;
+}>;
+
+// @public
 type NeighborsOptions<G extends GraphDef> = TemporalAlgorithmOptions & IterativeMemoryOptions & Readonly<{
     edges: readonly EdgeKinds<G>[];
     depth?: number;
@@ -3625,6 +3723,26 @@ type ObjectPredicate = Readonly<{
     valueType?: ValueType;
     elementType?: ValueType;
 }>;
+
+// @public
+type OneStatementBatchableQuery<R = unknown> = Readonly<{
+    execute?: () => Promise<R>;
+    compileOneStatementBatchItem?: () => Readonly<{
+        query: CompiledSelectSql;
+        outputNames: readonly string[];
+        orderBy: readonly Readonly<{
+            column: string;
+            direction: "asc" | "desc";
+            nulls: "first" | "last";
+        }>[];
+        mapRows: (rows: readonly Record<string, unknown>[]) => R;
+    }>;
+}>;
+
+// @public
+type OneStatementBatchResults<Queries extends readonly EmbeddableOneStatementRead<unknown>[]> = {
+    -readonly [K in keyof Queries]: Queries[K] extends (EmbeddableOneStatementRead<infer R>) ? R : never;
+};
 
 // @public
 type OntologyChange = Readonly<{
@@ -4344,6 +4462,9 @@ type ResolvedSqlTableNames = Readonly<{
     fences: string;
 }>;
 
+// @public (undocumented)
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
+
 // @public
 type ResolveNode<G extends GraphDef, K extends string> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? Node<N> : Node : Node;
 
@@ -4823,7 +4944,7 @@ type SqlTextChunk = Readonly<{
 }>;
 
 // @public
-type Store<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, Store<G>>;
+type Store<G extends GraphDef> = ResolvedStoreCore<G> & StoreTransactions<G> & StoreEvolution<G, Store<G>>;
 
 // @public (undocumented)
 const STORE_RUNTIME: unique symbol;
@@ -4868,6 +4989,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     schemaChanges: () => Promise<SchemaDiff | undefined>;
     requiresMigration: () => Promise<boolean>;
     query: () => InitialQueryBuilder<G, "open">;
+    withCheckedReads?: <T>(expectedSchemaVersion: number | undefined, fn: (reads: CheckedReadScope<G>) => Promise<T>) => Promise<T>;
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
     recordedNow: () => Promise<RecordedInstant | undefined>;
@@ -4880,6 +5002,13 @@ type StoreCore<G extends GraphDef> = Readonly<{
     BatchableQuery<unknown>,
     ...BatchableQuery<unknown>[]
     ]>(...queries: Queries) => Promise<BatchResults<Queries>>;
+    batchOnce?: <const Queries extends readonly [
+    EmbeddableOneStatementRead<unknown>,
+    EmbeddableOneStatementRead<unknown>,
+    ...EmbeddableOneStatementRead<unknown>[]
+    ]>(build: (read: BatchReadBuilder<G>) => Queries) => Promise<OneStatementBatchResults<Queries>>;
+    neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
+    countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
     bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
     bulkFindEdgesTo: <const K extends EdgeKinds<G>>(params: BulkFindEdgesToParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
@@ -5410,6 +5539,7 @@ type SubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends Nod
     asOf?: string;
     recordedAsOf?: never;
     project?: P;
+    edgeWindows?: Readonly<Partial<Record<EK, EdgeReadWindow>>>;
 }>;
 
 // @public (undocumented)
@@ -5621,6 +5751,17 @@ type UnbrandRecord<T extends Record<string, unknown>> = {
 class UnionableQuery<G extends GraphDef, R> {
     constructor(config: QueryBuilderConfig, state: UnionableQueryState);
     compile(): CompiledSelectSql;
+    // @internal
+    compileOneStatementBatchItem?(): Readonly<{
+        query: CompiledSelectSql;
+        outputNames: readonly string[];
+        orderBy: readonly Readonly<{
+            column: string;
+            direction: "asc" | "desc";
+            nulls: "first" | "last";
+        }>[];
+        mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
+    }>;
     except(other: ExecutableQueryLike<G, R>): UnionableQuery<G, R>;
     execute(): Promise<readonly R[]>;
     executeOn(backend: GraphBackend | TransactionBackend): Promise<readonly R[]>;

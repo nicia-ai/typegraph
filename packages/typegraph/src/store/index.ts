@@ -5,6 +5,15 @@ export type {
   RuntimeNodeKind,
   RuntimeNodeTypeFor,
 } from "../core/runtime-kind";
+export type {
+  EdgeReadWindow,
+  NeighborNodeOrderField,
+  NeighborOrder,
+  NeighborOrderField,
+  NeighborReadOptions,
+  NeighborResult,
+} from "./neighbors";
+export type { CheckedReadScope } from "./store";
 export {
   type AdapterTransactionContext,
   type BaseStoreOptions,
@@ -140,6 +149,7 @@ export type {
   AdapterHistoryTransactionContext,
   AdapterRecordedReadStore,
   AdapterStore,
+  BatchReadBuilder,
   EdgeCollectionLookup,
   HistoryStore,
   MeasurableAdapterHistoryTransactionContext,

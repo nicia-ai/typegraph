@@ -436,3 +436,94 @@ describe("store.batch()", () => {
     expect(result).toHaveLength(0);
   });
 });
+
+describe("store.batchOnce()", () => {
+  it("returns independently typed results through exactly one statement", async () => {
+    const starts: string[] = [];
+    const backend = createTestBackend();
+    const store = createStore(graph, backend, {
+      hooks: {
+        onQueryStart: (ctx) => {
+          starts.push(ctx.sql);
+        },
+      },
+    });
+    await store.nodes.Person.create({ name: "Alice", age: 30 });
+    await store.nodes.Person.create({ name: "Bob", age: 25 });
+    await store.nodes.Company.create({ name: "Acme", industry: "Tech" });
+
+    const [people, companies] = await store.batchOnce(() => [
+      store
+        .query()
+        .from("Person", "p")
+        .select((ctx) => ({ name: ctx.p.name, age: ctx.p.age }))
+        .orderBy("p", "name", "desc"),
+      store
+        .query()
+        .from("Company", "c")
+        .select((ctx) => ctx.c),
+    ]);
+
+    expect(people).toEqual([
+      { name: "Bob", age: 25 },
+      { name: "Alice", age: 30 },
+    ]);
+    expect(companies).toHaveLength(1);
+    expect(requireDefined(companies[0]).name).toBe("Acme");
+    expect(starts).toHaveLength(1);
+  });
+
+  it("preserves empty and traversal result sets", async () => {
+    const backend = createTestBackend();
+    const store = createStore(graph, backend);
+    const person = await store.nodes.Person.create({ name: "Alice" });
+    const skill = await store.nodes.Skill.create({ name: "TypeScript" });
+    await store.edges.hasSkill.create(person, skill);
+
+    const [missing, skills] = await store.batchOnce(() => [
+      store
+        .query()
+        .from("Company", "c")
+        .whereNode("c", (company) => company.name.eq("Missing"))
+        .select((ctx) => ctx.c.name),
+      store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (candidate) => candidate.id.eq(person.id))
+        .traverse("hasSkill", "edge")
+        .to("Skill", "skill")
+        .select((ctx) => ({ name: ctx.skill.name })),
+    ]);
+
+    expect(missing).toEqual([]);
+    expect(skills).toEqual([{ name: "TypeScript" }]);
+  });
+
+  it("returns projections wider than one SQLite JSON object call", async () => {
+    const backend = createTestBackend();
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+
+    const [wideRows] = await store.batchOnce(() => [
+      store
+        .query()
+        .from("Person", "person")
+        .select((ctx) =>
+          Object.fromEntries(
+            Array.from({ length: 81 }, (_, index) => [
+              `value${index}`,
+              ctx.person.name,
+            ]),
+          ),
+        ),
+      store
+        .query()
+        .from("Company", "company")
+        .select((ctx) => ctx.company.name),
+    ]);
+
+    expect(wideRows).toHaveLength(1);
+    expect(wideRows[0]?.["value0"]).toBe("Alice");
+    expect(wideRows[0]?.["value80"]).toBe("Alice");
+  });
+});

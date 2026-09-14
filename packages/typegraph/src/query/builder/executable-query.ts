@@ -7,7 +7,11 @@ import {
 } from "../../backend/types";
 import { DEFAULT_PAGINATION_LIMIT } from "../../constants";
 import { type GraphDef } from "../../core/define-graph";
-import { UnsupportedPredicateError, ValidationError } from "../../errors";
+import {
+  ConfigurationError,
+  UnsupportedPredicateError,
+  ValidationError,
+} from "../../errors";
 import { compareStrings } from "../../utils/compare";
 import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
@@ -49,6 +53,8 @@ import { type FieldTypeInfo } from "../schema-introspector";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
+import { getQueryBuilderInternalContext } from "./internal-context";
+import { oneStatementBatchOrderColumn } from "./one-statement-batch";
 import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
@@ -408,6 +414,15 @@ export class ExecutableQuery<
    * @throws Error if no backend is configured
    */
   prepare(): PreparedQuery<R> {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
+      undefined
+    ) {
+      throw new ConfigurationError(
+        "Prepared queries are unavailable inside withCheckedReads().",
+        { operation: "withCheckedReads.prepare" },
+      );
+    }
     if (!this.#config.backend) {
       throw new Error(
         "Cannot prepare query: no backend configured. " +
@@ -569,6 +584,11 @@ export class ExecutableQuery<
       );
     }
 
+    const checked = getQueryBuilderInternalContext(
+      this.#config,
+    ).expectedSchemaVersion;
+    if (checked !== undefined) return this.executeChecked(checked.value);
+
     // Phase 1: Try optimized execution
     const optimizedResult = await this.#tryOptimizedExecution();
     if (optimizedResult !== undefined) {
@@ -649,6 +669,26 @@ export class ExecutableQuery<
       );
     }
 
+    const checked = getQueryBuilderInternalContext(
+      this.#config,
+    ).expectedSchemaVersion;
+    if (checked !== undefined) {
+      const rows = await executeSchemaCheckedRead({
+        backend,
+        ast,
+        graphId: this.#config.graphId,
+        expectedVersion: checked.value,
+        compile: () =>
+          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+      });
+      return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+        rows,
+        this.#state.startAlias,
+        this.#state.traversals,
+        this.#selectFn,
+      );
+    }
+
     // Try optimized execution with the provided backend
     const optimizedResult = await this.#tryOptimizedExecutionOn(backend);
     if (optimizedResult !== undefined) {
@@ -670,6 +710,70 @@ export class ExecutableQuery<
       this.#state.traversals,
       this.#selectFn,
     );
+  }
+
+  /** @internal Embedding contract consumed by `store.batchOnce()`. */
+  compileOneStatementBatchItem?(): Readonly<{
+    query: CompiledSelectSql;
+    outputNames: readonly string[];
+    orderBy: readonly Readonly<{
+      column: string;
+      direction: "asc" | "desc";
+      nulls: "first" | "last";
+    }>[];
+    mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
+  }> {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
+      undefined
+    ) {
+      throw new ConfigurationError(
+        "Queries from withCheckedReads() cannot be embedded in batchOnce().",
+        { operation: "withCheckedReads.batchOnce" },
+      );
+    }
+    if (this.#hasParameterReferences()) {
+      throw new Error(
+        "Query contains param() references. Bind prepared queries before batching.",
+      );
+    }
+    const ast = this.toAst();
+    const batchOrderBy = (ast.orderBy ?? []).map((order, index) => ({
+      column: oneStatementBatchOrderColumn(index),
+      direction: order.direction,
+      nulls: order.nulls ?? (order.direction === "asc" ? "last" : "first"),
+    }));
+    const batchAst: QueryAst =
+      batchOrderBy.length === 0 ?
+        ast
+      : {
+          ...ast,
+          projection: {
+            fields: [
+              ...ast.projection.fields,
+              ...(ast.orderBy ?? []).map((order, index) => ({
+                outputName: oneStatementBatchOrderColumn(index),
+                source: order.field,
+              })),
+            ],
+          },
+        };
+    return {
+      query: compileQuery(
+        batchAst,
+        this.#config.graphId,
+        this.#compileOptions(),
+      ),
+      outputNames: ast.projection.fields.map((field) => field.outputName),
+      orderBy: batchOrderBy,
+      mapRows: (rows) =>
+        mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+          transformPathColumns(rows, this.#state, this.#dialect()),
+          this.#state.startAlias,
+          this.#state.traversals,
+          this.#selectFn,
+        ),
+    };
   }
 
   /**
@@ -1221,6 +1325,7 @@ export class ExecutableQuery<
    * @throws ValidationError if cursor columns don't match query ORDER BY columns
    */
   async paginate(options: PaginateOptions): Promise<PaginatedResult<R>> {
+    this.#refuseCheckedReadSurface("paginate");
     if (!this.#config.backend) {
       throw new Error(
         "Cannot execute query: no backend configured. " +
@@ -1325,6 +1430,7 @@ export class ExecutableQuery<
    * @throws ValidationError if ORDER BY is not specified
    */
   stream(options?: StreamOptions): AsyncIterable<R> {
+    this.#refuseCheckedReadSurface("stream");
     // Validate ORDER BY is present
     if (this.#state.orderBy.length === 0) {
       throw new ValidationError(
@@ -1343,6 +1449,19 @@ export class ExecutableQuery<
     const batchSize = getStreamBatchSize(options);
     return createStreamIterable(batchSize, (paginateOptions) =>
       this.paginate(paginateOptions),
+    );
+  }
+
+  #refuseCheckedReadSurface(surface: "paginate" | "stream"): void {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion ===
+      undefined
+    ) {
+      return;
+    }
+    throw new ConfigurationError(
+      `${surface === "paginate" ? "Pagination" : "Streaming"} is unavailable inside withCheckedReads().`,
+      { operation: `withCheckedReads.${surface}` },
     );
   }
 

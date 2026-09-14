@@ -52,8 +52,18 @@ async function seedSubgraphData(
     industry: "Tech",
   });
 
-  await store.edges.knows.create(alice, bob, { since: "2020" });
-  await store.edges.knows.create(bob, charlie, { since: "2021" });
+  await store.edges.knows.create(
+    alice,
+    bob,
+    { since: "2020" },
+    { id: "knows-alice-bob" },
+  );
+  await store.edges.knows.create(
+    bob,
+    charlie,
+    { since: "2021" },
+    { id: "knows-bob-charlie" },
+  );
   await store.edges.worksAt.create(alice, acme, { role: "Engineer" });
   await store.edges.worksAt.create(bob, acme, { role: "Manager" });
 
@@ -101,6 +111,82 @@ export function registerSubgraphIntegrationTests(
       expect(result.nodes.has(ids.aliceId)).toBe(true);
       expect(result.nodes.has(ids.bobId)).toBe(true);
       expect(result.nodes.has(ids.charlieId)).toBe(true);
+    });
+
+    it("applies per-edge-kind ordering and limits during traversal", async () => {
+      const store = context.getStore();
+      const dave = await store.nodes.Person.create({ name: "Dave" });
+      await store.edges.knows.create(
+        { kind: "Person", id: ids.aliceId },
+        dave,
+        {},
+        { id: "zzzz-alice-dave" },
+      );
+
+      const result = await store.subgraph(ids.aliceId as never, {
+        edges: ["knows"],
+        maxDepth: 2,
+        edgeWindows: {
+          knows: {
+            limit: 1,
+            orderBy: { field: "id", direction: "desc" },
+          },
+        },
+      });
+
+      expect(result.nodes.has(dave.id)).toBe(true);
+      expect(result.nodes.has(ids.bobId)).toBe(false);
+      expect(result.adjacency.get(ids.aliceId)?.get("knows")).toHaveLength(1);
+    });
+
+    it("partitions edge windows independently at later hops", async () => {
+      const store = context.getStore();
+      const result = await store.subgraph(ids.aliceId as never, {
+        edges: ["knows"],
+        maxDepth: 2,
+        edgeWindows: {
+          knows: { limit: 1, orderBy: { field: "id", direction: "asc" } },
+        },
+      });
+
+      expect(result.nodes.has(ids.bobId)).toBe(true);
+      expect(result.nodes.has(ids.charlieId)).toBe(true);
+      expect(result.adjacency.get(ids.bobId)?.get("knows")).toHaveLength(1);
+    });
+
+    it("keeps unwindowed kinds and supports per-kind traversal directions", async () => {
+      const store = context.getStore();
+      const result = await store.subgraph(ids.aliceId as never, {
+        edges: ["knows", "worksAt"],
+        maxDepth: 1,
+        edgeWindows: { knows: { limit: 1 } },
+      });
+
+      expect(result.nodes.has(ids.bobId)).toBe(true);
+      expect(result.nodes.has(ids.acmeId)).toBe(true);
+      const incoming = await store.subgraph(ids.bobId as never, {
+        edges: ["knows", "worksAt"],
+        edgeWindows: {
+          knows: { direction: "in", limit: 1 },
+          worksAt: { direction: "out", limit: 1 },
+        },
+      });
+      expect(incoming.nodes.has(ids.aliceId)).toBe(true);
+      expect(incoming.nodes.has(ids.acmeId)).toBe(true);
+
+      const both = await store.subgraph(ids.bobId as never, {
+        edges: ["knows"],
+        direction: "both",
+        edgeWindows: { knows: { limit: 1 } },
+      });
+      expect(both.nodes.has(ids.aliceId)).toBe(true);
+      expect(both.nodes.has(ids.charlieId)).toBe(true);
+      await expect(
+        store.subgraph(ids.aliceId as never, {
+          edges: ["knows"],
+          edgeWindows: { worksAt: { limit: 1 } } as never,
+        }),
+      ).rejects.toThrow("must name a traversed edge kind");
     });
 
     it("follows multiple edge kinds", async () => {
@@ -322,6 +408,48 @@ export function registerSubgraphIntegrationTests(
       expect(knowsEdges[0]).toHaveProperty("fromId", ids.aliceId);
       expect(knowsEdges[0]).toHaveProperty("toId", ids.bobId);
       expect(knowsEdges[0]).not.toHaveProperty("meta");
+    });
+
+    it("keeps direct and one-statement subgraph reads semantically equivalent", async () => {
+      const store = context.getStore();
+      const options = {
+        edges: ["knows", "worksAt"],
+        maxDepth: 2,
+        edgeWindows: {
+          knows: {
+            direction: "both",
+            limit: 1,
+            orderBy: { field: "id", direction: "asc" },
+          },
+        },
+        project: {
+          nodes: {
+            Person: ["name"],
+            Company: ["name", "meta"],
+          },
+          edges: {
+            knows: [],
+            worksAt: ["role"],
+          },
+        },
+      } as const;
+
+      const direct = await store.subgraph(ids.bobId as never, options);
+      const [oneStatement, count] = await store.batchOnce((read) => [
+        read.subgraph(ids.bobId as never, options),
+        read.countNeighbors(
+          { kind: "Person", id: ids.bobId as never },
+          { edges: ["knows"] },
+        ),
+      ]);
+
+      expect(oneStatement).toEqual(direct);
+      expect(count).toBeGreaterThan(0);
+      const edgeIds = collectAllEdges(oneStatement.adjacency).map(
+        (edge) => edge.id,
+      );
+      expect(edgeIds).toHaveLength(4);
+      expect(new Set(edgeIds).size).toBe(edgeIds.length);
     });
   });
 }

@@ -5,7 +5,7 @@
  * Uses SQLite's JSON1 extension for JSON operations.
  */
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
-import { sql } from "../sql-fragment";
+import { sql, type SqlFragment } from "../sql-fragment";
 import { fts5Strategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
 import { getSqlDialectProfile, packSqlListValue } from "./profile";
@@ -62,6 +62,14 @@ function toSqliteObjectPropertyPath(property: string): string {
 // compose bounded calls instead of making schema breadth an engine-version
 // dependency.
 const JSON_SET_REPLACEMENTS_PER_CALL = 50;
+const JSON_OBJECT_PAIRS_PER_CALL = 40;
+
+function mergeJsonObjects(parts: readonly SqlFragment[]): SqlFragment {
+  const [first, ...rest] = parts;
+  if (first === undefined) return sql`json('{}')`;
+  if (rest.length === 0) return first;
+  return sql`json_patch(${first}, ${mergeJsonObjects(rest)})`;
+}
 
 /**
  * Checks if a JSON pointer segment is an array index.
@@ -98,6 +106,26 @@ export const sqliteDialect: DialectAdapter = {
   setTransactionWorkingMemory(): undefined {
     // SQLite has no per-transaction working-memory budget to raise.
     return;
+  },
+
+  orderedRowsJsonArray(rowAlias, columns, orderColumn) {
+    const row = sql.identifier(rowAlias);
+    const objectParts = Array.from(
+      { length: Math.ceil(columns.length / JSON_OBJECT_PAIRS_PER_CALL) },
+      (_, index) => {
+        const slice = columns.slice(
+          index * JSON_OBJECT_PAIRS_PER_CALL,
+          (index + 1) * JSON_OBJECT_PAIRS_PER_CALL,
+        );
+        const pairs = slice.flatMap((column) => [
+          sql`${column}`,
+          sql`${row}.${sql.identifier(column)}`,
+        ]);
+        return sql`json_object(${sql.join(pairs, sql`, `)})`;
+      },
+    );
+    const object = mergeJsonObjects(objectParts);
+    return sql`COALESCE((SELECT json_group_array(json(batch_json)) FROM (SELECT ${object} AS batch_json FROM ${row} ORDER BY ${row}.${sql.identifier(orderColumn)})), json('[]'))`;
   },
 
   // ============================================================

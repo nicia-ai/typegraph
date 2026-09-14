@@ -13,6 +13,7 @@
  * repo-wide, and a literal, unbroken occurrence here would inflate its own
  * recorded count.
  */
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -33,7 +34,7 @@ type RecordedClaimSite = Readonly<{
 const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   {
     file: "README.md",
-    line: 118,
+    line: 119,
     text:
       "strategy authors can use the complete " +
       CLAIM_WORD +
@@ -65,14 +66,14 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "packages/typegraph/README.md",
-    line: 43,
+    line: 55,
     text:
       CLAIM_WORD +
       "-free `@nicia-ai/typegraph/core` entrypoint. Custom backend, dialect, and",
   },
   {
     file: "packages/typegraph/README.md",
-    line: 44,
+    line: 56,
     text:
       "search-strategy authors can import the complete " +
       CLAIM_WORD +
@@ -155,6 +156,42 @@ describe("drizzle claim-site inventory", () => {
           file: "visible.md",
           line: 1,
           text: "A " + CLAIM_WORD + "-free public contract.",
+        },
+      ]);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it("does not let ignored workspace files change the repository inventory", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "typegraph-claim-inventory-"));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      writeFileSync(path.join(root, ".gitignore"), "ignored.md\n");
+      writeFileSync(
+        path.join(root, "tracked.md"),
+        "A " + CLAIM_WORD + "-free tracked contract.\n",
+      );
+      writeFileSync(
+        path.join(root, "untracked.md"),
+        "A " + CLAIM_WORD + "-free untracked contract.\n",
+      );
+      writeFileSync(
+        path.join(root, "ignored.md"),
+        "A " + CLAIM_WORD + "-free ignored note.\n",
+      );
+      execFileSync("git", ["add", ".gitignore", "tracked.md"], { cwd: root });
+
+      expect(scanClaimSites(root)).toEqual([
+        {
+          file: "tracked.md",
+          line: 1,
+          text: "A " + CLAIM_WORD + "-free tracked contract.",
+        },
+        {
+          file: "untracked.md",
+          line: 1,
+          text: "A " + CLAIM_WORD + "-free untracked contract.",
         },
       ]);
     } finally {

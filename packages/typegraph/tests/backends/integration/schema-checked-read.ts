@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ConfigurationError,
+  count,
   createStore,
   defineGraph,
   SchemaChangedError,
@@ -101,6 +102,62 @@ export function registerSchemaCheckedReadIntegrationTests(
       await expect(query.executeChecked(0)).rejects.toBeInstanceOf(
         SchemaChangedError,
       );
+    });
+
+    it("binds one expected version to a store-level read scope", async () => {
+      const store = await context.createStore(integrationTestGraph);
+      await store.nodes.Person.create({ name: "Scoped", age: 1 });
+      const active = await context.getBackend().getActiveSchema(store.graphId);
+
+      const result = await store.withCheckedReads(
+        active?.version,
+        async (reads) => {
+          const names = await reads
+            .query()
+            .from("Person", "person")
+            .select((ctx) => ctx.person.name)
+            .execute();
+          const ages = await reads
+            .query()
+            .from("Person", "person")
+            .select((ctx) => ctx.person.age)
+            .execute();
+          return { names, ages };
+        },
+      );
+
+      expect(result).toEqual({ names: ["Scoped"], ages: [1] });
+      await expect(
+        store.withCheckedReads((active?.version ?? 0) + 1, async (reads) =>
+          reads
+            .query()
+            .from("Person", "person")
+            .select((ctx) => ctx.person.name)
+            .execute(),
+        ),
+      ).rejects.toBeInstanceOf(SchemaChangedError);
+
+      await expect(
+        store.withCheckedReads(active?.version, async (reads) =>
+          reads
+            .query()
+            .from("Person", "person")
+            .aggregate({ count: count("person") })
+            .execute(),
+        ),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+
+      await store.withCheckedReads(active?.version, async (reads) => {
+        const ordered = reads
+          .query()
+          .from("Person", "person")
+          .orderBy("person", "id")
+          .select((ctx) => ctx.person);
+        await expect(ordered.paginate({ first: 1 })).rejects.toBeInstanceOf(
+          ConfigurationError,
+        );
+        expect(() => ordered.stream()).toThrow(ConfigurationError);
+      });
     });
 
     it("refuses recursive and relevance queries before executing SQL", async () => {

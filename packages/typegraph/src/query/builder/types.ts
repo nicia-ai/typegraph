@@ -45,6 +45,7 @@ import type {
   SimilarToOptions,
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+import type { CompiledSelectSql } from "../sql-intent";
 import {
   type DynamicEdgeAccessor,
   type DynamicNodeAccessor,
@@ -81,6 +82,46 @@ export type BatchableQuery<R = unknown> = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<readonly R[]>;
 }>;
+
+/** A read whose result can be embedded in an exact-one-statement batch. */
+export type OneStatementBatchableQuery<R = unknown> = Readonly<{
+  execute?: () => Promise<R>;
+  /** @internal Resolved by `store.batchOnce()` before execution. */
+  compileOneStatementBatchItem?: () => Readonly<{
+    query: CompiledSelectSql;
+    outputNames: readonly string[];
+    orderBy: readonly Readonly<{
+      column: string;
+      direction: "asc" | "desc";
+      nulls: "first" | "last";
+    }>[];
+    mapRows: (rows: readonly Record<string, unknown>[]) => R;
+  }>;
+}>;
+
+/** A cold read with a concrete one-statement batch compilation contract. */
+export type CompiledOneStatementRead<R> = Required<
+  Pick<OneStatementBatchableQuery<R>, "compileOneStatementBatchItem">
+>;
+
+/** A read that can be embedded in an exact-one-statement batch. */
+export type EmbeddableOneStatementRead<R> = OneStatementBatchableQuery<R> &
+  (BatchableQuery<unknown> | CompiledOneStatementRead<R>);
+
+/** An embeddable one-statement read that can also execute independently. */
+export type ExecutableOneStatementRead<R> = CompiledOneStatementRead<R> &
+  Required<Pick<OneStatementBatchableQuery<R>, "execute">>;
+
+/** Preserves each input query's result type in an exact-one-statement batch. */
+export type OneStatementBatchResults<
+  Queries extends readonly EmbeddableOneStatementRead<unknown>[],
+> = {
+  -readonly [K in keyof Queries]: Queries[K] extends (
+    EmbeddableOneStatementRead<infer R>
+  ) ?
+    R
+  : never;
+};
 
 /**
  * Maps a tuple of BatchableQuery types to their result types.

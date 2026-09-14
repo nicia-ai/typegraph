@@ -6,6 +6,7 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
+import { ConfigurationError } from "../../errors";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
   type ComposableQuery,
@@ -21,6 +22,7 @@ import {
 import { mapResults } from "../execution";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildCompileOptions } from "./compile-options";
+import { getQueryBuilderInternalContext } from "./internal-context";
 import { composableQueryHasParameterReferences } from "./prepared-query";
 import {
   buildReadInstantTemplate,
@@ -324,6 +326,7 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Executes the combined query.
    */
   async execute(): Promise<readonly R[]> {
+    this.#refuseCheckedScope();
     if (!this.#config.backend) {
       throw new Error(
         "Cannot execute query: no backend configured. " +
@@ -354,6 +357,7 @@ export class UnionableQuery<G extends GraphDef, R> {
   async executeOn(
     backend: GraphBackend | TransactionBackend,
   ): Promise<readonly R[]> {
+    this.#refuseCheckedScope();
     const ast = this.toAst();
     if (composableQueryHasParameterReferences(ast)) {
       throw new Error(
@@ -365,4 +369,52 @@ export class UnionableQuery<G extends GraphDef, R> {
       await this.#fetchRows(backend, ast, "recorded-batch-query"),
     );
   }
+
+  /** @internal Embedding contract consumed by `store.batchOnce()`. */
+  compileOneStatementBatchItem?(): Readonly<{
+    query: CompiledSelectSql;
+    outputNames: readonly string[];
+    orderBy: readonly Readonly<{
+      column: string;
+      direction: "asc" | "desc";
+      nulls: "first" | "last";
+    }>[];
+    mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
+  }> {
+    this.#refuseCheckedScope();
+    const ast = this.toAst();
+    if (composableQueryHasParameterReferences(ast)) {
+      throw new Error(
+        "Query contains param() references. Bind prepared queries before batching.",
+      );
+    }
+    return {
+      query: compileSetOperation(
+        ast,
+        this.#config.graphId,
+        this.#compileOptions(),
+      ),
+      outputNames: projectionOutputNames(ast),
+      orderBy: [],
+      mapRows: (rows) => this.#mapRows(rows),
+    };
+  }
+
+  #refuseCheckedScope(): void {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion ===
+      undefined
+    ) {
+      return;
+    }
+    throw new ConfigurationError(
+      "Set operations are unavailable inside withCheckedReads().",
+      { operation: "withCheckedReads.setOperation" },
+    );
+  }
+}
+
+function projectionOutputNames(query: ComposableQuery): readonly string[] {
+  if ("__type" in query) return projectionOutputNames(query.left);
+  return query.projection.fields.map((field) => field.outputName);
 }

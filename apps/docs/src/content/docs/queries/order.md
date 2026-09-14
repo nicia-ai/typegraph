@@ -307,8 +307,21 @@ async function searchProducts(query: string, page: number) {
 
 ## Newest target through an edge
 
-Traverse to the target, sort by its version sequence (or timestamp), and limit the result.
-This reads the edge and target together in one statement:
+When the source node is already available, `store.neighbors()` is the direct one-statement read:
+
+```typescript
+const [latest] = await store.neighbors(document, {
+  edges: ["hasVersion"],
+  orderBy: { by: "node", field: "sequence", direction: "desc" },
+  limit: 1,
+});
+```
+
+Use `by: "edge"` (or omit `by`) for edge metadata and `by: "node"` for an adjacent-node property.
+Both forms sort nulls last and use the edge ID as the deterministic final tie-breaker.
+
+The equivalent fluent traversal is useful when additional target predicates or projections are
+needed:
 
 ```typescript
 const [newest] = await store.query()

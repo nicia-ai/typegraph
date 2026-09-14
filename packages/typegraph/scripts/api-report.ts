@@ -501,10 +501,32 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // bulkFindEdgesTo adds BulkFindEdgesToParams and BulkFindEdgesToResult to the
 // six Store-bearing secondary entrypoints (+2 each). Both are directly
 // exported from the root entrypoint; no other symbol sets changed.
+// Set-oriented read APIs add seven root-exported supporting types to
+// `StoreCore`: CheckedReadScope, EdgeReadWindow, NeighborOrderField,
+// NeighborReadOptions, NeighborResult, OneStatementBatchResults, and
+// OneStatementBatchableQuery. The same six Store-bearing secondary
+// entrypoints render those names without exporting them directly (+7 each).
+// Composable set-read follow-up. The root directly exports the six new public
+// helper types (`NeighborNodeOrderField`, `NeighborOrder`, `NeighborRead`,
+// `SubgraphRead`, `EmbeddableOneStatementRead`, and
+// `ExecutableOneStatementRead`), while the
+// compatibility-preserving optional-boundary Store construction makes six
+// private helper names newly reachable there (+6). The six Store-bearing
+// secondary entrypoints do not re-export the six public helper names, so they
+// gain those six plus the same six private helpers (+12 each). No other
+// entrypoint's forgotten-export set changes.
+// Scoped batch reads replace the public `*Query` pairs with a single
+// `BatchReadBuilder` callback surface. The four secondary Store entrypoints
+// that can re-export its two public helper types lose the three superseded
+// forgotten names (`NeighborRead`, `SubgraphRead`, and
+// `ExecutableOneStatementRead`). The bundled local-backend entrypoints also
+// lose one superseded helper without re-exporting the new helpers: importing
+// Store types there would unnecessarily expose the Store dependency graph
+// through their adapter aliases.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 402,
-    sha256: "9a8bb93ef5faa50db4d7afdb9eaeff371125c99df44408886f9a2e7c1d02085a",
+    count: 408,
+    sha256: "e705de84fe1cc3510a7a2bc7f7ae8f53acf2af773c4ec191c1e815be87119610",
   },
   "./adapters/drizzle/engine": {
     count: 331,
@@ -550,36 +572,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 744,
-    sha256: "08ed999989966b51f9226dd641c17f2b6015468d167c6cb75e6d481ff96b8da0",
+    count: 760,
+    sha256: "794eb35246ad34705a674fbbe4cdaa3853a4f5cd28cd6032651f2e087fde3c70",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 727,
-    sha256: "52bd6b7505a1fc7184315b3cfaffa75ea99336701f0b48d0e35fbba442c54fb4",
+    count: 743,
+    sha256: "71d010111cb8f20e86fb43badc9efba83a4e21d3ab62629541a7165a39ac2905",
   },
   "./postgres/pglite": {
-    count: 724,
-    sha256: "8863e8d0d78fdd28fc62415c8c3498ef0dbd132650942e51f707f9dc0f54ce12",
+    count: 742,
+    sha256: "62a522ae87a73b35bdf133485846eab215f7bfe2b47bf547b16e28672d07ed8f",
   },
   "./profiler": {
-    count: 729,
-    sha256: "ee83c569323e624916f1a0e9b1b5f791c2e513da44e506eebda50a9d5d67c9f3",
+    count: 745,
+    sha256: "39cdc802e4988d4d3c49b5ec188b99a45aeda3b9935e8e69654ef0258617d8c4",
   },
   "./provenance": {
-    count: 735,
-    sha256: "4f4aa90127b14ee9756f4fe78bfe2f4b9dcb1462b803a2a48273380117122738",
+    count: 751,
+    sha256: "c416f96f1bf051cdb401544271c5c1212e79acdd9674c04ba0034c0c69b85e9b",
   },
   "./schema": {
     count: 282,
     sha256: "912798b14b4548dc5f66ce6ff9db71dd7561b7d0f1303fd165aa9f58b37390de",
   },
   "./sqlite/local": {
-    count: 724,
-    sha256: "8863e8d0d78fdd28fc62415c8c3498ef0dbd132650942e51f707f9dc0f54ce12",
+    count: 742,
+    sha256: "62a522ae87a73b35bdf133485846eab215f7bfe2b47bf547b16e28672d07ed8f",
   },
 };
 
