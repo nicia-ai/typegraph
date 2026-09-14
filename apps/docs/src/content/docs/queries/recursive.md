@@ -81,15 +81,15 @@ const allManagers = await store
 .recursive(options?)
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `minHops` | `number` | `1` | Minimum traversal depth before including results |
-| `maxHops` | `number` | `100`* | Maximum traversal depth |
-| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | How to handle cycles |
-| `depth` | `boolean \| string` | — | Expose hop count in `select()` context |
-| `path` | `boolean \| string` | — | Expose node ID path in `select()` context |
+| Option        | Type                   | Default     | Description                                      |
+| ------------- | ---------------------- | ----------- | ------------------------------------------------ |
+| `minHops`     | `number`               | `1`         | Minimum traversal depth before including results |
+| `maxHops`     | `number`               | `10`*       | Maximum traversal depth                          |
+| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | How to handle cycles                             |
+| `depth`       | `boolean \| string`    | —           | Expose hop count in `select()` context           |
+| `path`        | `boolean \| string`    | —           | Expose node ID path in `select()` context        |
 
-*When `maxHops` is omitted, an implicit cap of 100 is applied. See [Depth Limits](#depth-limits).
+*When `maxHops` is omitted, an implicit cap of 10 is applied. See [Depth Limits](#depth-limits).
 
 ## Controlling Depth
 
@@ -160,7 +160,7 @@ const orgChart = await store
   .select((ctx) => ({
     ceo: ctx.ceo.name,
     employee: ctx.employee.name,
-    level: ctx.level,             // 1 = direct report, 2 = skip-level, etc.
+    level: ctx.level, // 1 = direct report, 2 = skip-level, etc.
   }))
   .execute();
 ```
@@ -183,7 +183,7 @@ const pathsToRoot = await store
   .select((ctx) => ({
     category: ctx.cat.name,
     ancestor: ctx.ancestor.name,
-    trail: ctx.trail,             // Array of node IDs from start to ancestor
+    trail: ctx.trail, // Array of node IDs from start to ancestor
   }))
   .execute();
 ```
@@ -205,8 +205,8 @@ const networkAnalysis = await store
   .select((ctx) => ({
     person: ctx.p.name,
     connection: ctx.connection.name,
-    distance: ctx.distance,       // number
-    route: ctx.route,             // string[] of node IDs
+    distance: ctx.distance, // number
+    route: ctx.route, // string[] of node IDs
   }))
   .execute();
 ```
@@ -236,7 +236,7 @@ const allReachable = await store
   .query()
   .from("Node", "start")
   .traverse("linkedTo", "e")
-  .recursive()                    // cyclePolicy: "prevent" is the default
+  .recursive() // cyclePolicy: "prevent" is the default
   .to("Node", "reachable")
   .select((ctx) => ctx.reachable.id)
   .execute();
@@ -268,11 +268,11 @@ const ancestors = await store
 
 :::caution
 With `cyclePolicy: "allow"` on a cyclic graph, the traversal **will** revisit nodes until it
-hits `maxHops`. If `maxHops` is not set, the implicit cap of 100 prevents infinite recursion,
+hits `maxHops`. If `maxHops` is not set, the implicit cap of 10 prevents infinite recursion,
 but you may get many duplicate results.
 :::
 
-## Filtering During Recursion
+## Expansion and completed-result filters
 
 Predicates placed on the target node or edge apply **at every step** of the recursion — not just
 the final results. This lets you prune paths early:
@@ -295,6 +295,59 @@ const activeNetwork = await store
 Source node predicates (on `"p"` above) apply only to the starting set. Edge and target node
 predicates are included in the recursive CTE, so unreachable branches are pruned at each level
 rather than filtered after the fact.
+
+Use `.where()` to filter completed matches without pruning intermediate nodes. In this example,
+inactive intermediate nodes can still lead to an active endpoint:
+
+```typescript
+const activeEndpoints = await store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.name.eq("Alice"))
+  .traverse("knows", "e")
+  .recursive({ maxHops: 5 })
+  .to("Person", "connection")
+  .where((fields) => expr.eq(fields.connection.active, expr.literal(true)))
+  .select((ctx) => ctx.connection.name)
+  .execute();
+```
+
+`whereNode("connection", ...)` is an every-hop constraint. `.where(...)` is an endpoint/result
+constraint applied after recursive expansion and the minimum-depth check.
+
+## Stop expansion at a boundary
+
+`stopExpansion()` prevents a matching endpoint from becoming the next recursive frontier. The
+stopping node is included by default:
+
+```typescript
+const managersThroughDirectors = await store
+  .query()
+  .from("Person", "employee")
+  .traverse("reportsTo", "edge")
+  .recursive({ maxHops: 10 })
+  .to("Person", "manager")
+  .stopExpansion("manager", (manager) => manager.role.eq("Director"))
+  .select((ctx) => ctx.manager.name)
+  .execute();
+```
+
+This emits the matching director but does not follow that director's outgoing `reportsTo` edge.
+Pass `{ emitStopNode: false }` to omit the director as well:
+
+```typescript
+.stopExpansion(
+  "manager",
+  (manager) => manager.role.eq("Director"),
+  { emitStopNode: false },
+)
+```
+
+A stop predicate can use ordinary fields from the recursive target alias. Subqueries, aggregate
+predicates, ranked search predicates, and fields from other aliases are refused. Only the matching
+branch stops; other recursive branches continue. With `minHops: 0`, the source node is also the
+depth-zero target, so a matching source is emitted or omitted according to `emitStopNode` and its
+branch does not expand. SQL `NULL` does not stop a branch.
 
 ## Duplicate Results
 
@@ -321,10 +374,10 @@ To get unique nodes, deduplicate in your application or use [set operations](/qu
 
 Two safety caps prevent runaway recursion:
 
-| Constant | Value | When it applies |
-|----------|-------|-----------------|
-| `MAX_RECURSIVE_DEPTH` | 10 | `maxHops` is omitted |
-| `MAX_EXPLICIT_RECURSIVE_DEPTH` | 1000 | Upper bound for explicit `maxHops` |
+| Constant                       | Value | When it applies                    |
+| ------------------------------ | ----- | ---------------------------------- |
+| `MAX_RECURSIVE_DEPTH`          | 10    | `maxHops` is omitted               |
+| `MAX_EXPLICIT_RECURSIVE_DEPTH` | 1000  | Upper bound for explicit `maxHops` |
 
 Graphs with branching factor *B* produce O(*B*^depth) rows before cycle detection
 can prune them. The default of 10 covers typical neighborhood, shortest-path, and
@@ -356,6 +409,8 @@ implicit 100-hop cap, add `.recursive({ maxHops: 100 })`.
 - **Edge properties are not projected** in recursive results. You can filter on edge properties
   with `whereEdge()`, but the `select()` context only exposes the start node, target node, and
   any depth/path aliases.
+- **Path output contains node IDs.** Rich path entities and traversed-edge projection are deferred;
+  use the kind-qualified start and target aliases when entity identity matters.
 
 ## Real-World Examples
 

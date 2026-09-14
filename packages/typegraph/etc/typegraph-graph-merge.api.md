@@ -5669,6 +5669,7 @@ type QueryAst = Readonly<{
     start: QueryStart;
     traversals: readonly Traversal[];
     predicates: readonly NodePredicate[];
+    resultPredicate?: PredicateExpression;
     projection: Projection;
     temporalMode: TemporalOptions;
     recordedAsOf?: string;
@@ -5732,6 +5733,9 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     pipe<OutAliases extends AliasMap, OutEdgeAliases extends EdgeAliasMap = EdgeAliases, OutRecAliases extends RecursiveAliasMap = RecursiveAliases>(fragment: (builder: QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>) => QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases, CoordinateState>): QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases, CoordinateState>;
     project<const Fields extends Readonly<Record<string, DatabaseExpression<unknown, (keyof Aliases | keyof EdgeAliases) & string>>>>(build: (context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>) => Fields): ExecutableProjectionQuery<Fields, QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>>;
     select<R>(selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R>;
+    stopExpansion<A extends keyof Aliases & string>(alias: A, build: (node: NodeAccessor<Aliases[A]["type"]>) => Predicate, options?: Readonly<{
+        emitStopNode?: boolean;
+    }>): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     // (undocumented)
     readonly temporal: TemporalMethod<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     traverse<EK extends keyof G["edges"] & string, EA extends string>(edgeKind: EK, edgeAlias: EA, options?: {
@@ -5749,6 +5753,7 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
         expand?: TraversalExpansion;
         from?: keyof Aliases & string;
     } & IdentityTraversalOption<G>): TraversalBuilder<G, Aliases, EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>>>, string, EA, TraversalDirection, false, false, false, RecursiveAliases, CoordinateState, DynamicEdgeTypeFor<T>>;
+    where(build: (context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>) => DatabaseExpression<boolean | undefined, (keyof Aliases | keyof EdgeAliases) & string>): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     whereEdge<EA extends keyof EdgeAliases & string>(alias: EA, predicateFunction: (edge: EdgeAccessor<EdgeAliases[EA]["type"]>, expressions: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>) => Predicate | DatabaseExpression<boolean | undefined, (keyof Aliases | keyof EdgeAliases) & string>): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     whereNode<A extends keyof Aliases & string>(alias: A, predicateFunction: (n: NodeAccessor<Aliases[A]["type"]>, expressions: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>) => Predicate | DatabaseExpression<boolean | undefined, (keyof Aliases | keyof EdgeAliases) & string>): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
 }
@@ -5774,6 +5779,7 @@ type QueryBuilderState = Readonly<{
     includeSubClasses: boolean;
     traversals: readonly Traversal[];
     predicates: readonly NodePredicate[];
+    resultPredicate?: PredicateExpression;
     projection: readonly ProjectedField[];
     orderBy: readonly OrderSpec[];
     aggregateOrderBy: readonly AggregateOrderSpec[];
@@ -7991,6 +7997,10 @@ type VariableLengthSpec = Readonly<{
     cyclePolicy: RecursiveCyclePolicy;
     pathAlias?: string;
     depthAlias?: string;
+    stopExpansion?: Readonly<{
+        expression: PredicateExpression;
+        emitStopNode: boolean;
+    }>;
 }>;
 
 // @public

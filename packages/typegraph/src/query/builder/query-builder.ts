@@ -80,6 +80,7 @@ import { createExpressionSubqueryHelpers } from "./expression-subqueries";
 import { registerQueryBuilderInternalContext } from "./internal-context";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
+import { withRecursiveStopExpansion } from "./recursive-stop";
 import { executeQueryTerminal } from "./terminal-query";
 import { TraversalBuilder } from "./traversal-builder";
 import {
@@ -485,6 +486,51 @@ export class QueryBuilder<
     };
 
     return new QueryBuilder(this.#config, newState);
+  }
+
+  /** Stops a recursive branch at a matching endpoint; stopping endpoints are emitted by default. */
+  stopExpansion<A extends keyof Aliases & string>(
+    alias: A,
+    build: (node: NodeAccessor<Aliases[A]["type"]>) => Predicate,
+    options: Readonly<{ emitStopNode?: boolean }> = {},
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    const accessor = this.#createNodeAccessor(alias);
+    const predicate = build(accessor as NodeAccessor<Aliases[A]["type"]>);
+    return new QueryBuilder(
+      this.#config,
+      withRecursiveStopExpansion(
+        this.#state,
+        alias,
+        predicate.__expr,
+        options.emitStopNode ?? true,
+      ),
+    );
+  }
+
+  /** Filters completed match rows, preserving optional and recursive expansion semantics. */
+  where(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) => DatabaseExpression<
+      boolean | undefined,
+      (keyof Aliases | keyof EdgeAliases) & string
+    >,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    validateQuerySource(this.#state, false);
+    const expression = build(this.#expressionContext());
+    if (!isDatabaseExpression(expression))
+      throw new ConfigurationError(
+        "where() requires a Boolean database expression; ranked match helpers belong in whereNode().",
+      );
+    const predicate = this.#expressionPredicate(expression);
+    const resultPredicate: PredicateExpression =
+      this.#state.resultPredicate === undefined ?
+        predicate
+      : {
+          __type: "and",
+          predicates: [this.#state.resultPredicate, predicate],
+        };
+    return new QueryBuilder(this.#config, { ...this.#state, resultPredicate });
   }
 
   /**
@@ -1046,13 +1092,15 @@ export class QueryBuilder<
       },
       parentCoordinate: buildQueryAst(this.#config, this.#state),
       createSubquery: () => {
+        const { resultPredicate: _resultPredicate, ...subqueryState } =
+          this.#state;
         const config = { ...this.#config };
         registerQueryBuilderInternalContext(
           config,
           getQueryBuilderInternalContext(this.#config),
         );
         return new QueryBuilder(config, {
-          ...this.#state,
+          ...subqueryState,
           startAlias: "",
           currentAlias: "",
           startKinds: [],

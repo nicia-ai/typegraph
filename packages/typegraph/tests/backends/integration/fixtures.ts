@@ -97,6 +97,10 @@ const knows = defineEdge("knows", {
   }),
 });
 
+const authoredBy = defineEdge("authoredBy", {
+  schema: z.object({}),
+});
+
 /**
  * Declared node indexes exercised by the `bulkFindByIndex` suite. Names are
  * stable so tests can reference them. These are declared but not materialized
@@ -155,6 +159,12 @@ export const integrationTestGraph = defineGraph({
     companyIdCoveringIndex,
   ],
   edges: {
+    authoredBy: {
+      type: authoredBy,
+      from: [Article],
+      to: [Person],
+      cardinality: "many",
+    },
     worksAt: {
       type: worksAt,
       from: [Person],

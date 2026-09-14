@@ -208,6 +208,18 @@ Use the same small fixture to contrast optional match versus result filtering, i
 filtering, and row counts versus entity counts. Test top-k, traversal fan-out, explicit ordering, and final limits
 together.
 
+### Implemented boundaries
+
+`whereNode()` and `whereEdge()` remain match constraints; recursive target and edge constraints apply at every hop.
+Scoped-expression `where()` filters completed match rows after match expansion, including optional and recursive
+results, and before grouping, ordering and limiting.
+
+`stopExpansion(alias, predicate, { emitStopNode? })` independently stops a matching recursive branch. Stopping nodes
+are emitted by default; `emitStopNode: false` omits them. Stop predicates are limited to ordinary fields on the
+recursive target alias. Recursive queries still support one variable-length traversal, node-ID path output, and no
+traversed-edge projection. Multiple recursive traversals and richer kind-qualified path entities remain deferred until
+these boundaries can be preserved across their additional match rows.
+
 ## Phase 6: Measure and optimize multi-root subgraphs
 
 ### Work

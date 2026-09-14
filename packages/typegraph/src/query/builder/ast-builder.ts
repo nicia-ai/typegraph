@@ -45,6 +45,9 @@ export function buildQueryAst(
     },
     traversals: state.traversals,
     predicates: state.predicates,
+    ...(state.resultPredicate === undefined ?
+      {}
+    : { resultPredicate: state.resultPredicate }),
     projection: {
       fields: state.projection,
     },

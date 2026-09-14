@@ -95,6 +95,7 @@ import {
   buildStandardHybridRrfOrderBy,
   buildStandardOrderBy,
   buildStandardProjection,
+  buildStandardResultWhere,
   buildStandardStartCte,
   buildStandardTraversalCte,
   buildStandardVectorOrderBy,
@@ -285,6 +286,7 @@ function compileQueryInExpressionContext(
   expressionContext: Readonly<{
     aliasScopes: ReadonlyMap<symbol, ExpressionAliasScope>;
     depth: number;
+    recursiveResultAliases?: ReadonlyMap<symbol, string>;
   }>,
 ): CompiledSelectSql {
   // Support legacy signature: compileQuery(ast, graphId, dialect)
@@ -305,6 +307,16 @@ function compileQueryInExpressionContext(
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
   const expressionCompileDepth = expressionContext.depth;
   const expressionAliasScopes = new Map(expressionContext.aliasScopes);
+  const recursiveResultAliases = new Map(
+    expressionContext.recursiveResultAliases,
+  );
+  const variableLength = hasVariableLengthTraversal(ast);
+  const loweredRecursive =
+    variableLength ? tryLowerSingleHopRecursiveTraversal(ast) : undefined;
+  const recursiveResultAlias =
+    variableLength && loweredRecursive === undefined ?
+      `__tg_recursive_result_${expressionCompileDepth}`
+    : undefined;
   if (
     ast.expressionScope !== undefined &&
     !expressionAliasScopes.has(ast.expressionScope)
@@ -323,6 +335,8 @@ function compileQueryInExpressionContext(
       ]),
     );
   }
+  if (ast.expressionScope !== undefined && recursiveResultAlias !== undefined)
+    recursiveResultAliases.set(ast.expressionScope, recursiveResultAlias);
   // Collects the ANN slot index types the emitter compiles engine-form
   // branches for; a non-empty set brands the finished statement so the
   // backend applies the pgvector iterative-scan GUCs around execution.
@@ -366,6 +380,7 @@ function compileQueryInExpressionContext(
         {
           aliasScopes: scopes,
           depth,
+          recursiveResultAliases,
         },
       );
     },
@@ -378,9 +393,27 @@ function compileQueryInExpressionContext(
         throw new CompilerInvariantError(
           "Expression outer reference has no enclosing query scope",
         );
-      return compileDatabaseExpression(expression, {
+      const recursiveResultAlias =
+        recursiveResultAliases.get(outerScopeIdentity);
+      const outerExpression =
+        recursiveResultAlias === undefined ? expression : (
+          {
+            ...expression,
+            node: {
+              ...expression.node,
+              field: {
+                ...expression.node.field,
+                alias:
+                  aliases.get(expression.node.field.alias) ??
+                  expression.node.field.alias,
+              },
+            },
+          }
+        );
+      return compileDatabaseExpression(outerExpression, {
         dialect: adapter,
         resolveFieldCteAlias: (field) =>
+          recursiveResultAlias ??
           `cte_${aliases.get(field.alias) ?? field.alias}`,
       });
     },
@@ -390,6 +423,7 @@ function compileQueryInExpressionContext(
     windowFunctions: options_.windowFunctions ?? true,
     recursiveTraversal:
       options_.recursiveTraversal ?? COMPILER_DEFAULT_RECURSIVE_TRAVERSAL,
+    ...(recursiveResultAlias === undefined ? {} : { recursiveResultAlias }),
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
@@ -406,10 +440,9 @@ function compileQueryInExpressionContext(
   }
 
   // Check for variable-length traversals
-  if (hasVariableLengthTraversal(ast)) {
-    const lowered = tryLowerSingleHopRecursiveTraversal(ast);
-    if (lowered !== undefined) {
-      return finish(compileStandardQuery(lowered, graphId, ctx));
+  if (variableLength) {
+    if (loweredRecursive !== undefined) {
+      return finish(compileStandardQuery(loweredRecursive, graphId, ctx));
     }
     return finish(compileVariableLengthQuery(ast, graphId, ctx));
   }
@@ -436,7 +469,8 @@ function tryLowerSingleHopRecursiveTraversal(
   }
   if (
     variableLength.pathAlias !== undefined ||
-    variableLength.depthAlias !== undefined
+    variableLength.depthAlias !== undefined ||
+    variableLength.stopExpansion !== undefined
   ) {
     return undefined;
   }
@@ -755,6 +789,8 @@ function compileCountAggregateFastPath(
   ) {
     return undefined;
   }
+  // Preaggregated traversal counts cannot evaluate completed row predicates.
+  if (ast.resultPredicate !== undefined) return undefined;
   const plan = resolveCountAggregateFastPath(ast);
   if (!plan) {
     return undefined;
@@ -1300,8 +1336,10 @@ function compileLateMaterializedQuery(
     temporalFilterPass,
     traversalLimit: undefined,
   });
+  const where = buildStandardResultWhere({ ast: leanAst, ctx });
   ctes.push(
     buildLateMaterializedTopKCte({
+      ...(where === undefined ? {} : { where }),
       ast: leanAst,
       dialect,
       fromClause: buildStandardFromClause({
@@ -1550,6 +1588,7 @@ function compileStandardQueryWithCteStrategy(
     ...(vectorPredicate === undefined ? {} : { vectorPredicate }),
     ...(fulltextPredicate === undefined ? {} : { fulltextPredicate }),
   });
+  const where = buildStandardResultWhere({ ast, ctx });
   const groupBy = buildStandardGroupBy({ ast, dialect });
   const having = buildStandardHaving({ ast, ctx });
 
@@ -1571,6 +1610,7 @@ function compileStandardQueryWithCteStrategy(
   return emitStandardQuerySql({
     ctes,
     fromClause,
+    ...(where === undefined ? {} : { where }),
     ...(groupBy === undefined ? {} : { groupBy }),
     ...(having === undefined ? {} : { having }),
     ...(orderBy === undefined ? {} : { orderBy }),

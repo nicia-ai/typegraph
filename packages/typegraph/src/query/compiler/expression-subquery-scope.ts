@@ -1,4 +1,5 @@
-import type { QueryAst } from "../ast";
+import type { FieldRef, QueryAst } from "../ast";
+import type { DatabaseExpression } from "../expressions";
 
 const ALIAS_KEYS = new Set([
   "alias",
@@ -52,4 +53,33 @@ export function namespaceExpressionSubquery(
     );
   }
   return { aliases: physicalAliases, ast: rewrite(ast) as QueryAst };
+}
+
+/** Visits enclosing fields referenced anywhere in a nested query, without lifting its local fields. */
+export function visitCorrelatedExpressionFields(
+  ast: QueryAst,
+  scopeIdentity: symbol,
+  visit: (field: FieldRef) => void,
+): void {
+  function walk(value: unknown): void {
+    if (Array.isArray(value)) {
+      for (const entry of value) walk(entry);
+      return;
+    }
+    if (typeof value !== "object" || value === null || value instanceof Date)
+      return;
+    const record = value as Readonly<Record<string, unknown>>;
+    if (record["__type"] === "literal" || record["kind"] === "literal") return;
+    if (record["__type"] === "database_expression") {
+      const expression = value as DatabaseExpression;
+      if (expression.node.kind === "outer_reference") {
+        const { outerScopeIdentity, expression: outer } = expression.node;
+        if (outerScopeIdentity === scopeIdentity && outer.node.kind === "field")
+          visit(outer.node.field);
+        return;
+      }
+    }
+    for (const entry of Object.values(record)) walk(entry);
+  }
+  walk(ast);
 }

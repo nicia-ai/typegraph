@@ -276,6 +276,13 @@ is fine for single-predicate use. `.limit()` on the query controls the
 `.fuseWith()`), pass a larger `k` per predicate (e.g. 200) so there are
 enough candidates for the fused ranking to be meaningful.
 
+Traversal happens after candidate generation. A candidate can therefore fan
+out into several match rows. Use query-level `.where((ctx) => ...)` to filter
+those completed rows, then apply an explicit `.orderBy()` and `.limit()` for
+the final result. The final order does not change which nodes entered the
+top-k candidate set, and the final limit counts match rows rather than distinct
+source nodes.
+
 ### Query Modes
 
 ```typescript

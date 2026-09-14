@@ -370,12 +370,36 @@ function substituteParameters(
 ): QueryAst {
   return {
     ...ast,
+    traversals: ast.traversals.map((traversal) => {
+      const variableLength = traversal.variableLength;
+      if (variableLength?.stopExpansion === undefined) return traversal;
+      const stopExpansion = variableLength.stopExpansion;
+      return {
+        ...traversal,
+        variableLength: {
+          ...variableLength,
+          stopExpansion: {
+            ...stopExpansion,
+            expression: substitutePredicateExpression(
+              stopExpansion.expression,
+              bindings,
+            ),
+          },
+        },
+      };
+    }),
     predicates: ast.predicates.map((pred) => ({
       ...pred,
       expression: substitutePredicateExpression(pred.expression, bindings),
     })),
     ...(ast.having !== undefined && {
       having: substitutePredicateExpression(ast.having, bindings),
+    }),
+    ...(ast.resultPredicate !== undefined && {
+      resultPredicate: substitutePredicateExpression(
+        ast.resultPredicate,
+        bindings,
+      ),
     }),
     projection: {
       ...ast.projection,
@@ -742,6 +766,14 @@ function collectParameterMetadataFromAst(
 ): void {
   for (const predicate of ast.predicates) {
     collectParameterMetadataFromExpression(predicate.expression, accumulator);
+  }
+  if (ast.resultPredicate !== undefined) {
+    collectParameterMetadataFromExpression(ast.resultPredicate, accumulator);
+  }
+  for (const traversal of ast.traversals) {
+    const stopExpression = traversal.variableLength?.stopExpansion?.expression;
+    if (stopExpression !== undefined)
+      collectParameterMetadataFromExpression(stopExpression, accumulator);
   }
   if (ast.having !== undefined) {
     collectParameterMetadataFromExpression(ast.having, accumulator);

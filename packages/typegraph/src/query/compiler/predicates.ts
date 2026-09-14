@@ -528,6 +528,10 @@ export type PredicateCompilerContext = Readonly<{
    */
   recursiveTraversal?: RecursiveTraversalVerdict;
   databaseExpressionAggregates?: boolean;
+  /** Resolves completed-match fields to the CTE carrying their columns. */
+  resolveFieldCteAlias?: (field: FieldRef) => string | undefined;
+  /** Final recursive CTE qualifier used by completed-result expressions. */
+  recursiveResultAlias?: string;
 }>;
 
 /**
@@ -720,6 +724,8 @@ export function compilePredicateExpression(
           {}
         : { compileOuterReference: ctx.compileExpressionOuterReference }),
         resolveFieldCteAlias(field) {
+          if (ctx.resolveFieldCteAlias !== undefined)
+            return ctx.resolveFieldCteAlias(field);
           return ctx.cteColumnPrefix === undefined ?
               `cte_${field.alias}`
             : undefined;

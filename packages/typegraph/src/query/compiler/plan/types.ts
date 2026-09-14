@@ -16,6 +16,7 @@ import type { DatabaseExpression } from "../../expressions";
 export type LogicalPlanNode =
   | ScanPlanNode
   | FilterPlanNode
+  | ResultFilterPlanNode
   | JoinPlanNode
   | AggregatePlanNode
   | SortPlanNode
@@ -50,6 +51,14 @@ export type FilterPlanNode = Readonly<{
   op: "filter";
   predicateTargetType: "edge" | "node";
   predicates: readonly PredicateExpression[];
+}>;
+
+/** A predicate on complete matches, distinct from alias-local match constraints. */
+export type ResultFilterPlanNode = Readonly<{
+  id: string;
+  input: LogicalPlanNode;
+  op: "result_filter";
+  predicate: PredicateExpression;
 }>;
 
 export type JoinPlanNode = Readonly<{

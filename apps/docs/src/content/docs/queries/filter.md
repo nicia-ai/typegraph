@@ -1,10 +1,10 @@
 ---
 title: Filter
-description: Reducing results with whereNode() and whereEdge()
+description: Match constraints and completed-result filters
 ---
 
 Filter operations reduce the result set based on property values. TypeGraph provides `whereNode()`
-for filtering nodes and `whereEdge()` for filtering edges during traversals.
+and `whereEdge()` for match constraints, plus `where()` for completed match rows.
 
 ## whereNode()
 
@@ -25,10 +25,10 @@ const engineers = await store
 .whereNode(alias, predicateFunction)
 ```
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `alias` | `string` | The node alias to filter (must exist in query) |
-| `predicateFunction` | `(accessor) => Predicate` | Function that returns a predicate |
+| Parameter           | Type                      | Description                                    |
+| ------------------- | ------------------------- | ---------------------------------------------- |
+| `alias`             | `string`                  | The node alias to filter (must exist in query) |
+| `predicateFunction` | `(accessor) => Predicate` | Function that returns a predicate              |
 
 The predicate function receives a typed accessor for the node's properties.
 
@@ -57,10 +57,10 @@ const highPaying = await store
 .whereEdge(alias, predicateFunction)
 ```
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `alias` | `string` | The edge alias to filter (must exist in query) |
-| `predicateFunction` | `(accessor) => Predicate` | Function that returns a predicate |
+| Parameter           | Type                      | Description                                    |
+| ------------------- | ------------------------- | ---------------------------------------------- |
+| `alias`             | `string`                  | The edge alias to filter (must exist in query) |
+| `predicateFunction` | `(accessor) => Predicate` | Function that returns a predicate              |
 
 ## Combining Predicates
 
@@ -149,6 +149,25 @@ const techCompanyEngineers = await store
   .execute();
 ```
 
+`whereNode("c", ...)` constrains the traversal match itself. For a recursive traversal it applies
+at every hop and prunes a branch as soon as a target fails. Use scoped-expression `where()` when
+intermediate nodes may fail the condition but a later endpoint should still be returned:
+
+```typescript
+const activeEndpoints = await store
+  .query()
+  .from("Person", "start")
+  .traverse("knows", "edge")
+  .recursive({ maxHops: 5 })
+  .to("Person", "person")
+  .where((fields) => expr.eq(fields.person.active, expr.literal(true)))
+  .select((ctx) => ctx.person)
+  .execute();
+```
+
+On an optional alias, an ordinary comparison removes rows where that alias is absent. Use an
+explicit null check when absent matches should remain.
+
 ## Common Predicates
 
 Here are the most commonly used predicates. For complete reference, see [Predicates](/queries/predicates/).
@@ -156,28 +175,28 @@ Here are the most commonly used predicates. For complete reference, see [Predica
 ### Equality
 
 ```typescript
-p.name.eq("Alice")       // equals
-p.name.neq("Bob")        // not equals
+p.name.eq("Alice"); // equals
+p.name.neq("Bob"); // not equals
 ```
 
 ### Comparison
 
 ```typescript
-p.age.gt(21)             // greater than
-p.age.gte(21)            // greater than or equal
-p.age.lt(65)             // less than
-p.age.lte(65)            // less than or equal
-p.age.between(18, 65)    // inclusive range
+p.age.gt(21); // greater than
+p.age.gte(21); // greater than or equal
+p.age.lt(65); // less than
+p.age.lte(65); // less than or equal
+p.age.between(18, 65); // inclusive range
 ```
 
 ### String Matching
 
 ```typescript
-p.name.contains("ali")   // substring match
-p.name.startsWith("A")   // prefix match
-p.name.endsWith("ice")   // suffix match
-p.email.like("%@example.com")  // SQL LIKE pattern
-p.name.ilike("alice")    // case-insensitive LIKE
+p.name.contains("ali"); // substring match
+p.name.startsWith("A"); // prefix match
+p.name.endsWith("ice"); // suffix match
+p.email.like("%@example.com"); // SQL LIKE pattern
+p.name.ilike("alice"); // case-insensitive LIKE
 ```
 
 ### Fulltext Search
@@ -187,59 +206,57 @@ node-level `$fulltext.matches()` for BM25-style ranked fulltext search.
 See [Fulltext Search](/fulltext-search) for the full guide.
 
 ```typescript
-d.$fulltext.matches("climate change", 20)  // Top 20 by relevance
+d.$fulltext.matches("climate change", 20); // Top 20 by relevance
 
 d.$fulltext.matches("quarterly earnings", 10, {
-  mode: "websearch",  // Google-style syntax
-})
+  mode: "websearch", // Google-style syntax
+});
 ```
 
 Combine with any other predicate — fulltext composes with metadata
 filters, graph traversal, and vector search:
 
 ```typescript
-d.$fulltext.matches("climate", 20)
-  .and(d.tenantId.eq(tenant))
-  .and(d.published.eq(true))
+d.$fulltext.matches("climate", 20).and(d.tenantId.eq(tenant)).and(d.published.eq(true));
 ```
 
 ### Null Checks
 
 ```typescript
-p.deletedAt.isNull()     // is null/undefined
-p.email.isNotNull()      // is not null
+p.deletedAt.isNull(); // is null/undefined
+p.email.isNotNull(); // is not null
 ```
 
 ### List Membership
 
 ```typescript
-p.status.in(["active", "pending"])
-p.status.notIn(["archived", "deleted"])
+p.status.in(["active", "pending"]);
+p.status.notIn(["archived", "deleted"]);
 ```
 
 ### Array Operations
 
 ```typescript
-p.tags.contains("typescript")
-p.tags.containsAll(["typescript", "nodejs"])
-p.tags.containsAny(["typescript", "rust", "go"])
-p.tags.isEmpty()
-p.tags.isNotEmpty()
+p.tags.contains("typescript");
+p.tags.containsAll(["typescript", "nodejs"]);
+p.tags.containsAny(["typescript", "rust", "go"]);
+p.tags.isEmpty();
+p.tags.isNotEmpty();
 ```
 
 ## Predicate Types by Field
 
 The available predicates depend on the field type:
 
-| Field Type | Key Predicates |
-|------------|----------------|
-| String | `eq`, `contains`, `startsWith`, `like`, `ilike` |
-| Nodes with `searchable()` fields | `$fulltext.matches()` (node-level, not per-field) |
-| Number | `eq`, `gt`, `gte`, `lt`, `lte`, `between` |
-| Date | `eq`, `gt`, `gte`, `lt`, `lte`, `between` |
-| Array | `contains`, `containsAll`, `containsAny`, `isEmpty` |
-| Object | `get()`, `hasKey`, `pathEquals` |
-| Embedding | `similarTo()` |
+| Field Type                       | Key Predicates                                      |
+| -------------------------------- | --------------------------------------------------- |
+| String                           | `eq`, `contains`, `startsWith`, `like`, `ilike`     |
+| Nodes with `searchable()` fields | `$fulltext.matches()` (node-level, not per-field)   |
+| Number                           | `eq`, `gt`, `gte`, `lt`, `lte`, `between`           |
+| Date                             | `eq`, `gt`, `gte`, `lt`, `lte`, `between`           |
+| Array                            | `contains`, `containsAll`, `containsAny`, `isEmpty` |
+| Object                           | `get()`, `hasKey`, `pathEquals`                     |
+| Embedding                        | `similarTo()`                                       |
 
 See [Predicates](/queries/predicates/) for complete documentation.
 

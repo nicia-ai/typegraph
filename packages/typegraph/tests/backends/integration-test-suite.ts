@@ -70,6 +70,8 @@ import {
   registerLateMaterializationIntegrationTests,
   registerLegacyClaimAxisIntegrationTests,
   registerLineageConformanceIntegrationTests,
+  registerMatchResultFilteringIntegrationTests,
+  registerMatchResultRankingIntegrationTests,
   registerMigrateSchemaKindIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
@@ -82,6 +84,7 @@ import {
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
+  registerRecursiveStopExpansionIntegrationTests,
   registerRelationalCompositionIntegrationTests,
   registerRemovalMaterializationIntegrationTests,
   registerSchemaCheckedReadIntegrationTests,
@@ -284,6 +287,8 @@ export function createIntegrationTestSuite<
     registerAggregateIntegrationTests(context);
     registerDatabaseExpressionQueryIntegrationTests(context);
     registerRelationalCompositionIntegrationTests(context);
+    registerMatchResultRankingIntegrationTests(context);
+    registerMatchResultFilteringIntegrationTests(context);
     registerExpressionSubqueryQueryIntegrationTests(context);
     registerQueryTerminalIntegrationTests(context);
     registerBackendProvenanceIntegrationTests(context);
@@ -328,6 +333,7 @@ export function createIntegrationTestSuite<
     registerSchemaCheckedReadIntegrationTests(context);
     registerEdgeOperationIntegrationTests(context);
     registerRecursiveIntegrationTests(context);
+    registerRecursiveStopExpansionIntegrationTests(context);
     registerPaginationIntegrationTests(context);
     registerTraversalIntegrationTests(context);
     registerEdgePropertyIntegrationTests(context);

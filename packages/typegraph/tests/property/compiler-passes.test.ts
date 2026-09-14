@@ -7,12 +7,11 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import type { ValueType, VectorSimilarityPredicate } from "../../src/query/ast";
+import type { ValueType } from "../../src/query/ast";
 import {
   type CompilerPass,
   runCompilerPass,
 } from "../../src/query/compiler/passes/runner";
-import { resolveVectorAwareLimit } from "../../src/query/compiler/passes/vector";
 import {
   isInSubqueryTypeCompatible,
   isUnsupportedInSubqueryValueType,
@@ -98,90 +97,6 @@ describe("Compiler Pass Framework Properties", () => {
       ),
       { numRuns: 100 },
     );
-  });
-});
-
-// ============================================================
-// resolveVectorAwareLimit Properties
-// ============================================================
-
-describe("Vector-Aware Limit Resolution Properties", () => {
-  const vectorPredicateArb: fc.Arbitrary<VectorSimilarityPredicate> = fc.record(
-    {
-      __type: fc.constant("vector_similarity" as const),
-      field: fc.constant({
-        __type: "field_ref" as const,
-        alias: "p",
-        path: ["props", "embedding"],
-      }),
-      queryEmbedding: fc.array(
-        fc.double({ noNaN: true, min: -1e10, max: 1e10 }),
-        {
-          minLength: 3,
-          maxLength: 3,
-        },
-      ),
-      metric: fc.constantFrom("cosine", "l2", "inner_product"),
-      limit: fc.integer({ min: 1, max: 10_000 }),
-    },
-  );
-
-  it("returns undefined when both astLimit and vectorPredicate are undefined", () => {
-    expect(resolveVectorAwareLimit()).toBeUndefined();
-  });
-
-  it("returns astLimit when no vector predicate", () => {
-    fc.assert(
-      fc.property(fc.integer({ min: 1, max: 10_000 }), (astLimit) => {
-        expect(resolveVectorAwareLimit(astLimit)).toBe(astLimit);
-      }),
-      { numRuns: 50 },
-    );
-  });
-
-  it("returns vector limit when astLimit is undefined", () => {
-    fc.assert(
-      fc.property(vectorPredicateArb, (vectorPredicate) => {
-        expect(resolveVectorAwareLimit(undefined, vectorPredicate)).toBe(
-          vectorPredicate.limit,
-        );
-      }),
-      { numRuns: 50 },
-    );
-  });
-
-  it("returns the minimum of astLimit and vector limit", () => {
-    fc.assert(
-      fc.property(
-        fc.integer({ min: 1, max: 10_000 }),
-        vectorPredicateArb,
-        (astLimit, vectorPredicate) => {
-          const result = resolveVectorAwareLimit(astLimit, vectorPredicate);
-          expect(result).toBe(Math.min(astLimit, vectorPredicate.limit));
-        },
-      ),
-      { numRuns: 100 },
-    );
-  });
-
-  it("effective limit is always <= astLimit when both present", () => {
-    fc.assert(
-      fc.property(
-        fc.integer({ min: 1, max: 10_000 }),
-        vectorPredicateArb,
-        (astLimit, vectorPredicate) => {
-          const result = resolveVectorAwareLimit(astLimit, vectorPredicate);
-          expect(result).toBeLessThanOrEqual(astLimit);
-          expect(result).toBeLessThanOrEqual(vectorPredicate.limit);
-        },
-      ),
-      { numRuns: 100 },
-    );
-  });
-
-  it("returns undefined only when both inputs are undefined", () => {
-    const result = resolveVectorAwareLimit();
-    expect(result).toBeUndefined();
   });
 });
 

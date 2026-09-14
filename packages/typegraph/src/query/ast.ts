@@ -434,6 +434,11 @@ export type VariableLengthSpec = Readonly<{
   pathAlias?: string;
   /** Optional column alias for projected traversal depth */
   depthAlias?: string;
+  /** Stop expanding a matching node, optionally omitting that node from results. */
+  stopExpansion?: Readonly<{
+    expression: PredicateExpression;
+    emitStopNode: boolean;
+  }>;
 }>;
 
 /**
@@ -634,6 +639,8 @@ export type QueryAst = Readonly<{
   start: QueryStart;
   traversals: readonly Traversal[];
   predicates: readonly NodePredicate[];
+  /** Filters completed match rows, after expansion/candidate generation and before grouping/ranges. */
+  resultPredicate?: PredicateExpression;
   projection: Projection;
   temporalMode: TemporalOptions;
   /** Recorded/system-time timestamp for recorded-pinned reads. */

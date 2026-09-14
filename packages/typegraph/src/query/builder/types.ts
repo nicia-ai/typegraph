@@ -709,6 +709,8 @@ export type QueryBuilderState = Readonly<{
   includeSubClasses: boolean;
   traversals: readonly Traversal[];
   predicates: readonly NodePredicate[];
+  /** Filters completed match rows without restricting optional or recursive expansion. */
+  resultPredicate?: PredicateExpression;
   projection: readonly ProjectedField[];
   orderBy: readonly OrderSpec[];
   /** ORDER BY entries added via `ExecutableAggregateQuery.orderBy()`. */

@@ -76,8 +76,16 @@ test("expression callbacks expose only in-scope aliases and schema fields", () =
     expr.gt(expressions.person.age, expr.literal(18)),
   );
   query.orderBy((expressions) => expressions.person.joinedAt, "desc");
+  query.where((expressions) =>
+    expr.gt(expressions.person.age, expr.literal(18)),
+  );
 
   function assertInvalidQueryExpressions(): void {
+    // @ts-expect-error completed-match predicates must be Boolean
+    query.where((expressions) => expressions.person.age);
+    // @ts-expect-error completed-match filters do not expose unknown aliases
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+    query.where((expressions) => expr.isNull(expressions.company));
     query.project((expressions) => ({
       // @ts-expect-error nonexistent schema properties are rejected
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment

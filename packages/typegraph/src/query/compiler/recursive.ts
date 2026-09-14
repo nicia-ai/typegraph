@@ -39,7 +39,10 @@ import {
   type PredicateCompilerContext,
 } from "./predicates";
 import { assertRecordedQueryAstDoesNotUseCurrentIndexes } from "./recorded-current-index-guard";
-import { visitExpressionFields } from "./standard-pass-pipeline";
+import {
+  markPredicateFieldsAsRequired,
+  visitExpressionFields,
+} from "./standard-pass-pipeline";
 import { compileSelectivePropsExtraction } from "./typed-json-extract";
 import {
   addRequiredColumn,
@@ -296,8 +299,21 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
 
   // Build final SELECT
   const minDepth = vlTraversal.variableLength.minDepth;
+  const resultClauses: SqlFragment[] = [];
+  if (minDepth > 0) resultClauses.push(sql`depth >= ${minDepth}`);
+  if (vlTraversal.variableLength.stopExpansion?.emitStopNode === false)
+    resultClauses.push(sql`stop_reached = ${dialect.booleanLiteral(false)}`);
+  if (ast.resultPredicate !== undefined)
+    resultClauses.push(
+      compilePredicateExpression(ast.resultPredicate, {
+        ...ctx,
+        resolveFieldCteAlias: () => ctx.recursiveResultAlias,
+      }),
+    );
   const depthFilter =
-    minDepth > 0 ? sql`WHERE depth >= ${minDepth}` : sql.raw("");
+    resultClauses.length > 0 ?
+      sql`WHERE ${sql.join(resultClauses, sql` AND `)}`
+    : sql.raw("");
 
   // Order by and limit/offset
   const orderBy = compileRecursiveOrderBy(ast, dialect);
@@ -313,6 +329,9 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
     : { precedingCtes: [identityClassCte] }),
     projection,
     recursiveCte,
+    ...(ctx.recursiveResultAlias === undefined ?
+      {}
+    : { resultAlias: ctx.recursiveResultAlias }),
   });
 }
 
@@ -420,6 +439,18 @@ function compileRecursiveCte(
     nodeAlias,
     targetContext,
   );
+  const stopExpression = traversal.variableLength.stopExpansion?.expression;
+  const compiledStopExpression =
+    stopExpression === undefined ? undefined : (
+      compilePredicateExpression(stopExpression, targetContext)
+    );
+  const compiledBaseStopExpression =
+    stopExpression === undefined ? undefined : (
+      compilePredicateExpression(stopExpression, {
+        ...ctx,
+        cteColumnPrefix: "n0",
+      })
+    );
 
   // Max depth condition:
   // - unlimited traversals are capped at MAX_RECURSIVE_DEPTH
@@ -486,6 +517,11 @@ function compileRecursiveCte(
     edgeTemporalFilter,
     nodeTemporalFilter,
     maxDepthCondition,
+    ...(stopExpression === undefined ?
+      []
+    : [
+        sql`COALESCE(r.stop_reached, ${dialect.booleanLiteral(false)}) = ${dialect.booleanLiteral(false)}`,
+      ]),
     // Conditions the frontier widening cannot state in a join condition —
     // currently the member-visibility guard. Every branch of the recursive term
     // carries them, because every branch reads the widened frontier.
@@ -553,6 +589,11 @@ function compileRecursiveCte(
       ...nodeColumnsFromRecursive,
       sql`r.depth + 1 AS depth`,
     ];
+    if (compiledStopExpression !== undefined) {
+      recursiveSelectColumns.push(
+        sql`COALESCE(${compiledStopExpression}, ${dialect.booleanLiteral(false)}) AS stop_reached`,
+      );
+    }
     if (pathExtension !== undefined) {
       recursiveSelectColumns.push(sql`${pathExtension} AS path`);
     }
@@ -639,6 +680,11 @@ function compileRecursiveCte(
     ...nodeColumnsFromBase,
     sql`0 AS depth`,
   ];
+  if (compiledBaseStopExpression !== undefined) {
+    baseSelectColumns.push(
+      sql`COALESCE(${compiledBaseStopExpression}, ${dialect.booleanLiteral(false)}) AS stop_reached`,
+    );
+  }
   if (initialPath !== undefined) {
     baseSelectColumns.push(sql`${initialPath} AS path`);
   }
@@ -737,6 +783,9 @@ function collectRequiredColumnsByAlias(
       }
     }
   }
+
+  if (ast.resultPredicate !== undefined)
+    markPredicateFieldsAsRequired(requiredColumnsByAlias, ast.resultPredicate);
 
   return requiredColumnsByAlias;
 }

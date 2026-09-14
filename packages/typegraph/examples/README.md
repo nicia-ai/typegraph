@@ -63,6 +63,7 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 | [26-store-views.ts](./26-store-views.ts) | Read lenses over one graph: view modes (current / includeTombstones / includeEnded), asOf-pinned edge reads, consistent snapshots, and the read-only refusal contract |
 | [27-typed-expressions.ts](./27-typed-expressions.ts) | Typed database filtering, arithmetic, projection, grouping, aggregation, and row mapping |
 | [28-relational-composition.ts](./28-relational-composition.ts) | Derived aggregates, visible-column set operations, typed prepared batches, and deterministic streaming |
+| [29-match-stages.ts](./29-match-stages.ts) | Optional match constraints, completed-row filters, and recursive stop expansion |
 
 ### Provenance & Retraction
 

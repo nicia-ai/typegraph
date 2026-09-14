@@ -990,6 +990,7 @@ type BuildLateMaterializedTopKCteInput = Readonly<{
   collapsedTraversalCteAlias?: string;
   dialect: DialectAdapter;
   fromClause: SqlFragment;
+  where?: SqlFragment;
   limit: number;
   offset?: number | undefined;
 }>;
@@ -1052,6 +1053,7 @@ export function buildLateMaterializedTopKCte(
     sql`SELECT ${sql.join(columns, sql`, `)}`,
     fromClause,
   ];
+  if (input.where !== undefined) parts.push(input.where);
   if (innerOrderBy !== undefined) parts.push(innerOrderBy);
   if (limitOffset !== undefined) parts.push(limitOffset);
 
@@ -1186,6 +1188,25 @@ export function buildStandardGroupBy(
   );
 
   return sql`GROUP BY ${sql.join(parts, sql`, `)}`;
+}
+
+/** Filters completed alias matches, never the candidate or optional-match CTEs. */
+export function buildStandardResultWhere(
+  input: Readonly<{
+    ast: QueryAst;
+    ctx: PredicateCompilerContext;
+  }>,
+): SqlFragment | undefined {
+  const { ast, ctx } = input;
+  if (ast.resultPredicate === undefined) return undefined;
+  const aliases = buildAliasToCteMap(ast);
+  const condition = compilePredicateExpression(ast.resultPredicate, {
+    ...ctx,
+    databaseExpressionAggregates: false,
+    resolveFieldCteAlias: (field) =>
+      aliases.get(field.alias) ?? `cte_${field.alias}`,
+  });
+  return sql`WHERE ${condition}`;
 }
 
 type BuildStandardHavingInput = Readonly<{

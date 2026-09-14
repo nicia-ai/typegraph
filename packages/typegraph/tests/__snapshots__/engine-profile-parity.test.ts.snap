@@ -2002,7 +2002,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       "[1,0,0]",
       5,
       5,
-      5,
     ],
     "sql": "WITH 
     cte_d AS NOT MATERIALIZED (
@@ -2033,7 +2032,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
         LIMIT $11
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC LIMIT $12",
+   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
   },
   {
     "params": [],
@@ -3998,7 +3997,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
       "engine_profile_parity_script",
       "Document",
       5,
-      5,
     ],
     "sql": "WITH 
     cte_d AS (
@@ -4028,7 +4026,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
         LIMIT ?
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC LIMIT ?",
+   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
   },
 ]
 `;

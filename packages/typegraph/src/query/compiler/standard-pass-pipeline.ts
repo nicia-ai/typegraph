@@ -8,11 +8,13 @@ import type {
 } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import { type DatabaseExpression } from "../expressions";
-import { expressionContainsAggregate } from "./expression-inspection";
+import {
+  expressionContainsAggregate,
+  visitExpressionChildren,
+} from "./expression-inspection";
+import { visitCorrelatedExpressionFields } from "./expression-subquery-scope";
 import {
   createTemporalFilterPass,
-  resolveFulltextAwareLimit,
-  resolveVectorAwareLimit,
   runCompilerPass,
   runFulltextPredicatePass,
   runFusionConfigPass,
@@ -64,55 +66,24 @@ export function visitExpressionFields(
   visit: (field: FieldRef) => void,
 ): void {
   const node = expression.node;
-  function recurse(operand: DatabaseExpression): void {
+  if (node.kind === "field") {
+    visit(node.field);
+    return;
+  }
+  if (node.kind === "exists_subquery" || node.kind === "scalar_subquery") {
+    visitCorrelatedExpressionFields(
+      node.subquery,
+      expression.scopeIdentity,
+      visit,
+    );
+    return;
+  }
+  visitExpressionChildren(expression, (operand) => {
     visitExpressionFields(operand, visit);
-  }
-  switch (node.kind) {
-    case "field": {
-      visit(node.field);
-      return;
-    }
-    case "arithmetic":
-    case "comparison": {
-      recurse(node.left);
-      recurse(node.right);
-      return;
-    }
-    case "boolean":
-    case "coalesce": {
-      for (const operand of node.operands) recurse(operand);
-      return;
-    }
-    case "not":
-    case "null_check":
-    case "numeric_conversion": {
-      recurse(node.operand);
-      return;
-    }
-    case "aggregate": {
-      if (node.operand !== undefined) recurse(node.operand);
-      return;
-    }
-    case "conditional": {
-      recurse(node.condition);
-      recurse(node.then);
-      recurse(node.otherwise);
-      return;
-    }
-    case "outer_reference": {
-      recurse(node.expression);
-      return;
-    }
-    case "exists_subquery":
-    case "scalar_subquery":
-    case "literal":
-    case "parameter": {
-      return;
-    }
-  }
+  });
 }
 
-function markPredicateFieldsAsRequired(
+export function markPredicateFieldsAsRequired(
   requiredColumnsByAlias: Map<string, Set<string>>,
   expression: PredicateExpression,
 ): void {
@@ -257,6 +228,10 @@ export function collectRequiredColumnsByAlias(
     }
   }
 
+  if (ast.resultPredicate !== undefined) {
+    markPredicateFieldsAsRequired(requiredColumnsByAlias, ast.resultPredicate);
+  }
+
   if (ast.having) {
     markPredicateFieldsAsRequired(requiredColumnsByAlias, ast.having);
   }
@@ -336,7 +311,7 @@ function resolveTraversalCteLimit(
     return 0;
   }
 
-  if (ast.groupBy || ast.having) {
+  if (ast.groupBy || ast.having || ast.resultPredicate !== undefined) {
     return undefined;
   }
 
@@ -397,7 +372,7 @@ function canCollapseSelectiveTraversalRowset(
     return false;
   }
 
-  if (ast.groupBy || ast.having) {
+  if (ast.groupBy || ast.having || ast.resultPredicate !== undefined) {
     return false;
   }
 
@@ -609,14 +584,11 @@ export function runStandardQueryPassPipeline(
   });
   state = traversalLimitPass.state;
 
-  // Compute effectiveLimit once — used by both logical plan lowering and SQL LIMIT/OFFSET.
-  // Both vector and fulltext predicates carry their own LIMITs; the tightest wins.
+  // Ranked predicates bound their candidate CTEs independently. The query limit
+  // applies to completed match rows after traversal fanout and result filtering.
   state = {
     ...state,
-    effectiveLimit: resolveFulltextAwareLimit(
-      resolveVectorAwareLimit(state.ast.limit, state.vectorPredicate),
-      state.fulltextPredicate,
-    ),
+    effectiveLimit: state.ast.limit,
   };
 
   const logicalPlanPass = runCompilerPass(state, {

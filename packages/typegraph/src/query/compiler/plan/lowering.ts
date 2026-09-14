@@ -15,8 +15,6 @@ import {
   type VectorStrategy,
 } from "../../dialect";
 import {
-  resolveFulltextAwareLimit,
-  resolveVectorAwareLimit,
   runFulltextPredicatePass,
   runRecursiveTraversalSelectionPass,
   runVectorPredicatePass,
@@ -28,6 +26,7 @@ import type {
   LogicalPlan,
   LogicalPlanNode,
   ProjectPlanNode,
+  ResultFilterPlanNode,
 } from "./types";
 
 export type LowerStandardQueryToLogicalPlanInput = Readonly<{
@@ -126,7 +125,15 @@ function appendAggregateSortLimitAndProjectNodes(
   limit: number | undefined,
   collapsedTraversalCteAlias?: string,
 ): LogicalPlanNode {
-  let node = currentNode;
+  let node: LogicalPlanNode =
+    ast.resultPredicate === undefined ?
+      currentNode
+    : ({
+        id: nextPlanNodeId(),
+        input: currentNode,
+        op: "result_filter",
+        predicate: ast.resultPredicate,
+      } satisfies ResultFilterPlanNode);
 
   const aggregateExpressions = extractAggregateExpressions(ast);
   if (
@@ -394,14 +401,7 @@ function lowerComposableQueryToLogicalPlanNode(
     query,
     dialectAdapter,
   ).fulltextPredicate;
-  const limitAfterVector = resolveVectorAwareLimit(
-    query.limit,
-    vectorPredicate,
-  );
-  const effectiveLimit = resolveFulltextAwareLimit(
-    limitAfterVector,
-    fulltextPredicate,
-  );
+  const effectiveLimit = query.limit;
   const loweringInput = {
     ast: query,
     dialect,

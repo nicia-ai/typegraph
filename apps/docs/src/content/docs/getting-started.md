@@ -437,6 +437,19 @@ const myTasks = await store
   .execute();
 ```
 
+`whereNode()` and `whereEdge()` constrain graph matches while traversal is
+built. Use `.where((ctx) => ...)` when a condition should filter completed
+rows, including optional or recursive results. Each successful traversal
+combination is one row, so fanout can repeat a source entity; project an
+identity and call relation `.distinct()` when the intended result is one row
+per entity.
+
+Traversal continues from the latest target by default. Reusable branching
+fragments should state their source explicitly with `{ from: "alias" }` so
+their behavior does not depend on which traversal preceded them. Direction,
+ontology expansion, and temporal coordinates retain their ordinary query
+defaults.
+
 ## Transactions
 
 Group operations in transactions for atomicity:
