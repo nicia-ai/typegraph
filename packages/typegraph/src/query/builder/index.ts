@@ -71,6 +71,7 @@ export {
   type BatchableQuery,
   type BatchResults,
   type BooleanFieldAccessor,
+  type CompiledOneStatementRead,
   type CreateQueryBuilderOptions,
   type DateFieldAccessor,
   type EdgeAccessor,

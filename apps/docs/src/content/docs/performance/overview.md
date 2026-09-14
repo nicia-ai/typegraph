@@ -83,8 +83,8 @@ This holds for all query types:
 
 The fluent query needs no dataloader for that joined read because the database handles its entire
 join graph in one execution. Separate reads can still form an N+1; use a traversal, `batchOnce()`,
-`neighbors()` / `countNeighbors()`, `subgraph()`, or the deferred `neighborsQuery()` /
-`countNeighborsQuery()` / `subgraphQuery()` forms when unlike result shapes must share one
+`neighbors()` / `countNeighbors()`, or `subgraph()`. Inside `batchOnce()`, its scoped `read` builder
+creates composable versions of the set-oriented reads when unlike result shapes must share one
 statement. Chunked collection reads remain useful for homogeneous ID and endpoint sets.
 
 ## Batch Write Patterns
@@ -454,7 +454,7 @@ For multiple independent embeddable reads with different shapes and filters, use
 [`store.batchOnce()`](/schemas-stores#batch-query-execution) to execute exactly one statement:
 
 ```typescript
-const [activeUsers, recentOrders] = await store.batchOnce(
+const [activeUsers, recentOrders] = await store.batchOnce(() => [
   store
     .query()
     .from("User", "u")
@@ -466,21 +466,21 @@ const [activeUsers, recentOrders] = await store.batchOnce(
     .select((ctx) => ({ id: ctx.o.id, total: ctx.o.total }))
     .orderBy("o", "createdAt", "desc")
     .limit(20),
-);
+]);
 ```
 
-Deferred set-oriented reads compose in the same call:
+The callback's scoped builder composes set-oriented reads in the same call:
 
 ```typescript
-const [latest, versionCount, detail] = await store.batchOnce(
-  store.neighborsQuery(document, {
+const [latest, versionCount, detail] = await store.batchOnce((read) => [
+  read.neighbors(document, {
     edges: ["hasVersion"],
     orderBy: { by: "node", field: "sequence", direction: "desc" },
     limit: 1,
   }),
-  store.countNeighborsQuery(document, { edges: ["hasVersion"] }),
-  store.subgraphQuery(document.id, { edges: ["hasSection"], maxDepth: 2 }),
-);
+  read.countNeighbors(document, { edges: ["hasVersion"] }),
+  read.subgraph(document.id, { edges: ["hasSection"], maxDepth: 2 }),
+]);
 ```
 
 Use `store.batch()` when deferred edge collection reads must participate. It runs them in sequence.
@@ -493,7 +493,15 @@ Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFind
 participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
 into one transaction — the statement count is unchanged either way. If the round trips are what
 hurt, replace the calls with `store.neighbors()` / `store.countNeighbors()` or a traversal (one
-statement), or compose their deferred query forms and `subgraphQuery()` in `batchOnce()`.
+statement), or compose the scoped `read.neighbors()`, `read.countNeighbors()`, and
+`read.subgraph()` forms in `batchOnce()`.
+
+Direct `store.subgraph()` and scoped `read.subgraph()` share one semantic planner and produce the
+same result, but intentionally retain different physical plans. The direct form uses 2 statements
+on SQLite and 3 on PostgreSQL so each backend can hydrate a closure efficiently. The scoped form
+uses 1 statement everywhere to make cross-shape composition possible. On PostgreSQL, prefer the
+direct form for a standalone large closure; use the scoped form when eliminating network round
+trips across several independent reads matters more than optimizing that closure in isolation.
 
 To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
 [Edge Collections](/schemas-stores#edge-collections)).

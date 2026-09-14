@@ -59,6 +59,7 @@ export type {
   AliasMap,
   BatchableQuery,
   BatchResults,
+  CompiledOneStatementRead,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,

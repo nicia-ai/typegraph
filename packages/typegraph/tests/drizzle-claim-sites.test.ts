@@ -73,14 +73,14 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "packages/typegraph/README.md",
-    line: 52,
+    line: 54,
     text:
       CLAIM_WORD +
       "-free `@nicia-ai/typegraph/core` entrypoint. Custom backend, dialect, and",
   },
   {
     file: "packages/typegraph/README.md",
-    line: 53,
+    line: 55,
     text:
       "search-strategy authors can import the complete " +
       CLAIM_WORD +

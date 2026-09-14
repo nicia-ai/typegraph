@@ -10,7 +10,6 @@ export type {
   NeighborNodeOrderField,
   NeighborOrder,
   NeighborOrderField,
-  NeighborRead,
   NeighborReadOptions,
   NeighborResult,
 } from "./neighbors";
@@ -123,7 +122,6 @@ export type {
   AnyEdge,
   AnyNode,
   SubgraphOptions,
-  SubgraphRead,
   SubgraphResult,
   SubsetEdge,
   SubsetNode,
@@ -151,6 +149,7 @@ export type {
   AdapterHistoryTransactionContext,
   AdapterRecordedReadStore,
   AdapterStore,
+  BatchReadBuilder,
   EdgeCollectionLookup,
   HistoryStore,
   MeasurableAdapterHistoryTransactionContext,

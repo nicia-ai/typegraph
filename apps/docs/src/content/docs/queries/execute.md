@@ -277,15 +277,15 @@ async function exportAllUsers(): Promise<void> {
 
 When independent reads must share one database round trip, use `store.batchOnce()`.
 It embeds each read as a CTE and returns the independently typed results in input order. Fluent
-queries preserve explicit ordering even when the sort field is not selected. Set-oriented graph
-reads use their deferred `*Query()` forms:
+queries preserve explicit ordering even when the sort field is not selected. The callback's scoped
+builder creates composable set-oriented graph reads without changing the eager Store API:
 
 ```typescript
-const [people, neighbors, neighborhood] = await store.batchOnce(
+const [people, neighbors, neighborhood] = await store.batchOnce((read) => [
   store.query().from("Person", "p").select((ctx) => ctx.p),
-  store.neighborsQuery(person, { edges: ["knows"], limit: 5 }),
-  store.subgraphQuery(person.id, { edges: ["knows"], maxDepth: 2 }),
-);
+  read.neighbors(person, { edges: ["knows"], limit: 5 }),
+  read.subgraph(person.id, { edges: ["knows"], maxDepth: 2 }),
+]);
 ```
 
 Use `store.batch()` when the batch includes deferred edge collection `batchFind*` reads or when
@@ -301,12 +301,14 @@ Connection reuse is the adapter's business either way.
 Whole-node, whole-edge, and spread selections detected during planning use a full fetch from
 the start. A selector branch that depends on actual row values can still trigger the fallback.
 
-It will not merge arbitrary promises or collection calls. Use fluent queries or deferred
-`neighborsQuery()`, `countNeighborsQuery()`, and `subgraphQuery()` reads when independent result
+It will not merge arbitrary promises or collection calls. Use fluent queries or the callback's
+`read.neighbors()`, `read.countNeighbors()`, and `read.subgraph()` methods when independent result
 shapes must share its one statement. Other alternatives are a `.traverse()` chain,
 `store.neighbors()` or `store.countNeighbors()` (one statement each), `store.subgraph()` (2
 statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
 `bulkFindByIndex()`, which are chunked rather than fixed-cost.
+Direct `store.subgraph()` and scoped `read.subgraph()` share validation, traversal, projection, and
+result semantics while exposing their different execution contracts through the call context.
 
 It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can
 observe a commit the earlier ones did not. There is no way to fix that for fluent queries today —

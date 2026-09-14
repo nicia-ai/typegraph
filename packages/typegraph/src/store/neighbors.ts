@@ -1,3 +1,7 @@
+import {
+  normalizeRequiredRowTimestamp,
+  normalizeRowTimestamp,
+} from "../backend/row-mappers";
 import type { GraphBackend, RowProps } from "../backend/types";
 import type { AllNodeTypes, EdgeKinds, GraphDef } from "../core/define-graph";
 import type { TemporalMode } from "../core/types";
@@ -486,11 +490,23 @@ function mapEdge(row: NeighborRow): Edge {
     to_kind: String(row["edge_to_kind"]),
     to_id: String(row["edge_to_id"]),
     props: row["edge_props"] as RowProps,
-    valid_from: row["edge_valid_from"] as string | undefined,
-    valid_to: row["edge_valid_to"] as string | undefined,
-    created_at: String(row["edge_created_at"]),
-    updated_at: String(row["edge_updated_at"]),
-    deleted_at: row["edge_deleted_at"] as string | undefined,
+    valid_from: normalizeRowTimestamp(
+      row["edge_valid_from"],
+      "edge_valid_from",
+    ),
+    valid_to: normalizeRowTimestamp(row["edge_valid_to"], "edge_valid_to"),
+    created_at: normalizeRequiredRowTimestamp(
+      row["edge_created_at"],
+      "edge_created_at",
+    ),
+    updated_at: normalizeRequiredRowTimestamp(
+      row["edge_updated_at"],
+      "edge_updated_at",
+    ),
+    deleted_at: normalizeRowTimestamp(
+      row["edge_deleted_at"],
+      "edge_deleted_at",
+    ),
   });
 }
 
@@ -500,10 +516,22 @@ function mapNode(row: NeighborRow): Node {
     kind: String(row["node_kind"]),
     props: row["node_props"] as RowProps,
     version: Number(row["node_version"]),
-    valid_from: row["node_valid_from"] as string | undefined,
-    valid_to: row["node_valid_to"] as string | undefined,
-    created_at: String(row["node_created_at"]),
-    updated_at: String(row["node_updated_at"]),
-    deleted_at: row["node_deleted_at"] as string | undefined,
+    valid_from: normalizeRowTimestamp(
+      row["node_valid_from"],
+      "node_valid_from",
+    ),
+    valid_to: normalizeRowTimestamp(row["node_valid_to"], "node_valid_to"),
+    created_at: normalizeRequiredRowTimestamp(
+      row["node_created_at"],
+      "node_created_at",
+    ),
+    updated_at: normalizeRequiredRowTimestamp(
+      row["node_updated_at"],
+      "node_updated_at",
+    ),
+    deleted_at: normalizeRowTimestamp(
+      row["node_deleted_at"],
+      "node_deleted_at",
+    ),
   });
 }

@@ -37,11 +37,13 @@ await store.close();
 ```
 
 For latency-sensitive reads, `store.batchOnce()` combines independent fluent
-queries and deferred set-oriented reads into one statement. Use
-`neighborsQuery()`, `countNeighborsQuery()`, and `subgraphQuery()` inside that
-batch, or execute them directly. `store.neighbors()` can order by edge metadata
-or adjacent-node properties, while `subgraph({ edgeWindows })` applies per-kind
-direction, ordering, and limits during traversal. See
+queries and set-oriented reads into one statement. Its callback receives a
+scoped builder with `neighbors()`, `countNeighbors()`, and `subgraph()` methods.
+The direct and scoped subgraph forms share one semantic planner; the direct form
+retains backend-tuned hydration while the scoped form guarantees one statement.
+`store.neighbors()` can order by edge metadata or adjacent-node properties,
+while `subgraph({ edgeWindows })` applies per-kind direction, ordering, and
+limits during traversal. See
 [Schemas and Stores](https://typegraph.dev/schemas-stores) for examples and
 constraints.
 

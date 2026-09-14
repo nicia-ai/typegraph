@@ -43,6 +43,8 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type { CompiledOneStatementRead } from "../query";
+export type { BatchReadBuilder } from "../store";
 
 const DEFAULT_RETRACTED_FIELD = "retracted";
 const KEY_SEPARATOR = "\u0000";

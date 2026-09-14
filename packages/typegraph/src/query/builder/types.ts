@@ -99,17 +99,17 @@ export type OneStatementBatchableQuery<R = unknown> = Readonly<{
   }>;
 }>;
 
+/** A cold read with a concrete one-statement batch compilation contract. */
+export type CompiledOneStatementRead<R> = Required<
+  Pick<OneStatementBatchableQuery<R>, "compileOneStatementBatchItem">
+>;
+
 /** A read that can be embedded in an exact-one-statement batch. */
 export type EmbeddableOneStatementRead<R> = OneStatementBatchableQuery<R> &
-  (
-    | BatchableQuery<unknown>
-    | Required<
-        Pick<OneStatementBatchableQuery<R>, "compileOneStatementBatchItem">
-      >
-  );
+  (BatchableQuery<unknown> | CompiledOneStatementRead<R>);
 
 /** An embeddable one-statement read that can also execute independently. */
-export type ExecutableOneStatementRead<R> = EmbeddableOneStatementRead<R> &
+export type ExecutableOneStatementRead<R> = CompiledOneStatementRead<R> &
   Required<Pick<OneStatementBatchableQuery<R>, "execute">>;
 
 /** Preserves each input query's result type in an exact-one-statement batch. */

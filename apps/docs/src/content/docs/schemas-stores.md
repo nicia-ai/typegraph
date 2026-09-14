@@ -2292,7 +2292,7 @@ when the schema-version guarantee is required.
 
 ### Batch Query Execution
 
-#### `store.batchOnce(...queries)`
+#### `store.batchOnce(buildReads)`
 
 Executes two or more independent reads as exactly one SQL statement. Each read is
 embedded as a CTE, and one JSON envelope carries the independently typed result sets back in input
@@ -2301,22 +2301,22 @@ form one statement and one database round trip. Each query's explicit `.orderBy(
 when its sort fields are not part of the public projection.
 
 ```typescript
-const [people, recentCompanies] = await store.batchOnce(
+const [people, neighbors] = await store.batchOnce((read) => [
   store.query().from("Person", "p").select((ctx) => ctx.p),
-  store
-    .query()
-    .from("Company", "c")
-    .orderBy("c", "createdAt", "desc")
-    .limit(5)
-    .select((ctx) => ctx.c),
-);
+  read.neighbors(person, {
+    edges: ["knows"],
+    orderBy: { by: "node", field: "name", direction: "asc" },
+    limit: 5,
+  }),
+]);
 ```
 
-`batchOnce()` has no sequential fallback. It accepts fluent relational queries, set operations, and
-the values returned by `neighborsQuery()`, `countNeighborsQuery()`, and `subgraphQuery()`. Prepared
-queries and edge collection `batchFind*` values are excluded because they cannot be embedded
-without changing their execution contract. Use `batch()` when those deferred collection reads or
-transaction-backed serialization are the goal.
+`batchOnce()` has no sequential fallback. Its callback returns fluent relational queries, set
+operations, and set-oriented reads built through the callback's `read.neighbors()`,
+`read.countNeighbors()`, and `read.subgraph()` methods. Prepared queries and edge collection
+`batchFind*` values are excluded because they cannot be embedded without changing their execution
+contract. Use `batch()` when those deferred collection reads or transaction-backed serialization
+are the goal.
 
 #### `store.batch(...queries)`
 
@@ -2501,8 +2501,8 @@ positive integer `limit`. Null metadata sorts last on both dialects, and ties ar
 ID so a bounded read is deterministic.
 
 Set `orderBy.by` to `"node"` to order by a schema-declared adjacent-node property instead. Omit it
-or use `"edge"` for edge metadata. Use `neighborsQuery()` and `countNeighborsQuery()` when the read
-must compose with other independent reads inside `batchOnce()`.
+or use `"edge"` for edge metadata. Inside `batchOnce()`, use the callback's `read.neighbors()` and
+`read.countNeighbors()` methods to compose these shapes with other independent reads.
 
 ### Schema-Checked Read Scopes
 
@@ -2555,13 +2555,18 @@ Each window accepts `direction: "out" | "in" | "both"`; when omitted it inherits
 global direction. Ranking is partitioned by the oriented source endpoint, so bidirectional windows
 have an unambiguous top N for each endpoint.
 
-`subgraphQuery()` has the same options and result as `subgraph()`, but compiles hydration and
-traversal into one statement so it can be passed to `batchOnce()`. It is also executable directly.
+Inside `batchOnce()`, the callback's `read.subgraph()` method accepts the same options and produces
+the same result as `store.subgraph()`, but compiles hydration and traversal into one embeddable
+statement. Both forms share the same validation, traversal, projection plan, and result assembly;
+only their physical execution strategy differs.
 
-Under the hood the traversal is a `WITH RECURSIVE` CTE and all the filtering and
-hydration happen in the database. The cost is a fixed 2 statements on SQLite
-(nodes, edges — each embedding the CTE) and 3 on PostgreSQL (the closure ids
-once, then nodes and edges), independent of how much it returns.
+Under the hood the traversal is a `WITH RECURSIVE` CTE and all filtering and hydration happen in
+the database. Direct `subgraph()` calls use a backend-tuned fixed cost: 2 statements on SQLite
+(nodes and edges, each embedding the CTE) and 3 on PostgreSQL (the closure ids once, then nodes and
+edges). Scoped `read.subgraph()` uses 1 statement on both backends. Prefer direct
+`store.subgraph()` unless the read must compose with other independent reads in `batchOnce()`;
+PostgreSQL can execute the split hydration plan substantially faster for larger closures even
+though it uses more round trips.
 
 ```typescript
 store.subgraph<EK, NK>(
@@ -2837,9 +2842,9 @@ const results = await store
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
 | `prepare()` | `PreparedQuery<T>` | Validate query AST once for repeated execution with different parameters |
 
-#### `store.batchOnce(...queries)` and `store.batch(...queries)`
+#### `store.batchOnce(buildReads)` and `store.batch(...queries)`
 
-Use `batchOnce()` to embed independent fluent and set-oriented query values in one statement. Use `batch()` for mixed
+Use `batchOnce()` to embed independent fluent and scoped set-oriented reads in one statement. Use `batch()` for mixed
 fluent and deferred collection reads that may run sequentially. See
 [Batch Query Execution](#batch-query-execution) for the exact contracts.
 

@@ -94,12 +94,9 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     EmbeddableOneStatementRead<unknown>,
     EmbeddableOneStatementRead<unknown>,
     ...EmbeddableOneStatementRead<unknown>[]
-    ]>(...queries: Queries) => Promise<OneStatementBatchResults<Queries>>;
+    ]>(build: (read: BatchReadBuilder<G>) => Queries) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
     countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
-    neighborsQuery?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => NeighborRead<G, K>;
-    countNeighborsQuery?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => ExecutableOneStatementRead<number>;
-    subgraphQuery?: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => SubgraphRead<G, NK, EK, P>;
 }>;
 
 // @public
@@ -456,6 +453,13 @@ export type BatchableQuery<R = unknown> = Readonly<{
 }>;
 
 // @public
+export type BatchReadBuilder<G extends GraphDef> = Readonly<{
+    neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => CompiledOneStatementRead<readonly NeighborResult<G, K>[]>;
+    countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => CompiledOneStatementRead<number>;
+    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
+}>;
+
+// @public
 export type BatchResults<Queries extends readonly BatchableQuery<unknown>[]> = {
     -readonly [K in keyof Queries]: Queries[K] extends BatchableQuery<infer R> ? readonly R[] : never;
 };
@@ -795,6 +799,9 @@ type ComparisonPredicate = Readonly<{
     left: FieldRef;
     right: LiteralValue | LiteralValue[] | ParameterRef;
 }>;
+
+// @public
+export type CompiledOneStatementRead<R> = Required<Pick<OneStatementBatchableQuery<R>, "compileOneStatementBatchItem">>;
 
 // @public (undocumented)
 export type CompiledRowsSql = IntentSql<"rows">;
@@ -2313,7 +2320,7 @@ export type EdgeTypeWithEndpoints = EdgeType<string, z.ZodObject<z.ZodRawShape>,
 export type EdgeWrites<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType> = Pick<EdgeCollection<E, From, To>, (typeof EDGE_WRITE_NAMES)[number]>;
 
 // @public
-export type EmbeddableOneStatementRead<R> = OneStatementBatchableQuery<R> & (BatchableQuery<unknown> | Required<Pick<OneStatementBatchableQuery<R>, "compileOneStatementBatchItem">>);
+export type EmbeddableOneStatementRead<R> = OneStatementBatchableQuery<R> & (BatchableQuery<unknown> | CompiledOneStatementRead<R>);
 
 // @public
 export function embedding<D extends number>(dimensions: D, options?: EmbeddingIndexOptions): EmbeddingSchema<D>;
@@ -2542,7 +2549,7 @@ export class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AliasM
 }
 
 // @public
-export type ExecutableOneStatementRead<R> = EmbeddableOneStatementRead<R> & Required<Pick<OneStatementBatchableQuery<R>, "execute">>;
+export type ExecutableOneStatementRead<R> = CompiledOneStatementRead<R> & Required<Pick<OneStatementBatchableQuery<R>, "execute">>;
 
 // @public
 export class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = {}, RecursiveAliases extends RecursiveAliasMap = {}, R = unknown> {
@@ -4944,9 +4951,6 @@ export type NeighborOrder<G extends GraphDef> = Readonly<{
 export type NeighborOrderField = "createdAt" | "id" | "updatedAt" | "validFrom" | "validTo";
 
 // @public (undocumented)
-export type NeighborRead<G extends GraphDef, K extends EdgeKinds<G>> = ExecutableOneStatementRead<readonly NeighborResult<G, K>[]>;
-
-// @public (undocumented)
 export type NeighborReadOptions<G extends GraphDef, K extends EdgeKinds<G>> = NeighborReadOptionsBoundary<G, K> & Required<Pick<NeighborReadOptionsBoundary<G, K>, "edges">>;
 
 // @public
@@ -7028,16 +7032,13 @@ type StoreCore<G extends GraphDef> = Readonly<{
     EmbeddableOneStatementRead<unknown>,
     EmbeddableOneStatementRead<unknown>,
     ...EmbeddableOneStatementRead<unknown>[]
-    ]>(...queries: Queries) => Promise<OneStatementBatchResults<Queries>>;
+    ]>(build: (read: BatchReadBuilder<G>) => Queries) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
     countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
-    neighborsQuery?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => NeighborRead<G, K>;
-    countNeighborsQuery?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => ExecutableOneStatementRead<number>;
     bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
     bulkFindEdgesTo: <const K extends EdgeKinds<G>>(params: BulkFindEdgesToParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
-    subgraphQuery?: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => SubgraphRead<G, NK, EK, P>;
     clear: () => Promise<void>;
     refreshStatistics: () => Promise<void>;
     materializeIndexes: (options?: MaterializeIndexesOptions) => Promise<MaterializeIndexesResult>;
@@ -7608,9 +7609,6 @@ type SubgraphProject<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>,
     nodes?: SubgraphNodeProjectionMap<G, NK>;
     edges?: SubgraphEdgeProjectionMap<G, EK>;
 }>;
-
-// @public
-export type SubgraphRead<G extends GraphDef, NK extends NodeKinds<G>, EK extends EdgeKinds<G>, P extends SubgraphProject<G, NK, EK> | undefined = undefined> = ExecutableOneStatementRead<SubgraphResult<G, NK, EK, P>>;
 
 // @public (undocumented)
 export type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, EK extends EdgeKinds<G> = EdgeKinds<G>, P extends SubgraphProject<G, NK, EK> | undefined = undefined> = Readonly<{

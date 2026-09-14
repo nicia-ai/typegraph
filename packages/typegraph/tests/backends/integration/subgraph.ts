@@ -409,5 +409,47 @@ export function registerSubgraphIntegrationTests(
       expect(knowsEdges[0]).toHaveProperty("toId", ids.bobId);
       expect(knowsEdges[0]).not.toHaveProperty("meta");
     });
+
+    it("keeps direct and one-statement subgraph reads semantically equivalent", async () => {
+      const store = context.getStore();
+      const options = {
+        edges: ["knows", "worksAt"],
+        maxDepth: 2,
+        edgeWindows: {
+          knows: {
+            direction: "both",
+            limit: 1,
+            orderBy: { field: "id", direction: "asc" },
+          },
+        },
+        project: {
+          nodes: {
+            Person: ["name"],
+            Company: ["name", "meta"],
+          },
+          edges: {
+            knows: [],
+            worksAt: ["role"],
+          },
+        },
+      } as const;
+
+      const direct = await store.subgraph(ids.bobId as never, options);
+      const [oneStatement, count] = await store.batchOnce((read) => [
+        read.subgraph(ids.bobId as never, options),
+        read.countNeighbors(
+          { kind: "Person", id: ids.bobId as never },
+          { edges: ["knows"] },
+        ),
+      ]);
+
+      expect(oneStatement).toEqual(direct);
+      expect(count).toBeGreaterThan(0);
+      const edgeIds = collectAllEdges(oneStatement.adjacency).map(
+        (edge) => edge.id,
+      );
+      expect(edgeIds).toHaveLength(4);
+      expect(new Set(edgeIds).size).toBe(edgeIds.length);
+    });
   });
 }

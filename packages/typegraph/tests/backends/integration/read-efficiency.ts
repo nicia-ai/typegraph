@@ -21,7 +21,7 @@ export function registerReadEfficiencyIntegrationTests(
       await store.nodes.Company.create({ name: "Company" });
       statements.length = 0;
 
-      const [people, companies] = await store.batchOnce(
+      const [people, companies] = await store.batchOnce(() => [
         store
           .query()
           .from("Person", "person")
@@ -31,7 +31,7 @@ export function registerReadEfficiencyIntegrationTests(
           .query()
           .from("Company", "company")
           .select((ctx) => ctx.company),
-      );
+      ]);
 
       expect(people).toEqual(["B", "A"]);
       expect(companies[0]?.name).toBe("Company");
@@ -128,15 +128,17 @@ export function registerReadEfficiencyIntegrationTests(
       const root = await store.nodes.Person.create({ name: "root" });
       const target = await store.nodes.Person.create({ name: "target" });
       await store.edges.knows.create(root, target, {});
+      const directNeighbors = await store.neighbors(root, { edges: ["knows"] });
       statements.length = 0;
 
-      const [neighbors, count, subgraph] = await store.batchOnce(
-        store.neighborsQuery(root, { edges: ["knows"] }),
-        store.countNeighborsQuery(root, { edges: ["knows"] }),
-        store.subgraphQuery(root.id, { edges: ["knows"], maxDepth: 1 }),
-      );
+      const [neighbors, count, subgraph] = await store.batchOnce((read) => [
+        read.neighbors(root, { edges: ["knows"] }),
+        read.countNeighbors(root, { edges: ["knows"] }),
+        read.subgraph(root.id, { edges: ["knows"], maxDepth: 1 }),
+      ]);
 
       expect(neighbors).toHaveLength(1);
+      expect(neighbors).toEqual(directNeighbors);
       expect(count).toBe(1);
       expect(subgraph.nodes.has(target.id)).toBe(true);
       expect(statements).toHaveLength(1);

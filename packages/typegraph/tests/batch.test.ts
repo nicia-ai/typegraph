@@ -452,7 +452,7 @@ describe("store.batchOnce()", () => {
     await store.nodes.Person.create({ name: "Bob", age: 25 });
     await store.nodes.Company.create({ name: "Acme", industry: "Tech" });
 
-    const [people, companies] = await store.batchOnce(
+    const [people, companies] = await store.batchOnce(() => [
       store
         .query()
         .from("Person", "p")
@@ -462,7 +462,7 @@ describe("store.batchOnce()", () => {
         .query()
         .from("Company", "c")
         .select((ctx) => ctx.c),
-    );
+    ]);
 
     expect(people).toEqual([
       { name: "Bob", age: 25 },
@@ -480,7 +480,7 @@ describe("store.batchOnce()", () => {
     const skill = await store.nodes.Skill.create({ name: "TypeScript" });
     await store.edges.hasSkill.create(person, skill);
 
-    const [missing, skills] = await store.batchOnce(
+    const [missing, skills] = await store.batchOnce(() => [
       store
         .query()
         .from("Company", "c")
@@ -493,7 +493,7 @@ describe("store.batchOnce()", () => {
         .traverse("hasSkill", "edge")
         .to("Skill", "skill")
         .select((ctx) => ({ name: ctx.skill.name })),
-    );
+    ]);
 
     expect(missing).toEqual([]);
     expect(skills).toEqual([{ name: "TypeScript" }]);
@@ -504,7 +504,7 @@ describe("store.batchOnce()", () => {
     const store = createStore(graph, backend);
     await store.nodes.Person.create({ name: "Alice" });
 
-    const [wideRows] = await store.batchOnce(
+    const [wideRows] = await store.batchOnce(() => [
       store
         .query()
         .from("Person", "person")
@@ -520,7 +520,7 @@ describe("store.batchOnce()", () => {
         .query()
         .from("Company", "company")
         .select((ctx) => ctx.company.name),
-    );
+    ]);
 
     expect(wideRows).toHaveLength(1);
     expect(wideRows[0]?.["value0"]).toBe("Alice");
