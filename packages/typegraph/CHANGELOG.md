@@ -1,5 +1,27 @@
 # @nicia-ai/typegraph
 
+## 0.59.0
+
+### Highlights
+
+TypeGraph 0.59 adds an exact-one-statement read batch for latency-sensitive request assembly. `store.batchOnce((read) => [...])` embeds two or more independent fluent queries, set operations, and batch-scoped neighbor, neighbor-count, or subgraph reads into one SQL statement, then restores their independently typed results in tuple order. There is no sequential fallback: if a read shape cannot be embedded, TypeGraph refuses it before execution instead of weakening the statement-count contract.
+
+Relationship reads no longer require applications to load every edge or hand-roll edge-plus-node joins. `store.neighbors()` returns each visible edge with its adjacent node in one statement, supports incoming, outgoing, and bidirectional reads, and can order by edge metadata or an adjacent-node property before applying a deterministic limit. `store.countNeighbors()` performs the matching aggregate without hydrating entities. `subgraph()` gains per-edge-kind windows with their own direction, ordering, and limit, so one traversal can follow different relationship kinds in different directions and retain only the top N edges for each oriented source.
+
+Direct and composable graph reads now share one public model without parallel `*Query` APIs. Direct `store.neighbors()`, `store.countNeighbors()`, and `store.subgraph()` execute eagerly; the corresponding `read.*` forms inside `batchOnce()` defer the same logical read so it can be embedded. Direct subgraph extraction keeps its backend-tuned plan of two statements on SQLite and three on PostgreSQL, while the batch-scoped form uses one statement on both backends. Query hooks report every submitted statement for these paths.
+
+`store.withCheckedReads(expectedSchemaVersion, fn)` extends schema-checked reads from one query to a fluent-query block. Every `.execute()` created through the scope checks the same expected active schema version, and a mismatch escapes through one callback boundary so an application can reload its schema and retry the whole read block.
+
+### Upgrade notes
+
+- Update hand-built `Store`, history-store, recorded-read-store, and adapter-store mocks or wrappers that expose the complete store surface with `batchOnce`, `neighbors`, `countNeighbors`, and `withCheckedReads`. Stores created by TypeGraph provide these methods automatically.
+- Use `store.batchOnce()` only for two or more independent embeddable reads. Prepared queries, queued collection reads, pagination, streaming, and writes are intentionally excluded; keep using `store.batch()` for mixed queued reads and `store.transaction()` for atomic multi-operation work.
+- When adopting `withCheckedReads`, catch `SchemaChangedError` outside the callback, reload the reconciled schema, and rebuild the whole block before retrying. The scope accepts ordinary fluent `.execute()` reads; aggregates, set operations, prepared queries, pagination, streaming, and `batchOnce()` refuse rather than run without the version check.
+
+### Minor Changes
+
+- [#687](https://github.com/nicia-ai/typegraph/pull/687) [`542e6a3`](https://github.com/nicia-ai/typegraph/commit/542e6a3de8e8aac001563fbd082bae4abdba1007) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.batchOnce()` for exact-one-statement independent reads, with a batch-scoped builder for composable neighbor, neighbor-count, and subgraph reads. Add one-statement `store.neighbors()` and `store.countNeighbors()` APIs with edge- or adjacent-node ordering, limits, and aggregates. Add per-edge-kind direction, ordering, and limits to `subgraph()` traversal and hydration. Direct `store.subgraph()` and batch-scoped `read.subgraph()` share result semantics while choosing backend-tuned and exact-one-statement physical plans, respectively. Add `store.withCheckedReads()` to bind an expected schema version once across a fluent-query read block.
+
 ## 0.58.0
 
 ### Highlights
