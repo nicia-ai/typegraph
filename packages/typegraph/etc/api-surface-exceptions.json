@@ -1,1 +1,282 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionContext",
+    "member": "query",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionContext",
+    "member": "batchOnce",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionContext",
+    "member": "neighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionContext",
+    "member": "countNeighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionContext",
+    "member": "subgraph",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionContext",
+    "member": "query",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionContext",
+    "member": "batchOnce",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionContext",
+    "member": "neighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionContext",
+    "member": "countNeighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionContext",
+    "member": "subgraph",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionContext",
+    "member": "query",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionContext",
+    "member": "batchOnce",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionContext",
+    "member": "neighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionContext",
+    "member": "countNeighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionContext",
+    "member": "subgraph",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionContext",
+    "member": "query",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionContext",
+    "member": "batchOnce",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionContext",
+    "member": "neighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionContext",
+    "member": "countNeighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionContext",
+    "member": "subgraph",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "query",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "batchOnce",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "neighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "countNeighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "subgraph",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionContext",
+    "member": "query",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionContext",
+    "member": "batchOnce",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionContext",
+    "member": "neighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionContext",
+    "member": "countNeighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionContext",
+    "member": "subgraph",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionContext",
+    "member": "query",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionContext",
+    "member": "batchOnce",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionContext",
+    "member": "neighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionContext",
+    "member": "countNeighbors",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionContext",
+    "member": "subgraph",
+    "kind": "required-member-added",
+    "reason": "Additive method on a library-created transaction callback context. Existing callers receive the implementation; external code does not implement transaction contexts.",
+    "issue": "#689"
+  }
+]
