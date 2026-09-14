@@ -839,6 +839,14 @@ export class ExecutableQuery<
             ],
           },
         };
+    const recursiveOutputNames = batchAst.traversals.flatMap((traversal) => {
+      const variableLength = traversal.variableLength;
+      return variableLength === undefined ?
+          []
+        : [variableLength.depthAlias, variableLength.pathAlias].filter(
+            (name): name is string => name !== undefined,
+          );
+    });
     return {
       query: compileQuery(
         batchAst,
@@ -851,7 +859,13 @@ export class ExecutableQuery<
           requireDefined(this.#config.backend),
         ),
       },
-      outputNames: ast.projection.fields.map((field) => field.outputName),
+      outputNames: [
+        ...ast.projection.fields.map((field) => field.outputName),
+        ...recursiveOutputNames.filter(
+          (name) =>
+            !ast.projection.fields.some((field) => field.outputName === name),
+        ),
+      ],
       orderBy: batchOrderBy,
       mapRows: (rows) =>
         mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
@@ -1083,7 +1097,7 @@ export class ExecutableQuery<
     for (const traversal of this.#state.traversals) {
       if (!traversal.optional) continue;
       add(traversal.nodeAlias);
-      add(traversal.edgeAlias);
+      if (traversal.variableLength === undefined) add(traversal.edgeAlias);
     }
 
     return result.toSorted((a, b) => {

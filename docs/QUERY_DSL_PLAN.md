@@ -216,9 +216,8 @@ results, and before grouping, ordering and limiting.
 
 `stopExpansion(alias, predicate, { emitStopNode? })` independently stops a matching recursive branch. Stopping nodes
 are emitted by default; `emitStopNode: false` omits them. Stop predicates are limited to ordinary fields on the
-recursive target alias. Recursive queries still support one variable-length traversal, node-ID path output, and no
-traversed-edge projection. Multiple recursive traversals and richer kind-qualified path entities remain deferred until
-these boundaries can be preserved across their additional match rows.
+recursive target alias. The subsequent recursion work below preserves these boundaries across multiple recursive
+stages and adds kind-qualified path references. Scalar traversed-edge projection remains unsupported.
 
 ## Phase 6: Measure and optimize multi-root subgraphs
 
@@ -242,6 +241,38 @@ these boundaries can be preserved across their additional match rows.
 Verify identical results against independent subgraph calls and the existing batch form, including missing roots,
 overlapping neighborhoods, cycles, windows, and projections. Measure representative workloads before making a new
 strategy the default.
+
+### Execution choice
+
+`batchOnce(build, { shareSubgraphs: true })` opts compatible subgraphs into one multi-root recursive plan and shared
+hydration. Compatibility includes traversal policy, projections, edge windows, schema, and temporal coordinates.
+Unmatched groups retain their independent plans inside the same statement. Duplicate roots retain separate result slots
+and independently owned nested data. The batch callback pins one current-time coordinate; explicit `asOf` reads retain
+their own coordinates.
+
+Sharing is opt-in because the SQLite measurements show a tradeoff: with eight overlapping roots and full 2 KiB payloads,
+it reduced encoded bytes by 27% and median total time by 18% against an independent batch. With disjoint roots it
+increased encoded bytes by 25%. The original `batchOnce()` plan and tuned direct hydration remain defaults. These are
+local measurements, not a universal speed guarantee; the benchmark records client-observed execution duration and
+JSON-encoded row bytes rather than server CPU or protocol wire bytes.
+
+## Implemented recursion extensions
+
+The follow-up adds opt-in `path: { format: "qualified", alias?: string }` output as an ordered sequence of node and
+edge references. Nodes include kind and ID; edges include kind, ID, and traversal direction. Existing `path: true` and
+string aliases continue to return node-ID arrays. Path references do not hydrate entity properties.
+
+Multiple recursive stages compose in one statement. Each later stage expands upstream source identities and rejoins
+them to prior match rows, preserving multiplicity. Per-stage depth, cycle, path, and stop state stay separate; completed-row
+filters and output ranges apply after the composed match. Branching from an earlier materialized alias is supported.
+Optional later stages preserve unmatched prior rows and expose missing nodes, paths, and depths as `undefined`.
+Mixed fixed-hop/recursive chains, an optional first stage, in-place grouping/aggregation, and scalar recursive-edge
+projections remain explicit refusals. Project node columns into a relation before aggregating them.
+
+Regression coverage includes overlapping and missing subgraph roots, per-root windows and projections, pinned clocks,
+independent nested results, qualified directions and delimiter-bearing IDs, ordered batch envelopes, optional path
+mapping, output collisions, and recursive-stage multiplicity. A witnessed mutation that deduplicates prior completed
+rows loses a legitimate diamond-path result; the restored rejoin preserves both rows.
 
 ## Follow-on capabilities
 

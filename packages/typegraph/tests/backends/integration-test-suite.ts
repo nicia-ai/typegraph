@@ -73,6 +73,8 @@ import {
   registerMatchResultFilteringIntegrationTests,
   registerMatchResultRankingIntegrationTests,
   registerMigrateSchemaKindIntegrationTests,
+  registerMultiRecursiveTraversalIntegrationTests,
+  registerMultiRootSubgraphBatchIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
@@ -289,6 +291,8 @@ export function createIntegrationTestSuite<
     registerRelationalCompositionIntegrationTests(context);
     registerMatchResultRankingIntegrationTests(context);
     registerMatchResultFilteringIntegrationTests(context);
+    registerMultiRecursiveTraversalIntegrationTests(context);
+    registerMultiRootSubgraphBatchIntegrationTests(context);
     registerExpressionSubqueryQueryIntegrationTests(context);
     registerQueryTerminalIntegrationTests(context);
     registerBackendProvenanceIntegrationTests(context);

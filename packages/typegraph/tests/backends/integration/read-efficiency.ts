@@ -7,6 +7,78 @@ export function registerReadEfficiencyIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("set-oriented read efficiency", () => {
+    it("shares hydration only when requested and preserves independent nested data", async () => {
+      const statements: string[] = [];
+      const store = await context.createStore(integrationTestGraph, {
+        hooks: {
+          onQueryStart: (query) => {
+            statements.push(query.sql);
+          },
+        },
+      });
+      const root = await store.nodes.Document.create({
+        title: "Shared nested document",
+        metadata: { author: "Original" },
+      });
+      statements.length = 0;
+      await store.batchOnce((read) => [
+        read.subgraph(root.id, {
+          edges: [],
+          maxDepth: 0,
+          includeKinds: ["Document"],
+          project: { nodes: { Document: ["metadata"] } },
+        }),
+        read.subgraph(root.id, {
+          edges: [],
+          maxDepth: 0,
+          includeKinds: ["Document"],
+          project: { nodes: { Document: ["metadata"] } },
+        }),
+      ]);
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).not.toContain("typegraph_shared_hydrated");
+      statements.length = 0;
+      const [first, duplicate] = await store.batchOnce(
+        (read) => [
+          read.subgraph(root.id, {
+            edges: [],
+            maxDepth: 0,
+            includeKinds: ["Document"],
+            project: { nodes: { Document: ["metadata"] } },
+          }),
+          read.subgraph(root.id, {
+            edges: [],
+            maxDepth: 0,
+            includeKinds: ["Document"],
+            project: { nodes: { Document: ["metadata"] } },
+          }),
+        ],
+        { shareSubgraphs: true },
+      );
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toContain("typegraph_shared_hydrated");
+      expect(duplicate).toEqual(first);
+      const duplicateMetadata = duplicate.root?.metadata;
+      expect(duplicateMetadata).toBeDefined();
+      if (duplicateMetadata === undefined)
+        throw new Error("Expected nested metadata");
+      Reflect.set(duplicateMetadata, "author", "Changed");
+      expect(first.root?.metadata?.author).toBe("Original");
+      statements.length = 0;
+      await store.transaction(async (transaction) => {
+        const [copy] = await transaction.batchOnce(
+          (read) => [
+            read.subgraph(root.id, { edges: [], maxDepth: 0 }),
+            read.subgraph(root.id, { edges: [], maxDepth: 0 }),
+          ],
+          { shareSubgraphs: true },
+        );
+        expect(copy.root?.id).toBe(root.id);
+      });
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toContain("typegraph_shared_hydrated");
+    });
+
     it("returns independent query payloads through one statement", async () => {
       const statements: string[] = [];
       const store = await context.createStore(integrationTestGraph, {

@@ -373,6 +373,15 @@ export const sqliteDialect: DialectAdapter = {
   // Recursive CTE Path Operations
   // ============================================================
 
+  textJsonArray(values) {
+    return sql`json_array(${sql.join(values, sql`, `)})`;
+  },
+
+  appendTextJsonArray(array, values) {
+    const arguments_ = values.flatMap((value) => [sql`'$[#]'`, value]);
+    return sql`json_insert(${array}, ${sql.join(arguments_, sql`, `)})`;
+  },
+
   initializePath(nodeId) {
     // SQLite uses string-based paths with delimiters: '|id|'
     return sql`'|' || ${nodeId} || '|'`;

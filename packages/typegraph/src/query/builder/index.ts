@@ -102,6 +102,11 @@ export {
   type PaginatedResult,
   type PaginateOptions,
   type PropsAccessor,
+  type QualifiedRecursivePath,
+  type QualifiedRecursivePathEdge,
+  type QualifiedRecursivePathElement,
+  type QualifiedRecursivePathNode,
+  type QualifiedRecursivePathOption,
   type QueryBuilderConfig,
   type QueryBuilderState,
   type QueryCoordinateState,
@@ -134,4 +139,5 @@ export {
 } from "./dynamic";
 
 // Validation utilities
+export type { BatchOnceOptions } from "./one-statement-batch";
 export { validateSqlIdentifier } from "./validation";

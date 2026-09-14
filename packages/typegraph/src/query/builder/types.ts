@@ -217,23 +217,60 @@ export type EmptyEdgeAliasMap = Readonly<Record<never, never>>;
 /**
  * A recursive alias marker with its associated type (depth or path).
  */
-export type RecursiveAlias<T extends "depth" | "path"> = Readonly<{ type: T }>;
+export type RecursiveAlias<
+  T extends "depth" | "path",
+  PathFormat extends "ids" | "qualified" = "ids",
+  Optional extends boolean = false,
+> = Readonly<{
+  type: T;
+  pathFormat?: PathFormat;
+  optional?: Optional;
+}>;
+
+export type QualifiedRecursivePathNode = Readonly<{
+  type: "node";
+  kind: string;
+  id: string;
+}>;
+
+export type QualifiedRecursivePathEdge = Readonly<{
+  type: "edge";
+  kind: string;
+  id: string;
+  direction: "out" | "in";
+}>;
+
+export type QualifiedRecursivePathElement =
+  QualifiedRecursivePathNode | QualifiedRecursivePathEdge;
+
+export type QualifiedRecursivePath = readonly QualifiedRecursivePathElement[];
+
+export type QualifiedRecursivePathOption = Readonly<{
+  alias?: string;
+  format: "qualified";
+}>;
 
 /**
  * A map of recursive alias names to their types.
  */
 export type RecursiveAliasMap = Readonly<
-  Record<string, RecursiveAlias<"depth" | "path">>
+  Record<string, RecursiveAlias<"depth" | "path", "ids" | "qualified", boolean>>
 >;
 export type EmptyRecursiveAliasMap = Readonly<Record<never, never>>;
 
 /**
  * Resolves a recursive alias marker to its runtime value type.
  */
-export type RecursiveAliasValue<RA> =
-  RA extends RecursiveAlias<"depth"> ? number
-  : RA extends RecursiveAlias<"path"> ? readonly string[]
+type RequiredRecursiveAliasValue<RA> =
+  RA extends RecursiveAlias<"depth", "ids" | "qualified", boolean> ? number
+  : RA extends RecursiveAlias<"path", "qualified", boolean> ?
+    QualifiedRecursivePath
+  : RA extends RecursiveAlias<"path", "ids", boolean> ? readonly string[]
   : never;
+
+export type RecursiveAliasValue<RA> =
+  RA extends { optional?: true } ? RequiredRecursiveAliasValue<RA> | undefined
+  : RequiredRecursiveAliasValue<RA>;
 
 /**
  * Resolves the depth alias name from the recursive config.
@@ -251,19 +288,31 @@ type ResolveDepthAlias<DC, A extends string> =
 type ResolvePathAlias<PC, A extends string> =
   PC extends string ? PC
   : PC extends true ? `${A}_path`
+  : PC extends QualifiedRecursivePathOption ?
+    PC["alias"] extends string ?
+      PC["alias"]
+    : `${A}_path`
   : never;
+
+type ResolvePathFormat<PC> =
+  PC extends QualifiedRecursivePathOption ? "qualified" : "ids";
 
 /**
  * Builds the recursive alias map from depth/path config and target node alias.
  */
 /* eslint-disable @typescript-eslint/no-empty-object-type -- Empty when depth/path config is false */
-export type BuildRecursiveAliases<DC, PC, A extends string> = ([DC] extends (
-  [false]
-) ?
-  {}
-: Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth">>) &
+export type BuildRecursiveAliases<
+  DC,
+  PC,
+  A extends string,
+  Optional extends boolean = false,
+> = ([DC] extends [false] ? {}
+: Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth", "ids", Optional>>) &
   ([PC] extends [false] ? {}
-  : Record<ResolvePathAlias<PC, A>, RecursiveAlias<"path">>);
+  : Record<
+      ResolvePathAlias<PC, A>,
+      RecursiveAlias<"path", ResolvePathFormat<PC>, Optional>
+    >);
 /* eslint-enable @typescript-eslint/no-empty-object-type */
 
 /**
@@ -670,7 +719,7 @@ export type RecursiveTraversalOptions = Readonly<{
   /** Cycle handling policy (default: "prevent") */
   cyclePolicy?: RecursiveCyclePolicy;
   /** Include path in output. Pass a string to customize alias. */
-  path?: boolean | string;
+  path?: boolean | string | QualifiedRecursivePathOption;
   /** Include depth in output. Pass a string to customize alias. */
   depth?: boolean | string;
 }>;

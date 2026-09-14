@@ -4,11 +4,18 @@ import { ConfigurationError } from "../../errors";
 import { getDialect } from "../dialect";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledRowsSql } from "../sql-intent";
+import { groupOneStatementBatchItems } from "./one-statement-sharing";
 import type {
   EmbeddableOneStatementRead,
   OneStatementBatchableQuery,
   OneStatementBatchResults,
 } from "./types";
+
+/** Execution choices for a one-statement read batch. */
+export type BatchOnceOptions = Readonly<{
+  /** Share hydration among compatible subgraphs. Recommended for overlapping, payload-heavy roots. Defaults to false. */
+  shareSubgraphs?: boolean;
+}>;
 
 const ORDER_COLUMN = "typegraphbatchordinal";
 const ORDER_KEY_PREFIX = "typegraphbatchorder";
@@ -54,7 +61,13 @@ export async function executeOneStatementBatch<
   backend: GraphBackend | TransactionBackend,
   graphId: string,
   queries: Queries,
+  options: BatchOnceOptions = {},
 ): Promise<OneStatementBatchResults<Queries>> {
+  if (
+    options.shareSubgraphs !== undefined &&
+    typeof options.shareSubgraphs !== "boolean"
+  )
+    throw new ConfigurationError("batchOnce shareSubgraphs must be a boolean.");
   if (queries.length === 0) return [] as OneStatementBatchResults<Queries>;
   if (queries.length > MAX_ONE_STATEMENT_BATCH_READS) {
     throw new ConfigurationError(
@@ -116,7 +129,7 @@ export async function executeOneStatementBatch<
   const ctes: SqlFragment[] = [];
   const branches: SqlFragment[] = [];
 
-  for (const [index, item] of items.entries()) {
+  for (const item of items) {
     const reservedAlias = item.outputNames.find(
       (outputName) =>
         outputName === ORDER_COLUMN || outputName.startsWith(ORDER_KEY_PREFIX),
@@ -127,6 +140,12 @@ export async function executeOneStatementBatch<
         { operation: "batchOnce", alias: reservedAlias },
       );
     }
+  }
+  const groups = groupOneStatementBatchItems(
+    items,
+    options.shareSubgraphs === true,
+  );
+  for (const [index, { item }] of groups.entries()) {
     const sourceName = `typegraph_batch_source_${index}`;
     const rowsName = `typegraph_batch_rows_${index}`;
     const ordinalOrder = buildOrdinalOrder(sourceName, item.orderBy);
@@ -165,9 +184,13 @@ export async function executeOneStatementBatch<
     payloads.set(Number(envelope.batch_index), parsePayload(envelope.payload));
   }
 
-  return items.map((item, index) =>
-    item.mapRows(payloads.get(index) ?? []),
-  ) as OneStatementBatchResults<Queries>;
+  const results: unknown[] = Array.from({ length: items.length });
+  for (const [index, group] of groups.entries()) {
+    const values = group.item.mapRows(payloads.get(index) ?? []);
+    for (const [offset, requestIndex] of group.indices.entries())
+      results[requestIndex] = values[offset];
+  }
+  return results as OneStatementBatchResults<Queries>;
 }
 
 function parsePayload(value: unknown): readonly Record<string, unknown>[] {

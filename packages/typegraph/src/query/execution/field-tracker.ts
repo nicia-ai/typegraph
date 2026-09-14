@@ -149,7 +149,11 @@ export function createTrackingContext(
         context[vl.depthAlias] = options.mode === "falsy" ? 0 : 1;
       }
       if (vl.pathAlias !== undefined) {
-        context[vl.pathAlias] = options.mode === "falsy" ? [] : ["placeholder"];
+        context[vl.pathAlias] =
+          options.mode === "falsy" ? []
+          : vl.pathFormat === "qualified" ?
+            [{ type: "node", kind: "placeholder", id: "placeholder" }]
+          : ["placeholder"];
       }
     }
   }

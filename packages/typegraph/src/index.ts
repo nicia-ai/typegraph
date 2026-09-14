@@ -772,6 +772,11 @@ export type {
   PaginateOptions,
   Predicate,
   PropsAccessor,
+  QualifiedRecursivePath,
+  QualifiedRecursivePathEdge,
+  QualifiedRecursivePathElement,
+  QualifiedRecursivePathNode,
+  QualifiedRecursivePathOption,
   QueryCoordinateState,
   RecursiveTraversalOptions,
   ResolvedSqlTableNames,
@@ -947,6 +952,7 @@ export type {
   ExpressionValue,
   QueryExpressionContext,
 } from "./query/builder/expression-context";
+export type { BatchOnceOptions } from "./query/builder/one-statement-batch";
 export type {
   PreparedBindings,
   PreparedParameterDeclaration,

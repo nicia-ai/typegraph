@@ -432,6 +432,8 @@ export type VariableLengthSpec = Readonly<{
   cyclePolicy: RecursiveCyclePolicy;
   /** Optional column alias for projected traversal path array */
   pathAlias?: string;
+  /** Qualified paths include alternating node and edge references. */
+  pathFormat?: "qualified";
   /** Optional column alias for projected traversal depth */
   depthAlias?: string;
   /** Stop expanding a matching node, optionally omitting that node from results. */

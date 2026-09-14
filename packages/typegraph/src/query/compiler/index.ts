@@ -123,6 +123,7 @@ import {
   compileVariableLengthQuery,
   hasVariableLengthTraversal,
 } from "./recursive";
+import { compileMultiStageRecursiveQuery } from "./recursive-chain";
 import {
   DEFAULT_SQL_SCHEMA,
   type RecordedReadBinding,
@@ -444,7 +445,11 @@ function compileQueryInExpressionContext(
     if (loweredRecursive !== undefined) {
       return finish(compileStandardQuery(loweredRecursive, graphId, ctx));
     }
-    return finish(compileVariableLengthQuery(ast, graphId, ctx));
+    return finish(
+      ast.traversals.length > 1 ?
+        compileMultiStageRecursiveQuery(ast, graphId, ctx)
+      : compileVariableLengthQuery(ast, graphId, ctx),
+    );
   }
 
   // Standard query compilation

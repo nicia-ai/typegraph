@@ -565,6 +565,19 @@ export interface DialectAdapter {
    */
   readonly initializePath: (this: void, nodeId: SqlFragment) => SqlFragment;
 
+  /** Creates a JSON array of text scalar expressions, preserving delimiters verbatim. */
+  readonly textJsonArray: (
+    this: void,
+    values: readonly SqlFragment[],
+  ) => SqlFragment;
+
+  /** Appends text scalar expressions to a JSON array. */
+  readonly appendTextJsonArray: (
+    this: void,
+    array: SqlFragment,
+    values: readonly SqlFragment[],
+  ) => SqlFragment;
+
   /**
    * Extends a path with a new node ID.
    *

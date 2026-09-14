@@ -10,7 +10,7 @@ import {
   normalizeRowTimestamp,
 } from "../../backend/row-mappers";
 import type { KindEntity } from "../../core/types";
-import { compareStrings, hasOwnKey, normalizePath } from "../../utils";
+import { compareStrings, hasOwnKey } from "../../utils";
 import { createDataKeyedBag, isInteropProbeKey } from "../../utils/object";
 import { mergeEdgeKinds, type SelectiveField, type Traversal } from "../ast";
 import type {
@@ -275,10 +275,13 @@ function buildSelectiveContext<
     const vl = traversal.variableLength;
     if (vl !== undefined) {
       if (vl.depthAlias !== undefined) {
-        context[vl.depthAlias] = row[vl.depthAlias];
+        context[vl.depthAlias] =
+          traversal.optional && row[vl.depthAlias] === null ?
+            undefined
+          : row[vl.depthAlias];
       }
       if (vl.pathAlias !== undefined) {
-        context[vl.pathAlias] = normalizePath(row[vl.pathAlias]);
+        context[vl.pathAlias] = row[vl.pathAlias];
       }
     }
   }

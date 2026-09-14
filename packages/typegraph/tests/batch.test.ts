@@ -440,6 +440,13 @@ describe("store.batch()", () => {
 });
 
 describe("store.batchOnce()", () => {
+  it("refuses invalid sharing options even for an empty batch", async () => {
+    const store = createStore(graph, createTestBackend());
+    await expect(
+      store.batchOnce(() => [], { shareSubgraphs: "yes" as never }),
+    ).rejects.toThrow("shareSubgraphs must be a boolean");
+  });
+
   it("accepts empty, singleton, and runtime-sized readonly inputs", async () => {
     const starts: string[] = [];
     const store = createStore(graph, createTestBackend(), {
@@ -475,37 +482,40 @@ describe("store.batchOnce()", () => {
     expect(starts).toHaveLength(1);
   });
 
-  it("refuses graph and execution-target rebinding before issuing SQL", async () => {
-    const starts: string[] = [];
-    const backend = createTestBackend();
-    const store = createStore(graph, backend, {
-      hooks: { onQueryStart: (ctx) => starts.push(ctx.sql) },
-    });
-    const otherGraph = defineGraph({
-      id: "other_batch_graph",
-      nodes: graph.nodes,
-      edges: graph.edges,
-    });
-    const otherGraphStore = createStore(otherGraph, backend);
-    const otherTargetStore = createStore(graph, createTestBackend());
+  it.each([false, true])(
+    "refuses graph and execution-target rebinding before SQL (shareSubgraphs=%s)",
+    async (shareSubgraphs) => {
+      const starts: string[] = [];
+      const backend = createTestBackend();
+      const store = createStore(graph, backend, {
+        hooks: { onQueryStart: (ctx) => starts.push(ctx.sql) },
+      });
+      const otherGraph = defineGraph({
+        id: "other_batch_graph",
+        nodes: graph.nodes,
+        edges: graph.edges,
+      });
+      const otherGraphStore = createStore(otherGraph, backend);
+      const otherTargetStore = createStore(graph, createTestBackend());
 
-    const wrongGraphRead = otherGraphStore
-      .query()
-      .from("Person", "person")
-      .select((ctx) => ctx.person.name);
-    await expect(store.batchOnce(() => [wrongGraphRead])).rejects.toThrow(
-      "different graphs",
-    );
+      const wrongGraphRead = otherGraphStore
+        .query()
+        .from("Person", "person")
+        .select((ctx) => ctx.person.name);
+      await expect(
+        store.batchOnce(() => [wrongGraphRead], { shareSubgraphs }),
+      ).rejects.toThrow("different graphs");
 
-    const wrongTargetRead = otherTargetStore
-      .query()
-      .from("Person", "person")
-      .select((ctx) => ctx.person.name);
-    await expect(store.batchOnce(() => [wrongTargetRead])).rejects.toThrow(
-      "different database or transaction target",
-    );
-    expect(starts).toHaveLength(0);
-  });
+      const wrongTargetRead = otherTargetStore
+        .query()
+        .from("Person", "person")
+        .select((ctx) => ctx.person.name);
+      await expect(
+        store.batchOnce(() => [wrongTargetRead], { shareSubgraphs }),
+      ).rejects.toThrow("different database or transaction target");
+      expect(starts).toHaveLength(0);
+    },
+  );
 
   it("refuses a set operation whose right operand has foreign provenance", () => {
     const backend = createTestBackend();

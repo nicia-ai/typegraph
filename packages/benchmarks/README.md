@@ -178,3 +178,30 @@ shared harness in `src/real/harness/` (stats, parity, doctor, summary,
 history, imperative Postgres container launcher) is written to be
 lane-agnostic — a new lane adds its own dataset loader, schema, and engine
 query implementations under `src/real/`, and reuses the harness as-is.
+
+## Subgraph batching benchmark
+
+Measure independent `subgraph()` calls against two runtime-sized `batchOnce()`
+arrays with the same roots and options. `batchOnceUnfused` uses the default
+independent plans, while `batchOnceShared` passes `{ shareSubgraphs: true }`.
+This separates one-statement batching from shared-root planning and hydration.
+
+```bash
+pnpm bench:subgraph-batch -- --roots=8 --depth=2 --branching=3 \
+  --overlap=75 --projection=full --payload-bytes=256 --iterations=8
+
+pnpm bench:subgraph-batch:postgres -- --postgres-driver=pg \
+  --roots=8 --depth=2 --branching=3 --overlap=75
+```
+
+`--overlap` is the percentage of roots connected to the first root's tree.
+`--projection=identity` excludes application payload fields. To model only
+client-side roundtrip latency, add `--simulated-roundtrip-ms=N`. This delay is
+injected before each `backend.execute` call and is reported separately; it is
+not a substitute for a remote PostgreSQL run. Independent calls execute in
+parallel, so their simulated delays may overlap.
+
+The JSON output reports statement count, client-observed aggregate backend
+duration, total duration, raw rows and JSON-encoded row bytes returned at the
+backend boundary, and the process heap delta. Server execution time and actual
+network wire bytes are explicitly unobservable through `GraphBackend`.

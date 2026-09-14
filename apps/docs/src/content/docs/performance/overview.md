@@ -469,6 +469,12 @@ const [activeUsers, recentOrders] = await store.batchOnce(() => [
 ]);
 ```
 
+Runtime arrays of compatible `read.subgraph()` calls can opt into shared traversal and hydration
+with `store.batchOnce(build, { shareSubgraphs: true })`. This helps overlapping, payload-heavy
+neighborhoods; it adds overhead for membership and per-request reconstruction, so the independent
+one-statement plan remains the default. Measure the real root overlap and projection rather than
+enabling sharing universally.
+
 The callback's batch-scoped builder composes set-oriented reads in the same call:
 
 ```typescript
@@ -509,7 +515,7 @@ const neighborhoods = await store.batchOnce((read) =>
 ```
 
 This changes several database round trips into one. Each subgraph still has its own recursive CTE and
-hydration work: `batchOnce()` does not merge roots, share traversal, or guarantee less database CPU.
+hydration work: By default, `batchOnce()` does not merge roots, share traversal, or guarantee less database CPU.
 For one large closure, the direct backend-tuned `store.subgraph()` path can be faster. Use
 `batchOnce()` when round-trip latency across several independent, bounded subgraphs is the cost to
 remove, and measure both forms when database work dominates.

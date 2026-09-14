@@ -76,6 +76,11 @@ export type {
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
+  QualifiedRecursivePath,
+  QualifiedRecursivePathEdge,
+  QualifiedRecursivePathElement,
+  QualifiedRecursivePathNode,
+  QualifiedRecursivePathOption,
   QueryCoordinateState,
   RecursiveTraversalOptions,
   SelectableEdge,
@@ -183,6 +188,7 @@ export type {
   ExpressionValue,
   QueryExpressionContext,
 } from "./builder/expression-context";
+export type { BatchOnceOptions } from "./builder/one-statement-batch";
 export {
   createSqlSchema,
   DEFAULT_SQL_SCHEMA,

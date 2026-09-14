@@ -28,8 +28,12 @@ import type {
   NodeType,
   TemporalMode,
 } from "../core/types";
-import { ValidationError } from "../errors";
+import { ConfigurationError, ValidationError } from "../errors";
 import type { RecursiveCyclePolicy } from "../query/ast";
+import {
+  type OneStatementBatchItem,
+  registerOneStatementSharing,
+} from "../query/builder/one-statement-sharing";
 import type { ExecutableOneStatementRead } from "../query/builder/types";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../query/compiler/recursive";
@@ -58,6 +62,7 @@ import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
 import { hasOwnKey } from "../utils/object";
+import { requireDefined } from "../utils/presence";
 import { type EdgeReadWindow, validateEdgeReadBounds } from "./neighbors";
 import { buildReachableCte, buildWindowedEdgesCte } from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
@@ -439,6 +444,7 @@ type SubgraphContext = Readonly<{
   direction: "out" | "both";
   cyclePolicy: RecursiveCyclePolicy;
   temporalMode: TemporalMode;
+  currentTimestamp: SqlFragment;
   asOf: string | undefined;
   recordedAsOf: RecordedInstant | undefined;
   dialect: DialectAdapter;
@@ -489,6 +495,7 @@ type SubgraphExecutionParams<
 }>;
 
 type SubgraphPlan = Readonly<{
+  baseSchema: SqlSchema;
   ctx: SubgraphContext;
   reachableCte: SqlFragment;
   includedIdsCte: SqlFragment;
@@ -518,13 +525,17 @@ function buildSubgraphPlan<
   const ctx: SubgraphContext = {
     graphId: params.graphId,
     rootId: params.rootId,
-    edgeKinds: options.edges,
+    edgeKinds: [...options.edges],
     maxDepth: options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
-    includeKinds: options.includeKinds,
+    includeKinds:
+      options.includeKinds === undefined ?
+        undefined
+      : [...options.includeKinds],
     excludeRoot: options.excludeRoot ?? false,
     direction: options.direction ?? "out",
     cyclePolicy: options.cyclePolicy ?? "prevent",
     temporalMode: coordinate.mode,
+    currentTimestamp: currentReadInstant(),
     asOf: coordinate.asOf,
     // Recorded coordinates reach here only through the StoreView seam. The
     // public API rejects them before either execution strategy is selected.
@@ -538,7 +549,10 @@ function buildSubgraphPlan<
     ),
     recordedReadBinding: params.recordedReadBinding,
     backend: params.backend,
-    edgeWindows: options.edgeWindows,
+    edgeWindows:
+      options.edgeWindows === undefined ?
+        undefined
+      : structuredClone(options.edgeWindows),
   };
   const introspector = getSubgraphSchemaIntrospector(params.graph);
   const nodeProjectionPlan = buildProjectionPlan(
@@ -553,15 +567,34 @@ function buildSubgraphPlan<
     (kind, field) => introspector.getEdgeFieldTypeInfo(kind, field),
     "edge",
   );
-  const reachableCte = buildReachableCte({
+  const reachableCte = buildSubgraphReachableCte(ctx, baseSchema, surface);
+
+  return {
+    baseSchema,
+    ctx,
+    reachableCte,
+    includedIdsCte: buildIncludedIdsCte(ctx),
+    nodeProjectionPlan,
+    edgeProjectionPlan,
+  };
+}
+
+function buildSubgraphReachableCte(
+  ctx: SubgraphContext,
+  baseSchema: SqlSchema,
+  surface: SubgraphSurface,
+  sourceIds?: readonly string[],
+): SqlFragment {
+  return buildReachableCte({
     graphId: ctx.graphId,
-    sourceId: ctx.rootId,
+    ...(sourceIds === undefined ? { sourceId: ctx.rootId } : { sourceIds }),
     edgeKinds: ctx.edgeKinds,
     maxHops: ctx.maxDepth,
     direction: ctx.direction,
     cyclePolicy: ctx.cyclePolicy,
     includePath: false,
     temporalMode: ctx.temporalMode,
+    currentTimestamp: ctx.currentTimestamp,
     ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
     ...(ctx.recordedAsOf !== undefined && { recordedAsOf: ctx.recordedAsOf }),
     dialect: ctx.dialect,
@@ -570,18 +603,10 @@ function buildSubgraphPlan<
     ...(ctx.recordedReadBinding === undefined ?
       {}
     : { recordedReadBinding: ctx.recordedReadBinding }),
-    recursiveTraversal: resolveRecursiveTraversal(params.backend.capabilities),
+    recursiveTraversal: resolveRecursiveTraversal(ctx.backend.capabilities),
     operation: surface,
     ...(ctx.edgeWindows === undefined ? {} : { edgeWindows: ctx.edgeWindows }),
   });
-
-  return {
-    ctx,
-    reachableCte,
-    includedIdsCte: buildIncludedIdsCte(ctx),
-    nodeProjectionPlan,
-    edgeProjectionPlan,
-  };
 }
 
 // ============================================================
@@ -678,13 +703,14 @@ export function createSubgraphRead<
   NK extends NodeKinds<G>,
   P extends SubgraphProject<G, NK, EK> | undefined = undefined,
 >(params: SubgraphExecutionParams<G, EK, NK, P>): SubgraphRead<G, NK, EK, P> {
+  const plan = buildSubgraphPlan(params, "batchOnce.subgraph");
   const {
     ctx,
     reachableCte,
     includedIdsCte,
     nodeProjectionPlan: nodePlan,
     edgeProjectionPlan: edgePlan,
-  } = buildSubgraphPlan(params, "batchOnce.subgraph");
+  } = plan;
   const query = buildOneStatementSubgraphQuery(
     ctx,
     reachableCte,
@@ -709,17 +735,189 @@ export function createSubgraphRead<
           asCompiledRowsSql(query),
         ),
       ),
-    compileOneStatementBatchItem: () => ({
-      query: asCompiledRowsSql(query),
-      provenance: {
-        graphId: params.graphId,
-        executionTarget: backendDerivationRoot(params.backend),
-      },
-      outputNames: oneStatementSubgraphOutputNames(nodePlan, edgePlan),
-      orderBy: [],
-      mapRows,
-    }),
+    compileOneStatementBatchItem: () => {
+      const item: OneStatementBatchItem<SubgraphResult<G, NK, EK, P>> = {
+        query: asCompiledRowsSql(query),
+        provenance: {
+          graphId: params.graphId,
+          executionTarget: backendDerivationRoot(params.backend),
+        },
+        outputNames: oneStatementSubgraphOutputNames(nodePlan, edgePlan),
+        orderBy: [],
+        mapRows,
+      };
+      sharedSubgraphPlans.set(item, plan);
+      registerOneStatementSharing(item, {
+        owner: params.graph,
+        key: subgraphSharingKey(plan),
+        combine: combineSubgraphBatchItems,
+      });
+      return item;
+    },
   };
+}
+
+const sharedSubgraphPlans = new WeakMap<OneStatementBatchItem, SubgraphPlan>();
+const SHARED_MEMBERSHIPS_COLUMN = "typegraph_shared_memberships";
+
+function projectionSharingKey(plan: ProjectionPlan): unknown {
+  return {
+    fullKinds: plan.fullKinds,
+    projectedKinds: [...plan.projectedKinds],
+  };
+}
+
+function subgraphSharingKey(plan: SubgraphPlan): string {
+  const { ctx } = plan;
+  return JSON.stringify({
+    graphId: ctx.graphId,
+    schema: ctx.schema,
+    edgeKinds: ctx.edgeKinds,
+    includeKinds: ctx.includeKinds,
+    excludeRoot: ctx.excludeRoot,
+    maxDepth: ctx.maxDepth,
+    direction: ctx.direction,
+    cyclePolicy: ctx.cyclePolicy,
+    temporalMode: ctx.temporalMode,
+    asOf: ctx.asOf,
+    recordedAsOf: ctx.recordedAsOf,
+    currentTimestamp: ctx.currentTimestamp.chunks,
+    edgeWindows: ctx.edgeWindows,
+    nodes: projectionSharingKey(plan.nodeProjectionPlan),
+    edges: projectionSharingKey(plan.edgeProjectionPlan),
+  });
+}
+
+function sharedEntityKey(row: Readonly<Record<string, unknown>>): string {
+  return JSON.stringify([row["typegraph_entity"], row["kind"], row["id"]]);
+}
+
+function combineSubgraphBatchItems(
+  items: readonly OneStatementBatchItem[],
+): OneStatementBatchItem<readonly unknown[]> {
+  const first = requireDefined(items[0]);
+  const plans = items.map((item) =>
+    requireDefined(sharedSubgraphPlans.get(item)),
+  );
+  const {
+    ctx,
+    baseSchema,
+    nodeProjectionPlan: nodePlan,
+    edgeProjectionPlan: edgePlan,
+  } = requireDefined(plans[0]);
+  const roots = plans.map((plan) => plan.ctx.rootId);
+  const reachable = buildSubgraphReachableCte(
+    ctx,
+    baseSchema,
+    "batchOnce.subgraph",
+    dedupeStrings(roots),
+  );
+  const filters: SqlFragment[] = [];
+  if (ctx.includeKinds !== undefined && ctx.includeKinds.length > 0)
+    filters.push(compileKindFilter(sql.raw("kind"), ctx.includeKinds));
+  if (ctx.excludeRoot) filters.push(sql`id != origin_id`);
+  const included = sql`, included_ids AS (SELECT DISTINCT origin_id, id FROM reachable ${filters.length === 0 ? sql.empty() : sql`WHERE ${sql.join(filters, sql` AND `)}`})`;
+  const requests = roots.map((root, index) => sql`(${index}, ${root})`);
+  const hydration = buildOneStatementSubgraphQuery(
+    ctx,
+    sql.empty(),
+    sql.empty(),
+    nodePlan,
+    edgePlan,
+    true,
+  );
+  const columns = first.outputNames;
+  const membershipPayload = ctx.dialect.orderedRowsJsonArray(
+    "typegraph_shared_ordered_membership",
+    ["request_id", "typegraph_entity", "kind", "id"],
+    "typegraph_shared_ordinal",
+  );
+  const hydratedColumns = columns.map(
+    (column) => sql`h.${sql.identifier(column)}`,
+  );
+  const membershipColumns = columns.map((column) =>
+    column === "typegraph_entity" ? sql`'membership'` : sql`NULL`,
+  );
+  const query = asCompiledRowsSql(sql`
+    ${reachable}${included},
+        typegraph_shared_requests(request_id, root_id) AS (VALUES ${sql.join(requests, sql`, `)}),
+        typegraph_shared_hydrated AS (${hydration}),
+        typegraph_shared_membership AS (
+          SELECT requests.request_id, h.typegraph_entity, h.kind, h.id
+          FROM typegraph_shared_hydrated h
+          JOIN included_ids included ON h.id = included.id
+          JOIN typegraph_shared_requests requests ON requests.root_id = included.origin_id
+          WHERE h.typegraph_entity = 'node'
+          UNION ALL
+          SELECT requests.request_id, h.typegraph_entity, h.kind, h.id
+          FROM typegraph_shared_hydrated h
+          JOIN included_ids source_membership ON h.from_id = source_membership.id
+          JOIN included_ids target_membership ON h.to_id = target_membership.id AND source_membership.origin_id = target_membership.origin_id
+          JOIN typegraph_shared_requests requests ON requests.root_id = source_membership.origin_id
+          WHERE h.typegraph_entity = 'edge'
+        ),
+        typegraph_shared_ordered_membership AS (
+          SELECT membership.*, request_id AS typegraph_shared_ordinal
+          FROM typegraph_shared_membership membership
+        )
+        SELECT ${sql.join(hydratedColumns, sql`, `)}, NULL AS ${sql.identifier(SHARED_MEMBERSHIPS_COLUMN)}
+        FROM typegraph_shared_hydrated h
+        UNION ALL
+        SELECT ${sql.join(membershipColumns, sql`, `)}, ${membershipPayload}
+  `);
+  return {
+    query,
+    provenance: first.provenance,
+    outputNames: [...columns, SHARED_MEMBERSHIPS_COLUMN],
+    orderBy: [],
+    mapRows: (rows) => mapSharedSubgraphRows(items, rows),
+  };
+}
+
+function mapSharedSubgraphRows(
+  items: readonly OneStatementBatchItem[],
+  rows: readonly Record<string, unknown>[],
+): readonly unknown[] {
+  const entities = new Map<string, Record<string, unknown>>();
+  const requestRows: Record<string, unknown>[][] = items.map(() => []);
+  const membershipRows = rows.filter(
+    (row) => row["typegraph_entity"] === "membership",
+  );
+  for (const row of rows)
+    if (row["typegraph_entity"] !== "membership")
+      entities.set(sharedEntityKey(row), row);
+  if (membershipRows.length !== 1)
+    throw new ConfigurationError(
+      "Shared subgraph query returned an invalid membership envelope.",
+    );
+  const encoded = requireDefined(membershipRows[0])[SHARED_MEMBERSHIPS_COLUMN];
+  const memberships: unknown =
+    typeof encoded === "string" ? JSON.parse(encoded) : encoded;
+  if (!Array.isArray(memberships))
+    throw new ConfigurationError(
+      "Shared subgraph query returned invalid membership rows.",
+    );
+  for (const membership of memberships) {
+    if (typeof membership !== "object" || membership === null)
+      throw new ConfigurationError(
+        "Shared subgraph membership must be an object.",
+      );
+    const row = membership as Record<string, unknown>;
+    const index = Number(row["request_id"]);
+    if (!Number.isInteger(index) || index < 0 || index >= items.length)
+      throw new ConfigurationError(
+        "Shared subgraph membership has an invalid request index.",
+      );
+    const entity = requireDefined(
+      entities.get(sharedEntityKey(row)),
+      "Shared subgraph membership refers to a missing entity.",
+    );
+    requireDefined(requestRows[index]).push(entity);
+  }
+  // The envelope reuses hydrated rows; each public result must own nested props.
+  return items.map((item, index) =>
+    item.mapRows(structuredClone(requireDefined(requestRows[index]))),
+  );
 }
 
 // ============================================================
@@ -992,8 +1190,9 @@ function buildOneStatementSubgraphQuery(
   includedIds: SqlFragment,
   nodePlan: ProjectionPlan,
   edgePlan: ProjectionPlan,
+  sharedOrigins = false,
 ): SqlFragment {
-  const instant = currentReadInstant();
+  const instant = ctx.currentTimestamp;
   const nodeTemporal = compileTemporalFilter({
     mode: ctx.temporalMode,
     asOf: ctx.asOf,
@@ -1051,7 +1250,11 @@ function buildOneStatementSubgraphQuery(
     ...buildProjectedPropertyColumns("e", edgePlan, ctx.dialect),
   ];
   const edgeSource = buildSubgraphEdgeSource(ctx, edgeTemporal);
-  return sql`${reachable}${includedIds} SELECT ${sql.join(nodeColumns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporal} AND n.id IN (SELECT id FROM included_ids) UNION ALL SELECT ${sql.join(edgeColumns, sql`, `)} FROM ${edgeSource} e WHERE e.graph_id = ${ctx.graphId} AND ${compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds)} AND ${edgeTemporal} AND e.from_id IN (SELECT id FROM included_ids) AND e.to_id IN (SELECT id FROM included_ids)`;
+  const edgeMembership =
+    sharedOrigins ?
+      sql`EXISTS (SELECT 1 FROM included_ids source_membership JOIN included_ids target_membership ON source_membership.origin_id = target_membership.origin_id WHERE source_membership.id = e.from_id AND target_membership.id = e.to_id)`
+    : sql`e.from_id IN (SELECT id FROM included_ids) AND e.to_id IN (SELECT id FROM included_ids)`;
+  return sql`${reachable}${includedIds} SELECT ${sql.join(nodeColumns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporal} AND n.id IN (SELECT id FROM included_ids) UNION ALL SELECT ${sql.join(edgeColumns, sql`, `)} FROM ${edgeSource} e WHERE e.graph_id = ${ctx.graphId} AND ${compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds)} AND ${edgeTemporal} AND ${edgeMembership}`;
 }
 
 function mapOneStatementSubgraphRows<
@@ -1114,7 +1317,7 @@ async function fetchSubgraphNodes(
     asOf: ctx.asOf,
     recordedAsOf: ctx.recordedAsOf,
     tableAlias: "n",
-    currentTimestamp: currentReadInstant(),
+    currentTimestamp: ctx.currentTimestamp,
     recordedReadBinding: ctx.recordedReadBinding,
   });
   const columns: SqlFragment[] = [
@@ -1151,7 +1354,7 @@ async function fetchSubgraphEdges(
     asOf: ctx.asOf,
     recordedAsOf: ctx.recordedAsOf,
     tableAlias: "e",
-    currentTimestamp: currentReadInstant(),
+    currentTimestamp: ctx.currentTimestamp,
     recordedReadBinding: ctx.recordedReadBinding,
   });
   const columns: SqlFragment[] = [

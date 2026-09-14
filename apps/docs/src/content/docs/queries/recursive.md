@@ -211,6 +211,72 @@ const networkAnalysis = await store
   .execute();
 ```
 
+For a path that identifies both nodes and traversed edges, request the qualified format:
+
+```typescript
+const routes = await store
+  .query()
+  .from("Person", "person")
+  .traverse("knows", "connection")
+  .recursive({
+    maxHops: 4,
+    path: { alias: "route", format: "qualified" },
+  })
+  .to("Person", "friend")
+  .select((ctx) => ctx.route)
+  .execute();
+```
+
+Each route alternates node and edge references, starting and ending with a node:
+
+```typescript
+[
+  { type: "node", kind: "Person", id: "alice" },
+  { type: "edge", kind: "knows", id: "edge-1", direction: "out" },
+  { type: "node", kind: "Person", id: "bob" },
+];
+```
+
+`direction` records how the edge was followed relative to its stored endpoints: `"out"` follows
+`from` to `to`, while `"in"` follows `to` to `from`. Qualified paths contain references only; they
+do not hydrate node or edge properties. Legacy `path: true` and `path: "alias"` continue to return
+node ID arrays.
+
+## Chaining Recursive Traversals
+
+Two or more recursive traversals compose from left to right. Each later stage expands from the
+completed identities produced by its `from` alias, then rejoins those results to the earlier rows.
+This preserves upstream multiplicity while avoiding repeated expansion of the same `(kind, id)`
+source within a stage.
+
+```typescript
+const routes = await store
+  .query()
+  .from("Person", "root")
+  .traverse("manages", "management")
+  .recursive({ maxHops: 3, depth: "managementDepth" })
+  .to("Person", "manager")
+  .traverse("worksAt", "employment", { from: "manager" })
+  .recursive({ maxHops: 2, path: "organizationPath" })
+  .to("Organization", "organization")
+  .where((expr) => expr.organization.active.eq(true))
+  .orderBy("organization", "name")
+  .limit(20)
+  .select((ctx) => ({
+    manager: ctx.manager.name,
+    organization: ctx.organization.name,
+    managementDepth: ctx.managementDepth,
+    organizationPath: ctx.organizationPath,
+  }))
+  .execute();
+```
+
+The `minHops`, `maxHops`, `cyclePolicy`, `stopExpansion`, `path`, and `depth` settings apply to
+their own stage. A later `optionalTraverse()` retains the earlier row when it finds no match; its
+target, path, and depth values are `undefined`. A completed `.where()`, final ordering, and final
+limit apply after every stage. The `from` option may also branch from any earlier materialized node
+alias.
+
 ### Boolean shorthand
 
 Pass `true` instead of a string to use the default alias names:
@@ -403,14 +469,16 @@ implicit 100-hop cap, add `.recursive({ maxHops: 100 })`.
 
 ## Limitations
 
-- **One recursive traversal per query.** A query with multiple `.recursive()` calls throws
-  `UnsupportedPredicateError`. If you need multiple recursive paths, run separate queries or
-  use [set operations](/queries/combine) to merge results.
+- **Every traversal in a recursive chain must be recursive.** Mixing fixed-hop and recursive
+  stages is refused. The first recursive stage must be required; later stages may be optional.
+- **Recursive queries cannot be aggregated in place yet.** `groupBy()`, aggregate projections,
+  aggregate ordering, and `having()` are refused. Project node columns with `project()`, then use
+  `asRelation()` to aggregate that completed relation.
 - **Edge properties are not projected** in recursive results. You can filter on edge properties
   with `whereEdge()`, but the `select()` context only exposes the start node, target node, and
   any depth/path aliases.
-- **Path output contains node IDs.** Rich path entities and traversed-edge projection are deferred;
-  use the kind-qualified start and target aliases when entity identity matters.
+- **Recursive edges are not materialized in the result.** Qualified paths expose edge references,
+  but selected recursive edge fields are refused.
 
 ## Real-World Examples
 

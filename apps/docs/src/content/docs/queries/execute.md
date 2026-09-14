@@ -323,6 +323,28 @@ const subgraphs = await store.batchOnce((read) =>
 );
 ```
 
+When compatible subgraphs have substantially overlapping roots and project meaningful payloads,
+opt into shared traversal and hydration:
+
+```typescript
+const subgraphs = await store.batchOnce(
+  (read) =>
+    roots.map((root) =>
+      read.subgraph(root.id, {
+        edges: ["knows"],
+        maxDepth: 2,
+        project: { nodes: { Person: ["name", "profile"] } },
+      }),
+    ),
+  { shareSubgraphs: true },
+);
+```
+
+The option groups only compatible subgraph reads and hydrates a shared entity once while preserving
+an independent result object for every request. The default remains independent subgraph plans in
+the same one statement. Sharing adds membership and reconstruction overhead, so enable it for
+measured overlap and payload shapes rather than assuming it is universally faster.
+
 Tuple members may use different roots, edge sets, depths, windows, and projections when a page
 needs heterogeneous neighborhoods:
 
@@ -344,9 +366,10 @@ const [social, employment] = await store.batchOnce((read) => [
 ]);
 ```
 
-The one-statement guarantee reduces round trips, which is often valuable for remote databases. It
-does not combine recursive plans or share hydration between overlapping subgraphs, and it does not
-promise less database work than direct `store.subgraph()` calls.
+The one-statement guarantee reduces round trips, which is often valuable for remote databases. By
+default it does not combine recursive plans or share hydration between overlapping subgraphs, and
+it does not promise less database work than direct `store.subgraph()` calls. The explicit
+`shareSubgraphs` option changes that planning choice for compatible subgraph members only.
 
 Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
 sequential execution is the intended connection profile.

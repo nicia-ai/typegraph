@@ -2293,7 +2293,7 @@ when the schema-version guarantee is required.
 
 ### Batch Query Execution
 
-#### `store.batchOnce(buildReads)`
+#### `store.batchOnce(buildReads, options?)`
 
 Executes zero or more independent reads. A nonempty input is exactly one SQL statement; an empty
 input returns `[]` without issuing SQL. Each read is
@@ -2344,10 +2344,21 @@ const [social, work] = await store.batchOnce((read) => [
 ]);
 ```
 
-One statement means one round trip, not one shared traversal. Overlapping subgraphs are planned and
-hydrated independently, so batching can use more database CPU or memory than the tuned direct path.
-Use it to remove round-trip latency across several reads; benchmark direct `store.subgraph()` for a
-single large closure.
+One statement means one round trip, not one shared traversal by default. Overlapping subgraphs are
+planned and hydrated independently. For compatible, overlapping, payload-heavy subgraphs, pass
+`{ shareSubgraphs: true }` as the second `batchOnce()` argument to traverse the roots together and
+hydrate each shared entity once:
+
+```typescript
+const details = await store.batchOnce(
+  (read) => roots.map((root) => read.subgraph(root.id, options)),
+  { shareSubgraphs: true },
+);
+```
+
+Every request still receives independent result objects. Sharing adds membership and reconstruction
+work, and measurements show it can increase encoded response size when roots do not overlap or the
+projection is small. Keep the independent default unless the request shape benefits in a benchmark.
 
 ```typescript
 const [people, neighbors] = await store.batchOnce((read) => [
@@ -2909,7 +2920,7 @@ const results = await store
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
 | `prepare()` | `PreparedQuery<T>` | Validate query AST once for repeated execution with different parameters |
 
-#### `store.batchOnce(buildReads)` and `store.batch(...queries)`
+#### `store.batchOnce(buildReads, options?)` and `store.batch(...queries)`
 
 Use `batchOnce()` to embed independent fluent and batch-scoped set-oriented reads in one statement. Use `batch()` for mixed
 fluent and queued collection reads that may run sequentially. See

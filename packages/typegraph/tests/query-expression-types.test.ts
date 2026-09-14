@@ -7,6 +7,7 @@ import {
   defineGraph,
   defineNode,
   expr,
+  type QualifiedRecursivePath,
 } from "../src";
 import { buildKindRegistry } from "../src/registry";
 
@@ -38,6 +39,48 @@ const graph = defineGraph({
   edges: { worksAt: { type: worksAt, from: [Person], to: [Company] } },
 });
 const registry = buildKindRegistry(graph);
+
+test("recursive path options preserve legacy IDs and infer qualified references", () => {
+  createQueryBuilder<typeof graph>(graph.id, registry)
+    .from("Person", "person")
+    .traverse("worksAt", "employment")
+    .recursive({ path: "ids", maxHops: 1 })
+    .to("Company", "company")
+    .select((context) => {
+      expectTypeOf(context.ids).toEqualTypeOf<readonly string[]>();
+      return context.ids;
+    });
+
+  createQueryBuilder<typeof graph>(graph.id, registry)
+    .from("Person", "person")
+    .traverse("worksAt", "employment")
+    .recursive({
+      path: { alias: "route", format: "qualified" },
+      maxHops: 1,
+    })
+    .to("Company", "company")
+    .select((context) => {
+      expectTypeOf(context.route).toEqualTypeOf<QualifiedRecursivePath>();
+      return context.route;
+    });
+
+  createQueryBuilder<typeof graph>(graph.id, registry)
+    .from("Person", "person")
+    .optionalTraverse("worksAt", "employment")
+    .recursive({
+      depth: "depth",
+      path: { alias: "route", format: "qualified" },
+      maxHops: 1,
+    })
+    .to("Company", "company")
+    .select((context) => {
+      expectTypeOf(context.depth).toEqualTypeOf<number | undefined>();
+      expectTypeOf(context.route).toEqualTypeOf<
+        QualifiedRecursivePath | undefined
+      >();
+      return context.route;
+    });
+});
 
 test("project and map infer database and JavaScript result types", () => {
   const projected = createQueryBuilder<typeof graph>(graph.id, registry)

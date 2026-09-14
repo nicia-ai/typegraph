@@ -17,6 +17,13 @@ import {
 } from "./profile";
 import { type DialectAdapter } from "./types";
 
+function buildTextJsonArray(values: readonly SqlFragment[]): SqlFragment {
+  return sql`jsonb_build_array(${sql.join(
+    values.map((value) => sql`CAST(${value} AS text)`),
+    sql`, `,
+  )})`;
+}
+
 // Exact round-to-nearest boundaries for IEEE-754 binary64. Keeping these as
 // decimal NUMERIC literals lets PostgreSQL decide whether a text value can be
 // converted before a DOUBLE PRECISION cast has a chance to throw.
@@ -328,6 +335,12 @@ export const postgresDialect: DialectAdapter = {
   // ============================================================
   // Recursive CTE Path Operations
   // ============================================================
+
+  textJsonArray: buildTextJsonArray,
+
+  appendTextJsonArray(array, values) {
+    return sql`(${array} || ${buildTextJsonArray(values)})`;
+  },
 
   initializePath(nodeId) {
     // PostgreSQL uses text arrays: ARRAY[id]
