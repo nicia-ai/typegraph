@@ -306,9 +306,10 @@ The callback can also return `roots.map(...)`, a singleton, or an empty array. A
 one statement with no sequential fallback; an empty batch executes no SQL. At most 500 reads may be
 planned, and the combined statement must fit the backend's bind-parameter budget. Every response is
 materialized as JSON rather than streamed, so bound each member's result explicitly. Response size
-is data-dependent and is not estimated before execution.
+is data-dependent; TypeGraph neither estimates it nor imposes a response-byte cap before execution.
 
-For several independent subgraphs, use the runtime-array form to remove one round trip per root:
+For several independent subgraphs, use the runtime-array form to collapse their database round
+trips into one statement:
 
 ```typescript
 const subgraphs = await store.batchOnce((read) =>

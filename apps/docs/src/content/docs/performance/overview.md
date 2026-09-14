@@ -487,7 +487,8 @@ The returned collection may be a runtime-sized array, including `roots.map(...)`
 execute zero statements; every nonempty array, including a singleton, executes exactly one or is
 refused before execution. The portable ceiling is 500 reads and the final statement must fit the
 backend's bind-parameter budget. Since all member rows are returned in materialized JSON envelopes,
-use bounded projections and limits; `batchOnce()` does not stream or predict payload size.
+use bounded projections and limits; `batchOnce()` does not stream, predict payload size, or impose a
+response-byte cap.
 
 When a request needs several independent neighborhoods, prefer one runtime batch over awaiting
 `store.subgraph()` in a loop, especially when the database is remote:

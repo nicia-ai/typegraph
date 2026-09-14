@@ -2320,7 +2320,8 @@ The portable planning limit is 500 reads, matching SQLite's compound-select ceil
 statement must also fit the backend's declared bind-parameter limit; otherwise `batchOnce()` refuses
 before execution. It never chunks. Result rows for every member are materialized in JSON envelopes,
 so this API is intended for bounded reads and is not streaming. TypeGraph does not guess response
-size before execution; use explicit limits, projections, and subgraph bounds to control it.
+size or impose a response-byte cap; use explicit limits, projections, and subgraph bounds to control
+it.
 
 Each member keeps its own root and options. A tuple can therefore combine unrelated neighborhood
 shapes in the same call:
