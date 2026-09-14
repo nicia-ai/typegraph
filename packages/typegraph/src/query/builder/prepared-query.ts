@@ -232,7 +232,7 @@ function substitutePredicateExpression(
   }
 }
 
-function substituteDatabaseExpression<T, Scope extends string>(
+export function substituteDatabaseExpression<T, Scope extends string>(
   expression: DatabaseExpression<T, Scope>,
   bindings: Readonly<Record<string, unknown>>,
 ): DatabaseExpression<T, Scope> {
@@ -614,7 +614,7 @@ export class PreparedQuery<R> {
   }
 }
 
-type ParameterMetadata = Readonly<{
+export type ParameterMetadata = Readonly<{
   names: ReadonlySet<string>;
   /** Parameters used in string_op predicates (must receive string values). */
   stringOpParameters: ReadonlySet<string>;
@@ -644,7 +644,10 @@ type ParameterMetadataAccumulator = Readonly<{
   conflictingElementTypes: Set<string>;
 }>;
 
-function collectParameterMetadata(ast: QueryAst): ParameterMetadata {
+export function collectParameterMetadata(
+  ast: QueryAst | readonly QueryAst[],
+  expressions: readonly DatabaseExpression[] = [],
+): ParameterMetadata {
   const accumulator: ParameterMetadataAccumulator = {
     names: new Set<string>(),
     stringOpParameters: new Set<string>(),
@@ -655,7 +658,12 @@ function collectParameterMetadata(ast: QueryAst): ParameterMetadata {
     conflictingElementTypes: new Set<string>(),
   };
 
-  collectParameterMetadataFromAst(ast, accumulator);
+  const queries: readonly QueryAst[] =
+    Array.isArray(ast) ? ast : [ast as QueryAst];
+  for (const query of queries)
+    collectParameterMetadataFromAst(query, accumulator);
+  for (const expression of expressions)
+    collectParameterMetadataFromDatabaseExpression(expression, accumulator);
 
   return accumulator;
 }
@@ -768,6 +776,16 @@ function collectParameterMetadataFromDatabaseExpression(
   }
   switch (node.kind) {
     case "parameter": {
+      const existingType = accumulator.expressionParameterTypes.get(node.name);
+      if (existingType !== undefined && existingType !== expression.valueType)
+        throw new ConfigurationError(
+          `Parameter "${node.name}" is used with incompatible expression types`,
+          {
+            parameterName: node.name,
+            expectedType: existingType,
+            actualType: expression.valueType,
+          },
+        );
       accumulator.names.add(node.name);
       accumulator.scalarParameters.add(node.name);
       accumulator.expressionParameters.add(node.name);
@@ -895,6 +913,31 @@ export function bindQueryParameters(
   assertDistinctParameterRoles(metadata);
   validateBindings(bindings, metadata);
   return substituteParameters(ast, bindings);
+}
+
+/** Validates a complete composed relation before its leaves bind their own subset. */
+export function validateQueryBindings(
+  queries: readonly QueryAst[],
+  bindings: Readonly<Record<string, unknown>>,
+  expressions: readonly DatabaseExpression[] = [],
+): void {
+  const metadata = collectParameterMetadata(queries, expressions);
+  assertDistinctParameterRoles(metadata);
+  validateBindings(bindings, metadata);
+}
+
+/** The complete relation validates its bindings before individual leaves bind their subset. */
+export function bindQueryParametersSubset(
+  ast: QueryAst,
+  bindings: Readonly<Record<string, unknown>>,
+): QueryAst {
+  const names = collectParameterMetadata(ast).names;
+  return bindQueryParameters(
+    ast,
+    Object.fromEntries(
+      [...names].map((name) => [name, readOwnProperty(bindings, name)]),
+    ),
+  );
 }
 
 function validateBindings(

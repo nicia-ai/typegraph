@@ -9,6 +9,7 @@ import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { tsvectorStrategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
+import { DOUBLE_OVERFLOW_BOUNDARY } from "./numeric-conversion";
 import {
   getSqlDialectProfile,
   inlineSqlStringLiteral,
@@ -19,7 +20,6 @@ import { type DialectAdapter } from "./types";
 // Exact round-to-nearest boundaries for IEEE-754 binary64. Keeping these as
 // decimal NUMERIC literals lets PostgreSQL decide whether a text value can be
 // converted before a DOUBLE PRECISION cast has a chance to throw.
-const DOUBLE_OVERFLOW_BOUNDARY = String(2n ** 1024n - 2n ** 970n);
 const DOUBLE_ZERO_ROUNDING_BOUNDARY = `${5n ** 1075n}e-1075`;
 
 /**

@@ -6,6 +6,10 @@ description: Set operations with union(), intersect(), and except()
 Combine operations merge results from multiple queries using set operations. Use `union()` to combine
 results, `intersect()` to find common results, and `except()` to exclude results.
 
+For new SQL projections, use [`project().asRelation()`](/queries/relations/) to combine visible output
+columns, then order, filter, prepare, or batch the combined relation. The `select()` examples below
+describe the compatibility API; its JavaScript result mapper does not define SQL row equality.
+
 ## Set Operations Overview
 
 | Operation | Description | Duplicates |

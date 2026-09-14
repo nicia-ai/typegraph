@@ -566,10 +566,19 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // helpers are implementation details behind the exported fluent surface; no
 // forgotten name was removed, and exporting them would add API without an
 // independent caller contract.
+// Phase 4 adds eleven internal relation contract names behind the root's public
+// fluent API: AggregateRelationFields, CompatibleRelationProjection,
+// DerivedRelation, RelationAst, RelationColumn, RelationDefinition, RelationOrder,
+// RelationProvenance, RelationSource, RelationState, and SetRelation. Root debt
+// is 476 -> 487. The six Store-bearing secondary entrypoints also reference the
+// root-only public ExecutableRelationQuery, PreparedBindings,
+// PreparedParameterDeclaration, RelationColumnContext, RelationProjection, and
+// RelationProjectionResult, giving each an exact +17 delta. No old names were
+// removed, and these internal constructor/compiler types are not independent APIs.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 476,
-    sha256: "9dab680cb26eba7615cb0dcce64923f3141888999de1eeb3065ad3c3e3ef233f",
+    count: 487,
+    sha256: "c2afe95571996d78fd7b97ed8ce4e3bf7ba554d7f17a5728e41fbd4a4a8cf605",
   },
   "./adapters/drizzle/engine": {
     count: 331,
@@ -615,36 +624,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 815,
-    sha256: "69e109b2565eb829e05af22c81d5d6971a4765a0775de77a739455ec2f53cdfd",
+    count: 832,
+    sha256: "c37b8fdd6c8d86bb9a52c34c60b0bc7ad5e8d24e03424b705e700cc7e0437545",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 798,
-    sha256: "3c05e20568a5573a451820bba11112f6b7ef0d6e574c846e2137a2312f34f424",
+    count: 815,
+    sha256: "2c2ef93ab703bf4c973838e60ade53f1ce2339e6f5b2eeefc2159ad1f013b04e",
   },
   "./postgres/pglite": {
-    count: 797,
-    sha256: "59990e0f5bafb41c2c847fd1adf0eb3731290683ba2d263373efb9c6608aa3e4",
+    count: 814,
+    sha256: "a42ecc467846c9c71e33fc0a9e3a062234559a3d2a9357968f81ad96f99eb4f2",
   },
   "./profiler": {
-    count: 800,
-    sha256: "8333d2cc70235c3da0e77d8bef60bcac46d5d600e4f1a50b4f3ccef7be27309d",
+    count: 817,
+    sha256: "de753d3c3877cb58f078858e446771f5cae47a4e130771bc7eadafc5ae6c3421",
   },
   "./provenance": {
-    count: 806,
-    sha256: "67aef78162b9d2262124f3474db9891040cdcb8af02ae336ab5915efc29a84d9",
+    count: 823,
+    sha256: "9ab41d4075904d5d1bd8b482dd9bb8644f9bd51946703cd3a973a9a77ac6c7a9",
   },
   "./schema": {
     count: 282,
     sha256: "912798b14b4548dc5f66ce6ff9db71dd7561b7d0f1303fd165aa9f58b37390de",
   },
   "./sqlite/local": {
-    count: 797,
-    sha256: "59990e0f5bafb41c2c847fd1adf0eb3731290683ba2d263373efb9c6608aa3e4",
+    count: 814,
+    sha256: "a42ecc467846c9c71e33fc0a9e3a062234559a3d2a9357968f81ad96f99eb4f2",
   },
 };
 

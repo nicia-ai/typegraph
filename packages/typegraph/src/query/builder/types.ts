@@ -296,10 +296,10 @@ export type PropsAccessor<N extends NodeType> = Readonly<
 export type FieldAccessor<T> = FieldAccessorForType<NonNullable<T>>;
 
 /** A value accepted by equality predicates for a schema field. */
-export type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
+type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 
 /** Values accepted by membership predicates for a schema field. */
-export type MembershipOperand<T> = readonly T[] | ParameterRef;
+type MembershipOperand<T> = readonly T[] | ParameterRef;
 
 type NullFieldAccessor = Readonly<{
   isNull: () => Predicate;

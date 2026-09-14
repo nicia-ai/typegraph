@@ -29,7 +29,7 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
 }>;
 
-// @public
+// @public (undocumented)
 type AggregateAliasMap = Readonly<Record<string, Readonly<{
     type: Readonly<{
         schema: z.ZodType;
@@ -74,6 +74,11 @@ type AggregateOrderSpec = Readonly<{
     direction: SortDirection;
     nulls?: NullOrdering;
 }>;
+
+// @public (undocumented)
+type AggregateRelationFields<R extends Record<string, FieldRef | AggregateExpr>, Aliases extends AggregateAliasMap> = {
+    [K in keyof R]: DatabaseExpression<AggregateResult<R, Aliases>[K]>;
+};
 
 // @public
 type AggregateResult<R extends Record<string, FieldRef | AggregateExpr>, Aliases extends AggregateAliasMap = AggregateAliasMap> = {
@@ -716,6 +721,11 @@ type ComparisonPredicate = Readonly<{
     right: FieldRef | LiteralValue | LiteralValue[] | ParameterRef;
 }>;
 
+// @public (undocumented)
+type CompatibleRelationProjection<Fields extends RelationProjection> = Readonly<{
+    [Key in keyof Fields]: DatabaseExpression<RelationProjectionResult<Fields>[Key]>;
+}>;
+
 // @public
 type CompiledOneStatementRead<R> = Required<Pick<OneStatementBatchableQuery<R>, "compileOneStatementBatchItem">>;
 
@@ -1138,6 +1148,23 @@ interface DepthDecrementMap {
     // (undocumented)
     5: 4;
 }
+
+// @public (undocumented)
+type DerivedRelation = Readonly<{
+    kind: "derived";
+    source: RelationAst;
+    sourceColumns: readonly RelationColumn[];
+    projection: readonly Readonly<{
+        column: RelationColumn;
+        expression: DatabaseExpression;
+    }>[];
+    predicate?: DatabaseExpression<boolean | undefined>;
+    groupBy?: readonly DatabaseExpression[];
+    distinct: boolean;
+    orderBy: readonly RelationOrder[];
+    limit?: number;
+    offset?: number;
+}>;
 
 // @public
 type DisjointOverlapRow = Readonly<{
@@ -1766,11 +1793,44 @@ type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 // @public
 class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AggregateAliasMap, R extends Record<string, FieldRef | AggregateExpr>> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: R);
+    asRelation(): ExecutableRelationQuery<AggregateRelationFields<R, Aliases>, AggregateResult<R, Aliases>>;
     compile(): CompiledSelectSql;
+    // @internal
+    compileOneStatementBatchItem(): {
+        query: CompiledRowsSql;
+        provenance: {
+            graphId: string;
+            executionTarget: object;
+        };
+        outputNames: string[];
+        orderBy: {
+            column: string;
+            direction: SortDirection;
+            nulls: "first" | "last";
+        }[];
+        mapRows: (rows: readonly Record<string, unknown>[]) => AggregateResult<R, Aliases>[];
+    };
+    // (undocumented)
+    count(): Promise<number>;
     execute(): Promise<readonly AggregateResult<R, Aliases>[]>;
+    executeOn(backend: GraphBackend | TransactionBackend): Promise<readonly AggregateResult<R, Aliases>[]>;
+    // (undocumented)
+    exists(): Promise<boolean>;
+    // (undocumented)
+    first(): Promise<AggregateResult<R, Aliases> | undefined>;
     limit(n: number): ExecutableAggregateQuery<G, Aliases, R>;
     offset(n: number): ExecutableAggregateQuery<G, Aliases, R>;
     orderBy<K extends keyof R & string>(key: K, direction?: SortDirection): ExecutableAggregateQuery<G, Aliases, R>;
+    // (undocumented)
+    prepare(): Readonly<{
+        execute: (bindings: Readonly<Record<string, unknown>>) => Promise<readonly AggregateResult<R, Aliases>[]>;
+        bind: (bindings: Readonly<Record<string, unknown>>) => ExecutableRelationQuery<AggregateRelationFields<R, Aliases>, AggregateResult<R, Aliases>>;
+    }>;
+    // (undocumented)
+    prepare<const Parameters extends PreparedParameterDeclaration>(parameters: Parameters): Readonly<{
+        execute: (bindings: PreparedBindings<Parameters>) => Promise<readonly AggregateResult<R, Aliases>[]>;
+        bind: (bindings: PreparedBindings<Parameters>) => ExecutableRelationQuery<AggregateRelationFields<R, Aliases>, AggregateResult<R, Aliases>>;
+    }>;
     toAst(): QueryAst;
     toSQL(): Readonly<{
         sql: string;
@@ -1781,6 +1841,7 @@ class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AggregateAlia
 // @public
 class ExecutableProjectionQuery<Fields extends DatabaseProjection, Context, Result = ProjectionResult<Fields>> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: Fields, context: () => Context, mapper?: (row: ProjectionResult<Fields>) => Result);
+    asRelation(): ExecutableRelationQuery<Fields, Result>;
     // (undocumented)
     compile(): CompiledRowsSql;
     // (undocumented)
@@ -1894,6 +1955,93 @@ interface ExecutableQueryLike<G extends GraphDef, R> {
     }>;
     // (undocumented)
     toAst(): QueryAst;
+}
+
+// @public (undocumented)
+class ExecutableRelationQuery<Fields extends RelationProjection, Result = RelationProjectionResult<Fields>> {
+    constructor(definition: RelationDefinition<Fields, Result>, state?: RelationState, scopeIdentity?: symbol);
+    // (undocumented)
+    aggregate<const NextFields extends RelationProjection>(build: (columns: RelationColumnContext<Fields>) => NextFields): ExecutableRelationQuery<NextFields>;
+    // (undocumented)
+    compile(): CompiledRowsSql;
+    // (undocumented)
+    compileOneStatementBatchItem(): {
+        query: CompiledRowsSql;
+        provenance: {
+            graphId: string;
+            executionTarget: object;
+        };
+        outputNames: string[];
+        orderBy: {
+            column: string;
+            direction: SortDirection;
+            nulls: "first" | "last";
+        }[];
+        mapRows: (rows: readonly Record<string, unknown>[]) => Result[];
+    };
+    // (undocumented)
+    count(): Promise<number>;
+    // (undocumented)
+    distinct(): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    distinctNodes(input: Readonly<{
+        kind: keyof Fields & string;
+        id: keyof Fields & string;
+    }>): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    except<Other extends CompatibleRelationProjection<Fields>>(other: ExecutableRelationQuery<Other>): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    execute(): Promise<readonly Result[]>;
+    // (undocumented)
+    executeOn(backend: GraphBackend | TransactionBackend): Promise<readonly Result[]>;
+    // (undocumented)
+    exists(): Promise<boolean>;
+    // (undocumented)
+    first(): Promise<Result | undefined>;
+    // (undocumented)
+    groupBy(build: (columns: RelationColumnContext<Fields>) => readonly DatabaseExpression[]): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    intersect<Other extends CompatibleRelationProjection<Fields>>(other: ExecutableRelationQuery<Other>): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    limit(value: number): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    map<Mapped>(mapper: (row: Result) => Mapped): ExecutableRelationQuery<Fields, Mapped>;
+    // (undocumented)
+    offset(value: number): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    orderBy(build: (columns: RelationColumnContext<Fields>) => DatabaseExpression, direction?: SortDirection, nulls?: "first" | "last"): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    page(options: Readonly<{
+        limit: number;
+        offset?: number;
+    }>): Promise<readonly Result[]>;
+    // (undocumented)
+    prepare(): Readonly<{
+        execute: (bindings: Readonly<Record<string, unknown>>) => Promise<readonly Result[]>;
+        bind: (bindings: Readonly<Record<string, unknown>>) => ExecutableRelationQuery<Fields, Result>;
+    }>;
+    // (undocumented)
+    prepare<const Parameters extends PreparedParameterDeclaration>(parameters: Parameters): Readonly<{
+        execute: (bindings: PreparedBindings<Parameters>) => Promise<readonly Result[]>;
+        bind: (bindings: PreparedBindings<Parameters>) => ExecutableRelationQuery<Fields, Result>;
+    }>;
+    // (undocumented)
+    project<const NextFields extends RelationProjection>(build: (columns: RelationColumnContext<Fields>) => NextFields): ExecutableRelationQuery<NextFields>;
+    // (undocumented)
+    stream(options?: Readonly<{
+        pageSize?: number;
+    }>): AsyncIterable<Result>;
+    // (undocumented)
+    toSQL(): Readonly<{
+        sql: string;
+        params: readonly unknown[];
+    }>;
+    // (undocumented)
+    union<Other extends CompatibleRelationProjection<Fields>>(other: ExecutableRelationQuery<Other>): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    unionAll<Other extends CompatibleRelationProjection<Fields>>(other: ExecutableRelationQuery<Other>): ExecutableRelationQuery<Fields, Result>;
+    // (undocumented)
+    where(build: (columns: RelationColumnContext<Fields>) => DatabaseExpression<boolean | undefined>): ExecutableRelationQuery<Fields, Result>;
 }
 
 // @public
@@ -4281,6 +4429,14 @@ type Predicate = Readonly<{
 // @public
 type PredicateExpression = ComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
 
+// @public (undocumented)
+type PreparedBindings<Parameters extends PreparedParameterDeclaration> = {
+    readonly [Name in keyof Parameters]: Parameters[Name] extends (DatabaseExpression<infer Value>) ? Value : never;
+};
+
+// @public
+type PreparedParameterDeclaration = Readonly<Record<string, DatabaseExpression>>;
+
 // @public
 class PreparedQuery<R> {
     constructor(config: PreparedQueryConfig<R>);
@@ -4797,6 +4953,78 @@ type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 // @public
 type RelationalIndexMethod = "btree" | "gin" | "trigram";
 
+// @public (undocumented)
+type RelationAst = DerivedRelation | RelationSource | SetRelation;
+
+// @public (undocumented)
+type RelationColumn = Readonly<{
+    outputName: string;
+    valueType: ValueType;
+    nullable: boolean;
+    identity?: Readonly<{
+        component: "id" | "kind";
+        alias: string;
+    }>;
+}>;
+
+// @public (undocumented)
+type RelationColumnContext<Fields extends RelationProjection> = {
+    readonly [Key in keyof Fields]: Fields[Key] extends (DatabaseExpression<infer Value, infer Scope>) ? DatabaseExpression<Value, Scope> : never;
+};
+
+// @public (undocumented)
+type RelationDefinition<Fields extends RelationProjection, Result> = Readonly<{
+    ast: RelationAst;
+    columns: readonly RelationColumn[];
+    fields: Fields;
+    config: QueryBuilderConfig;
+    provenance: RelationProvenance;
+    decodeRow: (row: Record<string, unknown>) => Result;
+    mapped?: boolean;
+}>;
+
+// @public (undocumented)
+type RelationOrder = Readonly<{
+    expression: DatabaseExpression;
+    direction: SortDirection;
+    nulls: "first" | "last";
+}>;
+
+// @public (undocumented)
+type RelationProjection = Readonly<Record<string, DatabaseExpression>>;
+
+// @public (undocumented)
+type RelationProjectionResult<Fields extends RelationProjection> = {
+    -readonly [Key in keyof Fields]: Fields[Key] extends (DatabaseExpression<infer Value>) ? Value : never;
+};
+
+// @public (undocumented)
+type RelationProvenance = Readonly<{
+    graphId: string;
+    executionTarget: object | undefined;
+    recordedAsOf: string | undefined;
+    checked: boolean;
+    temporalCoordinate: string;
+}>;
+
+// @public (undocumented)
+type RelationSource = Readonly<{
+    kind: "source";
+    query: QueryAst;
+    graphId: string;
+    options: CompileQueryOptions;
+}>;
+
+// @public (undocumented)
+type RelationState = Readonly<{
+    predicate?: DatabaseExpression<boolean | undefined>;
+    groupBy?: readonly DatabaseExpression[];
+    distinct: boolean;
+    orderBy: readonly RelationOrder[];
+    limit?: number;
+    offset?: number;
+}>;
+
 // @public
 type ReleaseIndexMaterializationClaimParams = Readonly<{
     indexName: string;
@@ -5187,6 +5415,15 @@ type SetOperation = Readonly<{
 
 // @public
 type SetOperationType = "union" | "unionAll" | "intersect" | "except";
+
+// @public (undocumented)
+type SetRelation = Readonly<{
+    kind: "set";
+    operator: "union" | "unionAll" | "intersect" | "except";
+    left: RelationAst;
+    right: RelationAst;
+    columns: readonly RelationColumn[];
+}>;
 
 // @public
 type ShortestPathOptions<G extends GraphDef> = BaseTraversalOptions<G>;

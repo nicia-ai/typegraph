@@ -60,6 +60,13 @@ const OPERATOR_MAP: Record<SetOperationType, string> = {
   except: "EXCEPT",
 };
 
+/** One closed operator vocabulary for graph and projected relation composition. */
+export function setOperationKeyword(operator: SetOperationType): string {
+  if (!Object.hasOwn(OPERATOR_MAP, operator))
+    throw new UnsupportedPredicateError("Unsupported set-operation operator");
+  return OPERATOR_MAP[operator];
+}
+
 type SetOperationPassState = Readonly<{
   dialect: DialectAdapter;
   graphId: string;
@@ -206,7 +213,7 @@ function compileSetOperationCore(
     dialect,
   );
 
-  const opSql = sql.raw(OPERATOR_MAP[op.operator]);
+  const opSql = sql.raw(setOperationKeyword(op.operator));
 
   return sql`${dialect.wrapSetOperationOperand(left)} ${opSql} ${dialect.wrapSetOperationOperand(right)}`;
 }

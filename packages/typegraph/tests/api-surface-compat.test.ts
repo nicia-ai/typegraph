@@ -80,6 +80,46 @@ const HEAD_OPTIONAL_NAMED_TYPE_WITH_REQUIRED_CHILD = BASE_BODY.replace(
   "type FixtureMandatoryOptions = Readonly<{\n    retries: number;\n}>;\n\n// @public (undocumented)\ntype FixtureAdvancedCapability = Readonly<{\n    mode: string;\n}>;",
 );
 
+const HEAD_MANDATORY_INPUT_UNION_WIDENED = BASE_BODY.replace(
+  "    mandatory: FixtureMandatoryOptions;",
+  "    mandatory: FixtureMandatoryOptions | FixtureAlternativeOptions;",
+).replace(
+  "type FixtureMandatoryOptions = Readonly<{\n    retries: number;\n}>;",
+  "type FixtureMandatoryOptions = Readonly<{\n    retries: number;\n}>;\n\n// @public (undocumented)\ntype FixtureAlternativeOptions = Readonly<{\n    strategy: string;\n}>;",
+);
+
+const BASE_WITH_MANDATORY_INPUT_UNION = HEAD_MANDATORY_INPUT_UNION_WIDENED;
+const HEAD_MANDATORY_INPUT_UNION_REPLACED =
+  BASE_WITH_MANDATORY_INPUT_UNION.replace(
+    "FixtureMandatoryOptions | FixtureAlternativeOptions",
+    "FixtureAlternativeOptions | FixtureReplacementOptions",
+  ).replace(
+    "type FixtureAlternativeOptions = Readonly<{\n    strategy: string;\n}>;",
+    "type FixtureAlternativeOptions = Readonly<{\n    strategy: string;\n}>;\n\n// @public (undocumented)\ntype FixtureReplacementOptions = Readonly<{\n    forceSync: boolean;\n}>;",
+  );
+
+const BASE_WITH_FUNCTION_INPUT_UNION =
+  BASE_BODY +
+  `
+// @public
+export function configureFixture(input: FixtureOldInput | string): FixtureResult;
+
+// @public (undocumented)
+type FixtureOldInput = Readonly<{ legacy: boolean }>;
+`;
+const HEAD_FUNCTION_INPUT_UNION_WIDENED =
+  BASE_WITH_FUNCTION_INPUT_UNION.replace(
+    "FixtureOldInput | string",
+    "FixtureOldInput | FixtureNewInput | string",
+  ) +
+  "\n// @public (undocumented)\ntype FixtureNewInput = Readonly<{ modern: boolean }>;\n";
+const HEAD_FUNCTION_INPUT_UNION_REPLACED =
+  BASE_WITH_FUNCTION_INPUT_UNION.replace(
+    "FixtureOldInput | string",
+    "FixtureNewInput | string",
+  ) +
+  "\n// @public (undocumented)\ntype FixtureNewInput = Readonly<{ modern: boolean }>;\n";
+
 // The regression guard for the fix above: swapping an EXISTING mandatory
 // field's value type for a brand-new, differently-shaped type must still
 // fail — `mandatory` was already required on `FixtureCapabilities` at the
@@ -263,6 +303,39 @@ const HEAD_RECORD_WRITER_CONFIG_RETYPED = BASE_WITH_RECORD_WRITER.replace(
   "type FixtureWriterConfig = Readonly<{\n    batchSize: number;\n}>;",
   "type FixtureWriterConfig = Readonly<{\n    batchSize: number;\n}>;\n\n// @public (undocumented)\ntype FixtureWriterConfigV2 = Readonly<{\n    batchSize: number;\n    flushIntervalMs: number;\n}>;",
 );
+
+const HEAD_NEW_DECLARATION_WITH_CALLBACK_INPUT =
+  BASE_BODY +
+  `
+// @public
+export interface FixtureRelation {
+    project(build: (fields: FixtureRelationFields) => FixtureRelationFields): FixtureRelation;
+}
+
+// @public (undocumented)
+type FixtureRelationFields = Readonly<{
+    name: string;
+}>;
+`;
+
+const HEAD_EXISTING_FUNCTION_ADDITIVE_OVERLOAD = BASE_BODY.replace(
+  "export function createFixtureStore(name: string, options: Readonly<{\n    timeout: number;\n}>): FixtureResult;",
+  "export function createFixtureStore(name: string, options: Readonly<{\n    timeout: number;\n}>): FixtureResult;\nexport function createFixtureStore(name: string, build: FixtureStoreBuilder): FixtureResult;",
+).replace(
+  "export interface FixtureQueryBuilder {",
+  "// @public (undocumented)\ntype FixtureStoreBuilder = Readonly<{\n    concurrency: number;\n}>;\n\nexport interface FixtureQueryBuilder {",
+);
+
+const BASE_WITH_STORE_BUILDER_OVERLOAD =
+  HEAD_EXISTING_FUNCTION_ADDITIVE_OVERLOAD;
+const HEAD_STORE_BUILDER_OVERLOAD_RETYPED =
+  BASE_WITH_STORE_BUILDER_OVERLOAD.replace(
+    "build: FixtureStoreBuilder",
+    "build: FixtureStoreBuilderV2",
+  ).replace(
+    "type FixtureStoreBuilder = Readonly<{\n    concurrency: number;\n}>;",
+    "type FixtureStoreBuilder = Readonly<{\n    concurrency: number;\n}>;\n\n// @public (undocumented)\ntype FixtureStoreBuilderV2 = Readonly<{\n    concurrency: number;\n    strategy: string;\n}>;",
+  );
 
 // Finding 8's coverage gap: T18 had no `export class` fixture at all, so the
 // class-METHOD half of `walkClassMembers`'s `calleeExisted` gating (as
@@ -514,6 +587,65 @@ describe("api-surface-compat", () => {
     );
   }, 30_000);
 
+  it("(b3a) reports a new required type introduced only by widening an existing input union", () => {
+    setupTaggedBaseFixture(fixtureDirectory);
+    writeFixtureReport(fixtureDirectory, HEAD_MANDATORY_INPUT_UNION_WIDENED);
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("gained REQUIRED");
+    expect(result.stdout).toContain(
+      "FixtureAlternativeOptions gained REQUIRED member `strategy` in a return-only position",
+    );
+  }, 30_000);
+
+  it("(b3b) fails when an existing input union loses an accepted constituent while adding a required replacement type", () => {
+    initGitRepo(fixtureDirectory);
+    writeFixtureReport(fixtureDirectory, BASE_WITH_MANDATORY_INPUT_UNION);
+    writeLedger(fixtureDirectory, "[]\n");
+    commitFixture(fixtureDirectory, "base with mandatory input union");
+    tagFixture(fixtureDirectory, "@nicia-ai/typegraph@0.10.0");
+
+    writeFixtureReport(fixtureDirectory, HEAD_MANDATORY_INPUT_UNION_REPLACED);
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "FixtureReplacementOptions gained REQUIRED member `forceSync`",
+    );
+  }, 30_000);
+
+  it("(b3c) reports a new type added to an existing function input union", () => {
+    initGitRepo(fixtureDirectory);
+    writeFixtureReport(fixtureDirectory, BASE_WITH_FUNCTION_INPUT_UNION);
+    writeLedger(fixtureDirectory, "[]\n");
+    commitFixture(fixtureDirectory, "base with function input union");
+    tagFixture(fixtureDirectory, "@nicia-ai/typegraph@0.10.0");
+    writeFixtureReport(fixtureDirectory, HEAD_FUNCTION_INPUT_UNION_WIDENED);
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("gained REQUIRED");
+    expect(result.stdout).toContain(
+      "FixtureNewInput gained REQUIRED member `modern` in a return-only position",
+    );
+  }, 30_000);
+
+  it("(b3d) fails when an existing function input union replaces an accepted named type", () => {
+    initGitRepo(fixtureDirectory);
+    writeFixtureReport(fixtureDirectory, BASE_WITH_FUNCTION_INPUT_UNION);
+    writeLedger(fixtureDirectory, "[]\n");
+    commitFixture(fixtureDirectory, "base with function input union");
+    tagFixture(fixtureDirectory, "@nicia-ai/typegraph@0.10.0");
+    writeFixtureReport(fixtureDirectory, HEAD_FUNCTION_INPUT_UNION_REPLACED);
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "FixtureNewInput gained REQUIRED member `modern`",
+    );
+  }, 30_000);
+
   it("(b4) passes when a brand-new function's mandatory parameter references a brand-new named type with a required member", () => {
     setupTaggedBaseFixture(fixtureDirectory);
     writeFixtureReport(
@@ -696,6 +828,52 @@ describe("api-surface-compat", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
       "FixtureLocateQueryV2 gained REQUIRED member `namespace`",
+    );
+  }, 30_000);
+
+  it("(d12) reports required input members reachable only through a brand-new declaration", () => {
+    setupTaggedBaseFixture(fixtureDirectory);
+    writeFixtureReport(
+      fixtureDirectory,
+      HEAD_NEW_DECLARATION_WITH_CALLBACK_INPUT,
+    );
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("gained REQUIRED");
+    expect(result.stdout).toContain(
+      "FixtureRelationFields gained REQUIRED member `name` in a return-only position",
+    );
+  }, 30_000);
+
+  it("(d13) reports required input members reachable only through an additive overload", () => {
+    setupTaggedBaseFixture(fixtureDirectory);
+    writeFixtureReport(
+      fixtureDirectory,
+      HEAD_EXISTING_FUNCTION_ADDITIVE_OVERLOAD,
+    );
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("gained REQUIRED");
+    expect(result.stdout).toContain(
+      "FixtureStoreBuilder gained REQUIRED member `concurrency` in a return-only position",
+    );
+  }, 30_000);
+
+  it("(d14) still fails when an existing overload's required named input is retyped", () => {
+    initGitRepo(fixtureDirectory);
+    writeFixtureReport(fixtureDirectory, BASE_WITH_STORE_BUILDER_OVERLOAD);
+    writeLedger(fixtureDirectory, "[]\n");
+    commitFixture(fixtureDirectory, "base with store builder overload");
+    tagFixture(fixtureDirectory, "@nicia-ai/typegraph@0.10.0");
+
+    writeFixtureReport(fixtureDirectory, HEAD_STORE_BUILDER_OVERLOAD_RETYPED);
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "FixtureStoreBuilderV2 gained REQUIRED member `strategy`",
     );
   }, 30_000);
 

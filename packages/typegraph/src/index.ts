@@ -947,6 +947,16 @@ export type {
   ExpressionValue,
   QueryExpressionContext,
 } from "./query/builder/expression-context";
+export type {
+  PreparedBindings,
+  PreparedParameterDeclaration,
+} from "./query/builder/prepared-bindings";
+export {
+  ExecutableRelationQuery,
+  type RelationColumnContext,
+  type RelationProjection,
+  type RelationProjectionResult,
+} from "./query/builder/relation";
 export { type DatabaseExpression, expr } from "./query/expressions";
 export {
   // ID utilities

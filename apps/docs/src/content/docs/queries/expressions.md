@@ -137,6 +137,10 @@ be pure. New code that should run in SQL should use `project()` explicitly. A `p
 runs exactly once when the query is built, and a `map()` callback runs exactly once for each decoded
 result row.
 
+Use [`asRelation()`](/queries/relations/) to compose a SQL projection with set operations, derived
+filters and aggregates, whole-row distinctness, and output-column ordering. Keep `map()` at the end
+of SQL composition; mapped relations cannot become new SQL projections or set operands.
+
 ## Grouping and aggregates
 
 Expression callbacks also work with grouping, aggregate projections, ordering, and HAVING:

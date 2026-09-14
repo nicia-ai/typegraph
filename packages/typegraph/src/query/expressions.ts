@@ -1,7 +1,7 @@
 import { assertPortableCountDistinctValueType } from "./aggregate-value-types";
 import type { FieldRef, QueryAst, ValueType } from "./ast";
 
-export type DatabaseJsonValue =
+type DatabaseJsonValue =
   | boolean
   | number
   | string
@@ -17,73 +17,73 @@ export type ExpressionComparisonOperator =
 export type AggregateOperator =
   "avg" | "count" | "countDistinct" | "max" | "min" | "sum";
 
-export type FieldExpressionNode = Readonly<{
+type FieldExpressionNode = Readonly<{
   kind: "field";
   field: FieldRef;
 }>;
-export type LiteralExpressionNode = Readonly<{
+type LiteralExpressionNode = Readonly<{
   kind: "literal";
   value: DatabaseLiteral;
 }>;
-export type ParameterExpressionNode = Readonly<{
+type ParameterExpressionNode = Readonly<{
   kind: "parameter";
   name: string;
 }>;
-export type ArithmeticExpressionNode = Readonly<{
+type ArithmeticExpressionNode = Readonly<{
   kind: "arithmetic";
   operator: ArithmeticOperator;
   left: DatabaseExpression;
   right: DatabaseExpression;
 }>;
-export type ComparisonExpressionNode = Readonly<{
+type ComparisonExpressionNode = Readonly<{
   kind: "comparison";
   operator: ExpressionComparisonOperator;
   left: DatabaseExpression;
   right: DatabaseExpression;
 }>;
-export type BooleanExpressionNode = Readonly<{
+type BooleanExpressionNode = Readonly<{
   kind: "boolean";
   operator: "and" | "or";
   operands: readonly DatabaseExpression<boolean | undefined>[];
 }>;
-export type NotExpressionNode = Readonly<{
+type NotExpressionNode = Readonly<{
   kind: "not";
   operand: DatabaseExpression<boolean | undefined>;
 }>;
-export type NullCheckExpressionNode = Readonly<{
+type NullCheckExpressionNode = Readonly<{
   kind: "null_check";
   operator: "isNull" | "isNotNull";
   operand: DatabaseExpression;
 }>;
-export type AggregateExpressionNode = Readonly<{
+type AggregateExpressionNode = Readonly<{
   kind: "aggregate";
   operator: AggregateOperator;
   operand?: DatabaseExpression | undefined;
 }>;
-export type CoalesceExpressionNode = Readonly<{
+type CoalesceExpressionNode = Readonly<{
   kind: "coalesce";
   operands: readonly DatabaseExpression[];
 }>;
-export type ConditionalExpressionNode = Readonly<{
+type ConditionalExpressionNode = Readonly<{
   kind: "conditional";
   condition: DatabaseExpression<boolean | undefined>;
   then: DatabaseExpression;
   otherwise: DatabaseExpression;
 }>;
-export type NumericConversionExpressionNode = Readonly<{
+type NumericConversionExpressionNode = Readonly<{
   kind: "numeric_conversion";
   operand: DatabaseExpression;
 }>;
-export type OuterReferenceExpressionNode = Readonly<{
+type OuterReferenceExpressionNode = Readonly<{
   kind: "outer_reference";
   expression: DatabaseExpression;
   outerScopeIdentity: symbol;
 }>;
-export type ExistsSubqueryExpressionNode = Readonly<{
+type ExistsSubqueryExpressionNode = Readonly<{
   kind: "exists_subquery";
   subquery: QueryAst;
 }>;
-export type ScalarSubqueryExpressionNode = Readonly<{
+type ScalarSubqueryExpressionNode = Readonly<{
   kind: "scalar_subquery";
   subquery: QueryAst;
 }>;

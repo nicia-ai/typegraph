@@ -26,6 +26,16 @@ export { ExecutableQuery } from "./executable-query";
 export { executeOneStatementBatch } from "./one-statement-batch";
 export { PreparedQuery } from "./prepared-query";
 export { type IdentityTraversalOption, QueryBuilder } from "./query-builder";
+export {
+  createExecutableRelation,
+  createProjectionRelation,
+  ExecutableRelationQuery,
+  type RelationColumnContext,
+  type RelationDefinition,
+  type RelationProjection,
+  type RelationProjectionResult,
+  type RelationProvenance,
+} from "./relation";
 export { TraversalBuilder } from "./traversal-builder";
 export { UnionableQuery } from "./unionable-query";
 

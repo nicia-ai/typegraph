@@ -14,7 +14,7 @@ const ORDER_COLUMN = "typegraphbatchordinal";
 const ORDER_KEY_PREFIX = "typegraphbatchorder";
 
 /** SQLite's default compound-select ceiling; kept as the portable request cap. */
-export const MAX_ONE_STATEMENT_BATCH_READS = 500;
+const MAX_ONE_STATEMENT_BATCH_READS = 500;
 
 export function oneStatementBatchOrderColumn(index: number): string {
   return `${ORDER_KEY_PREFIX}${index}`;

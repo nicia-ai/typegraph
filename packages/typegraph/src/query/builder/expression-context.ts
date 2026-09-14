@@ -48,7 +48,7 @@ export type ExpressionValue<Value, Scope extends string> = DatabaseExpression<
   : NonNullable<Value> extends object ? ExpressionObjectChildren<Value, Scope>
   : unknown);
 
-export type ExpressionMetadata<
+type ExpressionMetadata<
   Scope extends string,
   Optional extends boolean = false,
 > = Readonly<{

@@ -6,6 +6,10 @@ description: GROUP BY, aggregate functions, and HAVING clauses
 TypeGraph supports SQL-style aggregations for analytics and reporting. Group nodes by properties,
 compute aggregates like COUNT and SUM, and filter groups with HAVING clauses.
 
+Call [`asRelation()`](/queries/relations/) on an aggregate query to filter its completed output or
+aggregate those results again. Both expression aggregates and compatibility aggregates support
+prepared execution and one-statement batching through the shared relation API.
+
 Typed expression callbacks are recommended for new queries. They provide schema-checked operands,
 computed aggregate arguments, and inferred nullable result types:
 

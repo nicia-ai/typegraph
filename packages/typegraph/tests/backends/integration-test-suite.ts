@@ -82,6 +82,7 @@ import {
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
+  registerRelationalCompositionIntegrationTests,
   registerRemovalMaterializationIntegrationTests,
   registerSchemaCheckedReadIntegrationTests,
   registerSelectiveRetryIntegrationTests,
@@ -282,6 +283,7 @@ export function createIntegrationTestSuite<
 
     registerAggregateIntegrationTests(context);
     registerDatabaseExpressionQueryIntegrationTests(context);
+    registerRelationalCompositionIntegrationTests(context);
     registerExpressionSubqueryQueryIntegrationTests(context);
     registerQueryTerminalIntegrationTests(context);
     registerBackendProvenanceIntegrationTests(context);

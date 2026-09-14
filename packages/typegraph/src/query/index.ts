@@ -117,7 +117,17 @@ export { createQueryBuilder } from "./builder";
 export { type AggregateResult, ExecutableAggregateQuery } from "./builder";
 export { ExecutableQuery } from "./builder";
 export { QueryBuilder } from "./builder";
+export type {
+  PreparedBindings,
+  PreparedParameterDeclaration,
+} from "./builder/prepared-bindings";
 export { PreparedQuery } from "./builder/prepared-query";
+export {
+  ExecutableRelationQuery,
+  type RelationColumnContext,
+  type RelationProjection,
+  type RelationProjectionResult,
+} from "./builder/relation";
 export { UnionableQuery } from "./builder/unionable-query";
 
 // Aggregate functions

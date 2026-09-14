@@ -62,6 +62,7 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 | [22-breach-forensics.ts](./22-breach-forensics.ts) | Bitemporal + graph: valid-time-windowed grants (`validFrom`/`validTo`), composed pins (`store.asOf(breachAt).asOfRecorded(alertAnchor)`), `reachable()` for the true blast radius, and a pinned `shortestPath()` that names the attack path incident response later deleted |
 | [26-store-views.ts](./26-store-views.ts) | Read lenses over one graph: view modes (current / includeTombstones / includeEnded), asOf-pinned edge reads, consistent snapshots, and the read-only refusal contract |
 | [27-typed-expressions.ts](./27-typed-expressions.ts) | Typed database filtering, arithmetic, projection, grouping, aggregation, and row mapping |
+| [28-relational-composition.ts](./28-relational-composition.ts) | Derived aggregates, visible-column set operations, typed prepared batches, and deterministic streaming |
 
 ### Provenance & Retraction
 

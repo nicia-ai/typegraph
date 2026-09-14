@@ -34,9 +34,9 @@ const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
 const REASONED_FLOOR = 94;
-// ExecutableProjectionQuery.toSQL() adds the same guarded compileSql read and
-// invocation used by the existing executable query variants. Both accesses
-// remain below compileSql's measured deferred ceiling of 9.
+// Projection and relation toSQL() share renderQuerySql's guarded capability read
+// and invocation. Adding relation execution does not add scattered compileSql
+// accesses or raise its measured deferred ceiling of 9.
 const DEFERRED_LIVE_TOTAL = 214;
 const DEFERRED_DECLARED_TOTAL = 217;
 const EXCLUDED_COUNT = 5;

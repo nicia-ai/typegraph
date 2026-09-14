@@ -14,6 +14,11 @@ import { assertExpressionScope, getExpressionScope } from "./expression-scope";
 import type { ExpressionProjectionEntries } from "./expression-subqueries";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { bindQueryParameters, hasParameterReferences } from "./prepared-query";
+import {
+  createProjectionRelation,
+  type ExecutableRelationQuery,
+} from "./relation";
+import { renderQuerySql } from "./render-query-sql";
 import type { QueryBuilderConfig, QueryBuilderState } from "./types";
 import { validateQueryRange, validateSortDirection } from "./validation";
 
@@ -125,6 +130,20 @@ export class ExecutableProjectionQuery<
     })) as unknown as ExpressionProjectionEntries<Fields>;
   }
 
+  /** Enters the shared relational composition surface for derived queries and set operations. */
+  asRelation(): ExecutableRelationQuery<Fields, Result> {
+    return createProjectionRelation({
+      config: this.#config,
+      ast: this.toAst(),
+      fields: this.#fields,
+      checked:
+        getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
+        undefined,
+      mapped: this.#mapper !== undefined,
+      decodeRow: (row) => this.#decodeRow(row),
+    });
+  }
+
   compile() {
     return compileQuery(
       this.toAst(),
@@ -133,10 +152,7 @@ export class ExecutableProjectionQuery<
     );
   }
   toSQL(): Readonly<{ sql: string; params: readonly unknown[] }> {
-    const backend = this.#requireBackend();
-    if (backend.compileSql === undefined)
-      throw new ConfigurationError("The backend cannot render SQL text.");
-    return backend.compileSql(this.compile());
+    return renderQuerySql(this.#requireBackend(), () => this.compile());
   }
 
   execute(): Promise<readonly Result[]> {

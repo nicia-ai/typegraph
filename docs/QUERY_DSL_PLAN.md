@@ -1,6 +1,6 @@
 # Query DSL consolidation plan
 
-Status: phases 1–3 implemented in the working tree on 2026-09-14. Phases 4–6 remain proposals.
+Status: phases 1–4 implemented in the working tree on 2026-09-14. Phases 5–6 remain proposals.
 
 ## Objective
 
@@ -131,7 +131,7 @@ behavior.
 ### Implemented boundaries
 
 Explicit projections support execution, SQL inspection, scalar terminals, preparation, and `batchOnce()`. Prepared
-binding names and values are validated at runtime; inferred binding-object types remain phase 4 work. Boolean
+binding names and values are validated at runtime; phase 4 adds typed preparation declarations on relations. Boolean
 combinators conservatively include `undefined` in their result type. Scalar subqueries require one projected column
 and an explicit limit of at most one row, unless the projection is an ungrouped aggregate. Existence subqueries
 require a nonempty SQL projection. Both inherit and validate the enclosing temporal coordinate. JSON properties
@@ -162,6 +162,25 @@ that collide with expression members are accessible through `$get(key)`.
 
 Exercise union-then-order, union-then-limit, aggregate-then-filter, count-after-distinct, nullable aggregate ordering,
 prepared composition, and batched derived queries on each backend. Check duplicate sort keys and empty results.
+
+### Implemented boundaries
+
+`asRelation()` enters output-column scope from explicit projections and compatibility aggregate queries. The shared
+structural relation tree supports derived filters, projections and aggregates, scalar set equality, ordering, terminals,
+preparation and one-statement batching. Legacy hydrated `select()` set operations retain their compatibility behavior.
+
+`prepare(parameters)` infers binding names and values from a declaration of reused typed parameter expressions; it
+validates that declaration against all source and derived parameters. Automatic recovery of binding types from every
+earlier callback is not implemented. Undeclared `prepare()` retains its runtime-validated compatibility type.
+
+`distinctNodes()` admits only proven kind/id projections from one node alias, with an identity-only representative
+policy. It refuses extra payload, edge and path columns. Derived results do not introduce implicit graph traversal.
+`page()` and `stream()` require whole-projection distinctness and direct ordering by every scalar output column exactly
+once. They use bounded offset pages; stable results across concurrent writes require an appropriate transaction snapshot.
+
+Checked relation execution is explicitly refused. Recorded coordinates survive direct execution and preparation, while
+recorded one-statement batches retain their existing refusal. Structured or unresolved equality keys are refused for
+distinct set operations and grouping; `unionAll()` can preserve structured values without comparing them.
 
 ## Phase 5: Clarify graph matching and result semantics
 

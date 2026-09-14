@@ -16,6 +16,11 @@ export type DatabaseExpressionCompilerContext = Readonly<{
   cteColumnPrefix?: string;
   allowAggregates?: boolean;
   aggregateClause?: string;
+  /** Resolves fields for non-graph sources such as derived relation outputs. */
+  compileFieldExpression?: (
+    field: FieldRef,
+    expression: DatabaseExpression,
+  ) => SqlFragment | undefined;
   resolveFieldCteAlias?: (field: FieldRef) => string | undefined;
   compileSubquery?: (
     subquery: QueryAst,
@@ -26,25 +31,6 @@ export type DatabaseExpressionCompilerContext = Readonly<{
     outerScopeIdentity: symbol,
   ) => SqlFragment;
 }>;
-
-/** Builds field routing for expressions compiled in a graph query's CTE scope. */
-export function createDatabaseExpressionCompilerContext(
-  ast: QueryAst,
-  dialect: DialectAdapter,
-): DatabaseExpressionCompilerContext {
-  const edgeCteAliases = new Map(
-    ast.traversals.map((traversal) => [
-      traversal.edgeAlias,
-      `cte_${traversal.nodeAlias}`,
-    ]),
-  );
-  return {
-    dialect,
-    resolveFieldCteAlias(field) {
-      return edgeCteAliases.get(field.alias) ?? `cte_${field.alias}`;
-    },
-  };
-}
 
 function compileLiteral(
   value: DatabaseLiteral,
@@ -132,6 +118,8 @@ function compileNode(
 
   switch (node.kind) {
     case "field": {
+      const resolved = context.compileFieldExpression?.(node.field, expression);
+      if (resolved !== undefined) return resolved;
       return compileFieldValue(
         node.field,
         context.dialect,

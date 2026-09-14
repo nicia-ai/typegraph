@@ -54,6 +54,7 @@ export { registerReconciledSchemaIntegrationTests } from "./reconciled-schema";
 export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-binding";
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
+export { registerRelationalCompositionIntegrationTests } from "./relational-composition";
 export { registerRemovalMaterializationIntegrationTests } from "./removal-materialization";
 export { registerSchemaCheckedReadIntegrationTests } from "./schema-checked-read";
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";

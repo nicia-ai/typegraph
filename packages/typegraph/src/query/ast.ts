@@ -208,7 +208,7 @@ type NotPredicate = Readonly<{
 }>;
 
 /** A typed Boolean database expression used as a SQL predicate. */
-export type DatabaseExpressionPredicate = Readonly<{
+type DatabaseExpressionPredicate = Readonly<{
   __type: "database_expression_predicate";
   expression: DatabaseExpression<boolean | undefined>;
 }>;
@@ -482,7 +482,7 @@ export function mergeEdgeKinds(traversal: Traversal): readonly string[] {
 /**
  * Supported aggregate functions.
  */
-export type AggregateFunction =
+type AggregateFunction =
   "count" | "countDistinct" | "sum" | "avg" | "min" | "max";
 
 /**
