@@ -6,6 +6,33 @@ description: GROUP BY, aggregate functions, and HAVING clauses
 TypeGraph supports SQL-style aggregations for analytics and reporting. Group nodes by properties,
 compute aggregates like COUNT and SUM, and filter groups with HAVING clauses.
 
+Call [`asRelation()`](/queries/relations/) on an aggregate query to filter its completed output or
+aggregate those results again. Both expression aggregates and compatibility aggregates support
+prepared execution and one-statement batching through the shared relation API.
+
+Typed expression callbacks are recommended for new queries. They provide schema-checked operands,
+computed aggregate arguments, and inferred nullable result types:
+
+```typescript
+import { expr } from "@nicia-ai/typegraph";
+
+const companySizes = await store
+  .query()
+  .from("Person", "p")
+  .groupBy((e) => [e.p.department])
+  .having((e) => expr.gt(expr.count(e.p.id), expr.literal(5)))
+  .aggregate((e) => ({
+    department: e.p.department,
+    employees: expr.count(e.p.id),
+    payroll: expr.sum(e.p.salary),
+  }))
+  .execute();
+```
+
+The string helpers below remain supported as compatibility adapters. See
+[Database Expressions](/queries/expressions) for arithmetic, conditions, projection, and scope
+safety.
+
 ## When to Use Aggregations
 
 Aggregations are useful for:
@@ -63,6 +90,10 @@ countDistinct("p")              // COUNT(DISTINCT p.id)
 countDistinct("p", "department") // COUNT(DISTINCT p.props.department)
 ```
 
+Distinct counts support string, number, Boolean, and date fields. Structured JSON, array,
+embedding, and unresolved dynamic fields are refused so SQLite and PostgreSQL cannot disagree about
+value equality.
+
 ### sum
 
 Sum numeric values:
@@ -87,6 +118,15 @@ Minimum and maximum values:
 min("p", "hireDate")    // MIN(p.props.hireDate)
 max("p", "salary")      // MAX(p.props.salary)
 ```
+
+Aggregate results follow JavaScript value conventions. `count()` and
+`countDistinct()` always return a number, including `0` for an empty input.
+`sum()`, `avg()`, `min()`, and `max()` return `undefined` when SQL produces
+`NULL`, such as an aggregate over an empty input. Minimum and maximum preserve
+the schema field's scalar type, so string results remain strings and date
+results are decoded as `Date` values. Minimum and maximum support string, number,
+and date fields; schema-known boolean and structured operands are refused.
+Sum and average require numeric fields.
 
 ### field
 

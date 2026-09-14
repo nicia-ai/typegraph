@@ -16,7 +16,8 @@ Every query builder method falls into one of these categories:
 | [Filter](/queries/filter) | Reduce the result set | `whereNode()`, `whereEdge()` |
 | [Traverse](/queries/traverse) | Navigate relationships | `traverse()`, `optionalTraverse()`, `to()` |
 | [Recursive](/queries/recursive) | Variable-length paths | `recursive()` |
-| [Shape](/queries/shape) | Transform output structure | `select()`, `aggregate()` |
+| [Shape](/queries/shape) | Transform output structure | `select()`, `project()`, `map()`, `aggregate()` |
+| [Expressions](/queries/expressions) | Typed database calculations | `expr`, `project()`, expression callbacks |
 | [Aggregate](/queries/aggregate) | Summarize data | `groupBy()`, `count()`, `sum()`, `avg()` |
 | [Order](/queries/order) | Control result ordering/size | `orderBy()`, `limit()`, `offset()` |
 | [Temporal](/queries/temporal) | Time-based queries | `temporal()` |
@@ -77,6 +78,11 @@ const results = await store
   invalid: ctx.p.nonexistent,  // TypeScript error!
 }))
 ```
+
+For new database-side projections and calculations, use typed
+[database expressions](/queries/expressions). `project()` compiles its callback to SQL, while
+`map()` transforms decoded rows in JavaScript. Existing `select()` callbacks retain their
+compatibility behavior.
 
 ## When to Use Queries vs Store API
 
@@ -151,6 +157,7 @@ const page = await store
   .from("Event", "e")
   .orderBy("e", "date", "desc")
   .limit(100)
+  .select((ctx) => ctx.e)
   .execute();
 ```
 

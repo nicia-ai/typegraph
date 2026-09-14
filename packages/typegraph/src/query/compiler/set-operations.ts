@@ -27,6 +27,7 @@ import type { SetOperationType } from "../ast";
 import {
   type ComposableQuery,
   type FieldRef,
+  type OrderSpec,
   type ProjectedField,
   type Projection,
   type QueryAst,
@@ -37,6 +38,7 @@ import { type VectorStrategy } from "../dialect/vector-strategy";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { emitSetOperationQuerySql } from "./emitter";
+import { compileLimitOffsetClauses } from "./limit-offset";
 import { runCompilerPass } from "./passes";
 import { type LogicalPlan, lowerSetOperationToLogicalPlan } from "./plan";
 
@@ -57,6 +59,13 @@ const OPERATOR_MAP: Record<SetOperationType, string> = {
   intersect: "INTERSECT",
   except: "EXCEPT",
 };
+
+/** One closed operator vocabulary for graph and projected relation composition. */
+export function setOperationKeyword(operator: SetOperationType): string {
+  if (!Object.hasOwn(OPERATOR_MAP, operator))
+    throw new UnsupportedPredicateError("Unsupported set-operation operator");
+  return OPERATOR_MAP[operator];
+}
 
 type SetOperationPassState = Readonly<{
   dialect: DialectAdapter;
@@ -204,7 +213,7 @@ function compileSetOperationCore(
     dialect,
   );
 
-  const opSql = sql.raw(OPERATOR_MAP[op.operator]);
+  const opSql = sql.raw(setOperationKeyword(op.operator));
 
   return sql`${dialect.wrapSetOperationOperand(left)} ${opSql} ${dialect.wrapSetOperationOperand(right)}`;
 }
@@ -299,9 +308,12 @@ function normalizeFieldRefKey(field: FieldRef): string {
  * Uses normalized keys to handle equivalent field representations.
  */
 function matchFieldToProjection(
-  field: FieldRef,
+  field: OrderSpec["field"],
   projection: Projection,
 ): ProjectedField | undefined {
+  if (field.__type === "database_expression") {
+    return projection.fields.find((projected) => projected.source === field);
+  }
   const targetKey = normalizeFieldRefKey(field);
 
   for (const projected of projection.fields) {
@@ -354,7 +366,9 @@ function buildSetOperationSuffixClauses(
       if (!projected) {
         // Build a descriptive error message
         const fieldDesc =
-          orderSpec.field.jsonPointer ?
+          orderSpec.field.__type === "database_expression" ?
+            "database expression"
+          : orderSpec.field.jsonPointer ?
             `${orderSpec.field.alias}.props${orderSpec.field.jsonPointer}`
           : `${orderSpec.field.alias}.${orderSpec.field.path.join(".")}`;
         const availableFields = projection.fields
@@ -387,15 +401,7 @@ function buildSetOperationSuffixClauses(
     clauses.push(sql`ORDER BY ${sql.join(orderParts, sql`, `)}`);
   }
 
-  // Handle LIMIT
-  if (op.limit !== undefined) {
-    clauses.push(sql`LIMIT ${op.limit}`);
-  }
-
-  // Handle OFFSET
-  if (op.offset !== undefined) {
-    clauses.push(sql`OFFSET ${op.offset}`);
-  }
+  clauses.push(...compileLimitOffsetClauses(op.limit, op.offset, dialect));
 
   return clauses;
 }

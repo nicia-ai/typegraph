@@ -47,6 +47,7 @@ import {
   type EmptyEdgeAliasMap,
   type EmptyRecursiveAliasMap,
   type NodeAlias,
+  type QualifiedRecursivePathOption,
   type QueryBuilderConfig,
   type QueryBuilderState,
   type QueryCoordinateState,
@@ -101,6 +102,7 @@ interface VariableLengthState {
   cyclePolicy: RecursiveCyclePolicy;
   pathEnabled: boolean;
   pathAlias?: string;
+  pathFormat?: "qualified";
   depthEnabled: boolean;
   depthAlias?: string;
 }
@@ -152,7 +154,57 @@ function resolveAliasOption(
     return;
   }
 
-  return option;
+  return typeof option === "string" ? option : undefined;
+}
+
+function resolvePathOption(option: unknown):
+  | Readonly<{
+      enabled: boolean;
+      alias?: string;
+      format?: "qualified";
+    }>
+  | undefined {
+  if (option === undefined) return;
+  if (option === false) return { enabled: false };
+  if (option === true) return { enabled: true };
+  if (typeof option === "string") return { enabled: true, alias: option };
+
+  if (typeof option !== "object" || option === null || Array.isArray(option)) {
+    throw new TypeError(
+      'path must be a boolean, an alias string, or { format: "qualified", alias?: string }',
+    );
+  }
+
+  const candidate = option as Readonly<{
+    alias?: unknown;
+    format?: unknown;
+  }>;
+  if (candidate.format !== "qualified") {
+    throw new TypeError('path.format must be "qualified"');
+  }
+  if (candidate.alias !== undefined && typeof candidate.alias !== "string") {
+    throw new TypeError("path.alias must be a string");
+  }
+
+  return {
+    enabled: true,
+    format: "qualified",
+    ...(candidate.alias !== undefined && { alias: candidate.alias }),
+  };
+}
+
+function withoutPathMetadata(state: VariableLengthState): VariableLengthState {
+  const {
+    pathAlias: _pathAlias,
+    pathFormat: _pathFormat,
+    ...stateWithoutPathMetadata
+  } = state;
+  return stateWithoutPathMetadata;
+}
+
+function withoutDepthAlias(state: VariableLengthState): VariableLengthState {
+  const { depthAlias: _depthAlias, ...stateWithoutDepthAlias } = state;
+  return stateWithoutDepthAlias;
 }
 
 /**
@@ -170,7 +222,7 @@ export class TraversalBuilder<
   Dir extends TraversalDirection = "out",
   Optional extends boolean = false,
   DC extends boolean | string = false,
-  PC extends boolean | string = false,
+  PC extends boolean | string | QualifiedRecursivePathOption = false,
   RecAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap,
   CoordinateState extends QueryCoordinateState = "open",
   ET extends AnyEdgeType = EdgeTypeForKey<G, EK>,
@@ -231,7 +283,11 @@ export class TraversalBuilder<
     Dir,
     Optional,
     O extends { depth: infer D extends boolean | string } ? D : DC,
-    O extends { path: infer P extends boolean | string } ? P : PC,
+    O extends (
+      { path: infer P extends boolean | string | QualifiedRecursivePathOption }
+    ) ?
+      P
+    : PC,
     RecAliases,
     CoordinateState,
     ET
@@ -246,12 +302,19 @@ export class TraversalBuilder<
       throw new Error("minHops must be <= maxHops");
     }
 
-    const pathAlias = resolveAliasOption(options?.path);
+    const pathOption = resolvePathOption(options?.path);
+    const pathAlias = pathOption?.alias;
     const depthAlias = resolveAliasOption(options?.depth);
     if (pathAlias !== undefined) validateSqlIdentifier(pathAlias);
     if (depthAlias !== undefined) validateSqlIdentifier(depthAlias);
     const cyclePolicy =
       options?.cyclePolicy ?? this.#variableLength.cyclePolicy;
+    const pathState =
+      pathOption === undefined ?
+        this.#variableLength
+      : withoutPathMetadata(this.#variableLength);
+    const variableLengthState =
+      options?.depth === undefined ? pathState : withoutDepthAlias(pathState);
 
     return new TraversalBuilder<
       G,
@@ -262,7 +325,13 @@ export class TraversalBuilder<
       Dir,
       Optional,
       O extends { depth: infer D extends boolean | string } ? D : DC,
-      O extends { path: infer P extends boolean | string } ? P : PC,
+      O extends (
+        {
+          path: infer P extends boolean | string | QualifiedRecursivePathOption;
+        }
+      ) ?
+        P
+      : PC,
       RecAliases,
       CoordinateState,
       ET
@@ -276,18 +345,23 @@ export class TraversalBuilder<
       this.#inverseEdgeKinds,
       this.#optional,
       {
-        ...this.#variableLength,
+        ...variableLengthState,
         enabled: true,
         minDepth,
         maxDepth,
         cyclePolicy,
-        ...(options?.path !== undefined && {
-          pathEnabled: options.path !== false,
-          ...(pathAlias !== undefined && { pathAlias }),
-        }),
+        ...(pathOption === undefined ?
+          {}
+        : {
+            pathEnabled: pathOption.enabled,
+            ...(pathAlias === undefined ? {} : { pathAlias }),
+            ...(pathOption.format === undefined ?
+              {}
+            : { pathFormat: pathOption.format }),
+          }),
         ...(options?.depth !== undefined && {
           depthEnabled: options.depth !== false,
-          ...(depthAlias !== undefined && { depthAlias }),
+          ...(depthAlias === undefined ? {} : { depthAlias }),
         }),
       },
       this.#pendingEdgePredicates,
@@ -399,22 +473,22 @@ export class TraversalBuilder<
 
       switch (valueType) {
         case "string": {
-          return stringField(ref);
+          return stringField(ref) as unknown as BaseFieldAccessor;
         }
         case "number": {
-          return numberField(ref);
+          return numberField(ref) as unknown as BaseFieldAccessor;
         }
         case "boolean": {
           return baseField(ref);
         }
         case "date": {
-          return dateField(ref);
+          return dateField(ref) as unknown as BaseFieldAccessor;
         }
         case "array": {
-          return arrayField(ref);
+          return arrayField(ref) as unknown as BaseFieldAccessor;
         }
         case "object": {
-          return objectField(ref);
+          return objectField(ref) as unknown as BaseFieldAccessor;
         }
         case "embedding":
         case "unknown":
@@ -491,7 +565,7 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"], Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   >;
 
@@ -503,7 +577,7 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   >;
 
@@ -515,7 +589,7 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   > {
     validateSqlIdentifier(alias);
@@ -532,7 +606,7 @@ export class TraversalBuilder<
       G,
       Aliases & Record<A, NodeAlias<NodeType, Optional>>,
       EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-      RecAliases & BuildRecursiveAliases<DC, PC, A>,
+      RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
       CoordinateState
     >;
   }
@@ -549,7 +623,7 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   > {
     validateSqlIdentifier(alias);
@@ -581,7 +655,7 @@ export class TraversalBuilder<
       G,
       Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
       EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
-      RecAliases & BuildRecursiveAliases<DC, PC, A>,
+      RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
       CoordinateState
     >;
   }
@@ -629,6 +703,11 @@ export class TraversalBuilder<
             cyclePolicy: this.#variableLength.cyclePolicy,
             ...(this.#variableLength.pathEnabled && {
               pathAlias: this.#variableLength.pathAlias ?? `${alias}_path`,
+              ...(this.#variableLength.pathFormat === undefined ?
+                {}
+              : {
+                  pathFormat: this.#variableLength.pathFormat,
+                }),
             }),
             ...(this.#variableLength.depthEnabled && {
               depthAlias: this.#variableLength.depthAlias ?? `${alias}_depth`,

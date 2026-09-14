@@ -22,7 +22,6 @@ import { edgeOrderColumnName, type EdgeReadWindow } from "./neighbors";
 
 type BuildReachableCteOptions = Readonly<{
   graphId: string;
-  sourceId: string;
   edgeKinds: readonly string[];
   maxHops: number;
   direction: TraversalDirection;
@@ -34,6 +33,7 @@ type BuildReachableCteOptions = Readonly<{
    * pass `"includeEnded"`.
    */
   temporalMode: TemporalMode;
+  currentTimestamp?: SqlFragment;
   /** ISO-8601 timestamp used when `temporalMode === "asOf"`. */
   asOf?: string;
   /** Recorded/system-time timestamp for recorded-pinned reads. */
@@ -51,7 +51,11 @@ type BuildReachableCteOptions = Readonly<{
   /** Operation label echoed in the refusal's `details.operation`. */
   operation: string;
   edgeWindows?: Readonly<Record<string, EdgeReadWindow | undefined>>;
-}>;
+}> &
+  (
+    | Readonly<{ sourceId: string; sourceIds?: never }>
+    | Readonly<{ sourceId?: never; sourceIds: readonly string[] }>
+  );
 
 export function buildReachableCte(
   options: BuildReachableCteOptions,
@@ -62,7 +66,7 @@ export function buildReachableCte(
     sql.raw("e.kind"),
     options.edgeKinds,
   );
-  const currentTimestamp = currentReadInstant();
+  const currentTimestamp = options.currentTimestamp ?? currentReadInstant();
   const nodeTemporalFilter = compileTemporalFilter({
     mode: options.temporalMode,
     asOf: options.asOf,
@@ -109,7 +113,15 @@ export function buildReachableCte(
     baseColumns.push(sql`${initialPath} AS path`);
   }
 
-  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND ${nodeTemporalFilter}`;
+  if (options.sourceIds !== undefined) baseColumns.push(sql`n.id AS origin_id`);
+  const sourceFilter =
+    options.sourceIds === undefined ? sql`n.id = ${options.sourceId}`
+    : options.sourceIds.length === 0 ? sql`1 = 0`
+    : sql`n.id IN (${sql.join(
+        options.sourceIds.map((id) => sql`${id}`),
+        sql`, `,
+      )})`;
+  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND ${sourceFilter} AND ${nodeTemporalFilter}`;
 
   const recursiveColumns: SqlFragment[] = [
     sql`n.id`,
@@ -119,6 +131,8 @@ export function buildReachableCte(
   if (pathExtension !== undefined) {
     recursiveColumns.push(sql`${pathExtension} AS path`);
   }
+
+  if (options.sourceIds !== undefined) recursiveColumns.push(sql`r.origin_id`);
 
   const recursiveWhere: SqlFragment[] = [
     sql`e.graph_id = ${options.graphId}`,

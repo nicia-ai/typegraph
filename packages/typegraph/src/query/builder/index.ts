@@ -26,6 +26,16 @@ export { ExecutableQuery } from "./executable-query";
 export { executeOneStatementBatch } from "./one-statement-batch";
 export { PreparedQuery } from "./prepared-query";
 export { type IdentityTraversalOption, QueryBuilder } from "./query-builder";
+export {
+  createExecutableRelation,
+  createProjectionRelation,
+  ExecutableRelationQuery,
+  type RelationColumnContext,
+  type RelationDefinition,
+  type RelationProjection,
+  type RelationProjectionResult,
+  type RelationProvenance,
+} from "./relation";
 export { TraversalBuilder } from "./traversal-builder";
 export { UnionableQuery } from "./unionable-query";
 
@@ -87,10 +97,16 @@ export {
   type NumberFieldAccessor,
   type ObjectFieldAccessor,
   type OneStatementBatchableQuery,
+  type OneStatementBatchReads,
   type OneStatementBatchResults,
   type PaginatedResult,
   type PaginateOptions,
   type PropsAccessor,
+  type QualifiedRecursivePath,
+  type QualifiedRecursivePathEdge,
+  type QualifiedRecursivePathElement,
+  type QualifiedRecursivePathNode,
+  type QualifiedRecursivePathOption,
   type QueryBuilderConfig,
   type QueryBuilderState,
   type QueryCoordinateState,
@@ -123,4 +139,5 @@ export {
 } from "./dynamic";
 
 // Validation utilities
+export type { BatchOnceOptions } from "./one-statement-batch";
 export { validateSqlIdentifier } from "./validation";

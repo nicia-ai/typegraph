@@ -15,6 +15,7 @@ export type RecursiveQueryEmitterInput = Readonly<{
   precedingCtes?: readonly SqlFragment[];
   projection: SqlFragment;
   recursiveCte: SqlFragment;
+  resultAlias?: string;
 }>;
 
 function assertRecursiveEmitterClauseAlignment(
@@ -61,7 +62,9 @@ export function emitRecursiveQuerySql(
     sql`WITH RECURSIVE`,
     cteList,
     sql`SELECT ${input.projection}`,
-    sql`FROM recursive_cte`,
+    input.resultAlias === undefined ?
+      sql`FROM recursive_cte`
+    : sql`FROM recursive_cte AS ${sql.identifier(input.resultAlias)}`,
     input.depthFilter,
   ];
 

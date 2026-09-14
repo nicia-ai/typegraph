@@ -1,3 +1,4 @@
+import { backendDerivationRoot } from "../../backend/derive-backend";
 /**
  * UnionableQuery - A query formed by combining multiple queries with set operations.
  */
@@ -7,6 +8,7 @@ import {
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
+import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
   type ComposableQuery,
@@ -23,6 +25,7 @@ import { mapResults } from "../execution";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
+import { assertCompatibleSetOperationProvenance } from "./one-statement-provenance";
 import { composableQueryHasParameterReferences } from "./prepared-query";
 import {
   buildReadInstantTemplate,
@@ -36,6 +39,7 @@ import {
   type QueryBuilderConfig,
   type SelectContext,
 } from "./types";
+import { validateQueryRange } from "./validation";
 
 function executeOnBackend<T>(
   backend: GraphBackend | TransactionBackend,
@@ -71,6 +75,11 @@ interface ExecutableQueryLike<
   R,
 > {
   toAst(): QueryAst;
+  /** @internal Set-operation provenance validation. */
+  oneStatementBatchProvenance(): Readonly<{
+    graphId: string;
+    executionTarget: object | undefined;
+  }>;
 }
 
 /**
@@ -112,6 +121,7 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Combines with another query using UNION.
    */
   union(other: ExecutableQueryLike<G, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleOperand(other);
     return new UnionableQuery(this.#config, {
       left: this.toAst(),
       operator: "union",
@@ -133,6 +143,7 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Combines with another query using UNION ALL.
    */
   unionAll(other: ExecutableQueryLike<G, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleOperand(other);
     return new UnionableQuery(this.#config, {
       left: this.toAst(),
       operator: "unionAll",
@@ -154,6 +165,7 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Combines with another query using INTERSECT.
    */
   intersect(other: ExecutableQueryLike<G, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleOperand(other);
     return new UnionableQuery(this.#config, {
       left: this.toAst(),
       operator: "intersect",
@@ -175,6 +187,7 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Combines with another query using EXCEPT.
    */
   except(other: ExecutableQueryLike<G, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleOperand(other);
     return new UnionableQuery(this.#config, {
       left: this.toAst(),
       operator: "except",
@@ -196,6 +209,7 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Limits the number of results from the combined query.
    */
   limit(n: number): UnionableQuery<G, R> {
+    validateQueryRange(n, "limit");
     return new UnionableQuery(this.#config, { ...this.#state, limit: n });
   }
 
@@ -203,6 +217,7 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Offsets the results from the combined query.
    */
   offset(n: number): UnionableQuery<G, R> {
+    validateQueryRange(n, "offset");
     return new UnionableQuery(this.#config, { ...this.#state, offset: n });
   }
 
@@ -218,6 +233,26 @@ export class UnionableQuery<G extends GraphDef, R> {
       ...(this.#state.limit !== undefined && { limit: this.#state.limit }),
       ...(this.#state.offset !== undefined && { offset: this.#state.offset }),
     };
+  }
+
+  /** @internal Set-operation and batch provenance validation. */
+  oneStatementBatchProvenance(): Readonly<{
+    graphId: string;
+    executionTarget: object | undefined;
+  }> {
+    return {
+      graphId: this.#config.graphId,
+      executionTarget:
+        this.#config.backend === undefined ?
+          undefined
+        : backendDerivationRoot(this.#config.backend),
+    };
+  }
+
+  #assertCompatibleOperand(other: ExecutableQueryLike<G, R>): void {
+    const own = this.oneStatementBatchProvenance();
+    const candidate = other.oneStatementBatchProvenance();
+    assertCompatibleSetOperationProvenance(own, candidate);
   }
 
   /**
@@ -338,7 +373,7 @@ export class UnionableQuery<G extends GraphDef, R> {
     const ast = this.toAst();
     if (composableQueryHasParameterReferences(ast)) {
       throw new Error(
-        "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
+        "Combined queries do not support param() references; bind concrete values before combining queries.",
       );
     }
 
@@ -361,7 +396,7 @@ export class UnionableQuery<G extends GraphDef, R> {
     const ast = this.toAst();
     if (composableQueryHasParameterReferences(ast)) {
       throw new Error(
-        "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
+        "Combined queries do not support param() references; bind concrete values before combining queries.",
       );
     }
 
@@ -373,6 +408,7 @@ export class UnionableQuery<G extends GraphDef, R> {
   /** @internal Embedding contract consumed by `store.batchOnce()`. */
   compileOneStatementBatchItem?(): Readonly<{
     query: CompiledSelectSql;
+    provenance: Readonly<{ graphId: string; executionTarget: object }>;
     outputNames: readonly string[];
     orderBy: readonly Readonly<{
       column: string;
@@ -394,6 +430,12 @@ export class UnionableQuery<G extends GraphDef, R> {
         this.#config.graphId,
         this.#compileOptions(),
       ),
+      provenance: {
+        graphId: this.#config.graphId,
+        executionTarget: backendDerivationRoot(
+          requireDefined(this.#config.backend),
+        ),
+      },
       outputNames: projectionOutputNames(ast),
       orderBy: [],
       mapRows: (rows) => this.#mapRows(rows),

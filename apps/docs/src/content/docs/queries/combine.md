@@ -6,6 +6,10 @@ description: Set operations with union(), intersect(), and except()
 Combine operations merge results from multiple queries using set operations. Use `union()` to combine
 results, `intersect()` to find common results, and `except()` to exclude results.
 
+For new SQL projections, use [`project().asRelation()`](/queries/relations/) to combine visible output
+columns, then order, filter, prepare, or batch the combined relation. The `select()` examples below
+describe the compatibility API; its JavaScript result mapper does not define SQL row equality.
+
 ## Set Operations Overview
 
 | Operation | Description | Duplicates |
@@ -199,26 +203,30 @@ const results = await query1
 Search across different node types:
 
 ```typescript
+import { expr } from "@nicia-ai/typegraph";
+
 async function globalSearch(term: string) {
   const people = store
     .query()
     .from("Person", "p")
     .whereNode("p", (p) => p.name.ilike(`%${term}%`))
-    .select((ctx) => ({
-      id: ctx.p.id,
-      type: "person" as const,
-      title: ctx.p.name,
-    }));
+    .project((fields) => ({
+      id: fields.p.id,
+      type: expr.literal("person" as string),
+      title: fields.p.name,
+    }))
+    .asRelation();
 
   const companies = store
     .query()
     .from("Company", "c")
     .whereNode("c", (c) => c.name.ilike(`%${term}%`))
-    .select((ctx) => ({
-      id: ctx.c.id,
-      type: "company" as const,
-      title: ctx.c.name,
-    }));
+    .project((fields) => ({
+      id: fields.c.id,
+      type: expr.literal("company" as string),
+      title: fields.c.name,
+    }))
+    .asRelation();
 
   return people
     .union(companies)
@@ -274,7 +282,7 @@ async function mutualFriends(userId1: string, userId2: string) {
 
 ### Deduplicate Recursive Results
 
-Remove duplicate nodes from recursive traversals:
+Remove duplicate nodes from recursive traversals by projecting proven node identities:
 
 ```typescript
 // Get unique reachable nodes (recursive may return duplicates via different paths)
@@ -284,17 +292,17 @@ const uniqueNodes = await store
   .traverse("linkedTo", "e")
   .recursive()
   .to("Node", "reachable")
-  .select((ctx) => ({ id: ctx.reachable.id }))
-  .union(
-    // Union with empty set to deduplicate (hack)
-    store
-      .query()
-      .from("Node", "n")
-      .whereNode("n", (n) => n.id.eq("__nonexistent__"))
-      .select((ctx) => ({ id: ctx.n.id }))
-  )
+  .project((fields) => ({
+    kind: fields.reachable.kind,
+    id: fields.reachable.id,
+  }))
+  .asRelation()
+  .distinctNodes({ kind: "kind", id: "id" })
   .execute();
 ```
+
+`distinctNodes()` accepts only the `kind` and `id` columns from one proven node binding. This avoids
+choosing an arbitrary edge, path, or payload value when several matches reach the same node.
 
 ## Using Set Operations with batch()
 

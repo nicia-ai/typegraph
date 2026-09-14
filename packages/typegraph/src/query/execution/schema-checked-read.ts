@@ -11,7 +11,7 @@ import {
   extractVectorSimilarityPredicates,
 } from "../compiler/predicates";
 import { getDialect } from "../dialect";
-import { sql } from "../sql-fragment";
+import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 
 export type SchemaCheckedReadInput = Readonly<{
@@ -20,6 +20,10 @@ export type SchemaCheckedReadInput = Readonly<{
   graphId: string;
   expectedVersion: number | undefined;
   compile: () => CompiledSelectSql;
+  /** Non-null result column used to distinguish a real row from the envelope sentinel. */
+  rowIdentityColumn?: string;
+  /** Ordering over explicitly projected columns in the checked_rows envelope. */
+  resultOrderBy?: SqlFragment;
 }>;
 
 /** A version row survives even an empty data result; both reads share one SQL snapshot. */
@@ -63,11 +67,13 @@ export async function executeSchemaCheckedRead(
   // An envelope name without that separator cannot collide with data columns.
   const marker = "typegraphschemaversion";
   const dialect = getDialect(backend.dialect);
-  const orderBy = buildStandardOrderBy({
-    ast,
-    dialect,
-    collapsedTraversalCteAlias: "checked_rows",
-  });
+  const orderBy =
+    input.resultOrderBy ??
+    buildStandardOrderBy({
+      ast,
+      dialect,
+      collapsedTraversalCteAlias: "checked_rows",
+    });
   const query = asCompiledSelectSql(sql`
     WITH checked_rows AS (${input.compile()}),
     checked_version AS (
@@ -94,8 +100,8 @@ export async function executeSchemaCheckedRead(
   return rows
     .filter(
       (row) =>
-        row[`${ast.start.alias}_id`] !== null &&
-        row[`${ast.start.alias}_id`] !== undefined,
+        row[input.rowIdentityColumn ?? `${ast.start.alias}_id`] !== null &&
+        row[input.rowIdentityColumn ?? `${ast.start.alias}_id`] !== undefined,
     )
     .map((row) => {
       const { [marker]: _version, ...data } = row;

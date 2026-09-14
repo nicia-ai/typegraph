@@ -63,7 +63,7 @@ const SEAM_CONSTRUCTORS = [
   "wrapWithManagedClose",
 ] as const;
 
-const SEAM_QUERIES = ["isBackendDerivedFrom"] as const;
+const SEAM_QUERIES = ["backendDerivationRoot", "isBackendDerivedFrom"] as const;
 
 type SeamConstructor = (typeof SEAM_CONSTRUCTORS)[number];
 

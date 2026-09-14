@@ -10,6 +10,7 @@ import {
   min,
   sum,
 } from "../../../src";
+import { UnsupportedPredicateError } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   seedAdvancedAggregateProducts,
@@ -103,6 +104,106 @@ export function registerAggregateIntegrationTests(
 
       expect(electronics?.cheapest).toBe(500);
       expect(electronics?.mostExpensive).toBe(1200);
+    });
+
+    it("preserves string and date values for MIN and MAX", async () => {
+      const store = context.getStore();
+      const earlier = new Date("2024-01-02T03:04:05.000Z");
+      const later = new Date("2025-06-07T08:09:10.000Z");
+      await store.nodes.Document.create({ title: "Zulu", publishedAt: later });
+      await store.nodes.Document.create({
+        title: "Alpha",
+        publishedAt: earlier,
+      });
+
+      const [result] = await store
+        .query()
+        .from("Document", "document")
+        .aggregate({
+          firstTitle: min("document", "title"),
+          lastTitle: max("document", "title"),
+          earliest: min("document", "publishedAt"),
+          latest: max("document", "publishedAt"),
+        })
+        .execute();
+
+      expect(result).toEqual({
+        firstTitle: "Alpha",
+        lastTitle: "Zulu",
+        earliest: earlier,
+        latest: later,
+      });
+    });
+
+    it("normalizes empty aggregate results without changing COUNT", async () => {
+      const store = context.getStore();
+      const [result] = await store
+        .query()
+        .from("Product", "product")
+        .whereNode("product", (product) =>
+          product.category.eq("missing-category"),
+        )
+        .aggregate({
+          count: count("product"),
+          sum: sum("product", "price"),
+          average: avg("product", "price"),
+          minimum: min("product", "price"),
+          maximum: max("product", "price"),
+        })
+        .execute();
+
+      expect(result).toEqual({
+        count: 0,
+        sum: undefined,
+        average: undefined,
+        minimum: undefined,
+        maximum: undefined,
+      });
+    });
+
+    it("decodes a nested optional Date field in aggregate projections", async () => {
+      const store = context.getStore();
+      const publishedAt = new Date("2026-02-03T04:05:06.000Z");
+      await store.nodes.Document.create({
+        title: "Nested date",
+        metadata: { publishedAt },
+      });
+
+      const [result] = await store
+        .query()
+        .from("Document", "document")
+        .aggregate({
+          publishedAt: field("document", "metadata", "publishedAt"),
+        })
+        .execute();
+
+      expect(result?.publishedAt).toEqual(publishedAt);
+    });
+
+    it("refuses aggregate functions that cannot honor the schema field type", () => {
+      const store = context.getStore();
+
+      const invalidSum = () =>
+        store
+          .query()
+          .from("Product", "product")
+          .aggregate({ invalidSum: sum("product", "name") });
+      expect(invalidSum).toThrow(UnsupportedPredicateError);
+      expect(invalidSum).toThrow(/SUM requires a numeric field/);
+
+      expect(() =>
+        store
+          .query()
+          .from("Product", "product")
+          .aggregate({ invalidMinimum: min("product", "inStock") }),
+      ).toThrow(/MIN supports string, number, and date fields/);
+
+      expect(() =>
+        store
+          .query()
+          .from("Document", "document")
+          .aggregate({ invalidMaximum: max("document", "metadata") }),
+      ).toThrow(/MAX supports string, number, and date fields/);
     });
 
     it("executes aggregation with HAVING clause", async () => {
@@ -244,9 +345,7 @@ export function registerAggregateIntegrationTests(
         .execute();
 
       expect(
-        results.map(
-          (result) => `${String(result.category)}:${String(result.inStock)}`,
-        ),
+        results.map((result) => `${result.category}:${String(result.inStock)}`),
       ).toEqual(["Electronics:false", "Electronics:true", "Furniture:true"]);
     });
 
@@ -308,6 +407,37 @@ export function registerAggregateIntegrationTests(
       expect(results[0]?.employeeCount).toBe(3);
       expect(results[1]?.companyName).toBe("Globex");
       expect(results[1]?.employeeCount).toBe(1);
+    });
+
+    it("preserves edge-field scalar types for MIN and MAX", async () => {
+      const store = context.getStore();
+      const company = await store.nodes.Company.create({ name: "Acme" });
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      await store.edges.worksAt.create(alice, company, {
+        role: "Engineer",
+        salary: 100_000,
+      });
+      await store.edges.worksAt.create(bob, company, {
+        role: "Director",
+        salary: 120_000,
+      });
+
+      const [result] = await store
+        .query()
+        .from("Company", "company")
+        .traverse("worksAt", "employment", { direction: "in" })
+        .to("Person", "person")
+        .aggregate({
+          firstRole: min("employment", "role"),
+          highestSalary: max("employment", "salary"),
+        })
+        .execute();
+
+      expect(result).toEqual({
+        firstRole: "Director",
+        highestSalary: 120_000,
+      });
     });
 
     it("orders correct top-N results through the count fast path's optional-traversal LIMIT pushdown", async () => {
@@ -621,9 +751,7 @@ export function registerAggregateIntegrationTests(
       expect(results).toHaveLength(4);
       expect(
         results
-          .map(
-            (result) => `${String(result.category)}:${String(result.inStock)}`,
-          )
+          .map((result) => `${result.category}:${String(result.inStock)}`)
           .toSorted(),
       ).toEqual([
         "Electronics:false",

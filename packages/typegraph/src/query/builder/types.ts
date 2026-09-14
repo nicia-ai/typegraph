@@ -24,6 +24,7 @@ import {
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
   type AggregateOrderSpec,
+  type FieldRef,
   type GroupBySpec,
   type HybridFusionOptions,
   type NodePredicate,
@@ -89,6 +90,11 @@ export type OneStatementBatchableQuery<R = unknown> = Readonly<{
   /** @internal Resolved by `store.batchOnce()` before execution. */
   compileOneStatementBatchItem?: () => Readonly<{
     query: CompiledSelectSql;
+    /** Graph and execution target that authorized this compiled read. */
+    provenance: Readonly<{
+      graphId: string;
+      executionTarget: object;
+    }>;
     outputNames: readonly string[];
     orderBy: readonly Readonly<{
       column: string;
@@ -122,6 +128,10 @@ export type OneStatementBatchResults<
     R
   : never;
 };
+
+/** Public input accepted by the exact-one-statement batch surface. */
+export type OneStatementBatchReads =
+  readonly EmbeddableOneStatementRead<unknown>[];
 
 /**
  * Maps a tuple of BatchableQuery types to their result types.
@@ -207,23 +217,60 @@ export type EmptyEdgeAliasMap = Readonly<Record<never, never>>;
 /**
  * A recursive alias marker with its associated type (depth or path).
  */
-export type RecursiveAlias<T extends "depth" | "path"> = Readonly<{ type: T }>;
+export type RecursiveAlias<
+  T extends "depth" | "path",
+  PathFormat extends "ids" | "qualified" = "ids",
+  Optional extends boolean = false,
+> = Readonly<{
+  type: T;
+  pathFormat?: PathFormat;
+  optional?: Optional;
+}>;
+
+export type QualifiedRecursivePathNode = Readonly<{
+  type: "node";
+  kind: string;
+  id: string;
+}>;
+
+export type QualifiedRecursivePathEdge = Readonly<{
+  type: "edge";
+  kind: string;
+  id: string;
+  direction: "out" | "in";
+}>;
+
+export type QualifiedRecursivePathElement =
+  QualifiedRecursivePathNode | QualifiedRecursivePathEdge;
+
+export type QualifiedRecursivePath = readonly QualifiedRecursivePathElement[];
+
+export type QualifiedRecursivePathOption = Readonly<{
+  alias?: string;
+  format: "qualified";
+}>;
 
 /**
  * A map of recursive alias names to their types.
  */
 export type RecursiveAliasMap = Readonly<
-  Record<string, RecursiveAlias<"depth" | "path">>
+  Record<string, RecursiveAlias<"depth" | "path", "ids" | "qualified", boolean>>
 >;
 export type EmptyRecursiveAliasMap = Readonly<Record<never, never>>;
 
 /**
  * Resolves a recursive alias marker to its runtime value type.
  */
-export type RecursiveAliasValue<RA> =
-  RA extends RecursiveAlias<"depth"> ? number
-  : RA extends RecursiveAlias<"path"> ? readonly string[]
+type RequiredRecursiveAliasValue<RA> =
+  RA extends RecursiveAlias<"depth", "ids" | "qualified", boolean> ? number
+  : RA extends RecursiveAlias<"path", "qualified", boolean> ?
+    QualifiedRecursivePath
+  : RA extends RecursiveAlias<"path", "ids", boolean> ? readonly string[]
   : never;
+
+export type RecursiveAliasValue<RA> =
+  RA extends { optional?: true } ? RequiredRecursiveAliasValue<RA> | undefined
+  : RequiredRecursiveAliasValue<RA>;
 
 /**
  * Resolves the depth alias name from the recursive config.
@@ -241,19 +288,31 @@ type ResolveDepthAlias<DC, A extends string> =
 type ResolvePathAlias<PC, A extends string> =
   PC extends string ? PC
   : PC extends true ? `${A}_path`
+  : PC extends QualifiedRecursivePathOption ?
+    PC["alias"] extends string ?
+      PC["alias"]
+    : `${A}_path`
   : never;
+
+type ResolvePathFormat<PC> =
+  PC extends QualifiedRecursivePathOption ? "qualified" : "ids";
 
 /**
  * Builds the recursive alias map from depth/path config and target node alias.
  */
 /* eslint-disable @typescript-eslint/no-empty-object-type -- Empty when depth/path config is false */
-export type BuildRecursiveAliases<DC, PC, A extends string> = ([DC] extends (
-  [false]
-) ?
-  {}
-: Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth">>) &
+export type BuildRecursiveAliases<
+  DC,
+  PC,
+  A extends string,
+  Optional extends boolean = false,
+> = ([DC] extends [false] ? {}
+: Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth", "ids", Optional>>) &
   ([PC] extends [false] ? {}
-  : Record<ResolvePathAlias<PC, A>, RecursiveAlias<"path">>);
+  : Record<
+      ResolvePathAlias<PC, A>,
+      RecursiveAlias<"path", ResolvePathFormat<PC>, Optional>
+    >);
 /* eslint-enable @typescript-eslint/no-empty-object-type */
 
 /**
@@ -285,53 +344,70 @@ export type PropsAccessor<N extends NodeType> = Readonly<
  */
 export type FieldAccessor<T> = FieldAccessorForType<NonNullable<T>>;
 
-type FieldAccessorForType<T> =
-  [T] extends [EmbeddingValue] ? EmbeddingFieldAccessor
-  : [T] extends [string] ? StringFieldAccessor
-  : [T] extends [number] ? NumberFieldAccessor
-  : [T] extends [boolean] ? BooleanFieldAccessor
-  : [T] extends [Date] ? DateFieldAccessor
-  : [T] extends [readonly (infer U)[]] ? ArrayFieldAccessor<U>
-  : [T] extends [Record<string, unknown>] ? ObjectFieldAccessor<T>
-  : BaseFieldAccessor;
+/** A value accepted by equality predicates for a schema field. */
+type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 
-export type BaseFieldAccessor = Readonly<{
-  eq: (value: unknown) => Predicate;
-  neq: (value: unknown) => Predicate;
+/** Values accepted by membership predicates for a schema field. */
+type MembershipOperand<T> = readonly T[] | ParameterRef;
+
+type NullFieldAccessor = Readonly<{
   isNull: () => Predicate;
   isNotNull: () => Predicate;
-  in: (values: readonly unknown[] | ParameterRef) => Predicate;
-  notIn: (values: readonly unknown[] | ParameterRef) => Predicate;
 }>;
 
-export type StringFieldAccessor = BaseFieldAccessor &
-  Readonly<{
-    gt: (value: string | ParameterRef) => Predicate;
-    gte: (value: string | ParameterRef) => Predicate;
-    lt: (value: string | ParameterRef) => Predicate;
-    lte: (value: string | ParameterRef) => Predicate;
-    contains: (pattern: string | ParameterRef) => Predicate;
-    startsWith: (pattern: string | ParameterRef) => Predicate;
-    endsWith: (pattern: string | ParameterRef) => Predicate;
-    like: (pattern: string | ParameterRef) => Predicate;
-    ilike: (pattern: string | ParameterRef) => Predicate;
-  }>;
+type FieldAccessorForType<T> =
+  [T] extends [EmbeddingValue] ? EmbeddingFieldAccessor
+  : [T] extends [string] ? StringFieldAccessor<T>
+  : [T] extends [number] ? NumberFieldAccessor<T>
+  : [T] extends [boolean] ? BooleanFieldAccessor<T>
+  : [T] extends [Date] ? DateFieldAccessor<T>
+  : [T] extends [readonly (infer U)[]] ? ArrayFieldAccessor<U>
+  : [T] extends [Record<string, unknown>] ?
+    keyof T extends never ?
+      BaseFieldAccessor
+    : ObjectFieldAccessor<T>
+  : BaseFieldAccessor;
 
-export type NumberFieldAccessor = BaseFieldAccessor &
-  Readonly<{
-    gt: (value: number | ParameterRef) => Predicate;
-    gte: (value: number | ParameterRef) => Predicate;
-    lt: (value: number | ParameterRef) => Predicate;
-    lte: (value: number | ParameterRef) => Predicate;
-    between: (
-      lower: number | ParameterRef,
-      upper: number | ParameterRef,
-    ) => Predicate;
-  }>;
+export type BaseFieldAccessor<T = unknown> = Readonly<{
+  eq: (value: EqualityOperand<T>) => Predicate;
+  neq: (value: EqualityOperand<T>) => Predicate;
+  isNull: () => Predicate;
+  isNotNull: () => Predicate;
+  in: (values: MembershipOperand<T>) => Predicate;
+  notIn: (values: MembershipOperand<T>) => Predicate;
+}>;
 
-export type BooleanFieldAccessor = BaseFieldAccessor;
+export type StringFieldAccessor<T extends string = string> =
+  BaseFieldAccessor<T> &
+    Readonly<{
+      gt: (value: string | ParameterRef) => Predicate;
+      gte: (value: string | ParameterRef) => Predicate;
+      lt: (value: string | ParameterRef) => Predicate;
+      lte: (value: string | ParameterRef) => Predicate;
+      contains: (pattern: string | ParameterRef) => Predicate;
+      startsWith: (pattern: string | ParameterRef) => Predicate;
+      endsWith: (pattern: string | ParameterRef) => Predicate;
+      like: (pattern: string | ParameterRef) => Predicate;
+      ilike: (pattern: string | ParameterRef) => Predicate;
+    }>;
 
-export type DateFieldAccessor = BaseFieldAccessor &
+export type NumberFieldAccessor<T extends number = number> =
+  BaseFieldAccessor<T> &
+    Readonly<{
+      gt: (value: number | ParameterRef) => Predicate;
+      gte: (value: number | ParameterRef) => Predicate;
+      lt: (value: number | ParameterRef) => Predicate;
+      lte: (value: number | ParameterRef) => Predicate;
+      between: (
+        lower: number | ParameterRef,
+        upper: number | ParameterRef,
+      ) => Predicate;
+    }>;
+
+export type BooleanFieldAccessor<T extends boolean = boolean> =
+  BaseFieldAccessor<T>;
+
+export type DateFieldAccessor<T extends Date = Date> = BaseFieldAccessor<T> &
   Readonly<{
     gt: (value: Date | string | ParameterRef) => Predicate;
     gte: (value: Date | string | ParameterRef) => Predicate;
@@ -343,7 +419,7 @@ export type DateFieldAccessor = BaseFieldAccessor &
     ) => Predicate;
   }>;
 
-export type ArrayFieldAccessor<U> = BaseFieldAccessor &
+export type ArrayFieldAccessor<U> = NullFieldAccessor &
   Readonly<{
     contains: (value: U) => Predicate;
     containsAny: (values: readonly U[]) => Predicate;
@@ -358,7 +434,7 @@ export type ArrayFieldAccessor<U> = BaseFieldAccessor &
     lengthLte: (length: number) => Predicate;
   }>;
 
-export type EmbeddingFieldAccessor = BaseFieldAccessor &
+export type EmbeddingFieldAccessor = NullFieldAccessor &
   Readonly<{
     /**
      * Finds the k most similar items using vector similarity.
@@ -374,7 +450,10 @@ export type EmbeddingFieldAccessor = BaseFieldAccessor &
     ) => Predicate;
   }>;
 
-export type ObjectFieldAccessor<T> = BaseFieldAccessor &
+type ObjectComparisonAccessor<T> =
+  string extends keyof T ? BaseFieldAccessor<T> : NullFieldAccessor;
+
+export type ObjectFieldAccessor<T> = ObjectComparisonAccessor<T> &
   Readonly<{
     get: <K extends keyof T & string>(
       key: K,
@@ -640,7 +719,7 @@ export type RecursiveTraversalOptions = Readonly<{
   /** Cycle handling policy (default: "prevent") */
   cyclePolicy?: RecursiveCyclePolicy;
   /** Include path in output. Pass a string to customize alias. */
-  path?: boolean | string;
+  path?: boolean | string | QualifiedRecursivePathOption;
   /** Include depth in output. Pass a string to customize alias. */
   depth?: boolean | string;
 }>;
@@ -679,6 +758,8 @@ export type QueryBuilderState = Readonly<{
   includeSubClasses: boolean;
   traversals: readonly Traversal[];
   predicates: readonly NodePredicate[];
+  /** Filters completed match rows without restricting optional or recursive expansion. */
+  resultPredicate?: PredicateExpression;
   projection: readonly ProjectedField[];
   orderBy: readonly OrderSpec[];
   /** ORDER BY entries added via `ExecutableAggregateQuery.orderBy()`. */

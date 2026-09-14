@@ -473,9 +473,62 @@ function computeContravariantNames(
   namedDeclarations: ReadonlyMap<string, NamedDeclarationEntry>,
   functionDeclarations: readonly ts.FunctionDeclaration[],
   existingCallableKeys?: ReadonlySet<string>,
+  existingCallableEvidence?: ExistingCallableEvidence,
+  existingDeclarationNames?: ReadonlySet<string>,
+  replacedMemberInputNames?: ReadonlySet<string>,
 ): ReadonlySet<string> {
   const contravariant = new Set<string>();
   const visited = new Set<string>();
+  const replacementInputNames = new Set<string>();
+  for (const name of replacedMemberInputNames ?? [])
+    replacementInputNames.add(name);
+
+  function collectReferencedNames(node: ts.Node): void {
+    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName))
+      replacementInputNames.add(node.typeName.text);
+    ts.forEachChild(node, (child) => {
+      collectReferencedNames(child);
+    });
+  }
+
+  function collectReplacementInputs(
+    callableName: string,
+    signature: CallableSignature,
+  ): void {
+    const evidence = existingCallableEvidence?.get(callableName);
+    if (
+      evidence?.replacementFingerprints.has(callableFingerprint(signature)) !==
+      true
+    )
+      return;
+    for (const name of evidence.replacementInputNames)
+      replacementInputNames.add(name);
+  }
+
+  for (const declaration of functionDeclarations) {
+    if (declaration.name !== undefined)
+      collectReplacementInputs(declaration.name.text, {
+        parameters: declaration.parameters,
+        returnType: declaration.type,
+      });
+  }
+  for (const [ownerName, signatures] of collectInterfaceMethodCallables(
+    namedDeclarations,
+  ))
+    for (const signature of signatures)
+      collectReplacementInputs(ownerName, signature);
+  for (const [ownerName, signatures] of collectClassMethodCallables(
+    namedDeclarations,
+  ))
+    for (const signature of signatures)
+      collectReplacementInputs(ownerName, signature);
+
+  for (const name of replacementInputNames) {
+    const entry = namedDeclarations.get(name);
+    if (entry === undefined) continue;
+    if (entry.kind === "type") collectReferencedNames(entry.typeNode);
+    else for (const member of entry.members) collectReferencedNames(member);
+  }
 
   function markReachable(
     name: string,
@@ -485,7 +538,14 @@ function computeContravariantNames(
     const visitKey = `${name}\0${polarity}\0${mandatory}`;
     if (visited.has(visitKey)) return;
     visited.add(visitKey);
-    if (polarity === -1 && mandatory) contravariant.add(name);
+    if (
+      polarity === -1 &&
+      mandatory &&
+      (existingDeclarationNames === undefined ||
+        existingDeclarationNames.has(name) ||
+        replacementInputNames.has(name))
+    )
+      contravariant.add(name);
     const entry = namedDeclarations.get(name);
     if (entry === undefined) return;
     if (entry.kind === "type")
@@ -573,15 +633,26 @@ function computeContravariantNames(
    * when there is no "before" to gate against (building the base snapshot's
    * own inventory), matching the top-level-function gate below.
    */
-  function calleeExisted(
+  function callableSignatureExisted(
     ownerName: string | undefined,
     memberName: string | undefined,
+    signature: CallableSignature,
   ): boolean {
+    const callableName =
+      ownerName === undefined ? memberName
+      : memberName === undefined ? undefined
+      : `${ownerName}.${memberName}`;
     return (
       existingCallableKeys === undefined ||
-      ownerName === undefined ||
-      memberName === undefined ||
-      existingCallableKeys.has(`${ownerName}.${memberName}`)
+      callableName === undefined ||
+      (existingCallableKeys.has(callableName) &&
+        (existingCallableEvidence === undefined ||
+          existingCallableEvidence
+            .get(callableName)
+            ?.retainedFingerprints.has(callableFingerprint(signature)) ===
+            true ||
+          existingCallableEvidence.get(callableName)
+            ?.allBaseOverloadsRetained === false))
     );
   }
 
@@ -612,11 +683,17 @@ function computeContravariantNames(
           forcedMode,
           element.questionToken,
         );
-        const methodExisted = calleeExisted(
+        const methodName = getMemberName(element.name);
+        const signature = {
+          parameters: element.parameters,
+          returnType: element.type,
+        };
+        const methodExisted = callableSignatureExisted(
           ownerName,
-          getMemberName(element.name),
+          methodName,
+          signature,
         );
-        for (const parameter of element.parameters) {
+        element.parameters.forEach((parameter) => {
           if (parameter.type !== undefined) {
             const parameterMandatory =
               childMandatory &&
@@ -624,7 +701,7 @@ function computeContravariantNames(
               parameter.questionToken === undefined;
             walkTypeNode(parameter.type, flip(polarity), parameterMandatory);
           }
-        }
+        });
         if (element.type !== undefined)
           walkTypeNode(element.type, polarity, childMandatory);
       }
@@ -654,8 +731,12 @@ function computeContravariantNames(
         continue;
       }
       if (ts.isConstructorDeclaration(member)) {
-        const constructorExisted = calleeExisted(ownerName, "constructor");
-        for (const parameter of member.parameters) {
+        const constructorExisted = callableSignatureExisted(
+          ownerName,
+          "constructor",
+          { parameters: member.parameters, returnType: undefined },
+        );
+        member.parameters.forEach((parameter) => {
           if (parameter.type !== undefined) {
             const parameterMandatory =
               mandatory &&
@@ -663,16 +744,17 @@ function computeContravariantNames(
               parameter.questionToken === undefined;
             walkTypeNode(parameter.type, flip(polarity), parameterMandatory);
           }
-        }
+        });
         continue;
       }
       if (ts.isMethodDeclaration(member)) {
         const childMandatory = mandatory && member.questionToken === undefined;
-        const methodExisted = calleeExisted(
-          ownerName,
-          getMemberName(member.name),
-        );
-        for (const parameter of member.parameters) {
+        const methodName = getMemberName(member.name);
+        const methodExisted = callableSignatureExisted(ownerName, methodName, {
+          parameters: member.parameters,
+          returnType: member.type,
+        });
+        member.parameters.forEach((parameter) => {
           if (parameter.type !== undefined) {
             const parameterMandatory =
               childMandatory &&
@@ -680,26 +762,33 @@ function computeContravariantNames(
               parameter.questionToken === undefined;
             walkTypeNode(parameter.type, flip(polarity), parameterMandatory);
           }
-        }
+        });
         if (member.type !== undefined)
           walkTypeNode(member.type, polarity, childMandatory);
       }
     }
   }
 
-  for (const name of namedDeclarations.keys()) markReachable(name, 1, true);
+  for (const name of namedDeclarations.keys()) {
+    if (
+      existingDeclarationNames === undefined ||
+      existingDeclarationNames.has(name)
+    )
+      markReachable(name, 1, true);
+  }
   for (const functionDeclaration of functionDeclarations) {
-    const functionExisted =
-      existingCallableKeys === undefined ||
-      (functionDeclaration.name !== undefined &&
-        existingCallableKeys.has(functionDeclaration.name.text));
-    for (const parameter of functionDeclaration.parameters) {
+    const functionName = functionDeclaration.name?.text;
+    const functionExisted = callableSignatureExisted(undefined, functionName, {
+      parameters: functionDeclaration.parameters,
+      returnType: functionDeclaration.type,
+    });
+    functionDeclaration.parameters.forEach((parameter) => {
       if (parameter.type !== undefined) {
         const parameterMandatory =
           functionExisted && parameter.questionToken === undefined;
         walkTypeNode(parameter.type, -1, parameterMandatory);
       }
-    }
+    });
     if (functionDeclaration.type !== undefined)
       walkTypeNode(functionDeclaration.type, 1, true);
   }
@@ -723,6 +812,109 @@ type CallableSignature = Readonly<{
   parameters: ts.NodeArray<ts.ParameterDeclaration>;
   returnType: ts.TypeNode | undefined;
 }>;
+
+type ExistingCallableEvidence = ReadonlyMap<
+  string,
+  Readonly<{
+    retainedFingerprints: ReadonlySet<string>;
+    allBaseOverloadsRetained: boolean;
+    replacementFingerprints: ReadonlySet<string>;
+    replacementInputNames: ReadonlySet<string>;
+  }>
+>;
+
+function callableFingerprint(signature: CallableSignature): string {
+  const parameters = signature.parameters.map((parameter) => {
+    const type = parameter.type?.getText().replaceAll(/\s/g, "") ?? "unknown";
+    return `${parameter.dotDotDotToken === undefined ? "" : "..."}${type}${parameter.questionToken === undefined ? "" : "?"}`;
+  });
+  const returnType =
+    signature.returnType?.getText().replaceAll(/\s/g, "") ?? "void";
+  return `${parameters.join(",")}=>${returnType}`;
+}
+
+function typeNodeRetainsInput(base: ts.TypeNode, head: ts.TypeNode): boolean {
+  const baseNode = peelWrappers(base, undefined).node;
+  const headNode = peelWrappers(head, undefined).node;
+  if (
+    baseNode.getText().replaceAll(/\s/g, "") ===
+    headNode.getText().replaceAll(/\s/g, "")
+  )
+    return true;
+  if (!ts.isUnionTypeNode(baseNode) && !ts.isUnionTypeNode(headNode))
+    return false;
+  const baseTypes = ts.isUnionTypeNode(baseNode) ? baseNode.types : [baseNode];
+  const headTypes = ts.isUnionTypeNode(headNode) ? headNode.types : [headNode];
+  return baseTypes.every((baseType) =>
+    headTypes.some((headType) => typeNodeRetainsInput(baseType, headType)),
+  );
+}
+
+function referencedTypeNames(node: ts.Node): ReadonlySet<string> {
+  const names = new Set<string>();
+  function visit(child: ts.Node): void {
+    if (ts.isTypeReferenceNode(child) && ts.isIdentifier(child.typeName))
+      names.add(child.typeName.text);
+    ts.forEachChild(child, (nested) => {
+      visit(nested);
+    });
+  }
+  visit(node);
+  return names;
+}
+
+function replacementParameterTypeNames(
+  base: ts.TypeNode,
+  head: ts.TypeNode,
+): readonly string[] {
+  const baseNode = peelWrappers(base, undefined).node;
+  const headNode = peelWrappers(head, undefined).node;
+  if (ts.isUnionTypeNode(baseNode) && ts.isUnionTypeNode(headNode)) {
+    const headConstituents = headNode.types.map((type) => ({
+      node: type,
+      text: type.getText().replaceAll(/\s/g, ""),
+    }));
+    const removedBaseConstituent = baseNode.types.some(
+      (baseType) =>
+        !headConstituents.some(
+          (headType) =>
+            headType.text === baseType.getText().replaceAll(/\s/g, ""),
+        ),
+    );
+    if (!removedBaseConstituent) return [];
+    return headConstituents.flatMap((constituent) => [
+      ...referencedTypeNames(constituent.node),
+    ]);
+  }
+  if (
+    ts.isTypeReferenceNode(baseNode) &&
+    ts.isTypeReferenceNode(headNode) &&
+    ts.isIdentifier(baseNode.typeName) &&
+    ts.isIdentifier(headNode.typeName) &&
+    baseNode.typeName.text !== headNode.typeName.text
+  )
+    return [...referencedTypeNames(headNode)];
+  return [];
+}
+
+function callableRetainsInput(
+  base: CallableSignature,
+  head: CallableSignature,
+): boolean {
+  if (base.parameters.length !== head.parameters.length) return false;
+  return base.parameters.every((baseParameter, index) => {
+    const headParameter = head.parameters[index];
+    if (
+      headParameter === undefined ||
+      baseParameter.type === undefined ||
+      headParameter.type === undefined ||
+      (baseParameter.questionToken === undefined) !==
+        (headParameter.questionToken === undefined)
+    )
+      return false;
+    return typeNodeRetainsInput(baseParameter.type, headParameter.type);
+  });
+}
 
 /**
  * Inline object literals in parameter and return positions become their own
@@ -750,6 +942,7 @@ type CallableSignature = Readonly<{
 function collectInlineLiteralEntries(
   callableGroups: ReadonlyMap<string, readonly CallableSignature[]>,
   existingCallableKeys?: ReadonlySet<string>,
+  existingCallableEvidence?: ExistingCallableEvidence,
 ): Map<string, DeclarationRecord> {
   const entries = new Map<string, DeclarationRecord>();
 
@@ -767,6 +960,11 @@ function collectInlineLiteralEntries(
     const returnMaps: ReadonlyMap<string, boolean>[] = [];
 
     for (const overload of overloads) {
+      const evidence = existingCallableEvidence?.get(callableName);
+      const overloadExisted =
+        evidence === undefined ||
+        evidence.retainedFingerprints.has(callableFingerprint(overload)) ||
+        !evidence.allBaseOverloadsRetained;
       overload.parameters.forEach((parameter, index) => {
         if (parameter.type === undefined) return;
         const localMembers = resolveLocalMembers(parameter.type);
@@ -775,7 +973,10 @@ function collectInlineLiteralEntries(
         const existing = parameterMaps.get(key) ?? [];
         existing.push({
           members: localMembers,
-          mandatory: callableExisted && parameter.questionToken === undefined,
+          mandatory:
+            callableExisted &&
+            overloadExisted &&
+            parameter.questionToken === undefined,
         });
         parameterMaps.set(key, existing);
       });
@@ -973,6 +1174,213 @@ export function collectExistingCallableKeys(
   return keys;
 }
 
+function collectCallableEvidence(
+  baseBody: string,
+  headBody: string,
+  entrypoint: string,
+): ExistingCallableEvidence {
+  function collectGroups(body: string): Map<string, CallableSignature[]> {
+    const { namedDeclarations, functionDeclarations } = parseDeclarations(
+      parseReportSource(body, entrypoint),
+    );
+    const groups = new Map<string, CallableSignature[]>();
+    for (const declaration of functionDeclarations) {
+      if (declaration.name === undefined) continue;
+      pushCallableSignature(groups, declaration.name.text, {
+        parameters: declaration.parameters,
+        returnType: declaration.type,
+      });
+    }
+    for (const [key, signatures] of collectInterfaceMethodCallables(
+      namedDeclarations,
+    ))
+      groups.set(key, signatures);
+    for (const [key, signatures] of collectClassMethodCallables(
+      namedDeclarations,
+    ))
+      groups.set(key, signatures);
+    return groups;
+  }
+
+  const baseGroups = collectGroups(baseBody);
+  const headGroups = collectGroups(headBody);
+  const evidence = new Map<
+    string,
+    {
+      retainedFingerprints: ReadonlySet<string>;
+      allBaseOverloadsRetained: boolean;
+      replacementFingerprints: ReadonlySet<string>;
+      replacementInputNames: ReadonlySet<string>;
+    }
+  >();
+  for (const [key, baseSignatures] of baseGroups) {
+    const headSignatures = headGroups.get(key) ?? [];
+    const retainedFingerprints = new Set(
+      headSignatures
+        .filter((headSignature) =>
+          baseSignatures.some((baseSignature) =>
+            callableRetainsInput(baseSignature, headSignature),
+          ),
+        )
+        .map((signature) => callableFingerprint(signature)),
+    );
+    const allBaseOverloadsRetained = baseSignatures.every((baseSignature) =>
+      headSignatures.some((headSignature) =>
+        callableRetainsInput(baseSignature, headSignature),
+      ),
+    );
+    evidence.set(key, {
+      retainedFingerprints,
+      allBaseOverloadsRetained,
+      replacementFingerprints: new Set(
+        allBaseOverloadsRetained ?
+          []
+        : headSignatures
+            .map((signature) => callableFingerprint(signature))
+            .filter((fingerprint) => !retainedFingerprints.has(fingerprint)),
+      ),
+      replacementInputNames: new Set(
+        allBaseOverloadsRetained ?
+          []
+        : headSignatures.flatMap((headSignature) => {
+            const sameArity = baseSignatures.filter(
+              (candidate) =>
+                candidate.parameters.length === headSignature.parameters.length,
+            );
+            const baseSignature =
+              sameArity.find((candidate) =>
+                candidate.parameters.every((parameter, index) => {
+                  const headParameter = headSignature.parameters[index];
+                  if (
+                    parameter.type === undefined ||
+                    headParameter?.type === undefined
+                  )
+                    return true;
+                  return (
+                    ts.isTypeReferenceNode(
+                      peelWrappers(parameter.type, undefined).node,
+                    ) ===
+                    ts.isTypeReferenceNode(
+                      peelWrappers(headParameter.type, undefined).node,
+                    )
+                  );
+                }),
+              ) ?? sameArity[0];
+            if (baseSignature === undefined) return [];
+            return headSignature.parameters.flatMap((headParameter, index) => {
+              const baseParameter = baseSignature.parameters[index];
+              if (
+                baseParameter?.type === undefined ||
+                headParameter.type === undefined ||
+                typeNodeRetainsInput(baseParameter.type, headParameter.type)
+              )
+                return [];
+              return replacementParameterTypeNames(
+                baseParameter.type,
+                headParameter.type,
+              );
+            });
+          }),
+      ),
+    });
+  }
+  return evidence;
+}
+
+function collectExistingDeclarationNames(
+  body: string,
+  entrypoint: string,
+): ReadonlySet<string> {
+  const { namedDeclarations } = parseDeclarations(
+    parseReportSource(body, entrypoint),
+  );
+  return new Set(namedDeclarations.keys());
+}
+
+function collectDirectMemberTypes(
+  entry: NamedDeclarationEntry,
+): ReadonlyMap<string, ts.TypeNode> {
+  const peeledType =
+    entry.kind === "type" ?
+      peelWrappers(entry.typeNode, undefined).node
+    : undefined;
+  const elements =
+    entry.kind === "type" ?
+      peeledType !== undefined && ts.isTypeLiteralNode(peeledType) ?
+        peeledType.members
+      : []
+    : entry.members;
+  const result = new Map<string, ts.TypeNode>();
+  for (const element of elements) {
+    if (!ts.isPropertySignature(element) && !ts.isPropertyDeclaration(element))
+      continue;
+    const name = getMemberName(element.name);
+    if (name !== undefined && element.type !== undefined)
+      result.set(name, element.type);
+  }
+  return result;
+}
+
+function collectReplacedMemberInputNames(
+  baseBody: string,
+  headBody: string,
+  entrypoint: string,
+): ReadonlySet<string> {
+  function referencedNames(node: ts.Node): ReadonlySet<string> {
+    const names = new Set<string>();
+    function visit(child: ts.Node): void {
+      if (ts.isTypeReferenceNode(child) && ts.isIdentifier(child.typeName))
+        names.add(child.typeName.text);
+      ts.forEachChild(child, (nested) => {
+        visit(nested);
+      });
+    }
+    visit(node);
+    return names;
+  }
+
+  const base = parseDeclarations(parseReportSource(baseBody, entrypoint));
+  const head = parseDeclarations(parseReportSource(headBody, entrypoint));
+  const replacements = new Set<string>();
+  for (const [declarationName, baseEntry] of base.namedDeclarations) {
+    const headEntry = head.namedDeclarations.get(declarationName);
+    if (headEntry === undefined) continue;
+    const baseMembers = collectDirectMemberTypes(baseEntry);
+    const headMembers = collectDirectMemberTypes(headEntry);
+    for (const [memberName, baseType] of baseMembers) {
+      const headType = headMembers.get(memberName);
+      if (headType === undefined) continue;
+      const baseText = baseType.getText().replaceAll(/\s/g, "");
+      const headText = headType.getText().replaceAll(/\s/g, "");
+      if (headText === baseText) continue;
+      const peeledBase = peelWrappers(baseType, undefined).node;
+      const peeledHead = peelWrappers(headType, undefined).node;
+      const unionReplacement =
+        ts.isUnionTypeNode(peeledBase) &&
+        ts.isUnionTypeNode(peeledHead) &&
+        peeledBase.types.some(
+          (baseConstituent) =>
+            !peeledHead.types.some(
+              (headConstituent) =>
+                headConstituent.getText().replaceAll(/\s/g, "") ===
+                baseConstituent.getText().replaceAll(/\s/g, ""),
+            ),
+        );
+      if (
+        unionReplacement ||
+        (ts.isTypeReferenceNode(peeledBase) &&
+          ts.isIdentifier(peeledBase.typeName) &&
+          ts.isTypeReferenceNode(peeledHead) &&
+          ts.isIdentifier(peeledHead.typeName) &&
+          peeledBase.typeName.text !== peeledHead.typeName.text)
+      ) {
+        for (const name of referencedNames(peeledHead)) replacements.add(name);
+      }
+    }
+  }
+  return replacements;
+}
+
 /**
  * Builds the canonical `(declaration → member path → optional?)` inventory
  * for one report body. Walks `TypeAliasDeclaration`, `InterfaceDeclaration`,
@@ -990,6 +1398,9 @@ export function buildSurfaceInventory(
   body: string,
   entrypoint: string,
   existingCallableKeys?: ReadonlySet<string>,
+  existingCallableEvidence?: ExistingCallableEvidence,
+  existingDeclarationNames?: ReadonlySet<string>,
+  replacedMemberInputNames?: ReadonlySet<string>,
 ): SurfaceInventory {
   const sourceFile = parseReportSource(body, entrypoint);
   const { namedDeclarations, functionDeclarations } =
@@ -1007,6 +1418,9 @@ export function buildSurfaceInventory(
     namedDeclarations,
     functionDeclarations,
     existingCallableKeys,
+    existingCallableEvidence,
+    existingDeclarationNames,
+    replacedMemberInputNames,
   );
 
   const inventory = new Map<string, DeclarationRecord>();
@@ -1019,7 +1433,9 @@ export function buildSurfaceInventory(
     inventory.set(name, {
       name,
       kind: entry.kind,
-      contravariant: contravariantNames.has(name),
+      contravariant:
+        contravariantNames.has(name) ||
+        replacedMemberInputNames?.has(name) === true,
       members: toOptionalityMap(localMembers),
     });
   }
@@ -1032,6 +1448,7 @@ export function buildSurfaceInventory(
   for (const [key, record] of collectInlineLiteralEntries(
     callableGroups,
     existingCallableKeys,
+    existingCallableEvidence,
   )) {
     inventory.set(key, record);
   }
@@ -1550,6 +1967,7 @@ export function runApiSurfaceCompat(
 
   for (const reportFile of headReportFiles) {
     const headSource = readFileSync(path.join(etcDir, reportFile), "utf8");
+    const headBody = extractApiReportBody(headSource);
     const baseSource = readGitBlob(
       repoRoot,
       baseTag,
@@ -1562,31 +1980,42 @@ export function runApiSurfaceCompat(
     // contributes HARD contravariant reachability (§module doc's gating
     // note) — a new entrypoint has no base snapshot at all, so every head
     // callable is new by definition.
+    const baseBody =
+      baseSource === undefined ? undefined : extractApiReportBody(baseSource);
     const existingCallableKeys =
-      baseSource === undefined ?
+      baseBody === undefined ?
         new Set<string>()
-      : collectExistingCallableKeys(
-          extractApiReportBody(baseSource),
-          reportFile,
-        );
+      : collectExistingCallableKeys(baseBody, reportFile);
+    const existingCallableEvidence =
+      baseBody === undefined ?
+        new Map<string, never>()
+      : collectCallableEvidence(baseBody, headBody, reportFile);
+    const existingDeclarationNames =
+      baseBody === undefined ?
+        new Set<string>()
+      : collectExistingDeclarationNames(baseBody, reportFile);
+    const replacedMemberInputNames =
+      baseBody === undefined ?
+        new Set<string>()
+      : collectReplacedMemberInputNames(baseBody, headBody, reportFile);
     const headInventory = buildSurfaceInventory(
-      extractApiReportBody(headSource),
+      headBody,
       reportFile,
       existingCallableKeys,
+      existingCallableEvidence,
+      existingDeclarationNames,
+      replacedMemberInputNames,
     );
     headInventories.set(reportFile, headInventory);
 
-    if (baseSource === undefined) {
+    if (baseBody === undefined) {
       reportLines.push(
         `report: etc/${reportFile}: new entrypoint (no snapshot at ${baseTag}); surface not compared.`,
       );
       continue;
     }
     anyBaseSnapshotResolved = true;
-    const baseInventory = buildSurfaceInventory(
-      extractApiReportBody(baseSource),
-      reportFile,
-    );
+    const baseInventory = buildSurfaceInventory(baseBody, reportFile);
     const findings = compareSurfaceInventories({
       entrypoint: reportFile,
       base: baseInventory,

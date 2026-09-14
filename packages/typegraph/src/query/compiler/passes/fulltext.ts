@@ -85,23 +85,3 @@ export function runFulltextPredicatePass(
 
   return { fulltextPredicate };
 }
-
-/**
- * Resolves query LIMIT in the presence of a fulltext predicate.
- *
- * Mirrors resolveVectorAwareLimit. When a fulltext predicate is present
- * without an explicit AST limit, the predicate's own limit bounds the
- * result set; when both are present the tighter wins.
- */
-export function resolveFulltextAwareLimit(
-  astLimit?: number,
-  fulltextPredicate?: FulltextMatchPredicate,
-): number | undefined {
-  if (fulltextPredicate === undefined) {
-    return astLimit;
-  }
-  if (astLimit === undefined) {
-    return fulltextPredicate.limit;
-  }
-  return Math.min(astLimit, fulltextPredicate.limit);
-}

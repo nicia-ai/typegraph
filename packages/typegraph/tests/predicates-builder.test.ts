@@ -10,6 +10,7 @@ import { jsonPointer } from "../src/query/json-pointer";
 import {
   arrayField,
   baseField,
+  buildFieldBuilderForTypeInfo,
   dateField,
   embeddingField,
   exists,
@@ -310,6 +311,27 @@ describe("arrayField", () => {
     expect(expr.op).toBe("isEmpty");
   });
 
+  it("keeps specialized array operations in the schema-aware factory", () => {
+    const arrayBuilder = buildFieldBuilderForTypeInfo(field, {
+      valueType: "array",
+      elementType: "string",
+    }) as unknown as Readonly<{ contains: (value: string) => unknown }>;
+    const objectBuilder = buildFieldBuilderForTypeInfo(
+      fieldRef("p", ["props", "metadata"], { valueType: "object" }),
+      { valueType: "object", shape: { author: { valueType: "string" } } },
+    ) as unknown as Readonly<{ get: (key: string) => unknown }>;
+    const embeddingBuilder = buildFieldBuilderForTypeInfo(
+      fieldRef("p", ["props", "embedding"], { valueType: "embedding" }),
+      { valueType: "embedding", dimensions: 3 },
+    ) as unknown as Readonly<{
+      similarTo: (vector: readonly number[], k: number) => unknown;
+    }>;
+
+    expect(typeof arrayBuilder.contains).toBe("function");
+    expect(typeof objectBuilder.get).toBe("function");
+    expect(typeof embeddingBuilder.similarTo).toBe("function");
+  });
+
   it("creates isNotEmpty predicate", () => {
     const pred = arrayField(field).isNotEmpty();
 
@@ -471,10 +493,10 @@ describe("embeddingField", () => {
     valueType: "embedding",
   });
 
-  it("inherits base operations", () => {
+  it("provides null checks without scalar comparison operations", () => {
     const builder = embeddingField(field);
 
-    expect(typeof builder.eq).toBe("function");
+    expect("eq" in builder).toBe(false);
     expect(typeof builder.isNull).toBe("function");
   });
 

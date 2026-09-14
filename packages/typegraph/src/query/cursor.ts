@@ -7,8 +7,8 @@
  * - Version for forward compatibility
  */
 
-import { ValidationError } from "../errors";
-import { type OrderSpec } from "./ast";
+import { ConfigurationError, ValidationError } from "../errors";
+import { type FieldRef, type OrderSpec } from "./ast";
 import { resolveJsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -151,7 +151,7 @@ export function decodeCursor(cursor: string): CursorData {
  * In both cases, outputs flattened format "p.name" to match the flattened API.
  */
 export function buildColumnId(spec: OrderSpec): string {
-  const { alias, path, jsonPointer } = spec.field;
+  const { alias, path, jsonPointer } = requireCursorField(spec.field);
 
   // New format: path=["props"] with jsonPointer="/fieldName"
   // jsonPointer is a branded string like "/name" or "/nested/field"
@@ -182,7 +182,7 @@ export function extractCursorValue(
   row: Record<string, unknown>,
   spec: OrderSpec,
 ): unknown {
-  const { alias, path, jsonPointer } = spec.field;
+  const { alias, path, jsonPointer } = requireCursorField(spec.field);
 
   // Try alias-keyed format first (mapped results)
   let current: unknown = row[alias];
@@ -288,4 +288,13 @@ export function validateCursorColumns(
       );
     }
   }
+}
+
+/** Cursor encoding currently requires identifiable fields, not computed values. */
+export function requireCursorField(field: OrderSpec["field"]): FieldRef {
+  if (field.__type !== "field_ref")
+    throw new ConfigurationError(
+      "Cursor pagination does not support database-expression ordering.",
+    );
+  return field;
 }

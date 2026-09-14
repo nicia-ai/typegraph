@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { expr } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   seedKnowsChain,
@@ -372,6 +373,163 @@ export function registerRecursiveIntegrationTests(
       expect(vp).toBeDefined();
       expect(vp.level).toBe(1);
       expect(vp.route.length).toBe(2);
+    });
+  });
+
+  describe("Qualified recursive paths", () => {
+    it("honors explicit projection names and refuses recursive output collisions and scalar edges", async () => {
+      const store = context.getStore();
+      const root = await store.nodes.Person.create({ name: "Projection root" });
+      const target = await store.nodes.Person.create({
+        name: "Projection target",
+      });
+      await store.edges.knows.create(root, target, {});
+      const query = store
+        .query()
+        .from("Person", "root")
+        .whereNode("root", (person) => person.id.eq(root.id))
+        .traverse("knows", "edge", { expand: "none" })
+        .recursive({
+          maxHops: 2,
+          path: { format: "qualified", alias: "route" },
+        })
+        .to("Person", "target");
+      expect(
+        await query
+          .project((fields) => ({
+            root_id: expr.literal("selected"),
+            name: fields.target.name,
+            found: fields.$exists((subquery, outer) =>
+              subquery
+                .from("Person", "candidate")
+                .whereNode("candidate", (_person, inner) =>
+                  expr.eq(inner.candidate.id, outer.target.id),
+                )
+                .project((inner) => ({ id: inner.candidate.id })),
+            ),
+          }))
+          .execute(),
+      ).toEqual([
+        { root_id: "selected", name: "Projection target", found: true },
+      ]);
+      expect(() =>
+        query.project((fields) => ({ route: fields.target.name })).compile(),
+      ).toThrow(/collides with another result column/);
+      await expect(
+        query.select((row) => row.edge.id).execute(),
+      ).rejects.toThrow(/does not support alias/);
+      expect(() =>
+        query.project((fields) => ({ edgeId: fields.edge.id })).compile(),
+      ).toThrow(/Scalar recursive-edge projection/);
+    });
+
+    it("returns ordered node and edge references through execution, preparation, and batching", async () => {
+      const store = context.getStore();
+      const root = await store.nodes.Person.create({ name: "Qualified root" });
+      const middle = await store.nodes.Person.create({
+        name: "Qualified middle",
+      });
+      const leaf = await store.nodes.Person.create({ name: "Qualified leaf" });
+      const first = await store.edges.knows.create(root, middle, {});
+      const second = await store.edges.knows.create(middle, leaf, {});
+      await store.edges.knows.create(leaf, root, {});
+      const query = store
+        .query()
+        .from("Person", "root")
+        .whereNode("root", (person) => person.id.eq(root.id))
+        .traverse("knows", "edge", { expand: "none" })
+        .recursive({
+          maxHops: 3,
+          path: { format: "qualified", alias: "route" },
+          depth: true,
+        })
+        .to("Person", "target")
+        .orderBy("target", "name", "asc")
+        .select((row) => ({
+          name: row.target.name,
+          depth: row.target_depth,
+          route: row.route,
+        }));
+      const expectedLeaf = {
+        name: "Qualified leaf",
+        depth: 2,
+        route: [
+          { type: "node", kind: "Person", id: root.id },
+          { type: "edge", kind: "knows", id: first.id, direction: "out" },
+          { type: "node", kind: "Person", id: middle.id },
+          { type: "edge", kind: "knows", id: second.id, direction: "out" },
+          { type: "node", kind: "Person", id: leaf.id },
+        ],
+      };
+      const direct = await query.execute();
+      expect(direct).toHaveLength(2);
+      expect(direct[0]).toEqual(expectedLeaf);
+      expect(await query.prepare().execute({})).toEqual(direct);
+      expect(await store.batchOnce(() => [query, query])).toEqual([
+        direct,
+        direct,
+      ]);
+    });
+
+    it("preserves polymorphic endpoints and incoming direction with delimiter-bearing IDs", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Qualified employee" },
+        { id: 'person|,"id' },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Qualified employer" },
+        { id: 'company|,"id' },
+      );
+      const edge = await store.edges.worksAt.create(
+        person,
+        company,
+        { role: "Engineer" },
+        { id: 'edge|,"id' },
+      );
+      const rows = await store
+        .query()
+        .from("Company", "company")
+        .whereNode("company", (value) => value.id.eq(company.id))
+        .traverse("worksAt", "employment", { direction: "in", expand: "none" })
+        .recursive({
+          minHops: 1,
+          maxHops: 1,
+          cyclePolicy: "allow",
+          path: { format: "qualified" },
+        })
+        .to("Person", "employee")
+        .select((row) => row.employee_path)
+        .execute();
+      expect(rows).toEqual([
+        [
+          { type: "node", kind: "Company", id: company.id },
+          { type: "edge", kind: "worksAt", id: edge.id, direction: "in" },
+          { type: "node", kind: "Person", id: person.id },
+        ],
+      ]);
+    });
+
+    it("includes only the seed when expansion stops at depth zero", async () => {
+      const store = context.getStore();
+      const root = await store.nodes.Person.create({
+        name: "Qualified stop root",
+      });
+      const query = store
+        .query()
+        .from("Person", "root")
+        .whereNode("root", (person) => person.id.eq(root.id))
+        .traverse("knows", "edge", { expand: "none" })
+        .recursive({ minHops: 0, maxHops: 2, path: { format: "qualified" } })
+        .to("Person", "target")
+        .stopExpansion("target", (person) => person.id.eq(root.id))
+        .select((row) => ({ node: row.target, route: row.target_path }));
+      const rows = await query.execute();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.node.id).toBe(root.id);
+      expect(rows[0]?.route).toEqual([
+        { type: "node", kind: "Person", id: root.id },
+      ]);
     });
   });
 }

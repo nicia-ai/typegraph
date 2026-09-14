@@ -51,9 +51,11 @@ const Document = defineNode("Document", {
     metadata: z
       .object({
         author: z.string().optional(),
+        node: z.string().optional(),
         // Nullable so pointer-predicate tests can pin the JSON-null case.
         reviewer: z.string().nullable().optional(),
         version: z.number().optional(),
+        publishedAt: z.date().optional(),
         flags: z
           .object({
             published: z.boolean().optional(),
@@ -93,6 +95,10 @@ const knows = defineEdge("knows", {
     // Nullable so weighted-traversal tests can pin the JSON-null case.
     weight: z.number().nullable().optional(),
   }),
+});
+
+const authoredBy = defineEdge("authoredBy", {
+  schema: z.object({}),
 });
 
 /**
@@ -153,6 +159,12 @@ export const integrationTestGraph = defineGraph({
     companyIdCoveringIndex,
   ],
   edges: {
+    authoredBy: {
+      type: authoredBy,
+      from: [Article],
+      to: [Person],
+      cardinality: "many",
+    },
     worksAt: {
       type: worksAt,
       from: [Person],

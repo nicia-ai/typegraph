@@ -23,6 +23,7 @@ import type {
   SelectContext,
   StreamOptions,
 } from "../builder/types";
+import { requireCursorField } from "../cursor";
 import {
   buildCursorFromRow,
   type CursorData,
@@ -102,7 +103,9 @@ export function buildCursorPredicate(
     for (let index_ = 0; index_ < index; index_++) {
       const spec = requireDefined(orderBy[index_]);
       const value = values[index_];
-      andConditions.push(buildEqualityPredicate(spec.field, value));
+      andConditions.push(
+        buildEqualityPredicate(requireCursorField(spec.field), value),
+      );
     }
 
     // Current column uses comparison
@@ -115,7 +118,11 @@ export function buildCursorPredicate(
     const op = isAsc === isForward ? "gt" : "lt";
 
     andConditions.push(
-      buildComparisonPredicate(currentSpec.field, op, currentValue),
+      buildComparisonPredicate(
+        requireCursorField(currentSpec.field),
+        op,
+        currentValue,
+      ),
     );
 
     // Combine with AND

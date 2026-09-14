@@ -154,24 +154,32 @@ export function isParameterRef(value: unknown): value is ParameterRef {
  * A typed field builder for creating predicates.
  */
 type FieldBuilder<T> =
-  [T] extends [string] ? StringFieldBuilder
-  : [T] extends [number] ? NumberFieldBuilder
-  : [T] extends [boolean] ? BooleanFieldBuilder
-  : [T] extends [Date] ? DateFieldBuilder
+  [T] extends [string] ? StringFieldBuilder<T>
+  : [T] extends [number] ? NumberFieldBuilder<T>
+  : [T] extends [boolean] ? BooleanFieldBuilder<T>
+  : [T] extends [Date] ? DateFieldBuilder<T>
   : [T] extends [readonly (infer U)[]] ? ArrayFieldBuilder<U>
   : [T] extends [Record<string, unknown>] ? ObjectFieldBuilder<T>
-  : BaseFieldBuilder;
+  : BaseFieldBuilder<T>;
+
+type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
+type MembershipOperand<T> = readonly T[] | ParameterRef;
+
+type NullFieldBuilder = Readonly<{
+  isNull: () => Predicate;
+  isNotNull: () => Predicate;
+}>;
 
 /**
  * Base field operations available on all types.
  */
-type BaseFieldBuilder = Readonly<{
-  eq: (value: unknown) => Predicate;
-  neq: (value: unknown) => Predicate;
+type BaseFieldBuilder<T = unknown> = Readonly<{
+  eq: (value: EqualityOperand<T>) => Predicate;
+  neq: (value: EqualityOperand<T>) => Predicate;
   isNull: () => Predicate;
   isNotNull: () => Predicate;
-  in: (values: readonly unknown[] | ParameterRef) => Predicate;
-  notIn: (values: readonly unknown[] | ParameterRef) => Predicate;
+  in: (values: MembershipOperand<T>) => Predicate;
+  notIn: (values: MembershipOperand<T>) => Predicate;
 }>;
 
 /**
@@ -214,7 +222,7 @@ type MatchesOptions = Readonly<{
  * level (gated by `searchable()` declarations in the schema), not on
  * individual string fields.
  */
-type StringFieldBuilder = BaseFieldBuilder &
+type StringFieldBuilder<T extends string = string> = BaseFieldBuilder<T> &
   Readonly<{
     gt: (value: string | ParameterRef) => Predicate;
     gte: (value: string | ParameterRef) => Predicate;
@@ -230,7 +238,7 @@ type StringFieldBuilder = BaseFieldBuilder &
 /**
  * Number-specific field operations.
  */
-type NumberFieldBuilder = BaseFieldBuilder &
+type NumberFieldBuilder<T extends number = number> = BaseFieldBuilder<T> &
   Readonly<{
     gt: (value: number | ParameterRef) => Predicate;
     gte: (value: number | ParameterRef) => Predicate;
@@ -245,12 +253,12 @@ type NumberFieldBuilder = BaseFieldBuilder &
 /**
  * Boolean-specific field operations.
  */
-type BooleanFieldBuilder = BaseFieldBuilder;
+type BooleanFieldBuilder<T extends boolean = boolean> = BaseFieldBuilder<T>;
 
 /**
  * Date-specific field operations.
  */
-type DateFieldBuilder = BaseFieldBuilder &
+type DateFieldBuilder<T extends Date = Date> = BaseFieldBuilder<T> &
   Readonly<{
     gt: (value: Date | string | ParameterRef) => Predicate;
     gte: (value: Date | string | ParameterRef) => Predicate;
@@ -279,7 +287,7 @@ type ArrayPredicateOps<T> =
 /**
  * Array-specific field operations.
  */
-type ArrayFieldBuilder<T = unknown> = BaseFieldBuilder &
+type ArrayFieldBuilder<T = unknown> = NullFieldBuilder &
   Readonly<{
     /** Check if array is empty */
     isEmpty: () => Predicate;
@@ -318,7 +326,7 @@ type NestedFieldBuilder<T, K extends keyof T> =
 
 type ObjectFieldBuilder<
   T extends Record<string, unknown> = Record<string, unknown>,
-> = BaseFieldBuilder &
+> = NullFieldBuilder &
   Readonly<{
     /** Access a nested field by key for fluent chaining */
     get: <K extends keyof T & string>(key: K) => NestedFieldBuilder<T, K>;
@@ -388,7 +396,7 @@ export type SimilarToOptions = Readonly<{
 /**
  * Embedding-specific field operations for vector similarity search.
  */
-type EmbeddingFieldBuilder = BaseFieldBuilder &
+type EmbeddingFieldBuilder = NullFieldBuilder &
   Readonly<{
     /**
      * Find nodes with similar embeddings.
@@ -429,11 +437,11 @@ type FieldRefOptions = Readonly<{
   elementType?: ValueType | undefined;
 }>;
 
-export function fieldRef(
+export function fieldRef<Value = unknown>(
   alias: string,
   path: readonly string[],
   options?: FieldRefOptions,
-): FieldRef {
+): FieldRef<Value> {
   return {
     __type: "field_ref",
     alias,
@@ -446,6 +454,71 @@ export function fieldRef(
       elementType: options.elementType,
     }),
   };
+}
+
+function isFieldRef(value: unknown): value is FieldRef {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Readonly<{ __type?: unknown }>).__type === "field_ref"
+  );
+}
+
+function assertCompatibleFieldReferences(
+  left: FieldRef,
+  right: FieldRef,
+): void {
+  const leftType = left.valueType;
+  const rightType = right.valueType;
+  if (
+    leftType !== undefined &&
+    leftType !== "unknown" &&
+    rightType !== undefined &&
+    rightType !== "unknown" &&
+    leftType !== rightType
+  ) {
+    throw new UnsupportedPredicateError(
+      `Cannot compare ${leftType} field "${left.alias}.${left.path.join(".")}" with ${rightType} field "${right.alias}.${right.path.join(".")}".`,
+      { leftType, rightType },
+    );
+  }
+}
+
+function assertLiteralMatchesField(
+  field: FieldRef,
+  value: unknown,
+  allowDateString = false,
+): void {
+  const valueType = field.valueType;
+  if (valueType === undefined || valueType === "unknown") return;
+
+  const matches =
+    (valueType === "string" && typeof value === "string") ||
+    (valueType === "number" && typeof value === "number") ||
+    (valueType === "boolean" && typeof value === "boolean") ||
+    (valueType === "date" &&
+      (value instanceof Date ||
+        (allowDateString && typeof value === "string")));
+  if (matches) return;
+
+  throw new UnsupportedPredicateError(
+    `Expected a ${valueType} literal for field "${field.alias}.${field.path.join(".")}", got ${value instanceof Date ? "date" : typeof value}.`,
+    { expectedValueType: valueType, receivedValueType: typeof value },
+  );
+}
+
+function assertComparisonSupported(field: FieldRef): void {
+  const valueType = field.valueType;
+  if (
+    valueType === "array" ||
+    valueType === "object" ||
+    valueType === "embedding"
+  ) {
+    throw new UnsupportedPredicateError(
+      `Comparison predicates are not supported for ${valueType} field "${field.alias}.${field.path.join(".")}".`,
+      { valueType },
+    );
+  }
 }
 
 function coerceLiteralValue(value: unknown): string | number | boolean | Date {
@@ -495,6 +568,7 @@ function comparison(
   field: FieldRef,
   value: unknown,
 ): Predicate {
+  assertComparisonSupported(field);
   if (isParameterRef(value)) {
     const expr: ComparisonPredicate = {
       __type: "comparison",
@@ -504,6 +578,16 @@ function comparison(
     };
     return predicate(expr);
   }
+  if (isFieldRef(value)) {
+    assertCompatibleFieldReferences(field, value);
+    return predicate({
+      __type: "comparison",
+      op,
+      left: field,
+      right: value,
+    } satisfies ComparisonPredicate);
+  }
+  assertLiteralMatchesField(field, value, op !== "eq" && op !== "neq");
   const coercedValue = coerceLiteralValue(value);
   const expr: ComparisonPredicate = {
     __type: "comparison",
@@ -529,6 +613,7 @@ function inComparison(
   field: FieldRef,
   values: readonly unknown[] | ParameterRef,
 ): Predicate {
+  assertComparisonSupported(field);
   if (isParameterRef(values)) {
     return predicate({
       __type: "comparison",
@@ -547,6 +632,7 @@ function inComparison(
         },
       );
     }
+    assertLiteralMatchesField(field, value);
     return literal(coerceLiteralValue(value));
   });
   const expr: ComparisonPredicate = {
@@ -596,6 +682,13 @@ function nullCheck(op: NullCheckOp, field: FieldRef): Predicate {
   return predicate(expr);
 }
 
+function nullFieldBuilder(field: FieldRef): NullFieldBuilder {
+  return {
+    isNull: () => nullCheck("isNull", field),
+    isNotNull: () => nullCheck("isNotNull", field),
+  };
+}
+
 /**
  * Creates a between predicate.
  */
@@ -616,7 +709,7 @@ function between(
 /**
  * Creates a base field builder with common operations.
  */
-function baseFieldBuilder(field: FieldRef): BaseFieldBuilder {
+function baseFieldBuilder<T = unknown>(field: FieldRef): BaseFieldBuilder<T> {
   return {
     eq: (value) => comparison("eq", field, value),
     neq: (value) => comparison("neq", field, value),
@@ -624,6 +717,16 @@ function baseFieldBuilder(field: FieldRef): BaseFieldBuilder {
     isNotNull: () => nullCheck("isNotNull", field),
     in: (values) => inComparison("in", field, values),
     notIn: (values) => inComparison("notIn", field, values),
+  };
+}
+
+function unsupportedComparisonFieldBuilder(field: FieldRef): BaseFieldBuilder {
+  return {
+    eq: (value) => comparison("eq", field, value),
+    neq: (value) => comparison("neq", field, value),
+    in: (values) => inComparison("in", field, values),
+    notIn: (values) => inComparison("notIn", field, values),
+    ...nullFieldBuilder(field),
   };
 }
 
@@ -755,7 +858,9 @@ export function dateField(field: FieldRef): DateFieldBuilder {
  * Creates a base field builder (for booleans, enums, and unknown types).
  * Only provides the fundamental operations: eq, neq, isNull, isNotNull, in, notIn.
  */
-export function baseField(field: FieldRef): BaseFieldBuilder {
+export function baseField<T = unknown>(
+  field: FieldRef<T>,
+): BaseFieldBuilder<T> {
   return baseFieldBuilder(field);
 }
 
@@ -788,7 +893,7 @@ export function arrayField<T = unknown>(field: FieldRef): ArrayFieldBuilder<T> {
   // contains/containsAll/containsAny based on whether T extends ScalarValue.
   // At runtime we always provide them - they just won't type-check if T isn't scalar.
   return {
-    ...baseFieldBuilder(field),
+    ...nullFieldBuilder(field),
     contains: (value: T) => arrayOp("contains", field, [value]),
     containsAll: (values: readonly T[]) =>
       arrayOp("containsAll", field, values),
@@ -837,7 +942,7 @@ function vectorSimilarity(
  */
 export function embeddingField(field: FieldRef): EmbeddingFieldBuilder {
   return {
-    ...baseFieldBuilder(field),
+    ...nullFieldBuilder(field),
     similarTo: (queryEmbedding, k, options) =>
       vectorSimilarity(field, queryEmbedding, k, options),
   };
@@ -853,25 +958,34 @@ export function buildFieldBuilderForTypeInfo(
 
   switch (typeInfo.valueType) {
     case "string": {
-      return stringField(field);
+      return stringField(field) as unknown as BaseFieldBuilder;
     }
     case "number": {
-      return numberField(field);
+      return numberField(field) as unknown as BaseFieldBuilder;
     }
     case "boolean": {
       return baseField(field);
     }
     case "date": {
-      return dateField(field);
+      return dateField(field) as unknown as BaseFieldBuilder;
     }
     case "array": {
-      return arrayField(field);
+      return {
+        ...arrayField(field),
+        ...unsupportedComparisonFieldBuilder(field),
+      };
     }
     case "object": {
-      return objectField(field, { typeInfo });
+      return {
+        ...objectField(field, { typeInfo }),
+        ...unsupportedComparisonFieldBuilder(field),
+      };
     }
     case "embedding": {
-      return embeddingField(field);
+      return {
+        ...embeddingField(field),
+        ...unsupportedComparisonFieldBuilder(field),
+      };
     }
     case "unknown": {
       return baseField(field);
@@ -930,7 +1044,7 @@ export function objectField<
   const basePointer = field.jsonPointer;
 
   return {
-    ...baseFieldBuilder(field),
+    ...nullFieldBuilder(field),
     get: <K extends keyof T & string>(key: K) => {
       const pointer = jsonPointer([key]);
       const nestedPointer = joinJsonPointers(basePointer, pointer);

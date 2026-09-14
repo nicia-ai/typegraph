@@ -50,11 +50,13 @@ import {
   registerContributionDiagnosticIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerCurrentIdentityTraversalTests,
+  registerDatabaseExpressionQueryIntegrationTests,
   registerDurableEdgeMatchIdentityIntegrationTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeClaimSelfHealIntegrationTests,
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
+  registerExpressionSubqueryQueryIntegrationTests,
   registerFulltextIntegrationTests,
   registerGraphAnnotationsIntegrationTests,
   registerGraphMergeCallbackIntegrationTests,
@@ -68,17 +70,24 @@ import {
   registerLateMaterializationIntegrationTests,
   registerLegacyClaimAxisIntegrationTests,
   registerLineageConformanceIntegrationTests,
+  registerMatchResultFilteringIntegrationTests,
+  registerMatchResultRankingIntegrationTests,
   registerMigrateSchemaKindIntegrationTests,
+  registerMultiRecursiveTraversalIntegrationTests,
+  registerMultiRootSubgraphBatchIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
   registerProvenanceIntegrationTests,
   registerQueryHookIntegrationTests,
+  registerQueryTerminalIntegrationTests,
   registerReadEfficiencyIntegrationTests,
   registerReconciledSchemaIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
+  registerRecursiveStopExpansionIntegrationTests,
+  registerRelationalCompositionIntegrationTests,
   registerRemovalMaterializationIntegrationTests,
   registerSchemaCheckedReadIntegrationTests,
   registerSelectiveRetryIntegrationTests,
@@ -278,6 +287,14 @@ export function createIntegrationTestSuite<
     });
 
     registerAggregateIntegrationTests(context);
+    registerDatabaseExpressionQueryIntegrationTests(context);
+    registerRelationalCompositionIntegrationTests(context);
+    registerMatchResultRankingIntegrationTests(context);
+    registerMatchResultFilteringIntegrationTests(context);
+    registerMultiRecursiveTraversalIntegrationTests(context);
+    registerMultiRootSubgraphBatchIntegrationTests(context);
+    registerExpressionSubqueryQueryIntegrationTests(context);
+    registerQueryTerminalIntegrationTests(context);
     registerBackendProvenanceIntegrationTests(context);
     registerBulkFindByIndexIntegrationTests(context);
     registerBulkFindEndpointIntegrationTests(context);
@@ -320,6 +337,7 @@ export function createIntegrationTestSuite<
     registerSchemaCheckedReadIntegrationTests(context);
     registerEdgeOperationIntegrationTests(context);
     registerRecursiveIntegrationTests(context);
+    registerRecursiveStopExpansionIntegrationTests(context);
     registerPaginationIntegrationTests(context);
     registerTraversalIntegrationTests(context);
     registerEdgePropertyIntegrationTests(context);

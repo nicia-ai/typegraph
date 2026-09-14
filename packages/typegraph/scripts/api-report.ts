@@ -523,10 +523,70 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // lose one superseded helper without re-exporting the new helpers: importing
 // Store types there would unnecessarily expose the Store dependency graph
 // through their adapter aliases.
+// Query DSL phase 1/2 contract repair adds twelve private helper names to the
+// root and the six Store-bearing secondary entrypoints (+12 each). Seven
+// (`AggregateAliasMap`, `AggregateFieldResult`, `AliasSchemaValue`,
+// `AliasValue`, `FieldResult`, `PropertyValue`, `WithAliasOptionality`) carry
+// schema-aware aggregate result inference; four (`EqualityOperand`,
+// `MembershipOperand`, `NullFieldAccessor`, `ObjectComparisonAccessor`) carry
+// the corrected predicate operand/accessor contracts; and
+// `OneStatementBatchReads` preserves batchOnce tuple and readonly-array result
+// inference. These are implementation helpers behind exported fluent APIs,
+// not independently useful contracts, so exporting them merely to erase
+// measured forgotten-export debt would enlarge the package surface without a
+// caller use case. No names were removed and no other entrypoint moved.
+// Query DSL phase 3 adds typed database expressions and projection queries.
+// Thirty-six private representation/inference helpers become reachable from
+// every Store-bearing surface: `AggregateExpressionNode`, `AggregateOperator`,
+// `AliasExpressions`, `ArithmeticExpressionNode`, `ArithmeticOperator`,
+// `BooleanExpressionNode`, `CoalesceExpressionNode`, `ComparisonExpressionNode`,
+// `ConditionalExpressionNode`, `DatabaseExpressionNode`,
+// `DatabaseExpressionPredicate`, `DatabaseJsonValue`, `DatabaseLiteral`,
+// `ExistsSubqueryExpressionNode`, `ExpressionComparisonOperator`,
+// `ExpressionMetadata`, `ExpressionObjectChildren`,
+// `ExpressionProjectionEntries`, `ExpressionProjectionEntry`,
+// `ExpressionSubqueryHelpers`, `ExpressionSubqueryRelation`,
+// `ExpressionValue$1`, `FieldExpressionNode`, `IsUnion`,
+// `LiteralExpressionNode`, `NotExpressionNode`, `NullCheckExpressionNode`,
+// `NumericConversionExpressionNode`, `OneStatementReadProvenance`,
+// `OuterReferenceExpressionNode`, `ParameterExpressionNode`,
+// `ProjectedExpressionSubqueryRelation`, `ScalarExpressionSubqueryRelation`,
+// `ScalarSubqueryExpressionNode`, `UndefinedWhenNullish`, and
+// `UndefinedWhenOptional`. The six secondary Store entrypoints additionally
+// reach seven public root exports they do not re-export (`DatabaseExpression`,
+// `DatabaseProjection`, `ExecutableProjectionQuery`, `ExpressionAliasContext`,
+// `ExpressionValue`, `ProjectionResult`, `QueryExpressionContext`), producing
+// their exact +43 delta. The root instead gains twenty private helpers used by
+// its exported expression factories and inference: `Comparable`,
+// `ComparableExpression`, `LiteralResult`, `MergeAliasMaps`,
+// `MergeEdgeAliasMaps`, `NonNull`, `NullIfEitherUndefined`,
+// `NumericExpression`, `OrderedComparable`, `ParameterValue`, `coalesce`,
+// `countDistinct_2`, `count_2`, `isNotNull`, `isNull`, `literal`, `not`,
+// `parameter`, `toNumber`, and `when`, producing its exact +56 delta. These
+// helpers are implementation details behind the exported fluent surface; no
+// forgotten name was removed, and exporting them would add API without an
+// independent caller contract.
+// Phase 4 adds eleven internal relation contract names behind the root's public
+// fluent API: AggregateRelationFields, CompatibleRelationProjection,
+// DerivedRelation, RelationAst, RelationColumn, RelationDefinition, RelationOrder,
+// RelationProvenance, RelationSource, RelationState, and SetRelation. Root debt
+// is 476 -> 487. The six Store-bearing secondary entrypoints also reference the
+// root-only public ExecutableRelationQuery, PreparedBindings,
+// PreparedParameterDeclaration, RelationColumnContext, RelationProjection, and
+// RelationProjectionResult, giving each an exact +17 delta. No old names were
+// removed, and these internal constructor/compiler types are not independent APIs.
+// Phase 6 adds two internal qualified-path inference helpers at the root:
+// RequiredRecursiveAliasValue and ResolvePathFormat (487 -> 489). The six
+// Store-bearing secondary entrypoints additionally reach the root-exported
+// BatchOnceOptions and five QualifiedRecursivePath* types, plus those same two
+// helpers, for an exact +8 each. These names are the implementation graph behind
+// the public opt-in batch option and qualified recursive-path result; the public
+// caller types are exported at the root, while duplicating them across unrelated
+// entrypoints would enlarge those surfaces. No forgotten name was removed.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 408,
-    sha256: "e705de84fe1cc3510a7a2bc7f7ae8f53acf2af773c4ec191c1e815be87119610",
+    count: 489,
+    sha256: "e6e7176191a9d7ad6c58db972adea98da07aec7fdf7b454fc0b285bcb5dcf252",
   },
   "./adapters/drizzle/engine": {
     count: 331,
@@ -572,36 +632,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 760,
-    sha256: "794eb35246ad34705a674fbbe4cdaa3853a4f5cd28cd6032651f2e087fde3c70",
+    count: 840,
+    sha256: "841237968e18c408a4a02f9b666d7e7c1be5386433e9ccdac78a3e36aaaf6977",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 743,
-    sha256: "71d010111cb8f20e86fb43badc9efba83a4e21d3ab62629541a7165a39ac2905",
+    count: 823,
+    sha256: "69aa18bd5a3214fa1e94f1f2e668247d4bc78b98a0eff17a042dacbf9864324c",
   },
   "./postgres/pglite": {
-    count: 742,
-    sha256: "62a522ae87a73b35bdf133485846eab215f7bfe2b47bf547b16e28672d07ed8f",
+    count: 822,
+    sha256: "97db6d760d1f63e1a93f12fb2b1d6e5cb6139c4c560c019e784bfb073100458d",
   },
   "./profiler": {
-    count: 745,
-    sha256: "39cdc802e4988d4d3c49b5ec188b99a45aeda3b9935e8e69654ef0258617d8c4",
+    count: 825,
+    sha256: "8e4129ca2dbf8c3fcbbcbbb34e8efa684f41aada00400675ba4b0185a43b275d",
   },
   "./provenance": {
-    count: 751,
-    sha256: "c416f96f1bf051cdb401544271c5c1212e79acdd9674c04ba0034c0c69b85e9b",
+    count: 831,
+    sha256: "29e07935cac4ff96d0e448d9e535f298c589bb4460bae6f5e476028b974b22a0",
   },
   "./schema": {
     count: 282,
     sha256: "912798b14b4548dc5f66ce6ff9db71dd7561b7d0f1303fd165aa9f58b37390de",
   },
   "./sqlite/local": {
-    count: 742,
-    sha256: "62a522ae87a73b35bdf133485846eab215f7bfe2b47bf547b16e28672d07ed8f",
+    count: 822,
+    sha256: "97db6d760d1f63e1a93f12fb2b1d6e5cb6139c4c560c019e784bfb073100458d",
   },
 };
 

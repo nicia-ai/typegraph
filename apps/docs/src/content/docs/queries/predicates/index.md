@@ -22,6 +22,21 @@ appropriate for that field's type. Edge fields work the same way:
 .whereEdge("e", (e) => e.role.eq("admin"))
 ```
 
+New queries can also use the typed expression context passed as the second callback argument. This
+is the recommended form when a predicate combines fields, arithmetic, parameters, or subqueries:
+
+```typescript
+import { expr } from "@nicia-ai/typegraph";
+
+.whereNode("p", (_person, e) =>
+  expr.gt(e.p.age, expr.literal(18)),
+)
+```
+
+The first argument preserves the existing accessor API. Both forms compile through the same
+predicate representation. See [Database Expressions](/queries/expressions) for composition and
+null semantics.
+
 ## Predicate Types
 
 | Type | Predicates | Section |
@@ -88,6 +103,13 @@ These predicates are available on **all** field types:
 `eq` and `neq` accept `param()` references for [prepared queries](/queries/execute#prepared-queries).
 `in` and `notIn` accept one in place of the **whole** list — `p.id.in(param("ids"))`, bound with
 `execute({ ids: [...] })` — but not in place of an individual element.
+
+Equality and membership values follow the field's schema type. For example, a `number` field
+accepts numbers (or a parameter), while a `string` field accepts strings. `eq` and `neq` also
+accept a compatible explicit `fieldRef<T>` when comparing two query fields. Values that enter
+through a dynamic accessor or another unchecked boundary are validated while the predicate is
+built and are refused before TypeGraph compiles SQL when their runtime type disagrees with the
+registered schema.
 
 ---
 

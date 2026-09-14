@@ -87,6 +87,20 @@ export function registerPredicateIntegrationTests(
       expect(results.toSorted()).toEqual(["Alice", "Charlie"]);
     });
 
+    it("refuses a schema-incompatible literal before either backend compiles SQL", () => {
+      const store = context.getStore();
+
+      // The cast models a value arriving through an unchecked boundary. If
+      // assertLiteralMatchesField is removed, this reaches SQLite/PostgreSQL
+      // with divergent coercion behavior instead of throwing here.
+      expect(() =>
+        store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (p) => p.age.eq("thirty" as never)),
+      ).toThrow(/Expected a number literal/);
+    });
+
     it("executes NOT predicate", async () => {
       const store = context.getStore();
       const results = await store
@@ -450,7 +464,12 @@ export function registerPredicateIntegrationTests(
         store
           .query()
           .from("Person", "p")
-          .whereNode("p", (p) => p.name.in(["Alice", parameter("other")])),
+          .whereNode("p", (p) =>
+            p.name.in([
+              "Alice",
+              parameter("other"),
+            ] as unknown as readonly string[]),
+          ),
       ).toThrow(/is not supported as an element of the in\(\) list/);
     });
 
@@ -488,17 +507,17 @@ export function registerPredicateIntegrationTests(
         /every element must be a number/,
       );
 
-      // The literal form already refuses a mixed list when it compiles; the
-      // parameterized form, which has no literals to inspect at compile time,
-      // now reaches the same verdict from the binding.
-      await expect(
+      // Literal inputs have schema evidence at predicate-build time, so they
+      // are refused before either backend compiles a query. The parameterized
+      // form above has no elements to inspect until execution.
+      expect(() =>
         store
           .query()
           .from("Person", "p")
-          .whereNode("p", (p) => p.age.in([30, "a"]))
-          .select((ctx) => ctx.p.name)
-          .execute(),
-      ).rejects.toThrow(/Mixed literal value types/);
+          .whereNode("p", (p) =>
+            p.age.in([30, "a"] as unknown as readonly number[]),
+          ),
+      ).toThrow(/Expected a number literal/);
     });
 
     it("rejects non-finite numbers, which JSON would launder into NULL", async () => {

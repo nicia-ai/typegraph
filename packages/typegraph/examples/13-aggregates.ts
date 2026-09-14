@@ -139,7 +139,7 @@ export async function main() {
       .execute();
 
     for (const row of booksPerGenre) {
-      console.log(`  ${String(row.genre)}: ${row.bookCount} books`);
+      console.log(`  ${row.genre}: ${row.bookCount} books`);
     }
 
     // ============================================================
@@ -162,10 +162,12 @@ export async function main() {
       .execute();
 
     for (const row of priceStats) {
-      console.log(`  ${String(row.genre)}:`);
-      console.log(`    Total: $${row.totalValue.toFixed(2)}`);
-      console.log(`    Avg:   $${row.avgPrice.toFixed(2)}`);
-      console.log(`    Range: $${row.cheapest.toFixed(2)} – $${row.mostExpensive.toFixed(2)}`);
+      console.log(`  ${row.genre}:`);
+      console.log(`    Total: $${row.totalValue?.toFixed(2) ?? "n/a"}`);
+      console.log(`    Avg:   $${row.avgPrice?.toFixed(2) ?? "n/a"}`);
+      console.log(
+        `    Range: $${row.cheapest?.toFixed(2) ?? "n/a"} – $${row.mostExpensive?.toFixed(2) ?? "n/a"}`,
+      );
     }
 
     // ============================================================
@@ -191,7 +193,7 @@ export async function main() {
 
     for (const row of authorsPerGenre) {
       const authorLabel = row.uniqueAuthors === 1 ? "author" : "authors";
-      console.log(`  ${String(row.genre)}: ${row.totalBooks} books by ${row.uniqueAuthors} ${authorLabel}`);
+      console.log(`  ${row.genre}: ${row.totalBooks} books by ${row.uniqueAuthors} ${authorLabel}`);
     }
 
     // ============================================================
@@ -214,7 +216,7 @@ export async function main() {
 
     for (const row of breakdown) {
       const status = row.inStock ? "in stock" : "out of stock";
-      console.log(`  ${String(row.genre)} (${status}): ${row.bookCount}`);
+      console.log(`  ${row.genre} (${status}): ${row.bookCount}`);
     }
 
     // ============================================================
@@ -237,7 +239,9 @@ export async function main() {
       .execute();
 
     for (const row of booksPerAuthor) {
-      console.log(`  ${String(row.author)}: ${row.bookCount} books (avg rating: ${row.avgRating.toFixed(1)})`);
+      console.log(
+        `  ${row.author}: ${row.bookCount} books (avg rating: ${row.avgRating?.toFixed(1) ?? "n/a"})`,
+      );
     }
 
     // ============================================================
@@ -258,7 +262,7 @@ export async function main() {
       .execute();
 
     for (const row of popularGenres) {
-      console.log(`  ${String(row.genre)}: ${row.bookCount} books`);
+      console.log(`  ${row.genre}: ${row.bookCount} books`);
     }
 
     if (popularGenres.length === 0) {
@@ -285,7 +289,9 @@ export async function main() {
       .execute();
 
     for (const row of valuableInStock) {
-      console.log(`  ${String(row.genre)}: ${row.bookCount} books, $${row.totalValue.toFixed(2)} total`);
+      console.log(
+        `  ${row.genre}: ${row.bookCount} books, $${row.totalValue?.toFixed(2) ?? "n/a"} total`,
+      );
     }
 
     // ============================================================
@@ -310,8 +316,10 @@ export async function main() {
       .execute();
 
     for (const row of publisherRevenue) {
-      console.log(`  ${String(row.publisher)}:`);
-      console.log(`    ${row.bookCount} books, $${row.totalRevenue.toFixed(2)} total, avg $${row.avgPrice.toFixed(2)}`);
+      console.log(`  ${row.publisher}:`);
+      console.log(
+        `    ${row.bookCount} books, $${row.totalRevenue?.toFixed(2) ?? "n/a"} total, avg $${row.avgPrice?.toFixed(2) ?? "n/a"}`,
+      );
       console.log(`    Highest rating: ${row.topRating}`);
     }
 
@@ -339,7 +347,7 @@ export async function main() {
       .execute();
 
     for (const row of topAuthors) {
-      console.log(`  ${String(row.author)}: ${row.bookCount} books`);
+      console.log(`  ${row.author}: ${row.bookCount} books`);
     }
 
     console.log("\n=== Aggregate query example complete ===");

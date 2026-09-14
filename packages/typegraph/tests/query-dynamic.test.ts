@@ -372,6 +372,22 @@ describe(".field() discriminator", () => {
     ).toThrow(TypeError);
   });
 
+  it("rejects a dynamic literal whose type disagrees with the registered schema", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(paperExtension);
+
+    // Dynamic access starts as an unknown field surface, so TypeScript cannot
+    // establish this value's type. The accessor has the registered field
+    // metadata at build time and must refuse it before SQL compilation.
+    expect(() =>
+      evolved
+        .query()
+        .fromDynamic("Paper", "p")
+        .whereNode("p", (paper) => paper.field("year").eq("2017")),
+    ).toThrow(/Expected a number literal/);
+  });
+
   it("admits BaseFieldAccessor methods without a discriminator", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);

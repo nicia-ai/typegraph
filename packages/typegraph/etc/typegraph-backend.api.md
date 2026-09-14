@@ -1825,6 +1825,7 @@ export type DeleteUniqueParams = Readonly<{
 // @public
 export interface DialectAdapter {
     readonly analyzeTemporaryTable: (this: void, table: SqlFragment) => SqlFragment | undefined;
+    readonly appendTextJsonArray: (this: void, array: SqlFragment, values: readonly SqlFragment[]) => SqlFragment;
     readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
     readonly bindValue: (this: void, value: unknown) => unknown;
     readonly booleanLiteral: (this: void, value: boolean) => SqlFragment;
@@ -1859,8 +1860,11 @@ export interface DialectAdapter {
     readonly orderedRowsJsonArray: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly quoteIdentifier: (this: void, name: string) => string;
+    readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
     readonly supportsVectors: boolean;
+    readonly textJsonArray: (this: void, values: readonly SqlFragment[]) => SqlFragment;
+    unboundedLimit(): SqlFragment;
     readonly wrapSetOperationOperand: (this: void, inner: SqlFragment) => SqlFragment;
 }
 

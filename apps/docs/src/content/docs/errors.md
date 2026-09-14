@@ -1223,6 +1223,7 @@ try {
     .query()
     .from("Document", "d")
     .whereNode("d", (d) => d.embedding.similarTo(queryVector, 10))
+    .select((ctx) => ctx.d)
     .execute();
 } catch (error) {
   if (error instanceof UnsupportedPredicateError) {

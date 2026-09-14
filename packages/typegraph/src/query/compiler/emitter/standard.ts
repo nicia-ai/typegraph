@@ -6,6 +6,7 @@ import { inspectStandardProjectPlan } from "./plan-inspector";
 export type StandardQueryEmitterInput = Readonly<{
   ctes: readonly SqlFragment[];
   fromClause: SqlFragment;
+  where?: SqlFragment;
   groupBy?: SqlFragment;
   having?: SqlFragment;
   limitOffset?: SqlFragment;
@@ -70,6 +71,8 @@ export function emitStandardQuerySql(
   }
 
   parts.push(sql`SELECT ${input.projection}`, input.fromClause);
+
+  if (input.where !== undefined) parts.push(input.where);
 
   if (input.groupBy !== undefined) {
     parts.push(input.groupBy);

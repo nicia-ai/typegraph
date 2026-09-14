@@ -137,6 +137,13 @@ export type InListParameterOptions = Readonly<{
  * together and rendered by a backend adapter.
  */
 export interface DialectAdapter {
+  /** Converts strict finite decimal text to a number, returning SQL NULL otherwise. */
+  readonly safeNumericConversion: (
+    this: void,
+    expression: SqlFragment,
+  ) => SqlFragment;
+  /** Token for an unlimited result bound when OFFSET requires a LIMIT. */
+  unboundedLimit(): SqlFragment;
   /**
    * The dialect name this adapter handles.
    */
@@ -557,6 +564,19 @@ export interface DialectAdapter {
    * PostgreSQL: ARRAY[id]
    */
   readonly initializePath: (this: void, nodeId: SqlFragment) => SqlFragment;
+
+  /** Creates a JSON array of text scalar expressions, preserving delimiters verbatim. */
+  readonly textJsonArray: (
+    this: void,
+    values: readonly SqlFragment[],
+  ) => SqlFragment;
+
+  /** Appends text scalar expressions to a JSON array. */
+  readonly appendTextJsonArray: (
+    this: void,
+    array: SqlFragment,
+    values: readonly SqlFragment[],
+  ) => SqlFragment;
 
   /**
    * Extends a path with a new node ID.

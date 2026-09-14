@@ -1,6 +1,10 @@
 /**
  * ExecutableAggregateQuery - A query with aggregate functions that can be executed.
  */
+import { type z } from "zod";
+
+import { backendDerivationRoot } from "../../backend/derive-backend";
+import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
 import { createDataKeyedBag } from "../../utils/object";
@@ -8,14 +12,21 @@ import {
   type AggregateExpr,
   type AggregateOrderSpec,
   type FieldRef,
+  mergeEdgeKinds,
   type QueryAst,
   type SortDirection,
 } from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
+import type { DatabaseExpression } from "../expressions";
+import { parseJsonPointer } from "../json-pointer";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
+import type {
+  PreparedBindings,
+  PreparedParameterDeclaration,
+} from "./prepared-bindings";
 import { hasParameterReferences } from "./prepared-query";
 import {
   buildQueryTemplate,
@@ -23,32 +34,115 @@ import {
   fillTemplateParams,
 } from "./read-instant-template";
 import {
-  type AliasMap,
-  type QueryBuilderConfig,
-  type QueryBuilderState,
-} from "./types";
+  createExecutableRelation,
+  type ExecutableRelationQuery,
+} from "./relation";
+import { type QueryBuilderConfig, type QueryBuilderState } from "./types";
+import { validateQueryRange, validateSortDirection } from "./validation";
 
 /** Sentinel distinguishing "template not yet built" from a built `undefined`. */
 const NOT_COMPUTED = Symbol("NOT_COMPUTED");
 
-/**
- * Result type for aggregate queries.
- * Maps field refs to their value types and aggregates to numbers.
- */
+export type AggregateAliasMap = Readonly<
+  Record<
+    string,
+    Readonly<{
+      type: Readonly<{ schema: z.ZodType }>;
+      optional: boolean;
+    }>
+  >
+>;
+
+type AliasValue<Aliases extends AggregateAliasMap, Alias extends string> =
+  Alias extends keyof Aliases ? Aliases[Alias] : never;
+
+type AliasSchemaValue<
+  Aliases extends AggregateAliasMap,
+  Alias extends string,
+> = z.infer<AliasValue<Aliases, Alias>["type"]["schema"]>;
+
+type WithAliasOptionality<
+  Value,
+  Aliases extends AggregateAliasMap,
+  Alias extends string,
+> =
+  AliasValue<Aliases, Alias>["optional"] extends true ? Value | undefined
+  : Value;
+
+type PropertyValue<Value, Path extends readonly string[]> =
+  Path extends readonly [] ? Value
+  : Path extends (
+    readonly [
+      infer Head extends PropertyKey,
+      ...infer Tail extends readonly string[],
+    ]
+  ) ?
+    Head extends keyof Value ?
+      PropertyValue<Value[Head], Tail>
+    : unknown
+  : unknown;
+
+type FieldResult<Field extends FieldRef, Aliases extends AggregateAliasMap> =
+  Field extends (
+    FieldRef<infer Declared, infer Alias, readonly string[], infer PropsPath>
+  ) ?
+    unknown extends Declared ?
+      PropsPath extends readonly ["id"] ? string
+      : PropsPath extends readonly ["kind"] ?
+        AliasValue<Aliases, Alias>["type"] extends (
+          Readonly<{
+            kind: infer Kind;
+          }>
+        ) ?
+          Kind
+        : string
+      : WithAliasOptionality<
+          PropertyValue<AliasSchemaValue<Aliases, Alias>, PropsPath>,
+          Aliases,
+          Alias
+        >
+    : Declared
+  : never;
+
+type AggregateFieldResult<
+  Expression extends AggregateExpr,
+  Aliases extends AggregateAliasMap,
+> =
+  Expression extends AggregateExpr<infer Function, infer Field> ?
+    Function extends "count" | "countDistinct" ? number
+    : Function extends "sum" | "avg" ? number | undefined
+    : Function extends "min" | "max" ?
+      unknown extends FieldResult<Field, Aliases> ? unknown
+      : Exclude<FieldResult<Field, Aliases>, undefined> extends (
+        string | number | Date
+      ) ?
+        Extract<FieldResult<Field, Aliases>, string | number | Date> | undefined
+      : never
+    : never
+  : never;
+
+/** Result type for aggregate queries, including SQL empty-set nullability. */
 export type AggregateResult<
   R extends Record<string, FieldRef | AggregateExpr>,
+  Aliases extends AggregateAliasMap = AggregateAliasMap,
 > = {
-  [K in keyof R]: R[K] extends AggregateExpr ? number
-  : R[K] extends FieldRef ? unknown
+  [K in keyof R]: R[K] extends AggregateExpr ?
+    AggregateFieldResult<R[K], Aliases>
+  : R[K] extends FieldRef ? FieldResult<R[K], Aliases>
   : never;
 };
+
+export type AggregateRelationFields<
+  R extends Record<string, FieldRef | AggregateExpr>,
+  Aliases extends AggregateAliasMap,
+> = { [K in keyof R]: DatabaseExpression<AggregateResult<R, Aliases>[K]> };
 
 /**
  * An aggregate query that can be executed.
  */
 export class ExecutableAggregateQuery<
   G extends GraphDef,
-  Aliases extends AliasMap,
+  Aliases extends AggregateAliasMap,
   R extends Record<string, FieldRef | AggregateExpr>,
 > {
   readonly #config: QueryBuilderConfig;
@@ -102,6 +196,12 @@ export class ExecutableAggregateQuery<
     key: K,
     direction: SortDirection = "asc",
   ): ExecutableAggregateQuery<G, Aliases, R> {
+    validateSortDirection(direction);
+    if (!Object.hasOwn(this.#fields, key))
+      throw new ConfigurationError(
+        `Aggregate orderBy() output "${key}" is not projected by this query.`,
+        { operation: "aggregate.orderBy", outputName: key },
+      );
     const orderSpec: AggregateOrderSpec = { outputName: key, direction };
     return new ExecutableAggregateQuery(
       this.#config,
@@ -117,6 +217,7 @@ export class ExecutableAggregateQuery<
    * Limits the number of results.
    */
   limit(n: number): ExecutableAggregateQuery<G, Aliases, R> {
+    validateQueryRange(n, "limit");
     return new ExecutableAggregateQuery(
       this.#config,
       { ...this.#state, limit: n },
@@ -128,6 +229,7 @@ export class ExecutableAggregateQuery<
    * Offsets the results.
    */
   offset(n: number): ExecutableAggregateQuery<G, Aliases, R> {
+    validateQueryRange(n, "offset");
     return new ExecutableAggregateQuery(
       this.#config,
       { ...this.#state, offset: n },
@@ -162,6 +264,164 @@ export class ExecutableAggregateQuery<
     return compileQuery(ast, this.#config.graphId, this.#compileOptions());
   }
 
+  /** Adapts this compatibility aggregate builder to the shared relation API. */
+  asRelation(): ExecutableRelationQuery<
+    AggregateRelationFields<R, Aliases>,
+    AggregateResult<R, Aliases>
+  > {
+    const ast = this.toAst();
+    const { aggregateOrderBy, limit, offset, ...unorderedUnboundedAst } = ast;
+    const internalContext = getQueryBuilderInternalContext(this.#config);
+    const columns = Object.entries(this.#fields).map(
+      ([outputName, expression]) => ({
+        outputName,
+        valueType:
+          (
+            expression.__type === "aggregate" &&
+            (expression.function === "count" ||
+              expression.function === "countDistinct" ||
+              expression.function === "sum" ||
+              expression.function === "avg")
+          ) ?
+            ("number" as const)
+          : ((expression.__type === "aggregate" ?
+              expression.field.valueType
+            : expression.valueType) ?? "unknown"),
+        nullable: this.#aggregateOutputNullable(expression),
+      }),
+    );
+
+    let relation = createExecutableRelation<
+      AggregateRelationFields<R, Aliases>,
+      AggregateResult<R, Aliases>
+    >({
+      ast: {
+        kind: "source",
+        query: unorderedUnboundedAst,
+        graphId: this.#config.graphId,
+        options: this.#compileOptions(),
+      },
+      columns,
+      fields: {} as AggregateRelationFields<R, Aliases>,
+      config: this.#config,
+      provenance: {
+        graphId: this.#config.graphId,
+        executionTarget:
+          this.#config.backend === undefined ?
+            undefined
+          : backendDerivationRoot(this.#config.backend),
+        recordedAsOf: ast.recordedAsOf,
+        checked: internalContext.expectedSchemaVersion !== undefined,
+        temporalCoordinate: JSON.stringify(ast.temporalMode),
+      },
+      decodeRow: (row) => this.#mapRow(row),
+    });
+    for (const order of aggregateOrderBy ?? [])
+      relation = relation.orderBy(
+        (columns) => columns[order.outputName as keyof R],
+        order.direction,
+      );
+    if (limit !== undefined) relation = relation.limit(limit);
+    if (offset !== undefined) relation = relation.offset(offset);
+    return relation;
+  }
+
+  /** Runs on a target with the same database and transaction provenance. */
+  executeOn(
+    backend: GraphBackend | TransactionBackend,
+  ): Promise<readonly AggregateResult<R, Aliases>[]> {
+    return this.asRelation().executeOn(backend);
+  }
+
+  first(): Promise<AggregateResult<R, Aliases> | undefined> {
+    return this.asRelation().first();
+  }
+
+  count(): Promise<number> {
+    return this.asRelation().count();
+  }
+
+  exists(): Promise<boolean> {
+    return this.asRelation().exists();
+  }
+
+  prepare(): Readonly<{
+    execute: (
+      bindings: Readonly<Record<string, unknown>>,
+    ) => Promise<readonly AggregateResult<R, Aliases>[]>;
+    bind: (
+      bindings: Readonly<Record<string, unknown>>,
+    ) => ExecutableRelationQuery<
+      AggregateRelationFields<R, Aliases>,
+      AggregateResult<R, Aliases>
+    >;
+  }>;
+  prepare<const Parameters extends PreparedParameterDeclaration>(
+    parameters: Parameters,
+  ): Readonly<{
+    execute: (
+      bindings: PreparedBindings<Parameters>,
+    ) => Promise<readonly AggregateResult<R, Aliases>[]>;
+    bind: (
+      bindings: PreparedBindings<Parameters>,
+    ) => ExecutableRelationQuery<
+      AggregateRelationFields<R, Aliases>,
+      AggregateResult<R, Aliases>
+    >;
+  }>;
+  prepare(parameters?: PreparedParameterDeclaration) {
+    const relation = this.asRelation();
+    return parameters === undefined ?
+        relation.prepare()
+      : relation.prepare(parameters);
+  }
+
+  /** @internal Embedding contract consumed by `store.batchOnce()`. */
+  compileOneStatementBatchItem() {
+    return this.asRelation().compileOneStatementBatchItem();
+  }
+
+  #aggregateOutputNullable(expression: FieldRef | AggregateExpr): boolean {
+    if (expression.__type === "aggregate")
+      return (
+        expression.function !== "count" &&
+        expression.function !== "countDistinct"
+      );
+
+    const traversal = this.#state.traversals.find(
+      (candidate) =>
+        candidate.nodeAlias === expression.alias ||
+        candidate.edgeAlias === expression.alias,
+    );
+    const aliasIsOptional = traversal?.optional ?? false;
+    if (expression.path[0] !== "props" || expression.jsonPointer === undefined)
+      return aliasIsOptional;
+
+    const segments = parseJsonPointer(expression.jsonPointer);
+    const [fieldName, ...nestedPath] = segments;
+    if (fieldName === undefined) return aliasIsOptional;
+    const kindNames =
+      traversal === undefined ? this.#state.startKinds
+      : traversal.edgeAlias === expression.alias ? mergeEdgeKinds(traversal)
+      : traversal.nodeKinds;
+    let typeInfo =
+      traversal?.edgeAlias === expression.alias ?
+        this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
+          kindNames,
+          fieldName,
+        )
+      : this.#config.schemaIntrospector.getSharedFieldTypeInfo(
+          kindNames,
+          fieldName,
+        );
+    let nullable = aliasIsOptional || (typeInfo?.nullable ?? true);
+    for (const segment of nestedPath) {
+      typeInfo = typeInfo?.shape?.[segment];
+      nullable ||= typeInfo?.nullable ?? true;
+    }
+    return nullable;
+  }
+
   #compileOptions(): CompileQueryOptions {
     return buildCompileOptions(this.#config);
   }
@@ -187,7 +447,7 @@ export class ExecutableAggregateQuery<
    *
    * @throws Error if no backend is configured
    */
-  async execute(): Promise<readonly AggregateResult<R>[]> {
+  async execute(): Promise<readonly AggregateResult<R, Aliases>[]> {
     if (
       getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
       undefined
@@ -244,37 +504,74 @@ export class ExecutableAggregateQuery<
    */
   #mapResults(
     rows: readonly Record<string, unknown>[],
-  ): readonly AggregateResult<R>[] {
-    return rows.map((row) => {
-      // Data-keyed: the caller's aggregate/group aliases. An alias may be
-      // `__proto__` (it is a caller-supplied string), and `result[key] = value`
-      // on a `{}` literal would hand that key to `Object.prototype`'s setter
-      // and drop the value.
-      const result = createDataKeyedBag<unknown>();
-      for (const key of Object.keys(this.#fields)) {
-        const field = this.#fields[key];
-        if (!field) continue;
-        const value = row[key];
-
-        if (field.__type === "aggregate") {
-          // PostgreSQL returns aggregate bigint/numeric as strings.
-          result[key] = typeof value === "string" ? Number(value) : value;
-          continue;
-        }
-
-        result[key] = normalizeFieldValue(field, value);
-      }
-      // SPREAD at the boundary. The null-prototype bag is an internal write-side
-      // protection, not something a caller asked for: returned as-is, an
-      // aggregate row had no `toString`, no `hasOwnProperty`, and answered
-      // `false` to `instanceof Object` — a public behavior regression against
-      // every other row this library returns. Spread copies own properties with
-      // CreateDataProperty rather than Set, so a `__proto__` ALIAS survives as
-      // an own key while `Object.prototype` is restored; the same pattern
-      // `rowToNode` and `buildSelectableNode` already use.
-      return { ...result } as AggregateResult<R>;
-    });
+  ): readonly AggregateResult<R, Aliases>[] {
+    return rows.map((row) => this.#mapRow(row));
   }
+
+  #mapRow(row: Record<string, unknown>): AggregateResult<R, Aliases> {
+    // Data-keyed: the caller's aggregate/group aliases. An alias may be
+    // `__proto__` (it is a caller-supplied string), and `result[key] = value`
+    // on a `{}` literal would hand that key to `Object.prototype`'s setter
+    // and drop the value.
+    const result = createDataKeyedBag<unknown>();
+    for (const key of Object.keys(this.#fields)) {
+      const field = this.#fields[key];
+      if (!field) continue;
+      const value = row[key];
+
+      if (field.__type === "aggregate") {
+        result[key] = normalizeAggregateValue(field, value);
+        continue;
+      }
+
+      result[key] = normalizeFieldValue(field, value);
+    }
+    // SPREAD at the boundary. The null-prototype bag is an internal write-side
+    // protection, not something a caller asked for: returned as-is, an
+    // aggregate row had no `toString`, no `hasOwnProperty`, and answered
+    // `false` to `instanceof Object` — a public behavior regression against
+    // every other row this library returns. Spread copies own properties with
+    // CreateDataProperty rather than Set, so a `__proto__` ALIAS survives as
+    // an own key while `Object.prototype` is restored; the same pattern
+    // `rowToNode` and `buildSelectableNode` already use.
+    return { ...result } as AggregateResult<R, Aliases>;
+  }
+}
+
+function normalizeAggregateValue(
+  expression: AggregateExpr,
+  value: unknown,
+): unknown {
+  if (value === null) return undefined;
+
+  if (
+    expression.function === "count" ||
+    expression.function === "countDistinct" ||
+    expression.function === "sum" ||
+    expression.function === "avg" ||
+    expression.field.valueType === "number"
+  ) {
+    // PostgreSQL returns bigint/numeric aggregates as strings.
+    return typeof value === "string" ? Number(value) : value;
+  }
+
+  if (expression.field.valueType === "boolean") {
+    return normalizeBooleanValue(value);
+  }
+
+  if (expression.field.valueType === "date") {
+    return normalizeDateValue(value);
+  }
+
+  return value;
+}
+
+function normalizeDateValue(value: unknown): unknown {
+  if (value instanceof Date) return value;
+  if (typeof value === "string" || typeof value === "number") {
+    return new Date(value);
+  }
+  return value;
 }
 
 /**
@@ -296,9 +593,15 @@ function normalizeBooleanValue(value: unknown): unknown {
 }
 
 function normalizeFieldValue(field: FieldRef, value: unknown): unknown {
+  if (value === null) return undefined;
+
   if (field.valueType === "boolean") {
     return normalizeBooleanValue(value);
   }
 
-  return value === null ? undefined : value;
+  if (field.valueType === "date") {
+    return normalizeDateValue(value);
+  }
+
+  return value;
 }

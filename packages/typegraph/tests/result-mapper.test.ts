@@ -39,6 +39,131 @@ describe("transformPathColumns", () => {
     dynamicEdgeAliases: new Set(),
   };
 
+  it.each([
+    ["native array", ["Person", "p1", "knows", "e1", "out", "Company", "c1"]],
+    ["JSON text", '["Person","p1","knows","e1","out","Company","c1"]'],
+  ])("decodes a qualified path from %s", (_label, value) => {
+    const state: QueryBuilderState = {
+      ...baseState,
+      traversals: [
+        {
+          edgeKinds: ["knows"],
+          edgeAlias: "e",
+          nodeKinds: ["Company"],
+          nodeAlias: "company",
+          direction: "out",
+          joinFromAlias: "p",
+          joinEdgeField: "to_id",
+          optional: false,
+          variableLength: {
+            minDepth: 1,
+            maxDepth: 3,
+            cyclePolicy: "prevent",
+            pathAlias: "route",
+            pathFormat: "qualified",
+          },
+        },
+      ],
+    };
+
+    expect(transformPathColumns([{ route: value }], state, "sqlite")).toEqual([
+      {
+        route: [
+          { type: "node", kind: "Person", id: "p1" },
+          {
+            type: "edge",
+            kind: "knows",
+            id: "e1",
+            direction: "out",
+          },
+          { type: "node", kind: "Company", id: "c1" },
+        ],
+      },
+    ]);
+  });
+
+  it("refuses malformed qualified paths", () => {
+    const state: QueryBuilderState = {
+      ...baseState,
+      traversals: [
+        {
+          edgeKinds: ["knows"],
+          edgeAlias: "e",
+          nodeKinds: ["Person"],
+          nodeAlias: "friend",
+          direction: "out",
+          joinFromAlias: "p",
+          joinEdgeField: "to_id",
+          optional: false,
+          variableLength: {
+            minDepth: 1,
+            maxDepth: 3,
+            cyclePolicy: "prevent",
+            pathAlias: "route",
+            pathFormat: "qualified",
+          },
+        },
+      ],
+    };
+
+    expect(() =>
+      transformPathColumns(
+        [{ route: ["Person", "p1", "knows"] }],
+        state,
+        "postgres",
+      ),
+    ).toThrow(/Invalid qualified recursive path/);
+  });
+
+  it("normalizes an absent optional qualified path to undefined", () => {
+    const state: QueryBuilderState = {
+      ...baseState,
+      traversals: [
+        {
+          edgeKinds: ["knows"],
+          edgeAlias: "e",
+          nodeKinds: ["Company"],
+          nodeAlias: "company",
+          direction: "out",
+          joinFromAlias: "p",
+          joinEdgeField: "to_id",
+          optional: true,
+          variableLength: {
+            minDepth: 1,
+            maxDepth: 3,
+            cyclePolicy: "prevent",
+            pathAlias: "route",
+            pathFormat: "qualified",
+          },
+        },
+      ],
+    };
+
+    expect(transformPathColumns([{ route: null }], state, "sqlite")).toEqual([
+      { route: undefined },
+    ]);
+
+    expect(
+      transformPathColumns(
+        [
+          {
+            route: ["Person", "p1", "knows", "e1", "out", "Company", "c1"],
+          },
+        ],
+        state,
+        "sqlite",
+      ),
+    ).toEqual([
+      {
+        route: [
+          { type: "node", kind: "Person", id: "p1" },
+          { type: "edge", kind: "knows", id: "e1", direction: "out" },
+          { type: "node", kind: "Company", id: "c1" },
+        ],
+      },
+    ]);
+  });
+
   describe("dialect handling", () => {
     it("returns rows unchanged for PostgreSQL dialect", () => {
       const rows = [{ p_path: "a|b|c" }];

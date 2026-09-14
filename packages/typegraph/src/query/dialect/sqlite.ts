@@ -8,6 +8,11 @@ import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { fts5Strategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
+import {
+  DOUBLE_OVERFLOW_BOUNDARY,
+  MAXIMUM_FINITE_DOUBLE_INTEGER,
+  MAXIMUM_FINITE_DOUBLE_TEXT,
+} from "./numeric-conversion";
 import { getSqlDialectProfile, packSqlListValue } from "./profile";
 import { type DialectAdapter } from "./types";
 
@@ -82,6 +87,34 @@ function isArrayIndex(segment: string): boolean {
  * SQLite dialect adapter implementation.
  */
 export const sqliteDialect: DialectAdapter = {
+  safeNumericConversion(expression) {
+    const trimmed = sql`trim(${expression})`;
+    const wrapped = sql`'[' || ${trimmed} || ']'`;
+    const exponentPosition = sql`instr(lower(${trimmed}), 'e')`;
+    const exponent = sql`substr(${trimmed}, ${exponentPosition} + 1)`;
+    const exponentDigits = sql`CASE WHEN substr(${exponent}, 1, 1) IN ('+', '-') THEN substr(${exponent}, 2) ELSE ${exponent} END`;
+    const converted = sql`CAST(${trimmed} AS REAL)`;
+    // Linux libSQL can parse decimal text between the exact maximum and the
+    // binary64 overflow boundary as Infinity even though round-to-nearest must
+    // produce Number.MAX_VALUE. Classify that narrow interval from the decimal
+    // text so the fallback does not depend on another floating-point parse.
+    const unsigned = sql`CASE WHEN substr(${trimmed}, 1, 1) = '-' THEN substr(${trimmed}, 2) ELSE ${trimmed} END`;
+    const unsignedExponentPosition = sql`instr(lower(${unsigned}), 'e')`;
+    const mantissa = sql`CASE WHEN ${unsignedExponentPosition} = 0 THEN ${unsigned} ELSE substr(${unsigned}, 1, ${unsignedExponentPosition} - 1) END`;
+    const explicitExponent = sql`CASE WHEN ${unsignedExponentPosition} = 0 THEN 0 ELSE CAST(substr(${unsigned}, ${unsignedExponentPosition} + 1) AS INTEGER) END`;
+    const decimalPosition = sql`instr(${mantissa}, '.')`;
+    const integerDigits = sql`CASE WHEN ${decimalPosition} = 0 THEN length(${mantissa}) ELSE ${decimalPosition} - 1 END`;
+    const digits = sql`replace(${mantissa}, '.', '')`;
+    const significantDigits = sql`ltrim(${digits}, '0')`;
+    const magnitudeExponent = sql`${explicitExponent} + ${integerDigits} - 1 - (length(${digits}) - length(${significantDigits}))`;
+    const boundaryDigits = sql`substr(${significantDigits} || printf('%0309d', 0), 1, 309)`;
+    const belowOverflowBoundary = sql`${significantDigits} = '' OR ${magnitudeExponent} < 308 OR (${magnitudeExponent} = 308 AND ${boundaryDigits} < ${DOUBLE_OVERFLOW_BOUNDARY})`;
+    const roundsToMaximum = sql`${magnitudeExponent} = 308 AND ${boundaryDigits} >= ${MAXIMUM_FINITE_DOUBLE_INTEGER} AND ${boundaryDigits} < ${DOUBLE_OVERFLOW_BOUNDARY}`;
+    const maximumFinite = sql`CAST(${MAXIMUM_FINITE_DOUBLE_TEXT} AS REAL)`;
+    const signedMaximum = sql`CASE WHEN substr(${trimmed}, 1, 1) = '-' THEN -${maximumFinite} ELSE ${maximumFinite} END`;
+    const finiteConversion = sql`CASE WHEN NOT (${belowOverflowBoundary}) THEN NULL WHEN abs(${converted}) <= ${maximumFinite} THEN ${converted} WHEN ${roundsToMaximum} THEN ${signedMaximum} ELSE NULL END`;
+    return sql`CASE WHEN length(${trimmed}) <= 400 AND json_valid(${wrapped}) THEN CASE WHEN json_array_length(${wrapped}) = 1 AND json_type(${wrapped}, '$[0]') IN ('integer', 'real') AND (${exponentPosition} = 0 OR length(${exponentDigits}) BETWEEN 1 AND 3) THEN ${finiteConversion} ELSE NULL END ELSE NULL END`;
+  },
   name: "sqlite",
   capabilities: {
     standardQueryStrategy: "cte_project",
@@ -340,6 +373,15 @@ export const sqliteDialect: DialectAdapter = {
   // Recursive CTE Path Operations
   // ============================================================
 
+  textJsonArray(values) {
+    return sql`json_array(${sql.join(values, sql`, `)})`;
+  },
+
+  appendTextJsonArray(array, values) {
+    const arguments_ = values.flatMap((value) => [sql`'$[#]'`, value]);
+    return sql`json_insert(${array}, ${sql.join(arguments_, sql`, `)})`;
+  },
+
   initializePath(nodeId) {
     // SQLite uses string-based paths with delimiters: '|id|'
     return sql`'|' || ${nodeId} || '|'`;
@@ -362,6 +404,10 @@ export const sqliteDialect: DialectAdapter = {
 
   bindValue(value) {
     return getSqlDialectProfile("sqlite").bindValue(value);
+  },
+
+  unboundedLimit() {
+    return sql.raw("-1");
   },
 
   booleanLiteral(value) {

@@ -23,6 +23,10 @@ deployment.
 - Keep graph data in your existing SQL database (no separate graph service)
 - Model richer semantics with `subClassOf`, `implies`, `inverseOf`, and `disjointWith`
 - Traverse relationships with compile-time type safety
+- Filter and project with typed database expressions, then compose results with grouping, set operations,
+  preparation, and streaming
+- Chain fixed and recursive traversal stages with qualified paths, per-hop constraints,
+  completed-match filters, and explicit stop rules
 - Assemble independent reads in one statement and bound edge traversals before hydration
 - Run vector and hybrid search across every backend — pgvector, sqlite-vec, and libSQL/Turso native vectors
 - Start with SQLite, move to PostgreSQL without changing your graph definition
@@ -135,6 +139,8 @@ error, which names the same package.
 - Overview: [What is TypeGraph?](https://typegraph.dev/overview)
 - Setup: [Getting Started](https://typegraph.dev/getting-started)
 - Query builder: [Queries Overview](https://typegraph.dev/queries/overview)
+- Typed expressions and relational composition: [Expressions](https://typegraph.dev/queries/expressions), [Relations](https://typegraph.dev/queries/relations)
+- Traversal and recursive paths: [Traverse](https://typegraph.dev/queries/traverse), [Recursive queries](https://typegraph.dev/queries/recursive)
 - Temporal and bitemporal history: [Temporal queries](https://typegraph.dev/queries/temporal)
 - Application patterns: [Common Patterns](https://typegraph.dev/recipes)
 - Complete examples: [packages/typegraph/examples](packages/typegraph/examples/)

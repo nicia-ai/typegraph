@@ -772,6 +772,11 @@ export type {
   PaginateOptions,
   Predicate,
   PropsAccessor,
+  QualifiedRecursivePath,
+  QualifiedRecursivePathEdge,
+  QualifiedRecursivePathElement,
+  QualifiedRecursivePathNode,
+  QualifiedRecursivePathOption,
   QueryCoordinateState,
   RecursiveTraversalOptions,
   ResolvedSqlTableNames,
@@ -937,6 +942,28 @@ export {
 // Utilities
 // ============================================================
 
+export {
+  type DatabaseProjection,
+  ExecutableProjectionQuery,
+  type ProjectionResult,
+} from "./query/builder/executable-projection-query";
+export type {
+  ExpressionAliasContext,
+  ExpressionValue,
+  QueryExpressionContext,
+} from "./query/builder/expression-context";
+export type { BatchOnceOptions } from "./query/builder/one-statement-batch";
+export type {
+  PreparedBindings,
+  PreparedParameterDeclaration,
+} from "./query/builder/prepared-bindings";
+export {
+  ExecutableRelationQuery,
+  type RelationColumnContext,
+  type RelationProjection,
+  type RelationProjectionResult,
+} from "./query/builder/relation";
+export { type DatabaseExpression, expr } from "./query/expressions";
 export {
   // ID utilities
   generateId,

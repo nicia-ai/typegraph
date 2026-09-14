@@ -662,7 +662,7 @@ describe("UnionableQuery complex scenarios", () => {
     const combined = q1.union(q2);
 
     await expect(combined.execute()).rejects.toThrow(
-      "Query contains param() references",
+      "Combined queries do not support param() references; bind concrete values before combining queries.",
     );
     expect(mockBackend.execute).not.toHaveBeenCalled();
   });

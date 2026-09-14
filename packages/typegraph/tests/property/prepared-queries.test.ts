@@ -157,6 +157,11 @@ function collectFromExpr(
   names: Set<string>,
 ): void {
   switch (expression.__type) {
+    case "database_expression_predicate": {
+      throw new Error(
+        "This legacy-predicate generator does not emit database expressions",
+      );
+    }
     case "comparison": {
       if (
         !Array.isArray(expression.right) &&

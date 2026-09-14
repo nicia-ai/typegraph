@@ -48,6 +48,7 @@ function collectPlanOperations(node: LogicalPlanNode): readonly string[] {
       ];
     }
     case "aggregate":
+    case "result_filter":
     case "filter":
     case "fulltext_match":
     case "join":
@@ -260,6 +261,62 @@ describe("logical plan lowering", () => {
     expect(collectPlanOperations(plan.root)).toEqual([
       "project",
       "aggregate",
+      "scan",
+    ]);
+  });
+
+  it("places completed-result filtering after matching and before relational suffixes", () => {
+    const ast = createBaseAst({
+      groupBy: { fields: [createStringPropertyField("f", "city")] },
+      limit: 5,
+      orderBy: [
+        {
+          direction: "asc",
+          field: createStringPropertyField("f", "city"),
+        },
+      ],
+      projection: {
+        fields: [
+          {
+            outputName: "city",
+            source: createStringPropertyField("f", "city"),
+          },
+        ],
+      },
+      resultPredicate: {
+        __type: "comparison",
+        left: createStringPropertyField("f", "status"),
+        op: "eq",
+        right: { __type: "literal", value: "active" },
+      },
+      traversals: [
+        {
+          direction: "out",
+          edgeAlias: "e",
+          edgeKinds: ["knows"],
+          joinEdgeField: "from_id",
+          joinFromAlias: "p",
+          nodeAlias: "f",
+          nodeKinds: ["Person"],
+          optional: false,
+        },
+      ],
+    });
+
+    const plan = lowerStandardQueryToLogicalPlan({
+      ast,
+      dialect: "sqlite",
+      effectiveLimit: 5,
+      graphId: "graph_result_filter",
+    });
+
+    expect(collectPlanOperations(plan.root)).toEqual([
+      "project",
+      "limit_offset",
+      "sort",
+      "aggregate",
+      "result_filter",
+      "join",
       "scan",
     ]);
   });

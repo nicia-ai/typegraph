@@ -34,7 +34,7 @@ type RecordedClaimSite = Readonly<{
 const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   {
     file: "README.md",
-    line: 119,
+    line: 123,
     text:
       "strategy authors can use the complete " +
       CLAIM_WORD +
@@ -61,7 +61,7 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "apps/docs/src/content/docs/fulltext-search.md",
-    line: 661,
+    line: 668,
     text: "from the " + CLAIM_WORD + "-free backend-authoring entrypoint.",
   },
   {

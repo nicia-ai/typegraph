@@ -16,7 +16,9 @@ import {
   defineNode,
   type Store,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import type { GraphBackend } from "../src/backend/types";
+import type { EmbeddableOneStatementRead } from "../src/query/builder/types";
 import type { Node } from "../src/store/types";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
@@ -438,6 +440,214 @@ describe("store.batch()", () => {
 });
 
 describe("store.batchOnce()", () => {
+  it("refuses invalid sharing options even for an empty batch", async () => {
+    const store = createStore(graph, createTestBackend());
+    await expect(
+      store.batchOnce(() => [], { shareSubgraphs: "yes" as never }),
+    ).rejects.toThrow("shareSubgraphs must be a boolean");
+  });
+
+  it("accepts empty, singleton, and runtime-sized readonly inputs", async () => {
+    const starts: string[] = [];
+    const store = createStore(graph, createTestBackend(), {
+      hooks: { onQueryStart: (ctx) => starts.push(ctx.sql) },
+    });
+    await store.nodes.Person.create({ name: "Alice" });
+    starts.length = 0;
+
+    await expect(store.batchOnce(() => [])).resolves.toEqual([]);
+    expect(starts).toHaveLength(0);
+
+    const [people] = await store.batchOnce(() => [
+      store
+        .query()
+        .from("Person", "person")
+        .select((ctx) => ctx.person.name),
+    ]);
+    const typedPeople: readonly string[] = people;
+    expect(typedPeople).toEqual(["Alice"]);
+    expect(starts).toHaveLength(1);
+
+    starts.length = 0;
+    const aliases = ["first", "second", "third"] as const;
+    const runtimeReads = aliases.map((alias) =>
+      store
+        .query()
+        .from("Person", alias)
+        .select((ctx) => ctx[alias].name),
+    );
+    const results = await store.batchOnce(() => runtimeReads);
+    const typedResults: readonly (readonly string[])[] = results;
+    expect(typedResults).toEqual([["Alice"], ["Alice"], ["Alice"]]);
+    expect(starts).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    "refuses graph and execution-target rebinding before SQL (shareSubgraphs=%s)",
+    async (shareSubgraphs) => {
+      const starts: string[] = [];
+      const backend = createTestBackend();
+      const store = createStore(graph, backend, {
+        hooks: { onQueryStart: (ctx) => starts.push(ctx.sql) },
+      });
+      const otherGraph = defineGraph({
+        id: "other_batch_graph",
+        nodes: graph.nodes,
+        edges: graph.edges,
+      });
+      const otherGraphStore = createStore(otherGraph, backend);
+      const otherTargetStore = createStore(graph, createTestBackend());
+
+      const wrongGraphRead = otherGraphStore
+        .query()
+        .from("Person", "person")
+        .select((ctx) => ctx.person.name);
+      await expect(
+        store.batchOnce(() => [wrongGraphRead], { shareSubgraphs }),
+      ).rejects.toThrow("different graphs");
+
+      const wrongTargetRead = otherTargetStore
+        .query()
+        .from("Person", "person")
+        .select((ctx) => ctx.person.name);
+      await expect(
+        store.batchOnce(() => [wrongTargetRead], { shareSubgraphs }),
+      ).rejects.toThrow("different database or transaction target");
+      expect(starts).toHaveLength(0);
+    },
+  );
+
+  it("refuses a set operation whose right operand has foreign provenance", () => {
+    const backend = createTestBackend();
+    const store = createStore(graph, backend);
+    const otherGraph = defineGraph({
+      id: "foreign_set_graph",
+      nodes: graph.nodes,
+      edges: graph.edges,
+    });
+    const otherGraphStore = createStore(otherGraph, backend);
+    const otherTargetStore = createStore(graph, createTestBackend());
+    const left = store
+      .query()
+      .from("Person", "person")
+      .select((ctx) => ctx.person.name);
+
+    expect(() =>
+      left.union(
+        otherGraphStore
+          .query()
+          .from("Person", "person")
+          .select((ctx) => ctx.person.name) as never,
+      ),
+    ).toThrow("different graphs");
+    expect(() =>
+      left.union(
+        otherTargetStore
+          .query()
+          .from("Person", "person")
+          .select((ctx) => ctx.person.name),
+      ),
+    ).toThrow("different execution targets");
+  });
+
+  it("does not let a transaction-bound query escape into a Store batch", async () => {
+    const store = createStore(graph, createTestBackend());
+    let transactionRead:
+      EmbeddableOneStatementRead<readonly string[]> | undefined;
+    await store.transaction((tx) => {
+      transactionRead = tx
+        .query()
+        .from("Person", "person")
+        .select((ctx) => ctx.person.name);
+      return Promise.resolve();
+    });
+
+    await expect(
+      store.batchOnce(() => [requireDefined(transactionRead)]),
+    ).rejects.toThrow("different database or transaction target");
+  });
+
+  it("refuses batches beyond the portable planning budget before compiling", async () => {
+    const starts: string[] = [];
+    const store = createStore(graph, createTestBackend(), {
+      hooks: { onQueryStart: (ctx) => starts.push(ctx.sql) },
+    });
+    const read = store
+      .query()
+      .from("Person", "person")
+      .select((ctx) => ctx.person.name);
+    const reads = Array.from({ length: 501 }, () => read);
+
+    await expect(store.batchOnce(() => reads)).rejects.toThrow(
+      "at most 500 reads",
+    );
+    expect(starts).toHaveLength(0);
+  });
+
+  it("refuses an unsupported member before executing any member", async () => {
+    const starts: string[] = [];
+    const store = createStore(graph, createTestBackend(), {
+      hooks: { onQueryStart: (ctx) => starts.push(ctx.sql) },
+    });
+    const supported = store
+      .query()
+      .from("Person", "person")
+      .select((ctx) => ctx.person.name);
+    const unsupported = {
+      executeOn: () => Promise.resolve(["unreachable"]),
+    };
+
+    await expect(
+      store.batchOnce(() => [supported, unsupported] as never),
+    ).rejects.toThrow("cannot be embedded");
+    expect(starts).toHaveLength(0);
+  });
+
+  it("refuses a combined statement beyond the backend bind budget", async () => {
+    const starts: string[] = [];
+    const backend = createTestBackend();
+    const constrainedBackend = deriveBackend(backend, {
+      capabilities: {
+        ...backend.capabilities,
+        maxBindParameters: 1,
+      },
+    });
+    const store = createStore(graph, constrainedBackend, {
+      hooks: { onQueryStart: (ctx) => starts.push(ctx.sql) },
+    });
+
+    await expect(
+      store.batchOnce(() => [
+        store
+          .query()
+          .from("Person", "person")
+          .select((ctx) => ctx.person.id),
+      ]),
+    ).rejects.toThrow("bind-parameter budget");
+    expect(starts).toHaveLength(0);
+  });
+
+  it("refuses a nonempty batch when the target lacks window functions", async () => {
+    const starts: string[] = [];
+    const backend = createTestBackend();
+    const constrainedBackend = deriveBackend(backend, {
+      capabilities: { ...backend.capabilities, windowFunctions: false },
+    });
+    const store = createStore(graph, constrainedBackend, {
+      hooks: { onQueryStart: (ctx) => starts.push(ctx.sql) },
+    });
+
+    await expect(
+      store.batchOnce(() => [
+        store
+          .query()
+          .from("Person", "person")
+          .select((ctx) => ctx.person.id),
+      ]),
+    ).rejects.toThrow("window-function support");
+    expect(starts).toHaveLength(0);
+  });
+
   it("returns independently typed results through exactly one statement", async () => {
     const starts: string[] = [];
     const backend = createTestBackend();
@@ -471,6 +681,27 @@ describe("store.batchOnce()", () => {
     expect(companies).toHaveLength(1);
     expect(requireDefined(companies[0]).name).toBe("Acme");
     expect(starts).toHaveLength(1);
+  });
+
+  it("preserves each member's supported temporal coordinate", async () => {
+    const store = createStore(graph, createTestBackend());
+    await store.nodes.Person.create({ name: "Alice" });
+
+    const [current, historical] = await store.batchOnce(() => [
+      store
+        .query()
+        .from("Person", "currentPerson")
+        .temporal("current")
+        .select((ctx) => ctx.currentPerson.name),
+      store
+        .query()
+        .from("Person", "historicalPerson")
+        .temporal("asOf", new Date().toISOString())
+        .select((ctx) => ctx.historicalPerson.name),
+    ]);
+
+    expect(current).toEqual(["Alice"]);
+    expect(historical).toEqual(["Alice"]);
   });
 
   it("preserves empty and traversal result sets", async () => {

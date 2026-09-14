@@ -72,7 +72,9 @@ per graph, consistent with `getActiveSchema`.
 
 ## first()
 
-Get the first result or `undefined`:
+Get the first selected result or `undefined`. An existing `limit(0)` remains empty;
+`offset()` is preserved. Add `orderBy()` when the choice of first row must be deterministic.
+Only the returned row is passed to the selector:
 
 ```typescript
 const alice = await store
@@ -89,7 +91,12 @@ if (alice) {
 
 ## count()
 
-Count matching results without fetching data:
+Count matching SQL rows without fetching their data or running a `select()` callback.
+`count()` and `exists()` are available before and after `select()`. They preserve
+`groupBy()`, `having()`, `limit()`, and `offset()`: a grouped query counts groups,
+and `limit(0).count()` returns zero. Traversals count match rows, so multiple
+relationships can count the same node more than once. Bind named parameters as
+concrete values before using these terminals:
 
 ```typescript
 const activeCount = await store
@@ -116,6 +123,12 @@ const hasActiveUsers = await store
 ```
 
 ## Cursor Pagination
+
+Use `first`/`after` for forward pages or `last`/`before` for backward pages.
+Page sizes must be positive safe integers. Do not combine directions or add
+query-level `limit()`/`offset()` to a paginated or streamed query; those bounds
+are refused rather than silently discarded. Use `limit()`/`offset()` with
+`execute()` for offset pagination.
 
 For large datasets, cursor-based pagination is more efficient than `limit`/`offset`. It uses keyset
 pagination which doesn't degrade as you go deeper.
@@ -288,6 +301,77 @@ const [people, neighbors, neighborhood] = await store.batchOnce((read) => [
   read.subgraph(person.id, { edges: ["knows"], maxDepth: 2 }),
 ]);
 ```
+
+The callback can also return `roots.map(...)`, a singleton, or an empty array. A nonempty batch is
+one statement with no sequential fallback; an empty batch executes no SQL. At most 500 reads may be
+planned, and the combined statement must fit the backend's bind-parameter budget. Every response is
+materialized as JSON rather than streamed, so bound each member's result explicitly. Response size
+is data-dependent; TypeGraph neither estimates it nor imposes a response-byte cap before execution.
+
+For several independent subgraphs, use the runtime-array form to collapse their database round
+trips into one statement:
+
+```typescript
+const subgraphs = await store.batchOnce((read) =>
+  roots.map((root) =>
+    read.subgraph(root.id, {
+      edges: ["knows"],
+      maxDepth: 2,
+      project: { nodes: { Person: ["name"] } },
+    }),
+  ),
+);
+```
+
+When compatible subgraphs have substantially overlapping neighborhoods and project meaningful payloads,
+opt into shared traversal and hydration:
+
+```typescript
+const subgraphs = await store.batchOnce(
+  (read) =>
+    roots.map((root) =>
+      read.subgraph(root.id, {
+        edges: ["knows"],
+        maxDepth: 2,
+        project: { nodes: { Person: ["name", "profile"] } },
+      }),
+    ),
+  { shareSubgraphs: true },
+);
+```
+
+The option groups only compatible subgraph reads and hydrates a shared entity once while preserving
+an independent result object for every request. The default remains independent subgraph plans in
+the same one statement. Sharing adds membership and reconstruction overhead, so enable it for
+measured overlap and payload shapes rather than assuming it is universally faster. See
+[shared subgraph examples](/performance/overview#choosing-shared-subgraphs) for overlapping
+biographies, disjoint neighborhoods, and identity-only results with different tradeoffs.
+
+Tuple members may use different roots, edge sets, depths, windows, and projections when a page
+needs heterogeneous neighborhoods:
+
+```typescript
+const [social, employment] = await store.batchOnce((read) => [
+  read.subgraph(person.id, {
+    edges: ["knows"],
+    maxDepth: 2,
+    edgeWindows: { knows: { limit: 20 } },
+  }),
+  read.subgraph(person.id, {
+    edges: ["worksAt"],
+    maxDepth: 1,
+    project: {
+      nodes: { Company: ["name", "industry"] },
+      edges: { worksAt: ["role"] },
+    },
+  }),
+]);
+```
+
+The one-statement guarantee reduces round trips, which is often valuable for remote databases. By
+default it does not combine recursive plans or share hydration between overlapping subgraphs, and
+it does not promise less database work than direct `store.subgraph()` calls. The explicit
+`shareSubgraphs` option changes that planning choice for compatible subgraph members only.
 
 Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
 sequential execution is the intended connection profile.
@@ -591,7 +675,7 @@ async function processAllOrders() {
   for await (const order of stream) {
     try {
       await fulfillOrder(order);
-      await store.update("Order", order.id, { status: "fulfilled" });
+      await store.nodes.Order.update(order.id, { status: "fulfilled" });
     } catch (error) {
       console.error(`Failed to process order ${order.id}:`, error);
     }

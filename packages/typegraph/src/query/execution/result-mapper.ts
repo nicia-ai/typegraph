@@ -8,13 +8,16 @@ import {
   normalizeRowTimestamp,
 } from "../../backend/row-mappers";
 import { type NodeType } from "../../core/types";
+import { ConfigurationError } from "../../errors";
 import { normalizePath } from "../../utils";
 import { createDataKeyedBag } from "../../utils/object";
 import { stripIdentityPathTokens } from "../../utils/path";
+import { requireDefined } from "../../utils/presence";
 import { type Traversal } from "../ast";
 import type {
   AliasMap,
   EdgeAliasMap,
+  QualifiedRecursivePath,
   QueryBuilderState,
   RecursiveAliasMap,
   SelectableEdge,
@@ -31,6 +34,8 @@ import { type SqlDialect } from "../dialect/types";
 type PathColumn = Readonly<{
   alias: string;
   identityExpanded: boolean;
+  format: "ids" | "qualified";
+  optional: boolean;
 }>;
 
 function collectPathColumns(state: QueryBuilderState): readonly PathColumn[] {
@@ -41,6 +46,11 @@ function collectPathColumns(state: QueryBuilderState): readonly PathColumn[] {
       columns.push({
         alias: pathAlias,
         identityExpanded: traversal.includeIdentityMembers === true,
+        format:
+          traversal.variableLength?.pathFormat === "qualified" ?
+            "qualified"
+          : "ids",
+        optional: traversal.optional,
       });
     }
   }
@@ -73,9 +83,20 @@ export function transformPathColumns(
   let changed = false;
   for (const row of rows) {
     let transformed: Record<string, unknown> | undefined;
-    for (const { alias, identityExpanded } of pathColumns) {
+    for (const { alias, format, identityExpanded, optional } of pathColumns) {
       const value = row[alias];
       if (value === undefined) continue;
+      if (optional && value === null) {
+        transformed ??= { ...row };
+        transformed[alias] = undefined;
+        continue;
+      }
+      if (format === "qualified") {
+        const path = decodeQualifiedRecursivePath(value, alias);
+        transformed ??= { ...row };
+        transformed[alias] = path;
+        continue;
+      }
       const normalized = normalizePath(value);
       const path =
         identityExpanded ? stripIdentityPathTokens(normalized) : normalized;
@@ -94,6 +115,69 @@ export function transformPathColumns(
   }
   // Preserve reference identity when no rows were transformed
   return changed ? result : rows;
+}
+
+function decodeQualifiedRecursivePath(
+  value: unknown,
+  alias: string,
+): QualifiedRecursivePath {
+  const parsed: unknown =
+    typeof value === "string" ? parseQualifiedPathJson(value, alias) : value;
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length < 2 ||
+    (parsed.length - 2) % 5 !== 0
+  )
+    throw new ConfigurationError(
+      `Invalid qualified recursive path in column "${alias}"`,
+    );
+  if (!parsed.every((entry) => typeof entry === "string"))
+    throw new ConfigurationError(
+      `Invalid qualified recursive path in column "${alias}"`,
+    );
+  const tokens = parsed as readonly string[];
+  const path: QualifiedRecursivePath[number][] = [
+    {
+      type: "node",
+      kind: requireDefined(tokens[0]),
+      id: requireDefined(tokens[1]),
+    },
+  ];
+  for (let index = 2; index < tokens.length; index += 5) {
+    const direction = tokens[index + 2];
+    if (direction !== "out" && direction !== "in")
+      throw new ConfigurationError(
+        `Invalid qualified recursive path direction in column "${alias}"`,
+      );
+    path.push(
+      {
+        type: "edge",
+        kind: requireDefined(tokens[index]),
+        id: requireDefined(tokens[index + 1]),
+        direction,
+      },
+      {
+        type: "node",
+        kind: requireDefined(tokens[index + 3]),
+        id: requireDefined(tokens[index + 4]),
+      },
+    );
+  }
+  return path;
+}
+
+function parseQualifiedPathJson(value: string, alias: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    throw new ConfigurationError(
+      `Invalid qualified recursive path JSON in column "${alias}"`,
+      { alias },
+      {
+        cause: error,
+      },
+    );
+  }
 }
 
 // Reserved keys that cannot be overwritten by user props
@@ -322,10 +406,16 @@ export function buildSelectContext<
     const vl = traversal.variableLength;
     if (vl !== undefined) {
       if (vl.depthAlias !== undefined) {
-        context[vl.depthAlias] = row[vl.depthAlias] as number;
+        context[vl.depthAlias] =
+          traversal.optional && row[vl.depthAlias] === null ?
+            undefined
+          : (row[vl.depthAlias] as number);
       }
       if (vl.pathAlias !== undefined) {
-        context[vl.pathAlias] = row[vl.pathAlias] as readonly string[];
+        context[vl.pathAlias] =
+          traversal.optional && row[vl.pathAlias] === null ?
+            undefined
+          : (row[vl.pathAlias] as readonly string[]);
       }
     }
   }

@@ -31,7 +31,21 @@ import { jsonPointer } from "../json-pointer";
  * count("p", "email")
  * ```
  */
-export function count(alias: string, field?: string): AggregateExpr {
+export function count<
+  const Alias extends string,
+  const Property extends string,
+>(
+  alias: Alias,
+  field?: Property,
+): AggregateExpr<
+  "count",
+  FieldRef<
+    unknown,
+    Alias,
+    readonly ["id"] | readonly ["props"],
+    readonly [Property]
+  >
+> {
   return {
     __type: "aggregate",
     function: "count",
@@ -51,7 +65,21 @@ export function count(alias: string, field?: string): AggregateExpr {
  * @param alias - The node alias to count
  * @param field - Optional field to count distinct values of
  */
-export function countDistinct(alias: string, field?: string): AggregateExpr {
+export function countDistinct<
+  const Alias extends string,
+  const Property extends string,
+>(
+  alias: Alias,
+  field?: Property,
+): AggregateExpr<
+  "countDistinct",
+  FieldRef<
+    unknown,
+    Alias,
+    readonly ["id"] | readonly ["props"],
+    readonly [Property]
+  >
+> {
   return {
     __type: "aggregate",
     function: "countDistinct",
@@ -98,7 +126,9 @@ export function countDistinct(alias: string, field?: string): AggregateExpr {
  *   .execute();
  * ```
  */
-export function countEdges(edgeAlias: string): AggregateExpr {
+export function countEdges<const Alias extends string>(
+  edgeAlias: Alias,
+): AggregateExpr<"count", FieldRef<unknown, Alias>> {
   return count(edgeAlias);
 }
 
@@ -111,7 +141,9 @@ export function countEdges(edgeAlias: string): AggregateExpr {
  * polymorphic expansions and ontology-driven edge fan-outs where the
  * same edge can appear multiple times in the join output.
  */
-export function countDistinctEdges(edgeAlias: string): AggregateExpr {
+export function countDistinctEdges<const Alias extends string>(
+  edgeAlias: Alias,
+): AggregateExpr<"countDistinct", FieldRef<unknown, Alias>> {
   return countDistinct(edgeAlias);
 }
 
@@ -121,7 +153,13 @@ export function countDistinctEdges(edgeAlias: string): AggregateExpr {
  * @param alias - The node alias
  * @param field - The numeric field to sum
  */
-export function sum(alias: string, field: string): AggregateExpr {
+export function sum<const Alias extends string, const Property extends string>(
+  alias: Alias,
+  field: Property,
+): AggregateExpr<
+  "sum",
+  FieldRef<unknown, Alias, readonly ["props"], readonly [Property]>
+> {
   return {
     __type: "aggregate",
     function: "sum",
@@ -141,7 +179,13 @@ export function sum(alias: string, field: string): AggregateExpr {
  * @param alias - The node alias
  * @param field - The numeric field to average
  */
-export function avg(alias: string, field: string): AggregateExpr {
+export function avg<const Alias extends string, const Property extends string>(
+  alias: Alias,
+  field: Property,
+): AggregateExpr<
+  "avg",
+  FieldRef<unknown, Alias, readonly ["props"], readonly [Property]>
+> {
   return {
     __type: "aggregate",
     function: "avg",
@@ -161,7 +205,13 @@ export function avg(alias: string, field: string): AggregateExpr {
  * @param alias - The node alias
  * @param field - The field to find minimum of
  */
-export function min(alias: string, field: string): AggregateExpr {
+export function min<const Alias extends string, const Property extends string>(
+  alias: Alias,
+  field: Property,
+): AggregateExpr<
+  "min",
+  FieldRef<unknown, Alias, readonly ["props"], readonly [Property]>
+> {
   return {
     __type: "aggregate",
     function: "min",
@@ -170,7 +220,6 @@ export function min(alias: string, field: string): AggregateExpr {
       alias,
       path: ["props"],
       jsonPointer: jsonPointer([field]),
-      valueType: "number",
     },
   };
 }
@@ -181,7 +230,13 @@ export function min(alias: string, field: string): AggregateExpr {
  * @param alias - The node alias
  * @param field - The field to find maximum of
  */
-export function max(alias: string, field: string): AggregateExpr {
+export function max<const Alias extends string, const Property extends string>(
+  alias: Alias,
+  field: Property,
+): AggregateExpr<
+  "max",
+  FieldRef<unknown, Alias, readonly ["props"], readonly [Property]>
+> {
   return {
     __type: "aggregate",
     function: "max",
@@ -190,7 +245,6 @@ export function max(alias: string, field: string): AggregateExpr {
       alias,
       path: ["props"],
       jsonPointer: jsonPointer([field]),
-      valueType: "number",
     },
   };
 }
@@ -210,7 +264,19 @@ export function max(alias: string, field: string): AggregateExpr {
  * field("p", "nested", "field")  // Nested property
  * ```
  */
-export function field(alias: string, ...path: string[]): FieldRef {
+export function field<
+  Value = unknown,
+  const Alias extends string = string,
+  const PropertyPath extends readonly string[] = readonly string[],
+>(
+  alias: Alias,
+  ...path: PropertyPath
+): FieldRef<
+  Value,
+  Alias,
+  readonly ["id"] | readonly ["kind"] | readonly ["props"],
+  PropertyPath
+> {
   if (path.length === 0 || path[0] === "id") {
     return {
       __type: "field_ref",

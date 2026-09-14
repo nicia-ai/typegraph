@@ -6,6 +6,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { ValidationError } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
 import { collectAllEdges } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
@@ -349,6 +350,34 @@ export function registerSubgraphIntegrationTests(
       expect(result.adjacency.size).toBe(0);
     });
 
+    it("validates traversal options identically for direct and batched reads", async () => {
+      const store = context.getStore();
+      const rootOnly = await store.subgraph(ids.aliceId as never, {
+        edges: ["knows"],
+        maxDepth: 0,
+      });
+      expect(rootOnly.nodes.size).toBe(1);
+
+      const invalidOptions = [
+        { edges: ["knows"], maxDepth: -1 },
+        { edges: ["knows"], maxDepth: 1.5 },
+        { edges: ["knows"], maxDepth: Number.POSITIVE_INFINITY },
+        { edges: ["knows"], maxDepth: 1001 },
+        { edges: ["knows"], direction: "in" },
+        { edges: ["knows"], cyclePolicy: "ignore" },
+      ] as const;
+      for (const options of invalidOptions) {
+        await expect(
+          store.subgraph(ids.aliceId as never, options as never),
+        ).rejects.toBeInstanceOf(ValidationError);
+        await expect(
+          store.batchOnce((read) => [
+            read.subgraph(ids.aliceId as never, options as never),
+          ]),
+        ).rejects.toBeInstanceOf(ValidationError);
+      }
+    });
+
     it("projects node and edge fields across backends", async () => {
       const store = context.getStore();
       const result = await store.subgraph(ids.aliceId as never, {
@@ -450,6 +479,43 @@ export function registerSubgraphIntegrationTests(
       );
       expect(edgeIds).toHaveLength(4);
       expect(new Set(edgeIds).size).toBe(edgeIds.length);
+    });
+
+    it("keeps overlapping, duplicate, and missing runtime subgraphs independent", async () => {
+      const store = context.getStore();
+      const roots = [
+        ids.aliceId,
+        ids.bobId,
+        ids.aliceId,
+        "missing-subgraph-root",
+      ];
+      const results = await store.batchOnce((read) =>
+        roots.map((rootId) =>
+          read.subgraph(rootId as never, {
+            edges: ["knows", "worksAt"],
+            maxDepth: 2,
+            edgeWindows: {
+              knows: {
+                limit: 1,
+                orderBy: { field: "id", direction: "asc" },
+              },
+            },
+            project: {
+              nodes: { Person: ["name"], Company: ["name"] },
+              edges: { knows: [], worksAt: ["role"] },
+            },
+          }),
+        ),
+      );
+
+      expect(results).toHaveLength(4);
+      expect(results[0]).toEqual(results[2]);
+      expect(results[0]).not.toBe(results[2]);
+      expect(results[0]?.nodes.has(ids.acmeId)).toBe(true);
+      expect(results[1]?.nodes.has(ids.acmeId)).toBe(true);
+      expect(results[3]?.root).toBeUndefined();
+      expect(results[3]?.nodes.size).toBe(0);
+      expect(results[3]?.adjacency.size).toBe(0);
     });
   });
 }

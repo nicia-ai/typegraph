@@ -76,6 +76,11 @@ export type {
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
+  QualifiedRecursivePath,
+  QualifiedRecursivePathEdge,
+  QualifiedRecursivePathElement,
+  QualifiedRecursivePathNode,
+  QualifiedRecursivePathOption,
   QueryCoordinateState,
   RecursiveTraversalOptions,
   SelectableEdge,
@@ -117,7 +122,17 @@ export { createQueryBuilder } from "./builder";
 export { type AggregateResult, ExecutableAggregateQuery } from "./builder";
 export { ExecutableQuery } from "./builder";
 export { QueryBuilder } from "./builder";
+export type {
+  PreparedBindings,
+  PreparedParameterDeclaration,
+} from "./builder/prepared-bindings";
 export { PreparedQuery } from "./builder/prepared-query";
+export {
+  ExecutableRelationQuery,
+  type RelationColumnContext,
+  type RelationProjection,
+  type RelationProjectionResult,
+} from "./builder/relation";
 export { UnionableQuery } from "./builder/unionable-query";
 
 // Aggregate functions
@@ -164,9 +179,21 @@ export {
 
 // SQL schema configuration
 export {
+  type DatabaseProjection,
+  ExecutableProjectionQuery,
+  type ProjectionResult,
+} from "./builder/executable-projection-query";
+export type {
+  ExpressionAliasContext,
+  ExpressionValue,
+  QueryExpressionContext,
+} from "./builder/expression-context";
+export type { BatchOnceOptions } from "./builder/one-statement-batch";
+export {
   createSqlSchema,
   DEFAULT_SQL_SCHEMA,
   type ResolvedSqlTableNames,
   type SqlSchema,
   type SqlTableNames,
 } from "./compiler/schema";
+export { type DatabaseExpression, expr } from "./expressions";

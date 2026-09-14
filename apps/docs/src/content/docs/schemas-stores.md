@@ -2293,13 +2293,72 @@ when the schema-version guarantee is required.
 
 ### Batch Query Execution
 
-#### `store.batchOnce(buildReads)`
+#### `store.batchOnce(buildReads, options?)`
 
-Executes two or more independent reads as exactly one SQL statement. Each read is
+Executes zero or more independent reads. A nonempty input is exactly one SQL statement; an empty
+input returns `[]` without issuing SQL. Each read is
 embedded as a CTE, and one JSON envelope carries the independently typed result sets back in input
 order. This is the batch surface for latency-bound page assembly: dozens of independent reads still
 form one statement and one database round trip. Each query's explicit `.orderBy()` is preserved even
 when its sort fields are not part of the public projection.
+
+The callback may return a heterogeneous tuple, a singleton, or a readonly runtime array. This makes
+dynamic multi-root subgraph retrieval direct. Prefer this form over awaiting `store.subgraph()` in a
+loop when one request needs several independent bounded neighborhoods, especially against a remote
+database:
+
+```typescript
+const subgraphs = await store.batchOnce((read) =>
+  roots.map((root) =>
+    read.subgraph(root.id, { edges: ["knows"], maxDepth: 2 }),
+  ),
+);
+```
+
+Repeated roots remain separate results. Missing roots produce their ordinary empty subgraph result.
+The portable planning limit is 500 reads, matching SQLite's compound-select ceiling. The complete
+statement must also fit the backend's declared bind-parameter limit; otherwise `batchOnce()` refuses
+before execution. It never chunks. Result rows for every member are materialized in JSON envelopes,
+so this API is intended for bounded reads and is not streaming. TypeGraph does not guess response
+size or impose a response-byte cap; use explicit limits, projections, and subgraph bounds to control
+it.
+
+Each member keeps its own root and options. A tuple can therefore combine unrelated neighborhood
+shapes in the same call:
+
+```typescript
+const [social, work] = await store.batchOnce((read) => [
+  read.subgraph(person.id, {
+    edges: ["knows"],
+    maxDepth: 2,
+    edgeWindows: { knows: { limit: 25 } },
+  }),
+  read.subgraph(person.id, {
+    edges: ["worksAt"],
+    maxDepth: 1,
+    project: {
+      nodes: { Company: ["name", "industry"] },
+      edges: { worksAt: ["role"] },
+    },
+  }),
+]);
+```
+
+One statement means one round trip, not one shared traversal by default. Overlapping subgraphs are
+planned and hydrated independently. For compatible, overlapping, payload-heavy subgraphs, pass
+`{ shareSubgraphs: true }` as the second `batchOnce()` argument to traverse the roots together and
+hydrate each shared entity once:
+
+```typescript
+const details = await store.batchOnce(
+  (read) => roots.map((root) => read.subgraph(root.id, options)),
+  { shareSubgraphs: true },
+);
+```
+
+Every request still receives independent result objects. Sharing adds membership and reconstruction
+work, and measurements show it can increase encoded response size when roots do not overlap or the
+projection is small. Keep the independent default unless the request shape benefits in a benchmark.
 
 ```typescript
 const [people, neighbors] = await store.batchOnce((read) => [
@@ -2327,7 +2386,9 @@ await store.transaction(async (tx) => {
 });
 ```
 
-`batchOnce()` has no sequential fallback. Its callback returns fluent relational queries, set
+`batchOnce()` has no sequential fallback. Every read must belong to the same graph and execution
+target as the Store or transaction running the batch; cross-Store and cross-transaction rebinding is
+refused before SQL. Its callback returns fluent relational queries, set
 operations, and batch-scoped composable reads built through the callback's `read.neighbors()`,
 `read.countNeighbors()`, and `read.subgraph()` methods. Prepared queries and edge collection
 `batchFind*` values are excluded because they cannot be embedded without changing their execution
@@ -2546,6 +2607,10 @@ Extracts a typed subgraph by performing a BFS traversal from a root node, follow
 the specified edge kinds. Returns an indexed result with adjacency maps for immediate
 traversal.
 
+`maxDepth` defaults to 10 and accepts integers from 0 through 1000. Zero returns only the root
+(unless excluded). Values outside that range are rejected; they are never silently clamped.
+`direction` accepts `"out"` or `"both"`, and `cyclePolicy` accepts `"prevent"` or `"allow"`.
+
 Use `edgeWindows` to choose direction and cap an append-only edge kind per source at every traversal hop.
 The ranking is applied inside the recursive traversal and again during edge hydration,
 so omitted targets are not loaded and do not remain as orphan nodes.
@@ -2593,7 +2658,7 @@ store.subgraph<EK, NK>(
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `edges` | `readonly EK[]` | *(required)* | Edge kinds to follow during traversal |
-| `maxDepth` | `number` | `10` | Maximum traversal depth from root (capped at `MAX_RECURSIVE_DEPTH`) |
+| `maxDepth` | `number` | `10` | Integer traversal depth from root, from 0 through `MAX_EXPLICIT_RECURSIVE_DEPTH` (1000); larger values are rejected |
 | `includeKinds` | `readonly NK[]` | all kinds | Node kinds to include in the result. Other kinds are traversed through but omitted from output |
 | `excludeRoot` | `boolean` | `false` | Exclude the root node from the result |
 | `direction` | `"out" \| "both"` | `"out"` | `"out"` follows edges in their defined direction; `"both"` treats edges as undirected |
@@ -2767,6 +2832,7 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 | Load entity with all relationships | `subgraph(maxDepth: 1)` | Fixed 2 SQLite / 3 PostgreSQL statements — recursive traversal cost does not grow with edge count |
 | Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop without extra round trips per hop |
 | Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes, in one statement |
+| Several independent bounded reads in one round trip | `store.batchOnce()` | Embeds fluent queries, relations, neighbors, counts, or subgraphs in exactly one statement |
 | Multiple independent queries with per-query control | `store.batch()` | Typed tuple results, at most one query in flight — still at least a statement per query, and not a snapshot |
 | Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed; honors the graph's temporal mode by default |
 | Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit; pass `temporalMode` / `asOf` when reading history |
@@ -2778,10 +2844,11 @@ or how much it returns. Parallel `findFrom` calls scale linearly instead: one pe
 additional queries for node resolution. The gap widens as relationship count grows.
 
 For the common "load an entity and everything it touches" pattern (detail pages, config hydration,
-template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach. When you need
-per-query filtering, sorting, or pagination across multiple independent queries, use
-[`store.batch()`](#batch-query-execution) — but note it still costs at least a statement per query, so it
-does not narrow this gap. Reserve individual fluent queries for one-off operations.
+template instantiation), use `subgraph()` with `maxDepth: 1`. When one request needs several
+independent bounded reads, use [`store.batchOnce()`](#batch-query-execution) to keep them in one
+statement. Use `store.batch()` when a member cannot be embedded or sequential transaction execution
+is the intended contract; it still costs at least one statement per query. Reserve individual fluent
+queries for one-off operations.
 
 ### Graph Algorithms
 
@@ -2855,7 +2922,7 @@ const results = await store
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
 | `prepare()` | `PreparedQuery<T>` | Validate query AST once for repeated execution with different parameters |
 
-#### `store.batchOnce(buildReads)` and `store.batch(...queries)`
+#### `store.batchOnce(buildReads, options?)` and `store.batch(...queries)`
 
 Use `batchOnce()` to embed independent fluent and batch-scoped set-oriented reads in one statement. Use `batch()` for mixed
 fluent and queued collection reads that may run sequentially. See

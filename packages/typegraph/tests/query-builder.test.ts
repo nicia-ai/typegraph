@@ -1114,7 +1114,10 @@ describe("Query Builder - Aggregations", () => {
 
     expect(ast.groupBy).toBeDefined();
     expect(ast.groupBy?.fields).toHaveLength(1);
-    expect(ast.groupBy?.fields[0]?.alias).toBe("o");
+    expect(ast.groupBy?.fields[0]).toMatchObject({
+      __type: "field_ref",
+      alias: "o",
+    });
   });
 
   it("supports multiple GROUP BY fields", () => {
@@ -1147,7 +1150,10 @@ describe("Query Builder - Aggregations", () => {
     const ast = query.toAst();
 
     expect(ast.groupBy?.fields).toHaveLength(1);
-    expect(ast.groupBy?.fields[0]?.path).toEqual(["id"]);
+    expect(ast.groupBy?.fields[0]).toMatchObject({
+      __type: "field_ref",
+      path: ["id"],
+    });
   });
 
   it("field() throws error when 'props' is included in path", () => {
@@ -2206,6 +2212,57 @@ describe("QueryBuilder Variable-Length Paths", () => {
       requireDefined(requireDefined(ast.traversals[0]).variableLength)
         .pathAlias,
     ).toBe("my_path");
+  });
+
+  it("replaces qualified path configuration when recursive() is called again", () => {
+    const qualified = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .recursive({
+        depth: "qualified_depth",
+        path: { alias: "qualified_path", format: "qualified" },
+      });
+
+    const defaultPath = qualified
+      .recursive({ depth: true, path: true })
+      .to("Organization", "o")
+      .select((context) => ({ org: context.o.name }));
+    const customPath = qualified
+      .recursive({ path: "legacy_path" })
+      .to("Organization", "o")
+      .select((context) => ({ org: context.o.name }));
+
+    const defaultVariableLength = requireDefined(
+      requireDefined(defaultPath.toAst().traversals[0]).variableLength,
+    );
+    expect(defaultVariableLength.pathAlias).toBe("o_path");
+    expect(defaultVariableLength.pathFormat).toBeUndefined();
+    expect(defaultVariableLength.depthAlias).toBe("o_depth");
+
+    const customVariableLength = requireDefined(
+      requireDefined(customPath.toAst().traversals[0]).variableLength,
+    );
+    expect(customVariableLength.pathAlias).toBe("legacy_path");
+    expect(customVariableLength.pathFormat).toBeUndefined();
+  });
+
+  it("validates qualified path options at runtime", () => {
+    const traversal = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e");
+
+    // eslint-disable-next-line unicorn/no-null -- Validate invalid JavaScript input.
+    expect(() => traversal.recursive({ path: null } as never)).toThrow(
+      "path must be a boolean",
+    );
+    expect(() =>
+      traversal.recursive({ path: { format: "ids" } } as never),
+    ).toThrow('path.format must be "qualified"');
+    expect(() =>
+      traversal.recursive({
+        path: { alias: 42, format: "qualified" },
+      } as never),
+    ).toThrow("path.alias must be a string");
   });
 
   it("builds AST with recursive({ depth }) option", () => {
