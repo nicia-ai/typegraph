@@ -71,7 +71,7 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
       expect(requireDefined(results[0]).total).toBe(0);
     });
 
-    it("sum returns null for empty result set", async () => {
+    it("sum returns undefined for empty result set", async () => {
       const store = context.getStore();
 
       const results = await store
@@ -81,11 +81,10 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         .aggregate({ total: sum("p", "price") })
         .execute();
 
-      // SQL SUM of empty set returns NULL
-      expect(requireDefined(results[0]).total).toBeNull();
+      expect(requireDefined(results[0]).total).toBeUndefined();
     });
 
-    it("avg returns null for empty result set", async () => {
+    it("avg returns undefined for empty result set", async () => {
       const store = context.getStore();
 
       const results = await store
@@ -95,10 +94,10 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         .aggregate({ average: avg("p", "price") })
         .execute();
 
-      expect(requireDefined(results[0]).average).toBeNull();
+      expect(requireDefined(results[0]).average).toBeUndefined();
     });
 
-    it("min/max return null for empty result set", async () => {
+    it("min/max return undefined for empty result set", async () => {
       const store = context.getStore();
 
       const results = await store
@@ -111,8 +110,8 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         })
         .execute();
 
-      expect(requireDefined(results[0]).minPrice).toBeNull();
-      expect(requireDefined(results[0]).maxPrice).toBeNull();
+      expect(requireDefined(results[0]).minPrice).toBeUndefined();
+      expect(requireDefined(results[0]).maxPrice).toBeUndefined();
     });
   });
 }

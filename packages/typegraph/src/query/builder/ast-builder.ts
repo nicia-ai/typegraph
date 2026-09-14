@@ -4,9 +4,12 @@
  * Provides shared functions for building QueryAst objects from builder state.
  */
 import { type QueryAst } from "../ast";
+import { getExpressionScope } from "./expression-scope";
 import type { QueryBuilderConfig, QueryBuilderState } from "./types";
 import {
   validateFulltextPredicatePlacement,
+  validateQuerySource,
+  validateQueryState,
   validateVectorPredicatePlacement,
 } from "./validation";
 
@@ -20,6 +23,8 @@ export function buildQueryAst(
   config: QueryBuilderConfig,
   state: QueryBuilderState,
 ): QueryAst {
+  validateQuerySource(state, false);
+  validateQueryState(state);
   validateVectorPredicatePlacement(state.predicates);
   validateFulltextPredicatePlacement(state.predicates);
 
@@ -32,6 +37,7 @@ export function buildQueryAst(
 
   return {
     graphId: config.graphId,
+    expressionScope: getExpressionScope(config),
     start: {
       alias: state.startAlias,
       kinds: state.startKinds,

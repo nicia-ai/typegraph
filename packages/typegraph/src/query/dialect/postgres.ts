@@ -16,6 +16,12 @@ import {
 } from "./profile";
 import { type DialectAdapter } from "./types";
 
+// Exact round-to-nearest boundaries for IEEE-754 binary64. Keeping these as
+// decimal NUMERIC literals lets PostgreSQL decide whether a text value can be
+// converted before a DOUBLE PRECISION cast has a chance to throw.
+const DOUBLE_OVERFLOW_BOUNDARY = String(2n ** 1024n - 2n ** 970n);
+const DOUBLE_ZERO_ROUNDING_BOUNDARY = `${5n ** 1075n}e-1075`;
+
 /**
  * Escapes a string for use in a PostgreSQL string literal, independent of
  * server configuration.
@@ -97,6 +103,13 @@ function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
  * PostgreSQL dialect adapter implementation.
  */
 export const postgresDialect: DialectAdapter = {
+  safeNumericConversion(expression) {
+    const trimmed = sql`btrim(${expression}, ${" \t\r\n"})`;
+    const exact = sql`CAST(${trimmed} AS NUMERIC)`;
+    const converted = sql`CAST(${trimmed} AS DOUBLE PRECISION)`;
+    const signedZero = sql`CASE WHEN left(${trimmed}, 1) = '-' THEN CAST('-0' AS DOUBLE PRECISION) ELSE CAST('0' AS DOUBLE PRECISION) END`;
+    return sql`CASE WHEN length(${trimmed}) <= 400 AND ${trimmed} ~ '^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]{1,3})?$' THEN CASE WHEN abs(${exact}) >= ${sql.raw(DOUBLE_OVERFLOW_BOUNDARY)}::numeric THEN NULL WHEN abs(${exact}) <= ${sql.raw(DOUBLE_ZERO_ROUNDING_BOUNDARY)}::numeric THEN ${signedZero} ELSE ${converted} END ELSE NULL END`;
+  },
   name: "postgres",
   capabilities: {
     standardQueryStrategy: "cte_project",
@@ -338,6 +351,10 @@ export const postgresDialect: DialectAdapter = {
 
   bindValue(value) {
     return getSqlDialectProfile("postgres").bindValue(value);
+  },
+
+  unboundedLimit() {
+    return sql.raw("ALL");
   },
 
   booleanLiteral(value) {

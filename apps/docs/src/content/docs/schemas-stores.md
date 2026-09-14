@@ -2295,11 +2295,58 @@ when the schema-version guarantee is required.
 
 #### `store.batchOnce(buildReads)`
 
-Executes two or more independent reads as exactly one SQL statement. Each read is
+Executes zero or more independent reads. A nonempty input is exactly one SQL statement; an empty
+input returns `[]` without issuing SQL. Each read is
 embedded as a CTE, and one JSON envelope carries the independently typed result sets back in input
 order. This is the batch surface for latency-bound page assembly: dozens of independent reads still
 form one statement and one database round trip. Each query's explicit `.orderBy()` is preserved even
 when its sort fields are not part of the public projection.
+
+The callback may return a heterogeneous tuple, a singleton, or a readonly runtime array. This makes
+dynamic multi-root subgraph retrieval direct. Prefer this form over awaiting `store.subgraph()` in a
+loop when one request needs several independent bounded neighborhoods, especially against a remote
+database:
+
+```typescript
+const subgraphs = await store.batchOnce((read) =>
+  roots.map((root) =>
+    read.subgraph(root.id, { edges: ["knows"], maxDepth: 2 }),
+  ),
+);
+```
+
+Repeated roots remain separate results. Missing roots produce their ordinary empty subgraph result.
+The portable planning limit is 500 reads, matching SQLite's compound-select ceiling. The complete
+statement must also fit the backend's declared bind-parameter limit; otherwise `batchOnce()` refuses
+before execution. It never chunks. Result rows for every member are materialized in JSON envelopes,
+so this API is intended for bounded reads and is not streaming. TypeGraph does not guess response
+size before execution; use explicit limits, projections, and subgraph bounds to control it.
+
+Each member keeps its own root and options. A tuple can therefore combine unrelated neighborhood
+shapes in the same call:
+
+```typescript
+const [social, work] = await store.batchOnce((read) => [
+  read.subgraph(person.id, {
+    edges: ["knows"],
+    maxDepth: 2,
+    edgeWindows: { knows: { limit: 25 } },
+  }),
+  read.subgraph(person.id, {
+    edges: ["worksAt"],
+    maxDepth: 1,
+    project: {
+      nodes: { Company: ["name", "industry"] },
+      edges: { worksAt: ["role"] },
+    },
+  }),
+]);
+```
+
+One statement means one round trip, not one shared traversal. Overlapping subgraphs are planned and
+hydrated independently, so batching can use more database CPU or memory than the tuned direct path.
+Use it to remove round-trip latency across several reads; benchmark direct `store.subgraph()` for a
+single large closure.
 
 ```typescript
 const [people, neighbors] = await store.batchOnce((read) => [
@@ -2327,7 +2374,9 @@ await store.transaction(async (tx) => {
 });
 ```
 
-`batchOnce()` has no sequential fallback. Its callback returns fluent relational queries, set
+`batchOnce()` has no sequential fallback. Every read must belong to the same graph and execution
+target as the Store or transaction running the batch; cross-Store and cross-transaction rebinding is
+refused before SQL. Its callback returns fluent relational queries, set
 operations, and batch-scoped composable reads built through the callback's `read.neighbors()`,
 `read.countNeighbors()`, and `read.subgraph()` methods. Prepared queries and edge collection
 `batchFind*` values are excluded because they cannot be embedded without changing their execution
@@ -2546,6 +2595,10 @@ Extracts a typed subgraph by performing a BFS traversal from a root node, follow
 the specified edge kinds. Returns an indexed result with adjacency maps for immediate
 traversal.
 
+`maxDepth` defaults to 10 and accepts integers from 0 through 1000. Zero returns only the root
+(unless excluded). Values outside that range are rejected; they are never silently clamped.
+`direction` accepts `"out"` or `"both"`, and `cyclePolicy` accepts `"prevent"` or `"allow"`.
+
 Use `edgeWindows` to choose direction and cap an append-only edge kind per source at every traversal hop.
 The ranking is applied inside the recursive traversal and again during edge hydration,
 so omitted targets are not loaded and do not remain as orphan nodes.
@@ -2593,7 +2646,7 @@ store.subgraph<EK, NK>(
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `edges` | `readonly EK[]` | *(required)* | Edge kinds to follow during traversal |
-| `maxDepth` | `number` | `10` | Maximum traversal depth from root (capped at `MAX_RECURSIVE_DEPTH`) |
+| `maxDepth` | `number` | `10` | Integer traversal depth from root, from 0 through `MAX_EXPLICIT_RECURSIVE_DEPTH` (1000); larger values are rejected |
 | `includeKinds` | `readonly NK[]` | all kinds | Node kinds to include in the result. Other kinds are traversed through but omitted from output |
 | `excludeRoot` | `boolean` | `false` | Exclude the root node from the result |
 | `direction` | `"out" \| "both"` | `"out"` | `"out"` follows edges in their defined direction; `"both"` treats edges as undirected |

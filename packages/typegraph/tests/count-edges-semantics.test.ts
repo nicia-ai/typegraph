@@ -287,7 +287,7 @@ describe("countEdges vs count(target) semantics", () => {
     // double-applied.
     const page1Ids = new Set(page1.map((row) => row.id));
     for (const row of page2) {
-      expect(page1Ids.has(row.id as string)).toBe(false);
+      expect(page1Ids.has(row.id)).toBe(false);
     }
   });
 });

@@ -1,0 +1,152 @@
+import { describe, expect, it } from "vitest";
+
+import { expr } from "../../../src";
+import type { IntegrationTestContext } from "./test-context";
+
+export function registerExpressionSubqueryQueryIntegrationTests(
+  context: IntegrationTestContext,
+): void {
+  describe("Expression subqueries", () => {
+    it("correlates exists and scalar projections when inner aliases reuse outer names", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create({ age: 31, name: "Alice" });
+      await store.nodes.Person.create({ age: 27, name: "Bob" });
+
+      const rows = await store
+        .query()
+        .from("Person", "p")
+        .project((expression) => ({
+          age: expression.$scalar((subquery, outer) =>
+            subquery
+              .from("Person", "p")
+              .whereNode("p", (_person, inner) =>
+                expr.eq(inner.p.name, outer.p.name),
+              )
+              .project((inner) => ({ age: inner.p.age }))
+              .limit(1),
+          ),
+          found: expression.$exists((subquery, outer) =>
+            subquery
+              .from("Person", "p")
+              .whereNode("p", (_person, inner) =>
+                expr.eq(inner.p.name, outer.p.name),
+              )
+              .project((inner) => ({ id: inner.p.id })),
+          ),
+          name: expression.p.name,
+        }))
+        .orderBy((expression) => expression.p.name)
+        .execute();
+
+      expect(rows).toEqual([
+        { age: 31, found: true, name: "Alice" },
+        { age: 27, found: true, name: "Bob" },
+      ]);
+    });
+
+    it("binds parameters nested inside expression subqueries", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create({ name: "Alice" });
+      await store.nodes.Person.create({ name: "Bob" });
+
+      const prepared = store
+        .query()
+        .from("Person", "outerPerson")
+        .project((expression) => ({
+          found: expression.$exists((subquery) =>
+            subquery
+              .from("Person", "innerPerson")
+              .whereNode("innerPerson", (_person, inner) =>
+                expr.eq(inner.innerPerson.name, expr.param("needle", "string")),
+              )
+              .project((inner) => ({ id: inner.innerPerson.id })),
+          ),
+          name: expression.outerPerson.name,
+        }))
+        .prepare();
+
+      expect(await prepared.execute({ needle: "Alice" })).toEqual([
+        { found: true, name: "Alice" },
+        { found: true, name: "Bob" },
+      ]);
+      expect(await prepared.execute({ needle: "Missing" })).toEqual([
+        { found: false, name: "Alice" },
+        { found: false, name: "Bob" },
+      ]);
+    });
+
+    it("embeds expression subqueries in batchOnce", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create({ age: 31, name: "Alice" });
+
+      const [rows] = await store.batchOnce(() => [
+        store
+          .query()
+          .from("Person", "person")
+          .project((expression) => ({
+            age: expression.$scalar((subquery, outer) =>
+              subquery
+                .from("Person", "candidate")
+                .whereNode("candidate", (_person, inner) =>
+                  expr.eq(inner.candidate.name, outer.person.name),
+                )
+                .project((inner) => ({ age: inner.candidate.age }))
+                .limit(1),
+            ),
+            name: expression.person.name,
+          })),
+      ]);
+
+      expect(rows).toEqual([{ age: 31, name: "Alice" }]);
+    });
+
+    it("correlates an outer edge field through its physical traversal CTE", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      await store.nodes.Person.create({ name: "Engineer" });
+      const company = await store.nodes.Company.create({ name: "Acme" });
+      await store.edges.worksAt.create(alice, company, { role: "Engineer" });
+
+      const rows = await store
+        .query()
+        .from("Person", "person")
+        .traverse("worksAt", "employment")
+        .to("Company", "company")
+        .project((expression) => ({
+          matchedRole: expression.$exists((subquery, outer) =>
+            subquery
+              .from("Person", "candidate")
+              .whereNode("candidate", (_person, inner) =>
+                expr.eq(inner.candidate.name, outer.employment.role),
+              )
+              .project((inner) => ({ id: inner.candidate.id })),
+          ),
+        }))
+        .execute();
+
+      expect(rows).toEqual([{ matchedRole: true }]);
+    });
+
+    it("preserves application object keys while namespacing inner aliases", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create({ name: "Alice" });
+      const applicationValue = { alias: "candidate", nodeAlias: "candidate" };
+
+      const rows = await store
+        .query()
+        .from("Person", "person")
+        .project((expression) => ({
+          value: expression.$scalar((subquery) =>
+            subquery
+              .from("Person", "candidate")
+              .project(() => ({ value: expr.literal(applicationValue) }))
+              .limit(1),
+          ),
+        }))
+        .limit(1)
+        .execute();
+
+      expect(rows).toEqual([{ value: applicationValue }]);
+    });
+  });
+}

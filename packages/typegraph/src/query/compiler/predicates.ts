@@ -15,6 +15,7 @@ import {
 } from "../../errors";
 import { requireDefined } from "../../utils/presence";
 import {
+  type AggregateExpr,
   type ArrayPredicate,
   type ExistsSubquery,
   type FieldRef,
@@ -34,6 +35,7 @@ import {
 } from "../dialect/like-escape";
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
+import type { DatabaseExpression } from "../expressions";
 import {
   joinJsonPointers,
   type JsonPointer,
@@ -47,6 +49,11 @@ import {
   isInSubqueryTypeCompatible,
   isUnsupportedInSubqueryValueType,
 } from "../subquery-utils";
+import { validateAggregateOperand } from "./aggregate-validation";
+import {
+  compileDatabaseExpression,
+  compileLegacyAggregateExpression,
+} from "./database-expressions";
 import {
   type RecordedReadBinding,
   type SqlSchema,
@@ -297,12 +304,23 @@ function resolveLiteralValueTypes(
  */
 function resolveComparisonValueType(
   field: FieldRef,
-  right: LiteralValue | readonly LiteralValue[] | ParameterRef,
+  right: FieldRef | LiteralValue | readonly LiteralValue[] | ParameterRef,
 ): ValueType | undefined {
   if (isParameterRef(right)) {
     return (
       normalizeValueType(right.valueType) ?? normalizeValueType(field.valueType)
     );
+  }
+  if (isFieldReference(right)) {
+    const fieldType = normalizeValueType(field.valueType);
+    const rightType = normalizeValueType(right.valueType);
+    if (fieldType && rightType && fieldType !== rightType) {
+      throw new UnsupportedPredicateError(
+        `Cannot compare ${fieldType} and ${rightType} fields`,
+        { leftValueType: fieldType, rightValueType: rightType },
+      );
+    }
+    return fieldType ?? rightType;
   }
   const literals = Array.isArray(right) ? right : [right];
   const literalType = resolveLiteralValueTypes(literals);
@@ -318,6 +336,14 @@ function resolveComparisonValueType(
   }
 
   return fieldType;
+}
+
+function isFieldReference(value: unknown): value is FieldRef {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Readonly<{ __type?: unknown }>).__type === "field_ref"
+  );
 }
 
 /**
@@ -444,6 +470,11 @@ export type PredicateCompilerContext = Readonly<{
   dialect: DialectAdapter;
   schema: SqlSchema;
   compileQuery: (ast: QueryAst, graphId: string) => SqlFragment;
+  compileExpressionSubquery?: (ast: QueryAst) => SqlFragment;
+  compileExpressionOuterReference?: (
+    expression: DatabaseExpression,
+    outerScopeIdentity: symbol,
+  ) => SqlFragment;
   cteColumnPrefix?: string;
   /**
    * Active vector strategy for `field.similarTo(...)` compilation. When
@@ -496,6 +527,7 @@ export type PredicateCompilerContext = Readonly<{
    * (`compileVariableLengthQuery`) already asserts its presence.
    */
   recursiveTraversal?: RecursiveTraversalVerdict;
+  databaseExpressionAggregates?: boolean;
 }>;
 
 /**
@@ -673,6 +705,28 @@ export function compilePredicateExpression(
       return sql`NOT (${inner})`;
     }
 
+    case "database_expression_predicate": {
+      return compileDatabaseExpression(expr.expression, {
+        allowAggregates: ctx.databaseExpressionAggregates ?? false,
+        aggregateClause: "predicate",
+        ...(ctx.cteColumnPrefix === undefined ?
+          {}
+        : { cteColumnPrefix: ctx.cteColumnPrefix }),
+        dialect,
+        ...(ctx.compileExpressionSubquery === undefined ?
+          {}
+        : { compileSubquery: ctx.compileExpressionSubquery }),
+        ...(ctx.compileExpressionOuterReference === undefined ?
+          {}
+        : { compileOuterReference: ctx.compileExpressionOuterReference }),
+        resolveFieldCteAlias(field) {
+          return ctx.cteColumnPrefix === undefined ?
+              `cte_${field.alias}`
+            : undefined;
+        },
+      });
+    }
+
     case "array_op": {
       return compileArrayPredicate(expr, dialect, cteColumnPrefix);
     }
@@ -713,7 +767,7 @@ function compileComparisonPredicate(
     __type: "comparison";
     op: string;
     left: FieldRef;
-    right: LiteralValue | readonly LiteralValue[] | ParameterRef;
+    right: FieldRef | LiteralValue | readonly LiteralValue[] | ParameterRef;
   },
   dialect: DialectAdapter,
   cteColumnPrefix?: string,
@@ -765,6 +819,11 @@ function compileComparisonPredicate(
   );
 
   if (expr.op === "in" || expr.op === "notIn") {
+    if (isFieldReference(expr.right)) {
+      throw new UnsupportedPredicateError(
+        `${expr.op}() does not support a field-reference operand`,
+      );
+    }
     const values: readonly LiteralValue[] =
       Array.isArray(expr.right) ? expr.right : [expr.right as LiteralValue];
     if (values.length === 0) {
@@ -778,6 +837,23 @@ function compileComparisonPredicate(
 
   // For single-value comparisons, extract the literal value
   const right = expr.right;
+  if (isFieldReference(right)) {
+    const rightValue = compileFieldValue(
+      right,
+      dialect,
+      valueType,
+      undefined,
+      undefined,
+      cteColumnPrefix,
+    );
+    const opSql = COMPARISON_OP_SQL[expr.op];
+    if (!opSql) {
+      throw new UnsupportedPredicateError(
+        `Comparison operation "${expr.op}" is not supported`,
+      );
+    }
+    return sql`${left} ${sql.raw(opSql)} ${rightValue}`;
+  }
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Type narrowing with Array.isArray
   const rightValue: LiteralValue =
     Array.isArray(right) ? requireDefined(right[0]) : right;
@@ -960,7 +1036,7 @@ function compileObjectPredicate(
  */
 type AggregateExprInput = Readonly<{
   __type: "aggregate";
-  function: string;
+  function: AggregateExpr["function"];
   field: FieldRef;
 }>;
 
@@ -996,39 +1072,13 @@ function compileAggregateExpr(
   expr: AggregateExprInput,
   dialect: DialectAdapter,
 ): SqlFragment {
-  const cteAlias = `cte_${expr.field.alias}`;
-  const field = compileFieldValue(
-    expr.field,
+  validateAggregateOperand(expr);
+  return compileLegacyAggregateExpression(expr, {
     dialect,
-    expr.field.valueType,
-    cteAlias,
-  );
-
-  switch (expr.function) {
-    case "count": {
-      return sql`COUNT(${field})`;
-    }
-    case "countDistinct": {
-      return sql`COUNT(DISTINCT ${field})`;
-    }
-    case "sum": {
-      return sql`SUM(${field})`;
-    }
-    case "avg": {
-      return sql`AVG(${field})`;
-    }
-    case "min": {
-      return sql`MIN(${field})`;
-    }
-    case "max": {
-      return sql`MAX(${field})`;
-    }
-    default: {
-      throw new UnsupportedPredicateError(
-        `Unknown aggregate function: ${expr.function}`,
-      );
-    }
-  }
+    resolveFieldCteAlias() {
+      return `cte_${expr.field.alias}`;
+    },
+  });
 }
 
 /**
@@ -1166,6 +1216,9 @@ function extractStructuralPredicates<T extends PredicateExpression>(
       case "in_subquery":
       case "vector_similarity":
       case "fulltext_match": {
+        return;
+      }
+      case "database_expression_predicate": {
         return;
       }
     }

@@ -62,6 +62,19 @@ export function isBackendDerivedFrom(
   return false;
 }
 
+/** Returns the original backend at the root of a `deriveBackend` chain. */
+export function backendDerivationRoot(backend: object): object {
+  const visited = new Set<object>();
+  let current = backend;
+  while (!visited.has(current)) {
+    visited.add(current);
+    const source = BACKEND_DERIVATION_SOURCES.get(current);
+    if (source === undefined) return current;
+    current = source;
+  }
+  return current;
+}
+
 /**
  * Rejects overlay members that are not members of the decorated backend, so a
  * misspelled override cannot silently add a property nothing forwards to.

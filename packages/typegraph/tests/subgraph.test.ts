@@ -20,6 +20,7 @@ import {
   defineGraph,
   defineNode,
   defineSubgraphProject,
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
@@ -273,15 +274,15 @@ describe("store.subgraph()", () => {
       expect(kinds.has("Skill")).toBe(false);
     });
 
-    it("caps maxDepth at MAX_RECURSIVE_DEPTH", async () => {
-      // Should not throw even with very large maxDepth
-      const result = await store.subgraph(ids.runId, {
-        edges: ["has_task"],
-        maxDepth: 999_999,
-      });
-
-      // Still works, just capped internally
-      expect(result.nodes.size).toBeGreaterThan(0);
+    it("refuses maxDepth above MAX_EXPLICIT_RECURSIVE_DEPTH", async () => {
+      await expect(
+        store.subgraph(ids.runId, {
+          edges: ["has_task"],
+          maxDepth: MAX_EXPLICIT_RECURSIVE_DEPTH + 1,
+        }),
+      ).rejects.toThrow(
+        `maxDepth must be an integer from 0 through ${MAX_EXPLICIT_RECURSIVE_DEPTH}`,
+      );
     });
   });
 

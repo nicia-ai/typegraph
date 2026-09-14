@@ -523,10 +523,53 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // lose one superseded helper without re-exporting the new helpers: importing
 // Store types there would unnecessarily expose the Store dependency graph
 // through their adapter aliases.
+// Query DSL phase 1/2 contract repair adds twelve private helper names to the
+// root and the six Store-bearing secondary entrypoints (+12 each). Seven
+// (`AggregateAliasMap`, `AggregateFieldResult`, `AliasSchemaValue`,
+// `AliasValue`, `FieldResult`, `PropertyValue`, `WithAliasOptionality`) carry
+// schema-aware aggregate result inference; four (`EqualityOperand`,
+// `MembershipOperand`, `NullFieldAccessor`, `ObjectComparisonAccessor`) carry
+// the corrected predicate operand/accessor contracts; and
+// `OneStatementBatchReads` preserves batchOnce tuple and readonly-array result
+// inference. These are implementation helpers behind exported fluent APIs,
+// not independently useful contracts, so exporting them merely to erase
+// measured forgotten-export debt would enlarge the package surface without a
+// caller use case. No names were removed and no other entrypoint moved.
+// Query DSL phase 3 adds typed database expressions and projection queries.
+// Thirty-six private representation/inference helpers become reachable from
+// every Store-bearing surface: `AggregateExpressionNode`, `AggregateOperator`,
+// `AliasExpressions`, `ArithmeticExpressionNode`, `ArithmeticOperator`,
+// `BooleanExpressionNode`, `CoalesceExpressionNode`, `ComparisonExpressionNode`,
+// `ConditionalExpressionNode`, `DatabaseExpressionNode`,
+// `DatabaseExpressionPredicate`, `DatabaseJsonValue`, `DatabaseLiteral`,
+// `ExistsSubqueryExpressionNode`, `ExpressionComparisonOperator`,
+// `ExpressionMetadata`, `ExpressionObjectChildren`,
+// `ExpressionProjectionEntries`, `ExpressionProjectionEntry`,
+// `ExpressionSubqueryHelpers`, `ExpressionSubqueryRelation`,
+// `ExpressionValue$1`, `FieldExpressionNode`, `IsUnion`,
+// `LiteralExpressionNode`, `NotExpressionNode`, `NullCheckExpressionNode`,
+// `NumericConversionExpressionNode`, `OneStatementReadProvenance`,
+// `OuterReferenceExpressionNode`, `ParameterExpressionNode`,
+// `ProjectedExpressionSubqueryRelation`, `ScalarExpressionSubqueryRelation`,
+// `ScalarSubqueryExpressionNode`, `UndefinedWhenNullish`, and
+// `UndefinedWhenOptional`. The six secondary Store entrypoints additionally
+// reach seven public root exports they do not re-export (`DatabaseExpression`,
+// `DatabaseProjection`, `ExecutableProjectionQuery`, `ExpressionAliasContext`,
+// `ExpressionValue`, `ProjectionResult`, `QueryExpressionContext`), producing
+// their exact +43 delta. The root instead gains twenty private helpers used by
+// its exported expression factories and inference: `Comparable`,
+// `ComparableExpression`, `LiteralResult`, `MergeAliasMaps`,
+// `MergeEdgeAliasMaps`, `NonNull`, `NullIfEitherUndefined`,
+// `NumericExpression`, `OrderedComparable`, `ParameterValue`, `coalesce`,
+// `countDistinct_2`, `count_2`, `isNotNull`, `isNull`, `literal`, `not`,
+// `parameter`, `toNumber`, and `when`, producing its exact +56 delta. These
+// helpers are implementation details behind the exported fluent surface; no
+// forgotten name was removed, and exporting them would add API without an
+// independent caller contract.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 408,
-    sha256: "e705de84fe1cc3510a7a2bc7f7ae8f53acf2af773c4ec191c1e815be87119610",
+    count: 476,
+    sha256: "9dab680cb26eba7615cb0dcce64923f3141888999de1eeb3065ad3c3e3ef233f",
   },
   "./adapters/drizzle/engine": {
     count: 331,
@@ -572,36 +615,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 760,
-    sha256: "794eb35246ad34705a674fbbe4cdaa3853a4f5cd28cd6032651f2e087fde3c70",
+    count: 815,
+    sha256: "69e109b2565eb829e05af22c81d5d6971a4765a0775de77a739455ec2f53cdfd",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 743,
-    sha256: "71d010111cb8f20e86fb43badc9efba83a4e21d3ab62629541a7165a39ac2905",
+    count: 798,
+    sha256: "3c05e20568a5573a451820bba11112f6b7ef0d6e574c846e2137a2312f34f424",
   },
   "./postgres/pglite": {
-    count: 742,
-    sha256: "62a522ae87a73b35bdf133485846eab215f7bfe2b47bf547b16e28672d07ed8f",
+    count: 797,
+    sha256: "59990e0f5bafb41c2c847fd1adf0eb3731290683ba2d263373efb9c6608aa3e4",
   },
   "./profiler": {
-    count: 745,
-    sha256: "39cdc802e4988d4d3c49b5ec188b99a45aeda3b9935e8e69654ef0258617d8c4",
+    count: 800,
+    sha256: "8333d2cc70235c3da0e77d8bef60bcac46d5d600e4f1a50b4f3ccef7be27309d",
   },
   "./provenance": {
-    count: 751,
-    sha256: "c416f96f1bf051cdb401544271c5c1212e79acdd9674c04ba0034c0c69b85e9b",
+    count: 806,
+    sha256: "67aef78162b9d2262124f3474db9891040cdcb8af02ae336ab5915efc29a84d9",
   },
   "./schema": {
     count: 282,
     sha256: "912798b14b4548dc5f66ce6ff9db71dd7561b7d0f1303fd165aa9f58b37390de",
   },
   "./sqlite/local": {
-    count: 742,
-    sha256: "62a522ae87a73b35bdf133485846eab215f7bfe2b47bf547b16e28672d07ed8f",
+    count: 797,
+    sha256: "59990e0f5bafb41c2c847fd1adf0eb3731290683ba2d263373efb9c6608aa3e4",
   },
 };
 

@@ -82,6 +82,14 @@ function isArrayIndex(segment: string): boolean {
  * SQLite dialect adapter implementation.
  */
 export const sqliteDialect: DialectAdapter = {
+  safeNumericConversion(expression) {
+    const trimmed = sql`trim(${expression})`;
+    const wrapped = sql`'[' || ${trimmed} || ']'`;
+    const exponentPosition = sql`instr(lower(${trimmed}), 'e')`;
+    const exponent = sql`substr(${trimmed}, ${exponentPosition} + 1)`;
+    const exponentDigits = sql`CASE WHEN substr(${exponent}, 1, 1) IN ('+', '-') THEN substr(${exponent}, 2) ELSE ${exponent} END`;
+    return sql`CASE WHEN length(${trimmed}) <= 400 AND json_valid(${wrapped}) THEN CASE WHEN json_array_length(${wrapped}) = 1 AND json_type(${wrapped}, '$[0]') IN ('integer', 'real') AND (${exponentPosition} = 0 OR length(${exponentDigits}) BETWEEN 1 AND 3) AND abs(CAST(${trimmed} AS REAL)) <= 1.7976931348623157e308 THEN CAST(${trimmed} AS REAL) ELSE NULL END ELSE NULL END`;
+  },
   name: "sqlite",
   capabilities: {
     standardQueryStrategy: "cte_project",
@@ -362,6 +370,10 @@ export const sqliteDialect: DialectAdapter = {
 
   bindValue(value) {
     return getSqlDialectProfile("sqlite").bindValue(value);
+  },
+
+  unboundedLimit() {
+    return sql.raw("-1");
   },
 
   booleanLiteral(value) {

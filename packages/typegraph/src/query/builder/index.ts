@@ -87,6 +87,7 @@ export {
   type NumberFieldAccessor,
   type ObjectFieldAccessor,
   type OneStatementBatchableQuery,
+  type OneStatementBatchReads,
   type OneStatementBatchResults,
   type PaginatedResult,
   type PaginateOptions,

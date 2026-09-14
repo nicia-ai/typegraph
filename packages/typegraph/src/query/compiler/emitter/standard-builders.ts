@@ -18,9 +18,16 @@ import {
   vectorMinScoreCondition,
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
+import { type DatabaseExpression } from "../../expressions";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { validateAggregateOperand } from "../aggregate-validation";
+import {
+  compileDatabaseExpression,
+  compileLegacyAggregateExpression,
+} from "../database-expressions";
 import { planIdentityFrontierExpansion } from "../identity-traversal";
 import { compileInverseTraversalDuplicateGuard } from "../inverse-traversal-guard";
+import { compileLimitOffsetClauses } from "../limit-offset";
 import { type TemporalFilterPass } from "../passes";
 import {
   compileKindFilter,
@@ -587,46 +594,41 @@ export function buildStandardTraversalCte(
 function compileAggregateExprFromSource(
   expr: AggregateExpr,
   dialect: DialectAdapter,
+  cteAliasOverride?: string,
 ): SqlFragment {
+  validateAggregateOperand(expr);
   const { field } = expr;
-  const fn = expr.function;
-
-  switch (fn) {
-    case "count":
-    case "countDistinct":
-    case "sum":
-    case "avg":
-    case "min":
-    case "max": {
-      const cteAlias = `cte_${field.alias}`;
-      const column = compileFieldValue(
-        field,
-        dialect,
-        field.valueType,
-        cteAlias,
-      );
-      if (fn === "countDistinct") {
-        return sql`COUNT(DISTINCT ${column})`;
-      }
-      return sql`${sql.raw(fn.toUpperCase())}(${column})`;
-    }
-    default: {
-      throw new UnsupportedPredicateError(
-        `Unknown aggregate function: ${String(fn)}`,
-      );
-    }
-  }
+  return compileLegacyAggregateExpression(expr, {
+    dialect,
+    resolveFieldCteAlias() {
+      return cteAliasOverride ?? `cte_${field.alias}`;
+    },
+  });
 }
 
 function compileProjectedSource(
   field: {
     cteAlias?: string;
-    source: FieldRef | AggregateExpr;
+    source: DatabaseExpression | FieldRef | AggregateExpr;
   },
-  dialect: DialectAdapter,
+  ast: QueryAst,
+  ctx: PredicateCompilerContext,
 ): SqlFragment {
+  const { dialect } = ctx;
+  if (field.source.__type === "database_expression") {
+    return compileStandardDatabaseExpression(
+      ast,
+      field.source,
+      ctx,
+      field.cteAlias,
+    );
+  }
   if (isAggregateExpr(field.source)) {
-    return compileAggregateExprFromSource(field.source, dialect);
+    return compileAggregateExprFromSource(
+      field.source,
+      dialect,
+      field.cteAlias,
+    );
   }
   const cteAlias = field.cteAlias ?? `cte_${field.source.alias}`;
   return compileFieldValue(
@@ -640,13 +642,13 @@ function compileProjectedSource(
 type BuildStandardProjectionInput = Readonly<{
   ast: QueryAst;
   collapsedTraversalCteAlias?: string;
-  dialect: DialectAdapter;
+  ctx: PredicateCompilerContext;
 }>;
 
 export function buildStandardProjection(
   input: BuildStandardProjectionInput,
 ): SqlFragment {
-  const { ast, collapsedTraversalCteAlias, dialect } = input;
+  const { ast, collapsedTraversalCteAlias, ctx } = input;
   if (ast.selectiveFields && ast.selectiveFields.length > 0) {
     return compileSelectiveProjection(
       ast.selectiveFields,
@@ -661,7 +663,7 @@ export function buildStandardProjection(
   }
 
   const projectedFields = fields.map((field) => {
-    const source = compileProjectedSource(field, dialect);
+    const source = compileProjectedSource(field, ast, ctx);
     return sql`${source} AS ${quoteIdentifier(field.outputName)}`;
   });
   return sql.join(projectedFields, sql`, `);
@@ -709,10 +711,13 @@ function compileSelectiveProjection(
 
 function compileOrderFieldValue(
   ast: QueryAst,
-  field: FieldRef,
+  field: DatabaseExpression | FieldRef,
   dialect: DialectAdapter,
   cteAlias: string,
 ): SqlFragment {
+  if (field.__type === "database_expression") {
+    return compileStandardDatabaseExpression(ast, field, dialect, cteAlias);
+  }
   const selectiveField = findSelectivePropsFieldForFieldRef(
     ast.selectiveFields,
     field,
@@ -722,6 +727,39 @@ function compileOrderFieldValue(
   }
 
   return compileFieldValue(field, dialect, field.valueType, cteAlias);
+}
+
+function compileStandardDatabaseExpression(
+  ast: QueryAst,
+  expression: DatabaseExpression,
+  context: PredicateCompilerContext | DialectAdapter,
+  cteAliasOverride?: string,
+  allowAggregates = true,
+): SqlFragment {
+  const ctx = isPredicateCompilerContext(context) ? context : undefined;
+  const dialect =
+    isPredicateCompilerContext(context) ? context.dialect : context;
+  const aliasToCte = buildAliasToCteMap(ast);
+  return compileDatabaseExpression(expression, {
+    allowAggregates,
+    ...(allowAggregates ? {} : { aggregateClause: "GROUP BY" }),
+    dialect,
+    ...(ctx?.compileExpressionSubquery === undefined ?
+      {}
+    : { compileSubquery: ctx.compileExpressionSubquery }),
+    ...(ctx?.compileExpressionOuterReference === undefined ?
+      {}
+    : { compileOuterReference: ctx.compileExpressionOuterReference }),
+    resolveFieldCteAlias(field) {
+      return cteAliasOverride ?? aliasToCte.get(field.alias);
+    },
+  });
+}
+
+function isPredicateCompilerContext(
+  context: DialectAdapter | PredicateCompilerContext,
+): context is PredicateCompilerContext {
+  return "schema" in context;
 }
 
 function buildRelevanceJoins(
@@ -852,8 +890,11 @@ export function buildStandardOrderBy(
     }
     const cteAlias =
       collapsedTraversalCteAlias ??
-      aliasToCte?.get(orderSpec.field.alias) ??
-      `cte_${orderSpec.field.alias}`;
+      (orderSpec.field.__type === "field_ref" ?
+        (aliasToCte?.get(orderSpec.field.alias) ??
+        `cte_${orderSpec.field.alias}`)
+      : undefined) ??
+      "";
     const field = compileOrderFieldValue(
       ast,
       orderSpec.field,
@@ -985,7 +1026,9 @@ export function buildLateMaterializedTopKCte(
       ast,
       orderSpec.field,
       dialect,
-      cteAliasFor(orderSpec.field.alias),
+      orderSpec.field.__type === "field_ref" ?
+        cteAliasFor(orderSpec.field.alias)
+      : (collapsedTraversalCteAlias ?? ""),
     );
     columns.push(
       sql`${value} AS ${sql.raw(`${LATE_MAT_SORT_KEY_PREFIX}${index}`)}`,
@@ -1002,6 +1045,7 @@ export function buildLateMaterializedTopKCte(
   const limitOffset = buildLimitOffsetClause({
     limit: input.limit,
     offset: input.offset,
+    dialect,
   });
 
   const parts: SqlFragment[] = [
@@ -1101,7 +1145,7 @@ export function buildStandardGroupBy(
   }
 
   const seenKeys = new Set<string>();
-  const allFields: FieldRef[] = [];
+  const allFields: (DatabaseExpression | FieldRef)[] = [];
 
   for (const projectedField of ast.projection.fields) {
     if (projectedField.source.__type === "field_ref") {
@@ -1114,6 +1158,10 @@ export function buildStandardGroupBy(
   }
 
   for (const field of ast.groupBy.fields) {
+    if (field.__type === "database_expression") {
+      allFields.push(field);
+      continue;
+    }
     const key = fieldRefKey(field);
     if (!seenKeys.has(key)) {
       seenKeys.add(key);
@@ -1127,12 +1175,14 @@ export function buildStandardGroupBy(
 
   const aliasToCte = buildAliasToCteMap(ast);
   const parts = allFields.map((field) =>
-    compileFieldValue(
-      field,
-      dialect,
-      field.valueType,
-      aliasToCte.get(field.alias) ?? `cte_${field.alias}`,
-    ),
+    field.__type === "database_expression" ?
+      compileStandardDatabaseExpression(ast, field, dialect, undefined, false)
+    : compileFieldValue(
+        field,
+        dialect,
+        field.valueType,
+        aliasToCte.get(field.alias) ?? `cte_${field.alias}`,
+      ),
   );
 
   return sql`GROUP BY ${sql.join(parts, sql`, `)}`;
@@ -1151,7 +1201,10 @@ export function buildStandardHaving(
     return undefined;
   }
 
-  const condition = compilePredicateExpression(ast.having, ctx);
+  const condition = compilePredicateExpression(ast.having, {
+    ...ctx,
+    databaseExpressionAggregates: true,
+  });
   return sql`HAVING ${condition}`;
 }
 
@@ -1555,8 +1608,10 @@ function compileUserOrderBy(
       );
     }
     const cteAlias =
-      aliasToCte.get(orderSpec.field.alias) ??
-      `${ALIAS_CTE_PREFIX}${orderSpec.field.alias}`;
+      orderSpec.field.__type === "field_ref" ?
+        (aliasToCte.get(orderSpec.field.alias) ??
+        `${ALIAS_CTE_PREFIX}${orderSpec.field.alias}`)
+      : "";
     const field = compileOrderFieldValue(
       ast,
       orderSpec.field,
@@ -1661,6 +1716,7 @@ export function buildStandardVectorOrderBy(
 }
 
 type BuildLimitOffsetClauseInput = Readonly<{
+  dialect: DialectAdapter;
   limit: number | undefined;
   offset: number | undefined;
 }>;
@@ -1668,15 +1724,10 @@ type BuildLimitOffsetClauseInput = Readonly<{
 export function buildLimitOffsetClause(
   input: BuildLimitOffsetClauseInput,
 ): SqlFragment | undefined {
-  const { limit, offset } = input;
-  const parts: SqlFragment[] = [];
-
-  if (limit !== undefined) {
-    parts.push(sql`LIMIT ${limit}`);
-  }
-  if (offset !== undefined) {
-    parts.push(sql`OFFSET ${offset}`);
-  }
-
+  const parts = compileLimitOffsetClauses(
+    input.limit,
+    input.offset,
+    input.dialect,
+  );
   return parts.length > 0 ? sql.join(parts, sql` `) : undefined;
 }

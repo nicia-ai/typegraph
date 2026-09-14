@@ -15,12 +15,14 @@ import {
   type DialectRecursiveQueryStrategy,
 } from "../dialect";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { compileDatabaseExpression } from "./database-expressions";
 import { emitRecursiveQuerySql } from "./emitter";
 import {
   compileIdentityClassCte,
   planIdentityFrontierExpansion,
 } from "./identity-traversal";
 import { compileInverseTraversalDuplicateGuard } from "./inverse-traversal-guard";
+import { compileLimitOffsetClauses } from "./limit-offset";
 import {
   createTemporalFilterPass,
   runCompilerPass,
@@ -37,6 +39,7 @@ import {
   type PredicateCompilerContext,
 } from "./predicates";
 import { assertRecordedQueryAstDoesNotUseCurrentIndexes } from "./recorded-current-index-guard";
+import { visitExpressionFields } from "./standard-pass-pipeline";
 import { compileSelectivePropsExtraction } from "./typed-json-extract";
 import {
   addRequiredColumn,
@@ -60,8 +63,8 @@ import {
  * Graphs with branching factor B produce O(B^depth) rows before cycle
  * detection can prune them. A default of 10 covers typical neighborhood,
  * shortest-path, and hierarchy use-cases without risking exponential blowup
- * on dense graphs. Users who need deeper traversals should call .maxHops(N)
- * explicitly (up to MAX_EXPLICIT_RECURSIVE_DEPTH).
+ * on dense graphs. Users who need deeper traversals should pass
+ * `.recursive({ maxHops: N })` explicitly (up to MAX_EXPLICIT_RECURSIVE_DEPTH).
  */
 export const MAX_RECURSIVE_DEPTH = 10;
 
@@ -298,7 +301,7 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
 
   // Order by and limit/offset
   const orderBy = compileRecursiveOrderBy(ast, dialect);
-  const limitOffset = compileLimitOffset(ast);
+  const limitOffset = compileLimitOffset(ast, dialect);
 
   return emitRecursiveQuerySql({
     depthFilter,
@@ -725,7 +728,13 @@ function collectRequiredColumnsByAlias(
 
   if (ast.orderBy) {
     for (const orderSpec of ast.orderBy) {
-      markFieldRefAsRequired(requiredColumnsByAlias, orderSpec.field);
+      if (orderSpec.field.__type === "field_ref") {
+        markFieldRefAsRequired(requiredColumnsByAlias, orderSpec.field);
+      } else {
+        visitExpressionFields(orderSpec.field, (field) => {
+          markFieldRefAsRequired(requiredColumnsByAlias, field);
+        });
+      }
     }
   }
 
@@ -871,7 +880,10 @@ function compileRecursiveOrderBy(
         "Ordering by JSON arrays or objects is not supported",
       );
     }
-    const field = compileFieldValue(orderSpec.field, dialect, valueType);
+    const field =
+      orderSpec.field.__type === "database_expression" ?
+        compileDatabaseExpression(orderSpec.field, { dialect })
+      : compileFieldValue(orderSpec.field, dialect, valueType);
     const direction = sql.raw(orderSpec.direction.toUpperCase());
     const nulls =
       orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
@@ -889,15 +901,10 @@ function compileRecursiveOrderBy(
 /**
  * Compiles LIMIT and OFFSET clauses.
  */
-function compileLimitOffset(ast: QueryAst): SqlFragment | undefined {
-  const parts: SqlFragment[] = [];
-
-  if (ast.limit !== undefined) {
-    parts.push(sql`LIMIT ${ast.limit}`);
-  }
-  if (ast.offset !== undefined) {
-    parts.push(sql`OFFSET ${ast.offset}`);
-  }
-
+function compileLimitOffset(
+  ast: QueryAst,
+  dialect: DialectAdapter,
+): SqlFragment | undefined {
+  const parts = compileLimitOffsetClauses(ast.limit, ast.offset, dialect);
   return parts.length > 0 ? sql.join(parts, sql` `) : undefined;
 }

@@ -137,6 +137,13 @@ export type InListParameterOptions = Readonly<{
  * together and rendered by a backend adapter.
  */
 export interface DialectAdapter {
+  /** Converts strict finite decimal text to a number, returning SQL NULL otherwise. */
+  readonly safeNumericConversion: (
+    this: void,
+    expression: SqlFragment,
+  ) => SqlFragment;
+  /** Token for an unlimited result bound when OFFSET requires a LIMIT. */
+  unboundedLimit(): SqlFragment;
   /**
    * The dialect name this adapter handles.
    */

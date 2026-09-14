@@ -47,8 +47,8 @@ import type {
 } from "../query/builder";
 import type {
   BatchableQuery,
-  EmbeddableOneStatementRead,
   NodeAccessor,
+  OneStatementBatchReads,
   OneStatementBatchResults,
 } from "../query/builder/types";
 import {
@@ -2267,13 +2267,7 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
 export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
   Readonly<{
     query: () => InitialQueryBuilder<G, "open">;
-    batchOnce: <
-      const Queries extends readonly [
-        EmbeddableOneStatementRead<unknown>,
-        EmbeddableOneStatementRead<unknown>,
-        ...EmbeddableOneStatementRead<unknown>[],
-      ],
-    >(
+    batchOnce: <const Queries extends OneStatementBatchReads>(
       build: (read: BatchReadBuilder<G>) => Queries,
     ) => Promise<OneStatementBatchResults<Queries>>;
     neighbors: <const K extends EdgeKinds<G>>(

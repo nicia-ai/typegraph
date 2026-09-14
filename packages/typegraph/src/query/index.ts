@@ -164,9 +164,20 @@ export {
 
 // SQL schema configuration
 export {
+  type DatabaseProjection,
+  ExecutableProjectionQuery,
+  type ProjectionResult,
+} from "./builder/executable-projection-query";
+export type {
+  ExpressionAliasContext,
+  ExpressionValue,
+  QueryExpressionContext,
+} from "./builder/expression-context";
+export {
   createSqlSchema,
   DEFAULT_SQL_SCHEMA,
   type ResolvedSqlTableNames,
   type SqlSchema,
   type SqlTableNames,
 } from "./compiler/schema";
+export { type DatabaseExpression, expr } from "./expressions";

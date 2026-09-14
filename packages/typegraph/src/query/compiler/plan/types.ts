@@ -11,6 +11,7 @@ import type {
   VectorSimilarityPredicate,
 } from "../../ast";
 import type { SqlDialect } from "../../dialect";
+import type { DatabaseExpression } from "../../expressions";
 
 export type LogicalPlanNode =
   | ScanPlanNode
@@ -67,7 +68,7 @@ export type JoinPlanNode = Readonly<{
 
 export type AggregatePlanNode = Readonly<{
   aggregates: readonly AggregateExpr[];
-  groupBy: readonly FieldRef[];
+  groupBy: readonly (DatabaseExpression | FieldRef)[];
   having?: PredicateExpression;
   id: string;
   input: LogicalPlanNode;

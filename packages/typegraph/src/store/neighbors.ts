@@ -1,3 +1,4 @@
+import { backendDerivationRoot } from "../backend/derive-backend";
 import {
   normalizeRequiredRowTimestamp,
   normalizeRowTimestamp,
@@ -151,6 +152,10 @@ export function createNeighborRead<G extends GraphDef, K extends EdgeKinds<G>>(
     },
     compileOneStatementBatchItem: () => ({
       query: asCompiledRowsSql(query),
+      provenance: {
+        graphId: ctx.graphId,
+        executionTarget: backendDerivationRoot(ctx.backend),
+      },
       outputNames: neighborOutputNames(),
       orderBy: neighborBatchOrder(options.orderBy),
       mapRows,
@@ -196,6 +201,10 @@ export function createNeighborCountRead<
     },
     compileOneStatementBatchItem: () => ({
       query: asCompiledRowsSql(query),
+      provenance: {
+        graphId: ctx.graphId,
+        executionTarget: backendDerivationRoot(ctx.backend),
+      },
       outputNames: ["count"],
       orderBy: [],
       mapRows: mapNeighborCountRows,

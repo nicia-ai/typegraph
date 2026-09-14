@@ -7,6 +7,7 @@
  * one statement so it can participate in batchOnce().
  */
 import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
+import { backendDerivationRoot } from "../backend/derive-backend";
 import {
   normalizeRequiredRowTimestamp,
   normalizeRowTimestamp,
@@ -507,6 +508,7 @@ function buildSubgraphPlan<
   surface: SubgraphSurface,
 ): SubgraphPlan {
   const { options } = params;
+  validateSubgraphTraversalOptions(options);
   const { valid: coordinate } = resolveReadCoordinate(
     options.temporalMode ?? params.graph.defaults.temporalMode,
     options.asOf,
@@ -517,10 +519,7 @@ function buildSubgraphPlan<
     graphId: params.graphId,
     rootId: params.rootId,
     edgeKinds: options.edges,
-    maxDepth: Math.min(
-      options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
-      MAX_EXPLICIT_RECURSIVE_DEPTH,
-    ),
+    maxDepth: options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
     includeKinds: options.includeKinds,
     excludeRoot: options.excludeRoot ?? false,
     direction: options.direction ?? "out",
@@ -712,6 +711,10 @@ export function createSubgraphRead<
       ),
     compileOneStatementBatchItem: () => ({
       query: asCompiledRowsSql(query),
+      provenance: {
+        graphId: params.graphId,
+        executionTarget: backendDerivationRoot(params.backend),
+      },
       outputNames: oneStatementSubgraphOutputNames(nodePlan, edgePlan),
       orderBy: [],
       mapRows,
@@ -1199,6 +1202,69 @@ function validateEdgeWindows(
     if (window !== undefined) {
       validateEdgeReadBounds(window, `edgeWindows.${kind}`);
     }
+  }
+}
+
+function validateSubgraphTraversalOptions(
+  options: Readonly<{
+    maxDepth?: number;
+    direction?: unknown;
+    cyclePolicy?: unknown;
+  }>,
+): void {
+  const maxDepth = options.maxDepth;
+  if (
+    maxDepth !== undefined &&
+    (!Number.isFinite(maxDepth) ||
+      !Number.isInteger(maxDepth) ||
+      maxDepth < 0 ||
+      maxDepth > MAX_EXPLICIT_RECURSIVE_DEPTH)
+  ) {
+    throw new ValidationError(
+      `Subgraph maxDepth must be an integer from 0 through ${MAX_EXPLICIT_RECURSIVE_DEPTH}`,
+      {
+        issues: [
+          {
+            path: "maxDepth",
+            message: `Received ${String(maxDepth)}`,
+            code: "invalid_value",
+          },
+        ],
+      },
+    );
+  }
+  if (
+    options.direction !== undefined &&
+    options.direction !== "out" &&
+    options.direction !== "both"
+  ) {
+    throw new ValidationError('Subgraph direction must be "out" or "both"', {
+      issues: [
+        {
+          path: "direction",
+          message: "Received an unsupported direction",
+          code: "invalid_value",
+        },
+      ],
+    });
+  }
+  if (
+    options.cyclePolicy !== undefined &&
+    options.cyclePolicy !== "prevent" &&
+    options.cyclePolicy !== "allow"
+  ) {
+    throw new ValidationError(
+      'Subgraph cyclePolicy must be "prevent" or "allow"',
+      {
+        issues: [
+          {
+            path: "cyclePolicy",
+            message: "Received an unsupported cycle policy",
+            code: "invalid_value",
+          },
+        ],
+      },
+    );
   }
 }
 

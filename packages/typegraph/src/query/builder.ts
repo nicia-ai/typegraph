@@ -79,6 +79,7 @@ export type {
   NodeAccessor,
   NodeAlias,
   OneStatementBatchableQuery,
+  OneStatementBatchReads,
   OneStatementBatchResults,
   PaginatedResult,
   PaginateOptions,

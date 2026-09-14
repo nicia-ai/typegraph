@@ -483,6 +483,36 @@ const [latest, versionCount, detail] = await store.batchOnce((read) => [
 ]);
 ```
 
+The returned collection may be a runtime-sized array, including `roots.map(...)`. Empty arrays
+execute zero statements; every nonempty array, including a singleton, executes exactly one or is
+refused before execution. The portable ceiling is 500 reads and the final statement must fit the
+backend's bind-parameter budget. Since all member rows are returned in materialized JSON envelopes,
+use bounded projections and limits; `batchOnce()` does not stream or predict payload size.
+
+When a request needs several independent neighborhoods, prefer one runtime batch over awaiting
+`store.subgraph()` in a loop, especially when the database is remote:
+
+```typescript
+const neighborhoods = await store.batchOnce((read) =>
+  roots.map((root) =>
+    read.subgraph(root.id, {
+      edges: ["knows", "worksAt"],
+      maxDepth: 2,
+      project: {
+        nodes: { Person: ["name"], Company: ["name"] },
+        edges: { knows: [], worksAt: ["role"] },
+      },
+    }),
+  ),
+);
+```
+
+This changes several database round trips into one. Each subgraph still has its own recursive CTE and
+hydration work: `batchOnce()` does not merge roots, share traversal, or guarantee less database CPU.
+For one large closure, the direct backend-tuned `store.subgraph()` path can be faster. Use
+`batchOnce()` when round-trip latency across several independent, bounded subgraphs is the cost to
+remove, and measure both forms when database work dominates.
+
 Use `store.batch()` when queued edge collection reads must participate. It runs them in sequence.
 On a transactional backend it still issues at least one statement per query plus
 `begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no

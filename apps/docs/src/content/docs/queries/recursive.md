@@ -328,8 +328,9 @@ Two safety caps prevent runaway recursion:
 
 Graphs with branching factor *B* produce O(*B*^depth) rows before cycle detection
 can prune them. The default of 10 covers typical neighborhood, shortest-path, and
-hierarchy queries without risking exponential blowup on dense graphs. Use `.maxHops(N)`
-to opt in to deeper traversals when you know the graph structure.
+hierarchy queries without risking exponential blowup on dense graphs. Pass
+`maxHops` to `.recursive({ maxHops: N })` to opt in to deeper traversals when you know
+the graph structure.
 
 ```typescript
 import {
@@ -344,7 +345,7 @@ import {
 
 :::note[Breaking change in v0.14]
 The default depth was lowered from 100 to 10. If your traversals relied on the
-implicit 100-hop cap, add an explicit `.maxHops(100)` call.
+implicit 100-hop cap, add `.recursive({ maxHops: 100 })`.
 :::
 
 ## Limitations

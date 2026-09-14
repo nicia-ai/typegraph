@@ -1,6 +1,7 @@
 /**
  * QueryBuilder - The fluent query builder.
  */
+import { backendDerivationRoot } from "../../backend/derive-backend";
 import {
   type GraphDef,
   type GraphIdentityConfig,
@@ -36,6 +37,11 @@ import {
   type TraversalDirection,
   type TraversalExpansion,
 } from "../ast";
+import { validateAggregateOperand } from "../compiler/aggregate-validation";
+import {
+  createOuterReferenceExpression,
+  type DatabaseExpression,
+} from "../expressions";
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import {
   buildFieldBuilderForTypeInfo,
@@ -44,16 +50,37 @@ import {
   type Predicate,
   stringField,
 } from "../predicates";
-import { type FieldTypeInfo } from "../schema-introspector";
+import {
+  type FieldTypeInfo,
+  type SchemaIntrospector,
+} from "../schema-introspector";
+import { buildQueryAst } from "./ast-builder";
 import {
   createDynamicFieldBuilder,
   type DynamicEdgeType,
   type DynamicNodeType,
 } from "./dynamic";
 import { ExecutableAggregateQuery } from "./executable-aggregate-query";
+import {
+  type DatabaseProjection,
+  ExecutableProjectionQuery,
+} from "./executable-projection-query";
 import { ExecutableQuery } from "./executable-query";
+import {
+  createExpressionAliasContext,
+  type ExpressionAliasContext,
+  type QueryExpressionContext,
+} from "./expression-context";
+import {
+  assertExpressionScope,
+  getExpressionScope,
+  isDatabaseExpression,
+} from "./expression-scope";
+import { createExpressionSubqueryHelpers } from "./expression-subqueries";
+import { registerQueryBuilderInternalContext } from "./internal-context";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
+import { executeQueryTerminal } from "./terminal-query";
 import { TraversalBuilder } from "./traversal-builder";
 import {
   type AliasMap,
@@ -75,8 +102,42 @@ import {
 } from "./types";
 import {
   validateHybridFusionOptions,
+  validateQueryRange,
+  validateQuerySource,
+  validateQueryState,
+  validateSortDirection,
   validateSqlIdentifier,
+  validateTraversalOptions,
 } from "./validation";
+
+function resolveAggregateFieldTypeInfo(
+  introspector: SchemaIntrospector,
+  nodeKindNames: readonly string[] | undefined,
+  edgeKindNames: readonly string[] | undefined,
+  path: readonly string[],
+): FieldTypeInfo | undefined {
+  const [propertyName, ...nestedPath] = path;
+  if (propertyName === undefined) return undefined;
+
+  const rootTypeInfo =
+    nodeKindNames === undefined ?
+      edgeKindNames === undefined ?
+        undefined
+      : introspector.getSharedEdgeFieldTypeInfo(edgeKindNames, propertyName)
+    : introspector.getSharedFieldTypeInfo(nodeKindNames, propertyName);
+
+  function resolveNested(
+    current: FieldTypeInfo | undefined,
+    index: number,
+  ): FieldTypeInfo | undefined {
+    const segment = nestedPath[index];
+    return segment === undefined ? current : (
+        resolveNested(current?.shape?.[segment], index + 1)
+      );
+  }
+
+  return resolveNested(rootTypeInfo, 0);
+}
 
 /**
  * Identity-aware traversal option, available only on a graph that declares an
@@ -259,6 +320,7 @@ export class QueryBuilder<
   >;
 
   constructor(config: QueryBuilderConfig, state: QueryBuilderState) {
+    validateQueryState(state);
     this.#config = config;
     this.#state = state;
     this.temporal = ((mode, asOf) =>
@@ -353,8 +415,13 @@ export class QueryBuilder<
     RecursiveAliases,
     CoordinateState
   > {
+    validateQuerySource(this.#state, true);
     // Validate alias to prevent SQL injection
     validateSqlIdentifier(alias);
+    if (!this.#config.registry.hasNodeType(kind))
+      throw new KindNotFoundError(kind, "node", {
+        graphId: this.#config.graphId,
+      });
 
     const includeSubClasses = options?.includeSubClasses ?? false;
 
@@ -389,6 +456,7 @@ export class QueryBuilder<
     RecursiveAliases,
     CoordinateState
   > {
+    validateQuerySource(this.#state, true);
     validateSqlIdentifier(alias);
     const kindName = resolveRuntimeKindInput(
       kind,
@@ -424,11 +492,25 @@ export class QueryBuilder<
    */
   whereNode<A extends keyof Aliases & string>(
     alias: A,
-    predicateFunction: (n: NodeAccessor<Aliases[A]["type"]>) => Predicate,
+    predicateFunction: (
+      n: NodeAccessor<Aliases[A]["type"]>,
+      expressions: QueryExpressionContext<
+        G,
+        Aliases,
+        EdgeAliases,
+        CoordinateState
+      >,
+    ) =>
+      | Predicate
+      | DatabaseExpression<
+          boolean | undefined,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const accessor = this.#createNodeAccessor(alias);
     const predicate = predicateFunction(
       accessor as NodeAccessor<Aliases[A]["type"]>,
+      this.#expressionContext(),
     );
 
     const newState: QueryBuilderState = {
@@ -437,7 +519,7 @@ export class QueryBuilder<
         ...this.#state.predicates,
         {
           targetAlias: alias,
-          expression: predicate.__expr,
+          expression: this.#expressionPredicate(predicate),
         },
       ],
     };
@@ -455,11 +537,23 @@ export class QueryBuilder<
     alias: EA,
     predicateFunction: (
       edge: EdgeAccessor<EdgeAliases[EA]["type"]>,
-    ) => Predicate,
+      expressions: QueryExpressionContext<
+        G,
+        Aliases,
+        EdgeAliases,
+        CoordinateState
+      >,
+    ) =>
+      | Predicate
+      | DatabaseExpression<
+          boolean | undefined,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const accessor = this.#createEdgeAccessor(alias);
     const predicate = predicateFunction(
       accessor as EdgeAccessor<EdgeAliases[EA]["type"]>,
+      this.#expressionContext(),
     );
 
     const newState: QueryBuilderState = {
@@ -469,7 +563,7 @@ export class QueryBuilder<
         {
           targetAlias: alias,
           targetType: "edge",
-          expression: predicate.__expr,
+          expression: this.#expressionPredicate(predicate),
         },
       ],
     };
@@ -567,6 +661,8 @@ export class QueryBuilder<
     const direction = options?.direction ?? "out";
     this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    validateQuerySource(this.#state, false);
+    validateTraversalOptions(direction, expansion);
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
     const includeInverseEdges = expansion === "inverse" || expansion === "all";
@@ -721,6 +817,8 @@ export class QueryBuilder<
     const direction = options?.direction ?? "out";
     this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    validateQuerySource(this.#state, false);
+    validateTraversalOptions(direction, expansion);
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
     const includeInverseEdges = expansion === "inverse" || expansion === "all";
@@ -848,6 +946,8 @@ export class QueryBuilder<
     const direction = options?.direction ?? "out";
     this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    validateQuerySource(this.#state, false);
+    validateTraversalOptions(direction, expansion);
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
     const includeInverseEdges = expansion === "inverse" || expansion === "all";
@@ -898,6 +998,164 @@ export class QueryBuilder<
     );
   }
 
+  /** @internal Identifies this query's lexical expression scope. */
+  getExpressionScopeIdentity(): symbol {
+    return getExpressionScope(this.#config);
+  }
+
+  #expressionPredicate(
+    predicate: Predicate | DatabaseExpression<boolean | undefined>,
+  ): PredicateExpression {
+    if ("__expr" in predicate) return predicate.__expr;
+    assertExpressionScope(predicate, this.getExpressionScopeIdentity());
+    if (predicate.valueType !== "boolean")
+      throw new ConfigurationError(
+        "A predicate requires a Boolean database expression.",
+      );
+    return { __type: "database_expression_predicate", expression: predicate };
+  }
+
+  #expressionContext(): QueryExpressionContext<
+    G,
+    Aliases,
+    EdgeAliases,
+    CoordinateState
+  > {
+    const aliases = createExpressionAliasContext<Aliases, EdgeAliases>(
+      this.#config,
+      this.#state,
+    );
+    const helpers = createExpressionSubqueryHelpers<
+      QueryBuilder<
+        G,
+        EmptyAliasMap,
+        EmptyEdgeAliasMap,
+        EmptyRecursiveAliasMap,
+        CoordinateState
+      >,
+      ExpressionAliasContext<Aliases, EdgeAliases, never>,
+      (keyof Aliases | keyof EdgeAliases) & string
+    >({
+      parentScopeIdentity: this.getExpressionScopeIdentity(),
+      parentProvenance: {
+        graphId: this.#config.graphId,
+        executionTarget:
+          this.#config.backend === undefined ?
+            undefined
+          : backendDerivationRoot(this.#config.backend),
+      },
+      parentCoordinate: buildQueryAst(this.#config, this.#state),
+      createSubquery: () => {
+        const config = { ...this.#config };
+        registerQueryBuilderInternalContext(
+          config,
+          getQueryBuilderInternalContext(this.#config),
+        );
+        return new QueryBuilder(config, {
+          ...this.#state,
+          startAlias: "",
+          currentAlias: "",
+          startKinds: [],
+          traversals: [],
+          predicates: [],
+          projection: [],
+          orderBy: [],
+          aggregateOrderBy: [],
+          groupBy: undefined,
+          having: undefined,
+          limit: undefined,
+          offset: undefined,
+          fusion: undefined,
+          dynamicNodeAliases: new Set(),
+          dynamicEdgeAliases: new Set(),
+        });
+      },
+      createOuterContext: (childScope) =>
+        createExpressionAliasContext<Aliases, EdgeAliases, never>(
+          this.#config,
+          this.#state,
+          (expression) =>
+            createOuterReferenceExpression(expression, childScope),
+        ),
+    });
+    return new Proxy(helpers, {
+      get(target, key, receiver) {
+        if (key === "$exists" || key === "$scalar")
+          return Reflect.get(target, key, receiver);
+        return Reflect.get(aliases, key);
+      },
+    }) as QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>;
+  }
+
+  /** Projects database expressions; the callback runs once when building the query. */
+  project<
+    const Fields extends Readonly<
+      Record<
+        string,
+        DatabaseExpression<
+          unknown,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >
+      >
+    >,
+  >(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) => Fields,
+  ): ExecutableProjectionQuery<
+    Fields,
+    QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>
+  > {
+    return this.#project(build(this.#expressionContext()));
+  }
+
+  #project<Fields extends DatabaseProjection>(
+    fields: Fields,
+  ): ExecutableProjectionQuery<
+    Fields,
+    QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>
+  > {
+    if (Object.getOwnPropertySymbols(fields).length > 0)
+      throw new ConfigurationError("Projection output names must be strings.");
+    const entries = Object.entries(fields);
+    if (entries.length === 0)
+      throw new ConfigurationError(
+        "project() requires at least one database expression.",
+      );
+    const projection = entries.map(([outputName, source]) => {
+      validateSqlIdentifier(outputName);
+      if (
+        outputName.startsWith("__tg_") ||
+        outputName === "typegraphschemaversion"
+      )
+        throw new ConfigurationError("Projection output name is reserved.");
+      if (!isDatabaseExpression(source))
+        throw new ConfigurationError(
+          "project() accepts database expressions; use expr.literal() for constants.",
+        );
+      assertExpressionScope(source, this.getExpressionScopeIdentity());
+      return { outputName, source };
+    });
+    return new ExecutableProjectionQuery(
+      this.#config,
+      { ...this.#state, projection },
+      fields,
+      () => this.#expressionContext(),
+    );
+  }
+
+  /** Counts match rows (or groups), preserving offset and limit. */
+  count(): Promise<number> {
+    return executeQueryTerminal(this.#config, this.#state, "count");
+  }
+
+  /** Tests whether the bounded relation contains a row. */
+  async exists(): Promise<boolean> {
+    return (
+      (await executeQueryTerminal(this.#config, this.#state, "exists")) > 0
+    );
+  }
+
   /**
    * Selects fields to return.
    */
@@ -935,63 +1193,112 @@ export class QueryBuilder<
    *
    * @param fields - Object mapping output names to field refs or aggregate expressions
    */
+  aggregate<
+    const Fields extends Readonly<
+      Record<
+        string,
+        DatabaseExpression<
+          unknown,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >
+      >
+    >,
+  >(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) => Fields,
+  ): ExecutableProjectionQuery<
+    Fields,
+    QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>
+  >;
   aggregate<R extends Record<string, FieldRef | AggregateExpr>>(
     fields: R,
-  ): ExecutableAggregateQuery<G, Aliases, R> {
+  ): ExecutableAggregateQuery<G, Aliases & EdgeAliases, R>;
+  aggregate<
+    R extends Record<string, FieldRef | AggregateExpr>,
+    Fields extends DatabaseProjection,
+  >(
+    fields:
+      | R
+      | ((
+          context: QueryExpressionContext<
+            G,
+            Aliases,
+            EdgeAliases,
+            CoordinateState
+          >,
+        ) => Fields),
+  ):
+    | ExecutableAggregateQuery<G, Aliases & EdgeAliases, R>
+    | ExecutableProjectionQuery<
+        Fields,
+        QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>
+      > {
+    if (typeof fields === "function")
+      return this.#project(fields(this.#expressionContext()));
+
     const resolvedFields = Object.fromEntries(
       Object.entries(fields).map(([outputName, source]) => {
-        if (source.__type !== "field_ref") {
-          return [outputName, source];
-        }
+        const fieldRef = source.__type === "aggregate" ? source.field : source;
 
         if (
-          source.valueType !== undefined ||
-          source.path.length !== 1 ||
-          source.path[0] !== "props" ||
-          source.jsonPointer === undefined
+          fieldRef.path.length !== 1 ||
+          fieldRef.path[0] !== "props" ||
+          fieldRef.jsonPointer === undefined
         ) {
           return [outputName, source];
         }
 
-        const segments = parseJsonPointer(source.jsonPointer);
-        if (segments.length !== 1) {
+        const segments = parseJsonPointer(fieldRef.jsonPointer);
+        if (segments.length === 0) {
           return [outputName, source];
         }
 
-        const propertyName = segments[0];
-        if (propertyName === undefined) {
-          return [outputName, source];
-        }
-
-        const kindNames = this.#getKindNamesForAlias(source.alias);
-        const typeInfo =
-          kindNames ?
-            this.#config.schemaIntrospector.getSharedFieldTypeInfo(
-              kindNames,
-              propertyName,
-            )
-          : undefined;
+        const nodeKindNames = this.#getKindNamesForAlias(fieldRef.alias);
+        const edgeKindNames = this.#getEdgeKindNamesForAlias(fieldRef.alias);
+        const typeInfo = resolveAggregateFieldTypeInfo(
+          this.#config.schemaIntrospector,
+          nodeKindNames,
+          edgeKindNames,
+          segments,
+        );
 
         if (!typeInfo) {
+          if (source.__type === "aggregate") validateAggregateOperand(source);
           return [outputName, source];
         }
 
-        return [
-          outputName,
-          {
-            ...source,
-            valueType: typeInfo.valueType,
-            elementType: typeInfo.elementType,
-          } satisfies FieldRef,
-        ];
+        if (source.__type === "aggregate") {
+          validateAggregateOperand(source, typeInfo.valueType);
+        }
+
+        const resolvedField = {
+          ...fieldRef,
+          valueType: typeInfo.valueType,
+          elementType: typeInfo.elementType,
+        } satisfies FieldRef;
+
+        return source.__type === "aggregate" ?
+            [outputName, { ...source, field: resolvedField }]
+          : [outputName, resolvedField];
       }),
     ) as R;
 
     const projection: ProjectedField[] = Object.entries(resolvedFields).map(
-      ([outputName, source]) => ({
-        outputName,
-        source,
-      }),
+      ([outputName, source]) => {
+        const sourceAlias =
+          source.__type === "aggregate" ? source.field.alias : source.alias;
+        const edgeTraversal = this.#state.traversals.find(
+          (traversal) => traversal.edgeAlias === sourceAlias,
+        );
+        return edgeTraversal === undefined ?
+            { outputName, source }
+          : {
+              outputName,
+              source,
+              cteAlias: `cte_${edgeTraversal.nodeAlias}`,
+            };
+      },
     );
 
     const newState: QueryBuilderState = {
@@ -1005,11 +1312,50 @@ export class QueryBuilder<
   /**
    * Orders results.
    */
+  orderBy(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) => DatabaseExpression<
+      unknown,
+      (keyof Aliases | keyof EdgeAliases) & string
+    >,
+    direction?: SortDirection,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
   orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(
     alias: A,
     field: string,
+    direction?: SortDirection,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
+  orderBy(
+    alias:
+      | ((
+          context: QueryExpressionContext<
+            G,
+            Aliases,
+            EdgeAliases,
+            CoordinateState
+          >,
+        ) => DatabaseExpression)
+      | ((keyof Aliases | keyof EdgeAliases) & string),
+    field?: string,
     direction: SortDirection = "asc",
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    if (typeof alias === "function") {
+      const expression = alias(this.#expressionContext());
+      assertExpressionScope(expression, this.getExpressionScopeIdentity());
+      const sort = field ?? "asc";
+      validateSortDirection(sort);
+      return new QueryBuilder(this.#config, {
+        ...this.#state,
+        orderBy: [
+          ...this.#state.orderBy,
+          { field: expression, direction: sort },
+        ],
+      });
+    }
+    if (field === undefined)
+      throw new ConfigurationError("orderBy() requires a field.");
+    validateSortDirection(direction);
     const edgeKindNames = this.#getEdgeKindNamesForAlias(alias);
     const isEdge = edgeKindNames !== undefined;
     const nodeKindNames =
@@ -1064,6 +1410,7 @@ export class QueryBuilder<
   limit(
     n: number,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    validateQueryRange(n, "limit");
     return new QueryBuilder(this.#config, {
       ...this.#state,
       limit: n,
@@ -1076,6 +1423,7 @@ export class QueryBuilder<
   offset(
     n: number,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    validateQueryRange(n, "offset");
     return new QueryBuilder(this.#config, {
       ...this.#state,
       offset: n,
@@ -1089,10 +1437,55 @@ export class QueryBuilder<
    * @param alias - The node alias to group by
    * @param field - The field name to group by
    */
+  groupBy(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) =>
+      | DatabaseExpression<
+          unknown,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >
+      | readonly DatabaseExpression<
+          unknown,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >[],
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
   groupBy<A extends keyof Aliases & string>(
     alias: A,
     field: string,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
+  groupBy(
+    alias:
+      | (keyof Aliases & string)
+      | ((
+          context: QueryExpressionContext<
+            G,
+            Aliases,
+            EdgeAliases,
+            CoordinateState
+          >,
+        ) => DatabaseExpression | readonly DatabaseExpression[]),
+    field?: string,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    if (typeof alias === "function") {
+      const value = alias(this.#expressionContext());
+      const fields: readonly DatabaseExpression[] =
+        Array.isArray(value) ? value : [value as DatabaseExpression];
+      if (fields.length === 0)
+        throw new ConfigurationError(
+          "groupBy() requires at least one database expression.",
+        );
+      for (const expression of fields)
+        assertExpressionScope(expression, this.getExpressionScopeIdentity());
+      return new QueryBuilder(this.#config, {
+        ...this.#state,
+        groupBy: {
+          fields: [...(this.#state.groupBy?.fields ?? []), ...fields],
+        },
+      });
+    }
+    if (field === undefined)
+      throw new ConfigurationError("groupBy() requires a field.");
     const kindNames = this.#getKindNamesForAlias(alias);
     const typeInfo =
       kindNames ?
@@ -1153,11 +1546,30 @@ export class QueryBuilder<
    * @param predicate - A predicate expression to filter groups
    */
   having(
-    predicate: PredicateExpression,
+    predicateOrBuild:
+      | PredicateExpression
+      | ((
+          context: QueryExpressionContext<
+            G,
+            Aliases,
+            EdgeAliases,
+            CoordinateState
+          >,
+        ) => DatabaseExpression<
+          boolean | undefined,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >),
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    const predicate =
+      typeof predicateOrBuild === "function" ?
+        this.#expressionPredicate(predicateOrBuild(this.#expressionContext()))
+      : predicateOrBuild;
     return new QueryBuilder(this.#config, {
       ...this.#state,
-      having: predicate,
+      having:
+        this.#state.having === undefined ?
+          predicate
+        : { __type: "and", predicates: [this.#state.having, predicate] },
     });
   }
 

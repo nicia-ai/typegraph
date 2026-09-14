@@ -345,6 +345,20 @@ describe("comparison predicates", () => {
       expect(toSqlString(result)).toContain("!=");
     });
 
+    it("compiles an equality predicate between compatible field references", () => {
+      const expr: ComparisonPredicate = {
+        __type: "comparison",
+        op: "eq",
+        left: field("p", ["props", "ownerId"], { valueType: "string" }),
+        right: field("owner", ["id"], { valueType: "string" }),
+      };
+      const result = compilePredicateExpression(expr, ctx);
+      const compiled = toSqlString(result);
+
+      expect(compiled).toContain("p_props");
+      expect(compiled).toContain("owner_id");
+    });
+
     it("compiles gt operator", () => {
       const expr: ComparisonPredicate = {
         __type: "comparison",
@@ -1152,7 +1166,7 @@ describe("aggregate predicates", () => {
       aggregate: {
         __type: "aggregate",
         function: "countDistinct",
-        field: field("p", ["props", "category"]),
+        field: field("p", ["props", "category"], { valueType: "string" }),
       },
       value: literal(10, "number"),
     };

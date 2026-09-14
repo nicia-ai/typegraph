@@ -1,6 +1,7 @@
 /**
  * ExecutableQuery - A query that can be executed, paginated, or streamed.
  */
+import { backendDerivationRoot } from "../../backend/derive-backend";
 import {
   type GraphBackend,
   type TransactionBackend,
@@ -16,6 +17,7 @@ import { compareStrings } from "../../utils/compare";
 import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
+  type FieldRef,
   mergeEdgeKinds,
   type OrderSpec,
   type QueryAst,
@@ -27,6 +29,7 @@ import {
   buildCursorFromRow,
   type CursorData,
   decodeCursor,
+  requireCursorField,
   validateCursorColumns,
 } from "../cursor";
 import { type SqlDialect } from "../dialect/types";
@@ -55,6 +58,10 @@ import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { oneStatementBatchOrderColumn } from "./one-statement-batch";
+import {
+  assertCompatibleSetOperationProvenance,
+  type OneStatementReadProvenance,
+} from "./one-statement-provenance";
 import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
@@ -62,6 +69,7 @@ import {
   type CompiledTemplate,
   fillTemplateParams,
 } from "./read-instant-template";
+import { executeQueryTerminal } from "./terminal-query";
 import {
   type AliasMap,
   type EdgeAliasMap,
@@ -74,6 +82,7 @@ import {
   type StreamOptions,
 } from "./types";
 import { type UnionableQuery } from "./unionable-query";
+import { validatePaginationOptions, validateQueryRange } from "./validation";
 
 const NOT_COMPUTED = Symbol("NOT_COMPUTED");
 
@@ -238,6 +247,7 @@ export class ExecutableQuery<
   limit(
     n: number,
   ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
+    validateQueryRange(n, "limit");
     return new ExecutableQuery(
       this.#config,
       { ...this.#state, limit: n },
@@ -251,6 +261,7 @@ export class ExecutableQuery<
   offset(
     n: number,
   ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
+    validateQueryRange(n, "offset");
     return new ExecutableQuery(
       this.#config,
       { ...this.#state, offset: n },
@@ -291,6 +302,7 @@ export class ExecutableQuery<
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
   union(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleSetOperand(other);
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "union",
@@ -308,6 +320,7 @@ export class ExecutableQuery<
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
   unionAll(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleSetOperand(other);
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "unionAll",
@@ -325,6 +338,7 @@ export class ExecutableQuery<
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
   intersect(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleSetOperand(other);
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "intersect",
@@ -342,6 +356,7 @@ export class ExecutableQuery<
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
   except(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleSetOperand(other);
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "except",
@@ -608,6 +623,47 @@ export class ExecutableQuery<
     );
   }
 
+  /** Returns the first mapped row, preserving an existing zero limit. */
+  async first(): Promise<R | undefined> {
+    const query = this.limit(Math.min(this.#state.limit ?? 1, 1));
+    if (query.#hasParameterReferences())
+      throw new ConfigurationError(
+        "first() requires bound values, not param() references.",
+        { operation: "first" },
+      );
+    const checked = getQueryBuilderInternalContext(
+      this.#config,
+    ).expectedSchemaVersion;
+    if (checked !== undefined) {
+      const rows = await query.executeChecked(checked.value);
+      return rows[0];
+    }
+    const rows = await query.#fetchRows(
+      query.#requireBackend(),
+      query.toAst(),
+      "full",
+      "recorded-query-first",
+    );
+    return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+      rows,
+      this.#state.startAlias,
+      this.#state.traversals,
+      this.#selectFn,
+    )[0];
+  }
+
+  /** Counts SQL match rows after grouping, offset, and limit, without running the selector. */
+  count(): Promise<number> {
+    return executeQueryTerminal(this.#config, this.#state, "count");
+  }
+
+  /** Tests whether the bounded SQL relation has a row, without running the selector. */
+  async exists(): Promise<boolean> {
+    return (
+      (await executeQueryTerminal(this.#config, this.#state, "exists")) > 0
+    );
+  }
+
   /**
    * Reads rows and the active schema version in one statement snapshot.
    * Throws SchemaChangedError before invoking the selector on stale rows,
@@ -712,9 +768,34 @@ export class ExecutableQuery<
     );
   }
 
+  /** @internal Set-operation and batch provenance validation. */
+  oneStatementBatchProvenance(): Readonly<{
+    graphId: string;
+    executionTarget: object | undefined;
+  }> {
+    return {
+      graphId: this.#config.graphId,
+      executionTarget:
+        this.#config.backend === undefined ?
+          undefined
+        : backendDerivationRoot(this.#config.backend),
+    };
+  }
+
+  #assertCompatibleSetOperand(
+    other: Readonly<{
+      oneStatementBatchProvenance: () => OneStatementReadProvenance;
+    }>,
+  ): void {
+    const own = this.oneStatementBatchProvenance();
+    const candidate = other.oneStatementBatchProvenance();
+    assertCompatibleSetOperationProvenance(own, candidate);
+  }
+
   /** @internal Embedding contract consumed by `store.batchOnce()`. */
   compileOneStatementBatchItem?(): Readonly<{
     query: CompiledSelectSql;
+    provenance: Readonly<{ graphId: string; executionTarget: object }>;
     outputNames: readonly string[];
     orderBy: readonly Readonly<{
       column: string;
@@ -764,6 +845,12 @@ export class ExecutableQuery<
         this.#config.graphId,
         this.#compileOptions(),
       ),
+      provenance: {
+        graphId: this.#config.graphId,
+        executionTarget: backendDerivationRoot(
+          requireDefined(this.#config.backend),
+        ),
+      },
       outputNames: ast.projection.fields.map((field) => field.outputName),
       orderBy: batchOrderBy,
       mapRows: (rows) =>
@@ -1296,8 +1383,13 @@ export class ExecutableQuery<
    * validation — routes through here so the extra column stays consistent across
    * the standard and selective-field-optimized paths.
    */
-  #paginationOrderBy(): readonly OrderSpec[] {
-    const orderBy = this.#state.orderBy;
+  #paginationOrderBy(): readonly (Omit<OrderSpec, "field"> & {
+    field: FieldRef;
+  })[] {
+    const orderBy = this.#state.orderBy.map((order) => ({
+      ...order,
+      field: requireCursorField(order.field),
+    }));
     const startAlias = this.#state.startAlias;
     const alreadyTotal = orderBy.some(
       (spec) =>
@@ -1307,7 +1399,7 @@ export class ExecutableQuery<
         spec.field.jsonPointer === undefined,
     );
     if (alreadyTotal) return orderBy;
-    const tiebreaker: OrderSpec = {
+    const tiebreaker: Omit<OrderSpec, "field"> & { field: FieldRef } = {
       field: { __type: "field_ref", alias: startAlias, path: ["id"] },
       direction: "asc",
     };
@@ -1326,6 +1418,12 @@ export class ExecutableQuery<
    */
   async paginate(options: PaginateOptions): Promise<PaginatedResult<R>> {
     this.#refuseCheckedReadSurface("paginate");
+    validatePaginationOptions(this.#state, options);
+    if (this.#hasParameterReferences())
+      throw new ConfigurationError(
+        "Cursor pagination requires bound values, not param() references.",
+        { operation: "paginate" },
+      );
     if (!this.#config.backend) {
       throw new Error(
         "Cannot execute query: no backend configured. " +

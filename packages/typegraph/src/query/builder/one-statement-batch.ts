@@ -1,3 +1,4 @@
+import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import { getDialect } from "../dialect";
@@ -11,6 +12,9 @@ import type {
 
 const ORDER_COLUMN = "typegraphbatchordinal";
 const ORDER_KEY_PREFIX = "typegraphbatchorder";
+
+/** SQLite's default compound-select ceiling; kept as the portable request cap. */
+export const MAX_ONE_STATEMENT_BATCH_READS = 500;
 
 export function oneStatementBatchOrderColumn(index: number): string {
   return `${ORDER_KEY_PREFIX}${index}`;
@@ -48,9 +52,32 @@ export async function executeOneStatementBatch<
   const Queries extends readonly EmbeddableOneStatementRead<unknown>[],
 >(
   backend: GraphBackend | TransactionBackend,
+  graphId: string,
   queries: Queries,
 ): Promise<OneStatementBatchResults<Queries>> {
+  if (queries.length === 0) return [] as OneStatementBatchResults<Queries>;
+  if (queries.length > MAX_ONE_STATEMENT_BATCH_READS) {
+    throw new ConfigurationError(
+      `store.batchOnce() accepts at most ${MAX_ONE_STATEMENT_BATCH_READS} reads in one statement.`,
+      {
+        operation: "batchOnce",
+        reads: queries.length,
+        maxReads: MAX_ONE_STATEMENT_BATCH_READS,
+      },
+    );
+  }
+  if (!backend.capabilities.windowFunctions) {
+    throw new ConfigurationError(
+      "store.batchOnce() requires backend window-function support.",
+      {
+        operation: "batchOnce",
+        capability: "windowFunctions",
+        backend: backend.dialect,
+      },
+    );
+  }
   const dialect = getDialect(backend.dialect);
+  const executionTarget = backendDerivationRoot(backend);
   const items = queries.map((query) => {
     const compile = query.compileOneStatementBatchItem;
     if (compile === undefined) {
@@ -63,7 +90,28 @@ export async function executeOneStatementBatch<
         },
       );
     }
-    return compile.call(query);
+    const item = compile.call(query);
+    if (item.provenance.graphId !== graphId) {
+      throw new ConfigurationError(
+        "store.batchOnce() cannot combine reads from different graphs.",
+        {
+          operation: "batchOnce",
+          expectedGraphId: graphId,
+          receivedGraphId: item.provenance.graphId,
+        },
+      );
+    }
+    if (item.provenance.executionTarget !== executionTarget) {
+      throw new ConfigurationError(
+        "store.batchOnce() cannot rebind a read to a different database or transaction target.",
+        { operation: "batchOnce", graphId },
+        {
+          suggestion:
+            "Build fluent queries from the same Store or transaction context whose batchOnce() method executes them.",
+        },
+      );
+    }
+    return item;
   });
   const ctes: SqlFragment[] = [];
   const branches: SqlFragment[] = [];
@@ -97,6 +145,20 @@ export async function executeOneStatementBatch<
   const statement = asCompiledRowsSql(
     sql`WITH ${sql.join(ctes, sql`, `)} SELECT * FROM (${sql.join(branches, sql` UNION ALL `)}) AS typegraph_batch_envelope ORDER BY batch_index`,
   );
+  const bindCount = statement.chunks.filter(
+    (chunk) => chunk.kind === "parameter",
+  ).length;
+  const bindBudget = backend.capabilities.maxBindParameters;
+  if (bindBudget !== undefined && bindCount > bindBudget) {
+    throw new ConfigurationError(
+      "store.batchOnce() cannot fit the requested reads in one statement's bind-parameter budget.",
+      { operation: "batchOnce", bindCount, bindBudget },
+      {
+        suggestion:
+          "Split the reads into explicit batchOnce() calls or reduce their filters. batchOnce() never chunks or falls back to sequential execution.",
+      },
+    );
+  }
   const envelopes = await backend.execute<BatchEnvelopeRow>(statement);
   const payloads = new Map<number, readonly Record<string, unknown>[]>();
   for (const envelope of envelopes) {

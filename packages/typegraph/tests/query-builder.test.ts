@@ -1114,7 +1114,10 @@ describe("Query Builder - Aggregations", () => {
 
     expect(ast.groupBy).toBeDefined();
     expect(ast.groupBy?.fields).toHaveLength(1);
-    expect(ast.groupBy?.fields[0]?.alias).toBe("o");
+    expect(ast.groupBy?.fields[0]).toMatchObject({
+      __type: "field_ref",
+      alias: "o",
+    });
   });
 
   it("supports multiple GROUP BY fields", () => {
@@ -1147,7 +1150,10 @@ describe("Query Builder - Aggregations", () => {
     const ast = query.toAst();
 
     expect(ast.groupBy?.fields).toHaveLength(1);
-    expect(ast.groupBy?.fields[0]?.path).toEqual(["id"]);
+    expect(ast.groupBy?.fields[0]).toMatchObject({
+      __type: "field_ref",
+      path: ["id"],
+    });
   });
 
   it("field() throws error when 'props' is included in path", () => {

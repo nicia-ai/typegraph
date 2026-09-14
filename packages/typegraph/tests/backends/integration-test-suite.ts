@@ -50,11 +50,13 @@ import {
   registerContributionDiagnosticIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerCurrentIdentityTraversalTests,
+  registerDatabaseExpressionQueryIntegrationTests,
   registerDurableEdgeMatchIdentityIntegrationTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeClaimSelfHealIntegrationTests,
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
+  registerExpressionSubqueryQueryIntegrationTests,
   registerFulltextIntegrationTests,
   registerGraphAnnotationsIntegrationTests,
   registerGraphMergeCallbackIntegrationTests,
@@ -74,6 +76,7 @@ import {
   registerPredicateIntegrationTests,
   registerProvenanceIntegrationTests,
   registerQueryHookIntegrationTests,
+  registerQueryTerminalIntegrationTests,
   registerReadEfficiencyIntegrationTests,
   registerReconciledSchemaIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
@@ -278,6 +281,9 @@ export function createIntegrationTestSuite<
     });
 
     registerAggregateIntegrationTests(context);
+    registerDatabaseExpressionQueryIntegrationTests(context);
+    registerExpressionSubqueryQueryIntegrationTests(context);
+    registerQueryTerminalIntegrationTests(context);
     registerBackendProvenanceIntegrationTests(context);
     registerBulkFindByIndexIntegrationTests(context);
     registerBulkFindEndpointIntegrationTests(context);

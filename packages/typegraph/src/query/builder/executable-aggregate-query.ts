@@ -1,6 +1,8 @@
 /**
  * ExecutableAggregateQuery - A query with aggregate functions that can be executed.
  */
+import { type z } from "zod";
+
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
 import { createDataKeyedBag } from "../../utils/object";
@@ -22,24 +24,98 @@ import {
   type CompiledTemplate,
   fillTemplateParams,
 } from "./read-instant-template";
-import {
-  type AliasMap,
-  type QueryBuilderConfig,
-  type QueryBuilderState,
-} from "./types";
+import { type QueryBuilderConfig, type QueryBuilderState } from "./types";
+import { validateQueryRange } from "./validation";
 
 /** Sentinel distinguishing "template not yet built" from a built `undefined`. */
 const NOT_COMPUTED = Symbol("NOT_COMPUTED");
 
-/**
- * Result type for aggregate queries.
- * Maps field refs to their value types and aggregates to numbers.
- */
+type AggregateAliasMap = Readonly<
+  Record<
+    string,
+    Readonly<{
+      type: Readonly<{ schema: z.ZodType }>;
+      optional: boolean;
+    }>
+  >
+>;
+
+type AliasValue<Aliases extends AggregateAliasMap, Alias extends string> =
+  Alias extends keyof Aliases ? Aliases[Alias] : never;
+
+type AliasSchemaValue<
+  Aliases extends AggregateAliasMap,
+  Alias extends string,
+> = z.infer<AliasValue<Aliases, Alias>["type"]["schema"]>;
+
+type WithAliasOptionality<
+  Value,
+  Aliases extends AggregateAliasMap,
+  Alias extends string,
+> =
+  AliasValue<Aliases, Alias>["optional"] extends true ? Value | undefined
+  : Value;
+
+type PropertyValue<Value, Path extends readonly string[]> =
+  Path extends readonly [] ? Value
+  : Path extends (
+    readonly [
+      infer Head extends PropertyKey,
+      ...infer Tail extends readonly string[],
+    ]
+  ) ?
+    Head extends keyof Value ?
+      PropertyValue<Value[Head], Tail>
+    : unknown
+  : unknown;
+
+type FieldResult<Field extends FieldRef, Aliases extends AggregateAliasMap> =
+  Field extends (
+    FieldRef<infer Declared, infer Alias, readonly string[], infer PropsPath>
+  ) ?
+    unknown extends Declared ?
+      PropsPath extends readonly ["id"] ? string
+      : PropsPath extends readonly ["kind"] ?
+        AliasValue<Aliases, Alias>["type"] extends (
+          Readonly<{
+            kind: infer Kind;
+          }>
+        ) ?
+          Kind
+        : string
+      : WithAliasOptionality<
+          PropertyValue<AliasSchemaValue<Aliases, Alias>, PropsPath>,
+          Aliases,
+          Alias
+        >
+    : Declared
+  : never;
+
+type AggregateFieldResult<
+  Expression extends AggregateExpr,
+  Aliases extends AggregateAliasMap,
+> =
+  Expression extends AggregateExpr<infer Function, infer Field> ?
+    Function extends "count" | "countDistinct" ? number
+    : Function extends "sum" | "avg" ? number | undefined
+    : Function extends "min" | "max" ?
+      unknown extends FieldResult<Field, Aliases> ? unknown
+      : Exclude<FieldResult<Field, Aliases>, undefined> extends (
+        string | number | Date
+      ) ?
+        Extract<FieldResult<Field, Aliases>, string | number | Date> | undefined
+      : never
+    : never
+  : never;
+
+/** Result type for aggregate queries, including SQL empty-set nullability. */
 export type AggregateResult<
   R extends Record<string, FieldRef | AggregateExpr>,
+  Aliases extends AggregateAliasMap = AggregateAliasMap,
 > = {
-  [K in keyof R]: R[K] extends AggregateExpr ? number
-  : R[K] extends FieldRef ? unknown
+  [K in keyof R]: R[K] extends AggregateExpr ?
+    AggregateFieldResult<R[K], Aliases>
+  : R[K] extends FieldRef ? FieldResult<R[K], Aliases>
   : never;
 };
 
@@ -48,7 +124,7 @@ export type AggregateResult<
  */
 export class ExecutableAggregateQuery<
   G extends GraphDef,
-  Aliases extends AliasMap,
+  Aliases extends AggregateAliasMap,
   R extends Record<string, FieldRef | AggregateExpr>,
 > {
   readonly #config: QueryBuilderConfig;
@@ -117,6 +193,7 @@ export class ExecutableAggregateQuery<
    * Limits the number of results.
    */
   limit(n: number): ExecutableAggregateQuery<G, Aliases, R> {
+    validateQueryRange(n, "limit");
     return new ExecutableAggregateQuery(
       this.#config,
       { ...this.#state, limit: n },
@@ -128,6 +205,7 @@ export class ExecutableAggregateQuery<
    * Offsets the results.
    */
   offset(n: number): ExecutableAggregateQuery<G, Aliases, R> {
+    validateQueryRange(n, "offset");
     return new ExecutableAggregateQuery(
       this.#config,
       { ...this.#state, offset: n },
@@ -187,7 +265,7 @@ export class ExecutableAggregateQuery<
    *
    * @throws Error if no backend is configured
    */
-  async execute(): Promise<readonly AggregateResult<R>[]> {
+  async execute(): Promise<readonly AggregateResult<R, Aliases>[]> {
     if (
       getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
       undefined
@@ -244,7 +322,7 @@ export class ExecutableAggregateQuery<
    */
   #mapResults(
     rows: readonly Record<string, unknown>[],
-  ): readonly AggregateResult<R>[] {
+  ): readonly AggregateResult<R, Aliases>[] {
     return rows.map((row) => {
       // Data-keyed: the caller's aggregate/group aliases. An alias may be
       // `__proto__` (it is a caller-supplied string), and `result[key] = value`
@@ -257,8 +335,7 @@ export class ExecutableAggregateQuery<
         const value = row[key];
 
         if (field.__type === "aggregate") {
-          // PostgreSQL returns aggregate bigint/numeric as strings.
-          result[key] = typeof value === "string" ? Number(value) : value;
+          result[key] = normalizeAggregateValue(field, value);
           continue;
         }
 
@@ -272,9 +349,45 @@ export class ExecutableAggregateQuery<
       // CreateDataProperty rather than Set, so a `__proto__` ALIAS survives as
       // an own key while `Object.prototype` is restored; the same pattern
       // `rowToNode` and `buildSelectableNode` already use.
-      return { ...result } as AggregateResult<R>;
+      return { ...result } as AggregateResult<R, Aliases>;
     });
   }
+}
+
+function normalizeAggregateValue(
+  expression: AggregateExpr,
+  value: unknown,
+): unknown {
+  if (value === null) return undefined;
+
+  if (
+    expression.function === "count" ||
+    expression.function === "countDistinct" ||
+    expression.function === "sum" ||
+    expression.function === "avg" ||
+    expression.field.valueType === "number"
+  ) {
+    // PostgreSQL returns bigint/numeric aggregates as strings.
+    return typeof value === "string" ? Number(value) : value;
+  }
+
+  if (expression.field.valueType === "boolean") {
+    return normalizeBooleanValue(value);
+  }
+
+  if (expression.field.valueType === "date") {
+    return normalizeDateValue(value);
+  }
+
+  return value;
+}
+
+function normalizeDateValue(value: unknown): unknown {
+  if (value instanceof Date) return value;
+  if (typeof value === "string" || typeof value === "number") {
+    return new Date(value);
+  }
+  return value;
 }
 
 /**
@@ -296,9 +409,15 @@ function normalizeBooleanValue(value: unknown): unknown {
 }
 
 function normalizeFieldValue(field: FieldRef, value: unknown): unknown {
+  if (value === null) return undefined;
+
   if (field.valueType === "boolean") {
     return normalizeBooleanValue(value);
   }
 
-  return value === null ? undefined : value;
+  if (field.valueType === "date") {
+    return normalizeDateValue(value);
+  }
+
+  return value;
 }

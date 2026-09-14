@@ -48,6 +48,10 @@ import {
   MissingSelectiveFieldError,
   transformPathColumns,
 } from "../execution";
+import {
+  type DatabaseExpression,
+  normalizeDatabaseLiteral,
+} from "../expressions";
 import { isParameterRef } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
 import {
@@ -195,6 +199,13 @@ function substitutePredicateExpression(
       };
     }
 
+    case "database_expression_predicate": {
+      return {
+        ...expr,
+        expression: substituteDatabaseExpression(expr.expression, bindings),
+      };
+    }
+
     // These predicate types don't contain ParameterRef nodes
     case "null_check":
     case "array_op":
@@ -217,6 +228,117 @@ function substitutePredicateExpression(
         ...expr,
         subquery: substituteParameters(expr.subquery, bindings),
       };
+    }
+  }
+}
+
+function substituteDatabaseExpression<T, Scope extends string>(
+  expression: DatabaseExpression<T, Scope>,
+  bindings: Readonly<Record<string, unknown>>,
+): DatabaseExpression<T, Scope> {
+  const node = expression.node;
+  function substitute(operand: DatabaseExpression): DatabaseExpression {
+    return substituteDatabaseExpression(operand, bindings);
+  }
+  switch (node.kind) {
+    case "parameter": {
+      const value = resolveBinding(bindings, node.name);
+      if (value === null) {
+        throw new ConfigurationError(
+          `Parameter "${node.name}" must not be null`,
+          { parameterName: node.name, valueType: "null" },
+        );
+      }
+      return {
+        ...expression,
+        node: {
+          kind: "literal",
+          value: normalizeDatabaseLiteral(value, `$parameter.${node.name}`),
+        },
+      };
+    }
+    case "arithmetic":
+    case "comparison": {
+      return {
+        ...expression,
+        node: {
+          ...node,
+          left: substitute(node.left),
+          right: substitute(node.right),
+        },
+      };
+    }
+    case "boolean": {
+      return {
+        ...expression,
+        node: {
+          ...node,
+          operands: node.operands.map((operand) =>
+            substitute(operand),
+          ) as readonly DatabaseExpression<boolean | undefined>[],
+        },
+      };
+    }
+    case "not":
+    case "null_check":
+    case "numeric_conversion": {
+      const operand = substitute(node.operand);
+      return {
+        ...expression,
+        node: { ...node, operand },
+      } as DatabaseExpression<T, Scope>;
+    }
+    case "aggregate": {
+      return node.operand === undefined ?
+          expression
+        : {
+            ...expression,
+            node: { ...node, operand: substitute(node.operand) },
+          };
+    }
+    case "coalesce": {
+      return {
+        ...expression,
+        node: {
+          ...node,
+          operands: node.operands.map((operand) => substitute(operand)),
+        },
+      };
+    }
+    case "conditional": {
+      return {
+        ...expression,
+        node: {
+          ...node,
+          condition: substitute(node.condition) as DatabaseExpression<
+            boolean | undefined
+          >,
+          // This is AST data, never a promise-like runtime object.
+          // eslint-disable-next-line unicorn/no-thenable
+          then: substitute(node.then),
+          otherwise: substitute(node.otherwise),
+        },
+      };
+    }
+    case "outer_reference": {
+      return {
+        ...expression,
+        node: { ...node, expression: substitute(node.expression) },
+      };
+    }
+    case "exists_subquery":
+    case "scalar_subquery": {
+      return {
+        ...expression,
+        node: {
+          ...node,
+          subquery: substituteParameters(node.subquery, bindings),
+        },
+      };
+    }
+    case "field":
+    case "literal": {
+      return expression;
     }
   }
 }
@@ -254,6 +376,35 @@ function substituteParameters(
     })),
     ...(ast.having !== undefined && {
       having: substitutePredicateExpression(ast.having, bindings),
+    }),
+    projection: {
+      ...ast.projection,
+      fields: ast.projection.fields.map((projection) =>
+        projection.source.__type === "database_expression" ?
+          {
+            ...projection,
+            source: substituteDatabaseExpression(projection.source, bindings),
+          }
+        : projection,
+      ),
+    },
+    ...(ast.groupBy !== undefined && {
+      groupBy: {
+        fields: ast.groupBy.fields.map((field) =>
+          field.__type === "database_expression" ?
+            substituteDatabaseExpression(field, bindings)
+          : field,
+        ),
+      },
+    }),
+    ...(ast.orderBy !== undefined && {
+      orderBy: ast.orderBy.map((order) => ({
+        ...order,
+        field:
+          order.field.__type === "database_expression" ?
+            substituteDatabaseExpression(order.field, bindings)
+          : order.field,
+      })),
     }),
   };
 }
@@ -475,6 +626,8 @@ type ParameterMetadata = Readonly<{
   listParameters: ReadonlyMap<string, ValueType | undefined>;
   /** Parameters used in any position that binds a single scalar. */
   scalarParameters: ReadonlySet<string>;
+  expressionParameters: ReadonlySet<string>;
+  expressionParameterTypes: ReadonlyMap<string, ValueType>;
   /** Names bound in two `in`/`notIn` positions with different element types. */
   conflictingElementTypes: ReadonlySet<string>;
 }>;
@@ -485,6 +638,8 @@ type ParameterMetadataAccumulator = Readonly<{
   stringOpParameters: Set<string>;
   listParameters: Map<string, ValueType | undefined>;
   scalarParameters: Set<string>;
+  expressionParameters: Set<string>;
+  expressionParameterTypes: Map<string, ValueType>;
   /** Names bound in two `in`/`notIn` positions with different element types. */
   conflictingElementTypes: Set<string>;
 }>;
@@ -495,6 +650,8 @@ function collectParameterMetadata(ast: QueryAst): ParameterMetadata {
     stringOpParameters: new Set<string>(),
     listParameters: new Map<string, ValueType | undefined>(),
     scalarParameters: new Set<string>(),
+    expressionParameters: new Set<string>(),
+    expressionParameterTypes: new Map<string, ValueType>(),
     conflictingElementTypes: new Set<string>(),
   };
 
@@ -581,6 +738,80 @@ function collectParameterMetadataFromAst(
   if (ast.having !== undefined) {
     collectParameterMetadataFromExpression(ast.having, accumulator);
   }
+  for (const projection of ast.projection.fields) {
+    if (projection.source.__type === "database_expression") {
+      collectParameterMetadataFromDatabaseExpression(
+        projection.source,
+        accumulator,
+      );
+    }
+  }
+  for (const field of ast.groupBy?.fields ?? []) {
+    if (field.__type === "database_expression") {
+      collectParameterMetadataFromDatabaseExpression(field, accumulator);
+    }
+  }
+  for (const order of ast.orderBy ?? []) {
+    if (order.field.__type === "database_expression") {
+      collectParameterMetadataFromDatabaseExpression(order.field, accumulator);
+    }
+  }
+}
+
+function collectParameterMetadataFromDatabaseExpression(
+  expression: DatabaseExpression,
+  accumulator: ParameterMetadataAccumulator,
+): void {
+  const node = expression.node;
+  function collect(operand: DatabaseExpression): void {
+    collectParameterMetadataFromDatabaseExpression(operand, accumulator);
+  }
+  switch (node.kind) {
+    case "parameter": {
+      accumulator.names.add(node.name);
+      accumulator.scalarParameters.add(node.name);
+      accumulator.expressionParameters.add(node.name);
+      accumulator.expressionParameterTypes.set(node.name, expression.valueType);
+      return;
+    }
+    case "arithmetic":
+    case "comparison": {
+      collect(node.left);
+      collect(node.right);
+      return;
+    }
+    case "boolean":
+    case "coalesce": {
+      for (const operand of node.operands) collect(operand);
+      return;
+    }
+    case "not":
+    case "null_check":
+    case "numeric_conversion":
+    case "outer_reference": {
+      collect(node.kind === "outer_reference" ? node.expression : node.operand);
+      return;
+    }
+    case "aggregate": {
+      if (node.operand !== undefined) collect(node.operand);
+      return;
+    }
+    case "conditional": {
+      collect(node.condition);
+      collect(node.then);
+      collect(node.otherwise);
+      return;
+    }
+    case "exists_subquery":
+    case "scalar_subquery": {
+      collectParameterMetadataFromAst(node.subquery, accumulator);
+      return;
+    }
+    case "field":
+    case "literal": {
+      return;
+    }
+  }
 }
 
 function collectParameterMetadataFromExpression(
@@ -632,6 +863,13 @@ function collectParameterMetadataFromExpression(
       collectParameterMetadataFromExpression(expression.predicate, accumulator);
       return;
     }
+    case "database_expression_predicate": {
+      collectParameterMetadataFromDatabaseExpression(
+        expression.expression,
+        accumulator,
+      );
+      return;
+    }
     case "null_check":
     case "array_op":
     case "object_op":
@@ -648,11 +886,28 @@ function collectParameterMetadataFromExpression(
   }
 }
 
+/** Validates and substitutes every parameter used by a query AST. */
+export function bindQueryParameters(
+  ast: QueryAst,
+  bindings: Readonly<Record<string, unknown>>,
+): QueryAst {
+  const metadata = collectParameterMetadata(ast);
+  assertDistinctParameterRoles(metadata);
+  validateBindings(bindings, metadata);
+  return substituteParameters(ast, bindings);
+}
+
 function validateBindings(
   bindings: Readonly<Record<string, unknown>>,
   metadata: ParameterMetadata,
 ): void {
-  const { names: expectedNames, stringOpParameters, listParameters } = metadata;
+  const {
+    expressionParameters,
+    expressionParameterTypes,
+    names: expectedNames,
+    stringOpParameters,
+    listParameters,
+  } = metadata;
 
   const missing: string[] = [];
   for (const name of expectedNames) {
@@ -686,8 +941,31 @@ function validateBindings(
       validateListBinding(name, value, listParameters.get(name));
       continue;
     }
+    if (expressionParameters.has(name)) {
+      normalizeDatabaseLiteral(value, `$parameter.${name}`);
+      const expectedType = expressionParameterTypes.get(name);
+      if (
+        expectedType !== undefined &&
+        expectedType !== "unknown" &&
+        !matchesExpressionType(value, expectedType)
+      ) {
+        throw new ConfigurationError(
+          `Expression parameter "${name}" must be a ${expectedType}`,
+          { parameterName: name, valueType: expectedType },
+        );
+      }
+      continue;
+    }
     validateBindingValue(name, value, stringOpParameters.has(name));
   }
+}
+
+function matchesExpressionType(value: unknown, valueType: ValueType): boolean {
+  if (valueType === "array") return Array.isArray(value);
+  if (valueType === "object") {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  return matchesElementType(value, valueType);
 }
 
 /**

@@ -1,4 +1,5 @@
 import type {
+  FieldRef,
   FulltextMatchPredicate,
   HybridFusionOptions,
   PredicateExpression,
@@ -6,6 +7,7 @@ import type {
   VectorSimilarityPredicate,
 } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
+import { type DatabaseExpression } from "../expressions";
 import {
   createTemporalFilterPass,
   resolveFulltextAwareLimit,
@@ -49,8 +51,120 @@ function isColumnPruningEnabled(ast: QueryAst): boolean {
     return true;
   }
   return ast.projection.fields.some(
-    (field) => field.source.__type === "aggregate",
+    (field) =>
+      field.source.__type === "aggregate" ||
+      (field.source.__type === "database_expression" &&
+        expressionContainsAggregate(field.source)),
   );
+}
+
+export function visitExpressionFields(
+  expression: DatabaseExpression,
+  visit: (field: FieldRef) => void,
+): void {
+  const node = expression.node;
+  function recurse(operand: DatabaseExpression): void {
+    visitExpressionFields(operand, visit);
+  }
+  switch (node.kind) {
+    case "field": {
+      visit(node.field);
+      return;
+    }
+    case "arithmetic":
+    case "comparison": {
+      recurse(node.left);
+      recurse(node.right);
+      return;
+    }
+    case "boolean":
+    case "coalesce": {
+      for (const operand of node.operands) recurse(operand);
+      return;
+    }
+    case "not":
+    case "null_check":
+    case "numeric_conversion": {
+      recurse(node.operand);
+      return;
+    }
+    case "aggregate": {
+      if (node.operand !== undefined) recurse(node.operand);
+      return;
+    }
+    case "conditional": {
+      recurse(node.condition);
+      recurse(node.then);
+      recurse(node.otherwise);
+      return;
+    }
+    case "outer_reference": {
+      recurse(node.expression);
+      return;
+    }
+    case "exists_subquery":
+    case "scalar_subquery":
+    case "literal":
+    case "parameter": {
+      return;
+    }
+  }
+}
+
+function expressionContainsAggregate(expression: DatabaseExpression): boolean {
+  if (expression.node.kind === "aggregate") return true;
+  let found = false;
+  visitExpressionChildren(expression, (operand) => {
+    if (expressionContainsAggregate(operand)) found = true;
+  });
+  return found;
+}
+
+function visitExpressionChildren(
+  expression: DatabaseExpression,
+  visit: (operand: DatabaseExpression) => void,
+): void {
+  const node = expression.node;
+  switch (node.kind) {
+    case "arithmetic":
+    case "comparison": {
+      visit(node.left);
+      visit(node.right);
+      return;
+    }
+    case "boolean":
+    case "coalesce": {
+      for (const operand of node.operands) visit(operand);
+      return;
+    }
+    case "not":
+    case "null_check":
+    case "numeric_conversion": {
+      visit(node.operand);
+      return;
+    }
+    case "aggregate": {
+      if (node.operand !== undefined) visit(node.operand);
+      return;
+    }
+    case "conditional": {
+      visit(node.condition);
+      visit(node.then);
+      visit(node.otherwise);
+      return;
+    }
+    case "outer_reference": {
+      visit(node.expression);
+      return;
+    }
+    case "exists_subquery":
+    case "scalar_subquery":
+    case "field":
+    case "literal":
+    case "parameter": {
+      return;
+    }
+  }
 }
 
 function markPredicateFieldsAsRequired(
@@ -106,6 +220,12 @@ function markPredicateFieldsAsRequired(
     case "exists": {
       return;
     }
+    case "database_expression_predicate": {
+      visitExpressionFields(expression.expression, (field) => {
+        markFieldRefAsRequired(requiredColumnsByAlias, field);
+      });
+      return;
+    }
   }
 }
 
@@ -148,9 +268,13 @@ export function collectRequiredColumnsByAlias(
         const source = projectedField.source;
         if (source.__type === "field_ref") {
           markFieldRefAsRequired(requiredColumnsByAlias, source);
-        } else {
+        } else if (source.__type === "aggregate") {
           addRequiredColumn(requiredColumnsByAlias, source.field.alias, "id");
           markFieldRefAsRequired(requiredColumnsByAlias, source.field);
+        } else {
+          visitExpressionFields(source, (field) => {
+            markFieldRefAsRequired(requiredColumnsByAlias, field);
+          });
         }
       }
     }
@@ -158,12 +282,24 @@ export function collectRequiredColumnsByAlias(
 
   if (ast.groupBy) {
     for (const field of ast.groupBy.fields) {
-      markFieldRefAsRequired(requiredColumnsByAlias, field);
+      if (field.__type === "field_ref") {
+        markFieldRefAsRequired(requiredColumnsByAlias, field);
+      } else {
+        visitExpressionFields(field, (referencedField) => {
+          markFieldRefAsRequired(requiredColumnsByAlias, referencedField);
+        });
+      }
     }
   }
 
   if (ast.orderBy) {
     for (const orderSpec of ast.orderBy) {
+      if (orderSpec.field.__type === "database_expression") {
+        visitExpressionFields(orderSpec.field, (field) => {
+          markFieldRefAsRequired(requiredColumnsByAlias, field);
+        });
+        continue;
+      }
       if (
         findSelectivePropsFieldForFieldRef(
           ast.selectiveFields,
@@ -221,6 +357,9 @@ function hasIdEqualityPredicate(
     case "in_subquery":
     case "vector_similarity":
     case "fulltext_match": {
+      return false;
+    }
+    case "database_expression_predicate": {
       return false;
     }
   }

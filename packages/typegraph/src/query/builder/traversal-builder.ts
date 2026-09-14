@@ -399,22 +399,22 @@ export class TraversalBuilder<
 
       switch (valueType) {
         case "string": {
-          return stringField(ref);
+          return stringField(ref) as unknown as BaseFieldAccessor;
         }
         case "number": {
-          return numberField(ref);
+          return numberField(ref) as unknown as BaseFieldAccessor;
         }
         case "boolean": {
           return baseField(ref);
         }
         case "date": {
-          return dateField(ref);
+          return dateField(ref) as unknown as BaseFieldAccessor;
         }
         case "array": {
-          return arrayField(ref);
+          return arrayField(ref) as unknown as BaseFieldAccessor;
         }
         case "object": {
-          return objectField(ref);
+          return objectField(ref) as unknown as BaseFieldAccessor;
         }
         case "embedding":
         case "unknown":

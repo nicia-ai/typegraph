@@ -191,9 +191,9 @@ import {
   type BatchResults,
   type CompiledOneStatementRead,
   createInternalQueryBuilder,
-  type EmbeddableOneStatementRead,
   executeOneStatementBatch,
   type InitialQueryBuilder,
+  type OneStatementBatchReads,
   type OneStatementBatchResults,
   type QueryCoordinateState,
 } from "../query/builder";
@@ -779,13 +779,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   >(
     ...queries: Queries
   ) => Promise<BatchResults<Queries>>;
-  batchOnce?: <
-    const Queries extends readonly [
-      EmbeddableOneStatementRead<unknown>,
-      EmbeddableOneStatementRead<unknown>,
-      ...EmbeddableOneStatementRead<unknown>[],
-    ],
-  >(
+  batchOnce?: <const Queries extends OneStatementBatchReads>(
     build: (read: BatchReadBuilder<G>) => Queries,
   ) => Promise<OneStatementBatchResults<Queries>>;
   neighbors?: <const K extends EdgeKinds<G>>(
@@ -909,13 +903,7 @@ export type BatchReadBuilder<G extends GraphDef> = Readonly<{
 
 type TransactionReadMethods<G extends GraphDef> = Readonly<{
   query: () => InitialQueryBuilder<G, "open">;
-  batchOnce: <
-    const Queries extends readonly [
-      EmbeddableOneStatementRead<unknown>,
-      EmbeddableOneStatementRead<unknown>,
-      ...EmbeddableOneStatementRead<unknown>[],
-    ],
-  >(
+  batchOnce: <const Queries extends OneStatementBatchReads>(
     build: (read: BatchReadBuilder<G>) => Queries,
   ) => Promise<OneStatementBatchResults<Queries>>;
   neighbors: <const K extends EdgeKinds<G>>(
@@ -941,13 +929,7 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     expectedSchemaVersion: number | undefined,
     fn: (reads: CheckedReadScope<G>) => Promise<T>,
   ) => Promise<T>;
-  batchOnce?: <
-    const Queries extends readonly [
-      EmbeddableOneStatementRead<unknown>,
-      EmbeddableOneStatementRead<unknown>,
-      ...EmbeddableOneStatementRead<unknown>[],
-    ],
-  >(
+  batchOnce?: <const Queries extends OneStatementBatchReads>(
     build: (read: BatchReadBuilder<G>) => Queries,
   ) => Promise<OneStatementBatchResults<Queries>>;
   neighbors?: <const K extends EdgeKinds<G>>(
@@ -3166,8 +3148,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Executes two or more independent relational queries as exactly one SQL
-   * statement and returns their typed results in input order.
+   * Executes independent relational queries as exactly one SQL statement and
+   * returns their typed results in input order. An empty input executes zero
+   * statements.
    *
    * Each read is embedded as a CTE and its rows are returned through a JSON
    * envelope. Unlike {@link batch}, this method opens no transaction and has
@@ -3175,13 +3158,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * backend. Fluent queries and the reads built by the callback are composable
    * here.
    */
-  async batchOnce<
-    const Queries extends readonly [
-      EmbeddableOneStatementRead<unknown>,
-      EmbeddableOneStatementRead<unknown>,
-      ...EmbeddableOneStatementRead<unknown>[],
-    ],
-  >(
+  async batchOnce<const Queries extends OneStatementBatchReads>(
     build: (read: BatchReadBuilder<G>) => Queries,
   ): Promise<OneStatementBatchResults<Queries>> {
     return this.#batchOnceForBackend(this.#baseBackend, 1, build);
@@ -3213,13 +3190,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
   }
 
-  async #batchOnceForBackend<
-    const Queries extends readonly [
-      EmbeddableOneStatementRead<unknown>,
-      EmbeddableOneStatementRead<unknown>,
-      ...EmbeddableOneStatementRead<unknown>[],
-    ],
-  >(
+  async #batchOnceForBackend<const Queries extends OneStatementBatchReads>(
     backend: GraphBackend | TransactionBackend,
     attempt: number,
     build: (read: BatchReadBuilder<G>) => Queries,
@@ -3227,6 +3198,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const queries = build(this.#createBatchReadBuilder(backend, attempt));
     return executeOneStatementBatch(
       this.#createHookedQueryBackend(backend, attempt),
+      this.graphId,
       queries,
     );
   }

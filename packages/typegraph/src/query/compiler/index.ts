@@ -70,6 +70,7 @@ import {
   type SqlDialect,
 } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
+import type { DatabaseExpression } from "../expressions";
 import { sql, type SqlFragment } from "../sql-fragment";
 import {
   annIndexScanTypes,
@@ -77,6 +78,7 @@ import {
   type CompiledSelectSql,
   markAnnIndexScan,
 } from "../sql-intent";
+import { compileDatabaseExpression } from "./database-expressions";
 import { emitStandardQuerySql } from "./emitter";
 import {
   buildLateMaterializedOuterOrderBy,
@@ -100,6 +102,10 @@ import {
   lateMaterializedPhysicalAlias,
   lateMaterializedProjectedNodeAliases,
 } from "./emitter";
+import {
+  type ExpressionAliasScope,
+  namespaceExpressionSubquery,
+} from "./expression-subquery-scope";
 import { compileIdentityClassCte } from "./identity-traversal";
 import { type TemporalFilterPass } from "./passes";
 import { type LogicalPlan, type LogicalPlanNode } from "./plan";
@@ -266,6 +272,21 @@ export function compileQuery(
   graphId: string,
   options: CompileQueryOptions | SqlDialect = "sqlite",
 ): CompiledSelectSql {
+  return compileQueryInExpressionContext(ast, graphId, options, {
+    aliasScopes: new Map(),
+    depth: 0,
+  });
+}
+
+function compileQueryInExpressionContext(
+  ast: QueryAst,
+  graphId: string,
+  options: CompileQueryOptions | SqlDialect,
+  expressionContext: Readonly<{
+    aliasScopes: ReadonlyMap<symbol, ExpressionAliasScope>;
+    depth: number;
+  }>,
+): CompiledSelectSql {
   // Support legacy signature: compileQuery(ast, graphId, dialect)
   const options_: CompileQueryOptions =
     typeof options === "string" ? { dialect: options } : options;
@@ -282,6 +303,26 @@ export function compileQuery(
   );
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
+  const expressionCompileDepth = expressionContext.depth;
+  const expressionAliasScopes = new Map(expressionContext.aliasScopes);
+  if (
+    ast.expressionScope !== undefined &&
+    !expressionAliasScopes.has(ast.expressionScope)
+  ) {
+    expressionAliasScopes.set(
+      ast.expressionScope,
+      new Map([
+        [ast.start.alias, ast.start.alias],
+        ...ast.traversals.flatMap(
+          (traversal) =>
+            [
+              [traversal.edgeAlias, traversal.nodeAlias],
+              [traversal.nodeAlias, traversal.nodeAlias],
+            ] as const,
+        ),
+      ]),
+    );
+  }
   // Collects the ANN slot index types the emitter compiles engine-form
   // branches for; a non-empty set brands the finished statement so the
   // backend applies the pgvector iterative-scan GUCs around execution.
@@ -305,6 +346,44 @@ export function compileQuery(
         subGraphId,
         propagateOptions(options_),
       ),
+    compileExpressionSubquery(subAst) {
+      if (subAst.graphId === undefined)
+        throw new CompilerInvariantError(
+          "Expression subquery is missing its graph identifier",
+        );
+      const depth = expressionCompileDepth + 1;
+      const namespaced = namespaceExpressionSubquery(
+        subAst,
+        `__tg_sq_${depth}_`,
+      );
+      const scopes = new Map(expressionAliasScopes);
+      if (subAst.expressionScope !== undefined)
+        scopes.set(subAst.expressionScope, namespaced.aliases);
+      return compileQueryInExpressionContext(
+        namespaced.ast,
+        subAst.graphId,
+        propagateOptions(options_),
+        {
+          aliasScopes: scopes,
+          depth,
+        },
+      );
+    },
+    compileExpressionOuterReference(
+      expression: DatabaseExpression,
+      outerScopeIdentity: symbol,
+    ) {
+      const aliases = expressionAliasScopes.get(outerScopeIdentity);
+      if (aliases === undefined || expression.node.kind !== "field")
+        throw new CompilerInvariantError(
+          "Expression outer reference has no enclosing query scope",
+        );
+      return compileDatabaseExpression(expression, {
+        dialect: adapter,
+        resolveFieldCteAlias: (field) =>
+          `cte_${aliases.get(field.alias) ?? field.alias}`,
+      });
+    },
     ...(options_.vectorStrategy === undefined ?
       {}
     : { vectorStrategy: options_.vectorStrategy }),
@@ -577,7 +656,11 @@ function resolveCountAggregateFastPath(
   }
 
   if (
-    ast.orderBy?.some((orderSpec) => orderSpec.field.alias !== ast.start.alias)
+    ast.orderBy?.some(
+      (orderSpec) =>
+        orderSpec.field.__type !== "field_ref" ||
+        orderSpec.field.alias !== ast.start.alias,
+    )
   ) {
     return undefined;
   }
@@ -588,7 +671,11 @@ function resolveCountAggregateFastPath(
   }
 
   const groupField = requireDefined(ast.groupBy.fields[0]);
-  if (groupField.alias !== ast.start.alias || !isIdFieldRef(groupField)) {
+  if (
+    groupField.__type !== "field_ref" ||
+    groupField.alias !== ast.start.alias ||
+    !isIdFieldRef(groupField)
+  ) {
     return undefined;
   }
 
@@ -599,6 +686,8 @@ function resolveCountAggregateFastPath(
 
   for (const projectedField of ast.projection.fields) {
     const source = projectedField.source;
+
+    if (source.__type === "database_expression") return undefined;
 
     if (!isAggregateExpr(source)) {
       if (source.alias !== ast.start.alias) {
@@ -878,6 +967,12 @@ function compileCountAggregateFastPath(
     ast.projection.fields.map((projectedField) => {
       const source = projectedField.source;
 
+      if (source.__type === "database_expression") {
+        throw new CompilerInvariantError(
+          "Count aggregate fast path cannot compile database expressions",
+        );
+      }
+
       if (!isAggregateExpr(source)) {
         const value = compileFieldValue(
           source,
@@ -925,7 +1020,7 @@ function compileCountAggregateFastPath(
     );
   const limitOffset =
     startCteLimit === undefined ?
-      buildLimitOffsetClause({ limit: ast.limit, offset: ast.offset })
+      buildLimitOffsetClause({ limit: ast.limit, offset: ast.offset, dialect })
     : undefined;
 
   return emitStandardQuerySql({
@@ -1109,7 +1204,10 @@ function resolveLateMaterializationPlan(
     }
   }
   for (const orderSpec of orderBy) {
-    if (!nodeAliases.has(orderSpec.field.alias)) {
+    if (
+      orderSpec.field.__type !== "field_ref" ||
+      !nodeAliases.has(orderSpec.field.alias)
+    ) {
       return undefined;
     }
   }
@@ -1118,6 +1216,7 @@ function resolveLateMaterializationPlan(
   // them; everything else non-identity is deferred to the outer re-fetch.
   const orderReferenced = new Set<SelectiveField>();
   for (const orderSpec of orderBy) {
+    if (orderSpec.field.__type !== "field_ref") return undefined;
     const matched = findSelectivePropsFieldForFieldRef(
       selectiveFields,
       orderSpec.field,
@@ -1441,7 +1540,7 @@ function compileStandardQueryWithCteStrategy(
     ...(collapsedTraversalCteAlias === undefined ?
       {}
     : { collapsedTraversalCteAlias }),
-    dialect,
+    ctx,
   });
   const fromClause = buildStandardFromClause({
     ast,
@@ -1466,6 +1565,7 @@ function compileStandardQueryWithCteStrategy(
   const limitOffset = buildLimitOffsetClause({
     limit: effectiveLimit,
     offset: ast.offset,
+    dialect,
   });
 
   return emitStandardQuerySql({

@@ -40,6 +40,7 @@ function isSupportedSchemaType(type: string): type is SupportedSchemaType {
 
 export type FieldTypeInfo = Readonly<{
   valueType: ValueType;
+  nullable?: boolean;
   elementType?: ValueType | undefined;
   elementTypeInfo?: FieldTypeInfo | undefined;
   shape?: Readonly<Record<string, FieldTypeInfo>> | undefined;
@@ -322,7 +323,39 @@ export function createSchemaIntrospector(
   };
 }
 
+function schemaAllowsAbsence(schema: z.ZodType): boolean {
+  if (
+    schema.type === "optional" ||
+    schema.type === "nullable" ||
+    schema.type === "null" ||
+    schema.type === "undefined"
+  )
+    return true;
+  const definition = schema.def as {
+    innerType?: z.ZodType;
+    out?: z.ZodType;
+    options?: readonly z.ZodType[];
+  };
+  if (schema.type === "union" && definition.options !== undefined)
+    return definition.options.some((option) => schemaAllowsAbsence(option));
+  if (schema.type === "pipe" && definition.out !== undefined)
+    return schemaAllowsAbsence(definition.out);
+  if (
+    definition.innerType !== undefined &&
+    schema.type !== "default" &&
+    schema.type !== "prefault" &&
+    schema.type !== "nonoptional"
+  )
+    return schemaAllowsAbsence(definition.innerType);
+  return false;
+}
+
 function resolveFieldTypeInfo(schema: z.ZodType): FieldTypeInfo {
+  const info = resolveFieldTypeInfoValue(schema);
+  return schemaAllowsAbsence(schema) ? { ...info, nullable: true } : info;
+}
+
+function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
   // Check for embedding type before unwrapping
   // (embedding metadata is attached to the outer schema)
   const embeddingDimensions = getEmbeddingDimensions(schema);
@@ -487,6 +520,15 @@ function resolveEnumValueType(values: readonly unknown[]): ValueType {
 }
 
 function mergeFieldTypeInfos(
+  infos: readonly FieldTypeInfo[],
+): FieldTypeInfo | undefined {
+  const merged = mergeFieldTypeInfoValues(infos);
+  return merged !== undefined && infos.some((info) => info.nullable === true) ?
+      { ...merged, nullable: true }
+    : merged;
+}
+
+function mergeFieldTypeInfoValues(
   infos: readonly FieldTypeInfo[],
 ): FieldTypeInfo | undefined {
   const [first, ...rest] = infos;

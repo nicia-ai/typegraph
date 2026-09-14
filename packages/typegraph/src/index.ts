@@ -938,6 +938,17 @@ export {
 // ============================================================
 
 export {
+  type DatabaseProjection,
+  ExecutableProjectionQuery,
+  type ProjectionResult,
+} from "./query/builder/executable-projection-query";
+export type {
+  ExpressionAliasContext,
+  ExpressionValue,
+  QueryExpressionContext,
+} from "./query/builder/expression-context";
+export { type DatabaseExpression, expr } from "./query/expressions";
+export {
   // ID utilities
   generateId,
   type IdConfig,

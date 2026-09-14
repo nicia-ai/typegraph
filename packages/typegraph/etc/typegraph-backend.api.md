@@ -1859,8 +1859,10 @@ export interface DialectAdapter {
     readonly orderedRowsJsonArray: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly quoteIdentifier: (this: void, name: string) => string;
+    readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
     readonly supportsVectors: boolean;
+    unboundedLimit(): SqlFragment;
     readonly wrapSetOperationOperand: (this: void, inner: SqlFragment) => SqlFragment;
 }
 

@@ -26,10 +26,19 @@ import { type TraversalBuilder } from "./traversal-builder";
 import {
   type AliasMap,
   type EdgeAliasMap,
+  type EmptyAliasMap,
+  type EmptyEdgeAliasMap,
   type EmptyRecursiveAliasMap,
   type QueryCoordinateState,
   type RecursiveAliasMap,
 } from "./types";
+
+type MergeAliasMaps<Existing extends AliasMap, Added extends AliasMap> =
+  keyof Added extends never ? Existing : Existing & Added;
+type MergeEdgeAliasMaps<
+  Existing extends EdgeAliasMap,
+  Added extends EdgeAliasMap,
+> = keyof Added extends never ? Existing : Existing & Added;
 
 // ============================================================
 // Fragment Types
@@ -82,9 +91,9 @@ export type QueryFragment<
 export type FlexibleQueryFragment<
   G extends GraphDef,
   RequiredAliases extends AliasMap = AliasMap,
-  AddedAliases extends AliasMap = AliasMap,
+  AddedAliases extends AliasMap = EmptyAliasMap,
   RequiredEdgeAliases extends EdgeAliasMap = EdgeAliasMap,
-  AddedEdgeAliases extends EdgeAliasMap = EdgeAliasMap,
+  AddedEdgeAliases extends EdgeAliasMap = EmptyEdgeAliasMap,
 > = <
   Aliases extends RequiredAliases,
   EdgeAliases extends RequiredEdgeAliases,
@@ -100,8 +109,8 @@ export type FlexibleQueryFragment<
   >,
 ) => QueryBuilder<
   G,
-  Aliases & AddedAliases,
-  EdgeAliases & AddedEdgeAliases,
+  MergeAliasMaps<Aliases, AddedAliases>,
+  MergeEdgeAliasMaps<EdgeAliases, AddedEdgeAliases>,
   RecursiveAliases,
   CoordinateState
 >;
