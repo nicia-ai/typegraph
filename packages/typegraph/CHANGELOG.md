@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.60.0
+
+### Minor Changes
+
+- [#689](https://github.com/nicia-ai/typegraph/pull/689) [`956fd56`](https://github.com/nicia-ai/typegraph/commit/956fd560d270dc58fab687f810b2c63abd42694a) Thanks [@pdlug](https://github.com/pdlug)! - Add transaction-bound `query()`, `neighbors()`, `countNeighbors()`, `subgraph()`, and `batchOnce()` reads. Every read executes through the open transaction and observes earlier writes in the callback; `tx.subgraph()` and `tx.batchOnce()` each execute as exactly one statement.
+
 ## 0.59.0
 
 ### Highlights
