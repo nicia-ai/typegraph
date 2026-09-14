@@ -1,5 +1,25 @@
 # @nicia-ai/typegraph
 
+## 0.60.0
+
+### Highlights
+
+TypeGraph 0.60 brings the set-oriented read APIs introduced in 0.59 into transaction callbacks. `TransactionContext` now provides `query()`, `neighbors()`, `countNeighbors()`, `subgraph()`, and `batchOnce()`, all bound to the open transaction so read-modify-write workflows can observe earlier writes without leaving their atomic boundary.
+
+The transaction forms preserve the physical guarantees that matter on a held connection: `tx.neighbors()` and `tx.countNeighbors()` each execute as one statement, while `tx.subgraph()` and `tx.batchOnce()` use exact-one-statement plans. Transaction-bound `batchOnce()` composes fluent reads from `tx.query()` with neighbor, count, and subgraph reads from its callback builder, returning independently typed results in tuple order.
+
+The surface is consistent across managed, adapter, receipt-enabled, recorded-time, measurable, and adopted transaction contexts. `withCheckedReads()` remains a root-store API: transaction reads already execute against the transaction's bound session, and callers choose the required snapshot behavior through the transaction isolation options.
+
+### Upgrade notes
+
+- Update hand-built `TransactionContext`, adapter transaction-context, or measurable transaction-context mocks and wrappers with `query`, `neighbors`, `countNeighbors`, `subgraph`, and `batchOnce`. Contexts created by TypeGraph provide these methods automatically.
+- Replace runtime feature checks and edge-read-plus-node-load fallbacks inside transaction callbacks with the typed transaction APIs. Type callback parameters as `TransactionContext<G>` or the appropriate adapter/measurable variant rather than as `Store<G>`; `withCheckedReads()` is intentionally unavailable on transaction contexts.
+- On PostgreSQL, request `isolationLevel: "repeatable_read"` or `"serializable"` when several separate transaction reads must observe one stable database snapshot. `tx.subgraph()` and `tx.batchOnce()` remain one statement regardless of isolation level.
+
+### Minor Changes
+
+- [#689](https://github.com/nicia-ai/typegraph/pull/689) [`956fd56`](https://github.com/nicia-ai/typegraph/commit/956fd560d270dc58fab687f810b2c63abd42694a) Thanks [@pdlug](https://github.com/pdlug)! - Add transaction-bound `query()`, `neighbors()`, `countNeighbors()`, `subgraph()`, and `batchOnce()` reads. Every read executes through the open transaction and observes earlier writes in the callback; `tx.subgraph()` and `tx.batchOnce()` each execute as exactly one statement.
+
 ## 0.59.0
 
 ### Highlights
