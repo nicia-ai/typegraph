@@ -11,14 +11,17 @@
  * in 4 source files and 3 docs pages, when the repository actually carries
  * 13 in 11 files — including the shipped `packages/typegraph/README.md` and
  * a whole heading in `backend-setup.md` making the same claim). This scan is
- * the derived replacement: {@link scanClaimSites} walks the repository from
- * {@link repositoryRoot} — NOT from `packages/typegraph`, which the same
- * search would undercount, since the 13/11 figure includes the repo-root
+ * the derived replacement: {@link scanClaimSites} inventories repository-visible
+ * files from {@link repositoryRoot} — NOT from `packages/typegraph`, which the
+ * same search would undercount, since the 13/11 figure includes the repo-root
  * `README.md` and three `apps/docs` pages that do not exist under
- * `packages/typegraph` — and every exclusion is DATA
+ * `packages/typegraph`. Tracked and non-ignored untracked files participate;
+ * ignored workspace notes cannot make the ratchet checkout-dependent. Every
+ * directory and file exclusion is DATA
  * ({@link EXCLUDED_DIRECTORY_NAMES}, {@link EXCLUDED_FILE_PATTERN}), so "I
  * excluded it because I ran a different grep" is not an expressible outcome.
  */
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -106,14 +109,63 @@ function walk(root: string, directory: string, sites: ClaimSite[]): void {
   }
 }
 
+function repositoryVisibleFiles(root: string): readonly string[] | undefined {
+  try {
+    const repositoryTopLevel = execFileSync(
+      "git",
+      ["-C", root, "rev-parse", "--show-toplevel"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    if (fs.realpathSync(repositoryTopLevel) !== fs.realpathSync(root)) {
+      return undefined;
+    }
+
+    return execFileSync(
+      "git",
+      [
+        "-C",
+        root,
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    )
+      .split("\0")
+      .filter((file) => file.length > 0);
+  } catch {
+    return undefined;
+  }
+}
+
+function isExcludedPath(relativeFile: string): boolean {
+  return relativeFile
+    .split("/")
+    .some((part) => EXCLUDED_DIRECTORY_NAMES.includes(part));
+}
+
 /**
- * Every claim site beneath `root` matching {@link CLAIM_PHRASE_PATTERN},
- * sorted by file then line. The default {@link repositoryRoot} finds sites a
- * search run from `packages/typegraph` would miss.
+ * Every repository-visible claim site beneath `root` matching
+ * {@link CLAIM_PHRASE_PATTERN}, sorted by file then line. A non-repository
+ * root falls back to a filesystem walk. The default {@link repositoryRoot}
+ * finds sites a search run from `packages/typegraph` would miss.
  */
 export function scanClaimSites(root = repositoryRoot()): readonly ClaimSite[] {
   const sites: ClaimSite[] = [];
-  walk(root, root, sites);
+  const visibleFiles = repositoryVisibleFiles(root);
+  if (visibleFiles === undefined) {
+    walk(root, root, sites);
+  } else {
+    for (const relativeFile of visibleFiles) {
+      if (isExcludedPath(relativeFile)) continue;
+      if (!shouldScanFile(path.basename(relativeFile))) continue;
+      sites.push(
+        ...collectClaimSitesInFile(root, path.join(root, relativeFile)),
+      );
+    }
+  }
   return sites.toSorted(
     (left, right) =>
       left.file.localeCompare(right.file) || left.line - right.line,

@@ -13,6 +13,7 @@
  * repo-wide, and a literal, unbroken occurrence here would inflate its own
  * recorded count.
  */
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -64,23 +65,15 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
     text: "from the " + CLAIM_WORD + "-free backend-authoring entrypoint.",
   },
   {
-    file: "docs/design/version-controlled-backends-plan-review.md",
-    line: 333,
-    text:
-      "a " +
-      CLAIM_WORD +
-      "-free execution adapter over `db.query`, all-refuse write",
-  },
-  {
     file: "packages/typegraph/README.md",
-    line: 54,
+    line: 55,
     text:
       CLAIM_WORD +
       "-free `@nicia-ai/typegraph/core` entrypoint. Custom backend, dialect, and",
   },
   {
     file: "packages/typegraph/README.md",
-    line: 55,
+    line: 56,
     text:
       "search-strategy authors can import the complete " +
       CLAIM_WORD +
@@ -170,18 +163,54 @@ describe("drizzle claim-site inventory", () => {
     }
   });
 
-  it("has the recorded shape: 14 occurrences across 12 files", () => {
-    expect(RECORDED_CLAIM_SITES.length).toBe(14);
+  it("does not let ignored workspace files change the repository inventory", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "typegraph-claim-inventory-"));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      writeFileSync(path.join(root, ".gitignore"), "ignored.md\n");
+      writeFileSync(
+        path.join(root, "tracked.md"),
+        "A " + CLAIM_WORD + "-free tracked contract.\n",
+      );
+      writeFileSync(
+        path.join(root, "untracked.md"),
+        "A " + CLAIM_WORD + "-free untracked contract.\n",
+      );
+      writeFileSync(
+        path.join(root, "ignored.md"),
+        "A " + CLAIM_WORD + "-free ignored note.\n",
+      );
+      execFileSync("git", ["add", ".gitignore", "tracked.md"], { cwd: root });
+
+      expect(scanClaimSites(root)).toEqual([
+        {
+          file: "tracked.md",
+          line: 1,
+          text: "A " + CLAIM_WORD + "-free tracked contract.",
+        },
+        {
+          file: "untracked.md",
+          line: 1,
+          text: "A " + CLAIM_WORD + "-free untracked contract.",
+        },
+      ]);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it("has the recorded shape: 13 occurrences across 11 files", () => {
+    expect(RECORDED_CLAIM_SITES.length).toBe(13);
     expect(new Set(RECORDED_CLAIM_SITES.map((site) => site.file)).size).toBe(
-      12,
+      11,
     );
   });
 
   it("matches scanClaimSites() both directions", () => {
     const scanned = scanClaimSites();
 
-    expect(scanned.length).toBe(14);
-    expect(new Set(scanned.map((site) => site.file)).size).toBe(12);
+    expect(scanned.length).toBe(13);
+    expect(new Set(scanned.map((site) => site.file)).size).toBe(11);
 
     for (const site of scanned) {
       expect(
