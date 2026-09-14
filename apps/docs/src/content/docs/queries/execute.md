@@ -278,7 +278,8 @@ async function exportAllUsers(): Promise<void> {
 When independent reads must share one database round trip, use `store.batchOnce()`.
 It embeds each read as a CTE and returns the independently typed results in input order. Fluent
 queries preserve explicit ordering even when the sort field is not selected. The callback's scoped
-builder creates composable set-oriented graph reads without changing the eager Store API:
+builder creates batch-scoped composable graph reads without adding parallel `*Query` methods to the
+executing Store API:
 
 ```typescript
 const [people, neighbors, neighborhood] = await store.batchOnce((read) => [
@@ -288,7 +289,7 @@ const [people, neighbors, neighborhood] = await store.batchOnce((read) => [
 ]);
 ```
 
-Use `store.batch()` when the batch includes deferred edge collection `batchFind*` reads or when
+Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
 sequential execution is the intended connection profile.
 
 `batch()` does not batch round trips. The portable guarantee is that at most one query is in flight
@@ -307,8 +308,10 @@ shapes must share its one statement. Other alternatives are a `.traverse()` chai
 `store.neighbors()` or `store.countNeighbors()` (one statement each), `store.subgraph()` (2
 statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
 `bulkFindByIndex()`, which are chunked rather than fixed-cost.
-Direct `store.subgraph()` and scoped `read.subgraph()` share validation, traversal, projection, and
-result semantics while exposing their different execution contracts through the call context.
+Direct `store.subgraph()` and batch-scoped `read.subgraph()` share validation, traversal,
+projection, and result semantics. The call context selects the physical execution contract: the
+direct read uses backend-tuned hydration, while the batch-scoped read is embedded into the batch's
+single statement.
 
 It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can
 observe a commit the earlier ones did not. There is no way to fix that for fluent queries today —

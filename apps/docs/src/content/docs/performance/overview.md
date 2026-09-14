@@ -83,7 +83,7 @@ This holds for all query types:
 
 The fluent query needs no dataloader for that joined read because the database handles its entire
 join graph in one execution. Separate reads can still form an N+1; use a traversal, `batchOnce()`,
-`neighbors()` / `countNeighbors()`, or `subgraph()`. Inside `batchOnce()`, its scoped `read` builder
+`neighbors()` / `countNeighbors()`, or `subgraph()`. Inside `batchOnce()`, its batch-scoped `read` builder
 creates composable versions of the set-oriented reads when unlike result shapes must share one
 statement. Chunked collection reads remain useful for homogeneous ID and endpoint sets.
 
@@ -469,7 +469,7 @@ const [activeUsers, recentOrders] = await store.batchOnce(() => [
 ]);
 ```
 
-The callback's scoped builder composes set-oriented reads in the same call:
+The callback's batch-scoped builder composes set-oriented reads in the same call:
 
 ```typescript
 const [latest, versionCount, detail] = await store.batchOnce((read) => [
@@ -483,7 +483,7 @@ const [latest, versionCount, detail] = await store.batchOnce((read) => [
 ]);
 ```
 
-Use `store.batch()` when deferred edge collection reads must participate. It runs them in sequence.
+Use `store.batch()` when queued edge collection reads must participate. It runs them in sequence.
 On a transactional backend it still issues at least one statement per query plus
 `begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no
 framing. It buys a connection profile that never peaks at N — not lower latency, and not a snapshot
@@ -493,14 +493,14 @@ Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFind
 participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
 into one transaction — the statement count is unchanged either way. If the round trips are what
 hurt, replace the calls with `store.neighbors()` / `store.countNeighbors()` or a traversal (one
-statement), or compose the scoped `read.neighbors()`, `read.countNeighbors()`, and
+statement), or compose the batch-scoped `read.neighbors()`, `read.countNeighbors()`, and
 `read.subgraph()` forms in `batchOnce()`.
 
-Direct `store.subgraph()` and scoped `read.subgraph()` share one semantic planner and produce the
-same result, but intentionally retain different physical plans. The direct form uses 2 statements
+Direct `store.subgraph()` and batch-scoped `read.subgraph()` share one semantic planner and produce the
+same result, but intentionally use different physical plans. The direct form uses 2 statements
 on SQLite and 3 on PostgreSQL so each backend can hydrate a closure efficiently. The scoped form
 uses 1 statement everywhere to make cross-shape composition possible. On PostgreSQL, prefer the
-direct form for a standalone large closure; use the scoped form when eliminating network round
+direct form for a standalone large closure; use the batch-scoped form when eliminating network round
 trips across several independent reads matters more than optimizing that closure in isolation.
 
 To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see

@@ -38,9 +38,10 @@ await store.close();
 
 For latency-sensitive reads, `store.batchOnce()` combines independent fluent
 queries and set-oriented reads into one statement. Its callback receives a
-scoped builder with `neighbors()`, `countNeighbors()`, and `subgraph()` methods.
-The direct and scoped subgraph forms share one semantic planner; the direct form
-retains backend-tuned hydration while the scoped form guarantees one statement.
+batch-scoped builder with `neighbors()`, `countNeighbors()`, and `subgraph()`
+methods. Direct `store.subgraph()` and batch-scoped `read.subgraph()` return the
+same result shape and semantics; the direct form retains backend-tuned hydration
+while the batch-scoped form guarantees one statement.
 `store.neighbors()` can order by edge metadata or adjacent-node properties,
 while `subgraph({ edgeWindows })` applies per-kind direction, ordering, and
 limits during traversal. See

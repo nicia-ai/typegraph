@@ -2312,10 +2312,10 @@ const [people, neighbors] = await store.batchOnce((read) => [
 ```
 
 `batchOnce()` has no sequential fallback. Its callback returns fluent relational queries, set
-operations, and set-oriented reads built through the callback's `read.neighbors()`,
+operations, and batch-scoped composable reads built through the callback's `read.neighbors()`,
 `read.countNeighbors()`, and `read.subgraph()` methods. Prepared queries and edge collection
 `batchFind*` values are excluded because they cannot be embedded without changing their execution
-contract. Use `batch()` when those deferred collection reads or transaction-backed serialization
+contract. Use `batch()` when those queued collection reads or transaction-backed serialization
 are the goal.
 
 #### `store.batch(...queries)`
@@ -2463,7 +2463,7 @@ const [skills, employer, colleague] = await store.batch(
 | Pattern | Use |
 |---------|-----|
 | Independent embeddable reads that must use one statement | `store.batchOnce()` |
-| Mixed fluent and deferred collection queries | `store.batch()` |
+| Mixed fluent and queued collection queries | `store.batch()` |
 | Load entity with all relationships (uniform) | `store.subgraph()` |
 | Fixing an N+1 / reducing round trips | `.traverse()` or `store.batchOnce()` (one statement), `store.subgraph()` (2–3), `getByIds()` (chunked) |
 | Single query | `.execute()` directly |
@@ -2555,7 +2555,7 @@ Each window accepts `direction: "out" | "in" | "both"`; when omitted it inherits
 global direction. Ranking is partitioned by the oriented source endpoint, so bidirectional windows
 have an unambiguous top N for each endpoint.
 
-Inside `batchOnce()`, the callback's `read.subgraph()` method accepts the same options and produces
+Inside `batchOnce()`, the callback's batch-scoped `read.subgraph()` method accepts the same options and produces
 the same result as `store.subgraph()`, but compiles hydration and traversal into one embeddable
 statement. Both forms share the same validation, traversal, projection plan, and result assembly;
 only their physical execution strategy differs.
@@ -2563,7 +2563,7 @@ only their physical execution strategy differs.
 Under the hood the traversal is a `WITH RECURSIVE` CTE and all filtering and hydration happen in
 the database. Direct `subgraph()` calls use a backend-tuned fixed cost: 2 statements on SQLite
 (nodes and edges, each embedding the CTE) and 3 on PostgreSQL (the closure ids once, then nodes and
-edges). Scoped `read.subgraph()` uses 1 statement on both backends. Prefer direct
+edges). Batch-scoped `read.subgraph()` uses 1 statement on both backends. Prefer direct
 `store.subgraph()` unless the read must compose with other independent reads in `batchOnce()`;
 PostgreSQL can execute the split hydration plan substantially faster for larger closures even
 though it uses more round trips.
@@ -2844,8 +2844,8 @@ const results = await store
 
 #### `store.batchOnce(buildReads)` and `store.batch(...queries)`
 
-Use `batchOnce()` to embed independent fluent and scoped set-oriented reads in one statement. Use `batch()` for mixed
-fluent and deferred collection reads that may run sequentially. See
+Use `batchOnce()` to embed independent fluent and batch-scoped set-oriented reads in one statement. Use `batch()` for mixed
+fluent and queued collection reads that may run sequentially. See
 [Batch Query Execution](#batch-query-execution) for the exact contracts.
 
 ### Dynamic Collection Access
@@ -3192,10 +3192,13 @@ handle. See
 ## Observability Hooks
 
 TypeGraph supports observability hooks for monitoring and logging store operations.
-Query hooks describe SQL statements submitted by the query builder, not logical
-query-builder calls or backend-internal setup statements. A logical query that retries
-with a different projection therefore fires the query hooks once for each statement it
-submits.
+Query hooks describe SQL statements submitted by Store read APIs, not logical API calls or
+backend-internal setup statements. Fluent queries, `batchOnce()`, `neighbors()`,
+`countNeighbors()`, and `subgraph()` all use this observed execution path. A logical read that
+submits more than one statement fires one start/end pair per statement: direct `subgraph()` emits
+two pairs on SQLite and three on PostgreSQL, while the same subgraph embedded in `batchOnce()` emits
+one. A fluent query that retries with a different projection likewise fires a pair for each
+statement it submits.
 
 ### `StoreHooks`
 
@@ -3286,8 +3289,8 @@ const hooks: StoreHooks = {
 
 const store = createStore(graph, backend, { hooks });
 
-// CRUD operations trigger operation hooks; query-builder statements trigger
-// query hooks.
+// CRUD operations trigger operation hooks; observed Store read statements
+// trigger query hooks.
 await store.nodes.Person.create({ name: "Alice" });
 await store.query().from("Person", "p").select((ctx) => ctx.p).execute();
 // Logs include:
