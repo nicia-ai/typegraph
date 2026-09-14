@@ -44,6 +44,7 @@ import {
   registerClaimLookupPreferenceIntegrationTests,
   registerClaimOwnerIdentityIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
+  registerCollectionAggregateIntegrationTests,
   registerConstraintFenceErrorIntegrationTests,
   registerConstraintFenceTransactionHealthTests,
   registerConstraintFenceVerificationIntegrationTests,
@@ -287,6 +288,7 @@ export function createIntegrationTestSuite<
     });
 
     registerAggregateIntegrationTests(context);
+    registerCollectionAggregateIntegrationTests(context);
     registerDatabaseExpressionQueryIntegrationTests(context);
     registerRelationalCompositionIntegrationTests(context);
     registerMatchResultRankingIntegrationTests(context);

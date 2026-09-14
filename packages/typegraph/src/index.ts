@@ -963,7 +963,11 @@ export {
   type RelationProjection,
   type RelationProjectionResult,
 } from "./query/builder/relation";
-export { type DatabaseExpression, expr } from "./query/expressions";
+export {
+  type CollectOrder,
+  type DatabaseExpression,
+  expr,
+} from "./query/expressions";
 export {
   // ID utilities
   generateId,

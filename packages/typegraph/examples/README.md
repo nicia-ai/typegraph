@@ -61,6 +61,7 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 | [28-relational-composition.ts](./28-relational-composition.ts) | Derived aggregates, visible-column set operations, typed prepared batches, and deterministic streaming |
 | [29-match-stages.ts](./29-match-stages.ts) | Per-hop match constraints, completed-row filters, and recursive stop expansion |
 | [30-shared-subgraphs-and-paths.ts](./30-shared-subgraphs-and-paths.ts) | Shared hydration for overlapping subgraph batches, qualified paths across multiple recursive stages, mixed fixed/recursive traversals, and optional first recursion |
+| [31-ordered-collections.ts](./31-ordered-collections.ts) | Ordered scalar collections per group, duplicate preservation, empty results, typed preparation, and batching |
 
 ### Time Travel, Views & Bitemporal
 

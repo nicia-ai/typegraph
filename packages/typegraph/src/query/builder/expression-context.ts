@@ -126,6 +126,17 @@ const METADATA_COLUMNS: Readonly<Record<string, string>> = {
   deletedAt: "deleted_at",
 };
 
+const DATABASE_EXPRESSION_KEYS: ReadonlySet<PropertyKey> = new Set([
+  "__scope",
+  "__type",
+  "__value",
+  "elementValueType",
+  "node",
+  "nullable",
+  "scopeIdentity",
+  "valueType",
+]);
+
 /** Builds field expressions from schema evidence; no result callback is probed. */
 export function createExpressionAliasContext<
   Aliases extends AliasMap,
@@ -180,7 +191,11 @@ export function createExpressionAliasContext<
             );
           };
         }
-        if (typeof key !== "string" || key in target)
+        if (
+          typeof key !== "string" ||
+          key in target ||
+          DATABASE_EXPRESSION_KEYS.has(key)
+        )
           return Reflect.get(target, key, receiver) as unknown;
         const child = info.shape?.[key] ?? info.recordValueType;
         if (child === undefined)

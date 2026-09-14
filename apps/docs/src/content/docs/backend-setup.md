@@ -1427,6 +1427,7 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `execution`                                                                | Execution boundaries: `interactiveTransactions`, exact-resource `atomicBatch` support, and derived `unitOfWork` |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
+| `orderedAggregates?` | Ordered scalar collection aggregation; absent means unsupported |
 | `constraintClaims?`                                                        | The backend carries the claim relations that fence declared constraints without a lock (see below)  |
 | `durableEdgeMatchIdentity?`                                                | Edge writes persist and atomically arbitrate a schema-declared endpoint/property identity            |
 | `graphAnalytics?.{supported,mathFunctions}`                                | Static support for whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
@@ -1434,6 +1435,18 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
 | `recursiveTraversal?.{supported,reason}`                                   | Whether the engine can compute a bounded transitive closure of a relation in one round trip — a recursive CTE, or a graph-native expansion operator. **Absent means supported** |
 | `writeFence?.{mechanism,drain}`                                            | How this engine excludes concurrent writers, and how far a caller can drain a table lock — see [Write fence declaration](#write-fence-declaration-writefence) |
+
+`expr.collect()` requires `orderedAggregates: true`. Bundled PostgreSQL supports it. Supported preparable synchronous
+SQLite clients and the dedicated async `createLibsqlBackend()` factory are probed when the backend
+is created; the query itself adds no discovery statement. Other unprobed SQLite
+connections default to unsupported. If you have
+verified that your engine supports aggregate-local ordering, declare
+`capabilities: { orderedAggregates: true }` in the bundled backend options. Older or unsupported
+engines must retain `false`; collection queries are refused before execution.
+
+SQLite introduced aggregate-local ordering in [version 3.44](https://www.sqlite.org/releaselog/3_44_0.html).
+The scalar collection representation avoids depending on JSON object subtype preservation during
+sorting. Existing reads continue to work when ordered aggregates are unavailable.
 
 The former top-level `capabilities.transactions` override is not interpreted
 as an alias. Bundled factories refuse it with `LEGACY_CAPABILITY_OVERRIDE`,

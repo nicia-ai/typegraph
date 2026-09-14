@@ -20,9 +20,16 @@ export function isPortableCountDistinctValueType(
 export function assertPortableCountDistinctValueType(
   valueType: ValueType,
 ): asserts valueType is PortableCountDistinctValueType {
+  assertPortableScalarValueType(valueType, "COUNT DISTINCT");
+}
+
+export function assertPortableScalarValueType(
+  valueType: ValueType,
+  operation: string,
+): asserts valueType is PortableCountDistinctValueType {
   if (!isPortableCountDistinctValueType(valueType)) {
     throw new UnsupportedPredicateError(
-      `COUNT DISTINCT supports only string, number, boolean, and date values; received ${valueType}.`,
+      `${operation} supports only string, number, boolean, and date values; received ${valueType}.`,
     );
   }
 }

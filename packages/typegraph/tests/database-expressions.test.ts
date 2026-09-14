@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import { createStore, defineGraph, defineNode } from "../src";
+import { UnsupportedPredicateError } from "../src/errors";
 import type { FieldRef } from "../src/query/ast";
+import { decodeExpressionValue } from "../src/query/builder/executable-projection-query";
+import { compileDatabaseExpression } from "../src/query/compiler/database-expressions";
+import { sqliteDialect } from "../src/query/dialect/sqlite";
+import type { DatabaseExpression } from "../src/query/expressions";
 import { createFieldExpression, expr } from "../src/query/expressions";
+import { createTestBackend } from "./test-utils";
 
 function field<T>(
   alias: string,
@@ -69,6 +77,78 @@ describe("database expressions", () => {
     expect(expr.literal(new Date("2025-01-01T00:00:00.000Z")).valueType).toBe(
       "date",
     );
+  });
+
+  it("refuses ordering metadata on non-collection aggregates", () => {
+    const aggregate = expr.sum(expr.literal(1));
+    const forged = {
+      ...aggregate,
+      node: { ...aggregate.node, orderBy: [] },
+    } as DatabaseExpression;
+
+    expect(() =>
+      compileDatabaseExpression(forged, {
+        dialect: sqliteDialect,
+        orderedAggregates: true,
+      }),
+    ).toThrow(UnsupportedPredicateError);
+    expect(() =>
+      compileDatabaseExpression(forged, {
+        dialect: sqliteDialect,
+        orderedAggregates: true,
+      }),
+    ).toThrow("SUM does not accept aggregate ordering");
+  });
+
+  it("does not apply collection element decoding to ordinary JSON array fields", () => {
+    const tags = createFieldExpression<readonly (string | null)[], "document">(
+      {
+        __type: "field_ref",
+        alias: "document",
+        path: ["props", "tags"],
+        valueType: "array",
+        elementType: "string",
+      },
+      Symbol("document query"),
+      false,
+    );
+
+    expect(tags.elementValueType).toBeUndefined();
+    expect(decodeExpressionValue('["first",null]', tags)).toEqual([
+      "first",
+      // eslint-disable-next-line unicorn/no-null -- ordinary JSON null must remain JSON null.
+      null,
+    ]);
+  });
+
+  it("keeps reserved expression metadata separate from object fields", () => {
+    const Document = defineNode("ExpressionMetadataDocument", {
+      schema: z.object({
+        metadata: z.object({ elementValueType: z.string() }),
+      }),
+    });
+    const graph = defineGraph({
+      id: "expression-metadata-field",
+      nodes: { ExpressionMetadataDocument: { type: Document } },
+      edges: {},
+    });
+    const store = createStore(graph, createTestBackend());
+
+    const query = store
+      .query()
+      .from("ExpressionMetadataDocument", "document")
+      .project((fields) => ({
+        explicitSchemaField: fields.document.metadata.$get("elementValueType"),
+        metadata: fields.document.metadata,
+      }));
+
+    expect(query.getExpressionProjection()[0]?.expression.node).toMatchObject({
+      field: { jsonPointer: "/metadata/elementValueType" },
+      kind: "field",
+    });
+    expect(
+      query.getExpressionProjection()[1]?.expression.elementValueType,
+    ).toBeUndefined();
   });
 
   it("rejects invalid runtime operands, types, and mixed scopes", () => {

@@ -744,6 +744,7 @@ function compileStandardDatabaseExpression(
     allowAggregates,
     ...(allowAggregates ? {} : { aggregateClause: "GROUP BY" }),
     dialect,
+    orderedAggregates: ctx?.orderedAggregates ?? true,
     ...(ctx?.compileExpressionSubquery === undefined ?
       {}
     : { compileSubquery: ctx.compileExpressionSubquery }),

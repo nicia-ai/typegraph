@@ -1,5 +1,8 @@
-import { UnsupportedPredicateError } from "../../errors";
-import { assertPortableCountDistinctValueType } from "../aggregate-value-types";
+import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
+import {
+  assertPortableCountDistinctValueType,
+  assertPortableScalarValueType,
+} from "../aggregate-value-types";
 import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import {
@@ -7,6 +10,7 @@ import {
   type DatabaseExpression,
   type DatabaseExpressionNode,
   type DatabaseLiteral,
+  resolveCollectOrder,
 } from "../expressions";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { compileFieldValue } from "./predicates";
@@ -16,6 +20,7 @@ export type DatabaseExpressionCompilerContext = Readonly<{
   cteColumnPrefix?: string;
   allowAggregates?: boolean;
   aggregateClause?: string;
+  orderedAggregates?: boolean;
   /** Resolves fields for non-graph sources such as derived relation outputs. */
   compileFieldExpression?: (
     field: FieldRef,
@@ -83,6 +88,11 @@ function aggregateFunction(operator: AggregateOperator): SqlFragment {
     }
     case "count": {
       return sql.raw("COUNT");
+    }
+    case "collect": {
+      throw new UnsupportedPredicateError(
+        "COLLECT must be compiled through its ordered operand-aware path",
+      );
     }
     case "max": {
       return sql.raw("MAX");
@@ -187,10 +197,38 @@ function compileNode(
           "Nested aggregate expressions are not supported",
         );
       }
+      if (node.operator !== "collect" && node.orderBy !== undefined) {
+        throw new UnsupportedPredicateError(
+          `${node.operator.toUpperCase()} does not accept aggregate ordering`,
+        );
+      }
       const operand =
         node.operand === undefined ?
           sql.raw("*")
         : compileNode(node.operand, context, aggregateDepth + 1);
+      if (node.operator === "collect") {
+        if (context.orderedAggregates !== true)
+          throw new ConfigurationError(
+            "COLLECT requires ordered aggregate support from the active backend profile.",
+            { capability: "orderedAggregates", orderedAggregates: false },
+          );
+        if (node.operand === undefined)
+          throw new UnsupportedPredicateError("COLLECT requires an operand");
+        assertPortableScalarValueType(node.operand.valueType, "COLLECT");
+        const ordering = resolveCollectOrder(node.orderBy).map((order) => {
+          const { direction, nulls } = order;
+          const directionSql =
+            direction === "asc" ? sql.raw("ASC") : sql.raw("DESC");
+          const nullsSql =
+            nulls === "first" ? sql.raw("NULLS FIRST") : sql.raw("NULLS LAST");
+          return sql`${compileNode(order.expression, context, aggregateDepth + 1)} ${directionSql} ${nullsSql}`;
+        });
+        return context.dialect.orderedScalarJsonArray(
+          operand,
+          node.operand.valueType,
+          ordering,
+        );
+      }
       if (node.operator === "countDistinct") {
         if (node.operand === undefined) {
           throw new UnsupportedPredicateError(

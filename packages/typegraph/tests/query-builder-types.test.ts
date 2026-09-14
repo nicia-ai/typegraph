@@ -24,6 +24,7 @@ import {
   defineGraph,
   defineNode,
   type EdgeId,
+  expr,
   field,
   fieldRef,
   max,
@@ -163,6 +164,39 @@ describe("Query Builder Type Safety", () => {
     expectTypeOf<EdgeRow["minimumSalary"]>().toEqualTypeOf<
       number | undefined
     >();
+
+    const collectionQuery = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "person")
+      .aggregate((fields) => ({
+        names: expr.collect(fields.person.name, {
+          orderBy: [{ expression: fields.person.name }],
+        }),
+        joined: expr.collect(fields.person.joinedAt, {
+          orderBy: [{ expression: fields.person.joinedAt, nulls: "first" }],
+        }),
+      }));
+    type CollectionRow = Awaited<
+      ReturnType<typeof collectionQuery.execute>
+    >[number];
+    void collectionQuery;
+    expectTypeOf<CollectionRow["names"]>().toEqualTypeOf<readonly string[]>();
+    expectTypeOf<CollectionRow["joined"]>().toEqualTypeOf<
+      readonly (Date | undefined)[]
+    >();
+
+    function assertCollectionInputTypes(): void {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "person")
+        .aggregate((fields) => ({
+          // @ts-expect-error - COLLECT requires at least one explicit ordering expression
+          emptyOrder: expr.collect(fields.person.name, { orderBy: [] }),
+          // @ts-expect-error - COLLECT accepts scalar operands, not arrays
+          structured: expr.collect(fields.person.tags, {
+            orderBy: [{ expression: fields.person.name }],
+          }),
+        }));
+    }
+    void assertCollectionInputTypes;
   });
 
   describe("Operational Identity capability", () => {

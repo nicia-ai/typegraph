@@ -22,6 +22,9 @@ import {
 
 const DEFAULT_PREPARED_STATEMENT_CACHE_MAX = 256;
 
+export const ORDERED_AGGREGATE_PROBE_SQL =
+  "SELECT json_group_array(value ORDER BY value) FROM (SELECT 1 AS value)";
+
 type PreparedAllStatement = Readonly<{
   all: (...params: readonly unknown[]) => readonly unknown[];
   /**
@@ -134,6 +137,8 @@ export type SqliteExecutionProfile = Readonly<{
    * 999 floor when the limit cannot be probed (async/remote drivers).
    */
   maxBindParameters: number;
+  /** Whether this connection accepts ORDER BY within aggregate calls. */
+  orderedAggregates: boolean;
   supportsCompiledExecution: boolean;
   transactionMode: SqliteTransactionMode;
 }>;
@@ -531,6 +536,18 @@ function getOrCreatePreparedStatement(
   );
 }
 
+function detectOrderedAggregates(
+  sqliteClient: SqliteClientWithPrepare | undefined,
+): boolean {
+  if (sqliteClient === undefined) return false;
+  try {
+    sqliteClient.prepare(ORDERED_AGGREGATE_PROBE_SQL);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Uses unconditional `await` because Drizzle returns SQLiteRaw thenables
 // that fail `instanceof Promise` checks (drizzle-team/drizzle-orm#2275).
 async function executeDrizzleQuery<TRow>(
@@ -588,6 +605,7 @@ export function createSqliteExecutionAdapter(
     sqliteClient,
     hardMaxBindParameters,
   );
+  const orderedAggregates = detectOrderedAggregates(sqliteClient);
   const atomicBatchClient = resolveAtomicBatchClient(db, hostedPlatform);
 
   const profile: SqliteExecutionProfile = {
@@ -595,6 +613,7 @@ export function createSqliteExecutionAdapter(
     ...(hardMaxBindParameters === undefined ? {} : { hardMaxBindParameters }),
     isSync,
     maxBindParameters,
+    orderedAggregates,
     supportsCompiledExecution: sqliteClient !== undefined,
     transactionMode,
   };

@@ -129,6 +129,7 @@ function makePipelineContext(
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
     windowFunctions: true,
+    orderedAggregates: true,
   };
 }
 

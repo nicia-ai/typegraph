@@ -57,6 +57,7 @@ type AggregateExpressionNode = Readonly<{
     kind: "aggregate";
     operator: AggregateOperator;
     operand?: DatabaseExpression | undefined;
+    orderBy?: readonly CollectOrder[];
 }>;
 
 // @public (undocumented)
@@ -66,7 +67,7 @@ type AggregateFieldResult<Expression extends AggregateExpr, Aliases extends Aggr
 type AggregateFunction = "count" | "countDistinct" | "sum" | "avg" | "min" | "max";
 
 // @public (undocumented)
-type AggregateOperator = "avg" | "count" | "countDistinct" | "max" | "min" | "sum";
+type AggregateOperator = "avg" | "collect" | "count" | "countDistinct" | "max" | "min" | "sum";
 
 // @public
 type AggregateOrderSpec = Readonly<{
@@ -178,6 +179,7 @@ type BackendCapabilities = Readonly<{
         unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
     }>;
     windowFunctions: boolean;
+    orderedAggregates?: boolean;
     clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
@@ -649,6 +651,13 @@ type CoalesceExpressionNode = Readonly<{
 // @public
 type Collation = "binary" | "caseInsensitive";
 
+// @public (undocumented)
+type CollectOrder<Scope extends string = string> = Readonly<{
+    expression: DatabaseExpression<boolean | Date | number | string | undefined, Scope>;
+    direction?: "asc" | "desc";
+    nulls?: "first" | "last";
+}>;
+
 // @public
 type CommitSchemaVersionExpected = Readonly<{
     kind: "initial";
@@ -744,6 +753,7 @@ type CompileQueryOptions = Readonly<{
     fulltextStrategy?: FulltextStrategy | false | undefined;
     vectorStrategy?: VectorStrategy | undefined;
     windowFunctions?: boolean | undefined;
+    orderedAggregates?: boolean | undefined;
     vectorSlots?: VectorSlotMap | undefined;
     fulltextLanguages?: ReadonlyMap<string, string> | undefined;
     recordedReadBinding?: RecordedReadBinding | undefined;
@@ -1009,6 +1019,7 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
     __type: "database_expression";
     node: DatabaseExpressionNode;
     valueType: ValueType;
+    elementValueType?: ValueType;
     nullable: boolean;
     scopeIdentity: symbol;
     __value?: T;
@@ -4973,6 +4984,7 @@ type RelationAst = DerivedRelation | RelationSource | SetRelation;
 type RelationColumn = Readonly<{
     outputName: string;
     valueType: ValueType;
+    elementValueType?: ValueType;
     nullable: boolean;
     identity?: Readonly<{
         component: "id" | "kind";

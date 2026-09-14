@@ -392,6 +392,12 @@ export type BackendCapabilities = Readonly<{
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
   /**
+   * Whether aggregate calls may contain their own `ORDER BY` clause, as used
+   * by ordered scalar collection. Absent is `false`: custom and remote
+   * backends must opt in only when their active engine accepts that syntax.
+   */
+  orderedAggregates?: boolean;
+  /**
    * Whether `updateNode` / `updateEdge` honor `clearValidTo: true` by storing
    * SQL NULL in `valid_to`. Absent is `false`: custom backends must opt in so
    * the store refuses every explicit clear-bearing call before lookup,
@@ -4555,6 +4561,7 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
     unitOfWork: "interactive",
   }),
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
+  orderedAggregates: true,
   clearValidTo: true,
   returning: true, // PostgreSQL has supported RETURNING since 8.2
   // The bundled schema ships both claim relations and the shared operation

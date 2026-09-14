@@ -38,6 +38,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
     "supported": true,
   },
   "maxBindParameters": 32767,
+  "orderedAggregates": true,
   "recursiveTraversal": {
     "supported": true,
   },
@@ -241,6 +242,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
     "supported": true,
   },
   "maxBindParameters": 32767,
+  "orderedAggregates": true,
   "recursiveTraversal": {
     "supported": true,
   },
@@ -447,6 +449,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
     "supported": true,
   },
   "maxBindParameters": 32766,
+  "orderedAggregates": true,
   "recursiveTraversal": {
     "supported": true,
   },
@@ -630,6 +633,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
     "supported": true,
   },
   "maxBindParameters": 32766,
+  "orderedAggregates": true,
   "recursiveTraversal": {
     "supported": true,
   },

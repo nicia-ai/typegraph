@@ -36,6 +36,7 @@ export function visitExpressionChildren(
     }
     case "aggregate": {
       if (node.operand !== undefined) visit(node.operand);
+      for (const order of node.orderBy ?? []) visit(order.expression);
       return;
     }
     case "conditional": {

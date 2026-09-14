@@ -4,6 +4,10 @@
  * Implements dialect-specific SQL generation for PostgreSQL databases.
  * Uses PostgreSQL's native JSONB operators for JSON operations.
  */
+import {
+  assertPortableScalarValueType,
+  type PortableCountDistinctValueType,
+} from "../aggregate-value-types";
 import { type ValueType } from "../ast";
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -16,6 +20,15 @@ import {
   packSqlListValue,
 } from "./profile";
 import { type DialectAdapter } from "./types";
+
+const SCALAR_SQL_TYPES: Readonly<
+  Record<PortableCountDistinctValueType, string>
+> = {
+  boolean: "boolean",
+  date: "timestamptz",
+  number: "numeric",
+  string: "text",
+};
 
 function buildTextJsonArray(values: readonly SqlFragment[]): SqlFragment {
   return sql`jsonb_build_array(${sql.join(
@@ -149,6 +162,13 @@ export const postgresDialect: DialectAdapter = {
     const row = sql.identifier(rowAlias);
     const order = sql`${row}.${sql.identifier(orderColumn)}`;
     return sql`(SELECT COALESCE(jsonb_agg(to_jsonb(${row}) - ${orderColumn} ORDER BY ${order}), '[]'::jsonb) FROM ${row})`;
+  },
+
+  orderedScalarJsonArray(value, valueType, orderBy) {
+    assertPortableScalarValueType(valueType, "COLLECT");
+    // Bind-only operands have no SQL context from which PostgreSQL can infer a type.
+    const typedValue = sql`CAST(${value} AS ${sql.raw(SCALAR_SQL_TYPES[valueType])})`;
+    return sql`COALESCE(jsonb_agg(to_jsonb(${typedValue}) ORDER BY ${sql.join(orderBy, sql`, `)}), '[]'::jsonb)`;
   },
 
   // ============================================================

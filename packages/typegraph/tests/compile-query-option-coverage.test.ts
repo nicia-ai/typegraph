@@ -42,6 +42,7 @@ function fullyPopulatedOptions(): Required<CompileQueryOptions> {
     fulltextStrategy: fts5Strategy,
     vectorStrategy: sqliteVecStrategy,
     windowFunctions: false,
+    orderedAggregates: true,
     vectorSlots,
     fulltextLanguages: new Map([["Document", "english"]]),
     recordedReadBinding: recordedRelation({ schema: DEFAULT_SQL_SCHEMA }),

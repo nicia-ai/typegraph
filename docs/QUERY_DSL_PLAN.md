@@ -1,8 +1,9 @@
 # Query DSL consolidation plan
 
-Status: phases 1–5, mixed traversal composition, optional first recursive stages, and qualified paths are implemented
-in PR #691. Phase 6 implementation and local benchmarks are complete; real remote PostgreSQL measurements remain
-outstanding. The completion audit below records the final scope; further capabilities belong in separate PRs.
+Status: PR #691 merged on 2026-09-14 at `d80a10a2`, delivering phases 1–5, opt-in shared subgraphs, mixed traversal
+composition, optional first recursive stages, and qualified paths. Documentation and release notes are reconciled.
+Phase 6 local measurements are complete; real remote PostgreSQL measurements remain outstanding. The next feature
+slice, ordered scalar collection aggregation, is implemented and validated on `feat/query-collection-aggregates`.
 
 ## Delivery status
 
@@ -15,11 +16,19 @@ outstanding. The completion audit below records the final scope; further capabil
 | Phase 5: match/result semantics | Implemented: completed-row filters, recursive stopping, and candidate-limit semantics. |
 | Phase 6: shared subgraphs | Implemented as opt-in sharing, with SQLite and local PostgreSQL benchmarks. |
 | Recursive composition | Fixed/recursive chains, optional first stages, and qualified path references implemented. |
+| Ordered scalar collections | Implemented and validated: explicit element ordering, typed decoding, preparation, and batching. |
+| Documentation and release notes | PR #691 reconciled; collection slice adds its own minor changeset and runnable example. |
 | Performance evidence still due | Real remote PostgreSQL latency; simulated delay is not equivalent evidence. |
 
 The final composition work includes formatting/lint, type contracts, API compatibility/reports, examples, documentation,
 Knip, and full default/PostgreSQL test runs. Their camelCase optional-root failure was corrected and reverified in the
 complete affected traversal matrix: 52 checks across SQLite, PGlite, and both PostgreSQL drivers.
+
+The documentation reconciliation passed formatting/lint, type checking, Knip, all 30 SQLite examples, the PostgreSQL
+example, and the documentation build (441 internal links and public exports in 244 snippets). Two revised composition
+snippets also passed type and runtime checks. The full default suite reported 10,059 passes and one README inventory
+line mismatch; the recorded location was corrected and all five inventory checks passed on rerun. This is not a claim
+that the full suite was rerun after that correction; the latest CI run remains the release check.
 
 ## Objective
 
@@ -236,7 +245,8 @@ results, and before grouping, ordering and limiting.
 `stopExpansion(alias, predicate, { emitStopNode? })` independently stops a matching recursive branch. Stopping nodes
 are emitted by default; `emitStopNode: false` omits them. Stop predicates are limited to ordinary fields on the
 recursive target alias. The subsequent recursion work below preserves these boundaries across multiple recursive
-stages and adds kind-qualified path references. Scalar traversed-edge projection remains unsupported.
+stages and adds kind-qualified path references. Scalar recursive-edge projection remains unsupported; fixed-hop
+edge properties are selectable, including in mixed chains.
 
 ## Phase 6: Measure and optimize multi-root subgraphs
 
@@ -270,10 +280,16 @@ and independently owned nested data. The batch callback pins one current-time co
 their own coordinates.
 
 Sharing is opt-in because the SQLite measurements show a tradeoff: with eight overlapping roots and full 2 KiB payloads,
-it reduced encoded bytes by 27% and median total time by 18% against an independent batch. With disjoint roots it
+it reduced encoded bytes by 26.9% and median total time by 19.6% against an independent batch. With disjoint roots it
 increased encoded bytes by 25%. The original `batchOnce()` plan and tuned direct hydration remain defaults. These are
 local measurements, not a universal speed guarantee; the benchmark records client-observed execution duration and
 JSON-encoded row bytes rather than server CPU or protocol wire bytes.
+
+The [performance guide](../apps/docs/src/content/docs/performance/overview.md#choosing-shared-subgraphs) now contrasts
+overlapping biographies, disjoint neighborhoods, and identity-only projections with diagrams and code. Identity-only
+sharing increased encoded bytes even when local latency improved. Preserve that distinction when recommending a plan.
+The [SQLite report](../packages/benchmarks/reports/subgraph-batch-sqlite-2026-09-14.md) and
+[PostgreSQL report](../packages/benchmarks/reports/subgraph-batch-postgres-2026-09-14.md) record the measured tradeoffs.
 
 ## Implemented recursion extensions
 
@@ -391,13 +407,74 @@ a raw `recordedAsOf` option or weaken the current recorded-read boundary to make
 - Update API reports, examples, query docs, and changesets in the same implementation change. Preserve unrelated
   working-tree changes.
 
-## Remaining delivery order
+## Recommended next steps
 
-1. Documentation reconciliation is complete: API reports, README references, query guides, performance examples, and
-   runnable examples describe the final implementation and restrictions. One consolidated minor changeset preserves
-   feature descriptions and upgrade notes; Changesets will generate the packaged changelog at release time.
-2. Keep PR #691 aligned with that documentation and the final CI results.
-3. Close feature scope; pursue the listed follow-ons separately, including the outstanding remote PostgreSQL benchmark.
+### 1. PR #691 delivery: complete
 
-Do not expand this PR into general path hydration or new relational operators. Its final additions complete the
-composition contracts of the APIs it already introduces.
+PR #691 is merged. Its implementation, API reports, documentation, examples, consolidated minor changeset, and PR
+body are aligned. Changesets will generate the packaged changelog at release time; preserve the compatibility notes
+when reviewing that release.
+
+### 2. Complete performance evidence independently
+
+Run the existing subgraph harness against a disposable remote PostgreSQL target when one is available. Compare direct
+reads, default batching, and shared batching at the same root counts and projections, including overlapping, disjoint,
+and identity-only cases. Record client/server placement, pool size, root/depth/fanout bounds, warmups, and repeated-run
+latency distributions. Distinguish measured wire bytes and server time from the existing encoded-byte and client-time
+metrics; report unavailable metrics honestly.
+
+Do not make this a dependency for the next DSL feature. Keep sharing opt-in unless representative evidence supports a
+separate selection policy. A faster local result or simulated delay alone does not justify changing the default.
+
+### 3. Implemented: ordered scalar collection aggregation
+
+`expr.collect(value, { orderBy: [...] })` collects scalar values through the shared expression and relation compiler.
+Project a relation, group by its parent columns, and collect related values without introducing another graph-read API.
+The initial slice now has these contracts:
+
+- String, number, Boolean, and Date operands produce typed readonly arrays. Duplicates remain, SQL NULL elements become
+  `undefined`, an empty ungrouped aggregate returns `[]`, and an empty grouped input returns no rows. Optional misses
+  remain elements unless explicitly filtered out; filtering can remove an entire group.
+- A nonempty aggregate-local order is required. Direction and null placement are explicit or use the documented defaults.
+  Include a unique tie-breaker for deterministic output. Source filters, distinctness, ordering, and ranges apply before
+  aggregation; source or result-row order never substitutes for element order.
+- Collection codecs survive derived projection, scalar subqueries, conditional/coalescing expressions, compatible
+  `unionAll()`, preparation, and `batchOnce()`. Collection columns are refused as ordering/grouping/equality keys and
+  remain outside scalar-only paging. Ordinary JSON-array property decoding is unchanged.
+- Execution requires `capabilities.orderedAggregates: true`. Bundled PostgreSQL declares support. Supported preparable
+  synchronous SQLite clients and the async libSQL factory probe at construction. Other unprobed SQLite connections must
+  declare verified support explicitly. Custom dialect adapters implement `orderedScalarJsonArray()` through the required
+  dialect seam.
+- Shared backend cases cover optional misses, nullable elements, duplicates, tie-breakers, source ranges, literal and
+  parameter operands, empty input, Boolean/Date decoding, transaction-visible writes, temporal views, and refusal before
+  SQL on unsupported backends. Removing SQLite's aggregate-local ordering was witnessed to fail the regression case.
+- Example `31-ordered-collections.ts` demonstrates grouped purchase histories and prepared batched reads. Collections
+  materialize fully; there is no silent truncation or response-byte limit. Object elements, general top-N-per-group,
+  aggregate-local limits, and arbitrary nested queries remain outside this slice.
+
+Validation passed: formatting/lint, type checking and type contracts, Knip, API reports and compatibility, all 31 SQLite
+examples, the PostgreSQL example, and the documentation build (443 internal links and exports in 244 snippets). The final
+default suite passed 10,097 tests; the final PostgreSQL suite passed 4,122 tests. Existing platform-specific skips remain.
+The full runs caught and verified the object-field proxy metadata fix; capability snapshots now include ordered support.
+
+After the scalar contract is stable, extend collection elements to explicitly projected records. Define absent records
+versus records containing nullable fields, nested decoding, and ownership before introducing a convenience relationship
+API. Use this extension to deliver nested result objects without changing graph match multiplicity implicitly.
+
+### 4. Then add partitioned ranking and bounded nested results
+
+Build general top-N-per-group on an explicit partition/order contract, reusing the relation layer. Specify ties,
+null ordering, and whether filtering occurs before or after ranking. Start with one concrete ranked-per-parent use case;
+avoid exposing a broad window-function surface before its composition rules are settled. Existing subgraph
+`edgeWindows` continues to serve bounded graph expansion.
+
+### 5. Keep the other extensions demand-driven
+
+Hydrated paths come after collection/result-shaping contracts unless a concrete consumer needs them sooner. First define
+path order, repeated entities, identity, temporal coordinates, missing entities, and property projections. Qualified
+references already cover topology and direction, so property hydration is not required to complete PR #691.
+
+Recorded-time batching needs its own view-bound builder and provenance contract; prioritize it when an audit/replay
+consumer needs multiple independent reads. Direct recursive grouping remains lower priority because projecting into a
+relation already provides an aggregation boundary. Automatic sharing, streamed batch responses, and byte budgets remain
+separate execution designs rather than incidental additions to these features.

@@ -166,6 +166,9 @@ their result type because an empty input produces SQL `NULL`.
 and unknown dynamic values are refused because SQLite text equality and PostgreSQL JSON equality do
 not define the same distinct groups for structured values.
 
+For ordered scalar lists, use [`expr.collect()` on a relation](/queries/relations#ordered-scalar-collections).
+Collection ordering is explicit and independent of result-row ordering.
+
 ## Scope safety
 
 Each field expression belongs to the query scope that created it. TypeGraph refuses expression

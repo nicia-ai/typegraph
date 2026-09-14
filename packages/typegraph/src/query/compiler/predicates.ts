@@ -507,6 +507,7 @@ export type PredicateCompilerContext = Readonly<{
    * `ROW_NUMBER()`.
    */
   windowFunctions: boolean;
+  orderedAggregates?: boolean;
   /**
    * Declared embedding slots `(kind, fieldPath) -> {dimensions, metric,
    * indexType}`. The embeddings CTE consults it to know which kinds in

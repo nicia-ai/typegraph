@@ -473,6 +473,7 @@ function buildSqliteCapabilities(
   options: Readonly<{
     transactionMode: SqliteExecutionAdapter["profile"]["transactionMode"];
     maxBindParameters: number;
+    orderedAggregates: boolean;
   }>,
 ): BackendCapabilities {
   const base =
@@ -494,6 +495,7 @@ function buildSqliteCapabilities(
   return {
     ...base,
     maxBindParameters: options.maxBindParameters,
+    ...(options.orderedAggregates ? { orderedAggregates: true } : {}),
   };
 }
 
@@ -1267,6 +1269,7 @@ export function buildSqliteEngineProfile(
   const baseCapabilities = buildSqliteCapabilities({
     transactionMode,
     maxBindParameters: executionAdapter.profile.maxBindParameters,
+    orderedAggregates: executionAdapter.profile.orderedAggregates,
   });
   const declaredCapabilities = sealCapabilityDeclaration(
     normalizeGraphAnalyticsCapabilities({

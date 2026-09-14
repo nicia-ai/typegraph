@@ -84,6 +84,58 @@ position; the defaults are NULLS LAST for ascending and NULLS FIRST for descendi
 select an arbitrary edge or path to represent an entity. `count()` counts the current relation,
 including distinctness and its range; `exists()` checks whether it has a row. Neither runs `map()`.
 
+## Ordered scalar collections
+
+Use `expr.collect()` to return a list of scalar values per group on a backend declaring
+[`orderedAggregates: true`](/backend-setup#backend-capabilities). Project the input columns into a
+relation first, then define collection ordering explicitly:
+
+```typescript
+const purchases = store.query().from("Purchase", "purchase")
+  .project((fields) => ({
+    id: fields.purchase.id,
+    customerId: fields.purchase.customerId,
+    amount: fields.purchase.amount,
+    purchasedAt: fields.purchase.purchasedAt,
+  })).asRelation();
+
+const histories = await purchases
+  .groupBy((columns) => [columns.customerId])
+  .aggregate((columns) => ({
+    customerId: columns.customerId,
+    amounts: expr.collect(columns.amount, {
+      orderBy: [
+        { expression: columns.purchasedAt, direction: "asc", nulls: "last" },
+        { expression: columns.id },
+      ],
+    }),
+  }))
+  .orderBy((columns) => columns.customerId)
+  .execute();
+// One row per customer, with amounts in purchase order, including duplicates.
+```
+
+`orderBy` must contain at least one scalar expression. Each item accepts `direction` (`"asc"` by
+default) and `nulls` (last for ascending, first for descending). Include a unique tie-breaker when
+other ordering values can tie. Collection ordering controls elements inside each list; the relation's
+outer `orderBy()` controls result rows. Source ordering is not an implicit collection order.
+
+Collection elements may be strings, numbers, Booleans, or dates. The result is a readonly array with
+the operand's element type and nullability preserved. SQL NULL elements decode to `undefined`;
+they are retained, including missing optional targets. Filter the input relation explicitly with
+`expr.isNotNull(...)` to exclude those rows. Filtering can remove an entire group; it does not
+synthesize an empty group for an absent parent.
+
+An empty ungrouped collection aggregate returns one row containing `[]`; an empty grouped relation
+returns no rows. Source filters, distinctness, and ranges apply before collection aggregation.
+Duplicates remain unless you deduplicate the input projection explicitly.
+
+Collections support prepared and batched relation execution. They are materialized arrays, with no
+implicit truncation or response-byte limit. Object/nested collection elements and aggregate-local
+limits are outside this scalar API. Structured equality restrictions still apply: collection columns
+cannot be used as relation ordering keys, with `distinct()`, distinct set operations, grouping keys, or the existing
+scalar-only paging contract. Use compatible `unionAll()` to retain collection rows without equality.
+
 ## Typed prepared composition
 
 Reuse parameter expressions in the query and pass their declaration to `prepare()` to infer the

@@ -55,6 +55,8 @@ export function assertExpressionScope(
     case "aggregate": {
       if (node.operand !== undefined)
         assertExpressionScope(node.operand, scope);
+      for (const order of node.orderBy ?? [])
+        assertExpressionScope(order.expression, scope);
       return;
     }
     case "conditional": {
