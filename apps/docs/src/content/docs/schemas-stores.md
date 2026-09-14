@@ -2832,6 +2832,7 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 | Load entity with all relationships | `subgraph(maxDepth: 1)` | Fixed 2 SQLite / 3 PostgreSQL statements — recursive traversal cost does not grow with edge count |
 | Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop without extra round trips per hop |
 | Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes, in one statement |
+| Several independent bounded reads in one round trip | `store.batchOnce()` | Embeds fluent queries, relations, neighbors, counts, or subgraphs in exactly one statement |
 | Multiple independent queries with per-query control | `store.batch()` | Typed tuple results, at most one query in flight — still at least a statement per query, and not a snapshot |
 | Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed; honors the graph's temporal mode by default |
 | Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit; pass `temporalMode` / `asOf` when reading history |
@@ -2843,10 +2844,11 @@ or how much it returns. Parallel `findFrom` calls scale linearly instead: one pe
 additional queries for node resolution. The gap widens as relationship count grows.
 
 For the common "load an entity and everything it touches" pattern (detail pages, config hydration,
-template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach. When you need
-per-query filtering, sorting, or pagination across multiple independent queries, use
-[`store.batch()`](#batch-query-execution) — but note it still costs at least a statement per query, so it
-does not narrow this gap. Reserve individual fluent queries for one-off operations.
+template instantiation), use `subgraph()` with `maxDepth: 1`. When one request needs several
+independent bounded reads, use [`store.batchOnce()`](#batch-query-execution) to keep them in one
+statement. Use `store.batch()` when a member cannot be embedded or sequential transaction execution
+is the intended contract; it still costs at least one statement per query. Reserve individual fluent
+queries for one-off operations.
 
 ### Graph Algorithms
 

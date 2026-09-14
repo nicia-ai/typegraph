@@ -1,7 +1,12 @@
 /** Overlapping subgraph batches and independently tracked recursive path stages. */
 import assert from "node:assert/strict";
 
-import { createStoreWithSchema, defineEdge, defineGraph, defineNode } from "@nicia-ai/typegraph";
+import {
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "@nicia-ai/typegraph";
 import { z } from "zod";
 
 import { createExampleBackend } from "./_helpers";
@@ -20,31 +25,93 @@ async function main(): Promise<void> {
   const backend = createExampleBackend();
   try {
     const [store] = await createStoreWithSchema(graph, backend);
-    const ada = await store.nodes.Person.create({ name: "Ada", biography: "Ada's biography. ".repeat(256) });
-    const bea = await store.nodes.Person.create({ name: "Bea", biography: "Bea's biography. ".repeat(256) });
-    const cara = await store.nodes.Person.create({ name: "Cara", biography: "Cara's biography. ".repeat(256) });
+    const ada = await store.nodes.Person.create({
+      name: "Ada",
+      biography: "Ada's biography. ".repeat(256),
+    });
+    const bea = await store.nodes.Person.create({
+      name: "Bea",
+      biography: "Bea's biography. ".repeat(256),
+    });
+    const cara = await store.nodes.Person.create({
+      name: "Cara",
+      biography: "Cara's biography. ".repeat(256),
+    });
+    const dana = await store.nodes.Person.create({
+      name: "Dana",
+      biography: "Dana's biography. ".repeat(256),
+    });
+    const eli = await store.nodes.Person.create({
+      name: "Eli",
+      biography: "Eli's biography. ".repeat(256),
+    });
     await store.edges.knows.create(ada, bea, {});
     await store.edges.knows.create(bea, cara, {});
+    await store.edges.knows.create(dana, eli, {});
+
+    // Keep the default batching path for disjoint neighborhoods: there is no
+    // repeated hydration for a shared query to remove.
+    const disjoint = await store.batchOnce((read) =>
+      [ada.id, dana.id].map((root) =>
+        read.subgraph(root, { edges: ["knows"], maxDepth: 2 }),
+      ),
+    );
+    assert.equal(disjoint[0]?.nodes.has(cara.id), true);
+    assert.equal(disjoint[0].nodes.has(dana.id), false);
+    assert.equal(disjoint[1]?.nodes.has(eli.id), true);
+    assert.equal(disjoint[1].nodes.has(ada.id), false);
+
+    // The same overlapping Ada/Bea roots are also cheap on the default path
+    // when callers need identities only. Empty projections omit properties.
+    const identityOnly = await store.batchOnce((read) =>
+      [ada.id, bea.id].map((root) =>
+        read.subgraph(root, {
+          edges: ["knows"],
+          maxDepth: 2,
+          project: { nodes: { Person: [] }, edges: { knows: [] } },
+        }),
+      ),
+    );
+    assert.equal(identityOnly[0]?.nodes.has(cara.id), true);
+    assert.equal(identityOnly[1]?.nodes.has(cara.id), true);
+    const identityAda = identityOnly[0].nodes.get(ada.id);
+    assert.ok(identityAda);
+    assert.equal("biography" in identityAda, false);
 
     // One statement retrieves both bounded neighborhoods. Shared hydration is
     // useful here because they overlap and include substantial property data.
     // Measure your workload before opting in; disjoint roots can transfer more.
     const roots = [ada.id, bea.id];
     const subgraphs = await store.batchOnce(
-      (read) => roots.map((root) => read.subgraph(root, { edges: ["knows"], maxDepth: 2 })),
+      (read) =>
+        roots.map((root) =>
+          read.subgraph(root, { edges: ["knows"], maxDepth: 2 }),
+        ),
       { shareSubgraphs: true },
     );
     assert.equal(subgraphs.length, 2);
     assert.equal(subgraphs[0]?.nodes.has(cara.id), true);
     assert.equal(subgraphs[1]?.nodes.has(cara.id), true);
 
-    const paths = await store.query().from("Person", "root")
+    const paths = await store
+      .query()
+      .from("Person", "root")
       .whereNode("root", (person) => person.id.eq(ada.id))
       .traverse("knows", "firstEdge", { expand: "none" })
-      .recursive({ minHops: 1, maxHops: 1, path: { format: "qualified" }, depth: true })
+      .recursive({
+        minHops: 1,
+        maxHops: 1,
+        path: { format: "qualified" },
+        depth: true,
+      })
       .to("Person", "middle")
       .traverse("knows", "secondEdge", { expand: "none" })
-      .recursive({ minHops: 1, maxHops: 1, path: { format: "qualified" }, depth: true })
+      .recursive({
+        minHops: 1,
+        maxHops: 1,
+        path: { format: "qualified" },
+        depth: true,
+      })
       .to("Person", "leaf")
       .select((row) => ({
         name: row.leaf.name,
@@ -63,29 +130,52 @@ async function main(): Promise<void> {
     assert.equal(path.firstPath.length, 3);
     assert.equal(path.secondPath.length, 3);
     // Fixed hops and recursion share one completed-match pipeline.
-    const mixed = await store.query().from("Person", "root")
+    const mixed = await store
+      .query()
+      .from("Person", "root")
       .whereNode("root", (person) => person.id.eq(ada.id))
       .traverse("knows", "directEdge", { expand: "none" })
       .to("Person", "directFriend")
       .traverse("knows", "pathEdge", { expand: "none" })
       .recursive({ minHops: 1, maxHops: 2, depth: true })
       .to("Person", "friend")
-      .select((row) => ({ name: row.friend.name, directEdgeId: row.directEdge.id, depth: row.friend_depth }))
+      .select((row) => ({
+        name: row.friend.name,
+        directEdgeId: row.directEdge.id,
+        depth: row.friend_depth,
+      }))
       .execute();
     assert.equal(mixed.length, 1);
     assert.equal(mixed[0]?.name, "Cara");
 
     // Cara has no outgoing path; the optional first stage still returns her.
-    const optional = await store.query().from("Person", "root")
+    const optional = await store
+      .query()
+      .from("Person", "root")
       .whereNode("root", (person) => person.id.eq(cara.id))
       .optionalTraverse("knows", "pathEdge", { expand: "none" })
-      .recursive({ minHops: 1, maxHops: 2, path: { format: "qualified" }, depth: true })
+      .recursive({
+        minHops: 1,
+        maxHops: 2,
+        path: { format: "qualified" },
+        depth: true,
+      })
       .to("Person", "friend")
-      .select((row) => ({ name: row.root.name, friend: row.friend?.name, path: row.friend_path, depth: row.friend_depth }))
+      .select((row) => ({
+        name: row.root.name,
+        friend: row.friend?.name,
+        path: row.friend_path,
+        depth: row.friend_depth,
+      }))
       .execute();
-    assert.deepEqual(optional, [{ name: "Cara", friend: undefined, path: undefined, depth: undefined }]);
+    assert.deepEqual(optional, [
+      { name: "Cara", friend: undefined, path: undefined, depth: undefined },
+    ]);
 
-    console.log({ roots: subgraphs.map((subgraph) => subgraph.root?.name), paths });
+    console.log({
+      roots: subgraphs.map((subgraph) => subgraph.root?.name),
+      paths,
+    });
   } finally {
     await backend.close();
   }

@@ -81,13 +81,13 @@ const allManagers = await store
 .recursive(options?)
 ```
 
-| Option        | Type                   | Default     | Description                                      |
-| ------------- | ---------------------- | ----------- | ------------------------------------------------ |
-| `minHops`     | `number`               | `1`         | Minimum traversal depth before including results |
-| `maxHops`     | `number`               | `10`*       | Maximum traversal depth                          |
-| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | How to handle cycles                             |
-| `depth`       | `boolean \| string`    | —           | Expose hop count in `select()` context           |
-| `path`        | `boolean \| string`    | —           | Expose node ID path in `select()` context        |
+| Option        | Type                                                              | Default     | Description                                      |
+| ------------- | ----------------------------------------------------------------- | ----------- | ------------------------------------------------ |
+| `minHops`     | `number`                                                          | `1`         | Minimum traversal depth before including results |
+| `maxHops`     | `number`                                                          | `10`*       | Maximum traversal depth                          |
+| `cyclePolicy` | `"prevent" \| "allow"`                                            | `"prevent"` | How to handle cycles                             |
+| `depth`       | `boolean \| string`                                               | —           | Expose hop count in `select()` context           |
+| `path`        | `boolean \| string \| { format: "qualified"; alias?: string }` | —           | Expose an ID or qualified path                   |
 
 *When `maxHops` is omitted, an implicit cap of 10 is applied. See [Depth Limits](#depth-limits).
 
@@ -142,8 +142,8 @@ const distantConnections = await store
 ## Tracking Depth and Path
 
 When `depth` or `path` are enabled, they become available as properties on the `select()` context.
-Pass a string to control the property name; pass `true` to use the default names (`"depth"` and
-`"path"`).
+Pass a string to control the property name. Pass `true` to derive the default name from the target
+alias: `${targetAlias}_depth` or `${targetAlias}_path`.
 
 ### depth
 
@@ -273,10 +273,9 @@ const routes = await store
 
 The `minHops`, `maxHops`, `cyclePolicy`, `stopExpansion`, `path`, and `depth` settings apply to
 their own recursive stage. An `optionalTraverse()`, including the first stage, retains the earlier row
-when it finds no match; its
-target, path, and depth values are `undefined`. A completed `.where()`, final ordering, and final
-limit apply after every stage. The `from` option may also branch from any earlier materialized node
-alias.
+when it finds no match; its target, path, and depth values are `undefined`. A completed `.where()`,
+final ordering, and final limit apply after every stage. The `from` option may also branch from any
+earlier materialized node alias.
 
 ### Mixing fixed hops with recursion
 
@@ -497,7 +496,7 @@ import {
 
 .recursive()                  // Implicitly capped at 10
 .recursive({ maxHops: 50 })   // Honored (≤ 1000)
-.recursive({ maxHops: 2000 }) // Throws UnsupportedPredicateError
+.recursive({ maxHops: 2000 }) // Refused before SQL compilation
 ```
 
 :::note[Breaking change in v0.14]

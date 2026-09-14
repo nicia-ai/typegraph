@@ -34,7 +34,7 @@ type RecordedClaimSite = Readonly<{
 const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   {
     file: "README.md",
-    line: 119,
+    line: 123,
     text:
       "strategy authors can use the complete " +
       CLAIM_WORD +

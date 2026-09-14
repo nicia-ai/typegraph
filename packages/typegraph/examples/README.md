@@ -4,7 +4,7 @@ Runnable examples demonstrating TypeGraph features. Each example is self-contain
 
 ## Running Examples
 
-All examples use an in-memory SQLite backend by default, requiring no external database setup.
+Every example except the PostgreSQL setup example uses an in-memory SQLite backend and requires no external database setup.
 
 ```bash
 # From the packages/typegraph directory
@@ -45,13 +45,22 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 | Example | Description |
 |---------|-------------|
 | [07-delete-behaviors.ts](./07-delete-behaviors.ts) | Cascade, restrict, and disconnect on delete |
-| [09-pagination-streaming.ts](./09-pagination-streaming.ts) | Cursor pagination and result streaming |
-| [13-aggregates.ts](./13-aggregates.ts) | GROUP BY, COUNT, SUM, AVG, MIN, MAX, and HAVING |
 | [17-bulk-find-by-index.ts](./17-bulk-find-by-index.ts) | Batched candidate lookup by declared index for import reconciliation and dedup, with null-safe matching and `limitPerInput` |
 | [18-fhir-graph-merge.ts](./18-fhir-graph-merge.ts) | Branch and merge overlapping FHIR-style records into a canonical patient care graph with conflict and provenance reporting |
 | [19-incremental-merge.ts](./19-incremental-merge.ts) | Incrementally ingest a new source into a live graph with `mergeIncremental()` — recall an already-committed entity by its unique key (no duplicate), flag the conflict, and persist queryable provenance |
 | [24-bulk-writes.ts](./24-bulk-writes.ts) | High-throughput sync with `bulkCreate`, `bulkInsert`, `bulkUpsertById`, and `bulkDelete` — created-vs-updated tracking, atomic failure semantics, and a per-row-loop timing comparison |
 | [25-transactions.ts](./25-transactions.ts) | Atomic multi-write operations with `store.transaction()`: commit-or-rollback guarantees, rollback proof, and joining a caller-owned transaction via `withTransaction()` |
+
+### Querying and Composition
+
+| Example | Description |
+|---------|-------------|
+| [09-pagination-streaming.ts](./09-pagination-streaming.ts) | Stable ordering, cursor pagination, and result streaming |
+| [13-aggregates.ts](./13-aggregates.ts) | `GROUP BY`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `HAVING` |
+| [27-typed-expressions.ts](./27-typed-expressions.ts) | Typed database filtering, arithmetic, projection, grouping, aggregation, and row mapping |
+| [28-relational-composition.ts](./28-relational-composition.ts) | Derived aggregates, visible-column set operations, typed prepared batches, and deterministic streaming |
+| [29-match-stages.ts](./29-match-stages.ts) | Per-hop match constraints, completed-row filters, and recursive stop expansion |
+| [30-shared-subgraphs-and-paths.ts](./30-shared-subgraphs-and-paths.ts) | Shared hydration for overlapping subgraph batches, qualified paths across multiple recursive stages, mixed fixed/recursive traversals, and optional first recursion |
 
 ### Time Travel, Views & Bitemporal
 
@@ -61,15 +70,13 @@ POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
 | [21-agent-decision-replay.ts](./21-agent-decision-replay.ts) | Reconstruct the exact knowledge graph an AI agent saw at decision time and replay the *same* `query()` / `degree()` over it — point-in-time-correct reasoning for audit, eval, and debugging |
 | [22-breach-forensics.ts](./22-breach-forensics.ts) | Bitemporal + graph: valid-time-windowed grants (`validFrom`/`validTo`), composed pins (`store.asOf(breachAt).asOfRecorded(alertAnchor)`), `reachable()` for the true blast radius, and a pinned `shortestPath()` that names the attack path incident response later deleted |
 | [26-store-views.ts](./26-store-views.ts) | Read lenses over one graph: view modes (current / includeTombstones / includeEnded), asOf-pinned edge reads, consistent snapshots, and the read-only refusal contract |
-| [27-typed-expressions.ts](./27-typed-expressions.ts) | Typed database filtering, arithmetic, projection, grouping, aggregation, and row mapping |
-| [28-relational-composition.ts](./28-relational-composition.ts) | Derived aggregates, visible-column set operations, typed prepared batches, and deterministic streaming |
-| [29-match-stages.ts](./29-match-stages.ts) | Optional match constraints, completed-row filters, and recursive stop expansion |
 
 ### Provenance & Retraction
 
 | Example | Description |
 |---------|-------------|
 | [23-provenance-retraction.ts](./23-provenance-retraction.ts) | Retract bad scanner/vendor sources, keep facts with alternate support, close unsupported terminal facts, and replay the before/after belief state with recorded time |
+| [27-durable-merge-review.ts](./27-durable-merge-review.ts) | Persist candidate merge reviews, revalidate retained candidates, and apply approved plans under the revision fence |
 
 Docs walkthroughs for the temporal examples (20–23):
 [Bitemporal Time Travel](https://typegraph.dev/examples/bitemporal-time-travel)
@@ -163,18 +170,22 @@ Each example follows a consistent pattern:
 4. Understand data lifecycle with **07-delete-behaviors**
 5. Learn efficient data access with **09-pagination-streaming**
 6. Learn aggregate queries with **13-aggregates**
-7. Make multi-write invariants atomic with **25-transactions**
-8. Move high-volume ingestion to **24-bulk-writes**, and reconcile imports
+7. Continue through the query pipeline with **27-typed-expressions**,
+   **28-relational-composition**, **29-match-stages**, and
+   **30-shared-subgraphs-and-paths**
+8. Make multi-write invariants atomic with **25-transactions**
+9. Move high-volume ingestion to **24-bulk-writes**, and reconcile imports
    and find dedup candidates with **17-bulk-find-by-index**
-9. Merge independently edited graph branches with **18-fhir-graph-merge**, then
-   ingest into a live graph in waves with **19-incremental-merge**
-10. For production, see **10-postgresql** for backend configuration
-11. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
-12. For end-to-end application demos, see **14-research-copilot**
-13. For read lenses over one graph — view modes, pinned reads, consistent
+10. Merge independently edited graph branches with **18-fhir-graph-merge**, then
+    ingest into a live graph in waves with **19-incremental-merge** and review
+    durable candidates with **27-durable-merge-review**
+11. For production, see **10-postgresql** for backend configuration
+12. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
+13. For end-to-end application demos, see **14-research-copilot**
+14. For read lenses over one graph — view modes, pinned reads, consistent
     snapshots — see **26-store-views**
-14. For time travel and bitemporal history, start with **20-bitemporal-time-travel**,
+15. For time travel and bitemporal history, start with **20-bitemporal-time-travel**,
     then see **21-agent-decision-replay** (reconstruct what an agent saw) and
     **22-breach-forensics** (bitemporal reachability)
-15. For source lineage and belief transitions, run
+16. For source lineage and belief transitions, run
     **23-provenance-retraction**

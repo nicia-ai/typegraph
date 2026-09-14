@@ -323,7 +323,7 @@ const subgraphs = await store.batchOnce((read) =>
 );
 ```
 
-When compatible subgraphs have substantially overlapping roots and project meaningful payloads,
+When compatible subgraphs have substantially overlapping neighborhoods and project meaningful payloads,
 opt into shared traversal and hydration:
 
 ```typescript
@@ -343,7 +343,9 @@ const subgraphs = await store.batchOnce(
 The option groups only compatible subgraph reads and hydrates a shared entity once while preserving
 an independent result object for every request. The default remains independent subgraph plans in
 the same one statement. Sharing adds membership and reconstruction overhead, so enable it for
-measured overlap and payload shapes rather than assuming it is universally faster.
+measured overlap and payload shapes rather than assuming it is universally faster. See
+[shared subgraph examples](/performance/overview#choosing-shared-subgraphs) for overlapping
+biographies, disjoint neighborhoods, and identity-only results with different tradeoffs.
 
 Tuple members may use different roots, edge sets, depths, windows, and projections when a page
 needs heterogeneous neighborhoods:
@@ -673,7 +675,7 @@ async function processAllOrders() {
   for await (const order of stream) {
     try {
       await fulfillOrder(order);
-      await store.update("Order", order.id, { status: "fulfilled" });
+      await store.nodes.Order.update(order.id, { status: "fulfilled" });
     } catch (error) {
       console.error(`Failed to process order ${order.id}:`, error);
     }

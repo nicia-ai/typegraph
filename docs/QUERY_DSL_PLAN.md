@@ -375,11 +375,12 @@ Keep the following out of PR #691:
 Recorded-time batch composition needs an explicit view-bound builder and compatible recorded coordinates. Do not expose
 a raw `recordedAsOf` option or weaken the current recorded-read boundary to make batching convenient.
 
-## Delivery and migration
+## Delivery record and release checks
 
-- Deliver phases 1 and 2 independently; neither requires the expression redesign.
-- Deliver phase 3 as a foundation with a small complete expression surface, then extend it in phase 4. Avoid shipping
-  partially supported expression nodes.
+- Phases 1 and 2 are implemented as independent contract and read-composition layers; neither depends on the
+  expression redesign.
+- Phase 3 provides the complete base expression surface, and phase 4 composes those expressions through derived
+  relations. Expression nodes are applied across their documented execution paths or explicitly refused.
 - Keep existing APIs as adapters during migration. Document any newly rejected invalid calls, corrected aggregate result
   types, and changed terminal availability in upgrade notes.
 - Audit every consumer when changing shared return types, predicates, compilation, or decoding contracts. Include raw
@@ -392,8 +393,11 @@ a raw `recordedAsOf` option or weaken the current recorded-read boundary to make
 
 ## Remaining delivery order
 
-1. Keep PR #691 aligned with the final implementation, documented restrictions, and CI results.
-2. Close feature scope; pursue the listed follow-ons separately.
+1. Documentation reconciliation is complete: API reports, README references, query guides, performance examples, and
+   runnable examples describe the final implementation and restrictions. One consolidated minor changeset preserves
+   feature descriptions and upgrade notes; Changesets will generate the packaged changelog at release time.
+2. Keep PR #691 aligned with that documentation and the final CI results.
+3. Close feature scope; pursue the listed follow-ons separately, including the outstanding remote PostgreSQL benchmark.
 
 Do not expand this PR into general path hydration or new relational operators. Its final additions complete the
 composition contracts of the APIs it already introduces.

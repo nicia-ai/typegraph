@@ -1,10 +1,11 @@
 ---
 title: Shape
-description: Transform output structure with select() and aggregate()
+description: Transform output with select(), project(), map(), and aggregate()
 ---
 
-Shape operations transform how results are returned. Use `select()` to define the output structure
-and `aggregate()` for grouped/aggregated results.
+Shape operations transform how results are returned. Use `select()` for the compatibility result
+mapper, `project()` for an explicit SQL projection, `map()` for a final JavaScript transformation,
+and `aggregate()` for grouped results.
 
 ## select()
 
@@ -32,6 +33,11 @@ const results = await store
 | `selectFunction` | `(ctx) => T` | Function that receives a context and returns the output shape |
 
 The context provides typed access to all nodes and edges in the query via their aliases.
+
+For new queries that need SQL composition, use `project()` and the typed `expr` helpers described in
+[Database Expressions](/queries/expressions). A projected query can become an
+[`asRelation()`](/queries/relations/) for derived filtering, aggregation, distinctness, and set
+operations. Use `select()` when you specifically need the compatibility JavaScript mapper.
 
 ## Selection Patterns
 
@@ -244,6 +250,8 @@ const history = await store
 
 ## Next Steps
 
+- [Expressions](/queries/expressions) - SQL projection and typed expression callbacks
+- [Relations](/queries/relations) - Compose explicit projected results
 - [Aggregate](/queries/aggregate) - Grouping and aggregate functions
 - [Order](/queries/order) - Ordering and limiting results
 - [Execute](/queries/execute) - Running queries and pagination

@@ -182,7 +182,7 @@ await store.transaction(async (tx) => {
 
 ## Recursive Traversal Depth
 
-Variable-length traversals use two caps:
+Variable-length traversals use two depth caps and an explicit cycle policy:
 
 1. Unbounded traversals (no `maxHops` option) are capped at 10 hops.
 2. Explicit `maxHops` values are validated up to 1000 hops (`maxHops: >1000` throws).

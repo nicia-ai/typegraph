@@ -475,6 +475,8 @@ neighborhoods; it adds overhead for membership and per-request reconstruction, s
 one-statement plan remains the default. Measure the real root overlap and projection rather than
 enabling sharing universally.
 
+Compare the [concrete sharing examples](#choosing-shared-subgraphs) before enabling the option.
+
 The callback's batch-scoped builder composes set-oriented reads in the same call:
 
 ```typescript
@@ -588,6 +590,108 @@ individual write, call the single-item method instead. Query hooks still fire no
 [Schemas & Stores](/schemas-stores#observability-hooks) for details.
 :::
 
+#### Choosing shared subgraphs
+
+Consider a `Person` graph with `name` and a long `biography` property, connected by
+outgoing `knows` edges. The following examples use the same Store and bounded depth.
+Sharing preserves a separate subgraph for each input root; it changes the database
+plan and response encoding, not the returned neighborhoods.
+
+**Good candidate: overlapping neighborhoods with substantial properties.** Ada and
+Bea both know Cara, and Cara knows Dev:
+
+```text
+Ada ──knows──▶ Cara ──knows──▶ Dev
+Bea ──knows──▶ Cara
+```
+
+Both depth-two subgraphs contain Cara and Dev. If their biographies are several
+kilobytes each, independent plans repeat that property data. Enable sharing so the
+compatible reads hydrate those shared entities once:
+
+```typescript
+const overlapping = await store.batchOnce(
+  (read) =>
+    [ada.id, bea.id].map((rootId) =>
+      read.subgraph(rootId, {
+        edges: ["knows"],
+        maxDepth: 2,
+        project: { nodes: { Person: ["name", "biography"] } },
+      }),
+    ),
+  { shareSubgraphs: true },
+);
+// overlapping[0]: Ada, Cara, Dev
+// overlapping[1]: Bea, Cara, Dev
+// Each result owns independent projected values, including nested objects.
+```
+
+**Keep the default: disjoint neighborhoods.** Suppose Erin knows Finn, Finn knows
+Gia, Hana knows Ivan, and Ivan knows Jules, with no connections between the groups:
+
+```text
+Erin ──knows──▶ Finn ──knows──▶ Gia
+Hana ──knows──▶ Ivan ──knows──▶ Jules
+```
+
+No entities are reused across roots. Sharing adds membership information without
+removing duplicate biographies. Default `batchOnce()` still combines the two reads
+into one statement:
+
+```typescript
+const disjoint = await store.batchOnce((read) =>
+  [erin.id, hana.id].map((rootId) =>
+    read.subgraph(rootId, {
+      edges: ["knows"],
+      maxDepth: 2,
+      project: { nodes: { Person: ["name", "biography"] } },
+    }),
+  ),
+);
+```
+
+**Keep the default initially: overlapping roots, identity-only results.** A graph
+preview might need only connectivity, even when the stored biographies are large.
+Use empty property selections to retain identities and edge endpoints without
+transferring biographies:
+
+```typescript
+const connectivity = await store.batchOnce((read) =>
+  [ada.id, bea.id].map((rootId) =>
+    read.subgraph(rootId, {
+      edges: ["knows"],
+      maxDepth: 2,
+      project: { nodes: { Person: [] }, edges: { knows: [] } },
+    }),
+  ),
+);
+```
+
+Overlap alone does not make sharing a payload optimization here: little repeated
+property data remains to remove. Sharing may still improve latency, so measure
+both response size and elapsed time before choosing it.
+
+| Eight-root benchmark shape | Shared vs default batch encoded bytes | Starting choice |
+| --- | --- | --- |
+| 75% overlap, full 2,048-byte payload | About 27–29% fewer | Try sharing |
+| Disjoint roots, full 256-byte payload | About 21–25% more | Default batching |
+| 75% overlap, identities only | About 10–18% more | Default batching; measure latency |
+
+These are small local SQLite and PostgreSQL measurements, not universal thresholds.
+Bytes measure JSON encoding at the backend boundary, not protocol traffic; the
+identity-only cases were faster with sharing despite their larger encoded responses.
+See the [SQLite report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-sqlite-2026-09-14.md)
+and [PostgreSQL report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-postgres-2026-09-14.md)
+for timings, methodology, and reproduction commands. PostgreSQL measurements use a
+local server and a separately labeled delay simulation; real remote behavior remains
+unmeasured.
+
+Sharing also requires compatible options. Different edge sets, depths, temporal
+coordinates, projections, or edge windows can keep reads in separate groups even
+when their results overlap. For example, a social `knows` neighborhood and an
+employment `worksAt` neighborhood still fit in one `batchOnce()` call, but enabling
+sharing does not fuse those incompatible plans.
+
 ## Connection Management
 
 Managed local Store and backend factories own and close their SQLite or PGlite
@@ -694,6 +798,10 @@ transitive closure at store initialization. Queries like
 recursive lookups at runtime.
 
 ### Smart Select
+
+For explicit SQL field selection, prefer [`project()`](/queries/expressions#projection-and-mapping).
+Use `map()` afterward for JavaScript transformations. This avoids legacy selector probing
+and makes the database projection explicit.
 
 TypeGraph automatically optimizes queries based on which fields your `select()` callback accesses.
 When you select specific fields, TypeGraph generates SQL that only extracts those fields using
@@ -840,7 +948,8 @@ See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
 ### Subgraph extraction
 
 For the "load entity with all relationships" pattern, [`store.subgraph()`](/schemas-stores#subgraph-extraction)
-is the fastest strategy. It compiles to a recursive CTE that fans out across all specified edge
+is a backend-tuned option for a single bounded neighborhood. It compiles to a recursive CTE
+that fans out across all specified edge
 types in a fixed 2 statements on SQLite and 3 on PostgreSQL — no matter how many relationship kinds
 are involved, or how much it returns. See
 [Choosing a query strategy](/schemas-stores#choosing-a-query-strategy) for guidance on when to use
@@ -854,19 +963,21 @@ full `props` blob transfer and metadata columns for projected kinds.
 
 ### Filter early
 
-Apply `.whereNode()` predicates as early as possible in your query chain. TypeGraph moves these
-predicates into the initial CTEs, reducing the number of rows that need to be joined in subsequent
-steps.
+Use `.whereNode()` and `.whereEdge()` for match constraints that should restrict expansion.
+The compiler applies them at the matching stage regardless of their position in the chain.
+Use scoped `.where()` when the condition must filter completed rows; moving a completed-row
+condition into an optional match or recursive hop can change its meaning.
 
 ### Select specific fields
 
-When you only need certain fields, select them explicitly rather than returning whole nodes.
-This triggers the [smart select optimization](#smart-select) and can enable index-only scans with
-properly configured indexes.
+When you only need certain fields, use `project()` to make the SQL projection explicit.
+Legacy `select()` also supports [smart select optimization](#smart-select). Smaller projections
+reduce transferred data and may benefit from covering indexes, subject to the engine limitations
+described above.
 
 ```typescript
 // Preferred: Only fetches what you need
-.select((ctx) => ({ name: ctx.p.name, email: ctx.p.email }))
+.project((e) => ({ name: e.p.name, email: e.p.email }))
 
 // Avoid when possible: Fetches entire props blob
 .select((ctx) => ctx.p)
