@@ -423,7 +423,10 @@ export class ExecutableRelationQuery<
       );
     for (const expression of groupBy)
       assertExpressionScope(expression, this.#scopeIdentity);
-    return this.#copy({ ...this.#state, groupBy });
+    return this.#copy({
+      ...this.#state,
+      groupBy: [...(this.#state.groupBy ?? []), ...groupBy],
+    });
   }
 
   project<const NextFields extends RelationProjection>(
@@ -452,9 +455,9 @@ export class ExecutableRelationQuery<
       );
     for (const [, expression] of entries)
       assertExpressionScope(expression, this.#scopeIdentity);
-    const grouping = this.#state.groupBy;
-    const source =
-      grouping === undefined ? this.#materialize() : this.#definition.ast;
+    // Grouping belongs to the new projection; all other modifiers describe its input rows.
+    const { groupBy: grouping, ...inputState } = this.#state;
+    const source = this.#copy(inputState).#materialize();
     const columns = relationColumns(fields, {
       sourceColumns: this.#definition.columns,
     });
@@ -472,9 +475,6 @@ export class ExecutableRelationQuery<
       }),
       distinct: false,
       orderBy: [],
-      ...(grouping === undefined || this.#state.predicate === undefined ?
-        {}
-      : { predicate: this.#state.predicate }),
       ...(grouping === undefined ? {} : { groupBy: grouping }),
     };
     return createExecutableRelation({

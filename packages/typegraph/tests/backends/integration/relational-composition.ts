@@ -8,6 +8,127 @@ export function registerRelationalCompositionIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Relational composition", () => {
+    it.each(["aggregate", "project"] as const)(
+      "preserves distinct input rows before grouped %s",
+      async (operation) => {
+        const store = context.getStore();
+        for (const name of ["Ada", "Ada", "Bea"])
+          await store.nodes.Person.create({ name });
+        const names = store
+          .query()
+          .from("Person", "person")
+          .project((fields) => ({ name: fields.person.name }))
+          .asRelation();
+
+        expect(
+          await names
+            .distinct()
+            .groupBy((columns) => [columns.name])
+            [operation]((columns) => ({
+              name: columns.name,
+              count: expr.count(),
+            }))
+            .orderBy((columns) => columns.name)
+            .execute(),
+        ).toEqual([
+          { name: "Ada", count: 1 },
+          { name: "Bea", count: 1 },
+        ]);
+      },
+    );
+
+    it.each(["aggregate", "project"] as const)(
+      "preserves filtered, ordered and ranged input before grouped %s",
+      async (operation) => {
+        const store = context.getStore();
+        for (const person of [
+          { name: "Ada", age: 10 },
+          { name: "Ada", age: 20 },
+          { name: "Bea", age: 30 },
+          { name: "Cara", age: 40 },
+          { name: "Excluded", age: 50 },
+        ])
+          await store.nodes.Person.create(person);
+        const people = store
+          .query()
+          .from("Person", "person")
+          .project((fields) => ({
+            name: fields.person.name,
+            age: fields.person.age,
+          }))
+          .asRelation();
+        const grouped = people
+          .where((columns) => expr.neq(columns.name, expr.literal("Excluded")))
+          .orderBy((columns) => columns.age, "desc")
+          .offset(1)
+          .limit(1)
+          .groupBy((columns) => [columns.name]);
+
+        expect(
+          await grouped[operation]((columns) => ({
+            name: columns.name,
+            count: expr.count(),
+          }))
+            .orderBy((columns) => columns.name)
+            .execute(),
+        ).toEqual([{ name: "Bea", count: 1 }]);
+        expect(
+          await grouped
+            .limit(0)
+            [operation]((columns) => ({
+              name: columns.name,
+              count: expr.count(),
+            }))
+            .execute(),
+        ).toEqual([]);
+      },
+    );
+
+    it("accumulates repeated relation grouping without changing earlier builders", async () => {
+      const store = context.getStore();
+      for (const person of [
+        { name: "Ada", age: 20 },
+        { name: "Ada", age: 30 },
+        { name: "Bea", age: 20 },
+      ])
+        await store.nodes.Person.create(person);
+      const byName = store
+        .query()
+        .from("Person", "person")
+        .project((fields) => ({
+          name: fields.person.name,
+          age: fields.person.age,
+        }))
+        .asRelation()
+        .groupBy((columns) => [columns.name]);
+
+      expect(
+        await byName
+          .groupBy((columns) => [columns.age])
+          .aggregate((columns) => ({
+            name: columns.name,
+            age: columns.age,
+            count: expr.count(),
+          }))
+          .orderBy((columns) => columns.name)
+          .orderBy((columns) => columns.age)
+          .execute(),
+      ).toEqual([
+        { name: "Ada", age: 20, count: 1 },
+        { name: "Ada", age: 30, count: 1 },
+        { name: "Bea", age: 20, count: 1 },
+      ]);
+      expect(
+        await byName
+          .aggregate((columns) => ({ name: columns.name, count: expr.count() }))
+          .orderBy((columns) => columns.name)
+          .execute(),
+      ).toEqual([
+        { name: "Ada", count: 2 },
+        { name: "Bea", count: 1 },
+      ]);
+    });
+
     it("carries source ordering and refuses hidden-order distinctness or mapped SQL input", async () => {
       const store = context.getStore();
       await store.nodes.Person.create({ name: "Ada", age: 20 });

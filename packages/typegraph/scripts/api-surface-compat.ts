@@ -855,7 +855,9 @@ function referencedTypeNames(node: ts.Node): ReadonlySet<string> {
   function visit(child: ts.Node): void {
     if (ts.isTypeReferenceNode(child) && ts.isIdentifier(child.typeName))
       names.add(child.typeName.text);
-    ts.forEachChild(child, (nested) => { visit(nested); });
+    ts.forEachChild(child, (nested) => {
+      visit(nested);
+    });
   }
   visit(node);
   return names;

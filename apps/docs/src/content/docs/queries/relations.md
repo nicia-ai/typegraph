@@ -72,6 +72,11 @@ const grandTotal = await totals
   .first();
 ```
 
+Repeated relation `groupBy()` calls accumulate grouping expressions. When `aggregate()` or
+`project()` completes that grouping, filters, distinctness, ordering, limits, and offsets apply to
+the input rows first. Order or limit the returned relation to apply those operations to the grouped
+results instead.
+
 SQL NULL still decodes to `undefined`. Ordering accepts an explicit `"first"` or `"last"` null
 position; the defaults are NULLS LAST for ascending and NULLS FIRST for descending.
 
