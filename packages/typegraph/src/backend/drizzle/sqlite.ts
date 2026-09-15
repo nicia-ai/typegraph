@@ -64,6 +64,7 @@ import {
   assertVectorSearchLimit,
   resolveEfSearchOverride,
   vectorSearchFrontierTuning,
+  type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
 import { isSqlFragment, sql as portableSql } from "../../query/sql-fragment";
@@ -176,6 +177,7 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
+  ensureAdoptedVectorSlots,
   gateFulltext,
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
@@ -205,10 +207,11 @@ import {
   buildCommonOperationOptions,
   createEngineOperationBackend,
 } from "./engine/operation-layer";
-import type {
-  EngineAssemblyContext,
-  EngineLateMembers,
-  EngineOperationsContext,
+import {
+  type EngineAssemblyContext,
+  type EngineLateMembers,
+  type EngineOperationsContext,
+  resolveSchemaProvisioning,
 } from "./engine/profile";
 import {
   buildMaterializationInsertValues,
@@ -252,6 +255,8 @@ import {
  * Options for creating a SQLite backend.
  */
 export type SqliteBackendOptions = Readonly<{
+  /** Opt in to transactional DDL in a caller-owned schema transaction. */
+  schemaProvisioning?: "dml-only" | "transactional";
   /**
    * Custom table definitions. Use createSqliteTables() to customize table names.
    * Defaults to standard TypeGraph table names.
@@ -2275,7 +2280,22 @@ export function buildSqliteEngineProfile(
             );
           }
           const activeSchema = await backend.getActiveSchema(graphId);
-          return { backend, activeSchema };
+          return {
+            backend: Object.defineProperty(backend, "ensureVectorSlotContributions", {
+              value: (slots: readonly VectorSlot[], slotOptions?: Readonly<{ onDrift?: "throw" | "skip" }>) =>
+                ensureAdoptedVectorSlots(backend, slots, slotOptions, {
+                  dialect: "sqlite",
+                  fenceTarget,
+                  vectorStrategy,
+                  fulltextStrategy,
+                  fulltextTableName: tables.fulltextTableName,
+                  markerTableName: getTableName(tables.contributionMaterializations),
+                  decodeMarkerTimestamp: SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+                }),
+              enumerable: true,
+            }) as unknown as AdoptedSchemaWriteTransaction["backend"],
+            activeSchema,
+          };
         } }
           : {}
         ),
@@ -2413,6 +2433,7 @@ export function buildSqliteEngineProfile(
     fulltext: fulltextStrategy,
     vector: vectorStrategy,
     declaredCapabilities,
+    schemaProvisioning: resolveSchemaProvisioning(options.schemaProvisioning),
     resourceAudit,
     autocommit: { singleStatementDurable: true },
     provisioning,

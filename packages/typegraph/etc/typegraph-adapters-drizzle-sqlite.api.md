@@ -9,6 +9,7 @@ import * as drizzle_orm_sqlite_core from 'drizzle-orm/sqlite-core';
 
 // @public
 type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
+    schemaProvisioning: "dml-only" | "transactional";
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
     adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
@@ -20,6 +21,9 @@ type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
 type AdoptedSchemaWriteTransaction = Readonly<{
     backend: SchemaWriteTransactionBackend & Readonly<{
         commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+        ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
+            onDrift?: "throw" | "skip";
+        }>) => Promise<void>;
     }>;
     activeSchema: SchemaVersionRow | undefined;
 }>;
@@ -6606,6 +6610,7 @@ const SqlIntentBrand: unique symbol;
 
 // @public
 export type SqliteBackendOptions = Readonly<{
+    schemaProvisioning?: "dml-only" | "transactional";
     tables?: SqliteTables;
     executionProfile?: SqliteExecutionProfileHints;
     fulltext?: FulltextStrategy | false;

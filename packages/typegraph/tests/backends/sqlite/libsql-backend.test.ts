@@ -104,8 +104,12 @@ createIntegrationTestSuite("libsql", async () => {
       refuseUnsupportedSerializedBackendCapabilities("libsql", overrides);
       const serializedPath = createTemporaryDbPath();
       const serializedClient = createClient({ url: `file:${serializedPath}` });
-      const { backend: serializedBackend } =
-        await createLibsqlBackend(serializedClient);
+      const { backend: serializedBackend } = await createLibsqlBackend(
+        serializedClient,
+        {
+          schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
+        },
+      );
       return {
         backend: serializedBackend,
         close: async () => {

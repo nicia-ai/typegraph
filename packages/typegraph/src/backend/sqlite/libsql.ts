@@ -94,6 +94,7 @@ async function detectOrderedAggregates(client: Client): Promise<boolean> {
  * Options for creating a libsql backend.
  */
 export type LibsqlBackendOptions = Readonly<{
+  schemaProvisioning?: "dml-only" | "transactional";
   /**
    * Custom table definitions.
    * Defaults to standard TypeGraph table names.
@@ -163,6 +164,9 @@ export async function createLibsqlBackend(
   const db = drizzle(client);
   const orderedAggregates = await detectOrderedAggregates(client);
   const backend = createSqliteBackend(db, {
+    ...(options.schemaProvisioning === undefined ?
+      {}
+    : { schemaProvisioning: options.schemaProvisioning }),
     capabilities: { orderedAggregates },
     executionProfile: {
       isSync: false,

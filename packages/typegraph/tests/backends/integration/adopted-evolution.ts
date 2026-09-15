@@ -6,12 +6,19 @@ import {
   createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
+  embedding,
+  resolveGraphVectorSlots,
   SchemaContentConflictError,
   TransactionClosedError,
   UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
+import type {
+  AdapterBackend,
+  IdentityTableNames,
+} from "../../../src/backend/types";
 import { defineGraphExtension } from "../../../src/graph-extension";
+import { mergeGraphExtension } from "../../../src/graph-extension/merge";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../../../src/query/sql-intent";
 import type { EvolutionPlan } from "../../../src/schema";
@@ -27,6 +34,16 @@ const graph = defineGraph({
   nodes: { AdoptedPerson: { type: Person } },
   edges: {},
 });
+const rollbackVectorGraph = defineGraph({
+  id: "shared_adopted_vector_rollback",
+  nodes: { AdoptedPerson: { type: Person } },
+  edges: {},
+});
+const driftVectorGraph = defineGraph({
+  id: "shared_adopted_vector_drift",
+  nodes: { AdoptedPerson: { type: Person } },
+  edges: {},
+});
 const extension = defineGraphExtension({
   nodes: {
     AdoptedTag: { properties: { label: { type: "string", optional: true } } },
@@ -35,11 +52,97 @@ const extension = defineGraphExtension({
 const requiredTag = defineGraphExtension({
   nodes: { AdoptedTag: { properties: { label: { type: "string" } } } },
 });
+const vectorExtension = defineGraphExtension({
+  nodes: {
+    AdoptedVector: {
+      properties: {
+        vector: {
+          type: "array",
+          items: { type: "number" },
+          embedding: { dimensions: 3 },
+          optional: true,
+        },
+      },
+    },
+  },
+});
+const widerVectorExtension = defineGraphExtension({
+  nodes: {
+    AdoptedVector: {
+      properties: {
+        vector: {
+          type: "array",
+          items: { type: "number" },
+          embedding: { dimensions: 4 },
+          optional: true,
+        },
+      },
+    },
+  },
+});
+const IdentityPerson = defineNode("AdoptedIdentityPerson", {
+  schema: z.object({ name: z.string() }),
+});
+const IdentityAuthor = defineNode("AdoptedIdentityAuthor", {
+  schema: z.object({ penName: z.string() }),
+});
+const identityGraph = defineGraph({
+  id: "shared_adopted_identity_evolution",
+  nodes: {
+    AdoptedIdentityPerson: { type: IdentityPerson },
+    AdoptedIdentityAuthor: { type: IdentityAuthor },
+  },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+const identityExtension = defineGraphExtension({
+  ontology: [
+    {
+      metaEdge: "disjointWith",
+      from: "AdoptedIdentityPerson",
+      to: "AdoptedIdentityAuthor",
+    },
+  ],
+});
+const UnrelatedVector = defineNode("AdoptedUnrelatedVector", {
+  schema: z.object({ vector: embedding(3).optional() }),
+});
+const unrelatedFeatureGraph = defineGraph({
+  id: "shared_adopted_unrelated_features",
+  nodes: {
+    AdoptedIdentityPerson: { type: IdentityPerson },
+    AdoptedIdentityAuthor: { type: IdentityAuthor },
+    AdoptedUnrelatedVector: { type: UnrelatedVector },
+  },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+const standaloneKindExtension = defineGraphExtension({
+  nodes: {
+    AdoptedStandaloneTag: {
+      properties: { label: { type: "string", optional: true } },
+    },
+  },
+});
 
 async function assertUnsupportedAdoption(
   run: () => Promise<unknown>,
 ): Promise<void> {
   await expect(run()).rejects.toThrow(UnsupportedBackendCapabilityError);
+}
+
+function identityTablesForBackend(
+  backend: AdapterBackend<unknown>,
+): IdentityTableNames {
+  const names = requireDefined(backend.tableNames);
+  return {
+    identityAssertions: requireDefined(names.identityAssertions),
+    recordedIdentityAssertions: requireDefined(
+      names.recordedIdentityAssertions,
+    ),
+    identityClosure: requireDefined(names.identityClosure),
+    identitySeparation: requireDefined(names.identitySeparation),
+  };
 }
 
 export function registerAdoptedEvolutionIntegrationTests(
@@ -203,6 +306,96 @@ export function registerAdoptedEvolutionIntegrationTests(
       ).rejects.toThrow("outer application failure");
       const after = await backend.getActiveSchema(graph.id);
       expect(after?.version).toBe(before?.version);
+      expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
+    });
+
+    it("rolls back schema and graph writes when the evolved callback fails", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      const plan = await store.planEvolution(extension);
+      if (plan.status !== "change") throw new Error("Expected change plan.");
+      if (backend.adoptSchemaWriteTransaction === undefined) {
+        await assertUnsupportedAdoption(() =>
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async () => {
+              await Promise.resolve();
+            }),
+          ),
+        );
+        return;
+      }
+      const before = await backend.getActiveSchema(graph.id);
+      await expect(
+        backend.transactionWithNative(async (_target, nativeTx) =>
+          store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+            tx.requestRecordedRevision();
+            await tx.nodes.AdoptedPerson.create({ name: "callback failure" });
+            throw new Error("evolved callback failed");
+          }),
+        ),
+      ).rejects.toThrow("evolved callback failed");
+      expect(await backend.getActiveSchema(graph.id)).toEqual(before);
+      expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
+    });
+
+    it("rolls back schema and live rows when recorded capture fails", async () => {
+      const backend = context.getBackend();
+      const originalAdopt = backend.adoptSchemaWriteTransaction;
+      if (originalAdopt === undefined) return;
+      const recordedNodesTable =
+        backend.tableNames?.recordedNodes ?? "typegraph_recorded_nodes";
+      const capture = { callbackWriteCompleted: false, insertObserved: false };
+      const captureFailureBackend = deriveBackend(backend, {
+        adoptSchemaWriteTransaction: async (nativeTx, graphId, options) => {
+          const adopted = await originalAdopt(nativeTx, graphId, options);
+          const executeStatement = adopted.backend.executeStatement;
+          return {
+            ...adopted,
+            backend: deriveBackend(adopted.backend, {
+              executeStatement: async (statement) => {
+                const text = statement.chunks
+                  .filter((chunk) => chunk.kind === "text")
+                  .map((chunk) => chunk.value)
+                  .join(" ");
+                const recordedTable = statement.chunks.some(
+                  (chunk) =>
+                    chunk.kind === "identifier" &&
+                    chunk.value === recordedNodesTable,
+                );
+                if (text.includes("INSERT INTO") && recordedTable) {
+                  capture.insertObserved = true;
+                  throw new Error("forced recorded capture failure");
+                }
+                return executeStatement(statement);
+              },
+            }),
+          };
+        },
+      });
+      const [store] = await createAdapterStoreWithSchema(
+        graph,
+        captureFailureBackend,
+        { history: true, revisionTracking: true },
+      );
+      const plan = await store.planEvolution(extension);
+      if (plan.status !== "change") throw new Error("Expected change plan.");
+      const before = await backend.getActiveSchema(graph.id);
+      await expect(
+        backend.transactionWithNative(async (_target, nativeTx) =>
+          store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+            await tx.nodes.AdoptedPerson.create({ name: "capture failure" });
+            capture.callbackWriteCompleted = true;
+          }),
+        ),
+      ).rejects.toThrow("forced recorded capture failure");
+      expect(capture).toEqual({
+        callbackWriteCompleted: true,
+        insertObserved: true,
+      });
+      expect(await backend.getActiveSchema(graph.id)).toEqual(before);
       expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
     });
 
@@ -490,20 +683,6 @@ export function registerAdoptedEvolutionIntegrationTests(
           },
       );
       const [store] = await createAdapterStoreWithSchema(graph, guarded);
-      const vectorExtension = defineGraphExtension({
-        nodes: {
-          AdoptedVector: {
-            properties: {
-              vector: {
-                type: "array",
-                items: { type: "number" },
-                embedding: { dimensions: 3 },
-                optional: true,
-              },
-            },
-          },
-        },
-      });
       const plan = await store.planEvolution(vectorExtension);
       if (plan.status !== "change") return;
       expect(plan.requirements.vectorSlots).toEqual([
@@ -518,6 +697,532 @@ export function registerAdoptedEvolutionIntegrationTests(
         ),
       ).rejects.toThrow(UnsupportedBackendCapabilityError);
       expect(adoptCalls).toBe(0);
+    });
+
+    it("evolves a metadata-only kind without provisioning unrelated identity or vector storage", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(
+        unrelatedFeatureGraph,
+        backend,
+      );
+      const first = await store.nodes.AdoptedIdentityPerson.create({
+        name: "unrelated first",
+      });
+      const second = await store.nodes.AdoptedIdentityPerson.create({
+        name: "unrelated second",
+      });
+      await store.identity.assertSame(first, second);
+      const plan = await store.planEvolution(standaloneKindExtension);
+      if (plan.status !== "change")
+        throw new Error("Expected standalone kind change plan.");
+      expect(plan.requirements.vectorSlots).toEqual([]);
+      expect(plan.requirements.identityAffectedKinds).toEqual([]);
+      if (backend.adoptSchemaWriteTransaction === undefined) {
+        await assertUnsupportedAdoption(() =>
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async () => {
+              await Promise.resolve();
+            }),
+          ),
+        );
+        return;
+      }
+      const outcome = await backend.transactionWithNative(
+        async (_target, nativeTx) =>
+          store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+            await tx.nodes.AdoptedIdentityPerson.create({
+              name: "metadata only",
+            });
+          }),
+      );
+      expect(outcome.receipt.schema.version).toBe(plan.resultingVersion);
+      const refreshed = await store.refreshSchema({
+        expectedVersion: plan.resultingVersion,
+      });
+      expect(refreshed.getNodeCollection("AdoptedStandaloneTag")).toBeDefined();
+      expect(await refreshed.identity.membersOf(first)).toEqual(
+        expect.arrayContaining([
+          { kind: "AdoptedIdentityPerson", id: first.id },
+          { kind: "AdoptedIdentityPerson", id: second.id },
+        ]),
+      );
+    });
+
+    it("provisions a vector slot with schema and callback writes on a privileged session", async (ctx) => {
+      const handle = await context.createSerializedBackend({
+        schemaProvisioning: "transactional",
+      });
+      try {
+        const backend = handle.backend;
+        if (
+          backend.capabilities.vector?.supported !== true ||
+          backend.adoptSchemaWriteTransaction === undefined ||
+          backend.probeContributions === undefined ||
+          backend.schemaWriteTransaction === undefined ||
+          backend.vectorStrategy === undefined
+        ) {
+          ctx.skip();
+          return;
+        }
+        expect(backend.schemaProvisioning).toBe("transactional");
+        const [store] = await createAdapterStoreWithSchema(graph, backend, {
+          history: true,
+          revisionTracking: true,
+        });
+        const plan = await store.planEvolution(vectorExtension);
+        if (plan.status !== "change")
+          throw new Error("Expected vector change plan.");
+        const slots = resolveGraphVectorSlots(
+          mergeGraphExtension(graph, vectorExtension),
+        );
+        expect(slots).toHaveLength(1);
+        const vectorTable = backend.vectorStrategy.tableName(
+          graph.id,
+          "AdoptedVector",
+          "vector",
+        );
+        expect(
+          await backend.schemaWriteTransaction(graph.id, (tx) =>
+            tx.tableExists(vectorTable),
+          ),
+        ).toBe(false);
+        const outcome = await backend.transactionWithNative(
+          async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+              tx.requestRecordedRevision();
+              await tx.nodes.AdoptedPerson.create({
+                name: "vector provisioned",
+              });
+              return "provisioned";
+            }),
+        );
+        expect(outcome.result).toBe("provisioned");
+        expect(outcome.receipt.schema.version).toBe(plan.resultingVersion);
+        expect(outcome.receipt.recorded).toBeDefined();
+        expect(
+          await backend.schemaWriteTransaction(graph.id, (tx) =>
+            tx.tableExists(vectorTable),
+          ),
+        ).toBe(true);
+        expect(await backend.probeContributions(graph.id, slots)).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ contribution: "vector", state: "ready" }),
+          ]),
+        );
+        const refreshed = await store.refreshSchema({
+          expectedVersion: plan.resultingVersion,
+        });
+        expect(await refreshed.nodes.AdoptedPerson.find()).toHaveLength(1);
+      } finally {
+        await handle.close();
+      }
+    });
+
+    it("rolls back vector storage with schema and callback writes on a privileged session", async (ctx) => {
+      const handle = await context.createSerializedBackend({
+        schemaProvisioning: "transactional",
+      });
+      try {
+        const backend = handle.backend;
+        if (
+          backend.capabilities.vector?.supported !== true ||
+          backend.adoptSchemaWriteTransaction === undefined ||
+          backend.probeContributions === undefined ||
+          backend.schemaWriteTransaction === undefined ||
+          backend.vectorStrategy === undefined
+        ) {
+          ctx.skip();
+          return;
+        }
+        const [store] = await createAdapterStoreWithSchema(
+          rollbackVectorGraph,
+          backend,
+        );
+        const plan = await store.planEvolution(vectorExtension);
+        if (plan.status !== "change")
+          throw new Error("Expected vector change plan.");
+        const slots = resolveGraphVectorSlots(
+          mergeGraphExtension(rollbackVectorGraph, vectorExtension),
+        );
+        const vectorTable = backend.vectorStrategy.tableName(
+          rollbackVectorGraph.id,
+          "AdoptedVector",
+          "vector",
+        );
+        const beforeSchema = await backend.getActiveSchema(
+          rollbackVectorGraph.id,
+        );
+        const beforeVector = await backend.probeContributions(
+          rollbackVectorGraph.id,
+          slots,
+        );
+        expect(
+          await backend.schemaWriteTransaction(rollbackVectorGraph.id, (tx) =>
+            tx.tableExists(vectorTable),
+          ),
+        ).toBe(false);
+        await expect(
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+              await tx.nodes.AdoptedPerson.create({ name: "rollback vector" });
+              throw new Error("roll back provisioned vector");
+            }),
+          ),
+        ).rejects.toThrow("roll back provisioned vector");
+        expect(await backend.getActiveSchema(rollbackVectorGraph.id)).toEqual(
+          beforeSchema,
+        );
+        expect(
+          await backend.probeContributions(rollbackVectorGraph.id, slots),
+        ).toEqual(beforeVector);
+        expect(
+          await backend.schemaWriteTransaction(rollbackVectorGraph.id, (tx) =>
+            tx.tableExists(vectorTable),
+          ),
+        ).toBe(false);
+        expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
+      } finally {
+        await handle.close();
+      }
+    });
+
+    it("refuses a vector slot whose physical shape drifted after planning", async (ctx) => {
+      const handle = await context.createSerializedBackend({
+        schemaProvisioning: "transactional",
+      });
+      try {
+        const backend = handle.backend;
+        if (
+          backend.capabilities.vector?.supported !== true ||
+          backend.adoptSchemaWriteTransaction === undefined ||
+          backend.ensureVectorSlotContributions === undefined
+        ) {
+          ctx.skip();
+          return;
+        }
+        const [store] = await createAdapterStoreWithSchema(
+          driftVectorGraph,
+          backend,
+        );
+        const plan = await store.planEvolution(vectorExtension);
+        if (plan.status !== "change")
+          throw new Error("Expected vector slot change plan.");
+        expect(plan.requirements.vectorSlots).not.toEqual([]);
+        const widerSlots = resolveGraphVectorSlots(
+          mergeGraphExtension(driftVectorGraph, widerVectorExtension),
+        );
+        await backend.ensureVectorSlotContributions(widerSlots);
+        const beforeSchema = await backend.getActiveSchema(driftVectorGraph.id);
+        await expect(
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+              await tx.nodes.AdoptedPerson.create({ name: "drift refused" });
+            }),
+          ),
+        ).rejects.toThrow(/already materialized with a different signature/);
+        expect(await backend.getActiveSchema(driftVectorGraph.id)).toEqual(
+          beforeSchema,
+        );
+        expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
+      } finally {
+        await handle.close();
+      }
+    });
+
+    it("refuses a missing vector marker table before callback or sidecar provisioning", async (ctx) => {
+      const handle = await context.createSerializedBackend({
+        schemaProvisioning: "transactional",
+      });
+      try {
+        const backend = handle.backend;
+        if (
+          backend.capabilities.vector?.supported !== true ||
+          backend.adoptSchemaWriteTransaction === undefined
+        ) {
+          ctx.skip();
+          return;
+        }
+        // The shared lane factories use the default materialization schema.
+        const markerTable = "typegraph_contribution_materializations";
+        const [store] = await createAdapterStoreWithSchema(
+          driftVectorGraph,
+          backend,
+        );
+        const plan = await store.planEvolution(vectorExtension);
+        if (plan.status !== "change")
+          throw new Error("Expected vector slot change plan.");
+        const beforeSchema = await backend.getActiveSchema(driftVectorGraph.id);
+        const callback = { reached: false };
+        await expect(
+          backend.transactionWithNative(async (target, nativeTx) => {
+            if (target.executeStatement === undefined)
+              throw new Error("Native target lacks statement execution.");
+            await target.executeStatement(
+              asCompiledStatementSql(sql`
+                DROP TABLE ${sql.identifier(markerTable)}
+              `),
+            );
+            await expect(
+              store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+                callback.reached = true;
+                await tx.nodes.AdoptedPerson.create({ name: "marker missing" });
+              }),
+            ).rejects.toMatchObject({
+              details: { capability: "schemaProvisioning.vectorMarkers" },
+            });
+            throw new Error("restore dropped marker through outer rollback");
+          }),
+        ).rejects.toThrow("restore dropped marker through outer rollback");
+        expect(callback.reached).toBe(false);
+        expect(await backend.getActiveSchema(driftVectorGraph.id)).toEqual(
+          beforeSchema,
+        );
+        expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
+        const schemaWriteTransaction = requireDefined(
+          backend.schemaWriteTransaction,
+        );
+        expect(
+          await schemaWriteTransaction(driftVectorGraph.id, (tx) =>
+            tx.tableExists(markerTable),
+          ),
+        ).toBe(true);
+      } finally {
+        await handle.close();
+      }
+    });
+
+    it("revalidates identity on a privileged adopted evolution with graph writes", async () => {
+      const handle = await context.createSerializedBackend({
+        schemaProvisioning: "transactional",
+      });
+      try {
+        const backend = handle.backend;
+        const [store] = await createAdapterStoreWithSchema(
+          identityGraph,
+          backend,
+          { history: true, revisionTracking: true },
+        );
+        const first = await store.nodes.AdoptedIdentityPerson.create({
+          name: "first",
+        });
+        const second = await store.nodes.AdoptedIdentityPerson.create({
+          name: "second",
+        });
+        await store.identity.assertSame(first, second);
+        const plan = await store.planEvolution(identityExtension);
+        if (plan.status !== "change")
+          throw new Error("Expected identity ontology change plan.");
+        expect(plan.requirements.identityAffectedKinds).not.toEqual([]);
+        if (backend.adoptSchemaWriteTransaction === undefined) {
+          await assertUnsupportedAdoption(() =>
+            backend.transactionWithNative(async (_target, nativeTx) =>
+              store.withEvolvedTransaction(nativeTx, plan, async () => {
+                await Promise.resolve();
+              }),
+            ),
+          );
+          return;
+        }
+        const outcome = await backend.transactionWithNative(
+          async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+              await tx.nodes.AdoptedIdentityAuthor.create({ penName: "new" });
+              return "identity validated";
+            }),
+        );
+        expect(outcome.result).toBe("identity validated");
+        expect(outcome.receipt.schema.version).toBe(plan.resultingVersion);
+        const refreshed = await store.refreshSchema({
+          expectedVersion: plan.resultingVersion,
+        });
+        expect(await refreshed.identity.membersOf(first)).toEqual(
+          expect.arrayContaining([
+            { kind: "AdoptedIdentityPerson", id: first.id },
+            { kind: "AdoptedIdentityPerson", id: second.id },
+          ]),
+        );
+        expect(await refreshed.nodes.AdoptedIdentityAuthor.find()).toHaveLength(
+          1,
+        );
+      } finally {
+        await handle.close();
+      }
+    });
+
+    it("rolls back privileged identity evolution and callback writes", async () => {
+      const handle = await context.createSerializedBackend({
+        schemaProvisioning: "transactional",
+      });
+      try {
+        const backend = handle.backend;
+        const [store] = await createAdapterStoreWithSchema(
+          identityGraph,
+          backend,
+        );
+        const first = await store.nodes.AdoptedIdentityPerson.create({
+          name: "first",
+        });
+        const second = await store.nodes.AdoptedIdentityPerson.create({
+          name: "second",
+        });
+        await store.identity.assertSame(first, second);
+        const plan = await store.planEvolution(identityExtension);
+        if (plan.status !== "change")
+          throw new Error("Expected identity ontology change plan.");
+        if (backend.adoptSchemaWriteTransaction === undefined) {
+          await assertUnsupportedAdoption(() =>
+            backend.transactionWithNative(async (_target, nativeTx) =>
+              store.withEvolvedTransaction(nativeTx, plan, async () => {
+                await Promise.resolve();
+              }),
+            ),
+          );
+          return;
+        }
+        const beforeSchema = await backend.getActiveSchema(identityGraph.id);
+        const beforeMembers = await store.identity.membersOf(first);
+        await expect(
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+              await tx.nodes.AdoptedIdentityAuthor.create({
+                penName: "rolled back",
+              });
+              throw new Error("roll back identity evolution");
+            }),
+          ),
+        ).rejects.toThrow("roll back identity evolution");
+        expect(await backend.getActiveSchema(identityGraph.id)).toEqual(
+          beforeSchema,
+        );
+        expect(await store.identity.membersOf(first)).toEqual(beforeMembers);
+        expect(await store.nodes.AdoptedIdentityAuthor.find()).toEqual([]);
+      } finally {
+        await handle.close();
+      }
+    });
+
+    it("rolls back a newly provisioned identity relation with the adopted schema", async () => {
+      const handle = await context.createSerializedBackend({
+        schemaProvisioning: "transactional",
+      });
+      try {
+        const backend = handle.backend;
+        if (
+          backend.adoptSchemaWriteTransaction === undefined ||
+          backend.executeDdl === undefined ||
+          backend.schemaWriteTransaction === undefined ||
+          backend.ensureIdentityTables === undefined
+        )
+          return;
+        const identityTables = identityTablesForBackend(backend);
+        const [store] = await createAdapterStoreWithSchema(
+          identityGraph,
+          backend,
+        );
+        const plan = await store.planEvolution(identityExtension);
+        if (plan.status !== "change")
+          throw new Error("Expected identity ontology change plan.");
+        const beforeSchema = await backend.getActiveSchema(identityGraph.id);
+        await backend.executeDdl(
+          `DROP TABLE IF EXISTS "${identityTables.identitySeparation.replaceAll('"', '""')}"`,
+        );
+        try {
+          await expect(
+            backend.transactionWithNative(async (_target, nativeTx) => {
+              await store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+                await tx.nodes.AdoptedIdentityPerson.create({
+                  name: "identity DDL rolled back",
+                });
+              });
+              throw new Error("outer identity DDL rollback");
+            }),
+          ).rejects.toThrow("outer identity DDL rollback");
+          expect(await backend.getActiveSchema(identityGraph.id)).toEqual(
+            beforeSchema,
+          );
+          expect(await store.nodes.AdoptedIdentityPerson.find()).toEqual([]);
+          expect(
+            await backend.schemaWriteTransaction(identityGraph.id, (tx) =>
+              tx.tableExists(identityTables.identitySeparation),
+            ),
+          ).toBe(false);
+          const committed = await backend.transactionWithNative(
+            async (_target, nativeTx) =>
+              store.withEvolvedTransaction(nativeTx, plan, async () => {
+                await Promise.resolve();
+              }),
+          );
+          expect(committed.receipt.schema.version).toBe(plan.resultingVersion);
+          expect(
+            await backend.schemaWriteTransaction(identityGraph.id, (tx) =>
+              tx.tableExists(identityTables.identitySeparation),
+            ),
+          ).toBe(true);
+        } finally {
+          await backend.ensureIdentityTables(identityTables, {
+            provisionMissing: true,
+          });
+        }
+      } finally {
+        await handle.close();
+      }
+    });
+
+    it("refuses missing identity ledger storage without publishing a schema", async () => {
+      const handle = await context.createSerializedBackend({
+        schemaProvisioning: "transactional",
+      });
+      try {
+        const backend = handle.backend;
+        if (
+          backend.adoptSchemaWriteTransaction === undefined ||
+          backend.executeDdl === undefined ||
+          backend.schemaWriteTransaction === undefined ||
+          backend.ensureIdentityTables === undefined
+        )
+          return;
+        const identityTables = identityTablesForBackend(backend);
+        const [store] = await createAdapterStoreWithSchema(
+          identityGraph,
+          backend,
+        );
+        const plan = await store.planEvolution(identityExtension);
+        if (plan.status !== "change")
+          throw new Error("Expected identity ontology change plan.");
+        const beforeSchema = await backend.getActiveSchema(identityGraph.id);
+        await backend.executeDdl(
+          `DROP TABLE IF EXISTS "${identityTables.identityAssertions.replaceAll('"', '""')}"`,
+        );
+        try {
+          await expect(
+            backend.transactionWithNative(async (_target, nativeTx) =>
+              store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+                await tx.nodes.AdoptedIdentityPerson.create({
+                  name: "missing ledger",
+                });
+              }),
+            ),
+          ).rejects.toMatchObject({
+            code: "CONFIGURATION_ERROR",
+            details: { code: "IDENTITY_STORAGE_MISSING" },
+          });
+          expect(await backend.getActiveSchema(identityGraph.id)).toEqual(
+            beforeSchema,
+          );
+          expect(await store.nodes.AdoptedIdentityPerson.find()).toEqual([]);
+          expect(
+            await backend.schemaWriteTransaction(identityGraph.id, (tx) =>
+              tx.tableExists(identityTables.identityAssertions),
+            ),
+          ).toBe(false);
+        } finally {
+          await backend.ensureIdentityTables(identityTables, {
+            provisionMissing: true,
+          });
+        }
+      } finally {
+        await handle.close();
+      }
     });
 
     it("refuses an evolved boundary entered inside an active recorded callback", async () => {

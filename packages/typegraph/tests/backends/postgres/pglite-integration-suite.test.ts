@@ -74,7 +74,10 @@ createIntegrationTestSuite(
     // write fence.
     createSerializedBackend: (overrides) =>
       Promise.resolve({
-        backend: engine.makeBackend(overrides?.capabilities),
+        backend: engine.makeBackend(
+          overrides?.capabilities,
+          overrides?.schemaProvisioning,
+        ),
         close: () => Promise.resolve(),
       }),
   }),

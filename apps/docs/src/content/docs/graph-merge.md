@@ -292,9 +292,12 @@ schema refuses before merge mutation. Evolution's schema CAS is not treated
 as a prior callback entity write. Roll back the entire native transaction on
 any refusal; the schema change, merge, recorded capture, and application SQL
 then roll back together. The report and receipt are provisional until the
-outer commit succeeds. Plans requiring identity or vector provisioning are
-currently refused by the evolved transaction boundary before it applies a
-schema change; use the privileged bootstrap route and replan.
+outer commit succeeds. An adapter configured with
+`schemaProvisioning: "transactional"` can provision required identity or vector
+storage on the same native session before the merge callback. The default
+DML-only policy refuses such requirements before the schema fence or merge
+mutation. Bootstrap base storage before adopting either route; run generic
+eager index maintenance separately after the outer commit.
 
 For a frozen ancestor and a live destination, use the named incremental planner:
 

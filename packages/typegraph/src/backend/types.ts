@@ -3536,6 +3536,8 @@ export type GraphBackend = Readonly<{
  */
 export type AdapterBackend<TNativeTransaction> = GraphBackend &
   Readonly<{
+    /** Whether caller-owned schema transactions may provision physical storage. */
+    schemaProvisioning: "dml-only" | "transactional";
     /**
      * Runs TypeGraph operations and exposes the exact adapter-native handle
      * bound to the same transaction.
@@ -3575,6 +3577,11 @@ export type AdoptedSchemaWriteTransaction = Readonly<{
   backend: SchemaWriteTransactionBackend &
     Readonly<{
       commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+      ensureVectorSlotContributions?: (
+        this: void,
+        slots: readonly VectorSlot[],
+        options?: Readonly<{ onDrift?: "throw" | "skip" }>,
+      ) => Promise<void>;
     }>;
   activeSchema: SchemaVersionRow | undefined;
 }>;

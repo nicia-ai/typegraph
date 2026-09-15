@@ -148,6 +148,7 @@ import {
   ensureIdentitySchemaStorage,
   identityKindCascadeNeeded,
   identitySchemaCommitPreflight,
+  inspectAdoptedIdentityStorage,
 } from "../identity/schema-transition";
 import {
   applyIdentityChangesForContext,
@@ -4993,18 +4994,31 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
-    // Request connections never perform implicit provisioning. Bootstrap the
-    // required storage with the privileged managed evolution path, then replan.
+    // Permission policy is explicit and checked before the mutating fence.
+    // Database permissions remain authoritative on opted-in connections.
     if (
       plan.status === "change" &&
       (plan.requirements.vectorSlots.length > 0 ||
-        plan.requirements.identityAffectedKinds.length > 0)
+        plan.requirements.identityAffectedKinds.length > 0) &&
+      this.#adapterBackend?.schemaProvisioning !== "transactional"
     ) {
       throw new UnsupportedBackendCapabilityError(
         "store.withEvolvedTransaction()",
         "transactional schema provisioning",
         { graphId: this.graphId, requirements: plan.requirements },
-        "Apply this extension through the privileged bootstrap connection and replan before adopting graph writes.",
+        "Use an adapter configured with schemaProvisioning: 'transactional' on a privileged connection, or apply the extension through bootstrap and replan.",
+      );
+    }
+    if (
+      plan.status === "change" &&
+      plan.requirements.vectorSlots.length > 0 &&
+      (this.#backend.capabilities.vector?.supported !== true ||
+        this.#backend.ensureVectorSlotContributions === undefined)
+    ) {
+      throw new UnsupportedBackendCapabilityError(
+        "store.withEvolvedTransaction()",
+        "transactional vector provisioning",
+        { graphId: this.graphId, slots: plan.requirements.vectorSlots },
       );
     }
     if (plan.status === "noop") {
@@ -5086,6 +5100,33 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.graphId,
       requireDefined(payload.classification),
     );
+    if (plan.requirements.vectorSlots.length > 0) {
+      const provision = adopted.backend.ensureVectorSlotContributions;
+      if (provision === undefined) {
+        throw new UnsupportedBackendCapabilityError(
+          "store.withEvolvedTransaction()",
+          "transactional vector provisioning",
+          { graphId: this.graphId },
+        );
+      }
+      await provision(requireDefined(payload.vectorSlots), {
+        onDrift: "throw",
+      });
+    }
+    if (plan.requirements.identityAffectedKinds.length > 0) {
+      const storage = await inspectAdoptedIdentityStorage(
+        adopted.backend,
+        this.#sqlSchema(),
+        {
+          graphId: this.graphId,
+          identityTableDdl: this.#baseBackend.identityTableDdl,
+        },
+      );
+      await candidate.identitySchemaPreflight(
+        adopted.backend,
+        storage.provisionInCommit,
+      );
+    }
     const committed = await adopted.backend.commitSchemaVersion({
       graphId: this.graphId,
       expected: { kind: "active", version: plan.baselineVersion },

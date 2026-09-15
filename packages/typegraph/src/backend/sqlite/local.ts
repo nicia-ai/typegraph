@@ -309,6 +309,7 @@ function applyConnectionPragmas(
  * Options for creating a local SQLite backend.
  */
 export type LocalSqliteBackendOptions = Readonly<{
+  schemaProvisioning?: "dml-only" | "transactional";
   /**
    * Path to the SQLite database file.
    * Defaults to ":memory:" for an in-memory database.
@@ -426,6 +427,9 @@ export function createLocalSqliteBackend(
     installLocalSqliteBaseSchema(sqlite, tables, options.fulltext);
 
     const backend = createSqliteBackend(db, {
+      ...(options.schemaProvisioning === undefined ?
+        {}
+      : { schemaProvisioning: options.schemaProvisioning }),
       executionProfile: {
         isSync: true,
       },

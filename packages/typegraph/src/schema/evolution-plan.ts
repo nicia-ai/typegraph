@@ -1,9 +1,11 @@
 /** Pure preparation for a schema evolution; database-dependent guards run at apply time. */
 import type { GraphDef } from "../core/define-graph";
+import { resolveGraphVectorSlots } from "../core/embedding";
 import { classifyModifications } from "../graph-extension/classify";
 import { IncompatibleChangeError } from "../graph-extension/errors";
 import type { GraphExtension } from "../graph-extension/extension-types";
 import { mergeGraphExtension } from "../graph-extension/merge";
+import type { VectorSlot } from "../query/dialect/vector-strategy";
 import { freezeDeep } from "../utils/object";
 import { canonicalEqual } from "./canonical";
 import { prepareNewSchemaVersion } from "./new-schema-version";
@@ -21,11 +23,9 @@ export type EvolutionRequirements = Readonly<{
   }>[];
   /** New embedding slots require transactional vector provisioning. */
   vectorSlots: readonly Readonly<{ kindName: string; fieldName: string }>[];
-  /** Identity storage may need provisioning for a newly introduced kind. */
+  /** Ontology changes require revalidating and rebuilding identity relations. */
   identityAffectedKinds: readonly string[];
 }>;
-
-type KindCandidate = EvolutionRequirements["readdedKindCandidates"][number];
 
 type EvolutionPlanBase = Readonly<{
   graphId: string;
@@ -47,6 +47,7 @@ export type EvolutionPlanPayload<G extends GraphDef> = Readonly<{
   mergedGraph: G;
   classification?: ReturnType<typeof classifyModifications>;
   schemaDocument?: SerializedSchema;
+  vectorSlots?: readonly VectorSlot[];
 }>;
 
 const PLAN_PAYLOADS = new WeakMap<
@@ -92,7 +93,6 @@ function newlyAddedVectorSlots(
 function identityKindsRequiringPreflight<G extends GraphDef>(
   baselineGraph: G,
   mergedGraph: G,
-  addedKinds: readonly KindCandidate[],
 ): readonly string[] {
   if (baselineGraph.identity === undefined) return [];
   if (
@@ -103,9 +103,10 @@ function identityKindsRequiringPreflight<G extends GraphDef>(
   ) {
     return Object.keys(mergedGraph.nodes);
   }
-  return addedKinds
-    .filter((kind) => kind.entity === "node")
-    .map((kind) => kind.kindName);
+  // New kinds have no existing identity members. Kind removal cascades its
+  // assertions, and the apply-time pending-removal guard protects re-addition.
+  // An unrelated kind or scalar field therefore owes no identity scan.
+  return [];
 }
 
 /**
@@ -168,7 +169,7 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
     readdedKindCandidates: addedKinds,
     vectorSlots: newlyAddedVectorSlots(existingExtension, extension),
     identityAffectedKinds: Object.freeze(
-      identityKindsRequiringPreflight(baselineGraph, mergedGraph, addedKinds),
+      identityKindsRequiringPreflight(baselineGraph, mergedGraph),
     ),
   });
   const plan: EvolutionPlan = Object.freeze({
@@ -182,7 +183,20 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
   });
   PLAN_PAYLOADS.set(
     plan,
-    Object.freeze({ mergedGraph, classification, schemaDocument }),
+    Object.freeze({
+      mergedGraph,
+      classification,
+      schemaDocument,
+      vectorSlots: freezeDeep(
+        resolveGraphVectorSlots(mergedGraph).filter((slot) =>
+          requirements.vectorSlots.some(
+            (required) =>
+              required.kindName === slot.nodeKind &&
+              required.fieldName === slot.fieldPath,
+          ),
+        ),
+      ),
+    }),
   );
   return plan;
 }

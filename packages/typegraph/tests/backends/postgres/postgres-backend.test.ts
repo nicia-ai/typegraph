@@ -427,12 +427,12 @@ describe("PostgreSQL Adapter", () => {
               max: 1,
             });
             return Promise.resolve({
-              backend: createPostgresBackend(
-                drizzle(serializedPool),
-                overrides?.capabilities === undefined ?
-                  undefined
-                : { capabilities: overrides.capabilities },
-              ),
+              backend: createPostgresBackend(drizzle(serializedPool), {
+                ...(overrides?.capabilities === undefined ?
+                  {}
+                : { capabilities: overrides.capabilities }),
+                schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
+              }),
               close: () => serializedPool.end(),
             });
           },

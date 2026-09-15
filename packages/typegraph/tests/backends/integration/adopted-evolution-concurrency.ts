@@ -16,6 +16,7 @@ import {
   raceTimeout,
   TIMEOUT_SENTINEL,
 } from "../../concurrency-utils";
+import { assertAdoptedEvolutionVisibility } from "./adopted-evolution-visibility";
 import type {
   IntegrationTestContext,
   SerializedBackendHandle,
@@ -69,6 +70,22 @@ export function registerAdoptedEvolutionConcurrencyTests(
   context: IntegrationTestContext,
 ): void {
   describe("adopted evolution on independent PostgreSQL sessions", () => {
+    it.skipIf(!context.serverLaneConcurrency)(
+      "publishes schema and callback writes together on commit and neither on rollback",
+      async () => {
+        const writer = await context.createSerializedBackend();
+        const reader = await context.createSerializedBackend();
+        try {
+          await assertAdoptedEvolutionVisibility(
+            writer.backend,
+            reader.backend,
+          );
+        } finally {
+          await writer.close();
+          await reader.close();
+        }
+      },
+    );
     it.skipIf(!context.serverLaneConcurrency)(
       "returns success or its typed deadline while finite ordinary writers keep arriving",
       async () => {

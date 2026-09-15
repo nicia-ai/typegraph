@@ -399,16 +399,23 @@ Otherwise refresh reads the active schema, accepts a newer committed version,
 and refuses a missing or older one. It applies no extension or storage
 provisioning.
 
-The current adopted apply path supports metadata-only changes and changes
-whose existing kinds must be checked for emptiness. A plan that requires new
-vector or identity storage is refused before schema mutation; provision it
-through the privileged managed evolution/bootstrap connection, then replan.
+The adopted apply path supports metadata-only changes, required-empty checks,
+and transactional identity and vector provisioning. Configure the adapter with
+`schemaProvisioning: "transactional"` on a privileged connection when the plan
+names new vector slots or identity work. The adapter's default DML-only policy
+refuses those requirements before the schema fence, DDL, callback, or mutation.
+The privileged path rechecks storage on the caller's fenced session, provisions
+the required relations and vector contribution markers there, and rolls them
+back with the outer transaction. Missing bootstrap tables still refuse; run
+the normal bootstrap before serving adopted evolution requests.
 The apply path uses a bounded schema fence, baseline validation, and a
 version CAS; it can issue multiple statements. `waitBudgetMs` bounds fence
 acquisition for change plans; no-op plans refuse an explicit `waitBudgetMs`.
 On timeout, roll back and retry the complete native transaction.
 Do not pass `ref` or eager-index options to `withEvolvedTransaction`; they
 cannot be honored before the outer commit and are refused.
+Generic and concurrent eager indexes remain explicit maintenance after commit:
+call `materializeIndexes()` on the refreshed Store when they are needed.
 
 When a wiring pass produces a no-op, ordinary recorded adoption is sufficient
 and never takes the exclusive evolution fence. Reconcile only if the Store is

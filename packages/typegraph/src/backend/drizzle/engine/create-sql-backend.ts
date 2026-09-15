@@ -662,6 +662,7 @@ export function createSqlBackend<TTx>(
     // backend advertises even if a dialect's operation-backend layer closed
     // over a capabilities object of its own.
     capabilities,
+    schemaProvisioning: profile.schemaProvisioning,
     ...late.transactions,
     ...late.rawSql,
     lockSchemaVersionForWrite: requireDefined(

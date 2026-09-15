@@ -46,6 +46,7 @@ export type SerializedBackendHandle = Readonly<{
  */
 export type SerializedBackendOverrides = Readonly<{
   capabilities?: BundledBackendCapabilityOverrides;
+  schemaProvisioning?: "dml-only" | "transactional";
 }>;
 
 /**

@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { createPostgresBackend } from "../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
@@ -18,6 +19,7 @@ afterEach(async () => {
 describe("schema-write transaction adoption", () => {
   it("refuses an SQLite connection in autocommit and adopts its live deferred frame", async () => {
     const { backend, db } = createLocalSqliteBackend();
+    expect(backend.schemaProvisioning).toBe("dml-only");
     openedBackends.push(backend);
     const adopt = backend.adoptSchemaWriteTransaction;
     expect(adopt).toBeDefined();
@@ -46,6 +48,7 @@ describe("schema-write transaction adoption", () => {
 
   it("acquires PostgreSQL's fence on the literal native transaction", async () => {
     const { backend, db } = await createLocalPgliteBackend({ vector: false });
+    expect(backend.schemaProvisioning).toBe("dml-only");
     openedBackends.push(backend);
     const adopt = backend.adoptSchemaWriteTransaction;
     expect(adopt).toBeDefined();
@@ -71,6 +74,40 @@ describe("schema-write transaction adoption", () => {
     await expect(
       adopt(endedTransaction, "adoption_test", { waitBudgetMs: 1000 }),
     ).rejects.toBeInstanceOf(ConfigurationError);
+  });
+
+  it("exposes transactional policy only when adapters opt in", async () => {
+    const { backend: sqlite } = createLocalSqliteBackend({
+      schemaProvisioning: "transactional",
+    });
+    openedBackends.push(sqlite);
+    expect(sqlite.schemaProvisioning).toBe("transactional");
+    const { backend: postgres } = await createLocalPgliteBackend({
+      vector: false,
+      schemaProvisioning: "transactional",
+    });
+    openedBackends.push(postgres);
+    expect(postgres.schemaProvisioning).toBe("transactional");
+  });
+
+  it("rejects invalid provisioning policy values at adapter construction", async () => {
+    const { backend: sqlite, db: sqliteDb } = createLocalSqliteBackend();
+    openedBackends.push(sqlite);
+    expect(() =>
+      createSqliteBackend(sqliteDb, {
+        schemaProvisioning: "unexpected" as "dml-only",
+      }),
+    ).toThrow(ConfigurationError);
+
+    const { backend: postgres, db: postgresDb } =
+      await createLocalPgliteBackend({ vector: false });
+    openedBackends.push(postgres);
+    expect(() =>
+      createPostgresBackend(postgresDb, {
+        vector: false,
+        schemaProvisioning: "unexpected" as "dml-only",
+      }),
+    ).toThrow(ConfigurationError);
   });
 
   it("refuses a PostgreSQL caller-serialized promise before touching schema rows", async () => {

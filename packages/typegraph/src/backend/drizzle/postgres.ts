@@ -187,6 +187,7 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
+  ensureAdoptedVectorSlots,
   gateFulltext,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
@@ -219,10 +220,11 @@ import {
   buildCommonOperationOptions,
   createEngineOperationBackend,
 } from "./engine/operation-layer";
-import type {
-  EngineAssemblyContext,
-  EngineLateMembers,
-  EngineOperationsContext,
+import {
+  type EngineAssemblyContext,
+  type EngineLateMembers,
+  type EngineOperationsContext,
+  resolveSchemaProvisioning,
 } from "./engine/profile";
 import {
   type AnyPgDatabase,
@@ -294,6 +296,8 @@ import {
  * Options for creating a PostgreSQL backend.
  */
 export type PostgresBackendOptions = Readonly<{
+  /** Opt in to transactional DDL in a caller-owned schema transaction. */
+  schemaProvisioning?: "dml-only" | "transactional";
   /**
    * Custom table definitions. Use createPostgresTables() to customize table names.
    * Defaults to standard TypeGraph table names.
@@ -2154,7 +2158,22 @@ export function buildPostgresEngineProfile(
           }
 
           const activeSchema = await privilegedBackend.getActiveSchema(graphId);
-          return { backend: privilegedBackend, activeSchema };
+          return {
+            backend: Object.defineProperty(privilegedBackend, "ensureVectorSlotContributions", {
+              value: (slots: readonly VectorSlot[], slotOptions?: Readonly<{ onDrift?: "throw" | "skip" }>) =>
+                ensureAdoptedVectorSlots(privilegedBackend, slots, slotOptions, {
+                  dialect: "postgres",
+                  fenceTarget,
+                  vectorStrategy,
+                  fulltextStrategy,
+                  fulltextTableName: tables.fulltextTableName,
+                  markerTableName: getTableName(tables.contributionMaterializations),
+                  decodeMarkerTimestamp: POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+                }),
+              enumerable: true,
+            }) as unknown as AdoptedSchemaWriteTransaction["backend"],
+            activeSchema,
+          };
         } }
           : {}),
 
@@ -2342,6 +2361,7 @@ export function buildPostgresEngineProfile(
     fulltext: fulltextStrategy,
     vector: vectorStrategy,
     declaredCapabilities,
+    schemaProvisioning: resolveSchemaProvisioning(options.schemaProvisioning),
     resourceAudit,
     autocommit: { singleStatementDurable: true },
     provisioning,

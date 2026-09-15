@@ -93,6 +93,7 @@ const NON_DERIVABLE_KEY_REASONS = {
   strategy: "captured by buildOperations and every transaction handle",
   fulltext: "captured by buildOperations and every transaction handle",
   vector: "captured by buildOperations and every transaction handle",
+  schemaProvisioning: "adapter policy is fixed at backend construction",
   provisioning:
     "ensureTable and catalog are captured by migrations and transaction handles",
   assembly:

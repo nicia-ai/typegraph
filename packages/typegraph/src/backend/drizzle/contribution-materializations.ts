@@ -33,6 +33,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
+import { sql as portableSql } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
@@ -586,6 +587,8 @@ export function gateFulltext(
  */
 export type ContributionMaterializerDeps = Readonly<{
   dialect: SqlDialect;
+  /** A caller-owned PostgreSQL transaction cannot write diagnostics after a failed DDL statement aborts its session. */
+  recordFailedAttempts?: boolean;
   /**
    * The write-fence target `lockContributionDdl` / `lockSharedFulltextTable`
    * resolve a plan from — a small first-party-marked object rather than the
@@ -1060,7 +1063,7 @@ export function createContributionMaterializer(
       // operator at the idempotent re-stamp repair that blesses the
       // unchanged old-shape table, and letting the next attempt skip this
       // guard. Staying `stale` points at `store.rebuildContribution()`.
-      await deps.recordMarker({
+      if (deps.recordFailedAttempts !== false) await deps.recordMarker({
         ...identity,
         signature: existing.signature,
         attemptedAt: nowIso(),
@@ -1076,7 +1079,7 @@ export function createContributionMaterializer(
         await deps.execDdl(statement);
       }
     } catch (error) {
-      await deps.recordMarker({
+      if (deps.recordFailedAttempts !== false) await deps.recordMarker({
         ...identity,
         signature,
         attemptedAt,
@@ -2115,4 +2118,80 @@ export function createContributionMaterializer(
     probeContributions,
     rebuildContribution,
   };
+}
+
+/**
+ * Provision vector slots on the literal caller-owned schema session. A fresh
+ * materializer keeps provisional marker facts out of the root backend's cache:
+ * the caller can still roll this transaction back after this method returns.
+ */
+export async function ensureAdoptedVectorSlots(
+  target: SchemaWriteTransactionBackend,
+  slots: readonly VectorSlot[],
+  options: Readonly<{ onDrift?: "throw" | "skip" }> | undefined,
+  deps: Readonly<{
+    dialect: SqlDialect;
+    fenceTarget: WriteFenceTarget;
+    vectorStrategy: VectorStrategy | undefined;
+    fulltextStrategy: FulltextStrategy | undefined;
+    fulltextTableName: string;
+    markerTableName: string;
+    decodeMarkerTimestamp: (value: unknown) => string | undefined;
+  }>,
+): Promise<void> {
+  if (slots.length === 0) return;
+  if (deps.vectorStrategy === undefined) {
+    throw new ConfigurationError(
+      "Adopted vector provisioning requires an active vector strategy.",
+      { capability: "schemaProvisioning.vectorStrategy" },
+    );
+  }
+  const recordMarker = target.recordContributionMaterialization;
+  if (recordMarker === undefined || !(await target.tableExists(deps.markerTableName))) {
+    throw new ConfigurationError(
+      "Adopted vector provisioning requires existing contribution-marker storage and transaction-scoped marker writes.",
+      { capability: "schemaProvisioning.vectorMarkers", markerTableName: deps.markerTableName },
+    );
+  }
+  const markerTable = portableSql.identifier(deps.markerTableName);
+  const materializer = createContributionMaterializer({
+    dialect: deps.dialect,
+    recordFailedAttempts: false,
+    fenceTarget: deps.fenceTarget,
+    vectorStrategy: deps.vectorStrategy,
+    fulltextStrategy: deps.fulltextStrategy,
+    fulltextTableName: deps.fulltextTableName,
+    execDdl: (statement) => target.executeSchemaDdl(statement),
+    ensureMarkerTable: async () => {
+      if (!(await target.tableExists(deps.markerTableName))) {
+        throw new ConfigurationError(
+          "Adopted vector provisioning requires contribution-marker storage before schema evolution.",
+          { capability: "schemaProvisioning.vectorMarkers", markerTableName: deps.markerTableName },
+        );
+      }
+    },
+    getMarkers: async (graphId) => {
+      const rows = await target.execute<RawContributionMaterializationRow>(
+        asCompiledRowsSql(portableSql`
+          SELECT graph_id AS "graphId", logical_name AS "logicalName",
+            owner, table_name AS "tableName", signature,
+            materialized_at AS "materializedAt",
+            last_attempted_at AS "lastAttemptedAt",
+            last_error AS "lastError"
+          FROM ${markerTable} WHERE graph_id = ${graphId}
+        `),
+      );
+      return rows.map((row) => mapContributionMaterializationRow(row, deps.decodeMarkerTimestamp));
+    },
+    recordMarker: (params) => recordMarker.call(undefined, params),
+    deleteMarker: async () => {
+      await Promise.resolve();
+      throw new ConfigurationError(
+        "Adopted vector provisioning does not delete contribution markers.",
+        { capability: "schemaProvisioning.vectorMarkerDelete" },
+      );
+    },
+    tableExists: (tableName) => target.tableExists(tableName),
+  });
+  await materializer.ensureVectorSlots(slots, options);
 }

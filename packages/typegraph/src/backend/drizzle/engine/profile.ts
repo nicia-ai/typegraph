@@ -13,6 +13,7 @@
  * sanctioned way a late member reaches the backend `createSqlBackend` is
  * building, and it resolves only once that backend object exists.
  */
+import { ConfigurationError } from "../../../errors";
 import type { ResolvedSqlTableNames } from "../../../query/compiler/schema";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { SqlDialect } from "../../../query/dialect/types";
@@ -45,6 +46,18 @@ import type { CreateKindRemovalMembersDeps } from "./members/kind-removal-member
 
 /** Resolved physical table names, uniform across dialects. */
 export type EngineTableNames = ResolvedSqlTableNames;
+
+/** Resolve the adapter's physical-provisioning policy once at construction. */
+export function resolveSchemaProvisioning(
+  value: unknown,
+): "dml-only" | "transactional" {
+  if (value === undefined) return "dml-only";
+  if (value === "dml-only" || value === "transactional") return value;
+  throw new ConfigurationError(
+    "schemaProvisioning must be 'dml-only' or 'transactional'.",
+    { option: "schemaProvisioning", value },
+  );
+}
 
 /**
  * The DDL primitives a profile owns. Every DDL statement any member group
@@ -374,6 +387,8 @@ export type SqlEngineProfile<TTx> = Readonly<{
   vector: VectorStrategy | undefined;
   /** The dialect's declared capabilities, before its capability tail runs. */
   declaredCapabilities: BackendCapabilities;
+  /** Adapter policy for provisioning inside caller-owned schema transactions. */
+  schemaProvisioning: "dml-only" | "transactional";
   /**
    * The serialized-resource verdict {@link createSqlBackend} records once,
    * before the backend object escapes (see `../../transaction-resource.ts`).

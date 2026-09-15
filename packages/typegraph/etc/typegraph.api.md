@@ -17,6 +17,7 @@ const __nodeId: unique symbol;
 
 // @public
 export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
+    schemaProvisioning: "dml-only" | "transactional";
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
     adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
@@ -104,6 +105,9 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
 type AdoptedSchemaWriteTransaction = Readonly<{
     backend: SchemaWriteTransactionBackend & Readonly<{
         commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+        ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
+            onDrift?: "throw" | "skip";
+        }>) => Promise<void>;
     }>;
     activeSchema: SchemaVersionRow | undefined;
 }>;

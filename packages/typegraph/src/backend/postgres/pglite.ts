@@ -108,6 +108,8 @@ export type LocalPgliteBackendOptions = Readonly<{
    * mirroring `vector: false`.
    */
   fulltext?: FulltextStrategy | false;
+  /** Opt in to provisioning within caller-owned schema transactions. */
+  schemaProvisioning?: "dml-only" | "transactional";
 }>;
 
 /**
@@ -214,6 +216,9 @@ export async function createLocalPgliteBackend(
 
     const db = drizzle(client);
     const backend = createPostgresBackend(db, {
+      ...(options.schemaProvisioning === undefined ?
+        {}
+      : { schemaProvisioning: options.schemaProvisioning }),
       tables,
       ...(vectorEnabled ? {} : { vector: false }),
       ...(options.fulltext === undefined ? {} : { fulltext: options.fulltext }),

@@ -6,6 +6,7 @@ import {
   type GraphBackend,
   type IdentityTableNames,
   type SchemaCommitPreflightBackend,
+  type SchemaWriteTransactionBackend,
   type TransactionBackend,
 } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
@@ -83,6 +84,45 @@ export type IdentityStorageProvisioning = Readonly<{
 }>;
 
 const NOTHING_OWED: IdentityStorageProvisioning = { provisionInCommit: [] };
+
+function identityDerivedStorageMissing(
+  graphId: string,
+  missingTables: readonly string[],
+): boolean {
+  assertIdentityStoragePresent(
+    graphId,
+    missingTables.filter((name) => !UPGRADEABLE_DERIVED_RELATIONS.has(name)),
+  );
+  return missingTables.includes(IDENTITY_SEPARATION_RELATION);
+}
+
+/**
+ * Recheck identity storage on the adopted schema-fenced session. The returned
+ * DDL is the existing backend's idempotent identity DDL, to be executed on the
+ * same session before the existing commit preflight rebuilds the closure.
+ */
+export async function inspectAdoptedIdentityStorage(
+  target: SchemaWriteTransactionBackend,
+  schema: SqlSchema,
+  options: Readonly<{
+    graphId: string;
+    identityTableDdl?: GraphBackend["identityTableDdl"];
+  }>,
+): Promise<IdentityStorageProvisioning> {
+  const tableNames = identityTableNames(schema);
+  const missingTables: string[] = [];
+  for (const [logicalName, tableName] of Object.entries(tableNames)) {
+    if (!(await target.tableExists(tableName))) missingTables.push(logicalName);
+  }
+  if (!identityDerivedStorageMissing(options.graphId, missingTables))
+    return NOTHING_OWED;
+  const ddl = options.identityTableDdl?.(tableNames);
+  if (ddl === undefined)
+    throw identityDerivedUpgradeUnsupportedError(options.graphId, [
+      "identityTableDdl",
+    ]);
+  return { provisionInCommit: ddl };
+}
 
 /**
  * Ensures the identity relations exist for a schema transition, and decides —
@@ -166,12 +206,9 @@ export async function ensureIdentitySchemaStorage(
   // graph whose identity profile is not committed yet has no reader that could
   // observe the derived relation at all.
   if (options.enablement) return NOTHING_OWED;
-  assertIdentityStoragePresent(
+  const separationMissing = identityDerivedStorageMissing(
     options.graphId,
-    missingTables.filter((name) => !UPGRADEABLE_DERIVED_RELATIONS.has(name)),
-  );
-  const separationMissing = missingTables.includes(
-    IDENTITY_SEPARATION_RELATION,
+    missingTables,
   );
   const rebuildRequired = await separationRebuildRequired(
     backend,

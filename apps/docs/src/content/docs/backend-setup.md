@@ -655,10 +655,27 @@ better-sqlite3. Drivers without that evidence refuse schema adoption; ordinary
 transaction support alone does not imply support for this operation. A deferred
 SQLite transaction acquires the writer slot before validating the schema plan.
 
-The request path performs no provisioning DDL. Plans requiring new vector slots
-or identity provisioning/validation refuse before schema mutation; apply those
-changes through a privileged bootstrap connection using managed evolution, then
-replan. Eager index materialization remains an explicit post-commit operation.
+Adapters default to a DML-only schema provisioning policy. Plans requiring new
+vector slots or identity work refuse before taking a mutating fence, running
+DDL, or changing schema rows. A privileged adapter configured with
+`schemaProvisioning: "transactional"` can apply those plans: it revalidates
+storage on the pinned caller session and provisions identity relations, vector
+tables, and durable contribution markers inside that same transaction. The
+caller must roll back the entire native transaction if any step fails.
+
+```typescript
+const backend = createPostgresBackend(db, {
+  schemaProvisioning: "transactional",
+});
+```
+
+Use a connection with permission to run the required DDL for this adapter;
+keep the default policy for a runtime role limited to DML.
+Bootstrap base storage before this request path; missing bootstrap tables
+refuse rather than being created lazily. Database permissions still determine
+whether transactional DDL succeeds. Generic eager index materialization,
+including concurrent PostgreSQL indexes, remains an explicit post-commit
+operation on the refreshed Store.
 Custom adapters must implement `adoptSchemaWriteTransaction` with the same
 session-bound fencing, finite-wait, and CAS guarantees to support change plans.
 See [Graph Extensions](/graph-extensions) for callback and receipt usage.

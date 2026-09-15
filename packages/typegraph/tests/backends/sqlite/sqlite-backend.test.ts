@@ -74,7 +74,9 @@ createIntegrationTestSuite("SQLite", () => {
     // nothing a provenance test does reaches the suite's own fixture.
     createSerializedBackend: (overrides) => {
       refuseUnsupportedSerializedBackendCapabilities("SQLite", overrides);
-      const { backend } = createLocalSqliteBackend();
+      const { backend } = createLocalSqliteBackend({
+        schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
+      });
       return Promise.resolve({ backend, close: () => backend.close() });
     },
   };

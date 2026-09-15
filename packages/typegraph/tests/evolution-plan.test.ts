@@ -99,6 +99,34 @@ describe("evolution planning", () => {
     expect(plan.requirements.vectorSlots).toEqual([
       { kindName: "Tag", fieldName: "vector" },
     ]);
+    expect(getEvolutionPlanPayload(plan)?.vectorSlots).toMatchObject([
+      { nodeKind: "Tag", fieldPath: "vector", dimensions: 3 },
+    ]);
+    expect(Object.isFrozen(getEvolutionPlanPayload(plan)?.vectorSlots)).toBe(
+      true,
+    );
+  });
+
+  it("does not rebuild unrelated identity for an ordinary new kind", async () => {
+    const baselineGraph = defineGraph({
+      id: "evolution_plan_identity",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    const storedSchema = serializeSchema(baselineGraph, 1);
+    const plan = await prepareEvolutionPlan({
+      baselineGraph,
+      baselineVersion: 1,
+      baselineHash: await computeSchemaHash(storedSchema),
+      storedSchema,
+      extension: defineGraphExtension({
+        nodes: { Tag: { properties: { name: { type: "string" } } } },
+      }),
+    });
+    expect(plan.status).toBe("change");
+    if (plan.status !== "change") throw new Error("Expected a change plan.");
+    expect(plan.requirements.identityAffectedKinds).toEqual([]);
   });
 
   it("returns a branded no-op bound to the baseline snapshot", async () => {
