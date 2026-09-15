@@ -268,7 +268,7 @@ describe("compileSetOperation", () => {
       expect(sql).toContain('"name"');
     });
 
-    it("compiles ascending order with NULLS LAST emulation", () => {
+    it("compiles ascending order with native NULLS LAST", () => {
       const op: SetOperation = {
         ...createSetOperation("union", "a", "b", ["name"]),
         orderBy: [createOrderSpec("a", "name", "asc")],
@@ -277,11 +277,11 @@ describe("compileSetOperation", () => {
       const sql = getSqlString(op);
 
       expect(sql).toContain("ORDER BY");
-      // IS NULL emulation: (col IS NULL) ASC for NULLS LAST, then col ASC
-      expect(sql).toMatch(/\("name" IS NULL\) ASC.*"name" ASC/);
+      expect(sql).toContain('"name" ASC NULLS LAST');
+      expect(sql).not.toContain('"name" IS NULL');
     });
 
-    it("compiles descending order with NULLS FIRST emulation", () => {
+    it("compiles descending order with native NULLS FIRST", () => {
       const op: SetOperation = {
         ...createSetOperation("union", "a", "b", ["name"]),
         orderBy: [createOrderSpec("a", "name", "desc")],
@@ -290,8 +290,8 @@ describe("compileSetOperation", () => {
       const sql = getSqlString(op);
 
       expect(sql).toContain("ORDER BY");
-      // IS NULL emulation: (col IS NULL) DESC for NULLS FIRST, then col DESC
-      expect(sql).toMatch(/\("name" IS NULL\) DESC.*"name" DESC/);
+      expect(sql).toContain('"name" DESC NULLS FIRST');
+      expect(sql).not.toContain('"name" IS NULL');
     });
 
     it("compiles multiple order fields", () => {

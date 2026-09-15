@@ -6,7 +6,7 @@ import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import type { DatabaseExpression } from "../expressions";
-import { resolveNullOrdering } from "../order";
+import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
@@ -283,9 +283,12 @@ export class ExecutableProjectionQuery<
       orderBy.length === 0 ?
         sql.empty()
       : sql`ORDER BY ${sql.join(
-          orderBy.map(
-            (order) =>
-              sql`${sql.identifier("checked_rows")}.${sql.identifier(order.column)} ${sql.raw(order.direction.toUpperCase())} NULLS ${sql.raw(order.nulls.toUpperCase())}`,
+          orderBy.map((order) =>
+            compileOrderTerm(
+              sql`${sql.identifier("checked_rows")}.${sql.identifier(order.column)}`,
+              order.direction,
+              order.nulls,
+            ),
           ),
           sql`, `,
         )}`;

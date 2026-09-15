@@ -19,7 +19,7 @@ import {
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
 import { type DatabaseExpression } from "../../expressions";
-import { resolveNullOrdering } from "../../order";
+import { compileOrderTerm, resolveNullOrdering } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
 import { validateAggregateOperand } from "../aggregate-validation";
 import {
@@ -903,13 +903,8 @@ export function buildStandardOrderBy(
       dialect,
       cteAlias,
     );
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
     const nulls = resolveNullOrdering(orderSpec);
-    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
-    parts.push(
-      sql`(${field} IS NULL) ${nullsDirection}`,
-      sql`${field} ${direction}`,
-    );
+    parts.push(compileOrderTerm(field, orderSpec.direction, nulls));
   }
 
   // Aggregate ordering references the projected SELECT-list output alias
@@ -918,22 +913,10 @@ export function buildStandardOrderBy(
   // an alias, and both SQLite and PostgreSQL allow ORDER BY to reference
   // it, so this needs no per-CTE or per-dialect resolution.
   //
-  // Nulls ordering can't reuse the `(field IS NULL) direction, field
-  // direction` trick above: unlike a source-table field reference, an
-  // output alias is only resolved by either dialect when the ORDER BY term
-  // is the bare identifier itself — wrapping it in `(alias IS NULL)`
-  // makes both SQLite and PostgreSQL look for a real column named
-  // `alias` and fail. The standard `NULLS FIRST`/`NULLS LAST` suffix
-  // (supported by both dialects) sidesteps that: it attaches to the bare
-  // identifier rather than embedding it in a larger expression.
   for (const orderSpec of aggregateOrderBy) {
     const column = quoteIdentifier(orderSpec.outputName);
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
     const nulls = resolveNullOrdering(orderSpec);
-    const nullsKeyword = sql.raw(
-      nulls === "first" ? "NULLS FIRST" : "NULLS LAST",
-    );
-    parts.push(sql`${column} ${direction} ${nullsKeyword}`);
+    parts.push(compileOrderTerm(column, orderSpec.direction, nulls));
   }
 
   return sql`ORDER BY ${sql.join(parts, sql`, `)}`;
@@ -1088,8 +1071,7 @@ export function buildLateMaterializedOuterProjection(
 /**
  * The outer ORDER BY: re-orders the LIMIT survivors by the `__lm_sk{n}` sort
  * values carried out of the topK CTE, matching `buildStandardOrderBy`'s
- * null-ordering semantics. Referencing the CTE's real columns (not bare output
- * aliases) keeps the `(x IS NULL)` null-placement trick valid on both dialects.
+ * null-ordering semantics.
  */
 export function buildLateMaterializedOuterOrderBy(
   ast: QueryAst,
@@ -1100,13 +1082,8 @@ export function buildLateMaterializedOuterOrderBy(
   const parts: SqlFragment[] = [];
   for (const [index, orderSpec] of orderBy.entries()) {
     const column = sql`${topk}.${sql.raw(`${LATE_MAT_SORT_KEY_PREFIX}${index}`)}`;
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
     const nulls = resolveNullOrdering(orderSpec);
-    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
-    parts.push(
-      sql`(${column} IS NULL) ${nullsDirection}`,
-      sql`${column} ${direction}`,
-    );
+    parts.push(compileOrderTerm(column, orderSpec.direction, nulls));
   }
   return sql`ORDER BY ${sql.join(parts, sql`, `)}`;
 }
@@ -1638,13 +1615,8 @@ function compileUserOrderBy(
       dialect,
       cteAlias,
     );
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
     const nulls = resolveNullOrdering(orderSpec);
-    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
-    fragments.push(
-      sql`(${field} IS NULL) ${nullsDirection}`,
-      sql`${field} ${direction}`,
-    );
+    fragments.push(compileOrderTerm(field, orderSpec.direction, nulls));
   }
   return fragments;
 }

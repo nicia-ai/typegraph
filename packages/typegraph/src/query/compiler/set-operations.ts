@@ -36,7 +36,7 @@ import {
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
-import { resolveNullOrdering } from "../order";
+import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { emitSetOperationQuerySql } from "./emitter";
 import { compileLimitOffsetClauses } from "./limit-offset";
@@ -337,7 +337,7 @@ function matchFieldToProjection(
  * For set operations, ORDER BY must reference output column names from
  * the compound result, not internal CTE columns. This function:
  * 1. Maps each ORDER BY field to its output name from the leftmost projection
- * 2. Uses IS NULL emulation for consistent NULLS FIRST/LAST across dialects
+ * 2. Applies the requested NULLS FIRST/LAST placement
  * 3. Throws a descriptive error if an ORDER BY field isn't in the projection
  */
 function buildSetOperationSuffixClauses(
@@ -384,18 +384,9 @@ function buildSetOperationSuffixClauses(
 
       // Use output column name with proper quoting
       const columnRef = sql.raw(dialect.quoteIdentifier(projected.outputName));
-      const dir = sql.raw(orderSpec.direction.toUpperCase());
-
-      // Handle nulls with IS NULL emulation for cross-dialect consistency
       // Default: ASC → NULLS LAST, DESC → NULLS FIRST
       const nulls = resolveNullOrdering(orderSpec);
-      const nullsDir = sql.raw(nulls === "first" ? "DESC" : "ASC");
-
-      // Emulate NULLS FIRST/LAST: (col IS NULL) ASC/DESC, col DIR
-      orderParts.push(
-        sql`(${columnRef} IS NULL) ${nullsDir}`,
-        sql`${columnRef} ${dir}`,
-      );
+      orderParts.push(compileOrderTerm(columnRef, orderSpec.direction, nulls));
     }
 
     clauses.push(sql`ORDER BY ${sql.join(orderParts, sql`, `)}`);

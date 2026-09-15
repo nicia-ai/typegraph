@@ -1,6 +1,7 @@
 import { ConfigurationError } from "../../errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
 import type { DatabaseExpression } from "../expressions";
+import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 import {
@@ -129,9 +130,12 @@ function compileOrder(
       "Relation ordering requires scalar keys; collection-valued ordering is unsupported.",
     );
   return sql` ORDER BY ${sql.join(
-    orderBy.map(
-      (order) =>
-        sql`${compileExpression(order.expression, dialect, false, orderedAggregates)} ${sql.raw(order.direction.toUpperCase())} NULLS ${sql.raw(order.nulls.toUpperCase())}`,
+    orderBy.map((order) =>
+      compileOrderTerm(
+        compileExpression(order.expression, dialect, false, orderedAggregates),
+        order.direction,
+        order.nulls,
+      ),
     ),
     sql`, `,
   )}`;
