@@ -201,7 +201,16 @@ injected before each `backend.execute` call and is reported separately; it is
 not a substitute for a remote PostgreSQL run. Independent calls execute in
 parallel, so their simulated delays may overlap.
 
-The JSON output reports statement count, client-observed aggregate backend
-duration, total duration, raw rows and JSON-encoded row bytes returned at the
-backend boundary, and the process heap delta. Server execution time and actual
-network wire bytes are explicitly unobservable through `GraphBackend`.
+Use a dedicated disposable database for PostgreSQL runs: the harness drops and
+recreates public TypeGraph tables before every run. It rotates the three mode
+orders across rounds and reports median and p95 elapsed time, raw timing
+samples, statement count, client-observed aggregate backend duration, raw rows
+and JSON-encoded row bytes returned at the backend boundary, and the process
+heap delta. Server execution time and actual network wire bytes are explicitly
+unobservable through `GraphBackend`.
+
+The [remote Neon Oregon report](reports/subgraph-batch-neon-oregon-2026-09-15.md)
+compares two 20-sample passes of overlapping full payloads, disjoint payloads,
+and identity-only results against a pooled PostgreSQL service. It records the
+client and server placement, an observed simple-query round trip, and the raw
+latency distributions without publishing the connection string.

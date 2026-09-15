@@ -229,6 +229,17 @@ function median(values: readonly number[]): number {
     : sorted[middle]!;
 }
 
+function percentile(values: readonly number[], percentage: number): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const position = ((sorted.length - 1) * percentage) / 100;
+  const lowerIndex = Math.floor(position);
+  const upperIndex = Math.ceil(position);
+  return (
+    sorted[lowerIndex]! +
+    (sorted[upperIndex]! - sorted[lowerIndex]!) * (position - lowerIndex)
+  );
+}
+
 async function main(): Promise<void> {
   const options = parseOptions(process.argv.slice(2));
   const resources = await createBackendResources(
@@ -257,16 +268,14 @@ async function main(): Promise<void> {
       batchOnceUnfused: [],
       batchOnceShared: [],
     };
-    for (const mode of [
-      "direct",
-      "batchOnceUnfused",
-      "batchOnceShared",
-    ] as const) {
-      for (
-        let index = 0;
-        index < options.warmup + options.iterations;
-        index += 1
-      ) {
+    const modes = ["direct", "batchOnceUnfused", "batchOnceShared"] as const;
+    for (
+      let index = 0;
+      index < options.warmup + options.iterations;
+      index += 1
+    ) {
+      for (let offset = 0; offset < modes.length; offset += 1) {
+        const mode = modes[(index + offset) % modes.length]!;
         Object.assign(counters, {
           statements: 0,
           backendExecuteMs: 0,
@@ -290,6 +299,10 @@ async function main(): Promise<void> {
         mode,
         {
           medianTotalMs: median(samples.map((sample) => sample.totalMs)),
+          p95TotalMs: percentile(
+            samples.map((sample) => sample.totalMs),
+            95,
+          ),
           medianBackendExecuteMs: median(
             samples.map((sample) => sample.backendExecuteMs),
           ),
@@ -306,6 +319,13 @@ async function main(): Promise<void> {
           medianSimulatedDelayMsApplied: median(
             samples.map((sample) => sample.simulatedDelayMsApplied),
           ),
+          samples: samples.map((sample) => ({
+            totalMs: sample.totalMs,
+            backendExecuteMs: sample.backendExecuteMs,
+            statements: sample.statements,
+            transferredRows: sample.transferredRows,
+            transferredBytes: sample.transferredBytes,
+          })),
         },
       ]),
     );
