@@ -2,12 +2,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineGraph, defineNode } from "../src";
-import { UnsupportedPredicateError } from "../src/errors";
 import type { FieldRef } from "../src/query/ast";
 import { decodeExpressionValue } from "../src/query/builder/executable-projection-query";
-import { compileDatabaseExpression } from "../src/query/compiler/database-expressions";
-import { sqliteDialect } from "../src/query/dialect/sqlite";
-import type { DatabaseExpression } from "../src/query/expressions";
 import { createFieldExpression, expr } from "../src/query/expressions";
 import { createTestBackend } from "./test-utils";
 
@@ -79,25 +75,26 @@ describe("database expressions", () => {
     );
   });
 
-  it("refuses ordering metadata on non-collection aggregates", () => {
-    const aggregate = expr.sum(expr.literal(1));
-    const forged = {
-      ...aggregate,
-      node: { ...aggregate.node, orderBy: [] },
-    } as DatabaseExpression;
+  it("uses distinct public AST shapes for collection and scalar aggregates", () => {
+    const operand = expr.literal("Ada");
+    const order = expr.literal(1);
+    const collection = expr.collect(operand, {
+      orderBy: [{ expression: order, direction: "desc", nulls: "first" }],
+    });
+    const aggregate = expr.sum(order);
 
-    expect(() =>
-      compileDatabaseExpression(forged, {
-        dialect: sqliteDialect,
-        orderedAggregates: true,
-      }),
-    ).toThrow(UnsupportedPredicateError);
-    expect(() =>
-      compileDatabaseExpression(forged, {
-        dialect: sqliteDialect,
-        orderedAggregates: true,
-      }),
-    ).toThrow("SUM does not accept aggregate ordering");
+    expect(collection.node).toEqual({
+      kind: "collect",
+      operand,
+      orderBy: [{ expression: order, direction: "desc", nulls: "first" }],
+    });
+    expect(collection.node).not.toHaveProperty("operator");
+    expect(aggregate.node).toEqual({
+      kind: "aggregate",
+      operand: order,
+      operator: "sum",
+    });
+    expect(aggregate.node).not.toHaveProperty("orderBy");
   });
 
   it("does not apply collection element decoding to ordinary JSON array fields", () => {

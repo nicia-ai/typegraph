@@ -115,6 +115,10 @@ const histories = await purchases
 // One row per customer, with amounts in purchase order, including duplicates.
 ```
 
+Import `CollectOptions<Scope>` to type reusable options or helper parameters without restating the
+nonempty ordering tuple. It names the options contract for `expr.collect()`; `filter`, `distinct`,
+and aggregate-local `limit` are not supported yet.
+
 `orderBy` must contain at least one scalar expression. Each item accepts `direction` (`"asc"` by
 default) and `nulls` (last for ascending, first for descending). Include a unique tie-breaker when
 other ordering values can tie. Collection ordering controls elements inside each list; the relation's

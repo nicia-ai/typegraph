@@ -964,6 +964,7 @@ export {
   type RelationProjectionResult,
 } from "./query/builder/relation";
 export {
+  type CollectOptions,
   type CollectOrder,
   type DatabaseExpression,
   expr,

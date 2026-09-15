@@ -123,7 +123,6 @@ type AggregateExpressionNode = Readonly<{
     kind: "aggregate";
     operator: AggregateOperator;
     operand?: DatabaseExpression | undefined;
-    orderBy?: readonly CollectOrder[];
 }>;
 
 // @public (undocumented)
@@ -133,7 +132,7 @@ type AggregateFieldResult<Expression extends AggregateExpr, Aliases extends Aggr
 type AggregateFunction = "count" | "countDistinct" | "sum" | "avg" | "min" | "max";
 
 // @public (undocumented)
-type AggregateOperator = "avg" | "collect" | "count" | "countDistinct" | "max" | "min" | "sum";
+type AggregateOperator = "avg" | "count" | "countDistinct" | "max" | "min" | "sum";
 
 // @public
 type AggregateOrderSpec = Readonly<{
@@ -813,9 +812,19 @@ type CoalesceExpressionNode = Readonly<{
 export type Collation = "binary" | "caseInsensitive";
 
 // @public (undocumented)
-function collect<T extends Comparable | undefined, Scope extends string>(operand: DatabaseExpression<T, Scope>, options: Readonly<{
+function collect<T extends Comparable | undefined, Scope extends string>(operand: DatabaseExpression<T, Scope>, options: CollectOptions<Scope>): DatabaseExpression<readonly T[], Scope>;
+
+// @public (undocumented)
+type CollectExpressionNode = Readonly<{
+    kind: "collect";
+    operand: DatabaseExpression;
+    orderBy: readonly CollectOrder[];
+}>;
+
+// @public
+export type CollectOptions<Scope extends string = string> = Readonly<{
     orderBy: readonly [CollectOrder<Scope>, ...CollectOrder<Scope>[]];
-}>): DatabaseExpression<readonly T[], Scope>;
+}>;
 
 // @public (undocumented)
 export type CollectOrder<Scope extends string = string> = Readonly<{
@@ -1587,7 +1596,7 @@ export type DatabaseExpression<out T = unknown, out Scope extends string = strin
 }>;
 
 // @public (undocumented)
-type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
+type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
 
 // @public
 type DatabaseExpressionPredicate = Readonly<{

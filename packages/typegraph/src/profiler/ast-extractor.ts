@@ -327,6 +327,15 @@ function extractFromDatabaseExpression(
       if (node.operand !== undefined) collect(node.operand);
       break;
     }
+    case "collect": {
+      collect(node.operand);
+      for (const order of node.orderBy) {
+        accesses.push(
+          ...extractFromDatabaseExpression(order.expression, "sort", ast),
+        );
+      }
+      break;
+    }
     case "conditional": {
       collect(node.condition);
       collect(node.then);

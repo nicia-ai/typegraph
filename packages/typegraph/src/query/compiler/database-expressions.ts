@@ -13,6 +13,7 @@ import {
   resolveCollectOrder,
 } from "../expressions";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { isAggregateExpression } from "./expression-inspection";
 import { compileFieldValue } from "./predicates";
 
 export type DatabaseExpressionCompilerContext = Readonly<{
@@ -89,11 +90,6 @@ function aggregateFunction(operator: AggregateOperator): SqlFragment {
     case "count": {
       return sql.raw("COUNT");
     }
-    case "collect": {
-      throw new UnsupportedPredicateError(
-        "COLLECT must be compiled through its ordered operand-aware path",
-      );
-    }
     case "max": {
       return sql.raw("MAX");
     }
@@ -126,6 +122,18 @@ function compileNode(
     return compileNode(expression, context, aggregateDepth);
   }
 
+  if (isAggregateExpression(expression)) {
+    if (context.allowAggregates === false) {
+      throw new UnsupportedPredicateError(
+        `Aggregate expressions are not allowed in ${context.aggregateClause ?? "this query"} clauses`,
+      );
+    }
+    if (aggregateDepth > 0) {
+      throw new UnsupportedPredicateError(
+        "Nested aggregate expressions are not supported",
+      );
+    }
+  }
   switch (node.kind) {
     case "field": {
       const resolved = context.compileFieldExpression?.(node.field, expression);
@@ -186,49 +194,32 @@ function compileNode(
         : sql.raw("IS NOT NULL");
       return sql`(${compile(node.operand)} ${operator})`;
     }
+    case "collect": {
+      if (context.orderedAggregates !== true)
+        throw new ConfigurationError(
+          "COLLECT requires ordered aggregate support from the active backend profile.",
+          { capability: "orderedAggregates", orderedAggregates: false },
+        );
+      assertPortableScalarValueType(node.operand.valueType, "COLLECT");
+      const ordering = resolveCollectOrder(node.orderBy).map((order) => {
+        const { direction, nulls } = order;
+        const directionSql =
+          direction === "asc" ? sql.raw("ASC") : sql.raw("DESC");
+        const nullsSql =
+          nulls === "first" ? sql.raw("NULLS FIRST") : sql.raw("NULLS LAST");
+        return sql`${compileNode(order.expression, context, aggregateDepth + 1)} ${directionSql} ${nullsSql}`;
+      });
+      return context.dialect.orderedScalarJsonArray(
+        compileNode(node.operand, context, aggregateDepth + 1),
+        node.operand.valueType,
+        ordering,
+      );
+    }
     case "aggregate": {
-      if (context.allowAggregates === false) {
-        throw new UnsupportedPredicateError(
-          `Aggregate expressions are not allowed in ${context.aggregateClause ?? "this query"} clauses`,
-        );
-      }
-      if (aggregateDepth > 0) {
-        throw new UnsupportedPredicateError(
-          "Nested aggregate expressions are not supported",
-        );
-      }
-      if (node.operator !== "collect" && node.orderBy !== undefined) {
-        throw new UnsupportedPredicateError(
-          `${node.operator.toUpperCase()} does not accept aggregate ordering`,
-        );
-      }
       const operand =
         node.operand === undefined ?
           sql.raw("*")
         : compileNode(node.operand, context, aggregateDepth + 1);
-      if (node.operator === "collect") {
-        if (context.orderedAggregates !== true)
-          throw new ConfigurationError(
-            "COLLECT requires ordered aggregate support from the active backend profile.",
-            { capability: "orderedAggregates", orderedAggregates: false },
-          );
-        if (node.operand === undefined)
-          throw new UnsupportedPredicateError("COLLECT requires an operand");
-        assertPortableScalarValueType(node.operand.valueType, "COLLECT");
-        const ordering = resolveCollectOrder(node.orderBy).map((order) => {
-          const { direction, nulls } = order;
-          const directionSql =
-            direction === "asc" ? sql.raw("ASC") : sql.raw("DESC");
-          const nullsSql =
-            nulls === "first" ? sql.raw("NULLS FIRST") : sql.raw("NULLS LAST");
-          return sql`${compileNode(order.expression, context, aggregateDepth + 1)} ${directionSql} ${nullsSql}`;
-        });
-        return context.dialect.orderedScalarJsonArray(
-          operand,
-          node.operand.valueType,
-          ordering,
-        );
-      }
       if (node.operator === "countDistinct") {
         if (node.operand === undefined) {
           throw new UnsupportedPredicateError(

@@ -289,23 +289,23 @@ export function substituteDatabaseExpression<T, Scope extends string>(
       } as DatabaseExpression<T, Scope>;
     }
     case "aggregate": {
+      return node.operand === undefined ?
+          expression
+        : {
+            ...expression,
+            node: { ...node, operand: substitute(node.operand) },
+          };
+    }
+    case "collect": {
       return {
         ...expression,
         node: {
           ...node,
-          ...(node.operand === undefined ?
-            {}
-          : { operand: substitute(node.operand) }),
-          ...(node.orderBy === undefined ?
-            {}
-          : {
-              orderBy: node.orderBy.map((order) => ({
-                ...order,
-                expression: substitute(
-                  order.expression,
-                ) as typeof order.expression,
-              })),
-            }),
+          operand: substitute(node.operand),
+          orderBy: node.orderBy.map((order) => ({
+            ...order,
+            expression: substitute(order.expression) as typeof order.expression,
+          })),
         },
       };
     }
@@ -857,7 +857,11 @@ function collectParameterMetadataFromDatabaseExpression(
     }
     case "aggregate": {
       if (node.operand !== undefined) collect(node.operand);
-      for (const order of node.orderBy ?? []) collect(order.expression);
+      return;
+    }
+    case "collect": {
+      collect(node.operand);
+      for (const order of node.orderBy) collect(order.expression);
       return;
     }
     case "conditional": {

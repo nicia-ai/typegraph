@@ -197,6 +197,7 @@ export {
   type SqlTableNames,
 } from "./compiler/schema";
 export {
+  type CollectOptions,
   type CollectOrder,
   type DatabaseExpression,
   expr,

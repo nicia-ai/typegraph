@@ -13,6 +13,7 @@ import {
   defineNode,
   embedding,
   exists,
+  expr,
   field,
   havingGt,
   inSubquery,
@@ -1178,6 +1179,34 @@ describe("AST Extractor", () => {
         a.predicateType === "avg_gt",
     );
     expect(havingAccess).toBeDefined();
+  });
+
+  it("extracts collection operands and aggregate-local ordering", () => {
+    const namePointer = jsonPointer(["name"]);
+    const agePointer = jsonPointer(["age"]);
+    const query = store
+      .query()
+      .from("Person", "person")
+      .project((fields) => ({
+        names: expr.collect(fields.person.name, {
+          orderBy: [{ expression: fields.person.age }],
+        }),
+      }));
+
+    const accesses = extractPropertyAccesses(query.toAst());
+
+    expect(accesses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          context: "select",
+          target: { __type: "prop", pointer: namePointer },
+        }),
+        expect.objectContaining({
+          context: "sort",
+          target: { __type: "prop", pointer: agePointer },
+        }),
+      ]),
+    );
   });
 
   it("extracts from AND predicates", () => {

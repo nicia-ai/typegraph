@@ -19,7 +19,7 @@ export type ArithmeticOperator = "add" | "divide" | "multiply" | "subtract";
 export type ExpressionComparisonOperator =
   "eq" | "gt" | "gte" | "lt" | "lte" | "neq";
 export type AggregateOperator =
-  "avg" | "collect" | "count" | "countDistinct" | "max" | "min" | "sum";
+  "avg" | "count" | "countDistinct" | "max" | "min" | "sum";
 
 export type CollectOrder<Scope extends string = string> = Readonly<{
   expression: DatabaseExpression<
@@ -28,6 +28,17 @@ export type CollectOrder<Scope extends string = string> = Readonly<{
   >;
   direction?: "asc" | "desc";
   nulls?: "first" | "last";
+}>;
+
+/** Options for ordered scalar collection aggregation. */
+export type CollectOptions<Scope extends string = string> = Readonly<{
+  orderBy: readonly [CollectOrder<Scope>, ...CollectOrder<Scope>[]];
+}>;
+
+export type CollectExpressionNode = Readonly<{
+  kind: "collect";
+  operand: DatabaseExpression;
+  orderBy: readonly CollectOrder[];
 }>;
 
 type FieldExpressionNode = Readonly<{
@@ -72,7 +83,6 @@ type AggregateExpressionNode = Readonly<{
   kind: "aggregate";
   operator: AggregateOperator;
   operand?: DatabaseExpression | undefined;
-  orderBy?: readonly CollectOrder[];
 }>;
 type CoalesceExpressionNode = Readonly<{
   kind: "coalesce";
@@ -107,6 +117,7 @@ export type DatabaseExpressionNode =
   | ArithmeticExpressionNode
   | BooleanExpressionNode
   | CoalesceExpressionNode
+  | CollectExpressionNode
   | ComparisonExpressionNode
   | ConditionalExpressionNode
   | ExistsSubqueryExpressionNode
@@ -571,9 +582,7 @@ export function resolveCollectOrder<Scope extends string>(
 
 function collect<T extends Comparable | undefined, Scope extends string>(
   operand: DatabaseExpression<T, Scope>,
-  options: Readonly<{
-    orderBy: readonly [CollectOrder<Scope>, ...CollectOrder<Scope>[]];
-  }>,
+  options: CollectOptions<Scope>,
 ): DatabaseExpression<readonly T[], Scope> {
   assertPortableScalarValueType(operand.valueType, "COLLECT");
   const orderBy = resolveCollectOrder(options.orderBy);
@@ -582,7 +591,7 @@ function collect<T extends Comparable | undefined, Scope extends string>(
     ...orderBy.map((order) => order.expression),
   ]);
   return createExpression(
-    { kind: "aggregate", operand, operator: "collect", orderBy },
+    { kind: "collect", operand, orderBy },
     "array",
     false,
     scopeIdentity,

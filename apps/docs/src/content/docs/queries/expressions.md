@@ -214,3 +214,10 @@ query's bindings.
 
 Expression builders do not accept raw SQL. This keeps parameter binding, decoding, and SQLite /
 PostgreSQL behavior on the same compiler path.
+
+## Collection expression nodes
+
+`expr.collect(value, options)` returns `DatabaseExpression<readonly T[], Scope>`. Reusable helpers
+can import `CollectOptions<Scope>` for its required, nonempty `orderBy` tuple. Collection expressions
+expose a distinct `node.kind: "collect"`, with `operand` and `orderBy`. Ordinary `"aggregate"` nodes
+retain their operator and optional operand; collection-only options do not appear on them.
