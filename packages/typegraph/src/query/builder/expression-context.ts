@@ -11,10 +11,12 @@ import type { ExpressionSubqueryHelpers } from "./expression-subqueries";
 import type { QueryBuilder } from "./query-builder";
 import type {
   AliasMap,
+  CommonPropertyKeys,
   EdgeAliasMap,
   EmptyAliasMap,
   EmptyEdgeAliasMap,
   EmptyRecursiveAliasMap,
+  NodePropsFor,
   QueryBuilderConfig,
   QueryBuilderState,
   QueryCoordinateState,
@@ -26,13 +28,16 @@ type UndefinedWhenOptional<Optional extends boolean> =
   Optional extends true ? undefined : never;
 type ExpressionObjectChildren<Value, Scope extends string> = {
   readonly [
-    Key in Exclude<keyof NonNullable<Value>, keyof DatabaseExpression | "$get">
+    Key in Exclude<
+      CommonPropertyKeys<NonNullable<Value>>,
+      keyof DatabaseExpression | "$get"
+    >
   ]-?: ExpressionValue<
     NonNullable<Value>[Key] | UndefinedWhenNullish<Value>,
     Scope
   >;
 } & Readonly<{
-  $get: <Key extends keyof NonNullable<Value>>(
+  $get: <Key extends CommonPropertyKeys<NonNullable<Value>>>(
     key: Key,
   ) => ExpressionValue<
     NonNullable<Value>[Key] | UndefinedWhenNullish<Value>,
@@ -73,9 +78,9 @@ type AliasExpressions<
   Scope extends string,
 > = {
   readonly [
-    Property in keyof z.infer<Entry["type"]["schema"]>
+    Property in CommonPropertyKeys<NodePropsFor<Entry["type"]>>
   ]-?: ExpressionValue<
-    | z.infer<Entry["type"]["schema"]>[Property]
+    | NodePropsFor<Entry["type"]>[Property]
     | (Entry["optional"] extends true ? undefined : never),
     Scope
   >;

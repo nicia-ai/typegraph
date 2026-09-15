@@ -46,6 +46,7 @@ export { registerLineageConformanceIntegrationTests } from "./lineage-conformanc
 export { registerMatchResultFilteringIntegrationTests } from "./match-result-filtering";
 export { registerMatchResultRankingIntegrationTests } from "./match-result-ranking";
 export { registerMigrateSchemaKindIntegrationTests } from "./migrate-schema-kinds";
+export { registerMultiKindQueryIntegrationTests } from "./multi-kind-queries";
 export { registerMultiRecursiveTraversalIntegrationTests } from "./multi-recursive-traversals";
 export { registerMultiRootSubgraphBatchIntegrationTests } from "./multi-root-subgraph-batch";
 export { registerOrderingIntegrationTests } from "./ordering";

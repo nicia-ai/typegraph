@@ -36,6 +36,11 @@ await store.edges.knows.create(alice, bob);
 await store.close();
 ```
 
+Use `store.query().from(["Person", "Company"], "entity")` for one result stream
+across several node kinds. Queries expose compatible shared fields, full-node
+results retain their concrete kind, and cursor pagination includes both kind
+and ID so overlapping IDs remain distinct. See [Query sources](https://typegraph.dev/queries/source).
+
 For latency-sensitive reads, `store.batchOnce()` combines independent fluent
 queries and set-oriented reads into one statement. Its callback receives a
 batch-scoped builder with `neighbors()`, `countNeighbors()`, and `subgraph()`

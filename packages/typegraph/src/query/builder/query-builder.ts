@@ -79,7 +79,11 @@ import {
 import { createExpressionSubqueryHelpers } from "./expression-subqueries";
 import { registerQueryBuilderInternalContext } from "./internal-context";
 import { getQueryBuilderInternalContext } from "./internal-context";
-import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
+import {
+  assertSharedNodeField,
+  buildOrderSpec,
+  resolveSystemOrderField,
+} from "./order-by-field";
 import { withRecursiveStopExpansion } from "./recursive-stop";
 import { executeQueryTerminal } from "./terminal-query";
 import { TraversalBuilder } from "./traversal-builder";
@@ -376,11 +380,30 @@ export class QueryBuilder<
   }
 
   /**
-   * Starts a query from a node kind.
+   * Starts a query from one kind or a nonempty explicit list of kinds.
+   * Lists scan exactly the requested kinds; duplicates are normalized.
+   * Properties used in predicates and expressions must be shared by all kinds.
    *
    * @param kind - The node kind to start from
    * @param alias - A unique alias for this node (compile-time error if duplicate)
    */
+  from<
+    const Kinds extends readonly [
+      keyof G["nodes"] & string,
+      ...(keyof G["nodes"] & string)[],
+    ],
+    A extends string,
+  >(
+    kinds: Kinds,
+    alias: UniqueAlias<A, Aliases>,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<G["nodes"][Kinds[number]]["type"]>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
@@ -406,7 +429,7 @@ export class QueryBuilder<
   >;
 
   from<K extends keyof G["nodes"] & string, A extends string>(
-    kind: K,
+    kind: K | readonly K[],
     alias: UniqueAlias<A, Aliases>,
     options?: { includeSubClasses?: boolean },
   ): QueryBuilder<
@@ -419,16 +442,31 @@ export class QueryBuilder<
     validateQuerySource(this.#state, true);
     // Validate alias to prevent SQL injection
     validateSqlIdentifier(alias);
-    if (!this.#config.registry.hasNodeType(kind))
-      throw new KindNotFoundError(kind, "node", {
-        graphId: this.#config.graphId,
-      });
-
+    const explicitKinds = typeof kind !== "string";
+    if (explicitKinds && options !== undefined) {
+      throw new ConfigurationError(
+        "An explicit source kind list does not accept from() options.",
+      );
+    }
+    const requestedKinds =
+      typeof kind === "string" ? [kind] : [...new Set(kind)];
+    if (requestedKinds.length === 0) {
+      throw new ConfigurationError(
+        "from() requires a nonempty source kind list.",
+      );
+    }
+    for (const requestedKind of requestedKinds) {
+      if (!this.#config.registry.hasNodeType(requestedKind)) {
+        throw new KindNotFoundError(requestedKind, "node", {
+          graphId: this.#config.graphId,
+        });
+      }
+    }
     const includeSubClasses = options?.includeSubClasses ?? false;
-
-    // Expand kinds if including subclasses
     const kinds =
-      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+      typeof kind === "string" && includeSubClasses ?
+        this.#config.registry.expandSubClasses(kind)
+      : requestedKinds;
 
     const newState: QueryBuilderState = {
       ...this.#state,
@@ -1435,6 +1473,7 @@ export class QueryBuilder<
             nodeKindNames,
             field,
           );
+      assertSharedNodeField(nodeKindNames, field, typeInfo);
     }
     const orderSpec = buildOrderSpec(
       alias,
@@ -1539,6 +1578,7 @@ export class QueryBuilder<
       kindNames ?
         this.#config.schemaIntrospector.getSharedFieldTypeInfo(kindNames, field)
       : undefined;
+    assertSharedNodeField(kindNames, field, typeInfo);
 
     const fieldRefValue: FieldRef = {
       __type: "field_ref",
@@ -1740,6 +1780,7 @@ export class QueryBuilder<
         )
       : undefined;
 
+    assertSharedNodeField(kindNames, property, typeInfo);
     const ref = fieldRef(alias, ["props"], {
       jsonPointer: jsonPointer([property]),
       valueType: typeInfo?.valueType,

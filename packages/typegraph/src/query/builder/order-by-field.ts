@@ -1,3 +1,4 @@
+import { ConfigurationError } from "../../errors";
 import { type FieldRef, type OrderSpec, type SortDirection } from "../ast";
 import { jsonPointer } from "../json-pointer";
 import { fieldRef } from "../predicates";
@@ -77,4 +78,21 @@ export function buildOrderSpec(
       }),
     direction,
   };
+}
+
+/** Refuses property operations that lack schema agreement across node kinds. */
+export function assertSharedNodeField(
+  kindNames: readonly string[] | undefined,
+  field: string,
+  typeInfo: FieldTypeInfo | undefined,
+): void {
+  if (
+    kindNames !== undefined &&
+    kindNames.length > 1 &&
+    typeInfo === undefined
+  ) {
+    throw new ConfigurationError(
+      `Unknown or incompatible shared node field "${field}".`,
+    );
+  }
 }

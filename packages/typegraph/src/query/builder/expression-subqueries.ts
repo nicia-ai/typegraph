@@ -7,6 +7,7 @@ import {
   type DatabaseExpression,
 } from "../expressions";
 import type { OneStatementReadProvenance } from "./one-statement-provenance";
+import type { IsUnion } from "./types";
 
 export type ExpressionProjectionEntry<T = unknown> = Readonly<{
   outputName: string;
@@ -15,13 +16,6 @@ export type ExpressionProjectionEntry<T = unknown> = Readonly<{
 
 type ExpressionValue<Expression> =
   Expression extends DatabaseExpression<infer Value> ? Value : never;
-type IsUnion<Value, Whole = Value> =
-  Value extends Whole ?
-    [Whole] extends [Value] ?
-      false
-    : true
-  : never;
-
 /** Preserves a one-field projection as a tuple so `$scalar()` can reject wider records. */
 export type ExpressionProjectionEntries<
   Fields extends Readonly<Record<string, DatabaseExpression>>,

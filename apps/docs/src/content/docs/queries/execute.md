@@ -628,7 +628,11 @@ Both `paginate()` and `stream()` require an `orderBy()` clause:
 
 ### Stable Ordering
 
-For deterministic pagination, include a unique field in your ordering:
+Cursor pagination and streaming automatically append missing start-node identity keys: `id ASC`
+for a single kind, or `kind ASC` and `id ASC` for a multi-kind source. Existing caller-specified
+identity ordering is preserved. Offset pagination needs an explicit total ordering.
+
+For deterministic offset pagination of one kind, include `id` in your ordering:
 
 ```typescript
 .orderBy("p", "name", "asc")

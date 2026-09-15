@@ -32,6 +32,7 @@ import {
   getUnindexedFilters,
 } from "../src/profiler/recommendations";
 import { type DeclaredIndex } from "../src/profiler/types";
+import { fieldRef, stringField } from "../src/query/predicates";
 import { createStore, type Store } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
@@ -819,7 +820,13 @@ describe("QueryProfiler", () => {
       await profiledStore
         .query()
         .from("Organization", "o", { includeSubClasses: true })
-        .whereNode("o", (o) => requireDefined(o["industry"]).eq("Tech"))
+        // Deliberate low-level subclass-only predicate: the typed shared-field
+        // accessor refuses industry because Organization does not declare it.
+        .whereNode("o", () =>
+          stringField(
+            fieldRef("o", ["props"], { jsonPointer: industryPointer }),
+          ).eq("Tech"),
+        )
         .select((ctx) => ctx.o)
         .execute();
 
