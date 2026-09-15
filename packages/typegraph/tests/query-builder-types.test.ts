@@ -38,6 +38,7 @@ import {
 } from "../src";
 import { ConfigurationError } from "../src/errors";
 import type { TraversalBuilder } from "../src/query/builder/traversal-builder";
+import type { DialectAdapter } from "../src/query/dialect/types";
 import type {
   AggregateOperator,
   CollectExpressionNode,
@@ -183,6 +184,7 @@ describe("Query Builder Type Safety", () => {
         names: expr.collect(
           fields.person.name,
           preserveCollectOptions({
+            filter: expr.gt(fields.person.age, expr.literal(18)),
             orderBy: [{ expression: fields.person.name }],
           }),
         ),
@@ -198,6 +200,57 @@ describe("Query Builder Type Safety", () => {
     expectTypeOf<CollectionRow["joined"]>().toEqualTypeOf<
       readonly (Date | undefined)[]
     >();
+
+    const nullableEmploymentFilter = undefined as unknown as DatabaseExpression<
+      boolean | undefined,
+      "employment"
+    >;
+    const nullableFilterOptions: CollectOptions<"employment"> = {
+      filter: nullableEmploymentFilter,
+      orderBy: [{ expression: expr.literal(1) }],
+    };
+    expectTypeOf(nullableFilterOptions.filter).toEqualTypeOf<
+      DatabaseExpression<boolean | undefined, "employment"> | undefined
+    >();
+    const personFilter = undefined as unknown as DatabaseExpression<
+      boolean,
+      "person"
+    >;
+    const mismatchedFilterOptions: CollectOptions<"employment"> = {
+      // @ts-expect-error - COLLECT filter scope must match its aggregate scope
+      filter: personFilter,
+      orderBy: [{ expression: expr.literal(1) }],
+    };
+    void mismatchedFilterOptions;
+
+    type OrderedCollectionCompiler = DialectAdapter["orderedScalarJsonArray"];
+    type OrderedCollectionArguments = Parameters<OrderedCollectionCompiler>[0];
+    type LegacyPositionalCompiler = (
+      value: OrderedCollectionArguments["value"],
+      valueType: OrderedCollectionArguments["valueType"],
+      orderBy: OrderedCollectionArguments["orderBy"],
+    ) => ReturnType<OrderedCollectionCompiler>;
+    type LegacyCompilerIsCompatible =
+      LegacyPositionalCompiler extends OrderedCollectionCompiler ? true : false;
+    expectTypeOf<LegacyCompilerIsCompatible>().toEqualTypeOf<false>();
+    const compilerArgumentsWithoutFilter = {
+      filter: undefined,
+      orderBy: undefined as unknown as OrderedCollectionArguments["orderBy"],
+      value: undefined as unknown as OrderedCollectionArguments["value"],
+      valueType: "string" as const,
+    } satisfies OrderedCollectionArguments;
+    expectTypeOf(
+      compilerArgumentsWithoutFilter.filter,
+    ).toEqualTypeOf<undefined>();
+    const compilerArgumentsMissingFilter = {
+      orderBy: undefined as unknown as OrderedCollectionArguments["orderBy"],
+      value: undefined as unknown as OrderedCollectionArguments["value"],
+      valueType: "string" as const,
+    };
+    // @ts-expect-error - dialect implementations must explicitly accept the filter seam
+    const incompleteCompilerArguments: OrderedCollectionArguments =
+      compilerArgumentsMissingFilter;
+    void incompleteCompilerArguments;
 
     type CollectIsAggregateOperator =
       "collect" extends AggregateOperator ? true : false;
@@ -229,6 +282,11 @@ describe("Query Builder Type Safety", () => {
           emptyOrder: expr.collect(fields.person.name, { orderBy: [] }),
           // @ts-expect-error - COLLECT accepts scalar operands, not arrays
           structured: expr.collect(fields.person.tags, {
+            orderBy: [{ expression: fields.person.name }],
+          }),
+          nonBooleanFilter: expr.collect(fields.person.name, {
+            // @ts-expect-error - COLLECT filters must be Boolean expressions
+            filter: fields.person.age,
             orderBy: [{ expression: fields.person.name }],
           }),
         }));

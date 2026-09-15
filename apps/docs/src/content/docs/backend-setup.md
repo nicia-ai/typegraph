@@ -1448,6 +1448,14 @@ SQLite introduced aggregate-local ordering in [version 3.44](https://www.sqlite.
 The scalar collection representation avoids depending on JSON object subtype preservation during
 sorting. Existing reads continue to work when ordered aggregates are unavailable.
 
+Custom dialect adapters implement `orderedScalarJsonArray` with one required object argument:
+`{ value, valueType, orderBy, filter }`. Migrate positional implementations by destructuring that
+object, applying `filter` as an aggregate `FILTER (WHERE ...)` before wrapping the aggregate in the
+empty-input `COALESCE`, and leaving it off when `filter` is `undefined`. The aggregate must preserve
+included NULL operands and return `[]` for empty input. The `filter` key itself is required in the
+adapter contract, even though its value may be `undefined`, which requires old positional
+implementations to migrate explicitly.
+
 The former top-level `capabilities.transactions` override is not interpreted
 as an alias. Bundled factories refuse it with `LEGACY_CAPABILITY_OVERRIDE`,
 including for JavaScript and already-compiled callers, because transaction

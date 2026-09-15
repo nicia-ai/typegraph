@@ -6,6 +6,7 @@
  */
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { applyAggregateFilter } from "./aggregate-filter";
 import { fts5Strategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
 import {
@@ -161,9 +162,11 @@ export const sqliteDialect: DialectAdapter = {
     return sql`COALESCE((SELECT json_group_array(json(batch_json)) FROM (SELECT ${object} AS batch_json FROM ${row} ORDER BY ${row}.${sql.identifier(orderColumn)})), json('[]'))`;
   },
 
-  orderedScalarJsonArray(value, valueType, orderBy) {
+  orderedScalarJsonArray({ filter, orderBy, value, valueType }) {
     void valueType;
-    return sql`COALESCE(json_group_array(${value} ORDER BY ${sql.join(orderBy, sql`, `)}), json('[]'))`;
+    const aggregate = sql`json_group_array(${value} ORDER BY ${sql.join(orderBy, sql`, `)})`;
+    const filteredAggregate = applyAggregateFilter(aggregate, filter);
+    return sql`COALESCE(${filteredAggregate}, json('[]'))`;
   },
 
   // ============================================================

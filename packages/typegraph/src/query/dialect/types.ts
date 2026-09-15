@@ -201,12 +201,21 @@ export interface DialectAdapter {
     orderColumn: string,
   ) => SqlFragment;
 
-  /** Aggregates scalar values into an ordered JSON array, preserving NULL elements. */
+  /**
+   * Aggregates scalar values into an ordered JSON array.
+   *
+   * A filter admits only rows for which SQL evaluates it to TRUE; FALSE and
+   * NULL are excluded. Admitted NULL values remain array elements, and an
+   * empty input produces an empty array.
+   */
   readonly orderedScalarJsonArray: (
     this: void,
-    value: SqlFragment,
-    valueType: ValueType,
-    orderBy: readonly SqlFragment[],
+    options: Readonly<{
+      value: SqlFragment;
+      valueType: ValueType;
+      orderBy: readonly SqlFragment[];
+      filter: SqlFragment | undefined;
+    }>,
   ) => SqlFragment;
 
   // ============================================================

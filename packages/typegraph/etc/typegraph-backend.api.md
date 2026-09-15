@@ -1859,7 +1859,12 @@ export interface DialectAdapter {
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
     readonly orderedRowsJsonArray: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string) => SqlFragment;
-    readonly orderedScalarJsonArray: (this: void, value: SqlFragment, valueType: ValueType, orderBy: readonly SqlFragment[]) => SqlFragment;
+    readonly orderedScalarJsonArray: (this: void, options: Readonly<{
+        value: SqlFragment;
+        valueType: ValueType;
+        orderBy: readonly SqlFragment[];
+        filter: SqlFragment | undefined;
+    }>) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly quoteIdentifier: (this: void, name: string) => string;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;

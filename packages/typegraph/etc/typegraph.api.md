@@ -818,11 +818,13 @@ function collect<T extends Comparable | undefined, Scope extends string>(operand
 type CollectExpressionNode = Readonly<{
     kind: "collect";
     operand: DatabaseExpression;
+    filter?: DatabaseExpression<boolean | undefined>;
     orderBy: readonly CollectOrder[];
 }>;
 
 // @public
 export type CollectOptions<Scope extends string = string> = Readonly<{
+    filter?: DatabaseExpression<boolean | undefined, Scope>;
     orderBy: readonly [CollectOrder<Scope>, ...CollectOrder<Scope>[]];
 }>;
 

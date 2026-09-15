@@ -334,6 +334,11 @@ function extractFromDatabaseExpression(
           ...extractFromDatabaseExpression(order.expression, "sort", ast),
         );
       }
+      if (node.filter !== undefined) {
+        accesses.push(
+          ...extractFromDatabaseExpression(node.filter, "filter", ast),
+        );
+      }
       break;
     }
     case "conditional": {
