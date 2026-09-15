@@ -2961,10 +2961,15 @@ type HardDeleteUniquesByNodeIdsParams = Readonly<{
 type HasMeta<Selection extends readonly string[] | undefined> = Selection extends readonly string[] ? "meta" extends Selection[number] ? true : false : false;
 
 // @public (undocumented)
-type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> & StoreTransactions<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
+type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
+    transaction: <T>(fn: (tx: HistoryTransactionContext<G>) => Promise<T>, options?: StoreTransactionOptions) => Promise<T>;
+    transactionWithReceipt: <T>(fn: (tx: MeasurableHistoryTransactionContext<G>) => Promise<T>, options?: StoreTransactionOptions) => Promise<TransactionOutcome<T>>;
     historyEnabled: true;
     recordedReadBound: true;
 }>;
+
+// @public
+type HistoryTransactionContext<G extends GraphDef> = TransactionContext<G> & RecordedRevisionRequest;
 
 // @public
 type HookContext = Readonly<{
@@ -3739,6 +3744,11 @@ type MaterializeRemovalsResult = Readonly<{
 type MaterializeSystemIndexesOptions = Readonly<{
     stopOnError?: boolean;
     refreshStatistics?: boolean;
+}>;
+
+// @public
+type MeasurableHistoryTransactionContext<G extends GraphDef> = HistoryTransactionContext<G> & Readonly<{
+    measure: ScopedMeasure<MeasurableHistoryTransactionContext<G>>;
 }>;
 
 // @public
@@ -4830,6 +4840,11 @@ type RecordedRelationDdl = Readonly<{
     createTable: string;
     indexes: readonly string[];
     primaryKeyConstraintName?: string | undefined;
+}>;
+
+// @public
+type RecordedRevisionRequest = Readonly<{
+    requestRecordedRevision: () => void;
 }>;
 
 // @public

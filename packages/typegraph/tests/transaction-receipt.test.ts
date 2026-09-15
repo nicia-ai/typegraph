@@ -132,6 +132,18 @@ async function writeFixture(
 }
 
 describe("transaction receipts", () => {
+  it("does not expose recorded revision requests on non-history contexts", async () => {
+    const store = await createInitializedStore(
+      receiptGraph,
+      createTestBackend(),
+    );
+
+    await store.transactionWithReceipt((tx) => {
+      expect("requestRecordedRevision" in tx).toBe(false);
+      return Promise.resolve();
+    });
+  });
+
   it("refuses on non-transactional backends", async () => {
     const backend = disableTransactions(createTestBackend());
     const store = await createRawInitializedStore(receiptGraph, backend);

@@ -33,6 +33,7 @@ import {
   defineNode,
   migrateLegacyRecordedTime,
   recordedRelation,
+  UnsupportedBackendCapabilityError,
 } from "../src";
 import {
   type EngineRecordedRevision,
@@ -617,6 +618,20 @@ describe("engine-native recorded time: transaction receipts", () => {
     expect(outcome.receipt.recorded).toBeUndefined();
     expect(outcome.receipt.writes.total).toBe(0);
     expect(observedSessions).toHaveLength(0);
+  });
+
+  it("refuses explicit recorded revision requests under engine-native history", async () => {
+    const { backend } = createEngineNativeBackend([]);
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+
+    await expect(
+      store.transactionWithReceipt((tx) => {
+        tx.requestRecordedRevision();
+        return Promise.resolve();
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
   });
 
   /**
