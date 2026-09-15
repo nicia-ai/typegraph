@@ -174,6 +174,29 @@ export const postgresDialect: DialectAdapter = {
     return sql`COALESCE(${filteredAggregate}, '[]'::jsonb)`;
   },
 
+  orderedRecordJsonArray({ fields, filter, orderBy }) {
+    const parts = Array.from(
+      { length: Math.ceil(fields.length / 40) },
+      (_, index) => {
+        const chunk = fields.slice(index * 40, (index + 1) * 40);
+        const pairs = chunk.flatMap((field) => {
+          assertPortableScalarValueType(
+            field.valueType,
+            "COLLECT record field",
+          );
+          return [
+            sql`CAST(${field.name} AS text)`,
+            sql`CAST(${field.value} AS ${sql.raw(SCALAR_SQL_TYPES[field.valueType])})`,
+          ];
+        });
+        return sql`jsonb_build_object(${sql.join(pairs, sql`, `)})`;
+      },
+    );
+    const record = sql.join(parts, sql` || `);
+    const aggregate = sql`jsonb_agg(${record} ORDER BY ${sql.join(orderBy, sql`, `)})`;
+    return sql`COALESCE(${applyAggregateFilter(aggregate, filter)}, '[]'::jsonb)`;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

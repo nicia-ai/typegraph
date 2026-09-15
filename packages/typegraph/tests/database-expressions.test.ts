@@ -2,9 +2,16 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineGraph, defineNode } from "../src";
+import { UnsupportedPredicateError } from "../src/errors";
 import type { FieldRef } from "../src/query/ast";
 import { decodeExpressionValue } from "../src/query/builder/executable-projection-query";
-import { createFieldExpression, expr } from "../src/query/expressions";
+import {
+  collectOperandExpressions,
+  createFieldExpression,
+  type DatabaseExpression,
+  expr,
+  isCollectRecordOperand,
+} from "../src/query/expressions";
 import { createTestBackend } from "./test-utils";
 
 function field<T>(
@@ -100,6 +107,57 @@ describe("database expressions", () => {
     expect(aggregate.node).not.toHaveProperty("orderBy");
   });
 
+  it("snapshots record fields when constructing a collection", () => {
+    const publishedAt = new Date("2024-01-01T00:00:00.000Z");
+    const originalValue = expr.literal("original");
+    const fields: Record<
+      string,
+      DatabaseExpression<boolean | Date | number | string | undefined, never>
+    > = {
+      publishedAt: expr.literal(publishedAt),
+      value: originalValue,
+    };
+    const collection = expr.collect(fields, {
+      orderBy: [{ expression: expr.literal(1) }],
+    });
+
+    fields["value"] = expr.literal("changed");
+    fields["extra"] = expr.literal(true);
+
+    expect(collection.node).toMatchObject({
+      kind: "collect",
+      operand: {
+        kind: "record",
+        fields: { publishedAt: fields["publishedAt"], value: originalValue },
+      },
+    });
+    if (
+      collection.node.kind !== "collect" ||
+      !isCollectRecordOperand(collection.node.operand)
+    )
+      throw new Error("Expected a record collection operand");
+    expect(collection.node.operand.fields).not.toHaveProperty("extra");
+    expect(collection.elementFields).toEqual({
+      publishedAt: "date",
+      value: "string",
+    });
+    expect(
+      decodeExpressionValue(
+        '[{"publishedAt":"2024-01-01T00:00:00.000Z","value":"original"}]',
+        collection,
+      ),
+    ).toEqual([{ publishedAt, value: "original" }]);
+  });
+
+  it("refuses malformed record operands through the shared field resolver", () => {
+    expect(() =>
+      collectOperandExpressions({ kind: "record", fields: undefined as never }),
+    ).toThrow(UnsupportedPredicateError);
+    expect(() =>
+      collectOperandExpressions({ kind: "record", fields: {} }),
+    ).toThrow(UnsupportedPredicateError);
+  });
+
   it("does not apply collection element decoding to ordinary JSON array fields", () => {
     const tags = createFieldExpression<readonly (string | null)[], "document">(
       {
@@ -124,7 +182,10 @@ describe("database expressions", () => {
   it("keeps reserved expression metadata separate from object fields", () => {
     const Document = defineNode("ExpressionMetadataDocument", {
       schema: z.object({
-        metadata: z.object({ elementValueType: z.string() }),
+        metadata: z.object({
+          elementFields: z.string(),
+          elementValueType: z.string(),
+        }),
       }),
     });
     const graph = defineGraph({
@@ -139,6 +200,7 @@ describe("database expressions", () => {
       .from("ExpressionMetadataDocument", "document")
       .project((fields) => ({
         explicitSchemaField: fields.document.metadata.$get("elementValueType"),
+        explicitElementFields: fields.document.metadata.$get("elementFields"),
         metadata: fields.document.metadata,
       }));
 
@@ -146,8 +208,15 @@ describe("database expressions", () => {
       field: { jsonPointer: "/metadata/elementValueType" },
       kind: "field",
     });
+    expect(query.getExpressionProjection()[1]?.expression.node).toMatchObject({
+      field: { jsonPointer: "/metadata/elementFields" },
+      kind: "field",
+    });
     expect(
-      query.getExpressionProjection()[1]?.expression.elementValueType,
+      query.getExpressionProjection()[2]?.expression.elementValueType,
+    ).toBeUndefined();
+    expect(
+      query.getExpressionProjection()[2]?.expression.elementFields,
     ).toBeUndefined();
   });
 

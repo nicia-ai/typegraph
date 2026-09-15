@@ -316,6 +316,54 @@ describe("Query Builder Type Safety", () => {
       readonly (Date | undefined)[]
     >();
 
+    const recordQuery = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "person")
+      .aggregate((fields) => ({
+        records: expr.collect(
+          {
+            name: fields.person.name,
+            joinedAt: fields.person.joinedAt,
+            active: expr.isNotNull(fields.person.joinedAt),
+          },
+          { orderBy: [{ expression: fields.person.name }] },
+        ),
+      }));
+    type RecordRow = Awaited<ReturnType<typeof recordQuery.execute>>[number];
+    void recordQuery;
+    expectTypeOf<RecordRow["records"]>().toEqualTypeOf<
+      readonly Readonly<{
+        name: string;
+        joinedAt: Date | undefined;
+        active: boolean;
+      }>[]
+    >();
+    function assertRecordCollectScopeInference(): void {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "person")
+        .aggregate((fields) => {
+          const fieldScoped = expr.collect(
+            { name: fields.person.name },
+            {
+              orderBy: [{ expression: expr.literal(1) }],
+            },
+          );
+          expectTypeOf(fieldScoped).toEqualTypeOf<
+            DatabaseExpression<readonly Readonly<{ name: string }>[], "person">
+          >();
+          const orderScoped = expr.collect(
+            { name: expr.literal("Ada") },
+            {
+              orderBy: [{ expression: fields.person.name }],
+            },
+          );
+          expectTypeOf(orderScoped).toEqualTypeOf<
+            DatabaseExpression<readonly Readonly<{ name: "Ada" }>[], "person">
+          >();
+          return { fieldScoped, orderScoped };
+        });
+    }
+    void assertRecordCollectScopeInference;
+
     const nullableEmploymentFilter = undefined as unknown as DatabaseExpression<
       boolean | undefined,
       "employment"
@@ -399,14 +447,54 @@ describe("Query Builder Type Safety", () => {
           structured: expr.collect(fields.person.tags, {
             orderBy: [{ expression: fields.person.name }],
           }),
+          // @ts-expect-error - COLLECT filters must be Boolean expressions
           nonBooleanFilter: expr.collect(fields.person.name, {
-            // @ts-expect-error - COLLECT filters must be Boolean expressions
             filter: fields.person.age,
             orderBy: [{ expression: fields.person.name }],
           }),
         }));
     }
     void assertCollectionInputTypes;
+
+    function assertRecordCollectionInputTypes(): void {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "person")
+        .aggregate((fields) => ({
+          // @ts-expect-error - record COLLECT requires explicit ordering
+          missingOrder: expr.collect({ name: fields.person.name }, {}),
+          // @ts-expect-error - record COLLECT requires a nonempty order tuple
+          emptyOrder: expr.collect(
+            { name: fields.person.name },
+            { orderBy: [] },
+          ),
+          // @ts-expect-error - nested object literals are not scalar field expressions
+          nestedObject: expr.collect(
+            { name: { nested: fields.person.name } },
+            {
+              orderBy: [{ expression: fields.person.name }],
+            },
+          ),
+          arrayField: expr.collect(
+            {
+              // @ts-expect-error - array-valued field expressions are not scalar record fields
+              tags: fields.person.tags,
+            },
+            {
+              orderBy: [{ expression: fields.person.name }],
+            },
+          ),
+          rawField: expr.collect(
+            {
+              // @ts-expect-error - scalar record fields must be DatabaseExpressions
+              name: "Ada",
+            },
+            {
+              orderBy: [{ expression: fields.person.name }],
+            },
+          ),
+        }));
+    }
+    void assertRecordCollectionInputTypes;
   });
 
   describe("Operational Identity capability", () => {

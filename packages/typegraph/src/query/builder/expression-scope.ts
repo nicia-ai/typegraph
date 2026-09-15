@@ -1,5 +1,8 @@
 import { ConfigurationError } from "../../errors";
-import type { DatabaseExpression } from "../expressions";
+import {
+  collectOperandExpressions,
+  type DatabaseExpression,
+} from "../expressions";
 import type { QueryBuilderConfig } from "./types";
 
 const scopes = new WeakMap<QueryBuilderConfig, symbol>();
@@ -58,7 +61,8 @@ export function assertExpressionScope(
       return;
     }
     case "collect": {
-      assertExpressionScope(node.operand, scope);
+      for (const operand of collectOperandExpressions(node.operand))
+        assertExpressionScope(operand, scope);
       for (const order of node.orderBy)
         assertExpressionScope(order.expression, scope);
       if (node.filter !== undefined) assertExpressionScope(node.filter, scope);

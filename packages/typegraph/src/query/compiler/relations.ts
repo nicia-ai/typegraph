@@ -1,6 +1,9 @@
 import { ConfigurationError } from "../../errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
-import type { DatabaseExpression } from "../expressions";
+import {
+  type DatabaseExpression,
+  haveCompatibleCollectionElements,
+} from "../expressions";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
@@ -18,6 +21,7 @@ export type RelationColumn = Readonly<{
   outputName: string;
   valueType: ValueType;
   elementValueType?: ValueType;
+  elementFields?: Readonly<Record<string, ValueType>>;
   nullable: boolean;
   /** Proven graph-node identity carried only from a direct graph field. */
   identity?: Readonly<{
@@ -239,11 +243,11 @@ export function assertCompatibleRelationColumns(
     if (
       leftColumn.outputName !== rightColumn?.outputName ||
       leftColumn.valueType !== rightColumn.valueType ||
-      leftColumn.elementValueType !== rightColumn.elementValueType ||
+      !haveCompatibleCollectionElements(leftColumn, rightColumn) ||
       leftColumn.nullable !== rightColumn.nullable
     ) {
       throw new ConfigurationError(
-        "Set-operation projections must have identical ordered column names, types, and nullability.",
+        "Set-operation projections must have identical ordered column names, types, collection element codecs, and nullability.",
         { index, left: leftColumn, right: rightColumn },
       );
     }

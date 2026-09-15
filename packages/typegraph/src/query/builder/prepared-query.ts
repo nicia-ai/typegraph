@@ -49,7 +49,9 @@ import {
   transformPathColumns,
 } from "../execution";
 import {
+  collectOperandExpressions,
   type DatabaseExpression,
+  isCollectRecordOperand,
   normalizeDatabaseLiteral,
 } from "../expressions";
 import { isParameterRef } from "../predicates";
@@ -297,11 +299,23 @@ export function substituteDatabaseExpression<T, Scope extends string>(
           };
     }
     case "collect": {
+      const operand = node.operand;
       return {
         ...expression,
         node: {
           ...node,
-          operand: substitute(node.operand),
+          operand:
+            isCollectRecordOperand(operand) ?
+              {
+                kind: "record",
+                fields: Object.fromEntries(
+                  Object.entries(operand.fields).map(([name, value]) => [
+                    name,
+                    substitute(value),
+                  ]),
+                ),
+              }
+            : substitute(operand),
           ...(node.filter === undefined ?
             {}
           : {
@@ -865,7 +879,8 @@ function collectParameterMetadataFromDatabaseExpression(
       return;
     }
     case "collect": {
-      collect(node.operand);
+      for (const operand of collectOperandExpressions(node.operand))
+        collect(operand);
       for (const order of node.orderBy) collect(order.expression);
       if (node.filter !== undefined) collect(node.filter);
       return;

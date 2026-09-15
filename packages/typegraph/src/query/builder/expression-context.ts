@@ -136,6 +136,7 @@ const DATABASE_EXPRESSION_KEYS: ReadonlySet<PropertyKey> = new Set([
   "__type",
   "__value",
   "elementValueType",
+  "elementFields",
   "node",
   "nullable",
   "scopeIdentity",

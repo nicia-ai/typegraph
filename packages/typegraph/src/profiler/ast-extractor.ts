@@ -13,7 +13,10 @@ import {
   type QueryAst,
   type SelectiveField,
 } from "../query/ast";
-import { type DatabaseExpression } from "../query/expressions";
+import {
+  collectOperandExpressions,
+  type DatabaseExpression,
+} from "../query/expressions";
 import { jsonPointer } from "../query/json-pointer";
 import { requireDefined } from "../utils/presence";
 import {
@@ -328,7 +331,8 @@ function extractFromDatabaseExpression(
       break;
     }
     case "collect": {
-      collect(node.operand);
+      for (const operand of collectOperandExpressions(node.operand))
+        collect(operand);
       for (const order of node.orderBy) {
         accesses.push(
           ...extractFromDatabaseExpression(order.expression, "sort", ast),

@@ -1,4 +1,7 @@
-import type { DatabaseExpression } from "../expressions";
+import {
+  collectOperandExpressions,
+  type DatabaseExpression,
+} from "../expressions";
 
 export function isAggregateExpression(expression: DatabaseExpression): boolean {
   return (
@@ -45,7 +48,8 @@ export function visitExpressionChildren(
       return;
     }
     case "collect": {
-      visit(node.operand);
+      for (const operand of collectOperandExpressions(node.operand))
+        visit(operand);
       for (const order of node.orderBy) visit(order.expression);
       if (node.filter !== undefined) visit(node.filter);
       return;

@@ -166,7 +166,7 @@ their result type because an empty input produces SQL `NULL`.
 and unknown dynamic values are refused because SQLite text equality and PostgreSQL JSON equality do
 not define the same distinct groups for structured values.
 
-For ordered scalar lists, use [`expr.collect()` on a relation](/queries/relations#ordered-scalar-collections).
+For ordered scalar lists or flat records, use [`expr.collect()` on a relation](/queries/relations#ordered-collections).
 Collection ordering is explicit and independent of result-row ordering.
 
 ## Scope safety
@@ -225,5 +225,7 @@ narrow the operand or result type.
 
 Collection expressions remain distinct `node.kind: "collect"` nodes, with `operand`, `orderBy`, and
 optional `filter`. Ordinary `"aggregate"` nodes retain their operator and optional operand;
-collection-only options do not appear on them. Collection values are scalar only, ordering is
-required, and `distinct` and aggregate-local `limit` are not collection options.
+collection-only options do not appear on them. The collection value is either a scalar expression
+or an explicit flat record of named scalar expressions. A record remains present when every admitted
+field is SQL NULL, with those fields decoded as `undefined`. Ordering is required, and `distinct`
+and aggregate-local `limit` are not collection options.

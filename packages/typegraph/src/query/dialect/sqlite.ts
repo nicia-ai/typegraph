@@ -169,6 +169,27 @@ export const sqliteDialect: DialectAdapter = {
     return sql`COALESCE(${filteredAggregate}, json('[]'))`;
   },
 
+  orderedRecordJsonArray({ fields, filter, orderBy }) {
+    // json_patch treats null fields as deletion. Splice bounded JSON objects
+    // by removing only their outer braces; bound names remain JSON-escaped.
+    const chunks: SqlFragment[] = [];
+    for (
+      let index = 0;
+      index < fields.length;
+      index += JSON_OBJECT_PAIRS_PER_CALL
+    ) {
+      const chunk = fields.slice(index, index + JSON_OBJECT_PAIRS_PER_CALL);
+      const pairs = chunk.flatMap((field) => [sql`${field.name}`, field.value]);
+      const object = sql`json_object(${sql.join(pairs, sql`, `)})`;
+      chunks.push(sql`substr(${object}, 2, length(${object}) - 2)`);
+    }
+    const record = sql`json('{' || ${sql.join(chunks, sql` || ',' || `)} || '}')`;
+    // SQLite versions before 3.45 lose the JSON subtype through aggregate
+    // ORDER BY, so json_group_array would quote each record as a string.
+    const aggregate = sql`group_concat(${record} ORDER BY ${sql.join(orderBy, sql`, `)})`;
+    return sql`json('[' || COALESCE(${applyAggregateFilter(aggregate, filter)}, '') || ']')`;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

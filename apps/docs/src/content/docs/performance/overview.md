@@ -522,6 +522,12 @@ For one large closure, the direct backend-tuned `store.subgraph()` path can be f
 `batchOnce()` when round-trip latency across several independent, bounded subgraphs is the cost to
 remove, and measure both forms when database work dominates.
 
+When the response needs a list of matching child records per parent, use a relation grouped by the
+parent key and [`expr.collect()` with named scalar fields](/queries/relations#ordered-collections).
+That aggregates the selected fields into ordered records in one query. For several independent,
+bounded subgraphs, keep using the `batchOnce(read => roots.map(root => read.subgraph(...)))` pattern
+above; record collection does not replace subgraph hydration.
+
 Use `store.batch()` when queued edge collection reads must participate. It runs them in sequence.
 On a transactional backend it still issues at least one statement per query plus
 `begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no

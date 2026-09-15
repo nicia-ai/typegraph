@@ -199,8 +199,11 @@ export {
   type SqlTableNames,
 } from "./compiler/schema";
 export {
+  type CollectedRecord,
   type CollectOptions,
   type CollectOrder,
+  type CollectRecordFields,
+  type CollectRecordOperand,
   type DatabaseExpression,
   expr,
 } from "./expressions";

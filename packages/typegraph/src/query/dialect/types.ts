@@ -218,6 +218,20 @@ export interface DialectAdapter {
     }>,
   ) => SqlFragment;
 
+  /** Aggregates flat named scalar values into ordered JSON object rows. */
+  readonly orderedRecordJsonArray: (
+    this: void,
+    options: Readonly<{
+      fields: readonly Readonly<{
+        name: string;
+        value: SqlFragment;
+        valueType: ValueType;
+      }>[];
+      orderBy: readonly SqlFragment[];
+      filter: SqlFragment | undefined;
+    }>,
+  ) => SqlFragment;
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

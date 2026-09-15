@@ -1873,6 +1873,15 @@ export interface DialectAdapter {
     readonly jsonSetProperties: (this: void, column: SqlFragment, patch: Readonly<Record<string, JsonValue>>, unsetProperties?: readonly string[]) => SqlFragment;
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
+    readonly orderedRecordJsonArray: (this: void, options: Readonly<{
+        fields: readonly Readonly<{
+            name: string;
+            value: SqlFragment;
+            valueType: ValueType;
+        }>[];
+        orderBy: readonly SqlFragment[];
+        filter: SqlFragment | undefined;
+    }>) => SqlFragment;
     readonly orderedRowsJsonArray: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string) => SqlFragment;
     readonly orderedScalarJsonArray: (this: void, options: Readonly<{
         value: SqlFragment;

@@ -378,16 +378,41 @@ export function decodeExpressionValue(
       if (!Array.isArray(parsed) || expression.elementValueType === undefined)
         return parsed;
       const elementValueType = expression.elementValueType;
-      return parsed.map((element) =>
-        element === null || element === undefined ?
-          undefined
-        : decodeScalarExpressionValue(element, elementValueType),
-      );
+      const elementFields = expression.elementFields;
+      return parsed.map((element) => {
+        if (element === null || element === undefined) return;
+        return elementFields === undefined ?
+            decodeScalarExpressionValue(element, elementValueType)
+          : decodeRecordExpressionValue(element, elementFields);
+      });
     }
     case "unknown": {
       return value;
     }
   }
+}
+
+/** Decode only the explicitly projected scalar fields, preserving records whose fields are all null. */
+function decodeRecordExpressionValue(
+  value: unknown,
+  fields: Readonly<Record<string, ValueType>>,
+): Readonly<Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new ConfigurationError(
+      "Expected a JSON object in a record collection.",
+    );
+  const record = value as Readonly<Record<string, unknown>>;
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, valueType]) => {
+      const field = record[key];
+      return [
+        key,
+        field === null || field === undefined ?
+          undefined
+        : decodeScalarExpressionValue(field, valueType),
+      ];
+    }),
+  );
 }
 
 function decodeScalarExpressionValue(
