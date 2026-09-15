@@ -30,6 +30,7 @@ import type {
   BackendCatalogProbes,
   EngineRecordedTimeMembers,
   LineageMembers,
+  SchemaProvisioning,
   TransactionBackend,
 } from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
@@ -50,7 +51,7 @@ export type EngineTableNames = ResolvedSqlTableNames;
 /** Resolve the adapter's physical-provisioning policy once at construction. */
 export function resolveSchemaProvisioning(
   value: unknown,
-): "dml-only" | "transactional" {
+): SchemaProvisioning {
   if (value === undefined) return "dml-only";
   if (value === "dml-only" || value === "transactional") return value;
   throw new ConfigurationError(
@@ -388,7 +389,7 @@ export type SqlEngineProfile<TTx> = Readonly<{
   /** The dialect's declared capabilities, before its capability tail runs. */
   declaredCapabilities: BackendCapabilities;
   /** Adapter policy for provisioning inside caller-owned schema transactions. */
-  schemaProvisioning: "dml-only" | "transactional";
+  schemaProvisioning: SchemaProvisioning;
   /**
    * The serialized-resource verdict {@link createSqlBackend} records once,
    * before the backend object escapes (see `../../transaction-resource.ts`).

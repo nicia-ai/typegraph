@@ -3,7 +3,7 @@ import type { EvolutionPlan } from "../schema/evolution-plan";
 import { storeRuntime } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import { branch } from "./branch";
-import { MergePlanCapabilityError } from "./errors";
+import { type BranchError, MergePlanCapabilityError } from "./errors";
 import type { Result } from "./result";
 import { err } from "./result";
 import type { BranchOptions, GraphBranch } from "./types";
@@ -19,7 +19,7 @@ export async function branchForEvolution<G extends GraphDef>(
   plan: EvolutionPlan,
   makeBackend: MakeBackend,
   options?: BranchOptions,
-): Promise<Result<GraphBranch<G>, MergePlanCapabilityError>> {
+): Promise<Result<GraphBranch<G>, BranchError | MergePlanCapabilityError>> {
   const planningTarget = storeRuntime(store).evolutionPlanningTarget;
   if (planningTarget === undefined) {
     return err(
@@ -32,14 +32,7 @@ export async function branchForEvolution<G extends GraphDef>(
   try {
     const candidate = planningTarget(plan);
     const result = await branch(candidate, makeBackend, options);
-    return result.success ? result : (
-        err(
-          new MergePlanCapabilityError(
-            "Could not fork a resulting-schema branch.",
-            { cause: result.error, details: { capability: "evolutionBranch" } },
-          ),
-        )
-      );
+    return result;
   } catch (error) {
     return err(
       new MergePlanCapabilityError(

@@ -124,8 +124,6 @@ import {
   KindNotFoundError,
   MigrationError,
   RuntimeKindTokenError,
-  SchemaContentConflictError,
-  StaleVersionError,
   UnsupportedBackendCapabilityError,
   ValidationError,
 } from "../errors";
@@ -221,6 +219,7 @@ import { buildKindRegistry, type KindRegistry } from "../registry";
 import { canonicalEqual } from "../schema/canonical";
 import {
   type EvolutionPlan,
+  type EvolutionPlanRequirements,
   getEvolutionPlanPayload,
   prepareEvolutionPlan,
 } from "../schema/evolution-plan";
@@ -264,6 +263,8 @@ import {
 } from "./collection-factory";
 import { resolveTemporalReadParams } from "./collections/temporal-read-params";
 import {
+  assertEvolutionOptions,
+  assertEvolutionPlanBaseline,
   type EvolvedTransactionOptions,
   type EvolvedTransactionOutcome,
   type PlanEvolutionOptions,
@@ -980,7 +981,11 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
 
 type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
 
-interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
+/** Schema planning, reconciliation, and lifecycle operations shared by Stores. */
+export interface StoreEvolution<
+  G extends GraphDef,
+  TStore extends StoreCore<G>,
+> {
   readonly planEvolution: (
     extension: GraphExtension,
     options?: PlanEvolutionOptions,
@@ -1227,7 +1232,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         baseline: G;
       }>
     | undefined;
-  readonly #evolutionPlans = new WeakMap<EvolutionPlan, G>();
   /**
    * Bare backend for DDL, vector-storage, and bulk-materialization work that must
    * bypass recorded capture. Graph-entity writes use `#backend` instead.
@@ -4909,9 +4913,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     plan: EvolutionPlan,
   ): StoreImplementation<G, TNativeTransaction> {
     const payload = getEvolutionPlanPayload<G>(plan);
-    if (!this.#evolutionPlans.has(plan) || payload === undefined) {
+    if (payload === undefined || plan.graphId !== this.graphId) {
       throw new ConfigurationError(
-        "Evolution plans must be created by this Store.",
+        "Evolution plans must be created by this module for the same graph.",
         {
           code: "EVOLUTION_PLAN_OWNER_MISMATCH",
           graphId: this.graphId,
@@ -4919,9 +4923,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
     }
     return this.#cloneWithGraph(payload.mergedGraph, undefined, {
-      schemaVersion:
-        plan.status === "change" ? plan.resultingVersion : plan.baselineVersion,
-      schemaHash: plan.resultingHash,
+      schemaVersion: plan.result.version,
+      schemaHash: plan.result.hash,
     });
   }
 
@@ -4975,15 +4978,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   ): Promise<EvolvedTransactionOutcome<T>> {
     const candidate = this.#evolutionPlanningTarget(plan);
     const payload = requireDefined(getEvolutionPlanPayload<G>(plan));
-    const unknownOptions = Object.keys(options ?? {}).filter(
-      (key) => key !== "waitBudgetMs",
-    );
-    if (unknownOptions.length > 0) {
-      throw new ConfigurationError("Unsupported evolved transaction options.", {
-        code: "EVOLUTION_OPTIONS_UNSUPPORTED",
-        options: unknownOptions,
-      });
-    }
+    assertEvolutionOptions(options, ["waitBudgetMs"]);
     const waitBudgetMs = options?.waitBudgetMs ?? 5000;
     if (!Number.isSafeInteger(waitBudgetMs) || waitBudgetMs <= 0) {
       throw new ConfigurationError(
@@ -4992,33 +4987,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           code: "INVALID_SCHEMA_FENCE_BUDGET",
           waitBudgetMs,
         },
-      );
-    }
-    // Permission policy is explicit and checked before the mutating fence.
-    // Database permissions remain authoritative on opted-in connections.
-    if (
-      plan.status === "change" &&
-      (plan.requirements.vectorSlots.length > 0 ||
-        plan.requirements.identityAffectedKinds.length > 0) &&
-      this.#adapterBackend?.schemaProvisioning !== "transactional"
-    ) {
-      throw new UnsupportedBackendCapabilityError(
-        "store.withEvolvedTransaction()",
-        "transactional schema provisioning",
-        { graphId: this.graphId, requirements: plan.requirements },
-        "Use an adapter configured with schemaProvisioning: 'transactional' on a privileged connection, or apply the extension through bootstrap and replan.",
-      );
-    }
-    if (
-      plan.status === "change" &&
-      plan.requirements.vectorSlots.length > 0 &&
-      (this.#backend.capabilities.vector?.supported !== true ||
-        this.#backend.ensureVectorSlotContributions === undefined)
-    ) {
-      throw new UnsupportedBackendCapabilityError(
-        "store.withEvolvedTransaction()",
-        "transactional vector provisioning",
-        { graphId: this.graphId, slots: plan.requirements.vectorSlots },
       );
     }
     if (plan.status === "noop") {
@@ -5039,9 +5007,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       await lockSchemaVersionForStoreWrite(
         {
           graphId: this.graphId,
-          schemaVersion: plan.baselineVersion,
+          schemaVersion: plan.baseline.version,
         },
         target,
+      );
+      assertEvolutionPlanBaseline(
+        plan,
+        await target.getActiveSchema(this.graphId),
       );
       const outcome = await candidate.#runAdoptedRecordedTransaction(
         target,
@@ -5054,11 +5026,42 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         receipt: {
           ...outcome.receipt,
           schema: {
-            version: plan.baselineVersion,
-            hash: plan.baselineHash,
+            version: plan.baseline.version,
+            hash: plan.baseline.hash,
           },
         },
       };
+    }
+    const requirements: EvolutionPlanRequirements = requireDefined(
+      payload.requirements,
+    );
+    // Permission policy is explicit and checked before the mutating fence.
+    // Database permissions remain authoritative on opted-in connections.
+    if (
+      (requirements.vectorSlots.length > 0 ||
+        requirements.identityAffectedKinds.length > 0) &&
+      this.#adapterBackend?.schemaProvisioning !== "transactional"
+    ) {
+      throw new UnsupportedBackendCapabilityError(
+        "store.withEvolvedTransaction()",
+        "transactional schema provisioning",
+        { graphId: this.graphId, requirements: plan.requirements },
+        "Use an adapter configured with schemaProvisioning: 'transactional' on a privileged connection, or apply the extension through bootstrap and replan.",
+      );
+    }
+    if (
+      requirements.vectorSlots.length > 0 &&
+      (this.#backend.capabilities.vector?.supported !== true ||
+        this.#backend.ensureVectorSlotContributions === undefined)
+    ) {
+      throw new UnsupportedBackendCapabilityError(
+        "store.withEvolvedTransaction()",
+        "transactional vector provisioning",
+        {
+          graphId: this.graphId,
+          slots: requirements.vectorSlots,
+        },
+      );
     }
     const adopt = this.#adapterBackend?.adoptSchemaWriteTransaction;
     if (adopt === undefined)
@@ -5075,24 +5078,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await assertRecordedCaptureTransactionIsolation(ordinaryAdopt(externalTx));
     const adopted = await adopt(externalTx, this.graphId, { waitBudgetMs });
     const active = adopted.activeSchema;
-    if (active?.version !== plan.baselineVersion) {
-      throw new StaleVersionError({
-        graphId: this.graphId,
-        expected: plan.baselineVersion,
-        actual: active?.version ?? 0,
-      });
-    }
-    if (active.schema_hash !== plan.baselineHash) {
-      throw new SchemaContentConflictError({
-        graphId: this.graphId,
-        version: active.version,
-        existingHash: active.schema_hash,
-        incomingHash: plan.baselineHash,
-      });
-    }
+    assertEvolutionPlanBaseline(plan, active);
     await this.#assertNoPendingRemovalFor(
       payload.mergedGraph,
-      requireDefined(this.#evolutionPlans.get(plan)),
+      payload.baselineGraph,
       adopted.backend,
     );
     await assertEvolvedSchemaRequiredKindsEmpty(
@@ -5100,7 +5089,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.graphId,
       requireDefined(payload.classification),
     );
-    if (plan.requirements.vectorSlots.length > 0) {
+    if (requirements.vectorSlots.length > 0) {
       const provision = adopted.backend.ensureVectorSlotContributions;
       if (provision === undefined) {
         throw new UnsupportedBackendCapabilityError(
@@ -5113,7 +5102,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         onDrift: "throw",
       });
     }
-    if (plan.requirements.identityAffectedKinds.length > 0) {
+    if (requirements.identityAffectedKinds.length > 0) {
       const storage = await inspectAdoptedIdentityStorage(
         adopted.backend,
         this.#sqlSchema(),
@@ -5129,9 +5118,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
     const committed = await adopted.backend.commitSchemaVersion({
       graphId: this.graphId,
-      expected: { kind: "active", version: plan.baselineVersion },
-      version: plan.resultingVersion,
-      schemaHash: plan.resultingHash,
+      expected: { kind: "active", version: plan.baseline.version },
+      version: plan.result.version,
+      schemaHash: plan.result.hash,
       schemaDoc: requireDefined(payload.schemaDocument),
     });
     const outcome = await candidate.#runAdoptedRecordedTransaction(
@@ -5157,6 +5146,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     extension: GraphExtension,
     options?: PlanEvolutionOptions,
   ): Promise<EvolutionPlan> {
+    assertEvolutionOptions(options, ["source"]);
     if (
       options?.source !== undefined &&
       !["database", "cached"].includes(options.source)
@@ -5201,7 +5191,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       storedSchema: snapshot.storedSchema,
       extension,
     });
-    this.#evolutionPlans.set(plan, snapshot.baseline);
     return plan;
   }
 
@@ -5209,22 +5198,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async refreshSchema<TRefStore extends StoreCore<G>>(
     options?: RefreshSchemaOptions<TRefStore>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
-    const expectedVersion = options?.expectedVersion;
+    assertEvolutionOptions(options, ["ref", "minVersion"]);
+    const minVersion = options?.minVersion;
     if (
-      expectedVersion !== undefined &&
-      (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1)
+      minVersion !== undefined &&
+      (!Number.isSafeInteger(minVersion) || minVersion < 1)
     ) {
       throw new ConfigurationError(
-        "expectedVersion must be a positive safe integer.",
+        "minVersion must be a positive safe integer.",
         {
-          code: "INVALID_EXPECTED_SCHEMA_VERSION",
-          expectedVersion,
+          code: "INVALID_MIN_SCHEMA_VERSION",
+          minVersion,
         },
       );
     }
     if (
-      expectedVersion !== undefined &&
-      this.#schemaMetadata.schemaVersion === expectedVersion
+      minVersion !== undefined &&
+      this.#schemaMetadata.schemaVersion === minVersion
     ) {
       syncStoreReplacementRef(options?.ref, this);
       return this;
@@ -5233,14 +5223,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const active = await this.#backend.getActiveSchema(this.graphId);
     if (
       active === undefined ||
-      (expectedVersion !== undefined && active.version < expectedVersion)
+      (minVersion !== undefined && active.version < minVersion)
     ) {
       throw new ConfigurationError(
-        "The expected committed schema is not visible.",
+        "The minimum committed schema version is not visible.",
         {
           code: "SCHEMA_REFRESH_VERSION_UNAVAILABLE",
           graphId: this.graphId,
-          expectedVersion,
+          minVersion,
           actualVersion: active?.version,
         },
       );

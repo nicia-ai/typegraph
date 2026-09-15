@@ -14,6 +14,7 @@ export type {
   NeighborResult,
 } from "./neighbors";
 export type { CheckedReadScope } from "./store";
+export type { StoreEvolution } from "./store";
 export {
   type AdapterTransactionContext,
   type BaseStoreOptions,

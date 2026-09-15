@@ -1,4 +1,11 @@
-import { ConfigurationError } from "../errors";
+import type { SchemaVersionRow } from "../backend/types";
+import {
+  ConfigurationError,
+  SchemaContentConflictError,
+  StaleVersionError,
+} from "../errors";
+import type { EvolutionPlan } from "../schema/evolution-plan";
+import type { SchemaIdentity } from "../schema/types";
 import { type StoreRef, type TransactionOutcome } from "./types";
 
 /** Selects the snapshot used to plan without taking a schema write fence. */
@@ -11,7 +18,7 @@ export type PlanEvolutionOptions = Readonly<{
 export type RefreshSchemaOptions<TStore> = Readonly<{
   ref?: StoreRef<TStore>;
   /** Minimum committed version expected; a matching cached snapshot needs no SQL. */
-  expectedVersion?: number;
+  minVersion?: number;
 }>;
 
 /** Options for applying a precomputed evolution plan on a caller transaction. */
@@ -24,7 +31,7 @@ export type EvolvedTransactionOptions = Readonly<{
 export type EvolvedTransactionOutcome<T> = Readonly<{
   result: TransactionOutcome<T>["result"];
   receipt: TransactionOutcome<T>["receipt"] &
-    Readonly<{ schema: Readonly<{ version: number; hash: string }> }>;
+    Readonly<{ schema: SchemaIdentity }>;
 }>;
 
 interface AdoptedScopeState {
@@ -69,5 +76,43 @@ export async function withAdoptedTransactionScope<T>(
       if (scope.depth === 0)
         ACTIVE_ADOPTED_TRANSACTIONS.delete(nativeTransaction);
     }
+  }
+}
+
+/** Refuses options that an evolution operation cannot honor. */
+export function assertEvolutionOptions(
+  options: object | undefined,
+  allowedKeys: readonly string[],
+): void {
+  const unknownOptions = Object.keys(options ?? {}).filter(
+    (key) => !allowedKeys.includes(key),
+  );
+  if (unknownOptions.length > 0) {
+    throw new ConfigurationError("Unsupported schema evolution options.", {
+      code: "EVOLUTION_OPTIONS_UNSUPPORTED",
+      options: unknownOptions,
+    });
+  }
+}
+
+/** Checks the fenced active schema against the snapshot that minted a plan. */
+export function assertEvolutionPlanBaseline(
+  plan: EvolutionPlan,
+  active: SchemaVersionRow | undefined,
+): void {
+  if (active?.version !== plan.baseline.version) {
+    throw new StaleVersionError({
+      graphId: plan.graphId,
+      expected: plan.baseline.version,
+      actual: active?.version ?? 0,
+    });
+  }
+  if (active.schema_hash !== plan.baseline.hash) {
+    throw new SchemaContentConflictError({
+      graphId: plan.graphId,
+      version: active.version,
+      existingHash: active.schema_hash,
+      incomingHash: plan.baseline.hash,
+    });
   }
 }

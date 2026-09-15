@@ -34,6 +34,11 @@ const graph = defineGraph({
   nodes: { AdoptedPerson: { type: Person } },
   edges: {},
 });
+const otherGraph = defineGraph({
+  id: "shared_adopted_evolution_other_graph",
+  nodes: { AdoptedPerson: { type: Person } },
+  edges: {},
+});
 const rollbackVectorGraph = defineGraph({
   id: "shared_adopted_vector_rollback",
   nodes: { AdoptedPerson: { type: Person } },
@@ -149,6 +154,90 @@ export function registerAdoptedEvolutionIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Adopted schema evolution", () => {
+    it("applies a cached Store's plan through a compatible rebound Store", async () => {
+      const backend = context.getBackend();
+      const [cachedStore] = await createAdapterStoreWithSchema(graph, backend);
+      await cachedStore.planEvolution(extension);
+      const plan = await cachedStore.planEvolution(extension, {
+        source: "cached",
+      });
+      if (plan.status !== "change") throw new Error("Expected change plan.");
+      const writerStore = cachedStore.withBackend(deriveBackend(backend, {}));
+      if (backend.adoptSchemaWriteTransaction === undefined) {
+        await assertUnsupportedAdoption(() =>
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            writerStore.withEvolvedTransaction(nativeTx, plan, async () => {
+              await Promise.resolve();
+            }),
+          ),
+        );
+        return;
+      }
+      const outcome = await backend.transactionWithNative(
+        async (_target, nativeTx) =>
+          writerStore.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+            await tx.nodes.AdoptedPerson.create({ name: "portable plan" });
+          }),
+      );
+      expect(outcome.receipt.schema).toEqual(plan.result);
+      const active = await backend.getActiveSchema(graph.id);
+      expect(active?.version).toBe(plan.result.version);
+    });
+
+    it("refuses copied plans and plans for another graph before the callback", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(graph, backend);
+      const [otherStore] = await createAdapterStoreWithSchema(
+        otherGraph,
+        backend,
+      );
+      const plan = await store.planEvolution(extension);
+      const copiedPlan: EvolutionPlan = { ...plan };
+      for (const [target, candidate] of [
+        [store, copiedPlan],
+        [otherStore, plan],
+      ] as const) {
+        await expect(
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            target.withEvolvedTransaction(nativeTx, candidate, async () => {
+              await Promise.resolve();
+              throw new Error("Callback must not run.");
+            }),
+          ),
+        ).rejects.toMatchObject({
+          details: { code: "EVOLUTION_PLAN_OWNER_MISMATCH" },
+        });
+      }
+      const active = await backend.getActiveSchema(graph.id);
+      const otherActive = await backend.getActiveSchema(otherGraph.id);
+      expect(active?.version).toBe(1);
+      expect(otherActive?.version).toBe(1);
+    });
+
+    it("refuses unknown evolved transaction options before the callback", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(graph, backend);
+      const plan = await store.planEvolution(extension);
+      const options = { waitBudgetMs: 5000, future: true };
+      await expect(
+        backend.transactionWithNative(async (_target, nativeTx) =>
+          store.withEvolvedTransaction(
+            nativeTx,
+            plan,
+            async () => {
+              await Promise.resolve();
+              throw new Error("Callback must not run.");
+            },
+            options,
+          ),
+        ),
+      ).rejects.toMatchObject({
+        details: { code: "EVOLUTION_OPTIONS_UNSUPPORTED" },
+      });
+      const active = await backend.getActiveSchema(graph.id);
+      expect(active?.version).toBe(1);
+    });
+
     it("commits schema, graph writes, and an exact receipt in one native transaction", async () => {
       const backend = context.getBackend();
       const [store] = await createAdapterStoreWithSchema(graph, backend, {
@@ -179,17 +268,17 @@ export function registerAdoptedEvolutionIntegrationTests(
       );
       expect(outcome.result).toBe("applied");
       expect(outcome.receipt.schema).toEqual({
-        version: plan.resultingVersion,
-        hash: plan.resultingHash,
+        version: plan.result.version,
+        hash: plan.result.hash,
       });
       expect(outcome.receipt.writes.nodes).toEqual({ AdoptedPerson: 1 });
       expect(outcome.receipt.recorded).toBeDefined();
       const active = await backend.getActiveSchema(graph.id);
-      expect(active?.version).toBe(plan.resultingVersion);
-      expect(active?.schema_hash).toBe(plan.resultingHash);
+      expect(active?.version).toBe(plan.result.version);
+      expect(active?.schema_hash).toBe(plan.result.hash);
       expect(store.getNodeCollection("AdoptedTag")).toBeUndefined();
       const refreshed = await store.refreshSchema({
-        expectedVersion: plan.resultingVersion,
+        minVersion: plan.result.version,
       });
       expect(refreshed.getNodeCollection("AdoptedTag")).toBeDefined();
     });
@@ -222,8 +311,8 @@ export function registerAdoptedEvolutionIntegrationTests(
       expect(outcome.receipt.writes.total).toBe(0);
       expect(outcome.receipt.recorded).toBeDefined();
       expect(outcome.receipt.schema).toEqual({
-        version: plan.resultingVersion,
-        hash: plan.resultingHash,
+        version: plan.result.version,
+        hash: plan.result.hash,
       });
     });
 
@@ -479,7 +568,7 @@ export function registerAdoptedEvolutionIntegrationTests(
       await backend.executeStatement(
         asCompiledStatementSql(sql`
           UPDATE ${sql.raw(tableName)} SET schema_hash = ${"0".repeat(64)}
-          WHERE graph_id = ${graph.id} AND version = ${plan.baselineVersion}
+          WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
         `),
       );
       try {
@@ -494,8 +583,42 @@ export function registerAdoptedEvolutionIntegrationTests(
       } finally {
         await backend.executeStatement(
           asCompiledStatementSql(sql`
-            UPDATE ${sql.raw(tableName)} SET schema_hash = ${plan.baselineHash}
-            WHERE graph_id = ${graph.id} AND version = ${plan.baselineVersion}
+            UPDATE ${sql.raw(tableName)} SET schema_hash = ${plan.baseline.hash}
+            WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
+          `),
+        );
+      }
+    });
+
+    it("refuses a no-op plan when the fenced version has a different hash", async () => {
+      const backend = context.getBackend();
+      if (backend.executeStatement === undefined) return;
+      const [store] = await createAdapterStoreWithSchema(graph, backend);
+      await store.evolve(extension);
+      const plan = await store.planEvolution(extension);
+      if (plan.status !== "noop") throw new Error("Expected no-op plan.");
+      const tableName =
+        backend.tableNames?.schemaVersions ?? "typegraph_schema_versions";
+      await backend.executeStatement(
+        asCompiledStatementSql(sql`
+          UPDATE ${sql.raw(tableName)} SET schema_hash = ${"0".repeat(64)}
+          WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
+        `),
+      );
+      try {
+        await expect(
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+              await tx.nodes.AdoptedPerson.create({ name: "wrong no-op hash" });
+            }),
+          ),
+        ).rejects.toThrow(SchemaContentConflictError);
+        expect(await store.nodes.AdoptedPerson.find()).toEqual([]);
+      } finally {
+        await backend.executeStatement(
+          asCompiledStatementSql(sql`
+            UPDATE ${sql.raw(tableName)} SET schema_hash = ${plan.baseline.hash}
+            WHERE graph_id = ${graph.id} AND version = ${plan.baseline.version}
           `),
         );
       }
@@ -588,7 +711,7 @@ export function registerAdoptedEvolutionIntegrationTests(
         ).rejects.toThrow(TransactionClosedError);
       });
 
-      const caughtUp = await store.refreshSchema({ expectedVersion: 2 });
+      const caughtUp = await store.refreshSchema({ minVersion: 2 });
       const noOp = await caughtUp.planEvolution(extension);
       await expect(
         backend.transactionWithNative(async (_target, nativeTx) => {
@@ -624,8 +747,12 @@ export function registerAdoptedEvolutionIntegrationTests(
         );
         return;
       }
-      expect(plan.requirements.requireEmpty).toEqual([
-        { entity: "node", kindName: "AdoptedTag" },
+      expect(
+        plan.requirements.filter(
+          (requirement) => requirement.kind === "require-empty",
+        ),
+      ).toEqual([
+        { kind: "require-empty", entity: "node", kindName: "AdoptedTag" },
       ]);
       await expect(
         backend.transactionWithNative(async (_target, nativeTx) =>
@@ -636,7 +763,7 @@ export function registerAdoptedEvolutionIntegrationTests(
         ),
       ).rejects.toThrow();
       const active = await backend.getActiveSchema(graph.id);
-      expect(active?.version).toBe(plan.baselineVersion);
+      expect(active?.version).toBe(plan.baseline.version);
     });
 
     it("accepts required-empty tightening when the kind has no rows", async () => {
@@ -662,9 +789,9 @@ export function registerAdoptedEvolutionIntegrationTests(
             await tx.nodes.AdoptedPerson.create({ name: "after tightening" });
           }),
       );
-      expect(outcome.receipt.schema.version).toBe(plan.resultingVersion);
+      expect(outcome.receipt.schema.version).toBe(plan.result.version);
       const active = await backend.getActiveSchema(graph.id);
-      expect(active?.version).toBe(plan.resultingVersion);
+      expect(active?.version).toBe(plan.result.version);
     });
 
     it("refuses vector provisioning before adopting the native transaction", async () => {
@@ -685,8 +812,12 @@ export function registerAdoptedEvolutionIntegrationTests(
       const [store] = await createAdapterStoreWithSchema(graph, guarded);
       const plan = await store.planEvolution(vectorExtension);
       if (plan.status !== "change") return;
-      expect(plan.requirements.vectorSlots).toEqual([
-        { kindName: "AdoptedVector", fieldName: "vector" },
+      expect(
+        plan.requirements.filter(
+          (requirement) => requirement.kind === "vector-slot",
+        ),
+      ).toEqual([
+        { kind: "vector-slot", nodeKind: "AdoptedVector", fieldPath: "vector" },
       ]);
       await expect(
         backend.transactionWithNative(async (_target, nativeTx) =>
@@ -715,8 +846,16 @@ export function registerAdoptedEvolutionIntegrationTests(
       const plan = await store.planEvolution(standaloneKindExtension);
       if (plan.status !== "change")
         throw new Error("Expected standalone kind change plan.");
-      expect(plan.requirements.vectorSlots).toEqual([]);
-      expect(plan.requirements.identityAffectedKinds).toEqual([]);
+      expect(
+        plan.requirements.filter(
+          (requirement) => requirement.kind === "vector-slot",
+        ),
+      ).toEqual([]);
+      expect(
+        plan.requirements.filter(
+          (requirement) => requirement.kind === "identity",
+        ),
+      ).toEqual([]);
       if (backend.adoptSchemaWriteTransaction === undefined) {
         await assertUnsupportedAdoption(() =>
           backend.transactionWithNative(async (_target, nativeTx) =>
@@ -735,9 +874,9 @@ export function registerAdoptedEvolutionIntegrationTests(
             });
           }),
       );
-      expect(outcome.receipt.schema.version).toBe(plan.resultingVersion);
+      expect(outcome.receipt.schema.version).toBe(plan.result.version);
       const refreshed = await store.refreshSchema({
-        expectedVersion: plan.resultingVersion,
+        minVersion: plan.result.version,
       });
       expect(refreshed.getNodeCollection("AdoptedStandaloneTag")).toBeDefined();
       expect(await refreshed.identity.membersOf(first)).toEqual(
@@ -797,7 +936,7 @@ export function registerAdoptedEvolutionIntegrationTests(
             }),
         );
         expect(outcome.result).toBe("provisioned");
-        expect(outcome.receipt.schema.version).toBe(plan.resultingVersion);
+        expect(outcome.receipt.schema.version).toBe(plan.result.version);
         expect(outcome.receipt.recorded).toBeDefined();
         expect(
           await backend.schemaWriteTransaction(graph.id, (tx) =>
@@ -810,7 +949,7 @@ export function registerAdoptedEvolutionIntegrationTests(
           ]),
         );
         const refreshed = await store.refreshSchema({
-          expectedVersion: plan.resultingVersion,
+          minVersion: plan.result.version,
         });
         expect(await refreshed.nodes.AdoptedPerson.find()).toHaveLength(1);
       } finally {
@@ -907,7 +1046,11 @@ export function registerAdoptedEvolutionIntegrationTests(
         const plan = await store.planEvolution(vectorExtension);
         if (plan.status !== "change")
           throw new Error("Expected vector slot change plan.");
-        expect(plan.requirements.vectorSlots).not.toEqual([]);
+        expect(
+          plan.requirements.filter(
+            (requirement) => requirement.kind === "vector-slot",
+          ),
+        ).not.toEqual([]);
         const widerSlots = resolveGraphVectorSlots(
           mergeGraphExtension(driftVectorGraph, widerVectorExtension),
         );
@@ -1012,7 +1155,11 @@ export function registerAdoptedEvolutionIntegrationTests(
         const plan = await store.planEvolution(identityExtension);
         if (plan.status !== "change")
           throw new Error("Expected identity ontology change plan.");
-        expect(plan.requirements.identityAffectedKinds).not.toEqual([]);
+        expect(
+          plan.requirements.filter(
+            (requirement) => requirement.kind === "identity",
+          ),
+        ).not.toEqual([]);
         if (backend.adoptSchemaWriteTransaction === undefined) {
           await assertUnsupportedAdoption(() =>
             backend.transactionWithNative(async (_target, nativeTx) =>
@@ -1031,9 +1178,9 @@ export function registerAdoptedEvolutionIntegrationTests(
             }),
         );
         expect(outcome.result).toBe("identity validated");
-        expect(outcome.receipt.schema.version).toBe(plan.resultingVersion);
+        expect(outcome.receipt.schema.version).toBe(plan.result.version);
         const refreshed = await store.refreshSchema({
-          expectedVersion: plan.resultingVersion,
+          minVersion: plan.result.version,
         });
         expect(await refreshed.identity.membersOf(first)).toEqual(
           expect.arrayContaining([
@@ -1152,7 +1299,7 @@ export function registerAdoptedEvolutionIntegrationTests(
                 await Promise.resolve();
               }),
           );
-          expect(committed.receipt.schema.version).toBe(plan.resultingVersion);
+          expect(committed.receipt.schema.version).toBe(plan.result.version);
           expect(
             await backend.schemaWriteTransaction(identityGraph.id, (tx) =>
               tx.tableExists(identityTables.identitySeparation),
@@ -1240,7 +1387,7 @@ export function registerAdoptedEvolutionIntegrationTests(
         ),
       ).rejects.toThrow();
       const active = await backend.getActiveSchema(graph.id);
-      expect(active?.version).toBe(plan.baselineVersion);
+      expect(active?.version).toBe(plan.baseline.version);
     });
   });
 }

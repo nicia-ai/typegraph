@@ -140,6 +140,7 @@ export type {
 export type {
   AdapterBackend,
   AdapterBackendTransactions,
+  AdoptedSchemaWriteTransaction,
   BackendCapabilities,
   BackendExecutionCapabilities,
   BackendIdentity,
@@ -216,6 +217,7 @@ export type {
   RemovalMaterializationBackend,
   SchemaCommitBackend,
   SchemaKindEmptinessProbe,
+  SchemaProvisioning,
   SchemaReadBackend,
   SchemaVersionRow,
   SchemaWriteFenceBackend,
@@ -454,6 +456,7 @@ export {
   SchemaChangedError,
   type SchemaChangedErrorDetails,
   SchemaContentConflictError,
+  SchemaFenceTimeoutError,
   SchemaMismatchError,
   StaleVersionError,
   StoreNotInitializedError,
@@ -555,6 +558,7 @@ export type {
   StoreAnalysisCursorStaleErrorDetails,
   StoreAnalysisSchemaCoordinate,
   StoreDescription,
+  StoreEvolution,
   StorePopulationStatistics,
   StoreTransactionOptions,
   StoreValidationFailure,
@@ -616,9 +620,12 @@ export {
 // migration machinery.
 export type {
   EvolutionPlan,
+  EvolutionRequirement,
   EvolutionRequirements,
   GraphAnnotationsChange,
   IdentityChange,
+  SchemaHash,
+  SchemaIdentity,
   SerializedSchema,
 } from "./schema";
 export type { GraphTemplate, InstantiateGraphTemplateResult } from "./schema";

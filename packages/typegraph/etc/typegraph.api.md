@@ -17,7 +17,7 @@ const __nodeId: unique symbol;
 
 // @public
 export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
-    schemaProvisioning: "dml-only" | "transactional";
+    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
     adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
@@ -102,7 +102,7 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-type AdoptedSchemaWriteTransaction = Readonly<{
+export type AdoptedSchemaWriteTransaction = Readonly<{
     backend: SchemaWriteTransactionBackend & Readonly<{
         commitSchemaVersion: GraphBackend["commitSchemaVersion"];
         ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
@@ -2739,39 +2739,45 @@ export function equivalentTo(kindA: NodeType, kindBOrIri: NodeType | string): On
 // @public
 export type ErrorCategory = "user" | "constraint" | "system";
 
-// @public (undocumented)
+// @public
 export type EvolutionPlan = (EvolutionPlanBase & Readonly<{
     status: "noop";
 }>) | (EvolutionPlanBase & Readonly<{
     status: "change";
-    resultingVersion: number;
     requirements: EvolutionRequirements;
 }>);
 
 // @public (undocumented)
 type EvolutionPlanBase = Readonly<{
     graphId: string;
-    baselineVersion: number;
-    baselineHash: SchemaHash;
-    resultingHash: SchemaHash;
+    baseline: SchemaIdentity;
+    result: SchemaIdentity;
+    [evolutionPlanBrand]: true;
+}>;
+
+// @public (undocumented)
+const evolutionPlanBrand: unique symbol;
+
+// @public
+export type EvolutionRequirement = Readonly<{
+    kind: "require-empty";
+    entity: "node" | "edge";
+    kindName: string;
+}> | Readonly<{
+    kind: "pending-removal";
+    entity: "node" | "edge";
+    kindName: string;
+}> | Readonly<{
+    kind: "vector-slot";
+    nodeKind: string;
+    fieldPath: string;
+}> | Readonly<{
+    kind: "identity";
+    nodeKinds: readonly string[];
 }>;
 
 // @public
-export type EvolutionRequirements = Readonly<{
-    requireEmpty: readonly Readonly<{
-        entity: "node" | "edge";
-        kindName: string;
-    }>[];
-    readdedKindCandidates: readonly Readonly<{
-        entity: "node" | "edge";
-        kindName: string;
-    }>[];
-    vectorSlots: readonly Readonly<{
-        kindName: string;
-        fieldName: string;
-    }>[];
-    identityAffectedKinds: readonly string[];
-}>;
+export type EvolutionRequirements = readonly EvolutionRequirement[];
 
 // @public
 export type EvolvedTransactionOptions = Readonly<{
@@ -2782,10 +2788,7 @@ export type EvolvedTransactionOptions = Readonly<{
 export type EvolvedTransactionOutcome<T> = Readonly<{
     result: TransactionOutcome<T>["result"];
     receipt: TransactionOutcome<T>["receipt"] & Readonly<{
-        schema: Readonly<{
-            version: number;
-            hash: string;
-        }>;
+        schema: SchemaIdentity;
     }>;
 }>;
 
@@ -7140,7 +7143,7 @@ export type ReembedVectorFieldResult = Readonly<{
 // @public
 export type RefreshSchemaOptions<TStore> = Readonly<{
     ref?: StoreRef<TStore>;
-    expectedVersion?: number;
+    minVersion?: number;
 }>;
 
 // @public
@@ -7533,7 +7536,24 @@ type SchemaDiff = Readonly<{
 }>;
 
 // @public
-type SchemaHash = string;
+export class SchemaFenceTimeoutError extends TypeGraphError {
+    constructor(graphId: string, phase: "schema-advisory" | "schema-row" | "writer-slot", waitBudgetMs: number, cause?: unknown);
+    // (undocumented)
+    readonly details: Readonly<{
+        graphId: string;
+        phase: "schema-advisory" | "schema-row" | "writer-slot";
+        waitBudgetMs: number;
+    }>;
+}
+
+// @public
+export type SchemaHash = string;
+
+// @public
+export type SchemaIdentity = Readonly<{
+    version: number;
+    hash: SchemaHash;
+}>;
 
 // @public
 export type SchemaIntrospection = Readonly<{
@@ -7591,6 +7611,9 @@ export type SchemaMismatchErrorDetails = Readonly<{
     expectedHash: string;
     actualHash: string;
 }>;
+
+// @public
+export type SchemaProvisioning = "dml-only" | "transactional";
 
 // @public (undocumented)
 export type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
@@ -8136,8 +8159,8 @@ export type StoreDescription = Readonly<{
     statistics: StorePopulationStatistics;
 }>;
 
-// @public (undocumented)
-interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
+// @public
+export interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
     // (undocumented)
     readonly deprecateKinds: <TRefStore extends StoreCore<G> = TStore>(names: readonly string[], options?: Readonly<{
         ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;

@@ -56,7 +56,11 @@ import {
   type PostgresTables,
   tables as defaultTables,
 } from "../drizzle/postgres";
-import { type AdapterBackend, closeAfterFailure } from "../types";
+import {
+  type AdapterBackend,
+  closeAfterFailure,
+  type SchemaProvisioning,
+} from "../types";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
@@ -109,7 +113,7 @@ export type LocalPgliteBackendOptions = Readonly<{
    */
   fulltext?: FulltextStrategy | false;
   /** Opt in to provisioning within caller-owned schema transactions. */
-  schemaProvisioning?: "dml-only" | "transactional";
+  schemaProvisioning?: SchemaProvisioning;
 }>;
 
 /**

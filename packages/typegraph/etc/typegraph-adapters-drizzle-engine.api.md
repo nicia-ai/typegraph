@@ -16,7 +16,7 @@ import { SQL } from 'drizzle-orm';
 
 // @public
 type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
-    schemaProvisioning: "dml-only" | "transactional";
+    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
     adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
@@ -25,7 +25,7 @@ type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
 }>;
 
 // @public
-type AdoptedSchemaWriteTransaction = Readonly<{
+export type AdoptedSchemaWriteTransaction = Readonly<{
     backend: SchemaWriteTransactionBackend & Readonly<{
         commitSchemaVersion: GraphBackend["commitSchemaVersion"];
         ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
@@ -8479,7 +8479,7 @@ type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
 
 // @public
 type PostgresBackendOptions = Readonly<{
-    schemaProvisioning?: "dml-only" | "transactional";
+    schemaProvisioning?: SchemaProvisioning;
     tables?: PostgresTables;
     fulltext?: FulltextStrategy | false;
     vector?: VectorStrategy | false;
@@ -8730,6 +8730,9 @@ type SchemaKindEmptinessProbe = Readonly<{
     rows: "nonDeleted" | "all";
 }>;
 
+// @public
+export type SchemaProvisioning = "dml-only" | "transactional";
+
 // @public (undocumented)
 type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
 
@@ -8891,7 +8894,7 @@ export type SqlEngineProfile<TTx> = Readonly<{
     fulltext: FulltextStrategy | undefined;
     vector: VectorStrategy | undefined;
     declaredCapabilities: BackendCapabilities;
-    schemaProvisioning: "dml-only" | "transactional";
+    schemaProvisioning: SchemaProvisioning;
     resourceAudit: BackendResourceAudit;
     autocommit: Readonly<{
         singleStatementDurable: boolean;
@@ -8940,7 +8943,7 @@ const SqlIntentBrand: unique symbol;
 
 // @public
 type SqliteBackendOptions = Readonly<{
-    schemaProvisioning?: "dml-only" | "transactional";
+    schemaProvisioning?: SchemaProvisioning;
     tables?: SqliteTables;
     executionProfile?: SqliteExecutionProfileHints;
     fulltext?: FulltextStrategy | false;

@@ -3569,8 +3569,8 @@ export async function planMergeForEvolution<G extends GraphDef>(
   }
   if (
     baselineFence.graphId !== evolutionPlan.graphId ||
-    baselineFence.schema.version !== evolutionPlan.baselineVersion ||
-    baselineFence.schema.hash !== evolutionPlan.baselineHash
+    baselineFence.schema.version !== evolutionPlan.baseline.version ||
+    baselineFence.schema.hash !== evolutionPlan.baseline.hash
   ) {
     return err(
       new MergePlanningStaleError(
@@ -3585,9 +3585,9 @@ export async function planMergeForEvolution<G extends GraphDef>(
       managed: true,
       version:
         evolutionPlan.status === "change" ?
-          evolutionPlan.resultingVersion
-        : evolutionPlan.baselineVersion,
-      hash: evolutionPlan.resultingHash,
+          evolutionPlan.result.version
+        : evolutionPlan.baseline.version,
+      hash: evolutionPlan.result.hash,
     },
   };
   const baselinePrecondition = await validateBaseVersions(store, branches);

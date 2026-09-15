@@ -69,6 +69,7 @@ export {
 import {
   type AdapterBackend,
   type BundledBackendCapabilityOverrides,
+  type SchemaProvisioning,
 } from "../types";
 export type { BundledBackendCapabilityOverrides } from "../types";
 export type {
@@ -309,7 +310,7 @@ function applyConnectionPragmas(
  * Options for creating a local SQLite backend.
  */
 export type LocalSqliteBackendOptions = Readonly<{
-  schemaProvisioning?: "dml-only" | "transactional";
+  schemaProvisioning?: SchemaProvisioning;
   /**
    * Path to the SQLite database file.
    * Defaults to ":memory:" for an in-memory database.

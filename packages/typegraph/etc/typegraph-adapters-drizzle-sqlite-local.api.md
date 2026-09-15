@@ -10,7 +10,7 @@ import * as drizzle_orm_sqlite_core from 'drizzle-orm/sqlite-core';
 
 // @public
 type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
-    schemaProvisioning: "dml-only" | "transactional";
+    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
     adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
@@ -4673,7 +4673,7 @@ type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 export type LocalSqliteBackendOptions = Readonly<{
-    schemaProvisioning?: "dml-only" | "transactional";
+    schemaProvisioning?: SchemaProvisioning;
     path?: string;
     pragmas?: LocalSqlitePragmaOptions | false;
     tables?: SqliteTables;
@@ -4981,6 +4981,9 @@ type SchemaKindEmptinessProbe = Readonly<{
     kind: string;
     rows: "nonDeleted" | "all";
 }>;
+
+// @public
+type SchemaProvisioning = "dml-only" | "transactional";
 
 // @public (undocumented)
 type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;

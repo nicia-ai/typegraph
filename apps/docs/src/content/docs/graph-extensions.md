@@ -345,7 +345,13 @@ managed write fails the schema-version fence.
 
 `planEvolution(extension)` prepares a named schema change before the caller
 opens its write transaction. It returns an immutable `"noop"` or `"change"`
-plan bound to the graph, baseline version and hash, and resulting hash. The
+plan with `graphId`, `baseline: { version, hash }`, and
+`result: { version, hash }`. Change plans expose an ordered `requirements`
+array whose entries name empty-kind checks, pending removals, vector slots,
+and identity work. The plan is opaque and bound to the loaded TypeGraph module:
+it cannot be serialized, cloned, or reconstructed. It can be passed between
+compatible Stores for the same graph that use the same loaded module; apply
+still checks the active graph and fenced baseline version/hash. The
 default `{ source: "database" }` reloads the active schema. `{ source:
 "cached" }` uses a previously loaded planning snapshot on the same Store; a
 cached plan is not fresh database evidence. A stale baseline is refused during
@@ -360,11 +366,13 @@ including its reads, collections, and supported composition operations. It
 does not receive a replacement root Store.
 
 ```ts
-const ref = { current: store };
-const plan = await store.planEvolution(proposal);
+const cachedStore = store;
+const ref = { current: cachedStore };
+const plan = await cachedStore.planEvolution(proposal);
+const writerStore = cachedStore.withBackend(writerBackend);
 
 const provisional = await db.transaction(async (nativeTx) => {
-  const outcome = await store.withEvolvedTransaction(
+  const outcome = await writerStore.withEvolvedTransaction(
     nativeTx,
     plan,
     async (tx) => {
@@ -381,8 +389,8 @@ const provisional = await db.transaction(async (nativeTx) => {
   return outcome;
 });
 
-const refreshed = await store.refreshSchema({
-  expectedVersion: provisional.receipt.schema.version,
+const refreshed = await cachedStore.refreshSchema({
+  minVersion: provisional.receipt.schema.version,
   ref,
 });
 ```
@@ -393,7 +401,7 @@ that commit succeeds. A callback failure must reject the outer transaction;
 catching it and committing does not prove rollback. Callback contexts and
 queries built from them expire when the callback returns, including after a
 failure. Use `refreshSchema()` only after awaiting a successful outer commit.
-When the cached Store already matches `expectedVersion`, refresh returns it
+When the cached Store already matches `minVersion`, refresh returns it
 without a read; that shortcut does not check for a newer database version.
 Otherwise refresh reads the active schema, accepts a newer committed version,
 and refuses a missing or older one. It applies no extension or storage
@@ -423,7 +431,7 @@ behind the named snapshot; matching versions make this refresh a cached read:
 
 ```typescript
 if (plan.status === "noop") {
-  const current = await store.refreshSchema({ expectedVersion: plan.baselineVersion });
+  const current = await store.refreshSchema({ minVersion: plan.baseline.version });
   await db.transaction((nativeTx) =>
     current.withRecordedTransaction(nativeTx, async (tx) => {
       await tx.nodes.Person.create({ name: "Ada" });

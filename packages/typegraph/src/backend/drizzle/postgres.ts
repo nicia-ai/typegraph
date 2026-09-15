@@ -176,6 +176,7 @@ import {
   POSTGRES_MAX_BIND_PARAMETERS,
   type RecordKindRemovalParams,
   type ReleaseIndexMaterializationClaimParams,
+  type SchemaProvisioning,
   type SchemaWriteTransactionBackend,
   type TableState,
   type TransactionBackend,
@@ -297,7 +298,7 @@ import {
  */
 export type PostgresBackendOptions = Readonly<{
   /** Opt in to transactional DDL in a caller-owned schema transaction. */
-  schemaProvisioning?: "dml-only" | "transactional";
+  schemaProvisioning?: SchemaProvisioning;
   /**
    * Custom table definitions. Use createPostgresTables() to customize table names.
    * Defaults to standard TypeGraph table names.

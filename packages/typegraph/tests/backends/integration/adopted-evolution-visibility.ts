@@ -61,7 +61,7 @@ export async function assertAdoptedEvolutionVisibility<TNativeTransaction>(
     // committed. A separate connection must see neither part of the change.
     expect(await snapshot(reader)).toEqual(before);
   });
-  const committed = { version: plan.resultingVersion, count: 1 };
+  const committed = { version: plan.result.version, count: 1 };
   expect(await snapshot(reader)).toEqual(committed);
 
   const refreshed = await store.refreshSchema();

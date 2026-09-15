@@ -9,42 +9,76 @@ import type { VectorSlot } from "../query/dialect/vector-strategy";
 import { freezeDeep } from "../utils/object";
 import { canonicalEqual } from "./canonical";
 import { prepareNewSchemaVersion } from "./new-schema-version";
-import type { SchemaHash, SerializedSchema } from "./types";
+import type { SchemaHash, SchemaIdentity, SerializedSchema } from "./types";
 
-export type EvolutionRequirements = Readonly<{
-  requireEmpty: readonly Readonly<{
-    entity: "node" | "edge";
-    kindName: string;
-  }>[];
-  /** Newly introduced node/edge kinds must be checked for pending cleanup. */
-  readdedKindCandidates: readonly Readonly<{
-    entity: "node" | "edge";
-    kindName: string;
-  }>[];
-  /** New embedding slots require transactional vector provisioning. */
-  vectorSlots: readonly Readonly<{ kindName: string; fieldName: string }>[];
-  /** Ontology changes require revalidating and rebuilding identity relations. */
+/** A database-dependent check or provision needed before committing a change. */
+export type EvolutionRequirement =
+  | Readonly<{
+      kind: "require-empty";
+      entity: "node" | "edge";
+      kindName: string;
+    }>
+  | Readonly<{
+      kind: "pending-removal";
+      entity: "node" | "edge";
+      kindName: string;
+    }>
+  | Readonly<{
+      kind: "vector-slot";
+      nodeKind: string;
+      fieldPath: string;
+    }>
+  | Readonly<{
+      kind: "identity";
+      nodeKinds: readonly string[];
+    }>;
+
+/** Ordered requirements exposed by a change plan. */
+export type EvolutionRequirements = readonly EvolutionRequirement[];
+
+/** Private instructions retained for the Store's apply-time checks. */
+export type EvolutionPlanRequirements = Readonly<{
+  requireEmpty: readonly Extract<
+    EvolutionRequirement,
+    { kind: "require-empty" }
+  >[];
+  readdedKindCandidates: readonly Extract<
+    EvolutionRequirement,
+    { kind: "pending-removal" }
+  >[];
+  vectorSlots: readonly Extract<
+    EvolutionRequirement,
+    { kind: "vector-slot" }
+  >[];
   identityAffectedKinds: readonly string[];
 }>;
 
+declare const evolutionPlanBrand: unique symbol;
+
 type EvolutionPlanBase = Readonly<{
   graphId: string;
-  baselineVersion: number;
-  baselineHash: SchemaHash;
-  resultingHash: SchemaHash;
+  baseline: SchemaIdentity;
+  result: SchemaIdentity;
+  /** Only this module can mint a plan accepted by withEvolvedTransaction. */
+  [evolutionPlanBrand]: true;
 }>;
 
+/**
+ * A prepared schema change. Plans are module-bound, nonserializable values:
+ * object spreads, clones, and reconstructed data cannot be applied.
+ */
 export type EvolutionPlan =
   | (EvolutionPlanBase & Readonly<{ status: "noop" }>)
   | (EvolutionPlanBase &
       Readonly<{
         status: "change";
-        resultingVersion: number;
         requirements: EvolutionRequirements;
       }>);
 
 export type EvolutionPlanPayload<G extends GraphDef> = Readonly<{
+  baselineGraph: G;
   mergedGraph: G;
+  requirements?: EvolutionPlanRequirements;
   classification?: ReturnType<typeof classifyModifications>;
   schemaDocument?: SerializedSchema;
   vectorSlots?: readonly VectorSlot[];
@@ -55,24 +89,46 @@ const PLAN_PAYLOADS = new WeakMap<
   EvolutionPlanPayload<GraphDef>
 >();
 
+function mintEvolutionPlan(
+  fields:
+    | (Omit<EvolutionPlanBase, typeof evolutionPlanBrand> &
+        Readonly<{ status: "noop" }>)
+    | (Omit<EvolutionPlanBase, typeof evolutionPlanBrand> &
+        Readonly<{ status: "change"; requirements: EvolutionRequirements }>),
+): EvolutionPlan {
+  return Object.freeze(fields) as EvolutionPlan;
+}
+
 function newlyAddedKinds(
   existing: GraphExtension,
   next: GraphExtension,
-): EvolutionRequirements["readdedKindCandidates"] {
+): EvolutionPlanRequirements["readdedKindCandidates"] {
   const nodes = Object.keys(next.nodes ?? {})
     .filter((kindName) => !Object.hasOwn(existing.nodes ?? {}, kindName))
-    .map((kindName) => Object.freeze({ entity: "node" as const, kindName }));
+    .map((kindName) =>
+      Object.freeze({
+        kind: "pending-removal" as const,
+        entity: "node" as const,
+        kindName,
+      }),
+    );
   const edges = Object.keys(next.edges ?? {})
     .filter((kindName) => !Object.hasOwn(existing.edges ?? {}, kindName))
-    .map((kindName) => Object.freeze({ entity: "edge" as const, kindName }));
+    .map((kindName) =>
+      Object.freeze({
+        kind: "pending-removal" as const,
+        entity: "edge" as const,
+        kindName,
+      }),
+    );
   return Object.freeze([...nodes, ...edges]);
 }
 
 function newlyAddedVectorSlots(
   existing: GraphExtension,
   next: GraphExtension,
-): EvolutionRequirements["vectorSlots"] {
-  const slots: { kindName: string; fieldName: string }[] = [];
+): EvolutionPlanRequirements["vectorSlots"] {
+  const slots: Extract<EvolutionRequirement, { kind: "vector-slot" }>[] = [];
   for (const [kindName, node] of Object.entries(next.nodes ?? {})) {
     const previous =
       Object.hasOwn(existing.nodes ?? {}, kindName) ?
@@ -83,7 +139,13 @@ function newlyAddedVectorSlots(
         property.embedding !== undefined &&
         previous?.properties[fieldName]?.embedding === undefined
       ) {
-        slots.push(Object.freeze({ kindName, fieldName }));
+        slots.push(
+          Object.freeze({
+            kind: "vector-slot",
+            nodeKind: kindName,
+            fieldPath: fieldName,
+          }),
+        );
       }
     }
   }
@@ -132,14 +194,20 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
   const extension = freezeDeep(structuredClone(callerExtension));
   const mergedGraph = mergeGraphExtension(baselineGraph, extension);
   if (mergedGraph === baselineGraph) {
-    const plan: EvolutionPlan = Object.freeze({
+    const baseline = Object.freeze({
+      version: baselineVersion,
+      hash: baselineHash,
+    });
+    const plan = mintEvolutionPlan({
       status: "noop",
       graphId: baselineGraph.id,
-      baselineVersion,
-      baselineHash,
-      resultingHash: baselineHash,
+      baseline,
+      result: baseline,
     });
-    PLAN_PAYLOADS.set(plan, Object.freeze({ mergedGraph: baselineGraph }));
+    PLAN_PAYLOADS.set(
+      plan,
+      Object.freeze({ baselineGraph, mergedGraph: baselineGraph }),
+    );
     return plan;
   }
 
@@ -160,10 +228,14 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
   const schemaDocument = freezeDeep(prepared.schemaDocument);
   const resultingHash = prepared.schemaHash;
   const addedKinds = newlyAddedKinds(existingExtension, extension);
-  const requirements: EvolutionRequirements = Object.freeze({
+  const groupedRequirements: EvolutionPlanRequirements = Object.freeze({
     requireEmpty: Object.freeze(
       classification.requireEmpty.map((entry) =>
-        Object.freeze({ entity: entry.entity, kindName: entry.kindName }),
+        Object.freeze({
+          kind: "require-empty" as const,
+          entity: entry.entity,
+          kindName: entry.kindName,
+        }),
       ),
     ),
     readdedKindCandidates: addedKinds,
@@ -172,27 +244,40 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
       identityKindsRequiringPreflight(baselineGraph, mergedGraph),
     ),
   });
-  const plan: EvolutionPlan = Object.freeze({
+  const requirements: EvolutionRequirements = Object.freeze([
+    ...groupedRequirements.requireEmpty,
+    ...groupedRequirements.readdedKindCandidates,
+    ...groupedRequirements.vectorSlots,
+    ...(groupedRequirements.identityAffectedKinds.length > 0 ?
+      [
+        Object.freeze({
+          kind: "identity" as const,
+          nodeKinds: groupedRequirements.identityAffectedKinds,
+        }),
+      ]
+    : []),
+  ]);
+  const plan = mintEvolutionPlan({
     status: "change",
     graphId: baselineGraph.id,
-    baselineVersion,
-    baselineHash,
-    resultingHash,
-    resultingVersion,
+    baseline: Object.freeze({ version: baselineVersion, hash: baselineHash }),
+    result: Object.freeze({ version: resultingVersion, hash: resultingHash }),
     requirements,
   });
   PLAN_PAYLOADS.set(
     plan,
     Object.freeze({
+      baselineGraph,
       mergedGraph,
+      requirements: groupedRequirements,
       classification,
       schemaDocument,
       vectorSlots: freezeDeep(
         resolveGraphVectorSlots(mergedGraph).filter((slot) =>
-          requirements.vectorSlots.some(
+          groupedRequirements.vectorSlots.some(
             (required) =>
-              required.kindName === slot.nodeKind &&
-              required.fieldName === slot.fieldPath,
+              required.nodeKind === slot.nodeKind &&
+              required.fieldPath === slot.fieldPath,
           ),
         ),
       ),

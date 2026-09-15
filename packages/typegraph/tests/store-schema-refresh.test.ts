@@ -19,6 +19,20 @@ const extension = defineGraphExtension({
 });
 
 describe("schema planning snapshots and refresh", () => {
+  it("refuses unknown planning and refresh options", async () => {
+    const [store] = await createStoreWithSchema(graph, createTestBackend());
+    const planningOptions = { source: "database" as const, future: true };
+    await expect(
+      store.planEvolution(extension, planningOptions),
+    ).rejects.toMatchObject({
+      details: { code: "EVOLUTION_OPTIONS_UNSUPPORTED" },
+    });
+    const refreshOptions = { minVersion: 1, future: true };
+    await expect(store.refreshSchema(refreshOptions)).rejects.toMatchObject({
+      details: { code: "EVOLUTION_OPTIONS_UNSUPPORTED" },
+    });
+  });
+
   it("returns a matching cached version without SQL and reloads a newer version", async () => {
     const backend = createTestBackend();
     const read = vi.fn(backend.getActiveSchema);
@@ -26,11 +40,11 @@ describe("schema planning snapshots and refresh", () => {
     const [store] = await createStoreWithSchema(graph, observed);
     const ref = { current: store };
     read.mockClear();
-    expect(await store.refreshSchema({ ref, expectedVersion: 1 })).toBe(store);
+    expect(await store.refreshSchema({ ref, minVersion: 1 })).toBe(store);
     expect(read).not.toHaveBeenCalled();
     await store.evolve(extension);
     read.mockClear();
-    const refreshed = await store.refreshSchema({ ref, expectedVersion: 2 });
+    const refreshed = await store.refreshSchema({ ref, minVersion: 2 });
     expect(read).toHaveBeenCalledTimes(1);
     expect(ref.current).toBe(refreshed);
     expect(refreshed.registry.hasNodeType("Tag")).toBe(true);
@@ -41,7 +55,7 @@ describe("schema planning snapshots and refresh", () => {
     const [store] = await createStoreWithSchema(graph, createTestBackend());
     const ref = { current: store };
     await expect(
-      store.refreshSchema({ ref, expectedVersion: 2 }),
+      store.refreshSchema({ ref, minVersion: 2 }),
     ).rejects.toMatchObject({
       details: { code: "SCHEMA_REFRESH_VERSION_UNAVAILABLE" },
     });
@@ -60,17 +74,17 @@ describe("schema planning snapshots and refresh", () => {
     });
     expect(await store.planEvolution(extension)).toMatchObject({
       status: "change",
-      baselineVersion: 1,
+      baseline: { version: 1 },
     });
     await store.evolve(extension);
     read.mockClear();
     expect(
       await store.planEvolution(extension, { source: "cached" }),
-    ).toMatchObject({ status: "change", baselineVersion: 1 });
+    ).toMatchObject({ status: "change", baseline: { version: 1 } });
     expect(read).not.toHaveBeenCalled();
     expect(await store.planEvolution(extension)).toMatchObject({
       status: "noop",
-      baselineVersion: 2,
+      baseline: { version: 2 },
     });
     expect(read).toHaveBeenCalledTimes(1);
   });

@@ -129,6 +129,7 @@ import {
   type NormalizedColumnKind,
   normalizeGraphAnalyticsCapabilities,
   type RecordKindRemovalParams,
+  type SchemaProvisioning,
   type SchemaWriteTransactionBackend,
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
@@ -256,7 +257,7 @@ import {
  */
 export type SqliteBackendOptions = Readonly<{
   /** Opt in to transactional DDL in a caller-owned schema transaction. */
-  schemaProvisioning?: "dml-only" | "transactional";
+  schemaProvisioning?: SchemaProvisioning;
   /**
    * Custom table definitions. Use createSqliteTables() to customize table names.
    * Defaults to standard TypeGraph table names.

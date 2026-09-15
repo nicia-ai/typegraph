@@ -31,7 +31,11 @@ export type {
 // ============================================================
 
 export { type DeserializedSchema, deserializeSchema } from "./deserializer";
-export type { EvolutionPlan, EvolutionRequirements } from "./evolution-plan";
+export type {
+  EvolutionPlan,
+  EvolutionRequirement,
+  EvolutionRequirements,
+} from "./evolution-plan";
 export type {
   GraphTemplate,
   InstantiateGraphTemplateResult,
@@ -116,6 +120,7 @@ export type { GraphIdentityConfig } from "../core/define-graph";
 export type {
   JsonSchema,
   SchemaHash,
+  SchemaIdentity,
   SerializedClosures,
   SerializedEdgeDef,
   SerializedMetaEdge,

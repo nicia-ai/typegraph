@@ -1793,39 +1793,45 @@ type EntityKey = Readonly<{
 // @public
 type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 
-// @public (undocumented)
+// @public
 type EvolutionPlan = (EvolutionPlanBase & Readonly<{
     status: "noop";
 }>) | (EvolutionPlanBase & Readonly<{
     status: "change";
-    resultingVersion: number;
     requirements: EvolutionRequirements;
 }>);
 
 // @public (undocumented)
 type EvolutionPlanBase = Readonly<{
     graphId: string;
-    baselineVersion: number;
-    baselineHash: SchemaHash;
-    resultingHash: SchemaHash;
+    baseline: SchemaIdentity;
+    result: SchemaIdentity;
+    [evolutionPlanBrand]: true;
+}>;
+
+// @public (undocumented)
+const evolutionPlanBrand: unique symbol;
+
+// @public
+type EvolutionRequirement = Readonly<{
+    kind: "require-empty";
+    entity: "node" | "edge";
+    kindName: string;
+}> | Readonly<{
+    kind: "pending-removal";
+    entity: "node" | "edge";
+    kindName: string;
+}> | Readonly<{
+    kind: "vector-slot";
+    nodeKind: string;
+    fieldPath: string;
+}> | Readonly<{
+    kind: "identity";
+    nodeKinds: readonly string[];
 }>;
 
 // @public
-type EvolutionRequirements = Readonly<{
-    requireEmpty: readonly Readonly<{
-        entity: "node" | "edge";
-        kindName: string;
-    }>[];
-    readdedKindCandidates: readonly Readonly<{
-        entity: "node" | "edge";
-        kindName: string;
-    }>[];
-    vectorSlots: readonly Readonly<{
-        kindName: string;
-        fieldName: string;
-    }>[];
-    identityAffectedKinds: readonly string[];
-}>;
+type EvolutionRequirements = readonly EvolutionRequirement[];
 
 // @public
 class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AggregateAliasMap, R extends Record<string, FieldRef | AggregateExpr>> {
@@ -5075,7 +5081,7 @@ type ReembedVectorFieldResult = Readonly<{
 // @public
 type RefreshSchemaOptions<TStore> = Readonly<{
     ref?: StoreRef<TStore>;
-    expectedVersion?: number;
+    minVersion?: number;
 }>;
 
 // @public
@@ -5321,6 +5327,12 @@ type SchemaDiff = Readonly<{
 
 // @public
 type SchemaHash = string;
+
+// @public
+type SchemaIdentity = Readonly<{
+    version: number;
+    hash: SchemaHash;
+}>;
 
 // @public
 type SchemaIntrospection = Readonly<{
@@ -5800,7 +5812,7 @@ type StoreDescription = Readonly<{
     statistics: StorePopulationStatistics;
 }>;
 
-// @public (undocumented)
+// @public
 interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
     // (undocumented)
     readonly deprecateKinds: <TRefStore extends StoreCore<G> = TStore>(names: readonly string[], options?: Readonly<{

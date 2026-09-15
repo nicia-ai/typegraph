@@ -15,7 +15,7 @@ import { PgTransaction } from 'drizzle-orm/pg-core';
 
 // @public
 type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
-    schemaProvisioning: "dml-only" | "transactional";
+    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
     adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
@@ -4555,7 +4555,7 @@ export type LocalPgliteBackendOptions = Readonly<{
     tables?: PostgresTables;
     vector?: false | Extension;
     fulltext?: FulltextStrategy | false;
-    schemaProvisioning?: "dml-only" | "transactional";
+    schemaProvisioning?: SchemaProvisioning;
 }>;
 
 // @public
@@ -4871,6 +4871,9 @@ type SchemaKindEmptinessProbe = Readonly<{
     kind: string;
     rows: "nonDeleted" | "all";
 }>;
+
+// @public
+type SchemaProvisioning = "dml-only" | "transactional";
 
 // @public (undocumented)
 type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;

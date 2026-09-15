@@ -699,39 +699,45 @@ type EntityKey = Readonly<{
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
 
-// @public (undocumented)
+// @public
 export type EvolutionPlan = (EvolutionPlanBase & Readonly<{
     status: "noop";
 }>) | (EvolutionPlanBase & Readonly<{
     status: "change";
-    resultingVersion: number;
     requirements: EvolutionRequirements;
 }>);
 
 // @public (undocumented)
 type EvolutionPlanBase = Readonly<{
     graphId: string;
-    baselineVersion: number;
-    baselineHash: SchemaHash;
-    resultingHash: SchemaHash;
+    baseline: SchemaIdentity;
+    result: SchemaIdentity;
+    [evolutionPlanBrand]: true;
+}>;
+
+// @public (undocumented)
+const evolutionPlanBrand: unique symbol;
+
+// @public
+export type EvolutionRequirement = Readonly<{
+    kind: "require-empty";
+    entity: "node" | "edge";
+    kindName: string;
+}> | Readonly<{
+    kind: "pending-removal";
+    entity: "node" | "edge";
+    kindName: string;
+}> | Readonly<{
+    kind: "vector-slot";
+    nodeKind: string;
+    fieldPath: string;
+}> | Readonly<{
+    kind: "identity";
+    nodeKinds: readonly string[];
 }>;
 
 // @public
-export type EvolutionRequirements = Readonly<{
-    requireEmpty: readonly Readonly<{
-        entity: "node" | "edge";
-        kindName: string;
-    }>[];
-    readdedKindCandidates: readonly Readonly<{
-        entity: "node" | "edge";
-        kindName: string;
-    }>[];
-    vectorSlots: readonly Readonly<{
-        kindName: string;
-        fieldName: string;
-    }>[];
-    identityAffectedKinds: readonly string[];
-}>;
+export type EvolutionRequirements = readonly EvolutionRequirement[];
 
 // @public
 type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
@@ -2197,6 +2203,12 @@ export type SchemaDiff = Readonly<{
 
 // @public
 export type SchemaHash = string;
+
+// @public
+export type SchemaIdentity = Readonly<{
+    version: number;
+    hash: SchemaHash;
+}>;
 
 // @public (undocumented)
 type SchemaKindEmptinessProbe = Readonly<{

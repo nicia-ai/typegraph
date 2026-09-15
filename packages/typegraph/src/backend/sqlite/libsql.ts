@@ -44,7 +44,7 @@ import {
   type SqliteTables,
   tables as defaultTables,
 } from "../drizzle/sqlite";
-import type { AdapterBackend } from "../types";
+import type { AdapterBackend, SchemaProvisioning } from "../types";
 
 export type {
   ContributionDiagnostic,
@@ -94,7 +94,7 @@ async function detectOrderedAggregates(client: Client): Promise<boolean> {
  * Options for creating a libsql backend.
  */
 export type LibsqlBackendOptions = Readonly<{
-  schemaProvisioning?: "dml-only" | "transactional";
+  schemaProvisioning?: SchemaProvisioning;
   /**
    * Custom table definitions.
    * Defaults to standard TypeGraph table names.

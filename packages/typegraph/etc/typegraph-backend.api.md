@@ -6,7 +6,7 @@
 
 // @public
 export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
-    schemaProvisioning: "dml-only" | "transactional";
+    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
     adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
@@ -18,7 +18,7 @@ export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
 export type AdapterBackendTransactions<TNativeTransaction> = Pick<AdapterBackend<TNativeTransaction>, "transactionWithNative" | "adoptTransaction">;
 
 // @public
-type AdoptedSchemaWriteTransaction = Readonly<{
+export type AdoptedSchemaWriteTransaction = Readonly<{
     backend: SchemaWriteTransactionBackend & Readonly<{
         commitSchemaVersion: GraphBackend["commitSchemaVersion"];
         ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
@@ -3629,6 +3629,9 @@ export type SchemaKindEmptinessProbe = Readonly<{
     rows: "nonDeleted" | "all";
 }>;
 
+// @public
+export type SchemaProvisioning = "dml-only" | "transactional";
+
 // @public (undocumented)
 export type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
 
@@ -4161,8 +4164,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly identityTableDdl: {
         readonly kind: "reasoned";
-        readonly reason: "Same identity-DDL family as ensureIdentityTables.";
-        readonly accesses: 2;
+        readonly reason: "Same identity-DDL family as ensureIdentityTables. Adopted evolution adds one Store handoff of the DDL factory and one same-session catalog inspection before the fenced schema commit; both refuse absent DDL rather than skipping required storage.";
+        readonly accesses: 4;
     };
     readonly recordedTableDdl: {
         readonly kind: "reasoned";
@@ -4357,7 +4360,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorSlotContributions";
-        readonly ceiling: 1;
+        readonly ceiling: 3;
     };
     readonly executeDdl: {
         readonly kind: "deferred";

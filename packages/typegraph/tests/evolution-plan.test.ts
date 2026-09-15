@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph } from "../src/core/define-graph";
@@ -6,6 +6,7 @@ import { defineEdge } from "../src/core/edge";
 import { defineNode } from "../src/core/node";
 import { defineGraphExtension } from "../src/graph-extension/define-graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
+import type { EvolutionPlan } from "../src/schema/evolution-plan";
 import {
   getEvolutionPlanPayload,
   prepareEvolutionPlan,
@@ -44,20 +45,45 @@ describe("evolution planning", () => {
     });
     expect(plan.status).toBe("change");
     if (plan.status !== "change") return;
-    expect(plan.requirements.requireEmpty).toEqual([]);
-    expect(plan.requirements.vectorSlots).toEqual([]);
-    expect(plan.requirements.identityAffectedKinds).toEqual([]);
-    expect(plan.requirements.readdedKindCandidates).toEqual([
-      { entity: "node", kindName: "Tag" },
-    ]);
+    expect(
+      plan.requirements.filter(
+        (requirement) => requirement.kind === "require-empty",
+      ),
+    ).toEqual([]);
+    expect(
+      plan.requirements.filter(
+        (requirement) => requirement.kind === "vector-slot",
+      ),
+    ).toEqual([]);
+    expect(
+      plan.requirements.filter(
+        (requirement) => requirement.kind === "identity",
+      ),
+    ).toEqual([]);
+    expect(
+      plan.requirements.filter(
+        (requirement) => requirement.kind === "pending-removal",
+      ),
+    ).toEqual([{ kind: "pending-removal", entity: "node", kindName: "Tag" }]);
     expect(Object.isFrozen(plan)).toBe(true);
     expect(Object.isFrozen(plan.requirements)).toBe(true);
     const payload = getEvolutionPlanPayload(plan);
     expect(payload?.schemaDocument?.version).toBe(2);
     expect(
       await computeSchemaHash(requireDefined(payload?.schemaDocument)),
-    ).toBe(plan.resultingHash);
+    ).toBe(plan.result.hash);
     expect(getEvolutionPlanPayload({ ...plan })).toBeUndefined();
+    const reconstructed = {
+      status: "change" as const,
+      graphId: plan.graphId,
+      baseline: plan.baseline,
+      result: plan.result,
+      requirements: plan.requirements,
+    };
+    expectTypeOf(reconstructed).not.toExtend<EvolutionPlan>();
+    // @ts-expect-error Reconstructed values cannot carry the private plan brand.
+    const invalidPlan: EvolutionPlan = reconstructed;
+    expect(getEvolutionPlanPayload(invalidPlan)).toBeUndefined();
   });
 
   it("names required-empty probes and introduced vector slots", async () => {
@@ -93,12 +119,16 @@ describe("evolution planning", () => {
     });
     expect(plan.status).toBe("change");
     if (plan.status !== "change") return;
-    expect(plan.requirements.requireEmpty).toEqual([
-      { entity: "node", kindName: "Tag" },
-    ]);
-    expect(plan.requirements.vectorSlots).toEqual([
-      { kindName: "Tag", fieldName: "vector" },
-    ]);
+    expect(
+      plan.requirements.filter(
+        (requirement) => requirement.kind === "require-empty",
+      ),
+    ).toEqual([{ kind: "require-empty", entity: "node", kindName: "Tag" }]);
+    expect(
+      plan.requirements.filter(
+        (requirement) => requirement.kind === "vector-slot",
+      ),
+    ).toEqual([{ kind: "vector-slot", nodeKind: "Tag", fieldPath: "vector" }]);
     expect(getEvolutionPlanPayload(plan)?.vectorSlots).toMatchObject([
       { nodeKind: "Tag", fieldPath: "vector", dimensions: 3 },
     ]);
@@ -126,7 +156,11 @@ describe("evolution planning", () => {
     });
     expect(plan.status).toBe("change");
     if (plan.status !== "change") throw new Error("Expected a change plan.");
-    expect(plan.requirements.identityAffectedKinds).toEqual([]);
+    expect(
+      plan.requirements.filter(
+        (requirement) => requirement.kind === "identity",
+      ),
+    ).toEqual([]);
   });
 
   it("returns a branded no-op bound to the baseline snapshot", async () => {
@@ -145,9 +179,8 @@ describe("evolution planning", () => {
     });
     expect(plan).toMatchObject({
       status: "noop",
-      baselineVersion: 2,
-      baselineHash,
-      resultingHash: baselineHash,
+      baseline: { version: 2, hash: baselineHash },
+      result: { version: 2, hash: baselineHash },
     });
     expect(getEvolutionPlanPayload(plan)?.mergedGraph).toBe(baselineGraph);
   });
@@ -169,7 +202,7 @@ describe("evolution planning", () => {
       extension,
     });
     const payload = getEvolutionPlanPayload(plan);
-    const originalHash = plan.resultingHash;
+    const originalHash = plan.result.hash;
     const properties = extension.nodes.Tag.properties as Record<
       string,
       unknown

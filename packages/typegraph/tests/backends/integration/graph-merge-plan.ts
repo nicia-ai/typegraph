@@ -18,6 +18,7 @@ import {
 } from "../../../src/graph-merge";
 import { branch } from "../../../src/graph-merge/branch";
 import {
+  BranchError,
   MergePlanCapabilityError,
   MergePlanSchemaMismatchError,
   StaleMergePlanError,
@@ -302,6 +303,28 @@ export function registerGraphMergePlanIntegrationTests(
       ).toBeUndefined();
     });
 
+    it("preserves branch failures when forking a resulting-schema branch", async () => {
+      const store = await context.createStore(graph, {
+        revisionTracking: true,
+      });
+      const plan = await store.planEvolution(
+        defineGraphExtension({
+          nodes: {
+            Tag: { properties: { label: { type: "string", optional: true } } },
+          },
+        }),
+      );
+      const failure = new Error("working-copy backend unavailable");
+
+      const result = await branchForEvolution(store, plan, () =>
+        Promise.reject(failure),
+      );
+
+      if (!isErr(result)) throw new Error("Expected a branch failure.");
+      expect(result.error).toBeInstanceOf(BranchError);
+      expect(result.error.cause).toBe(failure);
+    });
+
     it("merges a newly added kind from a resulting-schema branch", async () => {
       const backend = context.getBackend();
       const [target] = await createAdapterStoreWithSchema(graph, backend, {
@@ -355,7 +378,7 @@ export function registerGraphMergePlanIntegrationTests(
             (tx) => applyMergePlanInTransaction(target, tx, mergePlan),
           ),
       );
-      const refreshed = await target.refreshSchema({ expectedVersion: 2 });
+      const refreshed = await target.refreshSchema({ minVersion: 2 });
       expect(
         await refreshed.getNodeCollectionOrThrow("Tag").find(),
       ).toHaveLength(1);
