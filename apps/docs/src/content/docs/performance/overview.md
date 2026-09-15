@@ -698,7 +698,7 @@ database endpoint was in Oregon; a simple pooled `SELECT 1` round trip measured
 size on the deployment route that matters to your application.
 See the [SQLite report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-sqlite-2026-09-14.md)
 and [PostgreSQL report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-postgres-2026-09-14.md)
-for local timings and methodology, and the [remote Neon report](https://github.com/nicia-ai/typegraph/blob/main/packages/benchmarks/reports/subgraph-batch-neon-oregon-2026-09-15.md)
+for local timings and methodology, and the [remote Neon report](https://github.com/nicia-ai/typegraph/blob/cffd0082906bffd5f5e993dfeede1e01e6e6f300/packages/benchmarks/reports/subgraph-batch-neon-oregon-2026-09-15.md)
 for 40 raw samples per shape and mode, placement, and reproduction commands. The
 older PostgreSQL report also includes a separately labeled delay simulation; the
 Neon measurements used actual network calls without injected delay.
