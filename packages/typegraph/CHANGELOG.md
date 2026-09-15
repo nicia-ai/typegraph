@@ -2,6 +2,38 @@
 
 ## 0.61.0
 
+### Highlights
+
+TypeGraph 0.61 expands the query DSL from graph matching into composable SQL result shaping. Schema-aware expressions power `project()`, completed-match filters, grouping, aggregates, and correlated subqueries; projected relations can be combined, filtered, deduplicated, prepared, and batched without returning intermediate rows to application code. `expr.collect(value, { orderBy, filter })` builds ordered scalar lists in SQL, including empty per-parent lists when optional matches are filtered inside the aggregate. `count()`, `exists()`, and selected-query `first()` make common terminal reads direct.
+
+Fetching several subgraphs is now a straightforward latency optimization: `store.batchOnce(read => roots.map(root => read.subgraph(root.id, options)))` retrieves independent bounded subgraphs in one statement. Runtime-sized arrays, singleton batches, and empty batches are supported; empty batches submit no SQL. For overlapping roots with substantial shared payloads, opt-in `shareSubgraphs: true` can also share traversal and hydration work while preserving independent results. Benchmark that option against ordinary batching for your workload; disjoint or lightly overlapping roots may not benefit.
+
+Queries can start from an explicit list of node kinds, such as `from(["Person", "Company"], "entity")`, and return one ordered stream with compatible shared fields and kind-discriminated results. Pagination now preserves nullable sort partitions and nodes whose IDs overlap across kinds. Native null ordering and directed node index keys let applications align indexes with their actual sort and identity columns. Recursive queries can compose multiple traversal stages, stop expansion explicitly, and return paths containing kind-qualified nodes and directed edge references.
+
+Approved merge plans can join graph writes and application SQL in one caller-owned transaction through `applyMergePlanInTransaction()`. Workflows using TypeGraph-owned recorded history can also request a checkpoint with `requestRecordedRevision()` when no entity changes are needed; the completed capture receipt supplies the recorded anchor. These additions let applications commit their own receipts alongside TypeGraph work while retaining control of the outer commit and retry boundary.
+
+### Upgrade notes
+
+**Queries and pagination**
+
+- Handle `undefined` for empty-input `sum`, `avg`, `min`, and `max` results. Equality and membership predicates require compatible operands, and `countDistinct` accepts scalar string, number, Boolean, or date values; project an explicit scalar key when replacing structured JSON or array distinct counts.
+- Move cross-alias conditions out of staged `whereNode()` / `whereEdge()` predicates into completed-match `where()`, accounting for optional-row filtering. Use only compatible shared properties for polymorphic predicates, grouping, and ordering; query a specific kind when a field is not shared. Low-level composed `resultPredicate` ASTs must use database-expression predicates, optionally combined with AND/OR/NOT.
+- Add an explicit query `limit()` when a ranked query must cap completed rows. Candidate `k` now bounds ranked candidates only; traversal fan-out can produce more than `k` result rows, including inside set operations.
+- Restart saved multi-kind cursors that lack the new `kind` identity column, including cursors from subclass-expanded sources. For traversal fan-out, include traversed-row identities in the ordering when one source node produces multiple rows. Remove query-level `limit()` / `offset()` before cursor pagination and pass only one pagination direction; conflicting options are now refused.
+- Keep one source per query, use unique aliases across nodes, edges, and recursive outputs, and pass non-negative safe integers for limits and offsets. Use integer subgraph depths from 0 through 1000 and supported traversal directions and cycle policies; invalid inputs are refused rather than ignored.
+- Build batched reads and set-operation operands from the executing Store or transaction context. Split requests explicitly when a batch exceeds its planning or bind budget. Custom operands exposing only `toAst()` must also supply execution provenance; prefer library-created queries. Keep legacy `select()` callbacks pure because they may be probed; use `project()` for database expressions and `map()` for transformations of decoded projected rows.
+
+**Transaction composition**
+
+- Call `applyMergePlanInTransaction(target, tx, plan)` inside an active callback from the same Store, before other writes to the target graph. Propagate its thrown merge error so the caller rolls back, and retry the entire native transaction if needed; the helper opens no nested transaction and performs no local retry. Use a plan with `persistProvenance: false`: persisted merge provenance cannot join this atomic unit, while report-only provenance remains available.
+- Request recorded checkpoints inside a writable callback with TypeGraph-owned history and obtain the anchor from its completed capture receipt; engine-native history and read-only transactions refuse explicit allocation. For atomic application receipt persistence, use `withRecordedTransaction()` and write the receipt through the same still-open native transaction before its outer commit. Do not infer a recorded revision number before capture flush.
+
+**Custom backends and dialects**
+
+- Implement the new `DialectAdapter` members `safeNumericConversion`, `unboundedLimit`, `textJsonArray`, `appendTextJsonArray`, and `orderedScalarJsonArray`. The last accepts one required `{ value, valueType, orderBy, filter }` argument: admit only SQL TRUE filter results, preserve included NULL elements, and return `[]` for empty input. Handle the dedicated `kind: "collect"` node in expression visitors; collection-only options are not ordinary aggregate-node fields.
+- Enable `capabilities.orderedAggregates` only after verifying ordered and filtered aggregate support on the active engine. Bundled PostgreSQL declares support; supported SQLite factories probe it. An unprobed custom or remote SQLite connection must explicitly declare verified support before using `expr.collect()`. Existing non-collection reads do not require this capability.
+- Supply engine serialization or session-bound READ COMMITTED isolation evidence through the write fence for composed merge application. Managed merge callbacks and adopted application now refuse missing or unsuitable evidence; a caller-serialization assertion alone is insufficient. Update custom backends and transaction test doubles that participate in these paths.
+
 ### Minor Changes
 
 - [#702](https://github.com/nicia-ai/typegraph/pull/702) [`81fa27b`](https://github.com/nicia-ai/typegraph/commit/81fa27b26e182b4be276255452bc4b27f3f366b7) Thanks [@pdlug](https://github.com/pdlug)! - Add `applyMergePlanInTransaction()` so applications can apply an approved merge plan, record graph receipts, and write application SQL under one caller-owned transaction and recorded-time receipt.
