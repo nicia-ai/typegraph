@@ -298,6 +298,18 @@ approval records in the target before calling
 V1 supports candidate write sets only. It does not rebase arbitrary artifacts
 from `planMerge()` or `planMergeIncremental()`.
 
+Planning and revalidation clone the target into a transient working copy. When
+that copy and the target really share one serialized connection, clone export
+is materialized before import, but its snapshot still holds the connection's
+exclusive stream lease while it is collected. Concurrent review calls on that
+resource can therefore return a merge error caused by a `ConfigurationError`
+with `details.code: INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` or
+`INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`. Await the whole review call before
+starting another on the same serialized resource. A `pg.Pool` with more than one
+connection is not one serialized resource; do not declare its pool object as
+`{ mode: "shared" }` just because the working copies use that pool. See
+[Serialized connections](/backend-setup#serialized-connections).
+
 The following continues the [candidate write set example](#constraint-aware-ingestion-branches).
 `Artifact`, `Decision`, and `evidence` are application-defined node/edge kinds;
 `proposal` is an existing node. The target enables `history` or `revisionTracking`.
