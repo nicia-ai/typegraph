@@ -678,13 +678,16 @@ export type TransactionReceipt = Readonly<{
   }>;
   /**
    * The recorded commit instant allocated for this store's graph by this
-   * transaction. Undefined when history capture is off, the transaction is
-   * read-only, or no captured writes were flushed. **Always undefined on a
+   * transaction. Under TypeGraph-owned capture, an explicit
+   * {@link RecordedRevisionRequest} allocates this instant without entity
+   * writes. Otherwise it is undefined when history capture is off, the
+   * transaction is read-only, or no captured writes were flushed. **Always undefined on a
    * scoped receipt from {@link ScopedMeasure}** (`tx.measure`) — the recorded
    * instant is a per-transaction flush concern allocated once when the whole
    * transaction's capture flushes, unknowable mid-transaction.
    *
-   * Under an engine-native store (one whose backend tracks recorded time
+   * Engine-native history does not support explicit revision requests. Under
+   * an engine-native store (one whose backend tracks recorded time
    * itself; see {@link GraphBackend.recordedTime}), "no captured writes were
    * flushed" instead means no node, edge, or identity write inside the
    * transaction actually changed a row: a delete of a missing id, an
@@ -2291,6 +2294,20 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
   }>;
 
 /**
+ * Requests a recorded revision even when a history transaction makes no entity
+ * changes. Repeated requests are idempotent. Receipt-enabled transactions
+ * expose the allocated instant on their terminal {@link TransactionReceipt},
+ * after capture flushes.
+ */
+export type RecordedRevisionRequest = Readonly<{
+  requestRecordedRevision: () => void;
+}>;
+
+/** A portable transaction context bound to a history-enabled Store. */
+export type HistoryTransactionContext<G extends GraphDef> =
+  TransactionContext<G> & RecordedRevisionRequest;
+
+/**
  * A transaction context exposed by an {@link AdapterStore}. In addition to the
  * portable graph collections, it carries the adapter-native handle when that
  * capability is available. The TypeGraph backend remains the same runtime
@@ -2340,6 +2357,13 @@ export type MeasurableTransactionContext<G extends GraphDef> =
   TransactionContext<G> &
     Readonly<{
       measure: ScopedMeasure<MeasurableTransactionContext<G>>;
+    }>;
+
+/** Receipt-enabled transaction context for a history-enabled Store. */
+export type MeasurableHistoryTransactionContext<G extends GraphDef> =
+  HistoryTransactionContext<G> &
+    Readonly<{
+      measure: ScopedMeasure<MeasurableHistoryTransactionContext<G>>;
     }>;
 
 /** Receipt-enabled transaction context for an {@link AdapterStore}. */

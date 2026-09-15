@@ -110,6 +110,53 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
     sqlite.close();
   });
 
+  it("returns a requested revision before application SQL in the native transaction", async () => {
+    const store = createHistoryStore(db);
+    sqlite.exec("CREATE TABLE app_checkpoints (recorded TEXT NOT NULL)");
+
+    sqlite.exec("BEGIN");
+    const { receipt } = await store.withRecordedTransaction(db, (tx) => {
+      tx.requestRecordedRevision();
+      return Promise.resolve();
+    });
+    const recorded = requireRecordedInstant(
+      receipt.recorded,
+      "expected requested revision",
+    );
+    sqlite
+      .prepare("INSERT INTO app_checkpoints (recorded) VALUES (?)")
+      .run(recorded);
+    sqlite.exec("COMMIT");
+
+    expect(
+      sqlite.prepare("SELECT recorded FROM app_checkpoints").get(),
+    ).toEqual({ recorded });
+  });
+
+  it("rolls back an allocated revision and later application SQL with the native transaction", async () => {
+    const store = createHistoryStore(db);
+    sqlite.exec("CREATE TABLE app_checkpoints (recorded TEXT NOT NULL)");
+
+    sqlite.exec("BEGIN");
+    const { receipt } = await store.withRecordedTransaction(db, (tx) => {
+      tx.requestRecordedRevision();
+      return Promise.resolve();
+    });
+    const recorded = requireRecordedInstant(
+      receipt.recorded,
+      "expected requested revision",
+    );
+    sqlite
+      .prepare("INSERT INTO app_checkpoints (recorded) VALUES (?)")
+      .run(recorded);
+    sqlite.exec("ROLLBACK");
+
+    expect(await store.recordedNow()).toBeUndefined();
+    expect(
+      sqlite.prepare("SELECT recorded FROM app_checkpoints").all(),
+    ).toEqual([]);
+  });
+
   it("captures recorded history through an adopted transaction", async () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { isSync: true },
@@ -402,6 +449,21 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
 
     // The live write never happened — neither the row nor a recorded instant.
     expect(await store.nodes.Person.find()).toEqual([]);
+    expect(await store.recordedNow()).toBeUndefined();
+  });
+
+  it("refuses a recorded revision request through a retained sealed context", async () => {
+    const store = createHistoryStore(db);
+
+    sqlite.exec("BEGIN");
+    const { result: escaped } = await store.withRecordedTransaction(db, (tx) =>
+      Promise.resolve(tx),
+    );
+    expect(() => {
+      escaped.requestRecordedRevision();
+    }).toThrow(/sealed/i);
+    sqlite.exec("COMMIT");
+
     expect(await store.recordedNow()).toBeUndefined();
   });
 

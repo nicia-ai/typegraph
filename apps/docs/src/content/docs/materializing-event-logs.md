@@ -317,7 +317,8 @@ The receipt carries **two signals that deliberately disagree**, and a
 materializer needs both. `receipt.writes.total` counts completed write intents at
 the collection surface; `receipt.recorded` (on a `{ history: true }` store) is
 the recorded commit instant this transaction allocated, or `undefined` when
-nothing was captured. The common, load-bearing case is where they diverge:
+nothing was captured or explicitly requested. The common, load-bearing case is
+where they diverge:
 
 | case                                          | `writes.total` | `recorded`      |
 | --------------------------------------------- | -------------- | --------------- |
@@ -325,6 +326,7 @@ nothing was captured. The common, load-bearing case is where they diverge:
 | no-op delete of an absent key (a real intent) | `1`            | **`undefined`** |
 | coalesced upsert (value-identical, opt-in)    | `1`            | **`undefined`** |
 | projector dropped the change                  | `0`            | `undefined`     |
+| explicit recorded revision request            | `0`            | defined         |
 
 A no-op delete completes a write *intent* but captures nothing; a
 [coalesced upsert](/schemas-stores/#createstoregraph-backend-options) is the same
@@ -332,6 +334,8 @@ shape by design. In both, `writes.total` counts (the method resolved) but
 `recorded` is `undefined`. **An offset whose transaction reports
 `recorded === undefined` must carry the prior anchor forward** — otherwise
 replay-by-offset breaks at exactly the offsets where nothing changed.
+Call `requestRecordedRevision()` when that offset must instead receive its own
+anchor despite making no entity change.
 
 Two counting rules bite materializers specifically, both worth internalizing
 before you read `writes.total` as "the projector did work":
@@ -363,6 +367,25 @@ anchor after the commit — as a separate step — would reopen the exactly-once
 the adopted transaction exists to close: a crash between the commit and the
 anchor write leaves the cursor advanced with no anchor, and that offset can never
 be replayed.
+
+If an accepted source position must be addressable even when the projector makes
+no entity changes, request an explicit revision in the callback. Await the
+`withRecordedTransaction` outcome, then insert the application-owned cursor and
+returned anchor through the still-open native transaction before its commit:
+
+```typescript
+await db.transaction(async (dbTx) => {
+  const { receipt } = await store.withRecordedTransaction(dbTx, async (tx) => {
+    tx.requestRecordedRevision();
+    await projectBatch(tx, batch);
+  });
+  await dbTx.insert(cursors).values({
+    source: batch.source,
+    offset: batch.offset,
+    recorded: receipt.recorded,
+  });
+});
+```
 
 ```typescript
 let lastAnchor: RecordedInstant | undefined = await loadLastAnchor(); // on resume
