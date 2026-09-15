@@ -986,6 +986,8 @@ export {
   type RelationColumnContext,
   type RelationProjection,
   type RelationProjectionResult,
+  type TopPerPartitionOptions,
+  type TopPerPartitionOrder,
 } from "./query/builder/relation";
 export {
   type CollectedRecord,

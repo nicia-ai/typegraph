@@ -67,7 +67,17 @@ type SetRelation = Readonly<{
   columns: readonly RelationColumn[];
 }>;
 
-export type RelationAst = DerivedRelation | RelationSource | SetRelation;
+export type TopPerPartitionRelation = Readonly<{
+  kind: "topPerPartition";
+  source: RelationAst;
+  columns: readonly RelationColumn[];
+  partitionBy: readonly DatabaseExpression[];
+  orderBy: readonly RelationOrder[];
+  limit: number;
+}>;
+
+export type RelationAst =
+  DerivedRelation | RelationSource | SetRelation | TopPerPartitionRelation;
 
 function relationSources(relation: RelationAst): readonly RelationSource[] {
   switch (relation.kind) {
@@ -75,6 +85,9 @@ function relationSources(relation: RelationAst): readonly RelationSource[] {
       return [relation];
     }
     case "derived": {
+      return relationSources(relation.source);
+    }
+    case "topPerPartition": {
       return relationSources(relation.source);
     }
     case "set": {
@@ -180,6 +193,37 @@ function compileDerived(
   );
 }
 
+function compileTopPerPartition(
+  relation: TopPerPartitionRelation,
+  dialect: DatabaseExpressionCompilerContext["dialect"],
+  orderedAggregates: boolean,
+): CompiledSelectSql {
+  const source = compileRelation(relation.source, dialect);
+  const partition = sql.join(
+    relation.partitionBy.map((expression) =>
+      compileExpression(expression, dialect, false, orderedAggregates),
+    ),
+    sql`, `,
+  );
+  const ordering = compileOrder(relation.orderBy, dialect, orderedAggregates);
+  const occupiedNames = new Set(
+    // SQLite resolves even quoted identifiers without case sensitivity.
+    relation.columns.map((column) => column.outputName.toLowerCase()),
+  );
+  let rankName = "__tg_partition_rank";
+  while (occupiedNames.has(rankName)) rankName += "_";
+  const selectedColumns = sql.join(
+    relation.columns.map(
+      (column) =>
+        sql`${sql.identifier(SOURCE_ALIAS)}.${sql.identifier(column.outputName)}`,
+    ),
+    sql`, `,
+  );
+  return asCompiledSelectSql(
+    sql`SELECT ${selectedColumns} FROM (SELECT ${sql.identifier(SOURCE_ALIAS)}.*, ROW_NUMBER() OVER (PARTITION BY ${partition}${ordering}) AS ${sql.identifier(rankName)} FROM (${source}) AS ${sql.identifier(SOURCE_ALIAS)}) AS ${sql.identifier(SOURCE_ALIAS)} WHERE ${sql.identifier(SOURCE_ALIAS)}.${sql.identifier(rankName)} <= ${relation.limit}`,
+  );
+}
+
 /** Compiles a structural relation tree without selecting a dialect strategy path. */
 function compileRelationInner(
   relation: RelationAst,
@@ -192,6 +236,9 @@ function compileRelationInner(
     }
     case "derived": {
       return compileDerived(relation, dialect, orderedAggregates);
+    }
+    case "topPerPartition": {
+      return compileTopPerPartition(relation, dialect, orderedAggregates);
     }
     case "set": {
       const left = compileRelation(relation.left, dialect);

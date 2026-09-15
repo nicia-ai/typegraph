@@ -645,5 +645,400 @@ export function registerRelationalCompositionIntegrationTests(
         ),
       ).toThrow();
     });
+
+    it("selects exactly two rows per interleaved partition with deterministic ties", async () => {
+      const store = context.getStore();
+      for (const product of [
+        { name: "a-low", category: "A", price: 10 },
+        { name: "b-high", category: "B", price: 90 },
+        { name: "a-tie-1", category: "A", price: 80 },
+        { name: "b-low", category: "B", price: 20 },
+        { name: "a-tie-2", category: "A", price: 80 },
+        { name: "a-tie-3", category: "A", price: 80 },
+        { name: "b-mid", category: "B", price: 50 },
+        { name: "a-mid", category: "A", price: 40 },
+      ])
+        await store.nodes.Product.create(product);
+      const products = store
+        .query()
+        .from("Product", "product")
+        .project((fields) => ({
+          category: fields.product.category,
+          name: fields.product.name,
+          price: fields.product.price,
+        }))
+        .asRelation();
+      expect(
+        await products
+          .topPerPartition({
+            partitionBy: (columns) => [columns.category],
+            orderBy: (columns) => [
+              { expression: columns.price, direction: "desc" },
+              { expression: columns.name },
+            ],
+            limit: 2,
+          })
+          .orderBy((columns) => columns.category)
+          .orderBy((columns) => columns.name)
+          .execute(),
+      ).toEqual([
+        { category: "A", name: "a-tie-1", price: 80 },
+        { category: "A", name: "a-tie-2", price: 80 },
+        { category: "B", name: "b-high", price: 90 },
+        { category: "B", name: "b-mid", price: 50 },
+      ]);
+      expect(
+        await products
+          .topPerPartition({
+            partitionBy: (columns) => [columns.category],
+            orderBy: (columns) => [
+              { expression: columns.price, direction: "desc" },
+              { expression: columns.name },
+            ],
+            limit: 2,
+          })
+          .orderBy((columns) => columns.category)
+          .orderBy((columns) => columns.name)
+          .offset(1)
+          .limit(1)
+          .execute(),
+      ).toEqual([{ category: "A", name: "a-tie-2", price: 80 }]);
+    });
+
+    it("deduplicates before ranking and treats absent partition keys as one partition", async () => {
+      const store = context.getStore();
+      for (const person of [
+        { name: "Ada", age: undefined },
+        { name: "Ada", age: undefined },
+        { name: "Bea", age: undefined },
+        { name: "Cara", age: 20 },
+        { name: "Dana", age: 20 },
+      ])
+        await store.nodes.Person.create(person);
+      const people = store
+        .query()
+        .from("Person", "person")
+        .project((fields) => ({
+          name: fields.person.name,
+          age: fields.person.age,
+        }))
+        .asRelation();
+      expect(
+        await people
+          .distinct()
+          .topPerPartition({
+            partitionBy: (columns) => [columns.age],
+            orderBy: (columns) => [{ expression: columns.name }],
+            limit: 2,
+          })
+          .orderBy((columns) => columns.name)
+          .execute(),
+      ).toEqual([
+        { name: "Ada", age: undefined },
+        { name: "Bea", age: undefined },
+        { name: "Cara", age: 20 },
+        { name: "Dana", age: 20 },
+      ]);
+    });
+
+    it("ranks the filtered and ranged source, then filters winners without replacement", async () => {
+      const store = context.getStore();
+      for (const product of [
+        { name: "a-100", category: "A", price: 100 },
+        { name: "a-90", category: "A", price: 90 },
+        { name: "a-80", category: "A", price: 80 },
+        { name: "b-100", category: "B", price: 100 },
+        { name: "b-90", category: "B", price: 90 },
+        { name: "b-80", category: "B", price: 80 },
+      ])
+        await store.nodes.Product.create(product);
+      const products = store
+        .query()
+        .from("Product", "product")
+        .project((fields) => ({
+          category: fields.product.category,
+          name: fields.product.name,
+          price: fields.product.price,
+        }))
+        .asRelation();
+      const top = products
+        .where((columns) => expr.lt(columns.price, expr.literal(100)))
+        .topPerPartition({
+          partitionBy: (columns) => [columns.category],
+          orderBy: (columns) => [
+            { expression: columns.price, direction: "desc" },
+          ],
+          limit: 1,
+        });
+      expect(
+        await top.orderBy((columns) => columns.category).execute(),
+      ).toEqual([
+        { category: "A", name: "a-90", price: 90 },
+        { category: "B", name: "b-90", price: 90 },
+      ]);
+      expect(
+        await top
+          .where((columns) => expr.lt(columns.price, expr.literal(90)))
+          .execute(),
+      ).toEqual([]);
+      expect(
+        await products
+          .orderBy((columns) => columns.name)
+          .offset(2)
+          .limit(2)
+          .topPerPartition({
+            partitionBy: (columns) => [columns.category],
+            orderBy: (columns) => [{ expression: columns.price }],
+            limit: 2,
+          })
+          .orderBy((columns) => columns.name)
+          .execute(),
+      ).toEqual([
+        { category: "A", name: "a-90", price: 90 },
+        { category: "B", name: "b-100", price: 100 },
+      ]);
+    });
+
+    it("preserves decoded values after ranking nullable dates", async () => {
+      const store = context.getStore();
+      const publishedAt = new Date("2025-02-01T00:00:00.000Z");
+      await store.nodes.Document.create({ title: "Guide" });
+      await store.nodes.Document.create({
+        title: "Guide",
+        publishedAt,
+        metadata: { flags: { published: true } },
+      });
+      const documents = store
+        .query()
+        .from("Document", "document")
+        .project((fields) => ({
+          title: fields.document.title,
+          date: fields.document.publishedAt,
+          metadata: fields.document.metadata,
+          label: fields.document.title,
+        }))
+        .asRelation();
+      expect(
+        await documents
+          .topPerPartition({
+            partitionBy: (columns) => [columns.title],
+            orderBy: (columns) => [
+              { expression: columns.date, direction: "desc", nulls: "last" },
+            ],
+            limit: 1,
+          })
+          .execute(),
+      ).toEqual([
+        {
+          title: "Guide",
+          date: publishedAt,
+          metadata: { flags: { published: true } },
+          label: "Guide",
+        },
+      ]);
+    });
+
+    it("keeps visible rank-like relation columns while choosing a hidden rank name", async () => {
+      const store = context.getStore();
+      for (const product of [
+        { name: "a-low", category: "A", price: 10 },
+        { name: "a-high", category: "A", price: 20 },
+        { name: "b-high", category: "B", price: 30 },
+      ])
+        await store.nodes.Product.create(product);
+      const ranked = store
+        .query()
+        .from("Product", "product")
+        .project((fields) => ({
+          category: fields.product.category,
+          name: fields.product.name,
+          price: fields.product.price,
+        }))
+        .asRelation()
+        .project((columns) => ({
+          category: columns.category,
+          __tg_partition_rank: columns.price,
+          __tg_partition_rank_: columns.name,
+          __TG_PARTITION_RANK__: columns.price,
+        }))
+        .topPerPartition({
+          partitionBy: (columns) => [columns.category],
+          orderBy: (columns) => [
+            { expression: columns.__tg_partition_rank, direction: "desc" },
+          ],
+          limit: 1,
+        })
+        .orderBy((columns) => columns.category);
+      expect(await ranked.execute()).toEqual([
+        {
+          category: "A",
+          __tg_partition_rank: 20,
+          __tg_partition_rank_: "a-high",
+          __TG_PARTITION_RANK__: 20,
+        },
+        {
+          category: "B",
+          __tg_partition_rank: 30,
+          __tg_partition_rank_: "b-high",
+          __TG_PARTITION_RANK__: 30,
+        },
+      ]);
+    });
+
+    it("composes ranking with preparation, batching, set operands and later stages", async () => {
+      const store = context.getStore();
+      for (const product of [
+        { name: "a-10", category: "A", price: 10 },
+        { name: "a-20", category: "A", price: 20 },
+        { name: "b-10", category: "B", price: 10 },
+        { name: "b-20", category: "B", price: 20 },
+      ])
+        await store.nodes.Product.create(product);
+      const minimum = expr.param("minimum", "number");
+      const rows = store
+        .query()
+        .from("Product", "product")
+        .project((fields) => ({
+          category: fields.product.category,
+          name: fields.product.name,
+          price: fields.product.price,
+        }))
+        .asRelation()
+        .where((columns) => expr.gt(columns.price, minimum))
+        .topPerPartition({
+          partitionBy: (columns) => [columns.category],
+          orderBy: (columns) => [
+            { expression: columns.price, direction: "desc" },
+          ],
+          limit: 1,
+        })
+        .orderBy((columns) => columns.category);
+      const prepared = rows.prepare({ minimum });
+      expect(await prepared.execute({ minimum: 0 })).toEqual([
+        { category: "A", name: "a-20", price: 20 },
+        { category: "B", name: "b-20", price: 20 },
+      ]);
+      const bound = prepared.bind({ minimum: 0 });
+      expect(await store.batchOnce(() => [bound, bound] as const)).toEqual([
+        [
+          { category: "A", name: "a-20", price: 20 },
+          { category: "B", name: "b-20", price: 20 },
+        ],
+        [
+          { category: "A", name: "a-20", price: 20 },
+          { category: "B", name: "b-20", price: 20 },
+        ],
+      ]);
+      expect(
+        await rows
+          .unionAll(rows)
+          .orderBy((columns) => columns.category)
+          .prepare({ minimum })
+          .execute({ minimum: 0 }),
+      ).toEqual([
+        { category: "A", name: "a-20", price: 20 },
+        { category: "A", name: "a-20", price: 20 },
+        { category: "B", name: "b-20", price: 20 },
+        { category: "B", name: "b-20", price: 20 },
+      ]);
+    });
+
+    it("binds parameters used inside partition and ranking expressions", async () => {
+      const store = context.getStore();
+      for (const product of [
+        { name: "a-10", category: "A", price: 10 },
+        { name: "a-20", category: "A", price: 20 },
+        { name: "b-30", category: "B", price: 30 },
+      ])
+        await store.nodes.Product.create(product);
+      const fallback = expr.param("fallback", "string");
+      const offset = expr.param("offset", "number");
+      const rows = store
+        .query()
+        .from("Product", "product")
+        .project((fields) => ({
+          category: fields.product.category,
+          name: fields.product.name,
+          price: fields.product.price,
+        }))
+        .asRelation()
+        .topPerPartition({
+          partitionBy: (columns) => [expr.coalesce(columns.category, fallback)],
+          orderBy: (columns) => [
+            { expression: expr.add(columns.price, offset), direction: "desc" },
+          ],
+          limit: 1,
+        })
+        .orderBy((columns) => columns.category)
+        .prepare({ fallback, offset });
+      expect(await rows.execute({ fallback: "unused", offset: 5 })).toEqual([
+        { category: "A", name: "a-20", price: 20 },
+        { category: "B", name: "b-30", price: 30 },
+      ]);
+    });
+
+    it("rejects invalid ranking inputs and captured scopes", () => {
+      const store = context.getStore();
+      const rows = store
+        .query()
+        .from("Product", "product")
+        .project((fields) => ({
+          category: fields.product.category,
+          price: fields.product.price,
+        }))
+        .asRelation();
+      const valid = {
+        partitionBy: (
+          columns: Parameters<Parameters<typeof rows.where>[0]>[0],
+        ) => [columns.category] as const,
+        orderBy: (columns: Parameters<Parameters<typeof rows.where>[0]>[0]) =>
+          [{ expression: columns.price }] as const,
+        limit: 1,
+      };
+      for (const limit of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])
+        expect(() => rows.topPerPartition({ ...valid, limit })).toThrow(
+          ConfigurationError,
+        );
+      expect(() => {
+        // @ts-expect-error Empty partition keys are rejected statically and at runtime.
+        rows.topPerPartition({ ...valid, partitionBy: () => [] });
+      }).toThrow(ConfigurationError);
+      expect(() => {
+        // @ts-expect-error Empty order keys are rejected statically and at runtime.
+        rows.topPerPartition({ ...valid, orderBy: () => [] });
+      }).toThrow(ConfigurationError);
+      let captured: ReturnType<typeof valid.partitionBy>[0] | undefined;
+      rows.topPerPartition({
+        ...valid,
+        partitionBy: (columns) => {
+          captured = columns.category;
+          return [columns.category] as const;
+        },
+      });
+      const other = store
+        .query()
+        .from("Product", "product")
+        .project((fields) => ({
+          category: fields.product.category,
+          price: fields.product.price,
+        }))
+        .asRelation();
+      expect(() =>
+        other.topPerPartition({
+          ...valid,
+          partitionBy: () => [requireDefined(captured)],
+        }),
+      ).toThrow(ConfigurationError);
+      expect(() => {
+        // @ts-expect-error Unknown options are rejected at the public type boundary.
+        rows.topPerPartition({ ...valid, unsupported: true });
+      }).toThrow(ConfigurationError);
+      expect(() => rows.map((row) => row).topPerPartition(valid)).toThrow(
+        ConfigurationError,
+      );
+      expect(() =>
+        rows.groupBy((columns) => [columns.category]).topPerPartition(valid),
+      ).toThrow(ConfigurationError);
+    });
   });
 }

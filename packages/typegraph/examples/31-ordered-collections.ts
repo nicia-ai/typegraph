@@ -1,4 +1,4 @@
-/** Ordered and filtered scalar collections over optional child rows. */
+/** Ordered scalar and bounded record collections over optional child rows. */
 import assert from "node:assert/strict";
 
 import {
@@ -49,6 +49,7 @@ async function main(): Promise<void> {
       .optionalTraverse("hasTask", "assignment")
       .to("Task", "task")
       .project((fields) => ({
+        projectId: fields.project.id,
         projectName: fields.project.name,
         taskId: fields.task.id,
         title: fields.task.title,
@@ -96,7 +97,40 @@ async function main(): Promise<void> {
       },
       { project: "Research", tasks: [] },
     ]);
-    console.log(openTasks);
+    // Rank in SQL before collecting: no per-project query or client-side slicing.
+    const topTasks = await projectTasks
+      .topPerPartition({
+        partitionBy: (columns) => [columns.projectId],
+        orderBy: (columns) => [
+          { expression: columns.priority },
+          { expression: columns.taskId },
+        ],
+        limit: 2,
+      })
+      .groupBy((columns) => [columns.projectId, columns.projectName])
+      .aggregate((columns) => ({
+        project: columns.projectName,
+        tasks: expr.collect({
+          title: columns.title,
+          completed: columns.completed,
+        }, {
+          orderBy: [
+            { expression: columns.priority },
+            { expression: columns.taskId },
+          ],
+          filter: expr.isNotNull(columns.taskId),
+        }),
+      }))
+      .orderBy((columns) => columns.project)
+      .execute();
+    assert.deepEqual(topTasks, [
+      { project: "Launch", tasks: [
+        { title: "Fix blocker", completed: true },
+        { title: "Run rehearsal", completed: false },
+      ] },
+      { project: "Research", tasks: [] },
+    ]);
+    console.log({ openTasks, topTasks });
   } finally {
     await backend.close();
   }
