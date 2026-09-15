@@ -16,7 +16,9 @@ import {
   notWhere,
   orWhere,
   type SystemColumnName,
+  toDeclaredIndex,
 } from "../src/indexes";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({
@@ -219,6 +221,159 @@ describe("indexes", () => {
     // keySystemColumns must not carry the key at all.
     const plainEmailIndex = defineNodeIndex(Person, { fields: ["email"] });
     expect(Object.hasOwn(plainEmailIndex, "keySystemColumns")).toBe(false);
+  });
+
+  it("interleaves directed property and system keys before covering fields", () => {
+    const ordered = defineNodeIndex(Person, {
+      keys: [
+        { field: "age", direction: "desc" },
+        { system: "id", direction: "asc" },
+      ],
+      coveringFields: ["name"],
+    });
+
+    expect(ordered.fields).toEqual([]);
+    expect(Object.hasOwn(ordered, "keySystemColumns")).toBe(false);
+    expect(ordered.keys).toEqual([
+      {
+        type: "field",
+        pointer: "/age",
+        valueType: "number",
+        direction: "desc",
+      },
+      { type: "system", column: "id", direction: "asc" },
+    ]);
+    expect(generateIndexDDL(ordered, "postgres")).toMatch(
+      /"graph_id", "kind", \(\("props" #>> ARRAY\['age'\]\)::numeric\) DESC, "id" ASC, \("props" #>> ARRAY\['name'\]\)/,
+    );
+    expect(generateIndexDDL(ordered, "sqlite")).toMatch(
+      /"graph_id", "kind", \(json_extract\("props", '\$\."age"'\)\) DESC, "id" ASC, \(json_extract\("props", '\$\."name"'\)\)/,
+    );
+  });
+
+  it("keeps legacy index declarations byte-compatible", () => {
+    const legacy = defineNodeIndex(Person, {
+      fields: ["email"],
+      keySystemColumns: ["id"],
+      coveringFields: ["name"],
+    });
+
+    expect(Object.hasOwn(legacy, "keys")).toBe(false);
+  });
+
+  it("does not expose ordered keys as profiler lookup fields", () => {
+    const ordered = defineNodeIndex(Person, {
+      keys: [
+        { field: "age", direction: "desc" },
+        { system: "id", direction: "asc" },
+      ],
+    });
+
+    expect(toDeclaredIndex(ordered).fields).toEqual([]);
+  });
+
+  it("refuses invalid ordered-key contracts", () => {
+    expect(() =>
+      defineNodeIndex(Person, {
+        keys: [{ field: "age", direction: "desc" }],
+        fields: ["email"],
+      } as never),
+    ).toThrow(/mutually exclusive/);
+    expect(
+      defineNodeIndex(Person, {
+        keys: [{ system: "id", direction: "asc" }],
+      }).keys,
+    ).toEqual([{ type: "system", column: "id", direction: "asc" }]);
+    expect(() =>
+      defineNodeIndex(Person, {
+        keys: [{ field: "age", direction: "desc" }],
+        unique: true,
+      } as never),
+    ).toThrow(/do not support unique/);
+    expect(() =>
+      defineNodeIndex(Person, {
+        keys: [{ field: "age", direction: "desc" }],
+        method: "trigram",
+      } as never),
+    ).toThrow(/only method: "btree"/);
+    expect(() =>
+      defineNodeIndex(Person, {
+        keys: [
+          { system: "graph_id", direction: "asc" },
+          { field: "age", direction: "desc" },
+        ],
+      }),
+    ).toThrow(/already implied by scope/);
+    expect(() =>
+      defineNodeIndex(Person, {
+        keys: [{ field: "age", direction: "desc" }],
+        coveringFields: ["age"],
+      }),
+    ).toThrow(/must not overlap/);
+    expect(() =>
+      defineNodeIndex(Person, {
+        keys: [
+          {
+            field: "age",
+            system: "id",
+            direction: "asc",
+          } as never,
+        ],
+      }),
+    ).toThrow(/exactly one of field or system/);
+    expect(() =>
+      defineNodeIndex(Person, {
+        keys: [{ direction: "asc" } as never],
+      }),
+    ).toThrow(/exactly one of field or system/);
+    expect(() =>
+      defineNodeIndex(Person, {
+        keys: [{ field: "age", direction: "sideways" } as never],
+      }),
+    ).toThrow(/direction must be/);
+    expect(() =>
+      defineEdgeIndex(worksAt, {
+        fields: ["role"],
+        keys: [{ field: "role", direction: "asc" }],
+      } as never),
+    ).toThrow(/Edge indexes do not support keys/);
+    const edgeIndex = defineEdgeIndex(worksAt, { fields: ["role"] });
+    expect(() =>
+      generateIndexDDL(
+        {
+          ...edgeIndex,
+          keys: [{ type: "system", column: "id", direction: "asc" }],
+        } as never,
+        "postgres",
+      ),
+    ).toThrow(/Edge indexes do not support keys/);
+    const ordered = defineNodeIndex(Person, {
+      keys: [{ field: "age", direction: "asc" }],
+    });
+    expect(() =>
+      generateIndexDDL(
+        {
+          ...ordered,
+          keys: requireDefined(ordered.keys).map((key) => ({
+            ...key,
+            direction: "asc); SELECT 1" as "asc",
+          })),
+        },
+        "postgres",
+      ),
+    ).toThrow(/Invalid index key direction/);
+    expect(() =>
+      generateIndexDDL(
+        {
+          ...ordered,
+          keys: requireDefined(ordered.keys).map((key) => ({
+            ...key,
+            direction: "toString" as "asc",
+          })),
+        },
+        "postgres",
+      ),
+    ).toThrow(/Invalid index key direction/);
   });
 
   it("generates a default name with no empty segment for a fields-less index", () => {

@@ -276,6 +276,9 @@ function serializeNodeIndexDeclaration(
     ) ?
       {}
     : { keySystemColumns: declaration.keySystemColumns }),
+    ...(declaration.keys === undefined || declaration.keys.length === 0 ?
+      {}
+    : { keys: declaration.keys }),
     // `origin: "compile-time"` is the default and is omitted from the
     // canonical form (absence == compile-time). Only `runtime` is
     // emitted explicitly so the restart loader can route the declaration

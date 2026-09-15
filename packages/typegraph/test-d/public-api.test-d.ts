@@ -978,6 +978,8 @@ import {
   type MaterializeIndexesEntry,
   type MaterializeIndexesResult,
   type NodeIndexDeclaration,
+  type NodeIndexKey,
+  type NodeSystemColumnName,
   type GraphExtensionIssue,
   type GraphExtensionIssueCode,
   type IncompatibleChange,
@@ -1099,6 +1101,69 @@ const nodeIndex: NodeIndexDeclaration = defineNodeIndex(Person, {
 });
 expectAssignable<IndexDeclaration>(nodeIndex);
 expectType<"node">(nodeIndex.entity);
+
+defineNodeIndex(Person, {
+  keys: [
+    { field: "name", direction: "desc" },
+    { system: "id", direction: "asc" },
+  ],
+});
+defineNodeIndex(Person, {
+  keys: [{ system: "created_at", direction: "desc" }],
+});
+expectError(defineNodeIndex(Person, { keys: [] }));
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", system: "id", direction: "asc" }],
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", direction: "asc" }],
+    fields: ["name"],
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", direction: "asc" }],
+    keySystemColumns: ["id"],
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", direction: "asc" }],
+    unique: true,
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", direction: "asc" }],
+    method: "trigram",
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ system: "from_id", direction: "asc" }],
+  }),
+);
+expectAssignable<NodeIndexDeclaration>({
+  ...nodeIndex,
+  keys: [{ type: "system", column: "created_at", direction: "desc" }],
+});
+expectError(
+  expectAssignable<NodeIndexDeclaration>({
+    ...nodeIndex,
+    keys: [{ type: "system", column: "from_id", direction: "asc" }],
+  }),
+);
+type NormalizedSystemIndexColumn = Extract<
+  NodeIndexKey,
+  { type: "system" }
+>["column"];
+declare const normalizedSystemIndexColumn: NormalizedSystemIndexColumn;
+declare const nodeSystemColumnName: NodeSystemColumnName;
+expectType<NodeSystemColumnName>(normalizedSystemIndexColumn);
+expectType<NormalizedSystemIndexColumn>(nodeSystemColumnName);
 
 const edgeIndex: EdgeIndexDeclaration = defineEdgeIndex(worksAt, {
   fields: ["role"],

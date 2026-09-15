@@ -3177,7 +3177,20 @@ export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";
     kind: string;
     keySystemColumns?: readonly SystemColumnName[];
+    keys?: readonly (Readonly<{
+        type: "field";
+        pointer: JsonPointer;
+        valueType: ValueType | undefined;
+        direction: "asc" | "desc";
+    }> | Readonly<{
+        type: "system";
+        column: "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
+        direction: "asc" | "desc";
+    }>)[];
 }>;
+
+// @public (undocumented)
+export type NodeIndexKey = NonNullable<NodeIndexDeclaration["keys"]>[number];
 
 // @public (undocumented)
 export type NodeInsertClaim = Readonly<{

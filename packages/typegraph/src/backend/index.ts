@@ -521,6 +521,7 @@ export type {
   IndexWhereOp,
   IndexWhereOperand,
   NodeIndexDeclaration,
+  NodeIndexKey,
   RelationalIndexDeclaration,
   RelationalIndexMethod,
   SystemColumnName,

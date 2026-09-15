@@ -4,6 +4,12 @@ import { type SqlDialect } from "../query/dialect/types";
 import { type JsonPointer, jsonPointer } from "../query/json-pointer";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import {
+  getNodeScopeColumns,
+  parseNodeIndexKeyDirection,
+  validateEdgeIndexKeysPresence,
+  validateNodeIndexKeyContract,
+} from "./node-key-contract";
+import {
   type EdgeIndexDeclaration,
   type IndexWhereExpression,
   type IndexWhereLiteral,
@@ -38,6 +44,18 @@ export function compileNodeIndexKeys(
   propsColumn: SqlFragment,
   systemColumn: (column: SystemColumnName) => SqlFragment,
 ): CompiledIndexKeys {
+  if (index.keys !== undefined) {
+    const contractError = validateNodeIndexKeyContract({
+      keys: index.keys,
+      fields: index.fields,
+      coveringFields: index.coveringFields,
+      keySystemColumns: index.keySystemColumns,
+      unique: index.unique,
+      scope: index.scope,
+      method: index.method,
+    })[0];
+    if (contractError !== undefined) throw new Error(contractError);
+  }
   const adapter = getDialect(dialect);
   const keys: SqlFragment[] = [];
 
@@ -47,6 +65,21 @@ export function compileNodeIndexKeys(
   ];
   for (const column of systemColumns) {
     keys.push(systemColumn(column));
+  }
+
+  for (const key of index.keys ?? []) {
+    const direction = compileIndexKeyDirection(key.direction);
+    if (key.type === "system") {
+      keys.push(sql`${systemColumn(key.column)} ${direction}`);
+      continue;
+    }
+    const extracted = compileIndexKeyValue(
+      adapter,
+      propsColumn,
+      key.pointer,
+      key.valueType,
+    );
+    keys.push(sql`(${extracted}) ${direction}`);
   }
 
   const allPointers = [...index.fields, ...index.coveringFields];
@@ -69,12 +102,22 @@ export function compileNodeIndexKeys(
   return { keys };
 }
 
+function compileIndexKeyDirection(direction: unknown): SqlFragment {
+  const parsed = parseNodeIndexKeyDirection(direction);
+  if (parsed === undefined) {
+    throw new Error(`Invalid index key direction: ${String(direction)}`);
+  }
+  return parsed === "asc" ? sql.raw("ASC") : sql.raw("DESC");
+}
+
 export function compileEdgeIndexKeys(
   index: EdgeIndexDeclaration,
   dialect: SqlDialect,
   propsColumn: SqlFragment,
   systemColumn: (column: SystemColumnName) => SqlFragment,
 ): CompiledIndexKeys {
+  const edgeKeyError = validateEdgeIndexKeysPresence(index);
+  if (edgeKeyError !== undefined) throw new Error(edgeKeyError);
   const adapter = getDialect(dialect);
   const keys: SqlFragment[] = [];
 
@@ -157,22 +200,6 @@ function compileIndexKeyValue(
       // For advanced index types (GIN/json), callers should use dialect.jsonExtract
       // or index the props column directly. We keep this as a conservative fallback.
       return dialect.jsonExtract(propsColumn, pointer);
-    }
-  }
-}
-
-export function getNodeScopeColumns(
-  scope: NodeIndexDeclaration["scope"],
-): readonly SystemColumnName[] {
-  switch (scope) {
-    case "graphAndKind": {
-      return ["graph_id", "kind"];
-    }
-    case "graph": {
-      return ["graph_id"];
-    }
-    case "none": {
-      return [];
     }
   }
 }

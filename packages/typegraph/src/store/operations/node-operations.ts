@@ -4534,7 +4534,7 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
       { indexName, kind },
       {
         suggestion:
-          "bulkFindByIndex probes by prop values from each item; an index declared with only keySystemColumns/coveringFields (no fields) has nothing to probe by.",
+          "bulkFindByIndex probes by legacy prop fields from each item; an index declared with ordered keys, keySystemColumns, or coveringFields but no fields has nothing to probe by.",
       },
     );
   }

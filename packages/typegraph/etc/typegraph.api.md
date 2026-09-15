@@ -5653,6 +5653,9 @@ export type Node<N extends NodeType = NodeType> = Readonly<{
 }> & Readonly<z.infer<N["schema"]>>;
 
 // @public
+export const NODE_SYSTEM_COLUMN_NAMES: readonly ["graph_id", "kind", "id", "deleted_at", "valid_from", "valid_to", "created_at", "updated_at", "version"];
+
+// @public
 const NODE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count"];
 
 // @public
@@ -5849,21 +5852,56 @@ export type NodeIdentifier = string | Readonly<{
 
 // @public (undocumented)
 export type NodeIndexConfig<N extends NodeType> = Readonly<{
-    fields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
     coveringFields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
-    keySystemColumns?: readonly SystemColumnName[] | undefined;
-    unique?: boolean | undefined;
     name?: string | undefined;
     scope?: IndexScope | undefined;
     where?: IndexWhereInput<NodeIndexWhereBuilder<N>> | undefined;
+}> & (Readonly<{
+    keys: readonly [
+    NodeIndexKeyInput<z.infer<N["schema"]>>,
+    ...NodeIndexKeyInput<z.infer<N["schema"]>>[]
+    ];
+    fields?: never;
+    keySystemColumns?: never;
+    unique?: false | undefined;
+    method?: "btree" | undefined;
+}> | Readonly<{
+    keys?: never;
+    fields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
+    keySystemColumns?: readonly SystemColumnName[] | undefined;
+    unique?: boolean | undefined;
     method?: RelationalIndexMethod | undefined;
-}>;
+}>);
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";
     kind: string;
     keySystemColumns?: readonly SystemColumnName[];
+    keys?: readonly (Readonly<{
+        type: "field";
+        pointer: JsonPointer;
+        valueType: ValueType | undefined;
+        direction: "asc" | "desc";
+    }> | Readonly<{
+        type: "system";
+        column: "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
+        direction: "asc" | "desc";
+    }>)[];
+}>;
+
+// @public (undocumented)
+export type NodeIndexKey = NonNullable<NodeIndexDeclaration["keys"]>[number];
+
+// @public (undocumented)
+export type NodeIndexKeyInput<T> = Readonly<{
+    field: IndexFieldInput<T>;
+    system?: never;
+    direction: "asc" | "desc";
+}> | Readonly<{
+    field?: never;
+    system: NodeSystemColumnName;
+    direction: "asc" | "desc";
 }>;
 
 // @public
@@ -6003,6 +6041,9 @@ type NodeRow = Readonly<{
     updated_at: string;
     deleted_at: string | undefined;
 }>;
+
+// @public (undocumented)
+export type NodeSystemColumnName = (typeof NODE_SYSTEM_COLUMN_NAMES)[number];
 
 // @public
 export type NodeTemporalReads<N extends NodeType, CN extends string = string> = Pick<NodeCollection<N, CN>, (typeof NODE_TEMPORAL_READ_NAMES)[number]>;

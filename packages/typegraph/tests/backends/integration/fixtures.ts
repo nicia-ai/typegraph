@@ -141,6 +141,11 @@ const companyIdCoveringIndex = defineNodeIndex(Company, {
   coveringFields: ["name"],
 });
 
+const companyNewestIndex = defineNodeIndex(Company, {
+  name: "company_newest",
+  keys: [{ system: "created_at", direction: "desc" }],
+});
+
 export const integrationTestGraph = defineGraph({
   id: "integration_test",
   nodes: {
@@ -157,6 +162,7 @@ export const integrationTestGraph = defineGraph({
     documentAuthorIndex,
     documentPublishedAtIndex,
     companyIdCoveringIndex,
+    companyNewestIndex,
   ],
   edges: {
     authoredBy: {
