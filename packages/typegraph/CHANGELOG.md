@@ -1,5 +1,36 @@
 # @nicia-ai/typegraph
 
+## 0.62.0
+
+### Highlights
+
+TypeGraph 0.62 lets schema changes, graph writes, recorded history, and application SQL commit or roll back together in a caller-owned transaction. Prepare the change with `planEvolution()` before opening the transaction, then apply it through `withEvolvedTransaction()`. Planning stays outside the write fence, and ordinary additions of kinds or optional scalar fields avoid entity scans and provisioning DDL. No-op plans can use `withRecordedTransaction()` without acquiring the exclusive evolution fence.
+
+Evolved callbacks operate against the resulting schema and return its exact version and hash in the transaction receipt. With TypeGraph-owned history, they also support schema-only recorded checkpoints through `requestRecordedRevision()`, so applications can persist an audit event even when no entities change. After the outer commit, `refreshSchema()` publishes the reconciled Store for subsequent work. Plans can move from a cached Store to a compatible `withBackend()` request Store within the same loaded TypeGraph module.
+
+Schema evolution also composes with approved merges. `branchForEvolution()` and `planMergeForEvolution()` prepare work against the resulting schema, allowing a merge that introduces new kinds to join the same atomic commit. Privileged adapters can provision required identity storage and vector slots inside that transaction; the default DML-only policy refuses such work before mutation.
+
+### Upgrade notes
+
+- Bootstrap the normal TypeGraph storage before serving adopted evolution requests. Route plans requiring identity or vector provisioning to a privileged adapter configured with `schemaProvisioning: "transactional"`; bundled adapters default to `"dml-only"`. Run generic or concurrent index maintenance explicitly after commit with `materializeIndexes()` on the refreshed Store.
+- Call `planEvolution()` outside the write transaction and keep its opaque token in memory. Do not serialize, clone, or reconstruct it; transfer it only between compatible Stores from the same loaded module. A `new-kind` requirement describes an addition, not queued removal work.
+- Enter `withEvolvedTransaction()` before other TypeGraph callbacks on the same native transaction. Propagate callback failures so the caller rolls back, and finish all callback reads and writes before returning: escaped transaction contexts, deferred queries, and prepared batches refuse execution after callback completion.
+- Handle `SchemaFenceTimeoutError` by rolling back and retrying the entire native transaction. Replan outside the transaction after a stale-baseline refusal. Change plans use a finite fence wait, defaulting to 5,000 ms; pass `waitBudgetMs` only for change plans, since no-op plans refuse an explicit budget.
+- Treat `receipt.schema` and any recorded anchor as provisional until the outer commit succeeds. Then call `refreshSchema({ ref, minVersion: receipt.schema.version })` on the cached root Store. A matching cache skips SQL and does not probe for newer versions; omit `minVersion` when a fresh lookup is needed. Refresh performs no provisioning.
+- Build resulting-schema merge plans with `planMergeForEvolution()` before opening the caller transaction, using `branchForEvolution()` when the branch needs new kinds. Apply the merge inside the evolved callback before other target graph writes; old-schema merge plans are refused.
+- Add `planEvolution()` and `refreshSchema()` to custom `StoreEvolution` implementations. Declare `schemaProvisioning` explicitly on custom `AdapterBackend` and `SqlEngineProfile` implementations, choosing a policy that matches the connection's intended provisioning permissions.
+- Offer `adoptSchemaWriteTransaction` only when a custom adapter can prove the active caller session and provide bounded schema fencing on that same transaction. Keep PostgreSQL advisory locks transaction-scoped. Native SQLite adoption requires observable transaction state on the actual connection; noninteractive adapters and SQLite drivers without that evidence cannot adopt schema changes.
+
+### Minor Changes
+
+- [#705](https://github.com/nicia-ai/typegraph/pull/705) [`acf5b47`](https://github.com/nicia-ai/typegraph/commit/acf5b47bc180520cf372dd1926285d00cbd55935) Thanks [@pdlug](https://github.com/pdlug)! - Plan schema evolution outside a write transaction with `store.planEvolution()`, then apply the version-bound plan alongside graph and application writes through `store.withEvolvedTransaction()`. Plans are opaque, nonserializable capability tokens that can move between compatible Stores from the same loaded module, including `withBackend()` request Stores. They expose `baseline` and `result` schema identities and a discriminated array of schema additions and apply-time requirements. A `new-kind` entry records a graph addition and does not imply a queued removal. No-op plans can use ordinary recorded transactions; metadata-only changes avoid entity scans and provisioning DDL. Schema fence waits are bounded and expose `SchemaFenceTimeoutError` for whole-transaction retry.
+  
+  Evolved callbacks use the resulting schema, support recorded revision requests, and return exact schema version/hash metadata alongside the provisional recorded receipt. Escaped TypeGraph reads and writes refuse after callback completion. Publish root Store changes after outer commit through read-only `refreshSchema({ ref, minVersion })`; a matching cached version needs no reload.
+  
+  Use `branchForEvolution()` to fork an isolated branch with the planned kind set and `planMergeForEvolution()` to prepare a merge for the resulting schema and apply it inside the evolved callback. Old-schema merge plans continue to refuse. Adapters default to a DML-only policy that refuses required identity or vector provisioning before mutation. Privileged adapters configured with `schemaProvisioning: "transactional"` provision identity storage, vector tables, and contribution markers on the caller's fenced transaction session, so outer rollback removes them with the schema and graph writes. Bootstrap storage is still required, and eager index maintenance runs explicitly after commit. SQLite schema adoption requires verifiable native transaction state, and noninteractive drivers remain unsupported.
+  
+  Custom implementations of the `StoreEvolution` interface must add `planEvolution()` and `refreshSchema()`. Custom `SqlEngineProfile` and `AdapterBackend` implementations must declare their schema provisioning policy explicitly; the bundled adapters default to `"dml-only"`.
+
 ## 0.61.0
 
 ### Highlights
