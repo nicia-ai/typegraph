@@ -73,6 +73,7 @@ export type {
   MatchSource,
   MatchStrategy,
 } from "./evidence";
+export { branchForEvolution } from "./evolution-branch";
 export { ingestionBranch } from "./ingestion-branch";
 export {
   applyMergePlan,
@@ -80,6 +81,7 @@ export {
   merge,
   mergeIncremental,
   planMerge,
+  planMergeForEvolution,
   planMergeIncremental,
 } from "./merge";
 export type { NormalizedMergeOptions } from "./options";

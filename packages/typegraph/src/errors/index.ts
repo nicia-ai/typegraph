@@ -1440,6 +1440,42 @@ export class ConfigurationError extends TypeGraphError {
   }
 }
 
+/** The lock acquisition phase that exhausted the schema-fence wait budget. */
+export type SchemaFencePhase = "schema-advisory" | "schema-row" | "writer-slot";
+
+/** Identifies the graph, lock phase, and requested wait budget for a timeout. */
+export type SchemaFenceTimeoutErrorDetails = Readonly<{
+  graphId: string;
+  phase: SchemaFencePhase;
+  waitBudgetMs: number;
+}>;
+
+/** The caller-owned transaction could not acquire its schema fence in time. */
+export class SchemaFenceTimeoutError extends TypeGraphError {
+  /** The graph and lock acquisition that exceeded the caller's budget. */
+  declare readonly details: SchemaFenceTimeoutErrorDetails;
+
+  constructor(
+    graphId: string,
+    phase: SchemaFencePhase,
+    waitBudgetMs: number,
+    cause?: unknown,
+  ) {
+    super(
+      `Timed out acquiring the schema fence for graph ${graphId}.`,
+      "SCHEMA_FENCE_TIMEOUT",
+      {
+        category: "system",
+        details: { graphId, phase, waitBudgetMs },
+        suggestion:
+          "Roll back the complete caller transaction before retrying it.",
+        cause,
+      },
+    );
+    this.name = "SchemaFenceTimeoutError";
+  }
+}
+
 /**
  * Why a destructive contribution rebuild is refused.
  *

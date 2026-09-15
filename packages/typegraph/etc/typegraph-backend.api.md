@@ -6,12 +6,27 @@
 
 // @public
 export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
+    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
+    adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
+        waitBudgetMs: number;
+    }>) => Promise<AdoptedSchemaWriteTransaction>;
 }>;
 
 // @public (undocumented)
 export type AdapterBackendTransactions<TNativeTransaction> = Pick<AdapterBackend<TNativeTransaction>, "transactionWithNative" | "adoptTransaction">;
+
+// @public
+export type AdoptedSchemaWriteTransaction = Readonly<{
+    backend: SchemaWriteTransactionBackend & Readonly<{
+        commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+        ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
+            onDrift?: "throw" | "skip";
+        }>) => Promise<void>;
+    }>;
+    activeSchema: SchemaVersionRow | undefined;
+}>;
 
 // @public
 export const ALL_FULLTEXT_MODES: readonly FulltextQueryMode[];
@@ -3614,6 +3629,9 @@ export type SchemaKindEmptinessProbe = Readonly<{
     rows: "nonDeleted" | "all";
 }>;
 
+// @public
+export type SchemaProvisioning = "dml-only" | "transactional";
+
 // @public (undocumented)
 export type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
 
@@ -3632,6 +3650,14 @@ export type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWr
 
 // @public
 type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
+
+// @internal
+type SchemaWriteTransactionBackend = TransactionBackend & Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+    tableExists: (this: void, tableName: string) => Promise<boolean>;
+    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+    deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
+}>;
 
 // @public
 export type SerializedClosures = Readonly<{
@@ -4138,8 +4164,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly identityTableDdl: {
         readonly kind: "reasoned";
-        readonly reason: "Same identity-DDL family as ensureIdentityTables.";
-        readonly accesses: 2;
+        readonly reason: "Same identity-DDL family as ensureIdentityTables. Adopted evolution adds one Store handoff of the DDL factory and one same-session catalog inspection before the fenced schema commit; both refuse absent DDL rather than skipping required storage.";
+        readonly accesses: 4;
     };
     readonly recordedTableDdl: {
         readonly kind: "reasoned";
@@ -4334,7 +4360,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorSlotContributions";
-        readonly ceiling: 1;
+        readonly ceiling: 3;
     };
     readonly executeDdl: {
         readonly kind: "deferred";

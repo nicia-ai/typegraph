@@ -61,6 +61,7 @@ import { PgTransaction } from "drizzle-orm/pg-core";
 import {
   CompilerInvariantError,
   ConfigurationError,
+  SchemaFenceTimeoutError,
   StaleVersionError,
 } from "../../errors";
 import {
@@ -151,6 +152,7 @@ import {
 } from "../transaction-resource";
 import {
   type AdapterBackend,
+  type AdoptedSchemaWriteTransaction,
   type BackendCapabilities,
   type BackendCatalogProbes,
   type BundledBackendCapabilityOverrides,
@@ -174,6 +176,7 @@ import {
   POSTGRES_MAX_BIND_PARAMETERS,
   type RecordKindRemovalParams,
   type ReleaseIndexMaterializationClaimParams,
+  type SchemaProvisioning,
   type SchemaWriteTransactionBackend,
   type TableState,
   type TransactionBackend,
@@ -185,6 +188,7 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
+  ensureAdoptedVectorSlots,
   gateFulltext,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
@@ -217,10 +221,11 @@ import {
   buildCommonOperationOptions,
   createEngineOperationBackend,
 } from "./engine/operation-layer";
-import type {
-  EngineAssemblyContext,
-  EngineLateMembers,
-  EngineOperationsContext,
+import {
+  type EngineAssemblyContext,
+  type EngineLateMembers,
+  type EngineOperationsContext,
+  resolveSchemaProvisioning,
 } from "./engine/profile";
 import {
   type AnyPgDatabase,
@@ -292,6 +297,8 @@ import {
  * Options for creating a PostgreSQL backend.
  */
 export type PostgresBackendOptions = Readonly<{
+  /** Opt in to transactional DDL in a caller-owned schema transaction. */
+  schemaProvisioning?: SchemaProvisioning;
   /**
    * Custom table definitions. Use createPostgresTables() to customize table names.
    * Defaults to standard TypeGraph table names.
@@ -546,6 +553,30 @@ function extensionDdlLockKey(extension: DatabaseExtensionName): string {
  * these two standalone statements take the fence row.
  */
 const SCHEMA_COMMIT_FENCE_NAMESPACE = "typegraph:schema-commit";
+
+/** PostgreSQL renders lock_timeout with a duration suffix, except zero. */
+function postgresLockTimeoutMilliseconds(value: string): number | undefined {
+  if (value === "0") return 0;
+  const match = /^(\d+(?:\.\d+)?)(ms|s|min|h|d)$/.exec(value);
+  if (match === null) return undefined;
+  const amount = Number(match[1]);
+  const unit = match[2] ?? "";
+  switch (unit) {
+    case "ms": { return amount; }
+    case "s": { return amount * 1000; }
+    case "min": { return amount * 60_000; }
+    case "h": { return amount * 3_600_000; }
+    case "d": { return amount * 86_400_000; }
+    default: { return undefined; }
+  }
+}
+
+/** Driver errors may wrap PostgreSQL's lock-not-available SQLSTATE. */
+function isPostgresLockTimeout(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ("code" in error && error.code === "55P03") return true;
+  return "cause" in error && isPostgresLockTimeout(error.cause);
+}
 
 /**
  * Normalizes one PostgreSQL declared column type to the family
@@ -1664,6 +1695,9 @@ export function buildPostgresEngineProfile(
     async function acquireSchemaWriteFence(
       tx: AnyPgTransaction,
       graphId: string,
+      beforeAcquisition?: (
+        phase: "schema-advisory" | "schema-row",
+      ) => Promise<void>,
     ): Promise<void> {
       const plan = requireWriteFence(
         resolveWriteFencePlan(fenceTarget),
@@ -1672,6 +1706,7 @@ export function buildPostgresEngineProfile(
       );
       switch (plan.kind) {
         case "lock": {
+          await beforeAcquisition?.("schema-advisory");
           // Advisory lock: hashtext($graphId) is collision-tolerant for the
           // size of an active graph set; collisions just serialize unrelated
           // graphs which is harmless. Held until the transaction commits.
@@ -1699,6 +1734,7 @@ export function buildPostgresEngineProfile(
               "postgres",
             ),
           );
+          await beforeAcquisition?.("schema-row");
           // Managed entity writers lock this row FOR SHARE. Locking it FOR
           // UPDATE before any emptiness probe makes a writer-first commit
           // wait; a schema-first snapshot-isolated writer gets PostgreSQL's
@@ -1715,6 +1751,7 @@ export function buildPostgresEngineProfile(
           return;
         }
         case "row": {
+          await beforeAcquisition?.("schema-row");
           // Takes the portable fence row instead of the `pg_advisory_xact_lock`/
           // `FOR UPDATE` pair `mechanism: "lock"` uses — `lockActiveSchemaVersion`
           // takes the SAME row on the write side, so a concurrent commit and a
@@ -1859,6 +1896,7 @@ export function buildPostgresEngineProfile(
       txIsFirstParty: boolean,
     ): Readonly<{
       backend: TransactionBackend;
+      privilegedBackend: InternalOperationBackend;
       drainAndClose: () => Promise<void>;
     }> {
       const { backend, drainAndClose } = createTransactionBackend({
@@ -1887,6 +1925,7 @@ export function buildPostgresEngineProfile(
       );
       return {
         backend: gatedBackend,
+        privilegedBackend: backend,
         drainAndClose,
       };
     }
@@ -2009,6 +2048,135 @@ export function buildPostgresEngineProfile(
           // dialect-derivation fallback or the lazy schema-fence lease.
           return bindTransactionBackend(externalTx, false).backend;
         },
+
+        ...(capabilities.execution.interactiveTransactions ?
+          { adoptSchemaWriteTransaction: async function adoptSchemaWriteTransaction(
+          externalTx: AnyPgTransaction,
+          graphId: string,
+          options: Readonly<{ waitBudgetMs: number }>,
+        ): Promise<AdoptedSchemaWriteTransaction> {
+          if (!capabilities.execution.interactiveTransactions) {
+            throw new ConfigurationError(
+              "Schema-write adoption requires an interactive PostgreSQL transaction.",
+              { capability: "execution.interactiveTransactions" },
+            );
+          }
+          assertAdoptedDialect<AnyPgTransaction>(
+            externalTx,
+            PgTransaction,
+            "postgres",
+          );
+          if (!Number.isSafeInteger(options.waitBudgetMs) || options.waitBudgetMs <= 0) {
+            throw new ConfigurationError(
+              "Schema fence waitBudgetMs must be a positive finite integer.",
+              { waitBudgetMs: options.waitBudgetMs },
+            );
+          }
+          const schemaFencePlan = resolveWriteFencePlan(fenceTarget);
+          if (schemaFencePlan.kind !== "lock" && schemaFencePlan.kind !== "row") {
+            throw new ConfigurationError(
+              "Schema adoption requires a database-enforced PostgreSQL schema fence on the caller's session.",
+              { capability: "schemaWriteAdoption.fence", fenceKind: schemaFencePlan.kind },
+            );
+          }
+
+          // SAVEPOINT refuses outside an explicit transaction. Release it
+          // immediately: this proves the literal pinned session is active,
+          // without opening another transaction or changing application data.
+          try {
+            await externalTx.execute(sql`SAVEPOINT typegraph_schema_adoption_probe`);
+            await externalTx.execute(sql`RELEASE SAVEPOINT typegraph_schema_adoption_probe`);
+          } catch (error) {
+            throw new ConfigurationError(
+              "Schema adoption requires a live caller-owned PostgreSQL transaction on this session.",
+              { capability: "postgres.activeNativeTransaction" },
+              { cause: error },
+            );
+          }
+
+          const { privilegedBackend } = bindTransactionBackend(externalTx, false);
+          const schemaVersionsTableName = getTableName(tables.schemaVersions);
+          if (!(await privilegedBackend.tableExists(schemaVersionsTableName))) {
+            throw new ConfigurationError(
+              "Schema adoption requires TypeGraph bootstrap storage before the caller transaction.",
+              { tableName: schemaVersionsTableName },
+            );
+          }
+
+          const settingAdapter = createPostgresExecutionAdapter(
+            externalTx,
+            adapterOptions,
+          );
+          const [setting] = await settingAdapter.execute<{ value: string }>(
+            sql`SELECT current_setting('lock_timeout') AS value`,
+          );
+          const previousTimeout = setting?.value;
+          const callerTimeout =
+            previousTimeout === undefined ? undefined :
+              postgresLockTimeoutMilliseconds(previousTimeout);
+          if (callerTimeout === undefined || previousTimeout === undefined) {
+            throw new ConfigurationError(
+              "Cannot preserve this transaction's PostgreSQL lock_timeout setting.",
+              { lockTimeout: previousTimeout },
+            );
+          }
+
+          const deadline = performance.now() + options.waitBudgetMs;
+          let phase: "schema-advisory" | "schema-row" = "schema-advisory";
+          try {
+            await acquireSchemaWriteFence(externalTx, graphId, async (acquisitionPhase) => {
+              phase = acquisitionPhase;
+              const remainingMs = deadline - performance.now();
+              if (remainingMs <= 0) {
+                throw new SchemaFenceTimeoutError(
+                  graphId,
+                  acquisitionPhase,
+                  options.waitBudgetMs,
+                );
+              }
+              const effectiveMs =
+                callerTimeout === 0 ? remainingMs :
+                  Math.min(callerTimeout, remainingMs);
+              await externalTx.execute(
+                sql`SELECT set_config('lock_timeout', ${`${Math.max(1, Math.floor(effectiveMs))}ms`}, true)`,
+              );
+            });
+            // A lock_timeout is per acquisition, so confirm that the entire
+            // ordered advisory/row sequence respected the caller's deadline.
+            if (performance.now() >= deadline) {
+              throw new SchemaFenceTimeoutError(graphId, phase, options.waitBudgetMs);
+            }
+            await externalTx.execute(
+              sql`SELECT set_config('lock_timeout', ${previousTimeout}, true)`,
+            );
+          } catch (error) {
+            // A database lock timeout aborts the native transaction. Do not
+            // issue a restore or diagnostic statement on that failed session.
+            if (isPostgresLockTimeout(error)) {
+              throw new SchemaFenceTimeoutError(graphId, phase, options.waitBudgetMs, error);
+            }
+            throw error;
+          }
+
+          const activeSchema = await privilegedBackend.getActiveSchema(graphId);
+          return {
+            backend: Object.defineProperty(privilegedBackend, "ensureVectorSlotContributions", {
+              value: (slots: readonly VectorSlot[], slotOptions?: Readonly<{ onDrift?: "throw" | "skip" }>) =>
+                ensureAdoptedVectorSlots(privilegedBackend, slots, slotOptions, {
+                  dialect: "postgres",
+                  fenceTarget,
+                  vectorStrategy,
+                  fulltextStrategy,
+                  fulltextTableName: tables.fulltextTableName,
+                  markerTableName: getTableName(tables.contributionMaterializations),
+                  decodeMarkerTimestamp: POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+                }),
+              enumerable: true,
+            }) as unknown as AdoptedSchemaWriteTransaction["backend"],
+            activeSchema,
+          };
+        } }
+          : {}),
 
         async schemaWriteTransaction<T>(
           graphId: string,
@@ -2194,6 +2362,7 @@ export function buildPostgresEngineProfile(
     fulltext: fulltextStrategy,
     vector: vectorStrategy,
     declaredCapabilities,
+    schemaProvisioning: resolveSchemaProvisioning(options.schemaProvisioning),
     resourceAudit,
     autocommit: { singleStatementDurable: true },
     provisioning,

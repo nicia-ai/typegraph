@@ -1,3 +1,5 @@
+export { registerAdoptedEvolutionIntegrationTests } from "./adopted-evolution";
+export { registerAdoptedEvolutionConcurrencyTests } from "./adopted-evolution-concurrency";
 export { registerAggregateIntegrationTests } from "./aggregates";
 export { registerAlgorithmIntegrationTests } from "./algorithms";
 export { registerBackendProvenanceIntegrationTests } from "./backend-provenance";

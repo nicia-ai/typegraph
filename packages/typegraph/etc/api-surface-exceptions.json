@@ -1,1082 +1,130 @@
 [
   {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "asRelation",
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "SqlEngineProfile",
+    "member": "schemaProvisioning",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom SQL engine profiles must declare the schema provisioning policy explicitly so adopted evolution never infers DDL permission.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "compileOneStatementBatchItem",
+    "declaration": "StoreEvolution",
+    "member": "planEvolution",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "count",
+    "declaration": "StoreEvolution",
+    "member": "refreshSchema",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "executeOn",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "prepare",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "ExecutableQueryLike",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Intentional provenance requirement on executable set-operation inputs so unsafe one-statement batching is refused before SQL.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "QueryBuilder",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "QueryBuilder",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "QueryBuilder",
-    "member": "getExpressionScopeIdentity",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "QueryBuilder",
-    "member": "project",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "QueryBuilder",
-    "member": "stopExpansion",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "QueryBuilder",
-    "member": "where",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "UnionableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "asRelation",
+    "declaration": "StoreEvolution",
+    "member": "planEvolution",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "compileOneStatementBatchItem",
+    "declaration": "StoreEvolution",
+    "member": "refreshSchema",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "executeOn",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "prepare",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "ExecutableQueryLike",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Intentional provenance requirement on executable set-operation inputs so unsafe one-statement batching is refused before SQL.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "QueryBuilder",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "QueryBuilder",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "QueryBuilder",
-    "member": "getExpressionScopeIdentity",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "QueryBuilder",
-    "member": "project",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "QueryBuilder",
-    "member": "stopExpansion",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "QueryBuilder",
-    "member": "where",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "UnionableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "asRelation",
+    "declaration": "StoreEvolution",
+    "member": "planEvolution",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "compileOneStatementBatchItem",
+    "declaration": "StoreEvolution",
+    "member": "refreshSchema",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "executeOn",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "prepare",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "ExecutableQueryLike",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Intentional provenance requirement on executable set-operation inputs so unsafe one-statement batching is refused before SQL.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "QueryBuilder",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "QueryBuilder",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "QueryBuilder",
-    "member": "getExpressionScopeIdentity",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "QueryBuilder",
-    "member": "project",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "QueryBuilder",
-    "member": "stopExpansion",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "QueryBuilder",
-    "member": "where",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "UnionableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "asRelation",
+    "declaration": "StoreEvolution",
+    "member": "planEvolution",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "compileOneStatementBatchItem",
+    "declaration": "StoreEvolution",
+    "member": "refreshSchema",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "executeOn",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "prepare",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "ExecutableQueryLike",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Intentional provenance requirement on executable set-operation inputs so unsafe one-statement batching is refused before SQL.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "QueryBuilder",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "QueryBuilder",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "QueryBuilder",
-    "member": "getExpressionScopeIdentity",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "QueryBuilder",
-    "member": "project",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "QueryBuilder",
-    "member": "stopExpansion",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "QueryBuilder",
-    "member": "where",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "UnionableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "asRelation",
+    "declaration": "StoreEvolution",
+    "member": "planEvolution",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "compileOneStatementBatchItem",
+    "declaration": "StoreEvolution",
+    "member": "refreshSchema",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "executeOn",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "prepare",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "ExecutableQueryLike",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Intentional provenance requirement on executable set-operation inputs so unsafe one-statement batching is refused before SQL.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "QueryBuilder",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "QueryBuilder",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "QueryBuilder",
-    "member": "getExpressionScopeIdentity",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "QueryBuilder",
-    "member": "project",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "QueryBuilder",
-    "member": "stopExpansion",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "QueryBuilder",
-    "member": "where",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "UnionableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "asRelation",
+    "declaration": "StoreEvolution",
+    "member": "planEvolution",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "compileOneStatementBatchItem",
+    "declaration": "StoreEvolution",
+    "member": "refreshSchema",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "executeOn",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "prepare",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "ExecutableQueryLike",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Intentional provenance requirement on executable set-operation inputs so unsafe one-statement batching is refused before SQL.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "QueryBuilder",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "QueryBuilder",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "QueryBuilder",
-    "member": "getExpressionScopeIdentity",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "QueryBuilder",
-    "member": "project",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "QueryBuilder",
-    "member": "stopExpansion",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "QueryBuilder",
-    "member": "where",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "UnionableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "asRelation",
+    "declaration": "AdapterBackend",
+    "member": "schemaProvisioning",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom adapter backends must declare the schema provisioning policy explicitly; DML-only is the default for bundled adapters.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "compileOneStatementBatchItem",
+    "declaration": "StoreEvolution",
+    "member": "planEvolution",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   },
   {
     "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "count",
+    "declaration": "StoreEvolution",
+    "member": "refreshSchema",
     "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "executeOn",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableAggregateQuery",
-    "member": "prepare",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "first",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "ExecutableQueryLike",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Intentional provenance requirement on executable set-operation inputs so unsafe one-statement batching is refused before SQL.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "QueryBuilder",
-    "member": "count",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "QueryBuilder",
-    "member": "exists",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "QueryBuilder",
-    "member": "getExpressionScopeIdentity",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "QueryBuilder",
-    "member": "project",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "QueryBuilder",
-    "member": "stopExpansion",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "QueryBuilder",
-    "member": "where",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "UnionableQuery",
-    "member": "oneStatementBatchProvenance",
-    "kind": "required-member-added",
-    "reason": "Additive member on a library-created query class with private nominal state. Existing callers receive instances; external code cannot implement this class contract.",
-    "issue": "#691"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "HistoryStore",
-    "member": "transaction",
-    "kind": "required-member-added",
-    "reason": "HistoryStore is created by the library, and its existing transaction member now supplies the history-specific callback context that can request a recorded revision.",
-    "issue": "#697"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "HistoryStore",
-    "member": "transactionWithReceipt",
-    "kind": "required-member-added",
-    "reason": "HistoryStore is created by the library, and its existing transactionWithReceipt member now supplies the measurable history callback context that can request a recorded revision.",
-    "issue": "#697"
+    "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
+    "issue": "#704"
   }
 ]

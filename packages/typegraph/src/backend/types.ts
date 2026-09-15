@@ -3530,12 +3530,17 @@ export type GraphBackend = Readonly<{
 }> &
   DurableEdgeBatchMembers;
 
+/** Policy for provisioning physical schema inside a caller-owned transaction. */
+export type SchemaProvisioning = "dml-only" | "transactional";
+
 /**
  * Adapter-native transaction interoperability layered on top of the portable
  * TypeGraph backend. Only adapter entrypoints expose this capability.
  */
 export type AdapterBackend<TNativeTransaction> = GraphBackend &
   Readonly<{
+    /** Whether caller-owned schema transactions may provision physical storage. */
+    schemaProvisioning: SchemaProvisioning;
     /**
      * Runs TypeGraph operations and exposes the exact adapter-native handle
      * bound to the same transaction.
@@ -3553,7 +3558,38 @@ export type AdapterBackend<TNativeTransaction> = GraphBackend &
       this: void,
       externalTransaction: TNativeTransaction,
     ) => TransactionBackend;
+    /**
+     * Adopt a caller-owned native transaction for a schema change. The adapter
+     * proves the transaction is active and acquires its schema-write fence on
+     * that literal session before returning the privileged CAS target. It
+     * never opens, commits, retries, or rolls back the caller's transaction.
+     * Optional because drivers without active-session evidence must refuse.
+     */
+    adoptSchemaWriteTransaction?: (
+      this: void,
+      externalTransaction: TNativeTransaction,
+      graphId: string,
+      options: Readonly<{ waitBudgetMs: number }>,
+    ) => Promise<AdoptedSchemaWriteTransaction>;
   }>;
+
+/**
+ * The schema-write facet available only after adoption earned its fence.
+ * The caller owns the native transaction and remains responsible for its commit
+ * or rollback.
+ */
+export type AdoptedSchemaWriteTransaction = Readonly<{
+  backend: SchemaWriteTransactionBackend &
+    Readonly<{
+      commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+      ensureVectorSlotContributions?: (
+        this: void,
+        slots: readonly VectorSlot[],
+        options?: Readonly<{ onDrift?: "throw" | "skip" }>,
+      ) => Promise<void>;
+    }>;
+  activeSchema: SchemaVersionRow | undefined;
+}>;
 
 export type BackendIdentity = Pick<
   GraphBackend,

@@ -63,6 +63,7 @@ export type SharedPgliteEngine = Readonly<{
    */
   makeBackend: (
     capabilities?: BundledBackendCapabilityOverrides,
+    schemaProvisioning?: "dml-only" | "transactional",
   ) => AdapterBackend<AnyPgTransaction>;
   /** TRUNCATE all managed metadata/data tables — default per-test isolation. */
   resetData: () => Promise<void>;
@@ -92,11 +93,11 @@ export async function setupSharedPgliteEngine(): Promise<SharedPgliteEngine> {
 
   return {
     client,
-    makeBackend: (capabilities) =>
-      createPostgresBackend(
-        db,
-        capabilities === undefined ? undefined : { capabilities },
-      ),
+    makeBackend: (capabilities, schemaProvisioning) =>
+      createPostgresBackend(db, {
+        ...(capabilities === undefined ? {} : { capabilities }),
+        schemaProvisioning: schemaProvisioning ?? "dml-only",
+      }),
     resetData: async () => {
       await client.exec(TRUNCATE_MANAGED_SQL);
     },

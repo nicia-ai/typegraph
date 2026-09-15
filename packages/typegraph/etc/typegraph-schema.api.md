@@ -700,6 +700,46 @@ type EntityKey = Readonly<{
 type ErrorCategory = "user" | "constraint" | "system";
 
 // @public
+export type EvolutionPlan = (EvolutionPlanBase & Readonly<{
+    status: "noop";
+}>) | (EvolutionPlanBase & Readonly<{
+    status: "change";
+    requirements: EvolutionRequirements;
+}>);
+
+// @public (undocumented)
+type EvolutionPlanBase = Readonly<{
+    graphId: string;
+    baseline: SchemaIdentity;
+    result: SchemaIdentity;
+    [evolutionPlanBrand]: true;
+}>;
+
+// @public (undocumented)
+const evolutionPlanBrand: unique symbol;
+
+// @public
+export type EvolutionRequirement = Readonly<{
+    kind: "require-empty";
+    entity: "node" | "edge";
+    kindName: string;
+}> | Readonly<{
+    kind: "new-kind";
+    entity: "node" | "edge";
+    kindName: string;
+}> | Readonly<{
+    kind: "vector-slot";
+    nodeKind: string;
+    fieldPath: string;
+}> | Readonly<{
+    kind: "identity";
+    nodeKinds: readonly string[];
+}>;
+
+// @public
+export type EvolutionRequirements = readonly EvolutionRequirement[];
+
+// @public
 type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
 
 // @public
@@ -2163,6 +2203,12 @@ export type SchemaDiff = Readonly<{
 
 // @public
 export type SchemaHash = string;
+
+// @public
+export type SchemaIdentity = Readonly<{
+    version: number;
+    hash: SchemaHash;
+}>;
 
 // @public (undocumented)
 type SchemaKindEmptinessProbe = Readonly<{

@@ -56,7 +56,11 @@ import {
   type PostgresTables,
   tables as defaultTables,
 } from "../drizzle/postgres";
-import { type AdapterBackend, closeAfterFailure } from "../types";
+import {
+  type AdapterBackend,
+  closeAfterFailure,
+  type SchemaProvisioning,
+} from "../types";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
@@ -108,6 +112,8 @@ export type LocalPgliteBackendOptions = Readonly<{
    * mirroring `vector: false`.
    */
   fulltext?: FulltextStrategy | false;
+  /** Opt in to provisioning within caller-owned schema transactions. */
+  schemaProvisioning?: SchemaProvisioning;
 }>;
 
 /**
@@ -214,6 +220,9 @@ export async function createLocalPgliteBackend(
 
     const db = drizzle(client);
     const backend = createPostgresBackend(db, {
+      ...(options.schemaProvisioning === undefined ?
+        {}
+      : { schemaProvisioning: options.schemaProvisioning }),
       tables,
       ...(vectorEnabled ? {} : { vector: false }),
       ...(options.fulltext === undefined ? {} : { fulltext: options.fulltext }),

@@ -964,8 +964,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   },
   identityTableDdl: {
     kind: "reasoned",
-    reason: "Same identity-DDL family as ensureIdentityTables.",
-    accesses: 2,
+    reason:
+      "Same identity-DDL family as ensureIdentityTables. Adopted evolution adds one Store handoff of the DDL factory and one same-session catalog inspection before the fenced schema commit; both refuse absent DDL rather than skipping required storage.",
+    accesses: 4,
   },
   recordedTableDdl: {
     kind: "reasoned",
@@ -1171,7 +1172,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "vectorSlotContributions",
-    ceiling: 1,
+    // Adopted evolution adds a pre-fence capability refusal and a same-session
+    // provision invocation. The existing boot consumer remains the third read.
+    ceiling: 3,
   },
   executeDdl: {
     kind: "deferred",

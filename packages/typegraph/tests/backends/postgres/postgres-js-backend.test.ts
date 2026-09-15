@@ -212,12 +212,12 @@ describe("PostgreSQL Adapter (postgres-js driver)", () => {
           createSerializedBackend: (overrides) => {
             const serializedSql = postgres(TEST_DATABASE_URL, { max: 1 });
             return Promise.resolve({
-              backend: createPostgresBackend(
-                drizzle(serializedSql),
-                overrides?.capabilities === undefined ?
-                  undefined
-                : { capabilities: overrides.capabilities },
-              ),
+              backend: createPostgresBackend(drizzle(serializedSql), {
+                ...(overrides?.capabilities === undefined ?
+                  {}
+                : { capabilities: overrides.capabilities }),
+                schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
+              }),
               close: () => serializedSql.end(),
             });
           },

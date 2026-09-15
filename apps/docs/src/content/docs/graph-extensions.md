@@ -341,6 +341,107 @@ before the commit remains pinned to the previous schema version, so its next
 managed write fails the schema-version fence.
 :::
 
+### Plan outside and apply inside a caller-owned transaction
+
+`planEvolution(extension)` prepares a named schema change before the caller
+opens its write transaction. It returns an immutable `"noop"` or `"change"`
+plan with `graphId`, `baseline: { version, hash }`, and
+`result: { version, hash }`. Change plans expose an ordered `requirements`
+array whose entries name new-kind additions, empty-kind checks, vector slots,
+and identity work. A `new-kind` entry describes a graph delta; it does not
+indicate that a removal is queued or direct callers to run
+`materializeRemovals()`. The plan is opaque and bound to the loaded TypeGraph
+module: it cannot be serialized, cloned, or reconstructed. It can be passed between
+compatible Stores for the same graph that use the same loaded module; apply
+still checks the active graph and fenced baseline version/hash. The
+default `{ source: "database" }` reloads the active schema. `{ source:
+"cached" }` uses a previously loaded planning snapshot on the same Store; a
+cached plan is not fresh database evidence. A stale baseline is refused during
+apply, so retry by rolling back the whole caller transaction and replanning
+outside it.
+
+Use `withEvolvedTransaction(nativeTx, plan, callback, { waitBudgetMs })` when
+the schema change, TypeGraph writes, and application SQL must share the
+caller's commit. Enter this boundary before other TypeGraph callbacks on the
+same native transaction. The callback receives an evolved transaction context,
+including its reads, collections, and supported composition operations. It
+does not receive a replacement root Store.
+
+```ts
+const cachedStore = store;
+const ref = { current: cachedStore };
+const plan = await cachedStore.planEvolution(proposal);
+const writerStore = cachedStore.withBackend(writerBackend);
+
+const provisional = await db.transaction(async (nativeTx) => {
+  const outcome = await writerStore.withEvolvedTransaction(
+    nativeTx,
+    plan,
+    async (tx) => {
+      const person = await tx.nodes.Person.create({ name: "Ada" });
+      return person.id;
+    },
+    plan.status === "change" ? { waitBudgetMs: 5000 } : undefined,
+  );
+
+  await nativeTx.insert(applicationEvents).values({
+    personId: outcome.result,
+    schemaVersion: outcome.receipt.schema.version,
+  });
+  return outcome;
+});
+
+const refreshed = await cachedStore.refreshSchema({
+  minVersion: provisional.receipt.schema.version,
+  ref,
+});
+```
+
+The callback and receipt finish before the outer SQL transaction commits.
+The receipt's schema version/hash and recorded anchor are provisional until
+that commit succeeds. A callback failure must reject the outer transaction;
+catching it and committing does not prove rollback. Callback contexts and
+queries built from them expire when the callback returns, including after a
+failure. Use `refreshSchema()` only after awaiting a successful outer commit.
+When the cached Store already matches `minVersion`, refresh returns it
+without a read; that shortcut does not check for a newer database version.
+Otherwise refresh reads the active schema, accepts a newer committed version,
+and refuses a missing or older one. It applies no extension or storage
+provisioning.
+
+The adopted apply path supports metadata-only changes, required-empty checks,
+and transactional identity and vector provisioning. Configure the adapter with
+`schemaProvisioning: "transactional"` on a privileged connection when the plan
+names new vector slots or identity work. The adapter's default DML-only policy
+refuses those requirements before the schema fence, DDL, callback, or mutation.
+The privileged path rechecks storage on the caller's fenced session, provisions
+the required relations and vector contribution markers there, and rolls them
+back with the outer transaction. Missing bootstrap tables still refuse; run
+the normal bootstrap before serving adopted evolution requests.
+The apply path uses a bounded schema fence, baseline validation, and a
+version CAS; it can issue multiple statements. `waitBudgetMs` bounds fence
+acquisition for change plans; no-op plans refuse an explicit `waitBudgetMs`.
+On timeout, roll back and retry the complete native transaction.
+Do not pass `ref` or eager-index options to `withEvolvedTransaction`; they
+cannot be honored before the outer commit and are refused.
+Generic and concurrent eager indexes remain explicit maintenance after commit:
+call `materializeIndexes()` on the refreshed Store when they are needed.
+
+When a wiring pass produces a no-op, ordinary recorded adoption is sufficient
+and never takes the exclusive evolution fence. Reconcile only if the Store is
+behind the named snapshot; matching versions make this refresh a cached read:
+
+```typescript
+if (plan.status === "noop") {
+  const current = await store.refreshSchema({ minVersion: plan.baseline.version });
+  await db.transaction((nativeTx) =>
+    current.withRecordedTransaction(nativeTx, async (tx) => {
+      await tx.nodes.Person.create({ name: "Ada" });
+    }),
+  );
+}
+```
+
 ### The `ref` pattern
 
 `Store<G>` is immutable by construction — `evolve()` returns the Store for the

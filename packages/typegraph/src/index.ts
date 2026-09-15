@@ -140,6 +140,7 @@ export type {
 export type {
   AdapterBackend,
   AdapterBackendTransactions,
+  AdoptedSchemaWriteTransaction,
   BackendCapabilities,
   BackendExecutionCapabilities,
   BackendIdentity,
@@ -216,6 +217,7 @@ export type {
   RemovalMaterializationBackend,
   SchemaCommitBackend,
   SchemaKindEmptinessProbe,
+  SchemaProvisioning,
   SchemaReadBackend,
   SchemaVersionRow,
   SchemaWriteFenceBackend,
@@ -454,6 +456,9 @@ export {
   SchemaChangedError,
   type SchemaChangedErrorDetails,
   SchemaContentConflictError,
+  type SchemaFencePhase,
+  SchemaFenceTimeoutError,
+  type SchemaFenceTimeoutErrorDetails,
   SchemaMismatchError,
   StaleVersionError,
   StoreNotInitializedError,
@@ -504,6 +509,8 @@ export type {
   ConstraintFenceViolation,
   EdgeIntrospection,
   EdgeReadWindow,
+  EvolvedTransactionOptions,
+  EvolvedTransactionOutcome,
   FulltextSearchHit,
   FulltextSearchOptions,
   GraphEdgeForKinds,
@@ -531,6 +538,7 @@ export type {
   NeighborReadOptions,
   NeighborResult,
   OntologyIntrospection,
+  PlanEvolutionOptions,
   PropertyPopulationStatistics,
   RebuildContributionOptions,
   RebuildFulltextOptions,
@@ -543,6 +551,7 @@ export type {
   ReembedFunction,
   ReembedVectorFieldOptions,
   ReembedVectorFieldResult,
+  RefreshSchemaOptions,
   SchemaIntrospection,
   SchemaManagerOptions,
   SchemaValidationResult,
@@ -551,6 +560,7 @@ export type {
   StoreAnalysisCursorStaleErrorDetails,
   StoreAnalysisSchemaCoordinate,
   StoreDescription,
+  StoreEvolution,
   StorePopulationStatistics,
   StoreTransactionOptions,
   StoreValidationFailure,
@@ -611,8 +621,13 @@ export {
 // exists at all. Also available from the "./schema" subpath alongside the
 // migration machinery.
 export type {
+  EvolutionPlan,
+  EvolutionRequirement,
+  EvolutionRequirements,
   GraphAnnotationsChange,
   IdentityChange,
+  SchemaHash,
+  SchemaIdentity,
   SerializedSchema,
 } from "./schema";
 export type { GraphTemplate, InstantiateGraphTemplateResult } from "./schema";

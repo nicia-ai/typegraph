@@ -4,7 +4,7 @@
  * Three ratchets, all comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **19** call sites — the 8 lock
+ *  1. `resolveWriteFencePlan` has exactly **20** call sites — the 8 lock
  *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
  *     ownership, J9b identity), the adopted-transaction writer-slot proof
  *     (J9c), the 3 consumers of the PostgreSQL schema fence (J14
@@ -14,7 +14,7 @@
  *     trusted-import table lock (J18), and SQLite's own schema-commit/
  *     writer fence resolution (J19, the `row`-mechanism counterpart to
  *     J14/J15), plus adopted merge writer-slot acquisition (J20) and
- *     composed merge snapshot enforcement (J21) — enumerated in both
+ *     composed merge snapshot enforcement (J21), and adopted schema fence evidence (J22) — enumerated in both
  *     directions, keyed on `(file, trimmed
  *     line)` so line drift cannot rot the pin.
  *
@@ -106,8 +106,15 @@ type InventoryEntry = Readonly<{
   reason: string;
 }>;
 
-/** The 19 `resolveWriteFencePlan` call sites (Contract J, I8). */
+/** The 20 `resolveWriteFencePlan` call sites (Contract J, I8). */
 const CALL_SITES: readonly InventoryEntry[] = [
+  {
+    file: "backend/drizzle/postgres.ts",
+    line: "const schemaFencePlan = resolveWriteFencePlan(fenceTarget);",
+    site: "J22",
+    reason:
+      "Adopted schema evolution refuses deployment-only serialization assertions before mutation and requires a real database lock or row fence.",
+  },
   {
     file: "store/recorded-capture/clock.ts",
     line: "const plan = resolveWriteFencePlan(target);",
@@ -402,13 +409,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 19 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 20 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 19 declared call sites, both directions", () => {
-    expect(found).toHaveLength(19);
-    expect(CALL_SITES).toHaveLength(19);
+  it("has exactly the 20 declared call sites, both directions", () => {
+    expect(found).toHaveLength(20);
+    expect(CALL_SITES).toHaveLength(20);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

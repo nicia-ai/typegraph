@@ -270,6 +270,7 @@ export {
 export type {
   AdapterBackend,
   AdapterBackendTransactions,
+  AdoptedSchemaWriteTransaction,
   BackendCapabilities,
   BackendCatalogProbes,
   BackendExecutionCapabilities,
@@ -415,6 +416,7 @@ export type {
   SchemaCommitBackend,
   SchemaCommitPreflightBackend,
   SchemaKindEmptinessProbe,
+  SchemaProvisioning,
   SchemaReadBackend,
   SchemaVersionRow,
   SchemaWriteFenceBackend,

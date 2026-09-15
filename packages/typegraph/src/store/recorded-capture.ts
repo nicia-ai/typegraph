@@ -12,7 +12,11 @@ import {
   executeAuthoritativeGraphCommand,
   type GraphCommandExecutionContext,
 } from "../backend/command-contract";
-import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
+import {
+  deriveBackend,
+  isBackendDerivedFrom,
+  projectGraphBackend,
+} from "../backend/derive-backend";
 import {
   type DeleteEdgesBatchParams,
   type EdgeRow,
@@ -387,6 +391,32 @@ const recordedTransactionBindings = new WeakMap<
 
 const recordedRevisionBindings = new WeakMap<object, RecordedCaptureSession>();
 
+/** Carries capture/control state through a lifetime-guarded backend decoration. */
+export function inheritRecordedTransactionBindings(
+  source: TransactionBackend,
+  derived: TransactionBackend,
+  assertScopeOpen: () => void,
+): void {
+  if (!isBackendDerivedFrom(derived, source)) {
+    throw new TypeError("Capture bindings require a derived backend.");
+  }
+  const binding = recordedTransactionBindings.get(source);
+  if (binding !== undefined) {
+    recordedTransactionBindings.set(derived, {
+      ...binding,
+      assertOpen: () => {
+        assertScopeOpen();
+        binding.assertOpen();
+      },
+    });
+    if (binding.capture !== undefined) {
+      registerRecordedGraphLockMemo(derived, binding.capture.graphLocks);
+    }
+  }
+  const session = recordedRevisionBindings.get(source);
+  if (session !== undefined) recordedRevisionBindings.set(derived, session);
+}
+
 /**
  * Runs one TypeGraph-owned savepoint without letting recorded state drift from
  * live state. A rollback restores both pending capture and the transaction's
@@ -482,6 +512,7 @@ export function hasPendingRecordedGraphWrites(
   backend: TransactionBackend,
   graphId: string,
 ): boolean {
+  recordedTransactionBindings.get(backend)?.assertOpen();
   const session = recordedRevisionBindings.get(backend);
   if (session === undefined) return false;
   const checkpoint = session.checkpoint();
@@ -498,6 +529,7 @@ export function forceRecordedGraphRevision(
   backend: TransactionBackend,
   graphId: string,
 ): boolean {
+  recordedTransactionBindings.get(backend)?.assertOpen();
   const session = recordedRevisionBindings.get(backend);
   if (session === undefined) return false;
   session.forceGraphRevision(graphId);

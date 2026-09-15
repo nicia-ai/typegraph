@@ -33,14 +33,18 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-const REASONED_FLOOR = 94;
+// Adopted identity evolution adds a Store DDL-factory handoff and a same-session
+// catalog-driven provisioning decision, both guarded before schema commit.
+const REASONED_FLOOR = 96;
 // Projection and relation toSQL() share renderQuerySql's guarded capability read
 // and invocation. Adding relation execution does not add scattered compileSql
 // accesses or raise its measured deferred ceiling of 9.
-const DEFERRED_LIVE_TOTAL = 214;
-const DEFERRED_DECLARED_TOTAL = 217;
+// Adopted vector evolution checks the root capability before fencing and
+// invokes the adopted same-session facet only when the plan owes a slot.
+const DEFERRED_LIVE_TOTAL = 216;
+const DEFERRED_DECLARED_TOTAL = 219;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 322;
+const TOTAL_ROW_COUNT = 326;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",

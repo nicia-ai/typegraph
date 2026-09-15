@@ -14,6 +14,7 @@ export type {
   NeighborResult,
 } from "./neighbors";
 export type { CheckedReadScope } from "./store";
+export type { StoreEvolution } from "./store";
 export {
   type AdapterTransactionContext,
   type BaseStoreOptions,
@@ -216,6 +217,12 @@ export type {
 export { StoreAnalysisCursorStaleError } from "./store-analysis";
 
 // Fulltext rebuild
+export type {
+  EvolvedTransactionOptions,
+  EvolvedTransactionOutcome,
+  PlanEvolutionOptions,
+  RefreshSchemaOptions,
+} from "./evolution";
 export type {
   RebuildFulltextOptions,
   RebuildFulltextResult,

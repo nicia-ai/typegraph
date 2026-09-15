@@ -633,6 +633,53 @@ its original SQL. Therefore this setting does not bound server-side prepared
 statement memory. For a high-cardinality stream of SQL text, use
 `prepareStatements: false` instead.
 
+### Adopted schema transactions
+
+`store.withEvolvedTransaction(nativeTx, plan, callback, { waitBudgetMs })`
+requires an initialized adapter Store and a live caller-owned transaction.
+Plan the extension outside that transaction with `store.planEvolution()`.
+For change plans, the default exclusive schema-fence wait budget is 5,000 ms; a `SchemaFenceTimeoutError`
+requires rollback and retry of the complete application transaction. Omit
+`waitBudgetMs` for no-op plans, which use ordinary adoption without the exclusive
+fence and refuse that option.
+
+Interactive PostgreSQL adapters validate the active session, retain the existing
+schema advisory lock → schema row → recorded-write lock order, and use
+transaction-scoped advisory locks. This lock lifetime is suitable for transaction
+poolers such as Hyperdrive. The adapter restores temporary timeout settings before
+the callback. Noninteractive HTTP drivers cannot adopt schema transactions.
+
+SQLite schema adoption requires an active transaction on the backend's exact
+native connection with an observable `inTransaction` state, as provided by
+better-sqlite3. Drivers without that evidence refuse schema adoption; ordinary
+transaction support alone does not imply support for this operation. A deferred
+SQLite transaction acquires the writer slot before validating the schema plan.
+
+Adapters default to a DML-only schema provisioning policy. Plans requiring new
+vector slots or identity work refuse before taking a mutating fence, running
+DDL, or changing schema rows. A privileged adapter configured with
+`schemaProvisioning: "transactional"` can apply those plans: it revalidates
+storage on the pinned caller session and provisions identity relations, vector
+tables, and durable contribution markers inside that same transaction. The
+caller must roll back the entire native transaction if any step fails.
+
+```typescript
+const backend = createPostgresBackend(db, {
+  schemaProvisioning: "transactional",
+});
+```
+
+Use a connection with permission to run the required DDL for this adapter;
+keep the default policy for a runtime role limited to DML.
+Bootstrap base storage before this request path; missing bootstrap tables
+refuse rather than being created lazily. Database permissions still determine
+whether transactional DDL succeeds. Generic eager index materialization,
+including concurrent PostgreSQL indexes, remains an explicit post-commit
+operation on the refreshed Store.
+Custom adapters must implement `adoptSchemaWriteTransaction` with the same
+session-bound fencing, finite-wait, and CAS guarantees to support change plans.
+See [Graph Extensions](/graph-extensions) for callback and receipt usage.
+
 ### Authoritative command sessions
 
 Store create paths use the backend's `commands` port for writes whose

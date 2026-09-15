@@ -39,6 +39,10 @@ export type { EngineAssembly } from "./assembly";
  * construct one.
  */
 export type { BackendResourceAudit } from "../../transaction-resource";
+export type {
+  AdoptedSchemaWriteTransaction,
+  SchemaProvisioning,
+} from "../../types";
 /**
  * The resolved write-fence plan and its mechanism-neutral statement bag —
  * public here because `CreateGraphTemplateMembersDeps.fencePlan` (the
