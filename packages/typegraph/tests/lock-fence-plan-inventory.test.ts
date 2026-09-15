@@ -4,7 +4,7 @@
  * Three ratchets, all comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **17** call sites — the 8 lock
+ *  1. `resolveWriteFencePlan` has exactly **19** call sites — the 8 lock
  *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
  *     ownership, J9b identity), the adopted-transaction writer-slot proof
  *     (J9c), the 3 consumers of the PostgreSQL schema fence (J14
@@ -13,7 +13,9 @@
  *     factory's own resolution (J17, `createSqlBackend`), the
  *     trusted-import table lock (J18), and SQLite's own schema-commit/
  *     writer fence resolution (J19, the `row`-mechanism counterpart to
- *     J14/J15) — enumerated in both directions, keyed on `(file, trimmed
+ *     J14/J15), plus adopted merge writer-slot acquisition (J20) and
+ *     composed merge snapshot enforcement (J21) — enumerated in both
+ *     directions, keyed on `(file, trimmed
  *     line)` so line drift cannot rot the pin.
  *
  *     J18 is not one of J1-J8: those eight sites are the ones that used to
@@ -104,7 +106,7 @@ type InventoryEntry = Readonly<{
   reason: string;
 }>;
 
-/** The 17 `resolveWriteFencePlan` call sites (Contract J, I8). */
+/** The 19 `resolveWriteFencePlan` call sites (Contract J, I8). */
 const CALL_SITES: readonly InventoryEntry[] = [
   {
     file: "store/recorded-capture/clock.ts",
@@ -224,6 +226,20 @@ const CALL_SITES: readonly InventoryEntry[] = [
     site: "J19",
     reason:
       "lockSchemaVersionForWrite resolves the plan for SQLite's schema-commit/writer fence — the SQLite counterpart to J14/J15's PostgreSQL FOR UPDATE/FOR SHARE pair. Under mechanism: \"row\" the fence row is taken as a preceding statement in the same transaction before the plain schema-version read, giving a concurrent schema commit and this write the row to contend on.",
+  },
+  {
+    file: "graph-merge/adopted-transaction.ts",
+    line: 'if (resolveWriteFencePlan(txBackend).kind !== "engine-serialized") return;',
+    site: "J20",
+    reason:
+      "Adopted merge application acquires the engine writer slot before plan decision reads, using the same writer-slot helper as constrained writes.",
+  },
+  {
+    file: "graph-merge/write-fence.ts",
+    line: 'resolveWriteFencePlan(txBackend).kind !== "engine-serialized"',
+    site: "J21",
+    reason:
+      "Composed merge application requires observed read-committed isolation unless the resolved plan proves engine serialization; missing coordination evidence is refused.",
   },
 ];
 
@@ -386,13 +402,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 17 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 19 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 17 declared call sites, both directions", () => {
-    expect(found).toHaveLength(17);
-    expect(CALL_SITES).toHaveLength(17);
+  it("has exactly the 19 declared call sites, both directions", () => {
+    expect(found).toHaveLength(19);
+    expect(CALL_SITES).toHaveLength(19);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

@@ -360,7 +360,12 @@ import {
   type RecordedReadService,
 } from "./recorded-read-service";
 import { rowToEdge, rowToNode } from "./row-mappers";
-import { STORE_RUNTIME, type StoreRuntime } from "./runtime-port";
+import {
+  bindTransactionStore,
+  runInTransactionContext,
+  STORE_RUNTIME,
+  type StoreRuntime,
+} from "./runtime-port";
 import { StoreSearch } from "./search-facade";
 import {
   describeStore,
@@ -3903,7 +3908,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             );
           }
           const invokeTransaction = (): Promise<T> =>
-            invoke(
+            runInTransactionContext(
               this.#buildTransactionContext(
                 writeTarget,
                 nativeTransaction,
@@ -3913,6 +3918,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 frame.attempt,
                 backendOptions.accessMode !== "read_only",
               ),
+              invoke,
             );
           const invokeWithSchemaFenceLease = (): Promise<T> =>
             this.#adapterBackend === undefined ?
@@ -4260,13 +4266,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
-    const result = await invoke(
+    const result = await runInTransactionContext(
       this.#buildTransactionContext(
         writeTarget,
         externalTx,
         undefined,
         receiptRecorder,
       ),
+      invoke,
     );
     // Flush allocates the recorded commit instant for this transaction's graph
     // under TypeGraph-owned capture; under engine-native it is
@@ -4543,6 +4550,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       enumerable: false,
       writable: false,
     });
+
+    bindTransactionStore(withSql, this);
 
     // Scoped write measurement (`tx.measure`) is only meaningful with a recorder
     // to scope; the plain `transaction()` path stays free of a `measure` the

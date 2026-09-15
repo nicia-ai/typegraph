@@ -468,6 +468,31 @@ export async function runRecordedTransactionSavepoint<T>(
   return result.value;
 }
 
+/** Internal fence/control statements bypass row capture but retain its lifetime guard. */
+export function recordedTransactionControlTarget(
+  backend: TransactionBackend,
+): TransactionBackend {
+  const binding = recordedTransactionBindings.get(backend);
+  binding?.assertOpen();
+  return binding?.target ?? backend;
+}
+
+/** Pending capture is not yet visible in the durable revision clock. */
+export function hasPendingRecordedGraphWrites(
+  backend: TransactionBackend,
+  graphId: string,
+): boolean {
+  const session = recordedRevisionBindings.get(backend);
+  if (session === undefined) return false;
+  const checkpoint = session.checkpoint();
+  return (
+    checkpoint.forcedGraphRevisions.has(graphId) ||
+    [...checkpoint.touched.values()].some(
+      (entity) => entity.graphId === graphId,
+    )
+  );
+}
+
 /** Forces one revision allocation when this capture transaction flushes. */
 export function forceRecordedGraphRevision(
   backend: TransactionBackend,

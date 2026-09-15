@@ -76,6 +76,7 @@ export type {
 export { ingestionBranch } from "./ingestion-branch";
 export {
   applyMergePlan,
+  applyMergePlanInTransaction,
   merge,
   mergeIncremental,
   planMerge,

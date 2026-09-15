@@ -144,7 +144,12 @@ changes. The target must have `revisionTracking: true` or `history: true` so the
 plan can carry a durable, store-specific revision fence.
 
 ```typescript
-import { applyMergePlan, isOk, planMerge } from "@nicia-ai/typegraph/graph-merge";
+import {
+  applyMergePlan,
+  applyMergePlanInTransaction,
+  isOk,
+  planMerge,
+} from "@nicia-ai/typegraph/graph-merge";
 
 const planned = await planMerge(base, [sourceA, sourceB], {
   resolve: {
@@ -180,6 +185,57 @@ The envelope is deliberately explicit: `formatVersion` selects the wire schema;
 what was observed; `proposed` summarizes the review; `writes` is the complete
 mechanical write set; and `review` holds the conflicts, resolutions, evidence,
 diagnostics, warnings, and other report material known before apply.
+
+### Apply a plan with application writes
+
+Use `applyMergePlanInTransaction(target, tx, artifact)` when the merge, a graph
+receipt or anchor, and application SQL must share one caller-owned commit. Build
+`tx` by passing the native transaction to the **same target Store's**
+`withRecordedTransaction()` callback. Apply the plan before any other write to
+the target graph in that transaction; after it returns, the callback may make
+more graph writes and the caller may run more SQL on the native handle.
+
+```typescript
+await db.transaction(async (nativeTx) => {
+  const { result: report, receipt } = await target.withRecordedTransaction(
+    nativeTx,
+    async (tx) => {
+      const applied = await applyMergePlanInTransaction(target, tx, reviewed);
+      await tx.nodes.MergeReceipt.create({
+        planDigest: reviewed.digest.value,
+        mergedNodes: applied.merged.nodes,
+      });
+      return applied;
+    },
+  );
+
+  await nativeTx.insert(mergeRuns).values({
+    planDigest: reviewed.digest.value,
+    recordedAt: receipt.recorded,
+    mergedNodes: report.merged.nodes,
+  });
+}); // await this outer commit before reporting success
+```
+
+The adopted applier returns `Promise<MergeReport>` and throws a typed
+`MergeError` on refusal or failure. It does not open, commit, roll back, or retry
+a transaction. Let the exception reject the outer callback so all merge and
+application writes roll back together. Never catch it inside the transaction
+and then commit. When the driver reports a retryable transaction failure, retry
+the entire outer transaction, including the application writes; do not add an
+inner retry or nested transaction around the merge.
+
+PostgreSQL requires the transaction's observed isolation to be `READ COMMITTED`.
+SQLite acquires its serialized writer slot before checking the plan fence. The
+plan must explicitly have `persistProvenance: false`: atomic sidecar provenance
+persistence is refused on this path. `includeInReport` remains supported, so
+the returned report can still contain the in-memory provenance index.
+
+On a history store, `receipt.recorded` is allocated after the
+`withRecordedTransaction()` capture callback returns. The caller can persist
+that anchor with application SQL on `nativeTx` before the outer commit, as the
+example above does. Await the outer commit before treating the report or receipt
+as durable.
 
 The plan's `proposed` summary describes **proposed changes**. It deliberately
 does not call them “merged”: `MergeReport.merged` is reserved for the actual
@@ -1713,8 +1769,10 @@ const result = await merge(base, [agentB, systemOfRecord, agentA], {
 
 ## Errors
 
-All entry points return a `Result`; the error arm is a typed `TypeGraphError`
-subclass you can branch on:
+Most entry points return a `Result`; the error arm is a typed `TypeGraphError`
+subclass you can branch on. `applyMergePlanInTransaction()` instead throws a
+typed `MergeError` so a caller-owned transaction callback cannot resolve and
+commit after a partially applied failure:
 
 | Error                        | When                                                                                                                                                                                                                                                                          |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

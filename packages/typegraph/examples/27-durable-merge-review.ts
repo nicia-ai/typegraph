@@ -9,13 +9,17 @@
  *   node --import tsx examples/27-durable-merge-review.ts
  */
 import {
-  createStoreWithSchema,
+  createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
 import {
+  createLocalSqliteBackend,
+} from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
+import {
   applyMergePlan,
+  applyMergePlanInTransaction,
   captureCandidateWriteSetTarget,
   isErr,
   planCandidateWriteSetReview,
@@ -23,6 +27,7 @@ import {
   StaleMergePlanError,
   unwrap,
 } from "@nicia-ai/typegraph/graph-merge";
+import { sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { createExampleBackend } from "./_helpers";
@@ -69,9 +74,9 @@ function makeBackend(): Promise<ReturnType<typeof createExampleBackend>> {
 }
 
 export async function main(): Promise<void> {
-  const backend = createExampleBackend();
+  const { backend, db } = createLocalSqliteBackend();
   try {
-    const [store] = await createStoreWithSchema(graph, backend, {
+    const [store] = await createAdapterStoreWithSchema(graph, backend, {
       history: true,
     });
     const proposal = await store.nodes.Item.create(
@@ -151,29 +156,71 @@ export async function main(): Promise<void> {
       throw new Error("Approval does not identify the validated review");
     }
 
-    // Do not persist this ephemeral plan or any new target record before apply.
-    // A concurrent write still produces StaleMergePlanError; constraints also
-    // remain enforced. Compatibility itself is never authorization.
-    const report = unwrap(await applyMergePlan(store, checked.plan));
+    // Do not persist this ephemeral plan or write the target graph before apply.
+    // The adopted applier throws on failure so the caller-owned transaction
+    // cannot accidentally commit a partial merge. The plan must have
+    // persistProvenance: false; report-only provenance remains available.
+    db.run(
+      sql`
+        CREATE TABLE application_merge_receipts (
+                review_digest TEXT NOT NULL,
+                recorded_at TEXT NOT NULL
+              )
+      `,
+    );
+    db.run(sql`BEGIN`);
+    try {
+      const { result: report, receipt } = await store.withRecordedTransaction(
+        db,
+        async (tx) => {
+          // Apply first: the plan fence must be checked before any other write
+          // to this target graph in the caller-owned transaction.
+          const applied = await applyMergePlanInTransaction(
+            store,
+            tx,
+            checked.plan,
+          );
+
+          // Additional graph writes may follow the apply. They share its one
+          // history capture and the caller's outer transaction.
+          await tx.nodes.Artifact.create({
+            content: JSON.stringify({
+              reviewDigest: checked.reviewDigest,
+              approvalId: approval.id,
+              executionPlanDigest: checked.plan.digest,
+              executionTarget: checked.plan.target,
+              report: applied,
+            }),
+          });
+          return applied;
+        },
+      );
+      if (receipt.recorded === undefined) {
+        throw new Error("Expected the merge transaction to allocate history");
+      }
+
+      // The receipt is allocated after the capture callback. Application SQL
+      // can persist it on the same native transaction before the outer COMMIT.
+      db.run(
+        sql`
+          INSERT INTO application_merge_receipts
+                    (review_digest, recorded_at)
+                    VALUES (${checked.reviewDigest.value}, ${receipt.recorded})
+        `,
+      );
+      db.run(sql`COMMIT`);
+      console.log(
+        `Applied ${report.merged.nodes} node change and recorded its receipt atomically.`,
+      );
+    } catch (error) {
+      db.run(sql`ROLLBACK`);
+      throw error;
+    }
     const accepted = await store.nodes.Item.getById(proposal.id);
     if (accepted?.status !== "accepted") {
       throw new Error("Expected the reviewed change to be committed");
     }
     console.log("Applied the approved change after same-graph audit writes.");
-
-    // Receipt persistence is a SEPARATE commit. If it fails, the merge remains
-    // committed. Reconcile history and application operation identity before
-    // repairing a missing receipt; never infer that the candidate can be retried.
-    await store.nodes.Artifact.create({
-      content: JSON.stringify({
-        reviewDigest: checked.reviewDigest,
-        approvalId: approval.id,
-        executionPlanDigest: checked.plan.digest,
-        executionTarget: checked.plan.target,
-        report,
-      }),
-    });
-    console.log("Recorded the review-to-execution receipt after apply.");
   } finally {
     await backend.close();
   }

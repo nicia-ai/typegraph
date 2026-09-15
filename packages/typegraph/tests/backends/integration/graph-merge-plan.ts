@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { asNodeId, defineGraph, defineNode, type Store } from "../../../src";
+import {
+  asNodeId,
+  createAdapterStoreWithSchema,
+  defineGraph,
+  defineNode,
+  type Store,
+} from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
+import { applyMergePlanInTransaction } from "../../../src/graph-merge";
 import { branch } from "../../../src/graph-merge/branch";
+import {
+  MergePlanCapabilityError,
+  StaleMergePlanError,
+} from "../../../src/graph-merge/errors";
 import { applyMergePlan, planMerge } from "../../../src/graph-merge/merge";
 import { constructMergePlanArtifact } from "../../../src/graph-merge/plan-wire";
 import { isErr, isOk, unwrap } from "../../../src/graph-merge/result";
@@ -119,6 +131,362 @@ export function registerGraphMergePlanIntegrationTests(
 
       expect(isErr(await applyMergePlan(base, malformed))).toBe(true);
       expect(await base.nodes.Person.getById(asNodeId("ada"))).toBeUndefined();
+    });
+
+    it("applies in a caller-owned transaction and records the merge at its receipt revision", async () => {
+      const backend = context.getBackend();
+      let nestedTransactions = 0;
+      const guardedBackend = deriveBackend(backend, {
+        transaction: (fn, options) => {
+          nestedTransactions += 1;
+          return backend.transaction(fn, options);
+        },
+      });
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        guardedBackend,
+        { history: true, revisionTracking: true },
+      );
+      const source = await makeBranch(context, target, "adopted-success");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+      nestedTransactions = 0;
+
+      const outcome = await backend.transactionWithNative(
+        async (_txBackend, nativeTransaction) =>
+          target.withRecordedTransaction(nativeTransaction, async (tx) =>
+            applyMergePlanInTransaction(target, tx, artifact),
+          ),
+      );
+
+      expect(outcome.receipt.writes.nodes).toEqual({ Person: 1 });
+      expect(outcome.receipt.writes.total).toBe(1);
+      expect(nestedTransactions).toBe(0);
+      expect(outcome.receipt.recorded).toBeDefined();
+      if (outcome.receipt.recorded === undefined)
+        throw new Error(
+          "Expected adopted merge to allocate a recorded revision.",
+        );
+      await expect(
+        target
+          .asOfRecorded(outcome.receipt.recorded)
+          .nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toMatchObject({ name: "Ada" });
+    });
+
+    it("rolls back merge and caller writes with the caller-owned transaction", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { history: true, revisionTracking: true },
+      );
+      const source = await makeBranch(context, target, "adopted-rollback");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+      const rollback = new Error("caller rollback");
+
+      await expect(
+        context
+          .getBackend()
+          .transactionWithNative(async (_txBackend, nativeTransaction) => {
+            await target.withRecordedTransaction(
+              nativeTransaction,
+              async (tx) => {
+                await applyMergePlanInTransaction(target, tx, artifact);
+                await tx.nodes.Person.create(
+                  { name: "Application", email: "app@example.test" },
+                  { id: "application" },
+                );
+              },
+            );
+            throw rollback;
+          }),
+      ).rejects.toBe(rollback);
+
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeUndefined();
+      await expect(
+        target.nodes.Person.getById(asNodeId("application")),
+      ).resolves.toBeUndefined();
+      await expect(target.recordedNow()).resolves.toBeUndefined();
+    });
+
+    it("refuses a merge after a target graph write in the adopted transaction", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { history: true, revisionTracking: true },
+      );
+      const source = await makeBranch(context, target, "adopted-pristine");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+
+      await context
+        .getBackend()
+        .transactionWithNative(async (_txBackend, nativeTransaction) => {
+          const outcome = await target.withRecordedTransaction(
+            nativeTransaction,
+            async (tx) => {
+              await tx.nodes.Person.create(
+                { name: "Application", email: "app@example.test" },
+                { id: "application" },
+              );
+              await expect(
+                applyMergePlanInTransaction(target, tx, artifact),
+              ).rejects.toMatchObject({
+                name: "MergePlanCapabilityError",
+                details: { capability: "mergeTransactionPristine" },
+              });
+            },
+          );
+          expect(outcome.receipt.writes.total).toBe(1);
+        });
+
+      await expect(
+        target.nodes.Person.getById(asNodeId("application")),
+      ).resolves.toBeDefined();
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeUndefined();
+    });
+
+    it("refuses a stale plan inside an otherwise pristine adopted transaction", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { history: true, revisionTracking: true },
+      );
+      const source = await makeBranch(context, target, "adopted-stale");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+      await target.nodes.Person.create(
+        { name: "Concurrent", email: "concurrent@example.test" },
+        { id: "concurrent" },
+      );
+
+      await context
+        .getBackend()
+        .transactionWithNative(async (_txBackend, nativeTransaction) => {
+          await target.withRecordedTransaction(
+            nativeTransaction,
+            async (tx) => {
+              await expect(
+                applyMergePlanInTransaction(target, tx, artifact),
+              ).rejects.toBeInstanceOf(StaleMergePlanError);
+            },
+          );
+        });
+
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeUndefined();
+    });
+
+    it("refuses a transaction context bound to a different target store", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { history: true, revisionTracking: true },
+      );
+      const [otherTarget] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { history: true, revisionTracking: true },
+      );
+      const source = await makeBranch(context, target, "adopted-owner");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+
+      await context
+        .getBackend()
+        .transactionWithNative(async (_txBackend, nativeTransaction) => {
+          await otherTarget.withRecordedTransaction(
+            nativeTransaction,
+            async (tx) => {
+              await expect(
+                applyMergePlanInTransaction(target, tx, artifact),
+              ).rejects.toBeInstanceOf(MergePlanCapabilityError);
+            },
+          );
+        });
+
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeUndefined();
+    });
+
+    it("refuses persisted provenance before writing in an adopted transaction", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { history: true, revisionTracking: true },
+      );
+      const source = await makeBranch(context, target, "adopted-provenance");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(
+        await planMerge(target, [source], { persistProvenance: true }),
+      );
+
+      await context
+        .getBackend()
+        .transactionWithNative(async (_txBackend, nativeTransaction) => {
+          await target.withRecordedTransaction(
+            nativeTransaction,
+            async (tx) => {
+              await expect(
+                applyMergePlanInTransaction(target, tx, artifact),
+              ).rejects.toBeInstanceOf(MergePlanCapabilityError);
+            },
+          );
+        });
+
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeUndefined();
+      await expect(target.recordedNow()).resolves.toBeUndefined();
+    });
+
+    it("refuses a retained adopted context after capture has sealed it", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { history: true, revisionTracking: true },
+      );
+      const source = await makeBranch(context, target, "adopted-sealed");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+
+      await context
+        .getBackend()
+        .transactionWithNative(async (_txBackend, nativeTransaction) => {
+          const { result: applyAfterReturn } =
+            await target.withRecordedTransaction(nativeTransaction, (tx) =>
+              Promise.resolve(() =>
+                applyMergePlanInTransaction(target, tx, artifact),
+              ),
+            );
+          await expect(applyAfterReturn()).rejects.toMatchObject({
+            name: "MergePlanCapabilityError",
+            details: { capability: "mergeTransactionStore" },
+          });
+        });
+
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeUndefined();
+      await expect(target.recordedNow()).resolves.toBeUndefined();
+    });
+
+    it("refuses a retained non-history recorded transaction context", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { revisionTracking: true },
+      );
+      const source = await makeBranch(
+        context,
+        target,
+        "adopted-non-history-retained",
+      );
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+
+      await context
+        .getBackend()
+        .transactionWithNative(async (_txBackend, nativeTransaction) => {
+          const { result: applyAfterReturn } =
+            await target.withRecordedTransaction(nativeTransaction, (tx) =>
+              Promise.resolve(() =>
+                applyMergePlanInTransaction(target, tx, artifact),
+              ),
+            );
+          await expect(applyAfterReturn()).rejects.toMatchObject({
+            name: "MergePlanCapabilityError",
+            details: { capability: "mergeTransactionStore" },
+          });
+        });
+
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeUndefined();
+    });
+
+    it("refuses an unscoped withTransaction context", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { revisionTracking: true },
+      );
+      const source = await makeBranch(context, target, "adopted-unscoped");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+
+      await context
+        .getBackend()
+        .transactionWithNative(async (_txBackend, nativeTransaction) => {
+          const tx = target.withTransaction(nativeTransaction);
+          await expect(
+            applyMergePlanInTransaction(target, tx, artifact),
+          ).rejects.toMatchObject({
+            name: "MergePlanCapabilityError",
+            details: { capability: "mergeTransactionStore" },
+          });
+        });
+
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeUndefined();
+    });
+
+    it("accepts an active store-managed transaction callback", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+        { revisionTracking: true },
+      );
+      const source = await makeBranch(context, target, "managed-active");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+
+      const report = await target.transaction((tx) =>
+        applyMergePlanInTransaction(target, tx, artifact),
+      );
+
+      expect(report.merged.nodes).toBe(1);
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeDefined();
     });
   });
 }
