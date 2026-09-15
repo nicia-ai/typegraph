@@ -2423,6 +2423,12 @@ factories that resolve it. The batteries-included wrappers
 (`createLibsqlBackend`, `createLocalSqliteBackend`, `createLocalPgliteBackend`)
 do not take it, because each already detects its own connection.
 
+`{ mode: "shared", resource: pool }` is incorrect for a `pg.Pool` that can open
+multiple connections, even if several backends use that pool. Each transaction
+checks out its own connection; marking the pool as one resource makes independent
+snapshot exports and imports contend for a single lease and refuses concurrent
+operations that the pool can run. Leave the declaration absent for such a pool.
+
 ```typescript
 const sql = postgres(process.env.DATABASE_URL + "?max=5");
 
