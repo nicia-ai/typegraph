@@ -103,6 +103,11 @@ Because `coveringFields` become index keys, they:
 
 :::
 
+Field ordering emits the database's native `NULLS FIRST` / `NULLS LAST` suffix. This keeps the
+primary sort expression aligned with a matching B-tree expression index. PostgreSQL and SQLite
+still choose plans from their statistics and the full query shape, so confirm important queries
+with `EXPLAIN`; an applicable index does not guarantee that every data distribution will use it.
+
 ### Nested JSON Paths
 
 For top-level properties, use the field name:

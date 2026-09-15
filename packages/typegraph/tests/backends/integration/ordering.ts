@@ -85,6 +85,37 @@ export function registerOrderingIntegrationTests(
       ]);
     });
 
+    it("honors explicit null placement in either direction", async () => {
+      const store = context.getStore();
+      const people = store
+        .query()
+        .from("Person", "p")
+        .project((ctx) => ({ name: ctx.p.name, age: ctx.p.age }))
+        .asRelation();
+
+      const ascendingNullsFirst = await people
+        .orderBy((columns) => columns.age, "asc", "first")
+        .execute();
+      const descendingNullsLast = await people
+        .orderBy((columns) => columns.age, "desc", "last")
+        .execute();
+
+      expect(ascendingNullsFirst.map((result) => result.age)).toEqual([
+        undefined,
+        undefined,
+        25,
+        30,
+        35,
+      ]);
+      expect(descendingNullsLast.map((result) => result.age)).toEqual([
+        35,
+        30,
+        25,
+        undefined,
+        undefined,
+      ]);
+    });
+
     it("orders by multiple fields", async () => {
       const store = context.getStore();
       // Add people with same age

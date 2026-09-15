@@ -655,8 +655,8 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
-      expect(sql).toContain("IS NULL) DESC");
-      expect(sql).toContain(" ASC");
+      expect(sql).toContain(" ASC NULLS FIRST");
+      expect(sql).not.toContain("ORDER BY (json_extract");
     });
 
     it("compiles NULLS LAST", () => {
@@ -666,8 +666,8 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
-      expect(sql).toContain("IS NULL) ASC");
-      expect(sql).toContain(" DESC");
+      expect(sql).toContain(" DESC NULLS LAST");
+      expect(sql).not.toContain("ORDER BY (json_extract");
     });
 
     it("compiles multiple order specifications", () => {

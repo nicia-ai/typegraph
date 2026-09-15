@@ -681,6 +681,12 @@ describe("store.batchOnce()", () => {
     expect(companies).toHaveLength(1);
     expect(requireDefined(companies[0]).name).toBe("Acme");
     expect(starts).toHaveLength(1);
+    expect(requireDefined(starts[0])).toContain(
+      'ROW_NUMBER() OVER (ORDER BY "typegraph_batch_source_0"."typegraphbatchorder0" DESC NULLS FIRST)',
+    );
+    expect(requireDefined(starts[0])).not.toContain(
+      '"typegraphbatchorder0" IS NULL',
+    );
   });
 
   it("preserves each member's supported temporal coordinate", async () => {

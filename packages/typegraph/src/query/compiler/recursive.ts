@@ -15,7 +15,7 @@ import {
   type DialectRecursiveQueryStrategy,
 } from "../dialect";
 import type { DatabaseExpression } from "../expressions";
-import { resolveNullOrdering } from "../order";
+import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { compileDatabaseExpression } from "./database-expressions";
 import { emitRecursiveQuerySql } from "./emitter";
@@ -1185,14 +1185,8 @@ export function compileRecursiveOrderBy(
           resultAlias,
           valueType,
         );
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
     const nulls = resolveNullOrdering(orderSpec);
-    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
-
-    parts.push(
-      sql`(${field} IS NULL) ${nullsDirection}`,
-      sql`${field} ${direction}`,
-    );
+    parts.push(compileOrderTerm(field, orderSpec.direction, nulls));
   }
 
   return sql`ORDER BY ${sql.join(parts, sql`, `)}`;

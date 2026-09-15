@@ -2,6 +2,7 @@ import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import { getDialect } from "../dialect";
+import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledRowsSql } from "../sql-intent";
 import { groupOneStatementBatchItems } from "./one-statement-sharing";
@@ -37,14 +38,9 @@ function buildOrdinalOrder(
 ): SqlFragment {
   if (orderBy.length === 0) return sql.empty();
   const row = sql.identifier(rowAlias);
-  const terms = orderBy.flatMap((order) => {
+  const terms = orderBy.map((order) => {
     const column = sql`${row}.${sql.identifier(order.column)}`;
-    const nullDirection =
-      order.nulls === "first" ? sql.raw("DESC") : sql.raw("ASC");
-    return [
-      sql`(${column} IS NULL) ${nullDirection}`,
-      sql`${column} ${sql.raw(order.direction.toUpperCase())}`,
-    ];
+    return compileOrderTerm(column, order.direction, order.nulls);
   });
   return sql`ORDER BY ${sql.join(terms, sql`, `)}`;
 }

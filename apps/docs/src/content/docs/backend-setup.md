@@ -1444,7 +1444,8 @@ verified that your engine supports aggregate-local ordering, declare
 `capabilities: { orderedAggregates: true }` in the bundled backend options. Older or unsupported
 engines must retain `false`; collection queries are refused before execution.
 
-SQLite introduced aggregate-local ordering in [version 3.44](https://www.sqlite.org/releaselog/3_44_0.html).
+SQLite introduced `NULLS FIRST` / `NULLS LAST` ordering in version 3.30 and aggregate-local ordering
+in [version 3.44](https://www.sqlite.org/releaselog/3_44_0.html).
 The scalar collection representation avoids depending on JSON object subtype preservation during
 sorting. Existing reads continue to work when ordered aggregates are unavailable.
 

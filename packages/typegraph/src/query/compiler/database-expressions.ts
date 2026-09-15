@@ -13,6 +13,7 @@ import {
   resolveCollectFilter,
   resolveCollectOrder,
 } from "../expressions";
+import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { isAggregateExpression } from "./expression-inspection";
 import { compileFieldValue } from "./predicates";
@@ -204,11 +205,11 @@ function compileNode(
       assertPortableScalarValueType(node.operand.valueType, "COLLECT");
       const ordering = resolveCollectOrder(node.orderBy).map((order) => {
         const { direction, nulls } = order;
-        const directionSql =
-          direction === "asc" ? sql.raw("ASC") : sql.raw("DESC");
-        const nullsSql =
-          nulls === "first" ? sql.raw("NULLS FIRST") : sql.raw("NULLS LAST");
-        return sql`${compileNode(order.expression, context, aggregateDepth + 1)} ${directionSql} ${nullsSql}`;
+        return compileOrderTerm(
+          compileNode(order.expression, context, aggregateDepth + 1),
+          direction,
+          nulls,
+        );
       });
       const filter = resolveCollectFilter(node.filter);
       return context.dialect.orderedScalarJsonArray({

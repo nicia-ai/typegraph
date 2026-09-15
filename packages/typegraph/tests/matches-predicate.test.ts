@@ -26,6 +26,7 @@ import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy"
 import { type FulltextAccessor } from "../src/query/predicates";
 import { buildKindRegistry } from "../src/registry";
 import type { Store } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 import { createInitializedStore, createTestBackend } from "./test-utils";
 
@@ -683,13 +684,29 @@ describe(".matches() with polymorphic alias", () => {
     // The outer ORDER BY contains the fused RRF expression FOLLOWED BY
     // the user's `rank` orderBy as a tiebreaker (json-path extraction).
     expect(sqlText).toMatch(
-      /ORDER BY.*cte_embeddings\.ord.*cte_fulltext\.ord.*ARRAY\['rank'\].*DESC/,
+      /ORDER BY.*cte_embeddings\.ord.*cte_fulltext\.ord.*ARRAY\['rank'\].*DESC NULLS FIRST/,
     );
+    expect(sqlText).not.toMatch(/ARRAY\['rank'\].*IS NULL/);
     // The fulltext CTE's inner LIMIT must break rank ties by node_id so
     // the top-k cutoff matches the backend's fulltextSearch (rank DESC, node_id ASC).
     expect(sqlText).toMatch(
       /ORDER BY rank DESC,\s+"typegraph_node_fulltext"\."node_id" ASC\s+LIMIT/,
     );
+
+    const malformedAst = {
+      ...ast,
+      orderBy: requireDefined(ast.orderBy).map((orderSpec) => ({
+        ...orderSpec,
+        direction: "desc; SELECT 1" as "desc",
+      })),
+    };
+    expect(() =>
+      compileQuery(
+        malformedAst,
+        HybridGraph.id,
+        pgVectorCompileOptions([["HybridDoc", "embedding"]]),
+      ),
+    ).toThrow(/Invalid ORDER BY direction/);
   });
 
   it("hybrid SQL preserves single-source candidates before RRF ordering", () => {

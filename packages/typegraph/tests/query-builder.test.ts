@@ -45,9 +45,12 @@ import {
   compileSetOperation,
   MAX_EXPLICIT_RECURSIVE_DEPTH,
 } from "../src/query/compiler";
+import { buildLateMaterializedOuterOrderBy } from "../src/query/compiler/emitter/standard-builders";
+import { compileOrderTerm } from "../src/query/order";
+import { sql as querySql } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry";
 import { requireDefined } from "../src/utils/presence";
-import { toSqlWithParams } from "./sql-test-utils";
+import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({
@@ -111,6 +114,39 @@ const graph = defineGraph({
 });
 
 const registry = buildKindRegistry(graph);
+
+describe("ORDER BY SQL tokens", () => {
+  it("refuses malformed runtime direction and null-placement values", () => {
+    expect(() =>
+      compileOrderTerm(
+        querySql.raw("safe_column"),
+        "asc; SELECT 1" as "asc",
+        "last",
+      ),
+    ).toThrow(/Invalid ORDER BY direction/);
+    expect(() =>
+      compileOrderTerm(
+        querySql.raw("safe_column"),
+        "asc",
+        "last; SELECT 1" as "last",
+      ),
+    ).toThrow(/Invalid ORDER BY null placement/);
+    expect(() =>
+      compileOrderTerm(
+        querySql.raw("safe_column"),
+        "constructor" as "asc",
+        "last",
+      ),
+    ).toThrow(/Invalid ORDER BY direction/);
+    expect(() =>
+      compileOrderTerm(
+        querySql.raw("safe_column"),
+        "asc",
+        "__proto__" as "last",
+      ),
+    ).toThrow(/Invalid ORDER BY null placement/);
+  });
+});
 
 describe("Query Builder Basics", () => {
   it("creates a simple query for a single node kind", () => {
@@ -361,7 +397,8 @@ describe("Query Builder Basics", () => {
       const { sql } = toSqlWithParams(
         compileQuery(query.toAst(), graph.id, "sqlite"),
       );
-      expect(sql).toContain("ORDER BY (json_extract");
+      expect(sql).toContain("ORDER BY json_extract");
+      expect(sql).toContain("ASC NULLS LAST");
       expect(sql).toContain("p_props");
       expect(sql).toContain("created_at");
     }
@@ -421,7 +458,8 @@ describe("Query Builder - Traversals", () => {
       compileQuery(query.toAst(), graph.id, "sqlite"),
     );
 
-    expect(sql).toContain("ORDER BY (json_extract");
+    expect(sql).toContain("ORDER BY json_extract");
+    expect(sql).toContain("ASC NULLS LAST");
     expect(sql).toContain("e_props");
     expect(sql).toContain("created_at");
   });
@@ -694,9 +732,31 @@ describe("Query Compilation to SQL", () => {
     );
     expect(sql).toContain('cte_friend."__tg_6:friend:4:name" AS "friend_name"');
     expect(sql).toContain(
-      'ORDER BY (cte_friend."__tg_6:friend:4:name" IS NULL)',
+      'ORDER BY cte_friend."__tg_6:friend:4:name" DESC NULLS FIRST',
     );
+    expect(sql).not.toContain('"__tg_6:friend:4:name" IS NULL');
     expect(sql).not.toContain("friend_props");
+
+    const outerOrderBy = buildLateMaterializedOuterOrderBy(selectiveAst);
+    expect(outerOrderBy).toBeDefined();
+    const outerOrderSql = toSqlString(requireDefined(outerOrderBy));
+    expect(outerOrderSql).toBe(
+      "ORDER BY cte_lm_topk.__lm_sk0 DESC NULLS FIRST, cte_lm_topk.__lm_sk1 DESC NULLS FIRST",
+    );
+    expect(outerOrderSql).not.toContain("IS NULL");
+
+    const malformedAst = {
+      ...selectiveAst,
+      orderBy: requireDefined(selectiveAst.orderBy).map((orderSpec, index) =>
+        index === 0 ?
+          { ...orderSpec, direction: "desc; SELECT 1" as "desc" }
+        : orderSpec,
+      ),
+    };
+    expect(() => {
+      const orderBy = buildLateMaterializedOuterOrderBy(malformedAst);
+      if (orderBy !== undefined) toSqlString(orderBy);
+    }).toThrow(/Invalid ORDER BY direction/);
   });
 
   it("does not collide CTE column names for aliases/fields that are ambiguous under naive underscore-joining", () => {
