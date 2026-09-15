@@ -42,6 +42,17 @@ const SQLITE_NOT_AUTHORIZED_CODE = "SQLITE_AUTH";
  */
 const SQLITE_STALE_SNAPSHOT_CODE = "SQLITE_BUSY_SNAPSHOT";
 const SQLITE_STALE_SNAPSHOT_EXTENDED_CODE = 517;
+
+/** A SQLite writer-slot wait failure, excluding stale DEFERRED snapshots. */
+export function isSqliteWriterSlotBusy(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (code === SQLITE_STALE_SNAPSHOT_CODE) return false;
+    if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
+  }
+  return false;
+}
 const DRIZZLE_QUERY_ERROR_PREFIX = "Failed query:";
 const POSTGRES_UNDEFINED_RELATION_PATTERN =
   /\b(?:relation|table)\s+"[^"]+"\s+does not exist\b/i;

@@ -31,6 +31,7 @@ export type {
 // ============================================================
 
 export { type DeserializedSchema, deserializeSchema } from "./deserializer";
+export type { EvolutionPlan, EvolutionRequirements } from "./evolution-plan";
 export type {
   GraphTemplate,
   InstantiateGraphTemplateResult,

@@ -18,6 +18,17 @@ import { SQL } from 'drizzle-orm';
 type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
+    adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
+        waitBudgetMs: number;
+    }>) => Promise<AdoptedSchemaWriteTransaction>;
+}>;
+
+// @public
+type AdoptedSchemaWriteTransaction = Readonly<{
+    backend: SchemaWriteTransactionBackend & Readonly<{
+        commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+    }>;
+    activeSchema: SchemaVersionRow | undefined;
 }>;
 
 // @public (undocumented)

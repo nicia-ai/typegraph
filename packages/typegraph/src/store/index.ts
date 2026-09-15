@@ -217,6 +217,12 @@ export { StoreAnalysisCursorStaleError } from "./store-analysis";
 
 // Fulltext rebuild
 export type {
+  EvolvedTransactionOptions,
+  EvolvedTransactionOutcome,
+  PlanEvolutionOptions,
+  RefreshSchemaOptions,
+} from "./evolution";
+export type {
   RebuildFulltextOptions,
   RebuildFulltextResult,
 } from "./fulltext-rebuild";

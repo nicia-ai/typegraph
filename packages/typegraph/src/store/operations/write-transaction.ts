@@ -76,6 +76,7 @@ import {
   isFirstPartyFactory,
   resolveWriteFencePlan,
 } from "../../backend/capabilities/write-fence";
+import { engineSerializedWriterSlotStatement } from "../../backend/sqlite-writer-slot";
 import {
   type GraphBackend,
   runOptionallyInTransaction,
@@ -83,8 +84,6 @@ import {
 } from "../../backend/types";
 import { ConfigurationError, StaleVersionError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
-import { sql } from "../../query/sql-fragment";
-import { asCompiledStatementSql } from "../../query/sql-intent";
 import { isSqliteStaleSnapshotError } from "../../utils/sql-errors";
 import { type ConstraintFenceReason } from "../constraints";
 import {
@@ -216,9 +215,7 @@ export async function ensureEngineSerializedWriterSlot(
     statementExecution,
   );
   await executeStatement(
-    asCompiledStatementSql(
-      sql`UPDATE ${schema.nodesTable} SET graph_id = graph_id WHERE 0`,
-    ),
+    engineSerializedWriterSlotStatement(schema.nodesTable),
   );
 }
 

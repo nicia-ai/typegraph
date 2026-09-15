@@ -1796,6 +1796,40 @@ type EntityKey = Readonly<{
 // @public
 type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 
+// @public (undocumented)
+type EvolutionPlan = (EvolutionPlanBase & Readonly<{
+    status: "noop";
+}>) | (EvolutionPlanBase & Readonly<{
+    status: "change";
+    resultingVersion: number;
+    requirements: EvolutionRequirements;
+}>);
+
+// @public (undocumented)
+type EvolutionPlanBase = Readonly<{
+    graphId: string;
+    baselineVersion: number;
+    baselineHash: SchemaHash;
+    resultingHash: SchemaHash;
+}>;
+
+// @public
+type EvolutionRequirements = Readonly<{
+    requireEmpty: readonly Readonly<{
+        entity: "node" | "edge";
+        kindName: string;
+    }>[];
+    readdedKindCandidates: readonly Readonly<{
+        entity: "node" | "edge";
+        kindName: string;
+    }>[];
+    vectorSlots: readonly Readonly<{
+        kindName: string;
+        fieldName: string;
+    }>[];
+    identityAffectedKinds: readonly string[];
+}>;
+
 // @public
 class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AggregateAliasMap, R extends Record<string, FieldRef | AggregateExpr>> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: R);
@@ -4389,6 +4423,11 @@ class Placeholder {
     readonly name: string;
 }
 
+// @public
+type PlanEvolutionOptions = Readonly<{
+    source?: "database" | "cached";
+}>;
+
 // @public (undocumented)
 type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
 
@@ -5044,6 +5083,12 @@ type ReembedVectorFieldResult = Readonly<{
 }>;
 
 // @public
+type RefreshSchemaOptions<TStore> = Readonly<{
+    ref?: StoreRef<TStore>;
+    expectedVersion?: number;
+}>;
+
+// @public
 type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 
 // @public
@@ -5267,6 +5312,9 @@ type SchemaDiff = Readonly<{
     hasChanges: boolean;
     summary: string;
 }>;
+
+// @public
+type SchemaHash = string;
 
 // @public
 type SchemaIntrospection = Readonly<{
@@ -5755,6 +5803,10 @@ interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
         eager?: MaterializeIndexesOptions;
     }>) => Promise<TStore>;
     // (undocumented)
+    readonly planEvolution: (extension: GraphExtension, options?: PlanEvolutionOptions) => Promise<EvolutionPlan>;
+    // (undocumented)
+    readonly refreshSchema: <TRefStore extends StoreCore<G> = TStore>(options?: RefreshSchemaOptions<TStore extends TRefStore ? TRefStore : never>) => Promise<TStore>;
+    // (undocumented)
     readonly removeKinds: <TRefStore extends StoreCore<G> = TStore>(names: readonly string[], options?: Readonly<{
         ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
         eager?: MaterializeRemovalsOptions;
@@ -5806,6 +5858,7 @@ interface StoreRef<in out T> {
 // @internal
 type StoreRuntime<G extends GraphDef> = Readonly<{
     backend: GraphBackend;
+    evolutionPlanningTarget?: (plan: EvolutionPlan) => Store<G>;
     captureEnabled?: boolean;
     uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
     queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;

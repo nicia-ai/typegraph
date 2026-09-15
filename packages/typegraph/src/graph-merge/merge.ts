@@ -1,6 +1,7 @@
 import { validateEdgeEndpoints } from "../constraints";
 import { IdentityEndpointValidityError } from "../errors";
-import { assertTransactionStore } from "../store/runtime-port";
+import type { EvolutionPlan } from "../schema/evolution-plan";
+import { resolveEvolvedTransactionStore } from "../store/runtime-port";
 import type { TransactionContext } from "../store/types";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
@@ -3478,7 +3479,7 @@ export async function planMerge<G extends GraphDef>(
       ),
     );
   }
-  const precondition = await validateBaseVersions(target, branches);
+  const precondition = await validateBaseVersions(store, branches);
   if (isErr(precondition)) return err(precondition.error);
   // Each branch's OWN raw `base` is recorded here, unlike
   // `planMergeIncremental`'s sibling `anchors.branches[].baseVersion`,
@@ -3515,6 +3516,109 @@ export async function planMerge<G extends GraphDef>(
     async (resolved) => {
       await assertPlanningFenceUnchanged(target, targetFence);
       return resolvedMergeArtifact(resolved, "snapshot", targetFence, anchors);
+    },
+  );
+}
+
+/**
+ * Plans a merge against the graph produced by a reviewed evolution plan.
+ * Durable data and revision evidence is still captured from the original
+ * target; the schema fence names the version the caller will apply first.
+ */
+export async function planMergeForEvolution<G extends GraphDef>(
+  store: Store<G>,
+  evolutionPlan: EvolutionPlan,
+  branchInputs: readonly MergeBranch<G>[],
+  optionsInput: MergeOptions<G> = {},
+): Promise<Result<MergePlanArtifact, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
+  const normalized = tryNormalize(optionsInput);
+  if (isErr(normalized)) return err(normalized.error);
+  const options = normalized.data;
+  if (options.target !== undefined && options.target !== store) {
+    return err(
+      new MergePlanCapabilityError(
+        "Evolution merge planning must use the Store that owns the evolution plan.",
+        { details: { capability: "evolutionPlanTarget" } },
+      ),
+    );
+  }
+  const planningTarget = storeRuntime(store).evolutionPlanningTarget;
+  if (planningTarget === undefined) {
+    return err(
+      new MergePlanCapabilityError(
+        "This Store cannot construct a resulting-schema merge planning view.",
+        { details: { capability: "evolutionPlanningTarget" } },
+      ),
+    );
+  }
+  let target: Store<G>;
+  let baselineFence: MergePlanTargetFence;
+  try {
+    target = planningTarget(evolutionPlan);
+    baselineFence = await captureMergePlanTargetFence(store);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to prepare an evolution merge target: ${describeCause(error)}`,
+          { cause: error, details: { capability: "evolutionPlanningTarget" } },
+        )
+      ),
+    );
+  }
+  if (
+    baselineFence.graphId !== evolutionPlan.graphId ||
+    baselineFence.schema.version !== evolutionPlan.baselineVersion ||
+    baselineFence.schema.hash !== evolutionPlan.baselineHash
+  ) {
+    return err(
+      new MergePlanningStaleError(
+        "The evolution plan baseline no longer matches the active merge target schema.",
+        { details: { startingFence: baselineFence } },
+      ),
+    );
+  }
+  const resultingFence: MergePlanTargetFence = {
+    ...baselineFence,
+    schema: {
+      managed: true,
+      version:
+        evolutionPlan.status === "change" ?
+          evolutionPlan.resultingVersion
+        : evolutionPlan.baselineVersion,
+      hash: evolutionPlan.resultingHash,
+    },
+  };
+  const baselinePrecondition = await validateBaseVersions(store, branches);
+  const precondition =
+    isErr(baselinePrecondition) ?
+      await validateBaseVersions(target, branches)
+    : baselinePrecondition;
+  if (isErr(precondition)) return err(precondition.error);
+  const anchors: MergePlanAnchors = {
+    kind: "snapshot",
+    base: { graphId: store.graphId, baseVersion: precondition.data },
+    branches: [...branches]
+      .sort((left, right) => compareStrings(left.id, right.id))
+      .map((branch) => ({ branchId: branch.id, baseVersion: branch.base })),
+  };
+  return resolveMerge(
+    target,
+    target,
+    branches,
+    { ...options, target },
+    false,
+    undefined,
+    precondition.data,
+    async (resolved) => {
+      await assertPlanningFenceUnchanged(store, baselineFence);
+      return resolvedMergeArtifact(
+        resolved,
+        "snapshot",
+        resultingFence,
+        anchors,
+      );
     },
   );
 }
@@ -4369,8 +4473,17 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
   input: MergePlanArtifact,
 ): Promise<MergeReport<G>> {
   try {
-    const artifact = await validateMergePlanForTarget(target, input);
-    assertPublicPlanCapability(target);
+    let effectiveTarget: Store<G>;
+    try {
+      effectiveTarget = resolveEvolvedTransactionStore(tx, target);
+    } catch (error) {
+      throw new MergePlanCapabilityError(
+        "The merge transaction must belong to an active callback of the target Store.",
+        { cause: error, details: { capability: "mergeTransactionStore" } },
+      );
+    }
+    const artifact = await validateMergePlanForTarget(effectiveTarget, input);
+    assertPublicPlanCapability(effectiveTarget);
     if (artifact.provenance.persist) {
       throw new MergePlanCapabilityError(
         "A caller-owned merge transaction cannot persist merge provenance atomically.",
@@ -4381,18 +4494,10 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
         },
       );
     }
-    try {
-      assertTransactionStore(tx, target);
-    } catch (error) {
-      throw new MergePlanCapabilityError(
-        "The merge transaction must belong to an active callback of the target Store.",
-        { cause: error, details: { capability: "mergeTransactionStore" } },
-      );
-    }
     const txBackend = transactionBackend(tx);
-    await assertMergeTransactionPristine(target, txBackend);
+    await assertMergeTransactionPristine(effectiveTarget, txBackend);
     const merged = await applyValidatedMergePlanInTransaction(
-      target,
+      effectiveTarget,
       tx,
       artifact,
       {},

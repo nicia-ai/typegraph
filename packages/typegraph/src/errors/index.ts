@@ -1440,6 +1440,35 @@ export class ConfigurationError extends TypeGraphError {
   }
 }
 
+/** The caller-owned transaction could not acquire its schema fence in time. */
+export class SchemaFenceTimeoutError extends TypeGraphError {
+  declare readonly details: Readonly<{
+    graphId: string;
+    phase: "schema-advisory" | "schema-row" | "writer-slot";
+    waitBudgetMs: number;
+  }>;
+
+  constructor(
+    graphId: string,
+    phase: "schema-advisory" | "schema-row" | "writer-slot",
+    waitBudgetMs: number,
+    cause?: unknown,
+  ) {
+    super(
+      `Timed out acquiring the schema fence for graph ${graphId}.`,
+      "SCHEMA_FENCE_TIMEOUT",
+      {
+        category: "system",
+        details: { graphId, phase, waitBudgetMs },
+        suggestion:
+          "Roll back the complete caller transaction before retrying it.",
+        cause,
+      },
+    );
+    this.name = "SchemaFenceTimeoutError";
+  }
+}
+
 /**
  * Why a destructive contribution rebuild is refused.
  *

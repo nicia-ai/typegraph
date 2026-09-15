@@ -699,6 +699,40 @@ type EntityKey = Readonly<{
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
 
+// @public (undocumented)
+export type EvolutionPlan = (EvolutionPlanBase & Readonly<{
+    status: "noop";
+}>) | (EvolutionPlanBase & Readonly<{
+    status: "change";
+    resultingVersion: number;
+    requirements: EvolutionRequirements;
+}>);
+
+// @public (undocumented)
+type EvolutionPlanBase = Readonly<{
+    graphId: string;
+    baselineVersion: number;
+    baselineHash: SchemaHash;
+    resultingHash: SchemaHash;
+}>;
+
+// @public
+export type EvolutionRequirements = Readonly<{
+    requireEmpty: readonly Readonly<{
+        entity: "node" | "edge";
+        kindName: string;
+    }>[];
+    readdedKindCandidates: readonly Readonly<{
+        entity: "node" | "edge";
+        kindName: string;
+    }>[];
+    vectorSlots: readonly Readonly<{
+        kindName: string;
+        fieldName: string;
+    }>[];
+    identityAffectedKinds: readonly string[];
+}>;
+
 // @public
 type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
 

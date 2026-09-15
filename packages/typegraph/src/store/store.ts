@@ -124,6 +124,8 @@ import {
   KindNotFoundError,
   MigrationError,
   RuntimeKindTokenError,
+  SchemaContentConflictError,
+  StaleVersionError,
   UnsupportedBackendCapabilityError,
   ValidationError,
 } from "../errors";
@@ -217,6 +219,11 @@ import { type CompiledRowsSql } from "../query/sql-intent";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import { canonicalEqual } from "../schema/canonical";
 import {
+  type EvolutionPlan,
+  getEvolutionPlanPayload,
+  prepareEvolutionPlan,
+} from "../schema/evolution-plan";
+import {
   applyDeprecatedKinds,
   commitNewSchemaVersion,
   commitNewSchemaVersionIfKindsEmpty,
@@ -255,6 +262,14 @@ import {
   type NodeOperations,
 } from "./collection-factory";
 import { resolveTemporalReadParams } from "./collections/temporal-read-params";
+import {
+  type EvolvedTransactionOptions,
+  type EvolvedTransactionOutcome,
+  type PlanEvolutionOptions,
+  type RefreshSchemaOptions,
+  withAdoptedTransactionScope,
+} from "./evolution";
+import { scopeBackendExecution } from "./execution-lifetime";
 import { repopulateFulltextInTransaction } from "./fulltext-rebuild";
 import {
   createHistoryStoreBackendProjection,
@@ -361,6 +376,7 @@ import {
 } from "./recorded-read-service";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import {
+  bindEvolvedTransactionStore,
   bindTransactionStore,
   runInTransactionContext,
   STORE_RUNTIME,
@@ -964,6 +980,16 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
 type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G>;
 
 interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
+  readonly planEvolution: (
+    extension: GraphExtension,
+    options?: PlanEvolutionOptions,
+  ) => Promise<EvolutionPlan>;
+  readonly refreshSchema: <TRefStore extends StoreCore<G> = TStore>(
+    options?: RefreshSchemaOptions<
+      TStore extends TRefStore ? TRefStore : never
+    >,
+  ) => Promise<TStore>;
+
   readonly evolve: <TRefStore extends StoreCore<G> = TStore>(
     extension: GraphExtension,
     options?: Readonly<{
@@ -1105,6 +1131,14 @@ type AdapterStoreTransactions<
   withTransaction: (
     externalTransaction: TNativeTransaction,
   ) => AdapterTransactionContext<G, TNativeTransaction>;
+  withEvolvedTransaction: <T>(
+    externalTransaction: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn: (
+      tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: EvolvedTransactionOptions,
+  ) => Promise<EvolvedTransactionOutcome<T>>;
   withRecordedTransaction: <T>(
     externalTransaction: TNativeTransaction,
     fn: (
@@ -1185,6 +1219,14 @@ const IDENTITY_FACADES = new WeakMap<object, unknown>();
 class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   readonly [STORE_RUNTIME]: StoreRuntime<G>;
   readonly #graph: G;
+  #evolutionPlanningSnapshot:
+    | Readonly<{
+        activeRow: SchemaVersionRow;
+        storedSchema: SerializedSchema;
+        baseline: G;
+      }>
+    | undefined;
+  readonly #evolutionPlans = new WeakMap<EvolutionPlan, G>();
   /**
    * Bare backend for DDL, vector-storage, and bulk-materialization work that must
    * bypass recorded capture. Graph-entity writes use `#backend` instead.
@@ -1426,6 +1468,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
       backend: this.#backend,
+      evolutionPlanningTarget: (plan) => this.#evolutionPlanningTarget(plan),
       captureEnabled: this.#captureEnabled,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
       // The query path's own construction, not a second spelling of it: a
@@ -4212,7 +4255,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
-    const txBackend = adopt(externalTx);
+    return withAdoptedTransactionScope(externalTx, () =>
+      this.#runAdoptedRecordedTransaction(adopt(externalTx), externalTx, fn),
+    );
+  }
+
+  async #runAdoptedRecordedTransaction<T>(
+    txBackend: TransactionBackend,
+    externalTx: TNativeTransaction,
+    fn:
+      | ((
+          tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>)
+      | ((
+          tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>),
+    originalStore?: StoreImplementation<G, TNativeTransaction>,
+  ): Promise<TransactionOutcome<T>> {
     if (this.#captureEnabled) {
       await assertRecordedCaptureTransactionIsolation(txBackend);
       await lockSchemaVersionForStoreWrite(
@@ -4266,14 +4325,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
+    const executionScope =
+      originalStore === undefined ? undefined : (
+        scopeBackendExecution(writeTarget)
+      );
+    const context = this.#buildTransactionContext(
+      executionScope?.backend ?? writeTarget,
+      externalTx,
+      undefined,
+      receiptRecorder,
+    );
+    if (originalStore !== undefined) {
+      bindEvolvedTransactionStore(context, originalStore, this);
+    }
     const result = await runInTransactionContext(
-      this.#buildTransactionContext(
-        writeTarget,
-        externalTx,
-        undefined,
-        receiptRecorder,
-      ),
-      invoke,
+      context,
+      async (activeContext) => {
+        try {
+          return await invoke(activeContext);
+        } finally {
+          executionScope?.seal();
+        }
+      },
     );
     // Flush allocates the recorded commit instant for this transaction's graph
     // under TypeGraph-owned capture; under engine-native it is
@@ -4829,6 +4902,320 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   async refreshStatistics(): Promise<void> {
     await this.#backend.refreshStatistics();
+  }
+
+  #evolutionPlanningTarget(
+    plan: EvolutionPlan,
+  ): StoreImplementation<G, TNativeTransaction> {
+    const payload = getEvolutionPlanPayload<G>(plan);
+    if (!this.#evolutionPlans.has(plan) || payload === undefined) {
+      throw new ConfigurationError(
+        "Evolution plans must be created by this Store.",
+        {
+          code: "EVOLUTION_PLAN_OWNER_MISMATCH",
+          graphId: this.graphId,
+        },
+      );
+    }
+    return this.#cloneWithGraph(payload.mergedGraph, undefined, {
+      schemaVersion:
+        plan.status === "change" ? plan.resultingVersion : plan.baselineVersion,
+      schemaHash: plan.resultingHash,
+    });
+  }
+
+  async withEvolvedTransaction<T>(
+    this: AdapterHistoryStore<G, TNativeTransaction>,
+    externalTx: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn: (
+      tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: EvolvedTransactionOptions,
+  ): Promise<EvolvedTransactionOutcome<T>>;
+  async withEvolvedTransaction<T>(
+    externalTx: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn: (
+      tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: EvolvedTransactionOptions,
+  ): Promise<EvolvedTransactionOutcome<T>>;
+  async withEvolvedTransaction<T>(
+    externalTx: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn:
+      | ((
+          tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>)
+      | ((
+          tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>),
+    options?: EvolvedTransactionOptions,
+  ): Promise<EvolvedTransactionOutcome<T>> {
+    return withAdoptedTransactionScope(
+      externalTx,
+      () => this.#applyEvolvedTransaction(externalTx, plan, fn, options),
+      true,
+    );
+  }
+
+  async #applyEvolvedTransaction<T>(
+    externalTx: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn:
+      | ((
+          tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>)
+      | ((
+          tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>),
+    options?: EvolvedTransactionOptions,
+  ): Promise<EvolvedTransactionOutcome<T>> {
+    const candidate = this.#evolutionPlanningTarget(plan);
+    const payload = requireDefined(getEvolutionPlanPayload<G>(plan));
+    const unknownOptions = Object.keys(options ?? {}).filter(
+      (key) => key !== "waitBudgetMs",
+    );
+    if (unknownOptions.length > 0) {
+      throw new ConfigurationError("Unsupported evolved transaction options.", {
+        code: "EVOLUTION_OPTIONS_UNSUPPORTED",
+        options: unknownOptions,
+      });
+    }
+    const waitBudgetMs = options?.waitBudgetMs ?? 5000;
+    if (!Number.isSafeInteger(waitBudgetMs) || waitBudgetMs <= 0) {
+      throw new ConfigurationError(
+        "waitBudgetMs must be a positive safe integer.",
+        {
+          code: "INVALID_SCHEMA_FENCE_BUDGET",
+          waitBudgetMs,
+        },
+      );
+    }
+    // Request connections never perform implicit provisioning. Bootstrap the
+    // required storage with the privileged managed evolution path, then replan.
+    if (
+      plan.status === "change" &&
+      (plan.requirements.vectorSlots.length > 0 ||
+        plan.requirements.identityAffectedKinds.length > 0)
+    ) {
+      throw new UnsupportedBackendCapabilityError(
+        "store.withEvolvedTransaction()",
+        "transactional schema provisioning",
+        { graphId: this.graphId, requirements: plan.requirements },
+        "Apply this extension through the privileged bootstrap connection and replan before adopting graph writes.",
+      );
+    }
+    if (plan.status === "noop") {
+      if (options?.waitBudgetMs !== undefined) {
+        throw new ConfigurationError(
+          "No-op plans use ordinary adoption and do not acquire an exclusive schema fence.",
+          { code: "EVOLUTION_NOOP_FENCE_BUDGET_UNSUPPORTED" },
+        );
+      }
+      const adopt = this.#adapterBackend?.adoptTransaction;
+      if (adopt === undefined)
+        throw new UnsupportedBackendCapabilityError(
+          "store.withEvolvedTransaction()",
+          "adoptTransaction",
+          { graphId: this.graphId },
+        );
+      const target = adopt(externalTx);
+      await lockSchemaVersionForStoreWrite(
+        {
+          graphId: this.graphId,
+          schemaVersion: plan.baselineVersion,
+        },
+        target,
+      );
+      const outcome = await candidate.#runAdoptedRecordedTransaction(
+        target,
+        externalTx,
+        fn,
+        this,
+      );
+      return {
+        ...outcome,
+        receipt: {
+          ...outcome.receipt,
+          schema: {
+            version: plan.baselineVersion,
+            hash: plan.baselineHash,
+          },
+        },
+      };
+    }
+    const adopt = this.#adapterBackend?.adoptSchemaWriteTransaction;
+    if (adopt === undefined)
+      throw new UnsupportedBackendCapabilityError(
+        "store.withEvolvedTransaction()",
+        "adoptSchemaWriteTransaction",
+        { graphId: this.graphId },
+      );
+    // Live evolution needs the same session-observed isolation as recorded
+    // capture: its emptiness and freshness decisions cannot use an old snapshot.
+    const ordinaryAdopt = requireDefined(
+      this.#adapterBackend?.adoptTransaction,
+    );
+    await assertRecordedCaptureTransactionIsolation(ordinaryAdopt(externalTx));
+    const adopted = await adopt(externalTx, this.graphId, { waitBudgetMs });
+    const active = adopted.activeSchema;
+    if (active?.version !== plan.baselineVersion) {
+      throw new StaleVersionError({
+        graphId: this.graphId,
+        expected: plan.baselineVersion,
+        actual: active?.version ?? 0,
+      });
+    }
+    if (active.schema_hash !== plan.baselineHash) {
+      throw new SchemaContentConflictError({
+        graphId: this.graphId,
+        version: active.version,
+        existingHash: active.schema_hash,
+        incomingHash: plan.baselineHash,
+      });
+    }
+    await this.#assertNoPendingRemovalFor(
+      payload.mergedGraph,
+      requireDefined(this.#evolutionPlans.get(plan)),
+      adopted.backend,
+    );
+    await assertEvolvedSchemaRequiredKindsEmpty(
+      adopted.backend,
+      this.graphId,
+      requireDefined(payload.classification),
+    );
+    const committed = await adopted.backend.commitSchemaVersion({
+      graphId: this.graphId,
+      expected: { kind: "active", version: plan.baselineVersion },
+      version: plan.resultingVersion,
+      schemaHash: plan.resultingHash,
+      schemaDoc: requireDefined(payload.schemaDocument),
+    });
+    const outcome = await candidate.#runAdoptedRecordedTransaction(
+      adopted.backend,
+      externalTx,
+      fn,
+      this,
+    );
+    return {
+      ...outcome,
+      receipt: {
+        ...outcome.receipt,
+        schema: {
+          version: committed.version,
+          hash: committed.schema_hash,
+        },
+      },
+    };
+  }
+
+  /** Prepares immutable schema instructions without acquiring a write fence. */
+  async planEvolution(
+    extension: GraphExtension,
+    options?: PlanEvolutionOptions,
+  ): Promise<EvolutionPlan> {
+    if (
+      options?.source !== undefined &&
+      !["database", "cached"].includes(options.source)
+    ) {
+      throw new ConfigurationError("Unknown evolution planning source.", {
+        code: "INVALID_EVOLUTION_PLANNING_SOURCE",
+        source: options.source,
+      });
+    }
+    if (options?.source !== "cached") {
+      const activeRow = await this.#backend.getActiveSchema(this.graphId);
+      if (activeRow === undefined) {
+        throw new ConfigurationError(
+          "Planning requires an initialized schema.",
+          {
+            code: "EVOLUTION_SCHEMA_REQUIRED",
+            graphId: this.graphId,
+          },
+        );
+      }
+      const storedSchema = parseSerializedSchema(activeRow.schema_doc);
+      this.#evolutionPlanningSnapshot = {
+        activeRow,
+        storedSchema,
+        baseline: this.#catchUpToStored(storedSchema),
+      };
+    }
+    const snapshot = this.#evolutionPlanningSnapshot;
+    if (snapshot === undefined) {
+      throw new ConfigurationError(
+        "No schema planning snapshot is cached. Plan from the database first.",
+        {
+          code: "EVOLUTION_SNAPSHOT_REQUIRED",
+          graphId: this.graphId,
+        },
+      );
+    }
+    const plan = await prepareEvolutionPlan({
+      baselineGraph: snapshot.baseline,
+      baselineVersion: snapshot.activeRow.version,
+      baselineHash: snapshot.activeRow.schema_hash,
+      storedSchema: snapshot.storedSchema,
+      extension,
+    });
+    this.#evolutionPlans.set(plan, snapshot.baseline);
+    return plan;
+  }
+
+  /** Reloads schema metadata after outer commit without applying or provisioning it. */
+  async refreshSchema<TRefStore extends StoreCore<G>>(
+    options?: RefreshSchemaOptions<TRefStore>,
+  ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    const expectedVersion = options?.expectedVersion;
+    if (
+      expectedVersion !== undefined &&
+      (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1)
+    ) {
+      throw new ConfigurationError(
+        "expectedVersion must be a positive safe integer.",
+        {
+          code: "INVALID_EXPECTED_SCHEMA_VERSION",
+          expectedVersion,
+        },
+      );
+    }
+    if (
+      expectedVersion !== undefined &&
+      this.#schemaMetadata.schemaVersion === expectedVersion
+    ) {
+      syncStoreReplacementRef(options?.ref, this);
+      return this;
+    }
+    // Reconciliation is read-only: missing bootstrap storage must never cause DDL.
+    const active = await this.#backend.getActiveSchema(this.graphId);
+    if (
+      active === undefined ||
+      (expectedVersion !== undefined && active.version < expectedVersion)
+    ) {
+      throw new ConfigurationError(
+        "The expected committed schema is not visible.",
+        {
+          code: "SCHEMA_REFRESH_VERSION_UNAVAILABLE",
+          graphId: this.graphId,
+          expectedVersion,
+          actualVersion: active?.version,
+        },
+      );
+    }
+    if (
+      active.version === this.#schemaMetadata.schemaVersion &&
+      active.schema_hash === this.#schemaMetadata.schemaHash
+    ) {
+      syncStoreReplacementRef(options?.ref, this);
+      return this;
+    }
+    return this.#cloneWithGraph(
+      this.#catchUpToStored(parseSerializedSchema(active.schema_doc)),
+      options?.ref,
+      schemaMetadataFromRow(active),
+    );
   }
 
   /**
@@ -6085,8 +6472,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Returns silently on backends without the removal queue: they cannot have
    * a pending row, so there is nothing to conflict with.
    */
-  async #assertNoPendingRemovalFor(merged: G, baseline: G): Promise<void> {
-    const getPendingKindRemovals = this.#backend.getPendingKindRemovals;
+  async #assertNoPendingRemovalFor(
+    merged: G,
+    baseline: G,
+    target?: TransactionBackend,
+  ): Promise<void> {
+    const backend = target ?? this.#backend;
+    const getPendingKindRemovals = backend.getPendingKindRemovals;
     if (getPendingKindRemovals === undefined) return;
 
     // Own keys only: `baseline` is rebuilt from the PARSED stored schema, so a kind
@@ -6100,10 +6492,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
     if (addedNodes.length === 0 && addedEdges.length === 0) return;
 
-    await ensureFocusedStatusTable(
-      this.#backend,
-      this.#backend.ensureKindRemovalsTable,
-    );
+    if (target === undefined) {
+      await ensureFocusedStatusTable(
+        this.#backend,
+        this.#backend.ensureKindRemovalsTable,
+      );
+    }
     const pending = await getPendingKindRemovals(this.graphId);
     if (pending.length === 0) return;
 
@@ -6897,6 +7291,14 @@ type AdapterHistoryStoreTransactions<
     ) => Promise<T>,
     options?: StoreTransactionOptions,
   ) => Promise<TransactionOutcome<T>>;
+  withEvolvedTransaction: <T>(
+    externalTransaction: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn: (
+      tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: EvolvedTransactionOptions,
+  ) => Promise<EvolvedTransactionOutcome<T>>;
   withRecordedTransaction: <T>(
     externalTransaction: TNativeTransaction,
     fn: (

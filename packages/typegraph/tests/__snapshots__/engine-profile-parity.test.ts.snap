@@ -78,6 +78,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
 exports[`engine-profile parity: member keys, capabilities, marks > PGlite root > pglite-root-keys 1`] = `
 [
   "adoptBaseSchema",
+  "adoptSchemaWriteTransaction",
   "adoptTransaction",
   "assertBaseSchemaCurrent",
   "assertRuntimeContributionsInitialized",
@@ -282,6 +283,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
 exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, fulltext off > pglite-fulltext-off-keys 1`] = `
 [
   "adoptBaseSchema",
+  "adoptSchemaWriteTransaction",
   "adoptTransaction",
   "assertBaseSchemaCurrent",
   "assertRuntimeContributionsInitialized",
@@ -484,6 +486,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
 exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite3 root > sqlite-root-keys 1`] = `
 [
   "adoptBaseSchema",
+  "adoptSchemaWriteTransaction",
   "adoptTransaction",
   "assertBaseSchemaCurrent",
   "assertRuntimeContributionsInitialized",
@@ -668,6 +671,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
 exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite3 root, fulltext off > sqlite-fulltext-off-keys 1`] = `
 [
   "adoptBaseSchema",
+  "adoptSchemaWriteTransaction",
   "adoptTransaction",
   "assertBaseSchemaCurrent",
   "assertRuntimeContributionsInitialized",

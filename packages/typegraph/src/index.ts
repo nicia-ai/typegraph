@@ -504,6 +504,8 @@ export type {
   ConstraintFenceViolation,
   EdgeIntrospection,
   EdgeReadWindow,
+  EvolvedTransactionOptions,
+  EvolvedTransactionOutcome,
   FulltextSearchHit,
   FulltextSearchOptions,
   GraphEdgeForKinds,
@@ -531,6 +533,7 @@ export type {
   NeighborReadOptions,
   NeighborResult,
   OntologyIntrospection,
+  PlanEvolutionOptions,
   PropertyPopulationStatistics,
   RebuildContributionOptions,
   RebuildFulltextOptions,
@@ -543,6 +546,7 @@ export type {
   ReembedFunction,
   ReembedVectorFieldOptions,
   ReembedVectorFieldResult,
+  RefreshSchemaOptions,
   SchemaIntrospection,
   SchemaManagerOptions,
   SchemaValidationResult,
@@ -611,6 +615,8 @@ export {
 // exists at all. Also available from the "./schema" subpath alongside the
 // migration machinery.
 export type {
+  EvolutionPlan,
+  EvolutionRequirements,
   GraphAnnotationsChange,
   IdentityChange,
   SerializedSchema,

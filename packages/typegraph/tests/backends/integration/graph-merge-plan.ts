@@ -7,12 +7,19 @@ import {
   defineGraph,
   defineNode,
   type Store,
+  UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
-import { applyMergePlanInTransaction } from "../../../src/graph-merge";
+import { defineGraphExtension } from "../../../src/graph-extension/define-graph-extension";
+import {
+  applyMergePlanInTransaction,
+  branchForEvolution,
+  planMergeForEvolution,
+} from "../../../src/graph-merge";
 import { branch } from "../../../src/graph-merge/branch";
 import {
   MergePlanCapabilityError,
+  MergePlanSchemaMismatchError,
   StaleMergePlanError,
 } from "../../../src/graph-merge/errors";
 import { applyMergePlan, planMerge } from "../../../src/graph-merge/merge";
@@ -175,6 +182,183 @@ export function registerGraphMergePlanIntegrationTests(
           .asOfRecorded(outcome.receipt.recorded)
           .nodes.Person.getById(asNodeId("ada")),
       ).resolves.toMatchObject({ name: "Ada" });
+    });
+
+    it("prepares a resulting-schema merge and applies it after evolution in the same caller transaction", async () => {
+      const backend = context.getBackend();
+      const [target] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      const source = await makeBranch(context, target, "evolved-merge-source");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@evolved.test" },
+        { id: "evolved-ada" },
+      );
+      const oldSchemaArtifact = unwrap(await planMerge(target, [source]));
+      const evolutionPlan = await target.planEvolution(
+        defineGraphExtension({
+          nodes: {
+            Tag: { properties: { label: { type: "string", optional: true } } },
+          },
+        }),
+      );
+      const resultingSchemaArtifact = unwrap(
+        await planMergeForEvolution(target, evolutionPlan, [source]),
+      );
+      if (backend.adoptSchemaWriteTransaction === undefined) {
+        let callbackCalled = false;
+        // eslint-disable-next-line vitest/no-conditional-expect -- backend capability refusal is one parity branch
+        await expect(
+          backend.transactionWithNative(async (_txBackend, nativeTransaction) =>
+            target.withEvolvedTransaction(
+              nativeTransaction,
+              evolutionPlan,
+              () => {
+                callbackCalled = true;
+                return Promise.resolve(undefined);
+              },
+            ),
+          ),
+        ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+        // eslint-disable-next-line vitest/no-conditional-expect -- asserts the unsupported path never runs the callback
+        expect(callbackCalled).toBe(false);
+        return;
+      }
+      await expect(
+        backend.transactionWithNative(async (_txBackend, nativeTransaction) =>
+          target.withEvolvedTransaction(
+            nativeTransaction,
+            evolutionPlan,
+            (tx) => applyMergePlanInTransaction(target, tx, oldSchemaArtifact),
+          ),
+        ),
+      ).rejects.toBeInstanceOf(MergePlanSchemaMismatchError);
+
+      const outcome = await backend.transactionWithNative(
+        async (_txBackend, nativeTransaction) =>
+          target.withEvolvedTransaction(
+            nativeTransaction,
+            evolutionPlan,
+            (tx) =>
+              applyMergePlanInTransaction(target, tx, resultingSchemaArtifact),
+          ),
+      );
+      expect(outcome.receipt.writes.nodes).toEqual({ Person: 1 });
+      expect(
+        await target.nodes.Person.getById(asNodeId("evolved-ada")),
+      ).toBeDefined();
+    });
+
+    it("refuses an evolved merge when the durable target revision changes after planning", async () => {
+      const backend = context.getBackend();
+      const [target] = await createAdapterStoreWithSchema(graph, backend, {
+        revisionTracking: true,
+      });
+      const source = await makeBranch(context, target, "evolved-stale-source");
+      await source.store.nodes.Person.create(
+        { name: "Ada", email: "ada@stale.test" },
+        { id: "stale-source-ada" },
+      );
+      const evolutionPlan = await target.planEvolution(
+        defineGraphExtension({
+          nodes: {
+            Tag: { properties: { label: { type: "string", optional: true } } },
+          },
+        }),
+      );
+      const mergePlan = unwrap(
+        await planMergeForEvolution(target, evolutionPlan, [source]),
+      );
+      if (backend.adoptSchemaWriteTransaction === undefined) {
+        // eslint-disable-next-line vitest/no-conditional-expect -- backend capability refusal is one parity branch
+        await expect(
+          backend.transactionWithNative(async (_txBackend, nativeTransaction) =>
+            target.withEvolvedTransaction(
+              nativeTransaction,
+              evolutionPlan,
+              (tx) => applyMergePlanInTransaction(target, tx, mergePlan),
+            ),
+          ),
+        ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+        return;
+      }
+      await target.nodes.Person.create(
+        { name: "Other", email: "other@stale.test" },
+        { id: "other-after-plan" },
+      );
+
+      await expect(
+        backend.transactionWithNative(async (_txBackend, nativeTransaction) =>
+          target.withEvolvedTransaction(
+            nativeTransaction,
+            evolutionPlan,
+            (tx) => applyMergePlanInTransaction(target, tx, mergePlan),
+          ),
+        ),
+      ).rejects.toBeInstanceOf(StaleMergePlanError);
+      expect(
+        await target.nodes.Person.getById(asNodeId("stale-source-ada")),
+      ).toBeUndefined();
+    });
+
+    it("merges a newly added kind from a resulting-schema branch", async () => {
+      const backend = context.getBackend();
+      const [target] = await createAdapterStoreWithSchema(graph, backend, {
+        revisionTracking: true,
+      });
+      const evolutionPlan = await target.planEvolution(
+        defineGraphExtension({
+          nodes: {
+            Tag: { properties: { label: { type: "string", optional: true } } },
+          },
+        }),
+      );
+      const futureBranch = unwrap(
+        await branchForEvolution(
+          target,
+          evolutionPlan,
+          () => context.createIsolatedBackend(),
+          { id: asBranchId("future-tag") },
+        ),
+      );
+      await futureBranch.store
+        .getNodeCollectionOrThrow("Tag")
+        .create({ label: "New" });
+      const mergePlan = unwrap(
+        await planMergeForEvolution(target, evolutionPlan, [futureBranch]),
+      );
+      if (backend.adoptSchemaWriteTransaction === undefined) {
+        let callbackCalled = false;
+        // eslint-disable-next-line vitest/no-conditional-expect -- unsupported adapter parity branch
+        await expect(
+          backend.transactionWithNative(async (_txBackend, nativeTransaction) =>
+            target.withEvolvedTransaction(
+              nativeTransaction,
+              evolutionPlan,
+              () => {
+                callbackCalled = true;
+                return Promise.resolve(undefined);
+              },
+            ),
+          ),
+        ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+        // eslint-disable-next-line vitest/no-conditional-expect -- callback must be untouched on refusal
+        expect(callbackCalled).toBe(false);
+        return;
+      }
+      await backend.transactionWithNative(
+        async (_txBackend, nativeTransaction) =>
+          target.withEvolvedTransaction(
+            nativeTransaction,
+            evolutionPlan,
+            (tx) => applyMergePlanInTransaction(target, tx, mergePlan),
+          ),
+      );
+      const refreshed = await target.refreshSchema({ expectedVersion: 2 });
+      expect(
+        await refreshed.getNodeCollectionOrThrow("Tag").find(),
+      ).toHaveLength(1);
     });
 
     it("rolls back merge and caller writes with the caller-owned transaction", async () => {

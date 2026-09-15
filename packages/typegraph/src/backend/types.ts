@@ -3553,7 +3553,31 @@ export type AdapterBackend<TNativeTransaction> = GraphBackend &
       this: void,
       externalTransaction: TNativeTransaction,
     ) => TransactionBackend;
+    /**
+     * Adopt a caller-owned native transaction for a schema change. The adapter
+     * proves the transaction is active and acquires its schema-write fence on
+     * that literal session before returning the privileged CAS target. It
+     * never opens, commits, retries, or rolls back the caller's transaction.
+     * Optional because drivers without active-session evidence must refuse.
+     *
+     * @internal
+     */
+    adoptSchemaWriteTransaction?: (
+      this: void,
+      externalTransaction: TNativeTransaction,
+      graphId: string,
+      options: Readonly<{ waitBudgetMs: number }>,
+    ) => Promise<AdoptedSchemaWriteTransaction>;
   }>;
+
+/** The schema-write facet available only after adoption earned its fence. */
+export type AdoptedSchemaWriteTransaction = Readonly<{
+  backend: SchemaWriteTransactionBackend &
+    Readonly<{
+      commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+    }>;
+  activeSchema: SchemaVersionRow | undefined;
+}>;
 
 export type BackendIdentity = Pick<
   GraphBackend,

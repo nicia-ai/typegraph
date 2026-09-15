@@ -633,6 +633,36 @@ its original SQL. Therefore this setting does not bound server-side prepared
 statement memory. For a high-cardinality stream of SQL text, use
 `prepareStatements: false` instead.
 
+### Adopted schema transactions
+
+`store.withEvolvedTransaction(nativeTx, plan, callback, { waitBudgetMs })`
+requires an initialized adapter Store and a live caller-owned transaction.
+Plan the extension outside that transaction with `store.planEvolution()`.
+For change plans, the default exclusive schema-fence wait budget is 5,000 ms; a `SchemaFenceTimeoutError`
+requires rollback and retry of the complete application transaction. Omit
+`waitBudgetMs` for no-op plans, which use ordinary adoption without the exclusive
+fence and refuse that option.
+
+Interactive PostgreSQL adapters validate the active session, retain the existing
+schema advisory lock → schema row → recorded-write lock order, and use
+transaction-scoped advisory locks. This lock lifetime is suitable for transaction
+poolers such as Hyperdrive. The adapter restores temporary timeout settings before
+the callback. Noninteractive HTTP drivers cannot adopt schema transactions.
+
+SQLite schema adoption requires an active transaction on the backend's exact
+native connection with an observable `inTransaction` state, as provided by
+better-sqlite3. Drivers without that evidence refuse schema adoption; ordinary
+transaction support alone does not imply support for this operation. A deferred
+SQLite transaction acquires the writer slot before validating the schema plan.
+
+The request path performs no provisioning DDL. Plans requiring new vector slots
+or identity provisioning/validation refuse before schema mutation; apply those
+changes through a privileged bootstrap connection using managed evolution, then
+replan. Eager index materialization remains an explicit post-commit operation.
+Custom adapters must implement `adoptSchemaWriteTransaction` with the same
+session-bound fencing, finite-wait, and CAS guarantees to support change plans.
+See [Graph Extensions](/graph-extensions) for callback and receipt usage.
+
 ### Authoritative command sessions
 
 Store create paths use the backend's `commands` port for writes whose

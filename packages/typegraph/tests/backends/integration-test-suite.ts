@@ -28,6 +28,8 @@ import type { AdapterBackend } from "../../src/backend/types";
 import type { IntegrationStore, IntegrationTestContext } from "./integration";
 import {
   integrationTestGraph,
+  registerAdoptedEvolutionConcurrencyTests,
+  registerAdoptedEvolutionIntegrationTests,
   registerAdvancedEdgePropertyIntegrationTests,
   registerAggregateIntegrationTests,
   registerAlgorithmIntegrationTests,
@@ -322,6 +324,8 @@ export function createIntegrationTestSuite<
     registerTemporalIntegrationTests(context);
     registerTemporalOracleIntegrationTests(context);
     registerTransactionReceiptIntegrationTests(context);
+    registerAdoptedEvolutionIntegrationTests(context);
+    registerAdoptedEvolutionConcurrencyTests(context);
     registerMigrateSchemaKindIntegrationTests(context);
     registerReconciledSchemaIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);

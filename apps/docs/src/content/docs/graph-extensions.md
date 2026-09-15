@@ -341,6 +341,90 @@ before the commit remains pinned to the previous schema version, so its next
 managed write fails the schema-version fence.
 :::
 
+### Plan outside and apply inside a caller-owned transaction
+
+`planEvolution(extension)` prepares a named schema change before the caller
+opens its write transaction. It returns an immutable `"noop"` or `"change"`
+plan bound to the graph, baseline version and hash, and resulting hash. The
+default `{ source: "database" }` reloads the active schema. `{ source:
+"cached" }` uses a previously loaded planning snapshot on the same Store; a
+cached plan is not fresh database evidence. A stale baseline is refused during
+apply, so retry by rolling back the whole caller transaction and replanning
+outside it.
+
+Use `withEvolvedTransaction(nativeTx, plan, callback, { waitBudgetMs })` when
+the schema change, TypeGraph writes, and application SQL must share the
+caller's commit. Enter this boundary before other TypeGraph callbacks on the
+same native transaction. The callback receives an evolved transaction context,
+including its reads, collections, and supported composition operations. It
+does not receive a replacement root Store.
+
+```ts
+const ref = { current: store };
+const plan = await store.planEvolution(proposal);
+
+const provisional = await db.transaction(async (nativeTx) => {
+  const outcome = await store.withEvolvedTransaction(
+    nativeTx,
+    plan,
+    async (tx) => {
+      const person = await tx.nodes.Person.create({ name: "Ada" });
+      return person.id;
+    },
+    plan.status === "change" ? { waitBudgetMs: 5000 } : undefined,
+  );
+
+  await nativeTx.insert(applicationEvents).values({
+    personId: outcome.result,
+    schemaVersion: outcome.receipt.schema.version,
+  });
+  return outcome;
+});
+
+const refreshed = await store.refreshSchema({
+  expectedVersion: provisional.receipt.schema.version,
+  ref,
+});
+```
+
+The callback and receipt finish before the outer SQL transaction commits.
+The receipt's schema version/hash and recorded anchor are provisional until
+that commit succeeds. A callback failure must reject the outer transaction;
+catching it and committing does not prove rollback. Callback contexts and
+queries built from them expire when the callback returns, including after a
+failure. Use `refreshSchema()` only after awaiting a successful outer commit.
+When the cached Store already matches `expectedVersion`, refresh returns it
+without a read; that shortcut does not check for a newer database version.
+Otherwise refresh reads the active schema, accepts a newer committed version,
+and refuses a missing or older one. It applies no extension or storage
+provisioning.
+
+The current adopted apply path supports metadata-only changes and changes
+whose existing kinds must be checked for emptiness. A plan that requires new
+vector or identity storage is refused before schema mutation; provision it
+through the privileged managed evolution/bootstrap connection, then replan.
+The apply path uses a bounded schema fence, baseline validation, and a
+version CAS; it can issue multiple statements. `waitBudgetMs` bounds fence
+acquisition for change plans; no-op plans refuse an explicit `waitBudgetMs`.
+On timeout, roll back and retry the complete native transaction.
+Do not pass `ref` or eager-index options to `withEvolvedTransaction`; they
+cannot be honored before the outer commit and are refused.
+
+When a wiring pass produces a no-op, ordinary recorded adoption is sufficient
+and never takes the exclusive evolution fence. Reconcile only if the Store is
+behind the named snapshot; matching versions make this refresh a cached read:
+
+```typescript
+if (plan.status === "noop") {
+  const current = await store.refreshSchema({ expectedVersion: plan.baselineVersion });
+  await db.transaction((nativeTx) =>
+    current.withRecordedTransaction(nativeTx, async (tx) => {
+      await tx.nodes.Person.create({ name: "Ada" });
+    }),
+  );
+}
+```
+
 ### The `ref` pattern
 
 `Store<G>` is immutable by construction — `evolve()` returns the Store for the

@@ -19,6 +19,9 @@ const __nodeId: unique symbol;
 export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
+    adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
+        waitBudgetMs: number;
+    }>) => Promise<AdoptedSchemaWriteTransaction>;
 }>;
 
 // @public (undocumented)
@@ -35,6 +38,7 @@ export type AdapterHistoryStore<G extends GraphDef, TNativeTransaction> = Resolv
 type AdapterHistoryStoreTransactions<G extends GraphDef, TNativeTransaction> = Readonly<{
     transaction: <T>(fn: (tx: AdapterHistoryTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: StoreTransactionOptions) => Promise<T>;
     transactionWithReceipt: <T>(fn: (tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: StoreTransactionOptions) => Promise<TransactionOutcome<T>>;
+    withEvolvedTransaction: <T>(externalTransaction: TNativeTransaction, plan: EvolutionPlan, fn: (tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: EvolvedTransactionOptions) => Promise<EvolvedTransactionOutcome<T>>;
     withRecordedTransaction: <T>(externalTransaction: TNativeTransaction, fn: (tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>) => Promise<T>) => Promise<TransactionOutcome<T>>;
 }>;
 
@@ -65,6 +69,7 @@ type AdapterStoreTransactions<G extends GraphDef, TNativeTransaction> = Readonly
     transaction: <T>(fn: (tx: AdapterTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: StoreTransactionOptions) => Promise<T>;
     transactionWithReceipt: <T>(fn: (tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: StoreTransactionOptions) => Promise<TransactionOutcome<T>>;
     withTransaction: (externalTransaction: TNativeTransaction) => AdapterTransactionContext<G, TNativeTransaction>;
+    withEvolvedTransaction: <T>(externalTransaction: TNativeTransaction, plan: EvolutionPlan, fn: (tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: EvolvedTransactionOptions) => Promise<EvolvedTransactionOutcome<T>>;
     withRecordedTransaction: <T>(externalTransaction: TNativeTransaction, fn: (tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>) => Promise<T>) => Promise<TransactionOutcome<T>>;
 }>;
 
@@ -93,6 +98,14 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
     countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
+}>;
+
+// @public
+type AdoptedSchemaWriteTransaction = Readonly<{
+    backend: SchemaWriteTransactionBackend & Readonly<{
+        commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+    }>;
+    activeSchema: SchemaVersionRow | undefined;
 }>;
 
 // @public (undocumented)
@@ -2721,6 +2734,56 @@ export function equivalentTo(kindA: NodeType, kindBOrIri: NodeType | string): On
 
 // @public
 export type ErrorCategory = "user" | "constraint" | "system";
+
+// @public (undocumented)
+export type EvolutionPlan = (EvolutionPlanBase & Readonly<{
+    status: "noop";
+}>) | (EvolutionPlanBase & Readonly<{
+    status: "change";
+    resultingVersion: number;
+    requirements: EvolutionRequirements;
+}>);
+
+// @public (undocumented)
+type EvolutionPlanBase = Readonly<{
+    graphId: string;
+    baselineVersion: number;
+    baselineHash: SchemaHash;
+    resultingHash: SchemaHash;
+}>;
+
+// @public
+export type EvolutionRequirements = Readonly<{
+    requireEmpty: readonly Readonly<{
+        entity: "node" | "edge";
+        kindName: string;
+    }>[];
+    readdedKindCandidates: readonly Readonly<{
+        entity: "node" | "edge";
+        kindName: string;
+    }>[];
+    vectorSlots: readonly Readonly<{
+        kindName: string;
+        fieldName: string;
+    }>[];
+    identityAffectedKinds: readonly string[];
+}>;
+
+// @public
+export type EvolvedTransactionOptions = Readonly<{
+    waitBudgetMs?: number;
+}>;
+
+// @public
+export type EvolvedTransactionOutcome<T> = Readonly<{
+    result: TransactionOutcome<T>["result"];
+    receipt: TransactionOutcome<T>["receipt"] & Readonly<{
+        schema: Readonly<{
+            version: number;
+            hash: string;
+        }>;
+    }>;
+}>;
 
 // @public
 export class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AggregateAliasMap, R extends Record<string, FieldRef | AggregateExpr>> {
@@ -6415,6 +6478,11 @@ export class Placeholder {
     readonly name: string;
 }
 
+// @public
+export type PlanEvolutionOptions = Readonly<{
+    source?: "database" | "cached";
+}>;
+
 // @public (undocumented)
 type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
 
@@ -7066,6 +7134,12 @@ export type ReembedVectorFieldResult = Readonly<{
 }>;
 
 // @public
+export type RefreshSchemaOptions<TStore> = Readonly<{
+    ref?: StoreRef<TStore>;
+    expectedVersion?: number;
+}>;
+
+// @public
 export function registerGraphTemplate<G extends GraphDef>(backend: GraphBackend, params: Readonly<{
     templateId: string;
     reconciled: ReconciledSchema<G>;
@@ -7455,6 +7529,9 @@ type SchemaDiff = Readonly<{
 }>;
 
 // @public
+type SchemaHash = string;
+
+// @public
 export type SchemaIntrospection = Readonly<{
     graphId: string;
     schemaVersion: number | undefined;
@@ -7553,6 +7630,14 @@ export type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWr
 
 // @public
 type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
+
+// @internal
+type SchemaWriteTransactionBackend = TransactionBackend & Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+    tableExists: (this: void, tableName: string) => Promise<boolean>;
+    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+    deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
+}>;
 
 // @public
 export type ScopedMeasure<Context> = <T>(fn: (scoped: Context) => Promise<T>) => Promise<TransactionOutcome<T>>;
@@ -8059,6 +8144,10 @@ interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
         eager?: MaterializeIndexesOptions;
     }>) => Promise<TStore>;
     // (undocumented)
+    readonly planEvolution: (extension: GraphExtension, options?: PlanEvolutionOptions) => Promise<EvolutionPlan>;
+    // (undocumented)
+    readonly refreshSchema: <TRefStore extends StoreCore<G> = TStore>(options?: RefreshSchemaOptions<TStore extends TRefStore ? TRefStore : never>) => Promise<TStore>;
+    // (undocumented)
     readonly removeKinds: <TRefStore extends StoreCore<G> = TStore>(names: readonly string[], options?: Readonly<{
         ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
         eager?: MaterializeRemovalsOptions;
@@ -8143,6 +8232,7 @@ export interface StoreRef<in out T> {
 // @internal
 type StoreRuntime<G extends GraphDef> = Readonly<{
     backend: GraphBackend;
+    evolutionPlanningTarget?: (plan: EvolutionPlan) => Store<G>;
     captureEnabled?: boolean;
     uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
     queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;

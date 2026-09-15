@@ -56,6 +56,7 @@ import {
   matchIdentitiesEqual,
   type SchemaDiff,
 } from "./migration";
+import { prepareNewSchemaVersion } from "./new-schema-version";
 import {
   computeSchemaHash,
   getSchemaHash,
@@ -1495,23 +1496,17 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
   currentVersion: number,
   previous: SerializedSchema | undefined,
 ): Promise<CommitSchemaVersionParams> {
-  // See initializeSchema: reject structurally invalid graphs (e.g.
-  // endpoint-incompatible implies() relations) before committing, not
-  // only when a Store is later built against the committed version.
-  buildKindRegistry(graph);
-
-  const newVersion = currentVersion + 1;
-  const schema =
-    previous === undefined ?
-      serializeSchema(graph, newVersion)
-    : serializeSchemaPreservingUnknownFields(graph, newVersion, previous);
-  const hash = await computeSchemaHash(schema);
+  const prepared = await prepareNewSchemaVersion(
+    graph,
+    currentVersion,
+    previous,
+  );
   return {
     graphId: graph.id,
     expected: { kind: "active", version: currentVersion },
-    version: newVersion,
-    schemaHash: hash,
-    schemaDoc: schema,
+    version: prepared.version,
+    schemaHash: prepared.schemaHash,
+    schemaDoc: prepared.schemaDocument,
   };
 }
 

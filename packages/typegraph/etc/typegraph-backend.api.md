@@ -8,10 +8,21 @@
 export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
+    adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
+        waitBudgetMs: number;
+    }>) => Promise<AdoptedSchemaWriteTransaction>;
 }>;
 
 // @public (undocumented)
 export type AdapterBackendTransactions<TNativeTransaction> = Pick<AdapterBackend<TNativeTransaction>, "transactionWithNative" | "adoptTransaction">;
+
+// @public
+type AdoptedSchemaWriteTransaction = Readonly<{
+    backend: SchemaWriteTransactionBackend & Readonly<{
+        commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+    }>;
+    activeSchema: SchemaVersionRow | undefined;
+}>;
 
 // @public
 export const ALL_FULLTEXT_MODES: readonly FulltextQueryMode[];
@@ -3632,6 +3643,14 @@ export type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWr
 
 // @public
 type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
+
+// @internal
+type SchemaWriteTransactionBackend = TransactionBackend & Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+    tableExists: (this: void, tableName: string) => Promise<boolean>;
+    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+    deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
+}>;
 
 // @public
 export type SerializedClosures = Readonly<{

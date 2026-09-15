@@ -48,9 +48,9 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
-import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
+import { BaseSQLiteDatabase, SQLiteTransaction } from "drizzle-orm/sqlite-core";
 
-import { CompilerInvariantError, ConfigurationError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError, SchemaFenceTimeoutError } from "../../errors";
 import {
   sinceIndexAdoptionDdl,
 } from "../../indexes/system";
@@ -76,6 +76,7 @@ import {
   isMissingTableError,
   isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
+  isSqliteWriterSlotBusy,
 } from "../../utils/sql-errors";
 import {
   type AtomicSqlProgramExecutor,
@@ -106,8 +107,10 @@ import {
   runWithSerializedQueue,
   type SerializedExecutionQueue,
 } from "../serialized-execution-queue";
+import { engineSerializedWriterSlotStatement } from "../sqlite-writer-slot";
 import {
   type AdapterBackend,
+  type AdoptedSchemaWriteTransaction,
   type BackendCapabilities,
   type BackendCatalogProbes,
   type BundledBackendCapabilityOverrides,
@@ -1737,6 +1740,11 @@ export function buildSqliteEngineProfile(
     // capabilities-gated call below reads exactly as it did when this
     // dialect built its own (stale-prone) copy.
     const { capabilities, fencePlan, fenceTarget, isFirstParty } = ctx;
+    const nativeRootClient = (db as Readonly<{ $client?: unknown }>).$client;
+    const supportsSchemaWriteAdoption =
+      transactionMode !== "none" && transactionMode !== "do-sqlite" &&
+      typeof nativeRootClient === "object" && nativeRootClient !== null &&
+      "inTransaction" in nativeRootClient;
 
     /**
      * #140: the `transactionMode: "do-sqlite"` primitive. Cloudflare
@@ -1986,6 +1994,25 @@ export function buildSqliteEngineProfile(
       );
     }
 
+    function bindPrivilegedTransactionBackend(
+      tx: AnySqliteDatabase,
+    ): InternalOperationBackend {
+      return createTransactionBackend({
+        capabilities,
+        db: tx,
+        operationStrategy,
+        profileHints: { isSync },
+        tableNames,
+        fulltextStrategy,
+        vectorStrategy,
+        contributionMaterializer: ctx.contributionMaterializer,
+        fenceTarget,
+        lineage: provisioning.lineage,
+        recordedTime: provisioning.recordedTime,
+        isFirstParty: false,
+      });
+    }
+
     return {
       transactions: {
         async transaction<T>(
@@ -2142,6 +2169,116 @@ export function buildSqliteEngineProfile(
           // dialect-derivation fallback or the lazy schema-fence lease.
           return bindTransactionBackend(externalTx, false);
         },
+
+        ...(
+          supportsSchemaWriteAdoption ?
+            { adoptSchemaWriteTransaction: async function adoptSchemaWriteTransaction(
+          externalTx: AnySqliteDatabase,
+          graphId: string,
+          options: Readonly<{ waitBudgetMs: number }>,
+        ): Promise<AdoptedSchemaWriteTransaction> {
+          if (!Number.isSafeInteger(options.waitBudgetMs) || options.waitBudgetMs <= 0) {
+            throw new ConfigurationError(
+              "Schema fence waitBudgetMs must be a positive finite integer.",
+              { waitBudgetMs: options.waitBudgetMs },
+            );
+          }
+          assertAdoptedDialect<AnySqliteDatabase>(
+            externalTx,
+            BaseSQLiteDatabase,
+            "sqlite",
+          );
+
+          // SQLite has no SQL transaction-state query. The official sync
+          // client's inTransaction fact belongs to the exact connection this
+          // Drizzle transaction/session will execute on. A transaction-shaped
+          // object or a successful zero-row UPDATE alone proves neither fact.
+          const rootClient = (db as Readonly<{ $client?: unknown }>).$client;
+          const transactionClient =
+            externalTx instanceof SQLiteTransaction ?
+              (externalTx as unknown as Readonly<{
+                session?: Readonly<{ client?: unknown }>;
+              }>).session?.client
+            : (externalTx as Readonly<{ $client?: unknown }>).$client;
+          if (
+            typeof rootClient !== "object" || rootClient === null ||
+            rootClient !== transactionClient ||
+            !("inTransaction" in rootClient) ||
+            rootClient.inTransaction !== true
+          ) {
+            throw new ConfigurationError(
+              "Schema adoption requires the active transaction on this backend's exact SQLite connection.",
+              { capability: "sqliteClient.inTransaction", transactionMode },
+            );
+          }
+
+          const backend = bindPrivilegedTransactionBackend(externalTx);
+          if (!(await backend.tableExists(tableNames.nodes))) {
+            throw new ConfigurationError(
+              "Schema adoption requires TypeGraph bootstrap storage before the caller transaction.",
+              { tableName: tableNames.nodes },
+            );
+          }
+          const [busyTimeout] = await externalTx.all<{ timeout: number }>(
+            sql`PRAGMA busy_timeout`,
+          );
+          if (busyTimeout === undefined || !Number.isFinite(busyTimeout.timeout)) {
+            throw new ConfigurationError(
+              "This SQLite driver cannot report its busy_timeout for bounded schema adoption.",
+              { capability: "sqlite.busy_timeout" },
+            );
+          }
+          const effectiveTimeout =
+            Math.min(busyTimeout.timeout, options.waitBudgetMs);
+          await externalTx.run(sql.raw(`PRAGMA busy_timeout = ${effectiveTimeout}`));
+          const deadline = performance.now() + options.waitBudgetMs;
+          let slotError: unknown;
+          try {
+            // On a DEFERRED caller transaction this no-op UPDATE reserves the
+            // one SQLite writer slot; in autocommit it would be meaningless,
+            // which is why the native inTransaction witness came first.
+            await backend.executeStatement(
+              engineSerializedWriterSlotStatement(
+                portableSql.identifier(tableNames.nodes),
+              ),
+            );
+          } catch (error) {
+            slotError = error;
+          }
+          try {
+            // busy_timeout belongs to the connection, not the transaction;
+            // even a failed or rolled-back frame must leave it unchanged.
+            await externalTx.run(sql.raw(`PRAGMA busy_timeout = ${busyTimeout.timeout}`));
+          } catch (restoreError) {
+            throw new ConfigurationError(
+              "Could not restore the SQLite connection's busy_timeout after schema fencing.",
+              { graphId, previousBusyTimeout: busyTimeout.timeout },
+              { cause: restoreError },
+            );
+          }
+          if (slotError !== undefined) {
+            if (isSqliteWriterSlotBusy(slotError)) {
+              throw new SchemaFenceTimeoutError(
+                graphId,
+                "writer-slot",
+                options.waitBudgetMs,
+                slotError,
+              );
+            }
+            throw slotError;
+          }
+          if (performance.now() >= deadline) {
+            throw new SchemaFenceTimeoutError(
+              graphId,
+              "writer-slot",
+              options.waitBudgetMs,
+            );
+          }
+          const activeSchema = await backend.getActiveSchema(graphId);
+          return { backend, activeSchema };
+        } }
+          : {}
+        ),
 
         async schemaWriteTransaction<T>(
           _graphId: string,

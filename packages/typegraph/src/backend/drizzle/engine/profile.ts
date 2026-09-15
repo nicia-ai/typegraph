@@ -194,6 +194,7 @@ export type EngineLateMembers<TTx> = Readonly<{
     | "transaction"
     | "transactionWithNative"
     | "adoptTransaction"
+    | "adoptSchemaWriteTransaction"
     | "schemaWriteTransaction"
   >;
   fence: Readonly<{
