@@ -1,7 +1,10 @@
 import { validateEdgeEndpoints } from "../constraints";
 import { IdentityEndpointValidityError } from "../errors";
+import { assertTransactionStore } from "../store/runtime-port";
+import type { TransactionContext } from "../store/types";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
+import { assertMergeTransactionPristine } from "./adopted-transaction";
 import {
   assertMergeCallbackResult,
   type MergePlanApplyOptions,
@@ -4177,36 +4180,99 @@ function reportFromArtifact<G extends GraphDef>(
   };
 }
 
+/** Validates a serialized merge plan and binds it to its target graph. */
+async function validateMergePlanForTarget<G extends GraphDef>(
+  target: Store<G>,
+  input: MergePlanArtifact,
+): Promise<MergePlanArtifactV1> {
+  let validation: Awaited<ReturnType<typeof validateMergePlanArtifact>>;
+  try {
+    validation = await validateMergePlanArtifact(input);
+  } catch (error) {
+    throw new InvalidMergePlanError(
+      `Merge plan validation failed: ${describeCause(error)}`,
+      { cause: error },
+    );
+  }
+  if (!validation.success) throw mergePlanValidationError(validation.error);
+  const artifact = validation.artifact;
+  if (artifact.target.graphId !== target.graphId) {
+    throw new MergePlanTargetMismatchError(
+      "The merge plan names a different target graph.",
+      {
+        details: {
+          expectedGraphId: artifact.target.graphId,
+          receivedGraphId: target.graphId,
+        },
+      },
+    );
+  }
+  return artifact;
+}
+
+async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
+  target: Store<G>,
+  tx: TransactionContext<G>,
+  artifact: MergePlanArtifactV1,
+  options: MergePlanApplyOptions<G>,
+  requireFreshSnapshot: boolean,
+): Promise<MergedCounts> {
+  const { beforeApply, afterApply } = options;
+  const txBackend = transactionBackend(tx);
+  await assertMergePlanFenceInsideTransaction(
+    target,
+    txBackend,
+    artifact,
+    requireFreshSnapshot,
+  );
+  if (beforeApply !== undefined) {
+    assertMergeCallbackResult(
+      await beforeApply(mergePlanReadContext(tx, target.graph)),
+      "beforeApply",
+    );
+  }
+  await preflightWireMergeWrites(
+    target,
+    tx.nodes as unknown as TxNodes,
+    tx.edges as unknown as TxEdges,
+    artifact,
+  );
+  await assertPlannedIdentityIdsFresh(target, txBackend, {
+    identityAssertions: artifact.writes.identityAssertions,
+    identityRetractions: artifact.writes.identityRetractions,
+  });
+  const applied = await applyWireMergeWrites(
+    target,
+    tx.nodes as unknown as TxNodes,
+    tx.edges as unknown as TxEdges,
+    txBackend,
+    artifact,
+  );
+  if (afterApply !== undefined) {
+    assertMergeCallbackResult(
+      await afterApply(tx, { merged: structuredClone(applied) }),
+      "afterApply",
+    );
+  }
+  return applied;
+}
+
 /** Validates and atomically applies an approved serialized merge plan. */
 export async function applyMergePlan<G extends GraphDef>(
   target: Store<G>,
   input: MergePlanArtifact,
   options: MergePlanApplyOptions<NoInfer<G>> = {},
 ): Promise<Result<MergeReport<G>, MergeError>> {
-  let validation: Awaited<ReturnType<typeof validateMergePlanArtifact>>;
+  let artifact: MergePlanArtifactV1;
   try {
-    validation = await validateMergePlanArtifact(input);
+    artifact = await validateMergePlanForTarget(target, input);
   } catch (error) {
     return err(
-      new InvalidMergePlanError(
-        `Merge plan validation failed: ${describeCause(error)}`,
-        { cause: error },
-      ),
-    );
-  }
-  if (!validation.success)
-    return err(mergePlanValidationError(validation.error));
-  const artifact = validation.artifact;
-  if (artifact.target.graphId !== target.graphId) {
-    return err(
-      new MergePlanTargetMismatchError(
-        "The merge plan names a different target graph.",
-        {
-          details: {
-            expectedGraphId: artifact.target.graphId,
-            receivedGraphId: target.graphId,
-          },
-        },
+      error instanceof MergeError ? error : (
+        new InvalidMergePlanError(
+          `Merge plan validation failed: ${describeCause(error)}`,
+          { cause: error },
+        )
       ),
     );
   }
@@ -4232,45 +4298,17 @@ export async function applyMergePlan<G extends GraphDef>(
         target: storeBackend(target),
       },
       () =>
-        target.transaction(async (tx) => {
-          const txBackend = transactionBackend(tx);
-          await assertMergePlanFenceInsideTransaction(
-            target,
-            txBackend,
-            artifact,
-            composed,
-          );
-          if (beforeApply !== undefined) {
-            assertMergeCallbackResult(
-              await beforeApply(mergePlanReadContext(tx, target.graph)),
-              "beforeApply",
-            );
-          }
-          await preflightWireMergeWrites(
-            target,
-            tx.nodes as unknown as TxNodes,
-            tx.edges as unknown as TxEdges,
-            artifact,
-          );
-          await assertPlannedIdentityIdsFresh(target, txBackend, {
-            identityAssertions: artifact.writes.identityAssertions,
-            identityRetractions: artifact.writes.identityRetractions,
-          });
-          const applied = await applyWireMergeWrites(
-            target,
-            tx.nodes as unknown as TxNodes,
-            tx.edges as unknown as TxEdges,
-            txBackend,
-            artifact,
-          );
-          if (afterApply !== undefined) {
-            assertMergeCallbackResult(
-              await afterApply(tx, { merged: structuredClone(applied) }),
-              "afterApply",
-            );
-          }
-          return applied;
-        }, transactionOptions),
+        target.transaction(
+          (tx) =>
+            applyValidatedMergePlanInTransaction(
+              target,
+              tx,
+              artifact,
+              options,
+              composed,
+            ),
+          transactionOptions,
+        ),
     );
     const warnings = [...artifact.review.warnings];
     let provenancePersisted: MergeReport<G>["provenancePersisted"];
@@ -4309,6 +4347,66 @@ export async function applyMergePlan<G extends GraphDef>(
         )
       ),
     );
+  }
+}
+
+/**
+ * Applies an approved serialized merge plan through a caller-owned transaction.
+ * `tx` must belong to a currently active callback of `target`; retained contexts
+ * and contexts created by another Store are refused. Apply the plan before any
+ * graph writes in that transaction, because pending writes are not represented by
+ * the plan's durable revision fence.
+ *
+ * The caller owns commit, rollback, and whole-transaction retry. This function
+ * opens no transaction and throws on every failure so the surrounding callback
+ * rejects rather than accidentally committing partial work. Plans requesting
+ * persisted provenance are refused because the sidecar cannot yet be enlisted in
+ * this caller-owned transaction.
+ */
+export async function applyMergePlanInTransaction<G extends GraphDef>(
+  target: Store<G>,
+  tx: TransactionContext<NoInfer<G>>,
+  input: MergePlanArtifact,
+): Promise<MergeReport<G>> {
+  try {
+    const artifact = await validateMergePlanForTarget(target, input);
+    assertPublicPlanCapability(target);
+    if (artifact.provenance.persist) {
+      throw new MergePlanCapabilityError(
+        "A caller-owned merge transaction cannot persist merge provenance atomically.",
+        {
+          details: { capability: "adoptedMergeProvenance" },
+          suggestion:
+            "Create the merge plan without persisted provenance, or apply it through applyMergePlan so TypeGraph can manage provenance persistence.",
+        },
+      );
+    }
+    try {
+      assertTransactionStore(tx, target);
+    } catch (error) {
+      throw new MergePlanCapabilityError(
+        "The merge transaction must belong to an active callback of the target Store.",
+        { cause: error, details: { capability: "mergeTransactionStore" } },
+      );
+    }
+    const txBackend = transactionBackend(tx);
+    await assertMergeTransactionPristine(target, txBackend);
+    const merged = await applyValidatedMergePlanInTransaction(
+      target,
+      tx,
+      artifact,
+      {},
+      true,
+    );
+    return reportFromArtifact(artifact, merged, artifact.review.warnings);
+  } catch (error) {
+    const translated = translateMergeCommitError(error);
+    throw translated instanceof MergeError ? translated : (
+        new MergeError(
+          `Merge plan apply failed: ${describeCause(translated)}`,
+          { cause: translated },
+        )
+      );
   }
 }
 

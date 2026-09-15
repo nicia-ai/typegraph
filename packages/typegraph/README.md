@@ -82,6 +82,7 @@ TypeGraph ships semantic graph merge as a dedicated subpath:
 ```ts
 import {
   applyMergePlan,
+  applyMergePlanInTransaction,
   branch,
   merge,
   planMerge,
@@ -123,6 +124,13 @@ target with `revisionTracking: true` or `history: true`. They may contain
 sensitive application data, and their digest provides integrity/identity—not a
 signature, authentication, or authorization. `merge()` and `mergeIncremental()`
 remain one-call compatibility APIs over the same resolution and write owners.
+When a reviewed merge and application records must commit together,
+`applyMergePlanInTransaction()` applies the plan through a transaction context
+created by the same target Store inside `withRecordedTransaction()`. Call it
+before other target-graph writes, then add graph writes or SQL and await the
+caller-owned commit. It throws on failure and leaves rollback and whole-
+transaction retry to the caller. This path refuses persisted provenance, while
+report-only provenance remains available.
 
 It lives in the core package because the primitive is defined over TypeGraph
 stores, schemas, indexes, backends, and ontology semantics rather than as a

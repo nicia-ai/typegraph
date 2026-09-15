@@ -1,3 +1,4 @@
+import { resolveWriteFencePlan } from "../backend/capabilities/write-fence";
 import { graphCommandCoordinationIsolation } from "../backend/command-contract";
 import { type TransactionBackend } from "../backend/types";
 import { TypeGraphError } from "../errors";
@@ -36,15 +37,21 @@ export async function lockMergeTargetWrite(
     const lock = await lockRecordedGraphWrite(txBackend, input.graphId);
     // Serialized engines already own the writer slot. An advisory-lock token
     // carries the isolation observed by the lock statement on this session.
-    if (input.requireFreshSnapshot && lock.coordination !== undefined) {
-      const isolation = graphCommandCoordinationIsolation(
-        txBackend.commands,
-        input.graphId,
-        lock.coordination,
-      );
+    if (
+      input.requireFreshSnapshot &&
+      resolveWriteFencePlan(txBackend).kind !== "engine-serialized"
+    ) {
+      const isolation =
+        lock.coordination === undefined ?
+          undefined
+        : graphCommandCoordinationIsolation(
+            txBackend.commands,
+            input.graphId,
+            lock.coordination,
+          );
       if (isolation !== "read_committed") {
         throw new MergePlanCapabilityError(
-          "Merge callbacks require read-committed isolation so their reads observe the target after acquiring its graph lock.",
+          "Composed merge application requires observed read-committed isolation so reads observe the target after acquiring its graph lock.",
           { details: { capability: "mergeCallbackIsolation", isolation } },
         );
       }

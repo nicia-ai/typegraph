@@ -132,6 +132,9 @@ type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeTyp
 // @public
 export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact, options?: MergePlanApplyOptions<NoInfer<G>>): Promise<Result<MergeReport<G>, MergeError>>;
 
+// @public
+export function applyMergePlanInTransaction<G extends GraphDef>(target: Store<G>, tx: TransactionContext<NoInfer<G>>, input: MergePlanArtifact): Promise<MergeReport<G>>;
+
 // @public (undocumented)
 type ArithmeticExpressionNode = Readonly<{
     kind: "arithmetic";

@@ -12,6 +12,7 @@ import {
 } from "..";
 import {
   applyMergePlan,
+  applyMergePlanInTransaction,
   BranchError,
   type CandidateDiagnostics,
   type EntityResolution,
@@ -238,6 +239,12 @@ expectError(
 expectError(applyMergePlan(store, mergePlan, { beforeApply: () => {} }));
 declare const transaction: TransactionContext<typeof graph>;
 expectError(applyMergePlan(transaction, mergePlan));
+expectType<Promise<MergeReport<typeof graph>>>(
+  applyMergePlanInTransaction(store, transaction, mergePlan),
+);
+expectError(applyMergePlanInTransaction(store, store, mergePlan));
+expectError(applyMergePlanInTransaction(store, transaction, {} as unknown));
+expectError(applyMergePlanInTransaction(store, transaction, mergePlan, {}));
 
 const related = defineEdge("related", { schema: z.object({}) });
 const identityGraph = defineGraph({

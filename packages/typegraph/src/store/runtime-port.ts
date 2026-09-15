@@ -23,6 +23,7 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
+import { ConfigurationError } from "../errors";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
@@ -418,6 +419,51 @@ type TransactionNodeOperationHookRunner = <T>(
   id: string,
   fn: () => Promise<T>,
 ) => Promise<T>;
+
+const transactionStoreOwners = new WeakMap<object, object>();
+const activeTransactionContexts = new WeakSet<object>();
+
+/** Binds the hidden context port to the Store that created its collections. */
+export function bindTransactionStore<G extends GraphDef>(
+  transaction: TransactionRuntimePort,
+  store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
+): void {
+  const runtime = requireDefined(transaction[TRANSACTION_RUNTIME]);
+  transactionStoreOwners.set(runtime, storeRuntime(store));
+}
+
+/** The callback boundary owns the lifetime of every measurable context overlay. */
+export async function runInTransactionContext<
+  T,
+  Context extends TransactionRuntimePort,
+>(context: Context, fn: (context: Context) => Promise<T>): Promise<T> {
+  const runtime = requireDefined(context[TRANSACTION_RUNTIME]);
+  activeTransactionContexts.add(runtime);
+  try {
+    return await fn(context);
+  } finally {
+    activeTransactionContexts.delete(runtime);
+  }
+}
+
+/** Refuses contexts whose collections and metadata belong to another Store. */
+export function assertTransactionStore<G extends GraphDef>(
+  transaction: TransactionRuntimePort,
+  store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
+): void {
+  const runtime = transaction[TRANSACTION_RUNTIME];
+  const belongsToStore =
+    runtime !== undefined &&
+    transactionStoreOwners.get(runtime) === storeRuntime(store);
+  const isActive =
+    runtime !== undefined && activeTransactionContexts.has(runtime);
+  if (!belongsToStore || !isActive) {
+    throw new ConfigurationError(
+      "The merge transaction must belong to an active callback of the target Store.",
+      { capability: "mergeTransactionStore" },
+    );
+  }
+}
 
 /** Returns the full backend for privileged transaction-bound internals. */
 export function transactionBackend(

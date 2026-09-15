@@ -90,6 +90,7 @@ import { type ConstraintFenceReason } from "../constraints";
 import {
   advanceRevisionClock,
   lockRecordedGraphWrite,
+  recordedTransactionControlTarget,
 } from "../recorded-capture";
 import {
   acquiredGraphWriteLockFromCombinedFence,
@@ -194,6 +195,33 @@ export async function withTransactionSchemaFenceLease<T>(
   }
 }
 
+/** A managed revision is allocated only when its outer callback completes. */
+export function hasPendingWriteTransactionRevision(
+  target: TransactionBackend,
+): boolean {
+  return writeTransactionSessions.get(target)?.wrote === true;
+}
+
+/** Takes the engine writer slot without changing graph data. */
+export async function ensureEngineSerializedWriterSlot(
+  target: GraphBackend | TransactionBackend,
+  schema: SqlSchema,
+  statementExecution: Extract<
+    BundleVerdictOf<typeof STATEMENT_EXECUTION>,
+    { supported: true }
+  >,
+): Promise<void> {
+  const { executeStatement } = statementExecutionMembers(
+    recordedTransactionControlTarget(target),
+    statementExecution,
+  );
+  await executeStatement(
+    asCompiledStatementSql(
+      sql`UPDATE ${schema.nodesTable} SET graph_id = graph_id WHERE 0`,
+    ),
+  );
+}
+
 /** Forces the enclosing managed Store transaction to consume one revision. */
 export function forceWriteTransactionRevision(
   target: TransactionBackend,
@@ -278,15 +306,11 @@ async function ensureAdoptedConstraintWriterSlot(
       },
     );
   }
-  const { executeStatement } = statementExecutionMembers(
-    target,
-    statementExecution,
-  );
   try {
-    await executeStatement(
-      asCompiledStatementSql(
-        sql`UPDATE ${ctx.revisionSchema.nodesTable} SET graph_id = graph_id WHERE 0`,
-      ),
+    await ensureEngineSerializedWriterSlot(
+      target,
+      ctx.revisionSchema,
+      statementExecution,
     );
   } catch (error) {
     if (!isSqliteStaleSnapshotError(error)) throw error;
