@@ -1181,14 +1181,16 @@ describe("AST Extractor", () => {
     expect(havingAccess).toBeDefined();
   });
 
-  it("extracts collection operands and aggregate-local ordering", () => {
+  it("extracts collection operands, filters, and aggregate-local ordering", () => {
     const namePointer = jsonPointer(["name"]);
     const agePointer = jsonPointer(["age"]);
+    const emailPointer = jsonPointer(["email"]);
     const query = store
       .query()
       .from("Person", "person")
       .project((fields) => ({
         names: expr.collect(fields.person.name, {
+          filter: expr.eq(fields.person.email, expr.literal("ada@example.com")),
           orderBy: [{ expression: fields.person.age }],
         }),
       }));
@@ -1204,6 +1206,10 @@ describe("AST Extractor", () => {
         expect.objectContaining({
           context: "sort",
           target: { __type: "prop", pointer: agePointer },
+        }),
+        expect.objectContaining({
+          context: "filter",
+          target: { __type: "prop", pointer: emailPointer },
         }),
       ]),
     );

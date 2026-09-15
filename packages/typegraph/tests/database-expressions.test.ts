@@ -78,13 +78,16 @@ describe("database expressions", () => {
   it("uses distinct public AST shapes for collection and scalar aggregates", () => {
     const operand = expr.literal("Ada");
     const order = expr.literal(1);
+    const filter = expr.literal(true);
     const collection = expr.collect(operand, {
+      filter,
       orderBy: [{ expression: order, direction: "desc", nulls: "first" }],
     });
     const aggregate = expr.sum(order);
 
     expect(collection.node).toEqual({
       kind: "collect",
+      filter,
       operand,
       orderBy: [{ expression: order, direction: "desc", nulls: "first" }],
     });

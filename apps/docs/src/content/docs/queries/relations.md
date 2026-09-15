@@ -108,27 +108,64 @@ const histories = await purchases
         { expression: columns.purchasedAt, direction: "asc", nulls: "last" },
         { expression: columns.id },
       ],
+      filter: expr.gte(columns.amount, expr.literal(10)),
     }),
   }))
   .orderBy((columns) => columns.customerId)
   .execute();
-// One row per customer, with amounts in purchase order, including duplicates.
+// One row per customer, with matching amounts in purchase order.
 ```
 
 Import `CollectOptions<Scope>` to type reusable options or helper parameters without restating the
-nonempty ordering tuple. It names the options contract for `expr.collect()`; `filter`, `distinct`,
-and aggregate-local `limit` are not supported yet.
+nonempty ordering tuple. It names the options contract for `expr.collect()`. `distinct` and
+aggregate-local `limit` are not supported.
 
 `orderBy` must contain at least one scalar expression. Each item accepts `direction` (`"asc"` by
 default) and `nulls` (last for ascending, first for descending). Include a unique tie-breaker when
 other ordering values can tie. Collection ordering controls elements inside each list; the relation's
 outer `orderBy()` controls result rows. Source ordering is not an implicit collection order.
 
+The optional `filter` is a Boolean database expression in the same scope as the value and ordering
+expressions. SQL TRUE includes an element; false and SQL NULL exclude it. This follows SQL aggregate
+filter semantics, including for prepared parameters.
+
+Aggregate-local filtering matters with optional traversals. It can exclude a missing child while
+retaining the parent's group:
+
+```typescript
+const projects = store.query().from("Project", "project")
+  .optionalTraverse("hasTask", "assignment").to("Task", "task")
+  .project((fields) => ({
+    project: fields.project.name,
+    taskId: fields.task.id,
+    taskTitle: fields.task.title,
+    priority: fields.task.priority,
+  })).asRelation();
+
+const rows = await projects
+  .groupBy((columns) => [columns.project])
+  .aggregate((columns) => ({
+    project: columns.project,
+    tasks: expr.collect(columns.taskTitle, {
+      orderBy: [{ expression: columns.priority }, { expression: columns.taskId }],
+      filter: expr.isNotNull(columns.taskId),
+    }),
+  }))
+  .orderBy((columns) => columns.project)
+  .execute();
+// [{ project: "Launch", tasks: ["Fix blocker", "Write announcement"] },
+//  { project: "Research", tasks: [] }]
+```
+
+Putting `expr.isNotNull(columns.taskId)` in the relation's outer `where()` instead removes the
+childless row before grouping, so `Research` has no result row. Use the collection filter when the
+parent must remain visible with an empty collection.
+
 Collection elements may be strings, numbers, Booleans, or dates. The result is a readonly array with
-the operand's element type and nullability preserved. SQL NULL elements decode to `undefined`;
-they are retained, including missing optional targets. Filter the input relation explicitly with
-`expr.isNotNull(...)` to exclude those rows. Filtering can remove an entire group; it does not
-synthesize an empty group for an absent parent.
+the operand's element type and nullability preserved. Filtering does not change that type. An
+included SQL NULL operand decodes to `undefined` and remains in the collection; filtering is based
+only on the `filter` expression. This includes NULL values from missing optional targets when the
+filter admits them.
 
 An empty ungrouped collection aggregate returns one row containing `[]`; an empty grouped relation
 returns no rows. Source filters, distinctness, and ranges apply before collection aggregation.

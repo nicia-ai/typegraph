@@ -1,8 +1,9 @@
-/** Ordered scalar collections over projected relations. */
+/** Ordered and filtered scalar collections over optional child rows. */
 import assert from "node:assert/strict";
 
 import {
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   expr,
@@ -11,72 +12,91 @@ import { z } from "zod";
 
 import { createExampleBackend } from "./_helpers";
 
-const Purchase = defineNode("Purchase", {
+const Project = defineNode("Project", {
+  schema: z.object({ name: z.string() }),
+});
+const Task = defineNode("Task", {
   schema: z.object({
-    customer: z.string(),
-    amount: z.number(),
-    sequence: z.number(),
+    title: z.string(),
+    priority: z.number(),
+    completed: z.boolean(),
   }),
 });
+const hasTask = defineEdge("hasTask", { schema: z.object({}) });
 const graph = defineGraph({
   id: "ordered_collections_example",
-  nodes: { Purchase: { type: Purchase } },
-  edges: {},
+  nodes: { Project: { type: Project }, Task: { type: Task } },
+  edges: { hasTask: { type: hasTask, from: [Project], to: [Task] } },
 });
 
 async function main(): Promise<void> {
   const backend = createExampleBackend();
   try {
     const [store] = await createStoreWithSchema(graph, backend);
-    await store.nodes.Purchase.bulkCreate([
-      { props: { customer: "Ada", amount: 50, sequence: 2 } },
-      { props: { customer: "Ada", amount: 100, sequence: 1 } },
-      { props: { customer: "Ada", amount: 50, sequence: 3 } },
-      { props: { customer: "Bea", amount: 80, sequence: 1 } },
+    const launch = await store.nodes.Project.create({ name: "Launch" });
+    await store.nodes.Project.create({ name: "Research" });
+    const tasks = await store.nodes.Task.bulkCreate([
+      { props: { title: "Write announcement", priority: 3, completed: false } },
+      { props: { title: "Fix blocker", priority: 1, completed: true } },
+      { props: { title: "Run rehearsal", priority: 2, completed: false } },
     ]);
-    const purchases = store
+    for (const task of tasks)
+      await store.edges.hasTask.create(launch, task, {});
+
+    const projectTasks = store
       .query()
-      .from("Purchase", "purchase")
+      .from("Project", "project")
+      .optionalTraverse("hasTask", "assignment")
+      .to("Task", "task")
       .project((fields) => ({
-        id: fields.purchase.id,
-        customer: fields.purchase.customer,
-        amount: fields.purchase.amount,
-        sequence: fields.purchase.sequence,
+        projectName: fields.project.name,
+        taskId: fields.task.id,
+        title: fields.task.title,
+        priority: fields.task.priority,
+        completed: fields.task.completed,
       }))
       .asRelation();
-    const grouped = purchases
-      .groupBy((columns) => [columns.customer])
+
+    const parameters = {
+      includeCompleted: expr.param("includeCompleted", "boolean"),
+    };
+    const prepared = projectTasks
+      .groupBy((columns) => [columns.projectName])
       .aggregate((columns) => ({
-        customer: columns.customer,
-        amounts: expr.collect(columns.amount, {
+        project: columns.projectName,
+        tasks: expr.collect(columns.title, {
           orderBy: [
-            { expression: columns.sequence },
-            { expression: columns.id },
+            { expression: columns.priority },
+            { expression: columns.taskId },
           ],
+          filter: expr.and(
+            expr.isNotNull(columns.taskId),
+            expr.or(
+              expr.eq(parameters.includeCompleted, expr.literal(true)),
+              expr.eq(columns.completed, expr.literal(false)),
+            ),
+          ),
         }),
       }))
-      .orderBy((columns) => columns.customer);
-    // Collection order is independent of result-row order. Duplicates remain.
-    assert.deepEqual(await grouped.execute(), [
-      { customer: "Ada", amounts: [100, 50, 50] },
-      { customer: "Bea", amounts: [80] },
-    ]);
-    const parameters = { minimum: expr.param("minimum", "number") };
-    const prepared = purchases
-      .where((columns) => expr.gte(columns.amount, parameters.minimum))
-      .aggregate((columns) => ({
-        amounts: expr.collect(columns.amount, {
-          orderBy: [{ expression: columns.amount }, { expression: columns.id }],
-        }),
-      }))
+      .orderBy((columns) => columns.project)
       .prepare(parameters);
-    const [empty, bounded] = await store.batchOnce(() => [
-      prepared.bind({ minimum: 1000 }),
-      prepared.bind({ minimum: 80 }),
+
+    const [openTasks, allTasks] = await store.batchOnce(() => [
+      prepared.bind({ includeCompleted: false }),
+      prepared.bind({ includeCompleted: true }),
     ]);
-    assert.deepEqual(empty, [{ amounts: [] }]);
-    assert.deepEqual(bounded, [{ amounts: [80, 100] }]);
-    console.log(await grouped.execute());
+    assert.deepEqual(openTasks, [
+      { project: "Launch", tasks: ["Run rehearsal", "Write announcement"] },
+      { project: "Research", tasks: [] },
+    ]);
+    assert.deepEqual(allTasks, [
+      {
+        project: "Launch",
+        tasks: ["Fix blocker", "Run rehearsal", "Write announcement"],
+      },
+      { project: "Research", tasks: [] },
+    ]);
+    console.log(openTasks);
   } finally {
     await backend.close();
   }

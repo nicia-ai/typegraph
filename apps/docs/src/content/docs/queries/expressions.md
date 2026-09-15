@@ -218,6 +218,12 @@ PostgreSQL behavior on the same compiler path.
 ## Collection expression nodes
 
 `expr.collect(value, options)` returns `DatabaseExpression<readonly T[], Scope>`. Reusable helpers
-can import `CollectOptions<Scope>` for its required, nonempty `orderBy` tuple. Collection expressions
-expose a distinct `node.kind: "collect"`, with `operand` and `orderBy`. Ordinary `"aggregate"` nodes
-retain their operator and optional operand; collection-only options do not appear on them.
+can import `CollectOptions<Scope>` for its required, nonempty `orderBy` tuple and optional
+`filter?: DatabaseExpression<boolean | undefined, Scope>`. SQL TRUE includes an element; false and
+SQL NULL exclude it. An included NULL value remains `undefined` in the result, so filtering does not
+narrow the operand or result type.
+
+Collection expressions remain distinct `node.kind: "collect"` nodes, with `operand`, `orderBy`, and
+optional `filter`. Ordinary `"aggregate"` nodes retain their operator and optional operand;
+collection-only options do not appear on them. Collection values are scalar only, ordering is
+required, and `distinct` and aggregate-local `limit` are not collection options.

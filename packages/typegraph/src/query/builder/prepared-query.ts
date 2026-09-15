@@ -302,6 +302,11 @@ export function substituteDatabaseExpression<T, Scope extends string>(
         node: {
           ...node,
           operand: substitute(node.operand),
+          ...(node.filter === undefined ?
+            {}
+          : {
+              filter: substitute(node.filter) as typeof node.filter,
+            }),
           orderBy: node.orderBy.map((order) => ({
             ...order,
             expression: substitute(order.expression) as typeof order.expression,
@@ -862,6 +867,7 @@ function collectParameterMetadataFromDatabaseExpression(
     case "collect": {
       collect(node.operand);
       for (const order of node.orderBy) collect(order.expression);
+      if (node.filter !== undefined) collect(node.filter);
       return;
     }
     case "conditional": {

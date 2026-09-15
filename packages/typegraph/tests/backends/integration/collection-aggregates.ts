@@ -101,6 +101,122 @@ export function registerCollectionAggregateIntegrationTests(
       ).toEqual([{ names: ["Root", "Isolated", "Friend"] }]);
     });
 
+    it("filters each collection without removing its parent group", async () => {
+      const store = context.getStore();
+      const matched = await store.nodes.Person.create({ name: "Matched" });
+      const unmatched = await store.nodes.Person.create({ name: "Unmatched" });
+      const childless = await store.nodes.Person.create({ name: "Childless" });
+      const alpha = await store.nodes.Company.create({ name: "Alpha" });
+      const beta = await store.nodes.Company.create({ name: "Beta" });
+      const ignored = await store.nodes.Company.create({ name: "Ignored" });
+      await store.edges.worksAt.create(matched, beta, {
+        role: "Engineer",
+        salary: 100,
+      });
+      await store.edges.worksAt.create(matched, alpha, {
+        role: "Engineer",
+        salary: 100,
+      });
+      await store.edges.worksAt.create(matched, beta, {
+        role: "Engineer",
+        salary: 100,
+      });
+      await store.edges.worksAt.create(matched, ignored, {
+        role: "Advisor",
+        salary: 200,
+      });
+      await store.edges.worksAt.create(unmatched, ignored, {
+        role: "Advisor",
+        salary: 200,
+      });
+
+      expect(
+        await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (person) =>
+            person.id.in([matched.id, unmatched.id, childless.id]),
+          )
+          .optionalTraverse("worksAt", "employment")
+          .to("Company", "company")
+          .groupBy((fields) => [fields.person.name])
+          .aggregate((fields) => ({
+            person: fields.person.name,
+            allCompanies: expr.collect(fields.company.name, {
+              orderBy: [{ expression: fields.company.name }],
+            }),
+            companies: expr.collect(fields.company.name, {
+              filter: expr.eq(fields.employment.role, expr.literal("Engineer")),
+              orderBy: [{ expression: fields.company.name }],
+            }),
+          }))
+          .asRelation()
+          .orderBy((columns) => columns.person)
+          .execute(),
+      ).toEqual([
+        { person: "Childless", allCompanies: [undefined], companies: [] },
+        {
+          person: "Matched",
+          allCompanies: ["Alpha", "Beta", "Beta", "Ignored"],
+          companies: ["Alpha", "Beta", "Beta"],
+        },
+        { person: "Unmatched", allCompanies: ["Ignored"], companies: [] },
+      ]);
+
+      expect(
+        await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (person) => person.id.eq(matched.id))
+          .traverse("worksAt", "employment")
+          .to("Company", "company")
+          .aggregate((fields) => ({
+            companies: expr.collect(fields.company.name, {
+              filter: expr.literal(false),
+              orderBy: [{ expression: fields.company.name }],
+            }),
+          }))
+          .execute(),
+      ).toEqual([{ companies: [] }]);
+    });
+
+    it("keeps nullable included operands and binds parameters used only by the filter", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create({ name: "Employee" });
+      const first = await store.nodes.Company.create({ name: "First" });
+      const second = await store.nodes.Company.create({ name: "Second" });
+      await store.edges.worksAt.create(person, first, { role: "Engineer" });
+      await store.edges.worksAt.create(person, second, {
+        role: "Engineer",
+        salary: 120,
+      });
+
+      const role = expr.param("role", "string");
+      const prepared = store
+        .query()
+        .from("Person", "person")
+        .traverse("worksAt", "employment")
+        .to("Company", "company")
+        .aggregate((fields) => ({
+          salaries: expr.collect(fields.employment.salary, {
+            filter: expr.eq(fields.employment.role, role),
+            orderBy: [{ expression: fields.employment.salary, nulls: "first" }],
+          }),
+        }))
+        .asRelation()
+        .prepare({ role });
+
+      expect(await prepared.execute({ role: "Engineer" })).toEqual([
+        { salaries: [undefined, 120] },
+      ]);
+      expect(
+        await store.batchOnce(() => [
+          prepared.bind({ role: "Advisor" }),
+          prepared.bind({ role: "Engineer" }),
+        ]),
+      ).toEqual([[{ salaries: [] }], [{ salaries: [undefined, 120] }]]);
+    });
+
     it("decodes dates and distinguishes empty ungrouped and grouped input", async () => {
       const store = context.getStore();
       const earlier = new Date("2024-01-01T00:00:00.000Z");
@@ -419,7 +535,7 @@ export function registerCollectionAggregateIntegrationTests(
       ).toEqual([{ names: ["Historically visible"] }]);
     });
 
-    it("refuses invalid operands, ordering, and nested aggregates", async () => {
+    it("refuses invalid operands, ordering, filters, and nested aggregates", async () => {
       const store = context.getStore();
       expect(() =>
         store
@@ -453,6 +569,30 @@ export function registerCollectionAggregateIntegrationTests(
           .execute(),
       ).rejects.toThrow(/nested aggregate|aggregate.*aggregate/i);
 
+      expect(() =>
+        store
+          .query()
+          .from("Person", "person")
+          .aggregate((fields) => ({
+            names: expr.collect(fields.person.name, {
+              filter: fields.person.age as never,
+              orderBy: [{ expression: fields.person.name }],
+            }),
+          })),
+      ).toThrow(/COLLECT.*filter.*Boolean|Boolean.*COLLECT.*filter/i);
+      await expect(
+        store
+          .query()
+          .from("Person", "person")
+          .aggregate((fields) => ({
+            names: expr.collect(fields.person.name, {
+              filter: expr.gt(expr.count(fields.person.id), expr.literal(0)),
+              orderBy: [{ expression: fields.person.name }],
+            }),
+          }))
+          .execute(),
+      ).rejects.toThrow(/nested aggregate|aggregate.*aggregate/i);
+
       let foreignOrder: DatabaseExpression<string> | undefined;
       store
         .query()
@@ -471,6 +611,17 @@ export function registerCollectionAggregateIntegrationTests(
           .aggregate((fields) => ({
             names: expr.collect(fields.person.name, {
               orderBy: [{ expression: capturedForeignOrder }],
+            }),
+          })),
+      ).toThrow(/different query scopes/i);
+      expect(() =>
+        store
+          .query()
+          .from("Person", "person")
+          .aggregate((fields) => ({
+            names: expr.collect(fields.person.name, {
+              filter: expr.eq(capturedForeignOrder, expr.literal("Ada")),
+              orderBy: [{ expression: fields.person.name }],
             }),
           })),
       ).toThrow(/different query scopes/i);

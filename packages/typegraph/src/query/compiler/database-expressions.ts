@@ -10,6 +10,7 @@ import {
   type DatabaseExpression,
   type DatabaseExpressionNode,
   type DatabaseLiteral,
+  resolveCollectFilter,
   resolveCollectOrder,
 } from "../expressions";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -209,11 +210,16 @@ function compileNode(
           nulls === "first" ? sql.raw("NULLS FIRST") : sql.raw("NULLS LAST");
         return sql`${compileNode(order.expression, context, aggregateDepth + 1)} ${directionSql} ${nullsSql}`;
       });
-      return context.dialect.orderedScalarJsonArray(
-        compileNode(node.operand, context, aggregateDepth + 1),
-        node.operand.valueType,
-        ordering,
-      );
+      const filter = resolveCollectFilter(node.filter);
+      return context.dialect.orderedScalarJsonArray({
+        filter:
+          filter === undefined ? undefined : (
+            compileNode(filter, context, aggregateDepth + 1)
+          ),
+        orderBy: ordering,
+        value: compileNode(node.operand, context, aggregateDepth + 1),
+        valueType: node.operand.valueType,
+      });
     }
     case "aggregate": {
       const operand =

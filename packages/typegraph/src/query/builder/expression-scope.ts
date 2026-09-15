@@ -61,6 +61,7 @@ export function assertExpressionScope(
       assertExpressionScope(node.operand, scope);
       for (const order of node.orderBy)
         assertExpressionScope(order.expression, scope);
+      if (node.filter !== undefined) assertExpressionScope(node.filter, scope);
       return;
     }
     case "conditional": {

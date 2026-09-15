@@ -32,12 +32,14 @@ export type CollectOrder<Scope extends string = string> = Readonly<{
 
 /** Options for ordered scalar collection aggregation. */
 export type CollectOptions<Scope extends string = string> = Readonly<{
+  filter?: DatabaseExpression<boolean | undefined, Scope>;
   orderBy: readonly [CollectOrder<Scope>, ...CollectOrder<Scope>[]];
 }>;
 
 export type CollectExpressionNode = Readonly<{
   kind: "collect";
   operand: DatabaseExpression;
+  filter?: DatabaseExpression<boolean | undefined>;
   orderBy: readonly CollectOrder[];
 }>;
 
@@ -580,18 +582,36 @@ export function resolveCollectOrder<Scope extends string>(
   });
 }
 
+/** Validates the optional row filter shared by builders and raw compilation. */
+export function resolveCollectFilter<Scope extends string>(
+  filter: DatabaseExpression<boolean | undefined, Scope> | undefined,
+): DatabaseExpression<boolean | undefined, Scope> | undefined {
+  if (filter !== undefined && filter.valueType !== "boolean")
+    throw new UnsupportedPredicateError(
+      "COLLECT filter requires a Boolean expression",
+    );
+  return filter;
+}
+
 function collect<T extends Comparable | undefined, Scope extends string>(
   operand: DatabaseExpression<T, Scope>,
   options: CollectOptions<Scope>,
 ): DatabaseExpression<readonly T[], Scope> {
   assertPortableScalarValueType(operand.valueType, "COLLECT");
   const orderBy = resolveCollectOrder(options.orderBy);
+  const filter = resolveCollectFilter(options.filter);
   const scopeIdentity = resolveScope([
     operand,
     ...orderBy.map((order) => order.expression),
+    ...(filter === undefined ? [] : [filter]),
   ]);
   return createExpression(
-    { kind: "collect", operand, orderBy },
+    {
+      ...(filter === undefined ? {} : { filter }),
+      kind: "collect",
+      operand,
+      orderBy,
+    },
     "array",
     false,
     scopeIdentity,

@@ -661,6 +661,7 @@ type Collation = "binary" | "caseInsensitive";
 type CollectExpressionNode = Readonly<{
     kind: "collect";
     operand: DatabaseExpression;
+    filter?: DatabaseExpression<boolean | undefined>;
     orderBy: readonly CollectOrder[];
 }>;
 

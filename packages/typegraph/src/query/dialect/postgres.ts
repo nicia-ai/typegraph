@@ -11,6 +11,7 @@ import {
 import { type ValueType } from "../ast";
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { applyAggregateFilter } from "./aggregate-filter";
 import { tsvectorStrategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
 import { DOUBLE_OVERFLOW_BOUNDARY } from "./numeric-conversion";
@@ -164,11 +165,13 @@ export const postgresDialect: DialectAdapter = {
     return sql`(SELECT COALESCE(jsonb_agg(to_jsonb(${row}) - ${orderColumn} ORDER BY ${order}), '[]'::jsonb) FROM ${row})`;
   },
 
-  orderedScalarJsonArray(value, valueType, orderBy) {
+  orderedScalarJsonArray({ filter, orderBy, value, valueType }) {
     assertPortableScalarValueType(valueType, "COLLECT");
     // Bind-only operands have no SQL context from which PostgreSQL can infer a type.
     const typedValue = sql`CAST(${value} AS ${sql.raw(SCALAR_SQL_TYPES[valueType])})`;
-    return sql`COALESCE(jsonb_agg(to_jsonb(${typedValue}) ORDER BY ${sql.join(orderBy, sql`, `)}), '[]'::jsonb)`;
+    const aggregate = sql`jsonb_agg(to_jsonb(${typedValue}) ORDER BY ${sql.join(orderBy, sql`, `)})`;
+    const filteredAggregate = applyAggregateFilter(aggregate, filter);
+    return sql`COALESCE(${filteredAggregate}, '[]'::jsonb)`;
   },
 
   // ============================================================

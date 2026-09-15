@@ -47,6 +47,7 @@ export function visitExpressionChildren(
     case "collect": {
       visit(node.operand);
       for (const order of node.orderBy) visit(order.expression);
+      if (node.filter !== undefined) visit(node.filter);
       return;
     }
     case "conditional": {
