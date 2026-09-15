@@ -986,16 +986,27 @@ export interface StoreEvolution<
   G extends GraphDef,
   TStore extends StoreCore<G>,
 > {
+  /**
+   * Prepares an immutable plan without acquiring a schema write fence.
+   * The default source reads the active schema; cached planning reuses this Store's snapshot.
+   * Apply the module-issued token through a compatible AdapterStore's withEvolvedTransaction().
+   */
   readonly planEvolution: (
     extension: GraphExtension,
     options?: PlanEvolutionOptions,
   ) => Promise<EvolutionPlan>;
+  /**
+   * Reconciles this Store with committed schema metadata without writes or provisioning.
+   * Call after outer commit. A cache matching minVersion skips SQL; otherwise a read
+   * accepts that version or newer. Updates ref when supplied and returns the reconciled Store.
+   */
   readonly refreshSchema: <TRefStore extends StoreCore<G> = TStore>(
     options?: RefreshSchemaOptions<
       TStore extends TRefStore ? TRefStore : never
     >,
   ) => Promise<TStore>;
 
+  /** Commits an extension in a TypeGraph-owned transaction and returns the evolved Store. */
   readonly evolve: <TRefStore extends StoreCore<G> = TStore>(
     extension: GraphExtension,
     options?: Readonly<{
@@ -1003,18 +1014,21 @@ export interface StoreEvolution<
       eager?: MaterializeIndexesOptions;
     }>,
   ) => Promise<TStore>;
+  /** Marks kinds deprecated for introspection without restricting reads or writes; returns the updated Store. */
   readonly deprecateKinds: <TRefStore extends StoreCore<G> = TStore>(
     names: readonly string[],
     options?: Readonly<{
       ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
     }>,
   ) => Promise<TStore>;
+  /** Clears kind deprecation markers and returns the updated Store. */
   readonly undeprecateKinds: <TRefStore extends StoreCore<G> = TStore>(
     names: readonly string[],
     options?: Readonly<{
       ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
     }>,
   ) => Promise<TStore>;
+  /** Removes runtime kinds from the schema, queues physical cleanup, and returns the updated Store. */
   readonly removeKinds: <TRefStore extends StoreCore<G> = TStore>(
     names: readonly string[],
     options?: Readonly<{

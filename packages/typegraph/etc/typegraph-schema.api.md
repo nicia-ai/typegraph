@@ -724,7 +724,7 @@ export type EvolutionRequirement = Readonly<{
     entity: "node" | "edge";
     kindName: string;
 }> | Readonly<{
-    kind: "pending-removal";
+    kind: "new-kind";
     entity: "node" | "edge";
     kindName: string;
 }> | Readonly<{

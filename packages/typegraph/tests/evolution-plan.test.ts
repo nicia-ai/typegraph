@@ -62,9 +62,9 @@ describe("evolution planning", () => {
     ).toEqual([]);
     expect(
       plan.requirements.filter(
-        (requirement) => requirement.kind === "pending-removal",
+        (requirement) => requirement.kind === "new-kind",
       ),
-    ).toEqual([{ kind: "pending-removal", entity: "node", kindName: "Tag" }]);
+    ).toEqual([{ kind: "new-kind", entity: "node", kindName: "Tag" }]);
     expect(Object.isFrozen(plan)).toBe(true);
     expect(Object.isFrozen(plan.requirements)).toBe(true);
     const payload = getEvolutionPlanPayload(plan);
@@ -84,6 +84,24 @@ describe("evolution planning", () => {
     // @ts-expect-error Reconstructed values cannot carry the private plan brand.
     const invalidPlan: EvolutionPlan = reconstructed;
     expect(getEvolutionPlanPayload(invalidPlan)).toBeUndefined();
+  });
+
+  it("reports an added edge as a new-kind graph delta", async () => {
+    const plan = await prepareEvolutionPlan({
+      ...(await snapshot()),
+      extension: defineGraphExtension({
+        edges: {
+          knows: { from: ["Person"], to: ["Person"], properties: {} },
+        },
+      }),
+    });
+    expect(plan.status).toBe("change");
+    if (plan.status !== "change") return;
+    expect(plan.requirements).toContainEqual({
+      kind: "new-kind",
+      entity: "edge",
+      kindName: "knows",
+    });
   });
 
   it("names required-empty probes and introduced vector slots", async () => {

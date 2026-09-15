@@ -2764,7 +2764,7 @@ export type EvolutionRequirement = Readonly<{
     entity: "node" | "edge";
     kindName: string;
 }> | Readonly<{
-    kind: "pending-removal";
+    kind: "new-kind";
     entity: "node" | "edge";
     kindName: string;
 }> | Readonly<{
@@ -7536,15 +7536,20 @@ type SchemaDiff = Readonly<{
 }>;
 
 // @public
+export type SchemaFencePhase = "schema-advisory" | "schema-row" | "writer-slot";
+
+// @public
 export class SchemaFenceTimeoutError extends TypeGraphError {
-    constructor(graphId: string, phase: "schema-advisory" | "schema-row" | "writer-slot", waitBudgetMs: number, cause?: unknown);
-    // (undocumented)
-    readonly details: Readonly<{
-        graphId: string;
-        phase: "schema-advisory" | "schema-row" | "writer-slot";
-        waitBudgetMs: number;
-    }>;
+    constructor(graphId: string, phase: SchemaFencePhase, waitBudgetMs: number, cause?: unknown);
+    readonly details: SchemaFenceTimeoutErrorDetails;
 }
+
+// @public
+export type SchemaFenceTimeoutErrorDetails = Readonly<{
+    graphId: string;
+    phase: SchemaFencePhase;
+    waitBudgetMs: number;
+}>;
 
 // @public
 export type SchemaHash = string;
@@ -8161,25 +8166,19 @@ export type StoreDescription = Readonly<{
 
 // @public
 export interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
-    // (undocumented)
     readonly deprecateKinds: <TRefStore extends StoreCore<G> = TStore>(names: readonly string[], options?: Readonly<{
         ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
     }>) => Promise<TStore>;
-    // (undocumented)
     readonly evolve: <TRefStore extends StoreCore<G> = TStore>(extension: GraphExtension, options?: Readonly<{
         ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
         eager?: MaterializeIndexesOptions;
     }>) => Promise<TStore>;
-    // (undocumented)
     readonly planEvolution: (extension: GraphExtension, options?: PlanEvolutionOptions) => Promise<EvolutionPlan>;
-    // (undocumented)
     readonly refreshSchema: <TRefStore extends StoreCore<G> = TStore>(options?: RefreshSchemaOptions<TStore extends TRefStore ? TRefStore : never>) => Promise<TStore>;
-    // (undocumented)
     readonly removeKinds: <TRefStore extends StoreCore<G> = TStore>(names: readonly string[], options?: Readonly<{
         ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
         eager?: MaterializeRemovalsOptions;
     }>) => Promise<TStore>;
-    // (undocumented)
     readonly undeprecateKinds: <TRefStore extends StoreCore<G> = TStore>(names: readonly string[], options?: Readonly<{
         ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
     }>) => Promise<TStore>;

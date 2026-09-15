@@ -11,7 +11,7 @@ import { canonicalEqual } from "./canonical";
 import { prepareNewSchemaVersion } from "./new-schema-version";
 import type { SchemaHash, SchemaIdentity, SerializedSchema } from "./types";
 
-/** A database-dependent check or provision needed before committing a change. */
+/** A planned schema delta, database-dependent check, or provisioning requirement. */
 export type EvolutionRequirement =
   | Readonly<{
       kind: "require-empty";
@@ -19,7 +19,8 @@ export type EvolutionRequirement =
       kindName: string;
     }>
   | Readonly<{
-      kind: "pending-removal";
+      /** A kind added by this delta; does not imply a pending removal or cleanup work. */
+      kind: "new-kind";
       entity: "node" | "edge";
       kindName: string;
     }>
@@ -42,10 +43,7 @@ export type EvolutionPlanRequirements = Readonly<{
     EvolutionRequirement,
     { kind: "require-empty" }
   >[];
-  readdedKindCandidates: readonly Extract<
-    EvolutionRequirement,
-    { kind: "pending-removal" }
-  >[];
+  addedKinds: readonly Extract<EvolutionRequirement, { kind: "new-kind" }>[];
   vectorSlots: readonly Extract<
     EvolutionRequirement,
     { kind: "vector-slot" }
@@ -102,12 +100,12 @@ function mintEvolutionPlan(
 function newlyAddedKinds(
   existing: GraphExtension,
   next: GraphExtension,
-): EvolutionPlanRequirements["readdedKindCandidates"] {
+): EvolutionPlanRequirements["addedKinds"] {
   const nodes = Object.keys(next.nodes ?? {})
     .filter((kindName) => !Object.hasOwn(existing.nodes ?? {}, kindName))
     .map((kindName) =>
       Object.freeze({
-        kind: "pending-removal" as const,
+        kind: "new-kind" as const,
         entity: "node" as const,
         kindName,
       }),
@@ -116,7 +114,7 @@ function newlyAddedKinds(
     .filter((kindName) => !Object.hasOwn(existing.edges ?? {}, kindName))
     .map((kindName) =>
       Object.freeze({
-        kind: "pending-removal" as const,
+        kind: "new-kind" as const,
         entity: "edge" as const,
         kindName,
       }),
@@ -238,7 +236,7 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
         }),
       ),
     ),
-    readdedKindCandidates: addedKinds,
+    addedKinds,
     vectorSlots: newlyAddedVectorSlots(existingExtension, extension),
     identityAffectedKinds: Object.freeze(
       identityKindsRequiringPreflight(baselineGraph, mergedGraph),
@@ -246,7 +244,7 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
   });
   const requirements: EvolutionRequirements = Object.freeze([
     ...groupedRequirements.requireEmpty,
-    ...groupedRequirements.readdedKindCandidates,
+    ...groupedRequirements.addedKinds,
     ...groupedRequirements.vectorSlots,
     ...(groupedRequirements.identityAffectedKinds.length > 0 ?
       [
