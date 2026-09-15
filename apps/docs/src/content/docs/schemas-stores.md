@@ -2100,9 +2100,10 @@ affected:
   future extension could ask backends to return row counts.
 
 When the store was created with `{ history: true }` and the transaction flushed
-captured writes, `receipt.recorded` is the recorded commit instant allocated for
-this store's graph by this transaction. It is `undefined` when history capture is
-off, the transaction is read-only, or no captured writes were flushed. Writes
+captured writes or an explicit revision request, `receipt.recorded` is the
+recorded commit instant allocated for this store's graph by this transaction. It
+is `undefined` when history capture is off, the transaction is read-only, or no
+captured writes or revision request were flushed. Writes
 that bypass the transaction collection surface — direct backend writes, raw SQL,
 and import helpers — are not counted. `store.withRecordedTransaction()` — the
 adopted-commit path for history stores — returns the same `TransactionOutcome`,
@@ -2113,6 +2114,26 @@ point, produces no receipt. On a Store backed by a non-transactional driver,
 `transactionWithReceipt()` refuses before invoking the callback, so it cannot
 produce a receipt. Ordinary Store writes remain available when the application
 deliberately owns non-atomic coordination.
+
+History transaction contexts also expose `tx.requestRecordedRevision()`. Call
+it when the transaction must produce a replay anchor even if it changes no
+nodes, edges, or identity assertions. Requests are idempotent: repeated calls,
+or a request combined with ordinary graph writes, allocate one revision at the
+terminal capture flush. The instant is not available inside the callback; read
+it from the outer `receipt.recorded` after the callback completes. A thrown
+callback rolls the request back with the transaction. Engine-native history
+refuses this method because revision allocation belongs to the database engine,
+and an `accessMode: "read_only"` transaction refuses it because allocation is a
+write. Plain `store.transaction()` can request a revision, but returns no receipt;
+callers that must persist the exact anchor produced by their own transaction use
+`transactionWithReceipt()` or `withRecordedTransaction()`.
+
+```typescript
+const outcome = await store.transactionWithReceipt(async (tx) => {
+  tx.requestRecordedRevision();
+});
+const checkpoint = outcome.receipt.recorded;
+```
 
 ##### Scoped receipts: `tx.measure()`
 
@@ -2145,6 +2166,8 @@ through its own scoped context, never cross-count. Nesting composes:
 A scoped receipt's `recorded` is **always `undefined`** — the recorded instant is
 a per-transaction flush concern, unknowable mid-transaction. Plain
 `store.transaction()` contexts have no `measure` (no receipt is being produced).
+The scoped history context still exposes `requestRecordedRevision()`; its request
+belongs to the outer transaction, so only the outer receipt contains the instant.
 
 #### Rollback and error propagation
 

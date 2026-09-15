@@ -46,7 +46,7 @@ import {
   IdentityValidityWindowError,
   type LiveStoreOptions,
   type MeasurableAdapterHistoryTransactionContext,
-  type MeasurableTransactionContext,
+  type MeasurableHistoryTransactionContext,
   createQueryBuilder,
   getEdgeKinds,
   getNodeKinds,
@@ -820,7 +820,7 @@ void receiptOutcome.then(({ receipt }) => {
 // context, same as transaction() does above (plus the scoped `measure`).
 void historyStore.transactionWithReceipt(async (tx) => {
   expectAssignable<TransactionReadBackend>(tx.backend);
-  expectType<ScopedMeasure<MeasurableTransactionContext<typeof graph>>>(
+  expectType<ScopedMeasure<MeasurableHistoryTransactionContext<typeof graph>>>(
     tx.measure,
   );
   expectError(tx.sql);

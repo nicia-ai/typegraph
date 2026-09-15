@@ -597,6 +597,12 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // graphs. Removing `"collect"` from `AggregateOperator` and `orderBy` from
 // `AggregateExpressionNode` changes existing declarations without changing
 // the forgotten-name set. No other entrypoint changes.
+// Recorded revision requests add three public root types:
+// `RecordedRevisionRequest`, `HistoryTransactionContext`, and
+// `MeasurableHistoryTransactionContext`. The Store-bearing `./provenance`,
+// `./sqlite/local`, and `./postgres/pglite` entrypoints render those root-only
+// types transitively, so each gains exactly those three forgotten exports.
+// The root names all three directly and gains no forgotten-export debt.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 491,
@@ -658,24 +664,24 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "40e09ef57aa047ea9b871a465cb13ee0e6c83944e5562597483d67e1fd05cb2f",
   },
   "./postgres/pglite": {
-    count: 824,
-    sha256: "6952b3f65160c3d81fbc836af9cf741a879334a794c66f00b4889d74ece83a50",
+    count: 827,
+    sha256: "10cc0756979413d1e4b048685376bfcd7f9e01bbb7075a8894b7b4800905eb89",
   },
   "./profiler": {
     count: 827,
     sha256: "4d595f23ef488927a9ced34205c03d266761d0222aecb032122a92b4e885e4bf",
   },
   "./provenance": {
-    count: 833,
-    sha256: "22118969a397f0b1f0312e423549983b903a1c3316889cff28fd61abdb5cee41",
+    count: 836,
+    sha256: "d63ef284cb48f13cbf324ad824ce364a220e3937ebba44bb1542e816c33fb69c",
   },
   "./schema": {
     count: 282,
     sha256: "912798b14b4548dc5f66ce6ff9db71dd7561b7d0f1303fd165aa9f58b37390de",
   },
   "./sqlite/local": {
-    count: 824,
-    sha256: "6952b3f65160c3d81fbc836af9cf741a879334a794c66f00b4889d74ece83a50",
+    count: 827,
+    sha256: "10cc0756979413d1e4b048685376bfcd7f9e01bbb7075a8894b7b4800905eb89",
   },
 };
 

@@ -22,6 +22,7 @@ import {
   recordedInstantRevision,
   searchable,
   type StoreSearch,
+  UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import {
@@ -717,6 +718,104 @@ function expectSyncContractRefusal(entry: RecordedContractCase): void {
 export function registerRecordedTimeIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  describe("recorded revision requests", () => {
+    it("allocates consecutive revisions without entity changes", async () => {
+      const store = await createHistoryStore(context);
+
+      const first = await store.transactionWithReceipt((tx) => {
+        tx.requestRecordedRevision();
+        return Promise.resolve();
+      });
+      const second = await store.transactionWithReceipt((tx) => {
+        tx.requestRecordedRevision();
+        return Promise.resolve();
+      });
+
+      const firstRecorded = requireRecordedInstant(
+        first.receipt.recorded,
+        "expected first requested revision",
+      );
+      const secondRecorded = requireRecordedInstant(
+        second.receipt.recorded,
+        "expected second requested revision",
+      );
+
+      expect(first.receipt.writes.total).toBe(0);
+      expect(second.receipt.writes.total).toBe(0);
+      expect(recordedInstantRevision(secondRecorded)).toBe(
+        recordedInstantRevision(firstRecorded) + 1,
+      );
+      expect(await store.recordedNow()).toBe(secondRecorded);
+    });
+
+    it("is idempotent and shares one revision with entity writes", async () => {
+      const store = await createHistoryStore(context);
+
+      const outcome = await store.transactionWithReceipt(async (tx) => {
+        tx.requestRecordedRevision();
+        tx.requestRecordedRevision();
+        await tx.nodes.Person.create(
+          { name: "checkpointed", age: 42 },
+          { id: "recorded-revision-request" },
+        );
+      });
+
+      expect(outcome.receipt.recorded).toBeDefined();
+      expect(outcome.receipt.recorded).toBe(await store.recordedNow());
+      expect(
+        recordedInstantRevision(
+          requireRecordedInstant(
+            outcome.receipt.recorded,
+            "expected requested revision",
+          ),
+        ),
+      ).toBe(1);
+    });
+
+    it("rolls back a requested revision with the transaction", async () => {
+      const store = await createHistoryStore(context);
+
+      await expect(
+        store.transaction((tx) => {
+          tx.requestRecordedRevision();
+          return Promise.reject(new Error("roll back checkpoint"));
+        }),
+      ).rejects.toThrow("roll back checkpoint");
+
+      expect(await store.recordedNow()).toBeUndefined();
+    });
+
+    it("refuses a revision request in a read-only transaction", async () => {
+      const store = await createHistoryStore(context);
+
+      await expect(
+        store.transactionWithReceipt(
+          (tx) => {
+            tx.requestRecordedRevision();
+            return Promise.resolve();
+          },
+          { accessMode: "read_only" },
+        ),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+
+      expect(await store.recordedNow()).toBeUndefined();
+    });
+
+    it("keeps the request available on scoped measure contexts", async () => {
+      const store = await createHistoryStore(context);
+
+      const outcome = await store.transactionWithReceipt(async (tx) =>
+        tx.measure((scoped) => {
+          scoped.requestRecordedRevision();
+          return Promise.resolve();
+        }),
+      );
+
+      expect(outcome.receipt.recorded).toBeDefined();
+      expect(outcome.result.receipt.recorded).toBeUndefined();
+    });
+  });
+
   describe("Recorded-time StoreView", () => {
     it("allocates distinct, both-observable recorded instants for same-millisecond commits", async () => {
       // The monotonic same-ms collision guard diverges by backend (Postgres

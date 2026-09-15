@@ -39,7 +39,7 @@ type AdapterHistoryStoreTransactions<G extends GraphDef, TNativeTransaction> = R
 }>;
 
 // @public (undocumented)
-export type AdapterHistoryTransactionContext<G extends GraphDef, TNativeTransaction> = Omit<AdapterTransactionContext<G, TNativeTransaction>, "sql" | "sqlAvailability"> & Readonly<{
+export type AdapterHistoryTransactionContext<G extends GraphDef, TNativeTransaction> = Omit<AdapterTransactionContext<G, TNativeTransaction>, "sql" | "sqlAvailability"> & RecordedRevisionRequest & Readonly<{
     sqlAvailability: "history";
 }>;
 
@@ -4281,7 +4281,9 @@ export function havingLte(aggregate: AggregateExpr, value: number): AggregateCom
 const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "lineage", "recordedTime", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
 
 // @public (undocumented)
-export type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> & StoreTransactions<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
+export type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
+    transaction: <T>(fn: (tx: HistoryTransactionContext<G>) => Promise<T>, options?: StoreTransactionOptions) => Promise<T>;
+    transactionWithReceipt: <T>(fn: (tx: MeasurableHistoryTransactionContext<G>) => Promise<T>, options?: StoreTransactionOptions) => Promise<TransactionOutcome<T>>;
     historyEnabled: true;
     recordedReadBound: true;
 }>;
@@ -4297,6 +4299,9 @@ export type HistoryStoreOptions = BaseStoreOptions & Readonly<{
     history: true;
     recordedRead?: never;
 }>;
+
+// @public
+export type HistoryTransactionContext<G extends GraphDef> = TransactionContext<G> & RecordedRevisionRequest;
 
 // @public
 export type HookContext = Readonly<{
@@ -5438,6 +5443,11 @@ export type MeasurableAdapterHistoryTransactionContext<G extends GraphDef, TNati
 // @public
 export type MeasurableAdapterTransactionContext<G extends GraphDef, TNativeTransaction> = AdapterTransactionContext<G, TNativeTransaction> & Readonly<{
     measure: ScopedMeasure<MeasurableAdapterTransactionContext<G, TNativeTransaction>>;
+}>;
+
+// @public
+export type MeasurableHistoryTransactionContext<G extends GraphDef> = HistoryTransactionContext<G> & Readonly<{
+    measure: ScopedMeasure<MeasurableHistoryTransactionContext<G>>;
 }>;
 
 // @public
@@ -6872,6 +6882,11 @@ type RecordedRelationDdl = Readonly<{
 // @public (undocumented)
 export type RecordedRelationOptions = Readonly<{
     schema: SqlSchema;
+}>;
+
+// @public
+export type RecordedRevisionRequest = Readonly<{
+    requestRecordedRevision: () => void;
 }>;
 
 // @public

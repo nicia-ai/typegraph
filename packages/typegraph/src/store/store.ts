@@ -341,6 +341,7 @@ import {
   createRecordedTransactionScope,
   ensureRevisionOrigin,
   ensureRevisionOriginsRelation,
+  forceRecordedGraphRevision,
   lockRecordedGraphWrite,
   mintsOriginNamespacedAnchor,
   readRecordedClock,
@@ -407,15 +408,18 @@ import {
   type GraphNodeCollections,
   type GraphNodeReference,
   type HistoryStoreOptions,
+  type HistoryTransactionContext,
   type HookContext,
   type LiveStoreOptions,
   type MeasurableAdapterTransactionContext,
+  type MeasurableHistoryTransactionContext,
   type MeasurableTransactionContext,
   type Node,
   type OperationHookContext,
   type QueryHookContext,
   type QueryOptions,
   type RecordedReadStoreOptions,
+  type RecordedRevisionRequest,
   type RecordedScanOptions,
   type RecordedScanPage,
   type RuntimeEdgeCollection,
@@ -3705,7 +3709,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * For stores created with `{ history: true }`, `receipt.recorded` is the
    * recorded commit instant this transaction allocated for the store's
-   * graph, or `undefined` when nothing was captured.
+   * graph, or `undefined` when nothing was captured or requested.
    *
    * The callback receives a {@link MeasurableTransactionContext}: call
    * `tx.measure((scoped) => ...)` to scope a sub-receipt to the writes made
@@ -3907,6 +3911,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 receiptRecorder,
                 runBulkHooks,
                 frame.attempt,
+                backendOptions.accessMode !== "read_only",
               ),
             );
           const invokeWithSchemaFenceLease = (): Promise<T> =>
@@ -3939,10 +3944,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // before it opened. Exactly once — never once per graph, since an
           // engine-native store answers for exactly one. Only when the
           // mutation witness actually saw a write — `TransactionReceipt.recorded`
-          // is undefined for a read-only or no-op transaction under either
-          // ownership form (the TypeGraph-owned path answers the same "nothing
-          // to stamp" case implicitly, by simply never flushing a row for a
-          // graph with no captured writes), so a plain `store.transaction()`
+          // is undefined for a read-only or no-op engine-native transaction.
+          // TypeGraph-owned capture can instead stamp an explicitly requested
+          // revision without an entity mutation, so a plain `store.transaction()`
           // or an empty-body `transactionWithReceipt()` neither takes the
           // extra round trip nor stamps an instant nothing earned.
           if (mutationWitness?.mutated === true) {
@@ -4138,9 +4142,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * `receipt.recorded` is the recorded commit instant this transaction allocated
    * for the store's graph at the flush point (when `fn` resolved), and is
-   * `undefined` when nothing was captured — a read-only `fn`, or a non-history
-   * store (where the receipt still counts write intents but there is no recorded
-   * time). To attribute writes when `fn` invokes user code that also
+   * `undefined` when nothing was captured or requested — a read-only `fn`, or a
+   * non-history store (where the receipt still counts write intents but there is
+   * no recorded time). To attribute writes when `fn` invokes user code that also
    * bookkeeps, use `tx.measure((scoped) => ...)` and have that code write
    * through the `scoped` context (see {@link MeasurableTransactionContext}).
    *
@@ -4272,10 +4276,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // the last one already committed before it opened. The engine-native
     // counterpart to `flush()`, called once for this store's one graph, and
     // only when the mutation witness actually saw a write (TypeGraph-owned
-    // capture answers the same "nothing to stamp" case implicitly, by simply
-    // never flushing a row for a graph with no captured writes). Either way
+    // capture may also answer an explicit revision request without a touched
+    // entity. Either way
     // `transactionOutcome` reads this store's instant out of the returned map
-    // (undefined when nothing was captured) into `receipt.recorded`.
+    // (undefined when nothing was captured or requested) into `receipt.recorded`.
     const recordedByGraph =
       mutationWitness?.mutated === true ?
         new Map([[this.graphId, await this.#engineRecordedInstant(txBackend)]])
@@ -4397,6 +4401,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // 1 outside a retried `store.transaction`; the retry owner's attempt
     // factory is the only caller that supplies anything else.
     attempt = 1,
+    recordedRevisionRequestAllowed = true,
   ): AdapterTransactionContext<G, TNativeTransaction> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
@@ -4483,6 +4488,34 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       [TRANSACTION_RUNTIME]: { backend: txBackend, runNodeOperationHooks },
       getNodeCollection,
       ...this.#edgeCollectionAccess(edges),
+      ...(this.#captureEnabled || this.#engineNativeHistory ?
+        {
+          requestRecordedRevision: (): void => {
+            if (!recordedRevisionRequestAllowed) {
+              throw new UnsupportedBackendCapabilityError(
+                "tx.requestRecordedRevision()",
+                "write transaction access",
+                { graphId: this.graphId, accessMode: "read_only" },
+                'Remove accessMode: "read_only" when the transaction must allocate a recorded revision.',
+              );
+            }
+            if (this.#engineNativeHistory) {
+              throw new UnsupportedBackendCapabilityError(
+                "tx.requestRecordedRevision()",
+                "TypeGraph-owned recorded-time capture",
+                { graphId: this.graphId, dialect: this.#backend.dialect },
+                "Use a backend with TypeGraph-owned history capture; engine-native revision allocation is controlled by the database engine.",
+              );
+            }
+            if (!forceRecordedGraphRevision(txBackend, this.graphId)) {
+              throw new ConfigurationError(
+                "The history transaction is not bound to a recorded-time capture session.",
+                { graphId: this.graphId },
+              );
+            }
+          },
+        }
+      : {}),
     };
 
     let withSql: AdapterTransactionContext<G, TNativeTransaction>;
@@ -6763,6 +6796,7 @@ export type AdapterHistoryTransactionContext<
   AdapterTransactionContext<G, TNativeTransaction>,
   "sql" | "sqlAvailability"
 > &
+  RecordedRevisionRequest &
   Readonly<{
     sqlAvailability: "history";
   }>;
@@ -6807,9 +6841,16 @@ export type RecordedReadStore<G extends GraphDef> = ResolvedStoreCore<G> &
   Readonly<{ recordedReadBound: true }>;
 
 export type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> &
-  StoreTransactions<G> &
   StoreEvolution<G, HistoryStore<G>> &
   Readonly<{
+    transaction: <T>(
+      fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
+      options?: StoreTransactionOptions,
+    ) => Promise<T>;
+    transactionWithReceipt: <T>(
+      fn: (tx: MeasurableHistoryTransactionContext<G>) => Promise<T>,
+      options?: StoreTransactionOptions,
+    ) => Promise<TransactionOutcome<T>>;
     historyEnabled: true;
     recordedReadBound: true;
   }>;
