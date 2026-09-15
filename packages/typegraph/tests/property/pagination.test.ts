@@ -438,7 +438,7 @@ describe("Order Direction Adjustment Properties", () => {
 
 describe("Cursor Predicate Properties", () => {
   describe("single column", () => {
-    it("forward ASC uses gt operator", () => {
+    it("forward ASC includes greater values and the trailing null partition", () => {
       const orderBy = [createOrderSpec("p", ["id"], "asc")];
       const cursorData: CursorData = {
         v: 1,
@@ -454,9 +454,13 @@ describe("Cursor Predicate Properties", () => {
         "p",
       );
 
-      expect(predicate.expression.__type).toBe("comparison");
-      if (predicate.expression.__type !== "comparison") return;
-      expect(predicate.expression.op).toBe("gt");
+      expect(predicate.expression).toMatchObject({
+        __type: "or",
+        predicates: [
+          { __type: "comparison", op: "gt" },
+          { __type: "null_check", op: "isNull" },
+        ],
+      });
     });
 
     it("forward DESC uses lt operator", () => {
@@ -501,7 +505,7 @@ describe("Cursor Predicate Properties", () => {
       expect(predicate.expression.op).toBe("lt");
     });
 
-    it("backward DESC uses gt operator", () => {
+    it("backward DESC includes greater values and the leading null partition", () => {
       const orderBy = [createOrderSpec("p", ["id"], "desc")];
       const cursorData: CursorData = {
         v: 1,
@@ -517,9 +521,13 @@ describe("Cursor Predicate Properties", () => {
         "p",
       );
 
-      expect(predicate.expression.__type).toBe("comparison");
-      if (predicate.expression.__type !== "comparison") return;
-      expect(predicate.expression.op).toBe("gt");
+      expect(predicate.expression).toMatchObject({
+        __type: "or",
+        predicates: [
+          { __type: "comparison", op: "gt" },
+          { __type: "null_check", op: "isNull" },
+        ],
+      });
     });
   });
 
@@ -543,15 +551,15 @@ describe("Cursor Predicate Properties", () => {
         "p",
       );
 
-      // Should be: (name > 'Alice') OR (name = 'Alice' AND id > 100)
+      // Each increasing key also admits that key's trailing null partition.
       expect(predicate.expression.__type).toBe("or");
       if (predicate.expression.__type !== "or") return;
       expect(predicate.expression.predicates).toHaveLength(2);
-      // First: name > 'Alice'
+      // First: name > 'Alice' OR name IS NULL
       expect(requireDefined(predicate.expression.predicates[0]).__type).toBe(
-        "comparison",
+        "or",
       );
-      // Second: name = 'Alice' AND id > 100
+      // Second: name = 'Alice' AND (id > 100 OR id IS NULL)
       expect(requireDefined(predicate.expression.predicates[1]).__type).toBe(
         "and",
       );
@@ -577,7 +585,7 @@ describe("Cursor Predicate Properties", () => {
         "p",
       );
 
-      // (a > 1) OR (a = 1 AND b > 2) OR (a = 1 AND b = 2 AND c > 3)
+      // One lexicographic branch per key, each accounting for null placement.
       expect(predicate.expression.__type).toBe("or");
       if (predicate.expression.__type !== "or") return;
       expect(predicate.expression.predicates).toHaveLength(3);
@@ -605,20 +613,14 @@ describe("Cursor Predicate Properties", () => {
         "p",
       );
 
-      // The second OR branch should have: name IS NULL AND id > 100
-      expect(predicate.expression.__type).toBe("or");
-      const orExpr = predicate.expression;
-      expect(orExpr.__type).toBe("or");
-      if (orExpr.__type !== "or") return;
-      const secondBranch = orExpr.predicates[1];
-      expect(secondBranch?.__type).toBe("and");
-      if (secondBranch?.__type !== "and") return;
-      expect(requireDefined(secondBranch.predicates[0]).__type).toBe(
-        "null_check",
-      );
+      // NULLS LAST has no later primary value, so only the tie branch remains.
+      expect(predicate.expression).toMatchObject({
+        __type: "and",
+        predicates: [{ __type: "null_check", op: "isNull" }, { __type: "or" }],
+      });
     });
 
-    it("null in comparison produces isNotNull", () => {
+    it("a single null cursor at NULLS LAST has no forward successors", () => {
       const orderBy = [createOrderSpec("p", ["name"], "asc")];
       const cursorData: CursorData = {
         v: 1,
@@ -635,9 +637,13 @@ describe("Cursor Predicate Properties", () => {
         "p",
       );
 
-      expect(predicate.expression.__type).toBe("null_check");
-      if (predicate.expression.__type !== "null_check") return;
-      expect(predicate.expression.op).toBe("isNotNull");
+      expect(predicate.expression).toMatchObject({
+        __type: "and",
+        predicates: [
+          { __type: "null_check", op: "isNull" },
+          { __type: "null_check", op: "isNotNull" },
+        ],
+      });
     });
   });
 });

@@ -13,6 +13,72 @@ export function registerPaginationIntegrationTests(
       await seedProductsForCursorPagination(store);
     });
 
+    it.each([
+      ["asc", "full"],
+      ["desc", "full"],
+      ["asc", "partial"],
+      ["desc", "partial"],
+    ] as const)(
+      "crosses nullable %s sort partitions in both directions with %s selection",
+      async (direction, selection) => {
+        const store = context.getStore();
+        const people = await store.nodes.Person.bulkCreate([
+          { props: { name: "A" } },
+          { props: { name: "B", age: 20 } },
+          { props: { name: "C", age: 10 } },
+          { props: { name: "D" } },
+          { props: { name: "E", age: 10 } },
+          { props: { name: "F", age: 30 } },
+        ]);
+        const ordered = store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (person) =>
+            person.id.in(people.map((entry) => entry.id)),
+          )
+          .orderBy("person", "age", direction)
+          .orderBy("person", "name", "asc");
+        const query =
+          selection === "full" ?
+            ordered.select((fields) => fields.person)
+          : ordered.select((fields) => ({ name: fields.person.name }));
+        const expected =
+          direction === "asc" ?
+            ["C", "E", "B", "F", "A", "D"]
+          : ["A", "D", "F", "B", "C", "E"];
+
+        let after: string | undefined;
+        for (const [index, name] of expected.entries()) {
+          const page = await query.paginate({
+            first: 1,
+            ...(after === undefined ? {} : { after }),
+          });
+          expect(page.data.map((person) => person.name)).toEqual([name]);
+          expect(page.hasNextPage).toBe(index < expected.length - 1);
+          expect(page.hasPrevPage).toBe(index > 0);
+          after = page.nextCursor;
+        }
+
+        let before: string | undefined;
+        for (const [index, name] of expected.toReversed().entries()) {
+          const page = await query.paginate({
+            last: 1,
+            ...(before === undefined ? {} : { before }),
+          });
+          expect(page.data.map((person) => person.name)).toEqual([name]);
+          expect(page.hasPrevPage).toBe(index < expected.length - 1);
+          expect(page.hasNextPage).toBe(index > 0);
+          before = page.prevCursor;
+        }
+
+        const streamed: string[] = [];
+        for await (const person of query.stream({ batchSize: 1 })) {
+          streamed.push(person.name);
+        }
+        expect(streamed).toEqual(expected);
+      },
+    );
+
     it("paginates forward with first/after", async () => {
       const store = context.getStore();
       // Get first page

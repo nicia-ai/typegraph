@@ -36,6 +36,7 @@ import {
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
+import { resolveNullOrdering } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { emitSetOperationQuerySql } from "./emitter";
 import { compileLimitOffsetClauses } from "./limit-offset";
@@ -387,8 +388,7 @@ function buildSetOperationSuffixClauses(
 
       // Handle nulls with IS NULL emulation for cross-dialect consistency
       // Default: ASC → NULLS LAST, DESC → NULLS FIRST
-      const nulls =
-        orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
+      const nulls = resolveNullOrdering(orderSpec);
       const nullsDir = sql.raw(nulls === "first" ? "DESC" : "ASC");
 
       // Emulate NULLS FIRST/LAST: (col IS NULL) ASC/DESC, col DIR

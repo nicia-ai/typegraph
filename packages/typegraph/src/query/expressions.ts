@@ -4,6 +4,7 @@ import {
   assertPortableScalarValueType,
 } from "./aggregate-value-types";
 import type { FieldRef, QueryAst, ValueType } from "./ast";
+import { resolveNullOrdering } from "./order";
 
 type DatabaseJsonValue =
   | boolean
@@ -571,7 +572,7 @@ export function resolveCollectOrder<Scope extends string>(
       throw new UnsupportedPredicateError(
         "COLLECT ordering direction must be asc or desc",
       );
-    const nulls = order.nulls ?? (direction === "asc" ? "last" : "first");
+    const nulls = resolveNullOrdering({ ...order, direction });
     if (!["first", "last"].includes(nulls))
       throw new UnsupportedPredicateError(
         "COLLECT null ordering must be first or last",

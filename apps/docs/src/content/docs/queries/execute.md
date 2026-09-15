@@ -135,6 +135,11 @@ pagination which doesn't degrade as you go deeper.
 
 ### paginate()
 
+Nullable sort values follow the same ordering across page boundaries as in `execute()`:
+ascending order places missing values last, and descending order places them first. Forward and
+backward cursors retain rows in both the missing-value and non-missing-value groups. Sort fields
+do not have to appear in the selected result; pagination retains them internally for its cursors.
+
 ```typescript
 const firstPage = await store
   .query()

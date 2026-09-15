@@ -17,6 +17,7 @@ import {
   type DatabaseExpression,
   expr,
 } from "../expressions";
+import { resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql } from "../sql-intent";
 import { buildCompileOptions } from "./compile-options";
@@ -997,7 +998,7 @@ export function createProjectionRelation<
         true,
       ),
       direction: order.direction,
-      nulls: order.nulls ?? (order.direction === "asc" ? "last" : "first"),
+      nulls: resolveNullOrdering(order),
     })),
   };
   return new ExecutableRelationQuery(definition, state, scopeIdentity);
