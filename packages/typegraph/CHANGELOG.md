@@ -1,5 +1,103 @@
 # @nicia-ai/typegraph
 
+## 0.61.0
+
+### Highlights
+
+TypeGraph 0.61 expands the query DSL from graph matching into composable SQL result shaping. Schema-aware expressions power `project()`, completed-match filters, grouping, aggregates, and correlated subqueries; projected relations can be combined, filtered, deduplicated, prepared, and batched without returning intermediate rows to application code. `expr.collect(value, { orderBy, filter })` builds ordered scalar lists in SQL, including empty per-parent lists when optional matches are filtered inside the aggregate. `count()`, `exists()`, and selected-query `first()` make common terminal reads direct.
+
+Fetching several subgraphs is now a straightforward latency optimization: `store.batchOnce(read => roots.map(root => read.subgraph(root.id, options)))` retrieves independent bounded subgraphs in one statement. Runtime-sized arrays, singleton batches, and empty batches are supported; empty batches submit no SQL. For overlapping roots with substantial shared payloads, opt-in `shareSubgraphs: true` can also share traversal and hydration work while preserving independent results. Benchmark that option against ordinary batching for your workload; disjoint or lightly overlapping roots may not benefit.
+
+Queries can start from an explicit list of node kinds, such as `from(["Person", "Company"], "entity")`, and return one ordered stream with compatible shared fields and kind-discriminated results. Pagination now preserves nullable sort partitions and nodes whose IDs overlap across kinds. Native null ordering and directed node index keys let applications align indexes with their actual sort and identity columns. Recursive queries can compose multiple traversal stages, stop expansion explicitly, and return paths containing kind-qualified nodes and directed edge references.
+
+Approved merge plans can join graph writes and application SQL in one caller-owned transaction through `applyMergePlanInTransaction()`. Workflows using TypeGraph-owned recorded history can also request a checkpoint with `requestRecordedRevision()` when no entity changes are needed; the completed capture receipt supplies the recorded anchor. These additions let applications commit their own receipts alongside TypeGraph work while retaining control of the outer commit and retry boundary.
+
+### Upgrade notes
+
+**Queries and pagination**
+
+- Handle `undefined` for empty-input `sum`, `avg`, `min`, and `max` results. Equality and membership predicates require compatible operands, and `countDistinct` accepts scalar string, number, Boolean, or date values; project an explicit scalar key when replacing structured JSON or array distinct counts.
+- Move cross-alias conditions out of staged `whereNode()` / `whereEdge()` predicates into completed-match `where()`, accounting for optional-row filtering. Use only compatible shared properties for polymorphic predicates, grouping, and ordering; query a specific kind when a field is not shared. Low-level composed `resultPredicate` ASTs must use database-expression predicates, optionally combined with AND/OR/NOT.
+- Add an explicit query `limit()` when a ranked query must cap completed rows. Candidate `k` now bounds ranked candidates only; traversal fan-out can produce more than `k` result rows, including inside set operations.
+- Restart saved multi-kind cursors that lack the new `kind` identity column, including cursors from subclass-expanded sources. For traversal fan-out, include traversed-row identities in the ordering when one source node produces multiple rows. Remove query-level `limit()` / `offset()` before cursor pagination and pass only one pagination direction; conflicting options are now refused.
+- Keep one source per query, use unique aliases across nodes, edges, and recursive outputs, and pass non-negative safe integers for limits and offsets. Use integer subgraph depths from 0 through 1000 and supported traversal directions and cycle policies; invalid inputs are refused rather than ignored.
+- Build batched reads and set-operation operands from the executing Store or transaction context. Split requests explicitly when a batch exceeds its planning or bind budget. Custom operands exposing only `toAst()` must also supply execution provenance; prefer library-created queries. Keep legacy `select()` callbacks pure because they may be probed; use `project()` for database expressions and `map()` for transformations of decoded projected rows.
+
+**Transaction composition**
+
+- Call `applyMergePlanInTransaction(target, tx, plan)` inside an active callback from the same Store, before other writes to the target graph. Propagate its thrown merge error so the caller rolls back, and retry the entire native transaction if needed; the helper opens no nested transaction and performs no local retry. Use a plan with `persistProvenance: false`: persisted merge provenance cannot join this atomic unit, while report-only provenance remains available.
+- Request recorded checkpoints inside a writable callback with TypeGraph-owned history and obtain the anchor from its completed capture receipt; engine-native history and read-only transactions refuse explicit allocation. For atomic application receipt persistence, use `withRecordedTransaction()` and write the receipt through the same still-open native transaction before its outer commit. Do not infer a recorded revision number before capture flush.
+
+**Custom backends and dialects**
+
+- Implement the new `DialectAdapter` members `safeNumericConversion`, `unboundedLimit`, `textJsonArray`, `appendTextJsonArray`, and `orderedScalarJsonArray`. The last accepts one required `{ value, valueType, orderBy, filter }` argument: admit only SQL TRUE filter results, preserve included NULL elements, and return `[]` for empty input. Handle the dedicated `kind: "collect"` node in expression visitors; collection-only options are not ordinary aggregate-node fields.
+- Enable `capabilities.orderedAggregates` only after verifying ordered and filtered aggregate support on the active engine. Bundled PostgreSQL declares support; supported SQLite factories probe it. An unprobed custom or remote SQLite connection must explicitly declare verified support before using `expr.collect()`. Existing non-collection reads do not require this capability.
+- Supply engine serialization or session-bound READ COMMITTED isolation evidence through the write fence for composed merge application. Managed merge callbacks and adopted application now refuse missing or unsuitable evidence; a caller-serialization assertion alone is insufficient. Update custom backends and transaction test doubles that participate in these paths.
+
+### Minor Changes
+
+- [#702](https://github.com/nicia-ai/typegraph/pull/702) [`81fa27b`](https://github.com/nicia-ai/typegraph/commit/81fa27b26e182b4be276255452bc4b27f3f366b7) Thanks [@pdlug](https://github.com/pdlug)! - Add `applyMergePlanInTransaction()` so applications can apply an approved merge plan, record graph receipts, and write application SQL under one caller-owned transaction and recorded-time receipt.
+  
+  Merge callbacks and adopted application now refuse custom backends without engine serialization or session-bound read-committed isolation evidence. Custom backends must expose that evidence through their write fence.
+  
+  Fix constrained writes in adopted SQLite history transactions by acquiring the writer slot through the internal transaction-control path while retaining capture lifetime checks.
+
+- [#701](https://github.com/nicia-ai/typegraph/pull/701) [`141deb4`](https://github.com/nicia-ai/typegraph/commit/141deb436af2818ca45288a647ede1fe7f61a6ff) Thanks [@pdlug](https://github.com/pdlug)! - Add directed node index keys that can interleave property and system columns, enabling B-tree indexes such as `(createdAt DESC, id ASC)` while keeping covering fields last. Export `NODE_SYSTEM_COLUMN_NAMES` as the readonly runtime companion to `NodeSystemColumnName` for config generation and validation.
+
+- [#703](https://github.com/nicia-ai/typegraph/pull/703) [`0e41ee3`](https://github.com/nicia-ai/typegraph/commit/0e41ee3703df914154e04aef815c6c354643ab87) Thanks [@pdlug](https://github.com/pdlug)! - Query a nonempty explicit list of node kinds with `from(["Person", "Company"], "entity")`. Shared fields support the existing query composition APIs, and full-node results retain kind-discriminated properties.
+  
+  Multi-kind cursor pagination and streaming now use both kind and ID to preserve rows when IDs overlap across kinds. Polymorphic sources refuse predicate, grouping, and ordering fields that are missing or incompatible across their kinds. Existing multi-kind cursors may need to be restarted because their identity columns now include kind.
+
+- [#694](https://github.com/nicia-ai/typegraph/pull/694) [`3ba5ff4`](https://github.com/nicia-ai/typegraph/commit/3ba5ff4926b3ac224f95ad4dea9c6fe7dd0e845b) Thanks [@pdlug](https://github.com/pdlug)! - Add an optional database-expression `filter` to `expr.collect(value, { orderBy, filter })`. SQL TRUE includes an element, while false and SQL NULL exclude it. Aggregate-local filtering preserves parent groups from optional traversals, so missing children can produce `[]` without removing the parent row; included NULL operands still decode to `undefined` and keep the collection's inferred element type.
+  
+  Keep scalar values and explicit nonempty ordering as the collection contract. `distinct` and aggregate-local `limit` remain unsupported, and collection expressions retain their dedicated `kind: "collect"` node.
+  
+  Change custom dialect adapters to accept one required `{ value, valueType, orderBy, filter }` argument in `orderedScalarJsonArray`. Apply the optional filter inside the aggregate before empty-input coalescing, preserve included NULL operands, and return `[]` for empty input. The existing `orderedAggregates: true` capability remains the declaration for filtered collections.
+
+- [#693](https://github.com/nicia-ai/typegraph/pull/693) [`6eb34ad`](https://github.com/nicia-ai/typegraph/commit/6eb34ad68c5b854a4f2af021fc52932392299f49) Thanks [@pdlug](https://github.com/pdlug)! - Add `expr.collect(value, { orderBy: [...] })` for ordered scalar collection aggregation. Project a relation, group by its parent columns, and collect string, number, Boolean, or date values into typed readonly arrays. Collection ordering is explicit and independent of result-row ordering; duplicates and nullable elements are preserved. Empty ungrouped collection aggregates return `[]`.
+  
+  Export `CollectOptions<Scope>` for reusable helpers and expose collection expressions as their own `kind: "collect"` node. Ordinary aggregate nodes do not carry collection-only options.
+  
+  Collection results compose with preparation, projection, and one-statement batching. Structured equality restrictions continue to apply, and collections are materialized without implicit truncation. Object elements and aggregate-local limits are outside this scalar API.
+  
+  Custom dialect adapters must implement `orderedScalarJsonArray()` with ordering and empty-input semantics. Collection reads require `capabilities.orderedAggregates: true`; bundled PostgreSQL declares support, and supported preparable synchronous SQLite clients and the async libSQL factory probe for support at construction. Other unprobed SQLite connections remain unsupported unless their capability is explicitly declared after verification. Existing reads are unaffected.
+
+- [#691](https://github.com/nicia-ai/typegraph/pull/691) [`d80a10a`](https://github.com/nicia-ai/typegraph/commit/d80a10a21c10186e4286c0867890b28940304558) Thanks [@pdlug](https://github.com/pdlug)! - Add query `count()` and `exists()` terminals and selected-query `first()`. Scalar terminals count or test the current SQL relation, including grouping, limits, and offsets, without invoking result selectors. Chained `having()` conditions now accumulate with AND. Offset-only queries compile consistently on SQLite and PostgreSQL.
+  
+  Allow `batchOnce()` to accept runtime-sized readonly arrays, singleton tuples, and empty arrays. Nonempty batches execute one statement or refuse before execution; empty batches execute no statement. Independent subgraphs retain their own roots, projections, traversal windows, and results. Batches now validate graph and execution-target provenance, window-function support, the request count, and the backend's declared bind budget.
+  
+  Introduce schema-aware database expressions for SQL projection, predicates, ordering, grouping, and aggregates. `project()` builds SQL once, while `map()` transforms decoded rows; legacy `select()` keeps its compatibility behavior, including callback probing; keep selectors pure. Expressions include nested JSON paths, metadata, parameters, arithmetic, coalescing, conditions, and typed correlated `$exists()` / `$scalar()` subqueries with scope and temporal validation. Explicit projections support scalar terminals, preparation, and one-statement batching. Document `batchOnce(read => roots.map(root => read.subgraph(root.id, options)))` as the recommended pattern for reducing round trips across several independent, bounded subgraphs.
+  
+  Add explicit SQL relation composition for projected and aggregated results. Combine visible columns with set operations, filter and aggregate derived results, deduplicate whole projections, order output columns, and execute prepared or batched relations through shared infrastructure. Typed preparation declarations preserve binding names and values across composition boundaries. Grouped relations apply input distinctness, ordering, limits, and offsets before grouping; repeated `groupBy()` calls accumulate. Identity-only `distinctNodes()` deduplicates node identities, and relation paging and streaming require a proven unique order.
+  
+  Add scoped `where()` filters for completed graph matches, independently of optional-match and recursive hop constraints. Add `stopExpansion()` with an explicit stopping-node emission policy. Preserve these stages in prepared queries, batches, and logical plans, and document ranked candidates, fanout, and distinct-entity counting.
+  
+  Ranked candidate `k` no longer implicitly caps completed rows after traversal fanout, including set-operation operands. Use an explicit query `limit()` to bound the final row count.
+  
+  Add opt-in shared subgraph hydration with `batchOnce(build, { shareSubgraphs: true })`. Compatible reads share a multi-root traversal and hydrated entities while preserving per-request membership, projections, temporal coordinates, edge windows, and independent result objects. Default batching retains independent plans; benchmark overlapping, payload-heavy roots before enabling sharing. All current-time reads built inside a batch use one pinned instant.
+  
+  Add qualified recursive paths with `path: { format: "qualified", alias: "route" }`. The output alternates kind-qualified node references and edge references with traversal direction. Existing `path: true` and string aliases still return node-ID arrays.
+  
+  Compose multiple recursive traversal stages with separate depth, path, cycle, and stop state. Later stages expand upstream source identities and preserve prior row multiplicity; final filters and ranges apply after composition. Fixed-hop stages compose before and after recursion, retaining fixed-edge properties. The first recursive stage can be optional and preserves roots without eligible endpoints. Scalar recursive-edge projections remain unsupported. Ordered recursive reads now retain their sort columns when embedded in `batchOnce()`.
+  
+  Add transaction-bound `query()`, `neighbors()`, `countNeighbors()`, `subgraph()`, and `batchOnce()` reads. Every read executes through the open transaction and observes earlier writes in the callback; `tx.subgraph()` and `tx.batchOnce()` each execute as exactly one statement.
+  
+  ### Upgrade notes
+  
+  Equality and membership predicates now require compatible operands, and invalid dynamic literals are rejected before SQL execution. Aggregate results preserve scalar field types and represent empty-input SQL NULL as `undefined`; handle absent sum, average, minimum, and maximum results. `countDistinct` accepts only string, number, Boolean, and date operands; replace structured JSON or array distinct counts with an explicit portable scalar projection. Query sources cannot be replaced mid-chain, aliases must be unique across nodes, edges, and recursive outputs, and limits and offsets must be non-negative safe integers. Cursor pagination refuses query-level limits/offsets and conflicting direction options instead of ignoring them. Subgraph depths must be integers from 0 through 1000; unsupported traversal directions and cycle policies are refused. Build batch reads from the executing Store or transaction context, and split requests explicitly if a single statement exceeds its planning budget.
+  
+  Custom objects exposing only `toAst()` are no longer accepted as legacy set-operation operands: operands must also supply execution provenance. Use queries created by the same Store or transaction so graph and execution-target compatibility can be verified.
+  
+  Staged `whereNode()` and `whereEdge()` predicates now refuse cross-alias references instead of compiling incorrect comparisons; use completed-row `where()` for those conditions, accounting for its optional-row filtering behavior. Raw composed `resultPredicate` ASTs must use database-expression predicates, optionally combined with AND/OR/NOT.
+
+- [#699](https://github.com/nicia-ai/typegraph/pull/699) [`f7f7376`](https://github.com/nicia-ai/typegraph/commit/f7f7376ae27a516d93816f70815b46d0d267c835) Thanks [@pdlug](https://github.com/pdlug)! - Add `requestRecordedRevision()` to history transaction contexts so applications can create a durable recorded-time checkpoint even when a transaction makes no entity changes. Repeated requests and entity changes in the same transaction allocate a single revision, exposed through the terminal receipt.
+
+### Patch Changes
+
+- [#700](https://github.com/nicia-ai/typegraph/pull/700) [`872ee09`](https://github.com/nicia-ai/typegraph/commit/872ee0997883eca0153c01d30c2eb9a1cb2430e2) Thanks [@pdlug](https://github.com/pdlug)! - Emit native null placement for field ordering so matching B-tree expression indexes can satisfy the primary sort without an added null-check key.
+
+- [#698](https://github.com/nicia-ai/typegraph/pull/698) [`cefe0b1`](https://github.com/nicia-ai/typegraph/commit/cefe0b1b45b6250c9f42d6331456e78b721d162e) Thanks [@pdlug](https://github.com/pdlug)! - Fix cursor pagination and streaming across nullable sort values. Forward and backward pages now preserve rows on both sides of a NULL partition, including tied values and queries that omit the sort field from their selected result. Existing ordering defaults remain unchanged.
+
 ## 0.60.0
 
 ### Highlights
