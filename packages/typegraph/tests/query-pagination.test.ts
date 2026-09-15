@@ -14,6 +14,7 @@ import {
   defineNode,
   ValidationError,
 } from "../src";
+import { decodeCursor } from "../src/query/cursor";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -100,6 +101,55 @@ async function seedTestData(
 // ============================================================
 
 describe("Cursor Pagination", () => {
+  it("pages across equal ids in different kinds with both selective and full projections", async () => {
+    const store = createTestStore();
+    await store.nodes.Person.create(
+      { name: "Shared", age: 30 },
+      { id: "shared" },
+    );
+    await store.nodes.Company.create(
+      { name: "Shared", revenue: 100 },
+      { id: "shared" },
+    );
+
+    const selective = store
+      .query()
+      .from(["Person", "Company"], "item")
+      .orderBy("item", "id")
+      .select((context) => ({ kind: context.item.kind, id: context.item.id }));
+    const selectiveFirst = await selective.paginate({ first: 1 });
+    expect(
+      decodeCursor(requireDefined(selectiveFirst.nextCursor)).cols,
+    ).toEqual(["item.id", "item.kind"]);
+    const selectiveSecond = await selective.paginate({
+      first: 1,
+      after: requireDefined(selectiveFirst.nextCursor),
+    });
+    expect([...selectiveFirst.data, ...selectiveSecond.data]).toEqual([
+      { kind: "Company", id: "shared" },
+      { kind: "Person", id: "shared" },
+    ]);
+    expect(selectiveSecond.hasNextPage).toBe(false);
+
+    const full = store
+      .query()
+      .from(["Person", "Company"], "item")
+      .orderBy("item", "kind")
+      .select((context) => context.item);
+    const fullFirst = await full.paginate({ first: 1 });
+    expect(decodeCursor(requireDefined(fullFirst.nextCursor)).cols).toEqual([
+      "item.kind",
+      "item.id",
+    ]);
+    const fullSecond = await full.paginate({
+      first: 1,
+      after: requireDefined(fullFirst.nextCursor),
+    });
+    expect(
+      [...fullFirst.data, ...fullSecond.data].map((item) => item.kind),
+    ).toEqual(["Company", "Person"]);
+  });
+
   it("returns first page of results", async () => {
     const store = createTestStore();
     await seedTestData(store);

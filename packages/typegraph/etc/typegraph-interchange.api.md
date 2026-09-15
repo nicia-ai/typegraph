@@ -96,7 +96,7 @@ type AliasExpressions<Entry extends Readonly<{
     }>;
     optional: boolean;
 }>, Scope extends string> = {
-    readonly [Property in keyof z.infer<Entry["type"]["schema"]>]-?: ExpressionValue<z.infer<Entry["type"]["schema"]>[Property] | (Entry["optional"] extends true ? undefined : never), Scope>;
+    readonly [Property in CommonPropertyKeys<NodePropsFor<Entry["type"]>>]-?: ExpressionValue<NodePropsFor<Entry["type"]>[Property] | (Entry["optional"] extends true ? undefined : never), Scope>;
 } & Readonly<{
     id: DatabaseExpression<string | (Entry["optional"] extends true ? undefined : never), Scope>;
     kind: DatabaseExpression<Entry["type"]["kind"] | (Entry["optional"] extends true ? undefined : never), Scope>;
@@ -690,6 +690,11 @@ type CommitSchemaVersionParams = Readonly<{
     schemaHash: string;
     schemaDoc: SerializedSchema;
 }>;
+
+// @public
+type CommonPropertyKeys<Props, Keys extends keyof Props = keyof Props> = true extends IsUnion<Props> ? {
+    [K in Keys]-?: true extends IsUnion<FieldCategory<Props[K]>> ? never : K;
+}[Keys] : Keys;
 
 // @public
 type CompareAndSetAbsent = typeof compareAndSetAbsent;
@@ -2131,9 +2136,9 @@ type ExpressionMetadata<Scope extends string, Optional extends boolean = false> 
 
 // @public (undocumented)
 type ExpressionObjectChildren<Value, Scope extends string> = {
-    readonly [Key in Exclude<keyof NonNullable<Value>, keyof DatabaseExpression | "$get">]-?: ExpressionValue<NonNullable<Value>[Key] | UndefinedWhenNullish<Value>, Scope>;
+    readonly [Key in Exclude<CommonPropertyKeys<NonNullable<Value>>, keyof DatabaseExpression | "$get">]-?: ExpressionValue<NonNullable<Value>[Key] | UndefinedWhenNullish<Value>, Scope>;
 } & Readonly<{
-    $get: <Key extends keyof NonNullable<Value>>(key: Key) => ExpressionValue<NonNullable<Value>[Key] | UndefinedWhenNullish<Value>, Scope>;
+    $get: <Key extends CommonPropertyKeys<NonNullable<Value>>>(key: Key) => ExpressionValue<NonNullable<Value>[Key] | UndefinedWhenNullish<Value>, Scope>;
 }>;
 
 // @public
@@ -2404,6 +2409,11 @@ type FieldAccessor<T> = FieldAccessorForType<NonNullable<T>>;
 type FieldAccessorForType<T> = [
 T
 ] extends [EmbeddingValue] ? EmbeddingFieldAccessor : [T] extends [string] ? StringFieldAccessor<T> : [T] extends [number] ? NumberFieldAccessor<T> : [T] extends [boolean] ? BooleanFieldAccessor<T> : [T] extends [Date] ? DateFieldAccessor<T> : [T] extends [readonly (infer U)[]] ? ArrayFieldAccessor<U> : [T] extends [Record<string, unknown>] ? keyof T extends never ? BaseFieldAccessor : ObjectFieldAccessor<T> : BaseFieldAccessor;
+
+// @public (undocumented)
+type FieldCategory<T> = T extends unknown ? [
+NonNullable<T>
+] extends [never] ? never : [NonNullable<T>] extends [EmbeddingValue] ? "embedding" : [NonNullable<T>] extends [string] ? "string" : [NonNullable<T>] extends [number] ? "number" : [NonNullable<T>] extends [boolean] ? "boolean" : [NonNullable<T>] extends [Date] ? "date" : [NonNullable<T>] extends [readonly unknown[]] ? "array" : [NonNullable<T>] extends [Record<string, unknown>] ? string extends keyof NonNullable<T> ? "record" : "object" : "unknown" : never;
 
 // @public (undocumented)
 type FieldExpressionNode = Readonly<{
@@ -3852,9 +3862,9 @@ type IsDynamicNodeType<N> = N extends Readonly<{
 }> ? true : false;
 
 // @public (undocumented)
-type IsUnion<Value, Whole = Value> = Value extends Whole ? [
+type IsUnion<T, Whole = T> = T extends Whole ? [
 Whole
-] extends [Value] ? false : true : never;
+] extends [T] ? false : true : never;
 
 // @public
 type IterativeMemoryOptions = Readonly<{
@@ -4519,6 +4529,13 @@ type NodePropertyExpectation = Readonly<{
     kind: "absent";
 }>;
 
+// @public (undocumented)
+type NodePropsFor<N extends Readonly<{
+    schema: z.ZodType;
+}>> = N extends Readonly<{
+    schema: z.ZodType;
+}> ? z.infer<N["schema"]> : never;
+
 // @public
 type NodeRef<N extends NodeType = NodeType> = Node<N> | Readonly<{
     kind: N["kind"];
@@ -4624,7 +4641,7 @@ type ObjectComparisonAccessor<T> = string extends keyof T ? BaseFieldAccessor<T>
 
 // @public (undocumented)
 type ObjectFieldAccessor<T> = ObjectComparisonAccessor<T> & Readonly<{
-    get: <K extends keyof T & string>(key: K) => T[K] extends Record<string, unknown> ? ObjectFieldAccessor<T[K]> : FieldAccessor<T[K]>;
+    get: <K extends CommonPropertyKeys<T> & string>(key: K) => T[K] extends Record<string, unknown> ? ObjectFieldAccessor<T[K]> : FieldAccessor<T[K]>;
     hasKey: (key: string) => Predicate;
     hasPath: <P extends JsonPointerInput<T>>(pointer: P) => Predicate;
     pathEquals: <P extends JsonPointerInput<T>>(pointer: P, value: string | number | boolean | Date) => Predicate;
@@ -4931,7 +4948,7 @@ infer Head extends PropertyKey,
 
 // @public
 type PropsAccessor<N extends NodeType> = Readonly<{
-    [K in keyof z.infer<N["schema"]>]-?: FieldAccessor<z.infer<N["schema"]>[K]>;
+    [K in CommonPropertyKeys<NodePropsFor<N>>]-?: FieldAccessor<NodePropsFor<N>[K]>;
 }>;
 
 // @public
@@ -4996,6 +5013,11 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     aggregate<R extends Record<string, FieldRef | AggregateExpr>>(fields: R): ExecutableAggregateQuery<G, Aliases & EdgeAliases, R>;
     count(): Promise<number>;
     exists(): Promise<boolean>;
+    from<const Kinds extends readonly [
+    keyof G["nodes"] & string,
+    ...(keyof G["nodes"] & string)[]
+    ], A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>): QueryBuilder<G, Aliases & Record<A, NodeAlias<G["nodes"][Kinds[number]]["type"]>>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    // (undocumented)
     from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options?: {
         includeSubClasses?: false;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<G["nodes"][K]["type"]>>, EdgeAliases, RecursiveAliases, CoordinateState>;
@@ -5704,11 +5726,11 @@ type SelectableEdgeMeta = Readonly<{
 }>;
 
 // @public
-type SelectableNode<N extends NodeType> = IsDynamicNodeType<N> extends true ? DynamicSelectableNode : Readonly<{
+type SelectableNode<N extends NodeType> = N extends NodeType ? IsDynamicNodeType<N> extends true ? DynamicSelectableNode : Readonly<{
     id: NodeId<N>;
     kind: N["kind"];
     meta: SelectableNodeMeta;
-}> & Readonly<z.infer<N["schema"]>>;
+}> & Readonly<z.infer<N["schema"]>> : never;
 
 // @public
 type SelectableNodeMeta = Readonly<{

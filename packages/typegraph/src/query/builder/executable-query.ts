@@ -64,7 +64,11 @@ import {
   assertCompatibleSetOperationProvenance,
   type OneStatementReadProvenance,
 } from "./one-statement-provenance";
-import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
+import {
+  assertSharedNodeField,
+  buildOrderSpec,
+  resolveSystemOrderField,
+} from "./order-by-field";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
   buildQueryTemplate,
@@ -224,6 +228,7 @@ export class ExecutableQuery<
               field,
             )
           : undefined;
+        assertSharedNodeField(nodeKindNames, field, typeInfo);
       }
     }
 
@@ -1388,16 +1393,14 @@ export class ExecutableQuery<
 
   /**
    * The ORDER BY used for keyset pagination: the caller's ORDER BY plus a final
-   * unique tiebreaker on the start alias's `id`. Without a unique final key, a
+   * identity tiebreaker on the start alias. Without a unique final key, a
    * non-unique sort (e.g. `orderBy("p", "age")` with many equal ages) makes the
    * keyset predicate `age > lastAge` skip every not-yet-returned equal-age row,
-   * silently losing data across pages. The start node's `id` is unique and
-   * always projected, so appending it gives a total order that page boundaries
-   * can split cleanly. Skipped when the caller already orders by the start
-   * alias's `id` (the sort is already total). Every pagination read of ORDER BY
-   * — the emitted sort, the cursor predicate, cursor encoding, and cursor
-   * validation — routes through here so the extra column stays consistent across
-   * the standard and selective-field-optimized paths.
+   * silently losing data across pages. For a multi-kind start, identity is
+   * `(kind, id)`; each missing component is appended after the caller's order.
+   * For a single-kind start, `id` alone remains sufficient. The emitted sort,
+   * cursor predicate, cursor encoding, and cursor validation all use this order,
+   * including the selective-field-optimized path.
    */
   #paginationOrderBy(): readonly (Omit<OrderSpec, "field"> & {
     field: FieldRef;
@@ -1407,19 +1410,32 @@ export class ExecutableQuery<
       field: requireCursorField(order.field),
     }));
     const startAlias = this.#state.startAlias;
-    const alreadyTotal = orderBy.some(
-      (spec) =>
-        spec.field.alias === startAlias &&
-        spec.field.path.length === 1 &&
-        spec.field.path[0] === "id" &&
-        spec.field.jsonPointer === undefined,
-    );
-    if (alreadyTotal) return orderBy;
-    const tiebreaker: Omit<OrderSpec, "field"> & { field: FieldRef } = {
-      field: { __type: "field_ref", alias: startAlias, path: ["id"] },
-      direction: "asc",
-    };
-    return [...orderBy, tiebreaker];
+    function hasSystemOrder(fieldName: "kind" | "id"): boolean {
+      return orderBy.some(
+        (spec) =>
+          spec.field.alias === startAlias &&
+          spec.field.path.length === 1 &&
+          spec.field.path[0] === fieldName &&
+          spec.field.jsonPointer === undefined,
+      );
+    }
+    const missingKind =
+      this.#state.startKinds.length > 1 && !hasSystemOrder("kind");
+    const missingId = !hasSystemOrder("id");
+    if (!missingKind && !missingId) return orderBy;
+    function tiebreaker(fieldName: "kind" | "id"): OrderSpec & {
+      field: FieldRef;
+    } {
+      return {
+        field: { __type: "field_ref", alias: startAlias, path: [fieldName] },
+        direction: "asc",
+      };
+    }
+    return [
+      ...orderBy,
+      ...(missingKind ? [tiebreaker("kind")] : []),
+      ...(missingId ? [tiebreaker("id")] : []),
+    ];
   }
 
   /**

@@ -3,8 +3,8 @@ title: Source
 description: Starting queries with from()
 ---
 
-Every query starts with `from()`, which specifies the node kind to query and assigns an alias for
-referencing it throughout the query.
+Every query starts with `from()`, which specifies the node kind or explicit list of kinds to query
+and assigns an alias for referencing it throughout the query.
 
 ## Basic Usage
 
@@ -27,6 +27,47 @@ const results = await store
 | `kind` | `string` | The node kind to query (must exist in your graph definition) |
 | `alias` | `string` | A unique identifier for referencing this node in the query |
 | `options.includeSubClasses` | `boolean` | Include nodes of subclass kinds (default: `false`) |
+
+## Multiple kinds in one query
+
+Pass a nonempty list to scan several registered kinds in one SQL query:
+
+```typescript
+// Person and Company both declare a string name property.
+const page = await store
+  .query()
+  .from(["Person", "Company"], "entity")
+  .whereNode("entity", (entity) => entity.name.startsWith("A"))
+  .orderBy("entity", "name")
+  .select((ctx) => ctx.entity)
+  .paginate({ first: 20 });
+```
+
+The source scans exactly these kinds. Repeated kinds are normalized, an empty list is rejected,
+and unknown kinds throw `KindNotFoundError`. List sources do not accept an options bag or expand
+subclasses. For a reusable list, preserve its nonempty tuple type with `as const`.
+
+Predicates and database expressions expose compatible properties shared by every selected kind,
+plus system fields such as `id` and `kind`. A property present on only one kind, or declared with
+incompatible types across kinds, cannot be used as a shared query field. Full-node selections
+retain each kind's properties as a discriminated union; check the returned node's `kind` before
+reading kind-specific properties.
+
+Multi-kind sources use the existing graph scope, visibility, temporal, identity, traversal,
+aggregation, and prepared-query paths. They also compose with `batchOnce()` like single-kind
+sources. Use them for a single ordered stream, such as a directory of people and companies.
+For separate result lists with independent filters and limits, use
+[one-statement batches](/queries/execute#batch-execution) instead.
+
+Node identity across kinds is `(kind, id)`. Cursor pagination and streaming append missing
+`kind ASC` and `id ASC` keys to make page boundaries deterministic, including when two kinds
+contain the same ID. For queries that fan out through traversals, also order by the traversed row
+identities when one source node can produce multiple rows. The input list's order does not order results:
+specify `orderBy()`.
+Restart saved multi-kind cursors from older versions if they lack the `kind` identity column.
+
+This is one source scan, but it does not guarantee an index-only plan or eliminate a database
+sort; verify the execution plan for your selected kinds, filters, and ordering.
 
 ## Aliases
 

@@ -592,6 +592,23 @@ expectNotAssignable<StoreRef<AdapterStore<typeof graph, NativeTransaction>>>(
   portableRef,
 );
 declare const registry: never;
+const multiKindQuery = store
+  .query()
+  .from(["Person", "Company"], "node")
+  .whereNode("node", (node) => node.name.eq("shared"))
+  .select((context) => context.node);
+expectAssignable<
+  Promise<
+    readonly (
+      | (Readonly<{ kind: "Person"; id: NodeId<typeof Person> }> &
+          Readonly<{ email: string; name: string }>)
+      | (Readonly<{ kind: "Company"; id: NodeId<typeof Company> }> &
+          Readonly<{ name: string }>)
+    )[]
+  >
+>(multiKindQuery.execute());
+expectError(store.query().from([], "node"));
+expectError(store.query().from(["Person", "Missing"], "node"));
 declare const worksAtId: EdgeId<typeof worksAt>;
 declare const worksAtEdge: Awaited<
   ReturnType<typeof store.edges.worksAt.create>

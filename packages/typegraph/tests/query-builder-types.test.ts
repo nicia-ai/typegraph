@@ -139,6 +139,121 @@ function preserveCollectOptions<Scope extends string>(
 // ============================================================
 
 describe("Query Builder Type Safety", () => {
+  it("exposes only compatible shared fields in predicates and expressions", () => {
+    const Text = defineNode("Text", {
+      schema: z.object({
+        value: z.string(),
+        label: z.string().optional(),
+        details: z.object({ shared: z.string(), mismatch: z.string() }),
+      }),
+    });
+    const Count = defineNode("Count", {
+      schema: z.object({
+        value: z.number(),
+        label: z.string(),
+        details: z.object({ shared: z.string(), mismatch: z.number() }),
+      }),
+    });
+    const mixedGraph = defineGraph({
+      id: "mixed_field_types",
+      nodes: { Text: { type: Text }, Count: { type: Count } },
+      edges: {},
+    });
+    const mixedRegistry = buildKindRegistry(mixedGraph);
+    const query = createQueryBuilder<typeof mixedGraph>(
+      mixedGraph.id,
+      mixedRegistry,
+    ).from(["Text", "Count"], "node");
+
+    query.whereNode("node", (node) => {
+      expectTypeOf<
+        "value" extends keyof typeof node ? true : false
+      >().toEqualTypeOf<false>();
+      expectTypeOf(node.details.get("shared")).toExtend<
+        Readonly<{ eq: (value: string) => unknown }>
+      >();
+      if (false as boolean) {
+        // @ts-expect-error Nested string and number fields do not share one accessor.
+        node.details.get("mismatch");
+      }
+      return node.label.eq("shared");
+    });
+    query.project((expressions) => {
+      expectTypeOf<
+        "value" extends keyof typeof expressions.node ? true : false
+      >().toEqualTypeOf<false>();
+      expectTypeOf<
+        "mismatch" extends keyof typeof expressions.node.details ? true : false
+      >().toEqualTypeOf<false>();
+      if (false as boolean) {
+        // @ts-expect-error Nested string and number fields cannot be selected with $get.
+        expressions.node.details.$get("mismatch");
+      }
+      expectTypeOf(expressions.node.label).toEqualTypeOf<
+        DatabaseExpression<string | undefined, "node">
+      >();
+      return { label: expressions.node.label };
+    });
+
+    if (false as boolean) {
+      const UnionField = defineNode("UnionField", {
+        schema: z.object({ value: z.union([z.string(), z.number()]) }),
+      });
+      const singletonGraph = defineGraph({
+        id: "single_union_field",
+        nodes: { UnionField: { type: UnionField } },
+        edges: {},
+      });
+      const singletonRegistry = buildKindRegistry(singletonGraph);
+      createQueryBuilder<typeof singletonGraph>(
+        singletonGraph.id,
+        singletonRegistry,
+      )
+        .from("UnionField", "node")
+        .whereNode("node", (node) => node.value.eq("text"));
+      createQueryBuilder<typeof singletonGraph>(
+        singletonGraph.id,
+        singletonRegistry,
+      )
+        .from("UnionField", "node")
+        .project((expressions) => ({ value: expressions.node.value }));
+    }
+    void query;
+  });
+  it("types explicit multi-kind sources by their common fields and concrete result kind", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from(["Person", "Company"], "node")
+      .whereNode("node", (node) => node.name.eq("shared"))
+      .select((context) => context.node);
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<"Person" | "Company">();
+    if (false as boolean) {
+      const row = undefined as unknown as Row;
+      if (row.kind === "Person") {
+        expectTypeOf(row.age).toEqualTypeOf<number>();
+        expectTypeOf(row.id).toEqualTypeOf<NodeId<typeof Person>>();
+      } else {
+        expectTypeOf(row.industry).toEqualTypeOf<string>();
+        expectTypeOf(row.id).toEqualTypeOf<NodeId<typeof Company>>();
+      }
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from(["Person", "Company"], "n")
+        .whereNode("n", (node) => {
+          expectTypeOf<
+            "age" extends keyof typeof node ? true : false
+          >().toEqualTypeOf<false>();
+          return node.name.eq("shared");
+        });
+      // @ts-expect-error An explicit source list cannot be empty.
+      createQueryBuilder<typeof graph>(graph.id, registry).from([], "n");
+      createQueryBuilder<typeof graph>(graph.id, registry).from(
+        // @ts-expect-error Every source kind must belong to the graph.
+        ["Person", "Missing"],
+        "n",
+      );
+    }
+    void query;
+  });
   it("infers aggregate scalar values and empty-input nullability", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "person")

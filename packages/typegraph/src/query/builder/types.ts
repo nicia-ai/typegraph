@@ -334,9 +334,45 @@ export type UniqueAlias<A extends string, Aliases extends AliasMap> =
 export type PropsAccessor<N extends NodeType> = Readonly<
   {
     // Remove optional modifier so optional fields still have accessor methods.
-    [K in keyof z.infer<N["schema"]>]-?: FieldAccessor<z.infer<N["schema"]>[K]>;
+    [K in CommonPropertyKeys<NodePropsFor<N>>]-?: FieldAccessor<
+      NodePropsFor<N>[K]
+    >;
   }
 >;
+
+export type NodePropsFor<N extends Readonly<{ schema: z.ZodType }>> =
+  N extends Readonly<{ schema: z.ZodType }> ? z.infer<N["schema"]> : never;
+
+type FieldCategory<T> =
+  T extends unknown ?
+    [NonNullable<T>] extends [never] ? never
+    : [NonNullable<T>] extends [EmbeddingValue] ? "embedding"
+    : [NonNullable<T>] extends [string] ? "string"
+    : [NonNullable<T>] extends [number] ? "number"
+    : [NonNullable<T>] extends [boolean] ? "boolean"
+    : [NonNullable<T>] extends [Date] ? "date"
+    : [NonNullable<T>] extends [readonly unknown[]] ? "array"
+    : [NonNullable<T>] extends [Record<string, unknown>] ?
+      string extends keyof NonNullable<T> ?
+        "record"
+      : "object"
+    : "unknown"
+  : never;
+
+export type IsUnion<T, Whole = T> =
+  T extends Whole ?
+    [Whole] extends [T] ?
+      false
+    : true
+  : never;
+
+/** Keys present on every polymorphic member with one shared accessor category. */
+export type CommonPropertyKeys<Props, Keys extends keyof Props = keyof Props> =
+  true extends IsUnion<Props> ?
+    {
+      [K in Keys]-?: true extends IsUnion<FieldCategory<Props[K]>> ? never : K;
+    }[Keys]
+  : Keys;
 
 /**
  * A field accessor with type-appropriate predicate methods.
@@ -455,7 +491,7 @@ type ObjectComparisonAccessor<T> =
 
 export type ObjectFieldAccessor<T> = ObjectComparisonAccessor<T> &
   Readonly<{
-    get: <K extends keyof T & string>(
+    get: <K extends CommonPropertyKeys<T> & string>(
       key: K,
     ) => T[K] extends Record<string, unknown> ? ObjectFieldAccessor<T[K]>
     : FieldAccessor<T[K]>;
@@ -559,13 +595,16 @@ export type SelectableNodeMeta = Readonly<{
  * without a cast.
  */
 export type SelectableNode<N extends NodeType> =
-  IsDynamicNodeType<N> extends true ? DynamicSelectableNode
-  : Readonly<{
-      id: NodeId<N>;
-      kind: N["kind"];
-      meta: SelectableNodeMeta;
-    }> &
-      Readonly<z.infer<N["schema"]>>;
+  N extends NodeType ?
+    IsDynamicNodeType<N> extends true ?
+      DynamicSelectableNode
+    : Readonly<{
+        id: NodeId<N>;
+        kind: N["kind"];
+        meta: SelectableNodeMeta;
+      }> &
+        Readonly<z.infer<N["schema"]>>
+  : never;
 
 /**
  * Metadata for a selectable edge result.
