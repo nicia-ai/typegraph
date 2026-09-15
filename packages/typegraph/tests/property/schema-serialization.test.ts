@@ -1092,6 +1092,115 @@ describe("Schema Serialization Properties", () => {
       expect(reSerialized).toBe(json);
     });
 
+    it("ordered node keys emit and round-trip in canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const newest = defineNodeIndex(Person, {
+        keys: [
+          { system: "created_at", direction: "desc" },
+          { field: "name", direction: "asc" },
+          { system: "id", direction: "asc" },
+        ],
+      });
+      const graph = defineGraph({
+        id: "ordered_keys_emit",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [newest],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const serializedIndex = serialized.indexes?.[0];
+      expect(serializedIndex?.entity).toBe("node");
+      expect(
+        serializedIndex?.entity === "node" ? serializedIndex.keys : undefined,
+      ).toEqual(newest.keys);
+      const json = JSON.stringify(serialized, sortedReplacer);
+      expect(
+        JSON.stringify(
+          serializedSchemaZod.parse(JSON.parse(json)),
+          sortedReplacer,
+        ),
+      ).toBe(json);
+    });
+
+    it("rejects malformed ordered node keys at the serialized schema boundary", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const newest = defineNodeIndex(Person, {
+        keys: [{ system: "created_at", direction: "desc" }],
+      });
+      const graph = defineGraph({
+        id: "ordered_keys_reject",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [newest],
+      });
+      const serialized = serializeSchema(graph, 1);
+      const replaceKeys = (keys: readonly unknown[]) => ({
+        ...serialized,
+        indexes: serialized.indexes?.map((index) =>
+          index.entity === "node" ? { ...index, keys } : index,
+        ),
+      });
+
+      expect(serializedSchemaZod.safeParse(replaceKeys([])).success).toBe(
+        false,
+      );
+      expect(
+        serializedSchemaZod.safeParse(
+          replaceKeys([
+            { type: "system", column: "from_id", direction: "asc" },
+          ]),
+        ).success,
+      ).toBe(false);
+      expect(
+        serializedSchemaZod.safeParse(
+          replaceKeys([
+            { type: "system", column: "id", direction: "sideways" },
+          ]),
+        ).success,
+      ).toBe(false);
+      expect(
+        serializedSchemaZod.safeParse({
+          ...serialized,
+          indexes: serialized.indexes?.map((index) =>
+            index.entity === "node" ?
+              {
+                ...index,
+                scope: "graph",
+                keys: [
+                  { type: "system", column: "graph_id", direction: "asc" },
+                ],
+              }
+            : index,
+          ),
+        }).success,
+      ).toBe(false);
+      expect(
+        serializedSchemaZod.safeParse({
+          ...replaceKeys([
+            { type: "system", column: "created_at", direction: "desc" },
+          ]),
+          indexes: serialized.indexes?.map((index) =>
+            index.entity === "node" ? { ...index, method: "trigram" } : index,
+          ),
+        }).success,
+      ).toBe(false);
+      expect(
+        serializedSchemaZod.safeParse({
+          ...serialized,
+          indexes: serialized.indexes?.map((index) => ({
+            ...index,
+            entity: "edge",
+            direction: "none",
+          })),
+        }).success,
+      ).toBe(false);
+    });
+
     // Regression: `keySystemColumns` previously had no entry in
     // `nodeIndexDeclarationZod`, so `.loose()` let any value ride through the
     // persisted-schema parse boundary unchecked — a malformed value would

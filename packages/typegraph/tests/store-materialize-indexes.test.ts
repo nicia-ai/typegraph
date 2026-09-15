@@ -269,6 +269,22 @@ describe("Store.materializeIndexes — signature drift", () => {
 
     expect(signaturePresentButEmpty).toBe(signatureOmitted);
   });
+
+  it("includes ordered key direction in the materialization signature", async () => {
+    const ascending = defineNodeIndex(Person, {
+      keys: [{ field: "name", direction: "asc" }],
+    });
+    const descending = defineNodeIndex(Person, {
+      keys: [{ field: "name", direction: "desc" }],
+      name: ascending.name,
+    });
+
+    await expect(
+      computeIndexSignature("sqlite", "typegraph_nodes", ascending),
+    ).resolves.not.toBe(
+      await computeIndexSignature("sqlite", "typegraph_nodes", descending),
+    );
+  });
 });
 
 describe("Store.materializeIndexes — legacy DB bootstrap", () => {

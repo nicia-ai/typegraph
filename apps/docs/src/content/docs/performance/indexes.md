@@ -30,6 +30,7 @@ const Person = defineNode("Person", {
   schema: z.object({
     email: z.string().email(),
     name: z.string(),
+    createdAt: z.date(),
     isActive: z.boolean().optional(),
   }),
 });
@@ -54,9 +55,12 @@ export const worksAtRoleOut = defineEdgeIndex(worksAt, {
 });
 
 // drizzle-kit will include these indexes in generated migrations
-export const typegraphTables = createPostgresTables({}, {
-  indexes: [personEmail, worksAtRoleOut],
-});
+export const typegraphTables = createPostgresTables(
+  {},
+  {
+    indexes: [personEmail, worksAtRoleOut],
+  },
+);
 ```
 
 For SQLite, use `createSqliteTables`:
@@ -64,21 +68,26 @@ For SQLite, use `createSqliteTables`:
 ```ts
 import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
-export const typegraphTables = createSqliteTables({}, {
-  indexes: [personEmail, worksAtRoleOut],
-});
+export const typegraphTables = createSqliteTables(
+  {},
+  {
+    indexes: [personEmail, worksAtRoleOut],
+  },
+);
 ```
 
 ## Node Indexes
 
-`defineNodeIndex(nodeType, config)` creates an index definition for node properties and, via
-`keySystemColumns`, TypeGraph system columns.
+`defineNodeIndex(nodeType, config)` creates an index definition for node properties and TypeGraph
+system columns.
 
 **Key options:**
 
+- `keys`: ordered node B-tree keys with an explicit direction. Property and system-column keys can
+  be interleaved to match a complete query order. This node-only option is mutually exclusive with
+  `fields` and `keySystemColumns`, and does not define a `bulkFindByIndex` lookup key.
 - `fields`: JSON property paths used for filtering/ordering (B-tree expression keys). Optional if
-  `coveringFields` or `keySystemColumns` supply the key instead — an index must declare at least
-  one of the three.
+  `keys`, `coveringFields`, or `keySystemColumns` supply the key instead.
 - `coveringFields`: additional properties frequently selected with the same filters. These become
   additional index keys to enable index-only reads when combined with smart select.
 - `keySystemColumns`: system columns (e.g. `"id"`) to include in the key, after the `scope` prefix
@@ -107,6 +116,36 @@ Field ordering emits the database's native `NULLS FIRST` / `NULLS LAST` suffix. 
 primary sort expression aligned with a matching B-tree expression index. PostgreSQL and SQLite
 still choose plans from their statistics and the full query shape, so confirm important queries
 with `EXPLAIN`; an applicable index does not guarantee that every data distribution will use it.
+
+### Directed node keys
+
+Use `keys` when the direction and interleaving of the B-tree keys must match a query's complete
+ordering. Scope columns remain first, keys retain declaration order, and `coveringFields` remain
+last:
+
+```ts
+const newestPerson = defineNodeIndex(Person, {
+  keys: [
+    { field: "createdAt", direction: "desc" },
+    { system: "id", direction: "asc" },
+  ],
+  coveringFields: ["name"],
+});
+
+const page = await store
+  .query()
+  .from("Person", "person")
+  .select((fields) => ({ name: fields.person.name }))
+  .orderBy("person", "createdAt", "desc")
+  .orderBy("person", "id", "asc")
+  .paginate({ first: 50 });
+```
+
+The resulting key order is `(graph_id, kind, createdAt DESC, id ASC, name)`. In the first version,
+`keys` is supported for node B-tree indexes only and refuses
+`unique: true`. It intentionally does not participate in `bulkFindByIndex`: that operation probes
+the equality lookup fields declared through `fields`, while `keys` describes physical ordering.
+Use a separate legacy `fields` index when the same graph also needs keyed candidate lookup.
 
 ### Nested JSON Paths
 
@@ -271,9 +310,9 @@ Semantics:
   each bucket is a (possibly empty) array — this is candidate retrieval, not a uniqueness guarantee.
   For unique lookups prefer `bulkFindByConstraint` (backed by the uniqueness side-table).
 - TypeGraph computes the lookup key from **`index.fields` only** (JSON-pointer extraction, reusing the
-  index's own extraction expressions). Neither `coveringFields` nor `keySystemColumns` are part of the
-  probe key. An index declared without `fields` (only `coveringFields` and/or `keySystemColumns`) has
-  nothing to probe by and throws `ConfigurationError`.
+  index's own extraction expressions). `keys`, `coveringFields`, and `keySystemColumns` are not part
+  of the probe key. An index declared without `fields` has nothing to probe by and throws
+  `ConfigurationError`.
 - The index's partial `where` is applied in SQL to **stored** rows only; probes carry index-field
   values, nothing else. Only the indexed fields are validated — full records are not required.
 - A missing/`undefined` indexed field matches stored `NULL` (null-safe equality). Live,
@@ -300,11 +339,11 @@ TypeGraph's `defineNodeIndex` / `defineEdgeIndex` generate **B-tree expression i
 choice for scalar equality, range, and ordering queries. But JSON properties can also hold arrays
 and objects, which need different index strategies.
 
-| Data shape | Query pattern | Index type | TypeGraph utility? |
-|------------|--------------|------------|-------------------|
-| Scalar (`string`, `number`, `boolean`) | `eq()`, `gt()`, `in()`, `orderBy()` | B-tree expression | Yes — `defineNodeIndex` |
-| Array of scalars | `contains()`, `containsAll()`, `containsAny()` | GIN (PostgreSQL) | No — use raw SQL |
-| Nested object | `hasKey()`, `pathEquals()`, `pathContains()` | GIN or B-tree expression | Partially — B-tree on specific paths |
+| Data shape                             | Query pattern                                  | Index type               | TypeGraph utility?                   |
+| -------------------------------------- | ---------------------------------------------- | ------------------------ | ------------------------------------ |
+| Scalar (`string`, `number`, `boolean`) | `eq()`, `gt()`, `in()`, `orderBy()`            | B-tree expression        | Yes — `defineNodeIndex`              |
+| Array of scalars                       | `contains()`, `containsAll()`, `containsAny()` | GIN (PostgreSQL)         | No — use raw SQL                     |
+| Nested object                          | `hasKey()`, `pathEquals()`, `pathContains()`   | GIN or B-tree expression | Partially — B-tree on specific paths |
 
 ### B-tree expression indexes (scalar properties)
 

@@ -21,7 +21,15 @@ import {
   type UniquenessScope,
 } from "../core/types";
 import { type GraphExtension } from "../graph-extension/extension-types";
-import { type IndexDeclaration } from "../indexes/types";
+import {
+  validateEdgeIndexKeysPresence,
+  validateNodeIndexKeyContract,
+} from "../indexes/node-key-contract";
+import {
+  type IndexDeclaration,
+  NODE_INDEX_KEY_DIRECTIONS,
+  NODE_SYSTEM_COLUMN_NAMES,
+} from "../indexes/types";
 import { type InferenceType } from "../ontology/types";
 import { type JsonPointer } from "../query/json-pointer";
 
@@ -101,17 +109,10 @@ const systemColumnNameZod = z.enum([
   "version",
 ]);
 
-// A node index's `keySystemColumns` must reject the 4 edge-only join columns,
-// mirroring the construction-time check in `indexes/define-index.ts`'s
-// `normalizeKeySystemColumnsOrThrow`. Excluding from the shared enum (rather
-// than a second hand-written node-column list) keeps this narrowed exactly in
-// sync with `systemColumnNameZod` as the union evolves.
-const nodeSystemColumnNameZod = systemColumnNameZod.exclude([
-  "from_kind",
-  "from_id",
-  "to_kind",
-  "to_id",
-]);
+// Node index keys reject edge-only join columns. The shared runtime tuple also
+// defines the public node-system-column type and the normalized contract guard,
+// keeping construction, persisted schemas, and DDL compilation aligned.
+const nodeSystemColumnNameZod = z.enum(NODE_SYSTEM_COLUMN_NAMES);
 
 const indexWhereOperandZod = z.discriminatedUnion("__type", [
   z.object({
@@ -193,6 +194,20 @@ const jsonPointerZod = z.custom<JsonPointer>(
   { message: "Expected a JSON pointer string" },
 );
 
+const nodeIndexKeyZod = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("field"),
+    pointer: jsonPointerZod,
+    valueType: valueTypeOrUndefinedZod,
+    direction: z.enum(NODE_INDEX_KEY_DIRECTIONS),
+  }),
+  z.object({
+    type: z.literal("system"),
+    column: nodeSystemColumnNameZod,
+    direction: z.enum(NODE_INDEX_KEY_DIRECTIONS),
+  }),
+]);
+
 const indexDeclarationCommonShape = {
   name: z.string(),
   // `origin` is optional. `"compile-time"` is the default and is omitted
@@ -220,8 +235,25 @@ const nodeIndexDeclarationZod = z
     // silently accepting a present-but-empty array that would have to be
     // canonicalized away again downstream (see `serializeNodeIndexDeclaration`).
     keySystemColumns: z.array(nodeSystemColumnNameZod).min(1).optional(),
+    keys: z.array(nodeIndexKeyZod).min(1).optional(),
   })
-  .loose();
+  .loose()
+  .superRefine((index, ctx) => {
+    if (index.keys === undefined) return;
+    for (const message of validateNodeIndexKeyContract({
+      keys: index.keys.map((key) =>
+        key.type === "field" ? { ...key, valueType: key.valueType } : key,
+      ),
+      fields: index.fields,
+      coveringFields: index.coveringFields,
+      keySystemColumns: index.keySystemColumns,
+      unique: index.unique,
+      scope: index.scope,
+      method: index["method"],
+    })) {
+      ctx.addIssue({ code: "custom", message });
+    }
+  });
 
 const edgeIndexDeclarationZod = z
   .object({
@@ -230,7 +262,11 @@ const edgeIndexDeclarationZod = z
     direction: edgeIndexDirectionZod,
     ...indexDeclarationCommonShape,
   })
-  .loose();
+  .loose()
+  .superRefine((index, ctx) => {
+    const message = validateEdgeIndexKeysPresence(index);
+    if (message !== undefined) ctx.addIssue({ code: "custom", message });
+  });
 
 const vectorIndexMetricZod = z.enum(["cosine", "l2", "inner_product"]);
 
