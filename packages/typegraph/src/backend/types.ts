@@ -393,7 +393,7 @@ export type BackendCapabilities = Readonly<{
   windowFunctions: boolean;
   /**
    * Whether aggregate calls may contain their own `ORDER BY` clause, as used
-   * by ordered scalar collection. Absent is `false`: custom and remote
+   * by ordered scalar and record collection. Absent is `false`: custom and remote
    * backends must opt in only when their active engine accepts that syntax.
    */
   orderedAggregates?: boolean;

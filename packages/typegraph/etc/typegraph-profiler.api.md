@@ -653,7 +653,7 @@ type Collation = "binary" | "caseInsensitive";
 // @public (undocumented)
 type CollectExpressionNode = Readonly<{
     kind: "collect";
-    operand: DatabaseExpression;
+    operand: DatabaseExpression | CollectRecordOperand;
     filter?: DatabaseExpression<boolean | undefined>;
     orderBy: readonly CollectOrder[];
 }>;
@@ -663,6 +663,12 @@ type CollectOrder<Scope extends string = string> = Readonly<{
     expression: DatabaseExpression<boolean | Date | number | string | undefined, Scope>;
     direction?: "asc" | "desc";
     nulls?: "first" | "last";
+}>;
+
+// @public
+type CollectRecordOperand = Readonly<{
+    kind: "record";
+    fields: Readonly<Record<string, DatabaseExpression>>;
 }>;
 
 // @public
@@ -1013,6 +1019,7 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
     node: DatabaseExpressionNode;
     valueType: ValueType;
     elementValueType?: ValueType;
+    elementFields?: Readonly<Record<string, ValueType>>;
     nullable: boolean;
     scopeIdentity: symbol;
     __value?: T;
@@ -5108,6 +5115,7 @@ type RelationColumn = Readonly<{
     outputName: string;
     valueType: ValueType;
     elementValueType?: ValueType;
+    elementFields?: Readonly<Record<string, ValueType>>;
     nullable: boolean;
     identity?: Readonly<{
         component: "id" | "kind";

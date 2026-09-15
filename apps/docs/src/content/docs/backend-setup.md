@@ -1474,7 +1474,7 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `execution`                                                                | Execution boundaries: `interactiveTransactions`, exact-resource `atomicBatch` support, and derived `unitOfWork` |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
-| `orderedAggregates?` | Ordered scalar collection aggregation; absent means unsupported |
+| `orderedAggregates?` | Ordered scalar and record collection aggregation; absent means unsupported |
 | `constraintClaims?`                                                        | The backend carries the claim relations that fence declared constraints without a lock (see below)  |
 | `durableEdgeMatchIdentity?`                                                | Edge writes persist and atomically arbitrate a schema-declared endpoint/property identity            |
 | `graphAnalytics?.{supported,mathFunctions}`                                | Static support for whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
@@ -1493,8 +1493,8 @@ engines must retain `false`; collection queries are refused before execution.
 
 SQLite introduced `NULLS FIRST` / `NULLS LAST` ordering in version 3.30 and aggregate-local ordering
 in [version 3.44](https://www.sqlite.org/releaselog/3_44_0.html).
-The scalar collection representation avoids depending on JSON object subtype preservation during
-sorting. Existing reads continue to work when ordered aggregates are unavailable.
+Collection compilation avoids depending on JSON object subtype preservation during sorting.
+Existing reads continue to work when ordered aggregates are unavailable.
 
 Custom dialect adapters implement `orderedScalarJsonArray` with one required object argument:
 `{ value, valueType, orderBy, filter }`. Migrate positional implementations by destructuring that
@@ -1503,6 +1503,14 @@ empty-input `COALESCE`, and leaving it off when `filter` is `undefined`. The agg
 included NULL operands and return `[]` for empty input. The `filter` key itself is required in the
 adapter contract, even though its value may be `undefined`, which requires old positional
 implementations to migrate explicitly.
+
+The dialect adapter contract also requires `orderedRecordJsonArray` for
+`expr.collect({ field: scalarExpression }, options)`. Custom adapters must add this method when
+upgrading. It builds an ordered JSON array of flat records with the named projected scalar fields,
+honors the required ordering tuple and optional aggregate-local filter, preserves admitted SQL NULL
+fields within each record, and returns `[]` for empty input. The same `orderedAggregates` capability
+governs scalar and record collections; a custom adapter must supply both SQL emitters before
+declaring that capability.
 
 The former top-level `capabilities.transactions` override is not interpreted
 as an alias. Bundled factories refuse it with `LEGACY_CAPABILITY_OVERRIDE`,

@@ -10,8 +10,11 @@ import {
   type DatabaseExpression,
   type DatabaseExpressionNode,
   type DatabaseLiteral,
+  isCollectRecordOperand,
+  isCollectScalarOperand,
   resolveCollectFilter,
   resolveCollectOrder,
+  resolveCollectRecordFields,
 } from "../expressions";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -202,7 +205,9 @@ function compileNode(
           "COLLECT requires ordered aggregate support from the active backend profile.",
           { capability: "orderedAggregates", orderedAggregates: false },
         );
-      assertPortableScalarValueType(node.operand.valueType, "COLLECT");
+      const operand = node.operand;
+      if (!isCollectScalarOperand(operand) && !isCollectRecordOperand(operand))
+        throw new UnsupportedPredicateError("Unknown COLLECT operand kind");
       const ordering = resolveCollectOrder(node.orderBy).map((order) => {
         const { direction, nulls } = order;
         return compileOrderTerm(
@@ -212,14 +217,31 @@ function compileNode(
         );
       });
       const filter = resolveCollectFilter(node.filter);
-      return context.dialect.orderedScalarJsonArray({
-        filter:
-          filter === undefined ? undefined : (
-            compileNode(filter, context, aggregateDepth + 1)
+      const compiledFilter =
+        filter === undefined ? undefined : (
+          compileNode(filter, context, aggregateDepth + 1)
+        );
+      if (isCollectRecordOperand(operand)) {
+        return context.dialect.orderedRecordJsonArray({
+          fields: resolveCollectRecordFields(operand.fields).map(
+            ({ name, expression: value }) => {
+              return {
+                name,
+                value: compileNode(value, context, aggregateDepth + 1),
+                valueType: value.valueType,
+              };
+            },
           ),
+          filter: compiledFilter,
+          orderBy: ordering,
+        });
+      }
+      assertPortableScalarValueType(operand.valueType, "COLLECT");
+      return context.dialect.orderedScalarJsonArray({
+        filter: compiledFilter,
         orderBy: ordering,
-        value: compileNode(node.operand, context, aggregateDepth + 1),
-        valueType: node.operand.valueType,
+        value: compileNode(operand, context, aggregateDepth + 1),
+        valueType: operand.valueType,
       });
     }
     case "aggregate": {

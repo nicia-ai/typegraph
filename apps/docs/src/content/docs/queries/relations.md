@@ -84,9 +84,11 @@ position; the defaults are NULLS LAST for ascending and NULLS FIRST for descendi
 select an arbitrary edge or path to represent an entity. `count()` counts the current relation,
 including distinctness and its range; `exists()` checks whether it has a row. Neither runs `map()`.
 
-## Ordered scalar collections
+<a id="ordered-scalar-collections"></a>
 
-Use `expr.collect()` to return a list of scalar values per group on a backend declaring
+## Ordered collections
+
+Use `expr.collect()` to return a list of scalar values or explicit flat records per group on a backend declaring
 [`orderedAggregates: true`](/backend-setup#backend-capabilities). Project the input columns into a
 relation first, then define collection ordering explicitly:
 
@@ -114,6 +116,31 @@ const histories = await purchases
   .orderBy((columns) => columns.customerId)
   .execute();
 // One row per customer, with matching amounts in purchase order.
+```
+
+Project a record when each parent needs the fields from each matching child together. Record fields
+must be explicitly named scalar expressions; nested objects, arrays, and raw object expressions
+are not collection elements:
+
+```typescript
+const histories = await purchases
+  .groupBy((columns) => [columns.customerId])
+  .aggregate((columns) => ({
+    customerId: columns.customerId,
+    purchases: expr.collect({
+      id: columns.id,
+      amount: columns.amount,
+      purchasedAt: columns.purchasedAt,
+    }, {
+      orderBy: [
+        { expression: columns.purchasedAt },
+        { expression: columns.id },
+      ],
+    }),
+  }))
+  .execute();
+// Each purchases value is a readonly array of readonly records.
+// purchasedAt decodes to Date; nullable fields decode to undefined.
 ```
 
 Import `CollectOptions<Scope>` to type reusable options or helper parameters without restating the
@@ -161,8 +188,16 @@ Putting `expr.isNotNull(columns.taskId)` in the relation's outer `where()` inste
 childless row before grouping, so `Research` has no result row. Use the collection filter when the
 parent must remain visible with an empty collection.
 
-Collection elements may be strings, numbers, Booleans, or dates. The result is a readonly array with
-the operand's element type and nullability preserved. Filtering does not change that type. An
+The same rule applies to records. Replace `columns.taskTitle` in the optional-traversal example
+with `{ id: columns.taskId, title: columns.taskTitle }`, keeping its `orderBy` and
+`filter: expr.isNotNull(columns.taskId)` options. This returns `[]` for a parent without a child.
+Without that filter, an admitted optional-traversal row creates a record even when every projected
+field is SQL NULL; its fields decode to `undefined`.
+
+Scalar collection elements may be strings, numbers, Booleans, or dates. Record fields may use those
+same scalar types, and their Boolean, Date, and SQL NULL values decode to `boolean`, `Date`, and
+`undefined` respectively. The result is a readonly array with the projected element types and
+nullability preserved. Filtering does not change those types. An
 included SQL NULL operand decodes to `undefined` and remains in the collection; filtering is based
 only on the `filter` expression. This includes NULL values from missing optional targets when the
 filter admits them.
@@ -172,8 +207,8 @@ returns no rows. Source filters, distinctness, and ranges apply before collectio
 Duplicates remain unless you deduplicate the input projection explicitly.
 
 Collections support prepared and batched relation execution. They are materialized arrays, with no
-implicit truncation or response-byte limit. Object/nested collection elements and aggregate-local
-limits are outside this scalar API. Structured equality restrictions still apply: collection columns
+implicit truncation or response-byte limit. Arbitrary object/nested collection elements and aggregate-local
+limits are outside this API. Structured equality restrictions still apply: collection columns
 cannot be used as relation ordering keys, with `distinct()`, distinct set operations, grouping keys, or the existing
 scalar-only paging contract. Use compatible `unionAll()` to retain collection rows without equality.
 

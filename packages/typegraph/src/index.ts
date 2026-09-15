@@ -988,8 +988,11 @@ export {
   type RelationProjectionResult,
 } from "./query/builder/relation";
 export {
+  type CollectedRecord,
   type CollectOptions,
   type CollectOrder,
+  type CollectRecordFields,
+  type CollectRecordOperand,
   type DatabaseExpression,
   expr,
 } from "./query/expressions";

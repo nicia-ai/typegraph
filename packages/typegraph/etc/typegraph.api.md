@@ -828,13 +828,21 @@ type CoalesceExpressionNode = Readonly<{
 // @public
 export type Collation = "binary" | "caseInsensitive";
 
-// @public (undocumented)
+// @public
 function collect<T extends Comparable | undefined, Scope extends string>(operand: DatabaseExpression<T, Scope>, options: CollectOptions<Scope>): DatabaseExpression<readonly T[], Scope>;
+
+// @public
+function collect<Scope extends string, Fields extends CollectRecordFields<Scope>>(operand: Fields & CollectRecordFields<Scope>, options: CollectOptions<Scope>): DatabaseExpression<readonly CollectedRecord<Fields>[], Scope>;
+
+// @public
+export type CollectedRecord<Fields extends CollectRecordFields<string>> = Readonly<{
+    [Name in keyof Fields]: Fields[Name] extends (DatabaseExpression<infer Value>) ? Value : never;
+}>;
 
 // @public (undocumented)
 type CollectExpressionNode = Readonly<{
     kind: "collect";
-    operand: DatabaseExpression;
+    operand: DatabaseExpression | CollectRecordOperand;
     filter?: DatabaseExpression<boolean | undefined>;
     orderBy: readonly CollectOrder[];
 }>;
@@ -850,6 +858,15 @@ export type CollectOrder<Scope extends string = string> = Readonly<{
     expression: DatabaseExpression<boolean | Date | number | string | undefined, Scope>;
     direction?: "asc" | "desc";
     nulls?: "first" | "last";
+}>;
+
+// @public
+export type CollectRecordFields<Scope extends string = string> = Readonly<Record<string, DatabaseExpression<Comparable | undefined, Scope>>>;
+
+// @public
+export type CollectRecordOperand = Readonly<{
+    kind: "record";
+    fields: Readonly<Record<string, DatabaseExpression>>;
 }>;
 
 // @public
@@ -1613,6 +1630,7 @@ export type DatabaseExpression<out T = unknown, out Scope extends string = strin
     node: DatabaseExpressionNode;
     valueType: ValueType;
     elementValueType?: ValueType;
+    elementFields?: Readonly<Record<string, ValueType>>;
     nullable: boolean;
     scopeIdentity: symbol;
     __value?: T;
@@ -3085,6 +3103,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, number>;
@@ -3095,6 +3114,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: boolean | undefined;
@@ -3105,6 +3125,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: number | undefined;
@@ -3119,6 +3140,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: number | undefined;
@@ -3129,6 +3151,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3139,6 +3162,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3149,6 +3173,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3162,6 +3187,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3172,6 +3198,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3182,6 +3209,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: T | undefined;
@@ -3192,6 +3220,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: T | undefined;
@@ -3202,6 +3231,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, number>;
@@ -3212,6 +3242,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3223,6 +3254,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: boolean | undefined;
@@ -3234,6 +3266,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, number>;
@@ -3244,6 +3277,7 @@ export const expr: {
         node: DatabaseExpressionNode;
         valueType: ValueType;
         elementValueType?: ValueType;
+        elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: number | undefined;
@@ -7169,6 +7203,7 @@ type RelationColumn = Readonly<{
     outputName: string;
     valueType: ValueType;
     elementValueType?: ValueType;
+    elementFields?: Readonly<Record<string, ValueType>>;
     nullable: boolean;
     identity?: Readonly<{
         component: "id" | "kind";

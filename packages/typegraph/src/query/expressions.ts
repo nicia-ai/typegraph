@@ -31,7 +31,7 @@ export type CollectOrder<Scope extends string = string> = Readonly<{
   nulls?: "first" | "last";
 }>;
 
-/** Options for ordered scalar collection aggregation. */
+/** Options for ordered collection aggregation. */
 export type CollectOptions<Scope extends string = string> = Readonly<{
   filter?: DatabaseExpression<boolean | undefined, Scope>;
   orderBy: readonly [CollectOrder<Scope>, ...CollectOrder<Scope>[]];
@@ -39,10 +39,69 @@ export type CollectOptions<Scope extends string = string> = Readonly<{
 
 export type CollectExpressionNode = Readonly<{
   kind: "collect";
-  operand: DatabaseExpression;
+  operand: DatabaseExpression | CollectRecordOperand;
   filter?: DatabaseExpression<boolean | undefined>;
   orderBy: readonly CollectOrder[];
 }>;
+
+/** Flat named scalar expressions collected as one JSON object per admitted row. */
+export type CollectRecordOperand = Readonly<{
+  kind: "record";
+  fields: Readonly<Record<string, DatabaseExpression>>;
+}>;
+
+/** @internal */
+export function isCollectRecordOperand(
+  operand: CollectExpressionNode["operand"],
+): operand is CollectRecordOperand {
+  const kind: unknown = "kind" in operand ? operand.kind : undefined;
+  return kind === "record";
+}
+
+/** @internal Enumerates every value expression in a COLLECT operand. */
+export function collectOperandExpressions(
+  operand: CollectExpressionNode["operand"],
+): readonly DatabaseExpression[] {
+  return isCollectRecordOperand(operand) ?
+      resolveCollectRecordFields(operand.fields).map(
+        ({ expression }) => expression,
+      )
+    : [operand];
+}
+
+/** @internal */
+export function isCollectScalarOperand(
+  operand: DatabaseExpression | Readonly<Record<string, unknown>>,
+): operand is DatabaseExpression {
+  return "__type" in operand && operand.__type === "database_expression";
+}
+
+/** @internal Validates and orders flat scalar record fields. */
+export function resolveCollectRecordFields(
+  fields: unknown,
+): readonly Readonly<{ name: string; expression: DatabaseExpression }>[] {
+  if (typeof fields !== "object" || fields === null || Array.isArray(fields))
+    throw new UnsupportedPredicateError("COLLECT record requires a field map");
+  const entries: readonly [string, unknown][] = Object.entries(fields);
+  if (entries.length === 0)
+    throw new UnsupportedPredicateError(
+      "COLLECT record requires at least one field",
+    );
+  return entries
+    .toSorted(([left], [right]) =>
+      left < right ? -1
+      : left > right ? 1
+      : 0,
+    )
+    .map(([name, expression]) => {
+      assertExpression(expression);
+      assertPortableScalarValueType(
+        expression.valueType,
+        "COLLECT record field",
+      );
+      return { name, expression };
+    });
+}
 
 type FieldExpressionNode = Readonly<{
   kind: "field";
@@ -141,8 +200,10 @@ export type DatabaseExpression<
   __type: "database_expression";
   node: DatabaseExpressionNode;
   valueType: ValueType;
-  /** Scalar element type carried by collection-valued expressions. */
+  /** Element type carried by collection-valued expressions; records also carry field codecs. */
   elementValueType?: ValueType;
+  /** Scalar codecs for fields of each collected record. */
+  elementFields?: Readonly<Record<string, ValueType>>;
   nullable: boolean;
   scopeIdentity: symbol;
   /** @internal Carries the public result type without runtime data. */
@@ -182,6 +243,7 @@ function createExpression<T, Scope extends string>(
   nullable: boolean,
   scopeIdentity: symbol,
   elementValueType?: ValueType,
+  elementFields?: Readonly<Record<string, ValueType>>,
 ): DatabaseExpression<T, Scope> {
   return {
     __type: "database_expression",
@@ -190,6 +252,7 @@ function createExpression<T, Scope extends string>(
     scopeIdentity,
     valueType,
     ...(elementValueType === undefined ? {} : { elementValueType }),
+    ...(elementFields === undefined ? {} : { elementFields }),
   };
 }
 
@@ -221,12 +284,30 @@ function resolveScope(expressions: readonly DatabaseExpression[]): symbol {
   return firstScope ?? UNSCOPED_EXPRESSION;
 }
 
+/** @internal Compares scalar or record collection codecs across expression composition. */
+export function haveCompatibleCollectionElements(
+  left: Pick<DatabaseExpression, "elementValueType" | "elementFields">,
+  right: Pick<DatabaseExpression, "elementValueType" | "elementFields">,
+): boolean {
+  if (left.elementValueType !== right.elementValueType) return false;
+  const leftFields = left.elementFields;
+  const rightFields = right.elementFields;
+  if (leftFields === undefined || rightFields === undefined)
+    return leftFields === rightFields;
+  const keys = Object.keys(leftFields);
+  return (
+    keys.length === Object.keys(rightFields).length &&
+    keys.every((key) => leftFields[key] === rightFields[key])
+  );
+}
+
 function assertSameValueType(
   expressions: readonly DatabaseExpression[],
 ): ValueType {
-  const valueType = expressions[0]?.valueType;
-  if (valueType === undefined)
+  const firstExpression = expressions[0];
+  if (firstExpression === undefined)
     throw new TypeError("At least one database expression is required");
+  const valueType = firstExpression.valueType;
   if (valueType === "unknown")
     throw new TypeError("Unknown expression value types cannot be combined");
   if (expressions.some((expression) => expression.valueType !== valueType)) {
@@ -238,7 +319,7 @@ function assertSameValueType(
     valueType === "array" &&
     expressions.some(
       (expression) =>
-        expression.elementValueType !== expressions[0]?.elementValueType,
+        !haveCompatibleCollectionElements(expression, firstExpression),
     )
   )
     throw new TypeError(
@@ -386,6 +467,7 @@ export function createScalarSubqueryExpression<T, Scope extends string>(
     true,
     parentScopeIdentity,
     projected.elementValueType,
+    projected.elementFields,
   );
 }
 
@@ -594,15 +676,57 @@ export function resolveCollectFilter<Scope extends string>(
   return filter;
 }
 
+/** Explicitly named scalar expressions accepted by record collection aggregation. */
+export type CollectRecordFields<Scope extends string = string> = Readonly<
+  Record<string, DatabaseExpression<Comparable | undefined, Scope>>
+>;
+/** Readonly decoded record inferred from a collection field map. */
+export type CollectedRecord<Fields extends CollectRecordFields<string>> =
+  Readonly<{
+    [Name in keyof Fields]: Fields[Name] extends (
+      DatabaseExpression<infer Value>
+    ) ?
+      Value
+    : never;
+  }>;
+
+/** Collects scalar values in explicit order, optionally filtering admitted rows. */
 function collect<T extends Comparable | undefined, Scope extends string>(
   operand: DatabaseExpression<T, Scope>,
   options: CollectOptions<Scope>,
-): DatabaseExpression<readonly T[], Scope> {
-  assertPortableScalarValueType(operand.valueType, "COLLECT");
+): DatabaseExpression<readonly T[], Scope>;
+/** Collects explicitly projected scalar fields into ordered readonly records. */
+function collect<
+  Scope extends string,
+  Fields extends CollectRecordFields<Scope>,
+>(
+  operand: Fields & CollectRecordFields<Scope>,
+  options: CollectOptions<Scope>,
+): DatabaseExpression<readonly CollectedRecord<Fields>[], Scope>;
+function collect<Scope extends string>(
+  operand:
+    | DatabaseExpression<Comparable | undefined, Scope>
+    | CollectRecordFields<Scope>,
+  options: CollectOptions<Scope>,
+): DatabaseExpression<readonly unknown[], Scope> {
+  const scalar = isCollectScalarOperand(operand);
+  const recordEntries = scalar ? [] : resolveCollectRecordFields(operand);
+  if (scalar) assertPortableScalarValueType(operand.valueType, "COLLECT");
+  const values =
+    scalar ? [operand] : recordEntries.map(({ expression }) => expression);
+  const recordFields =
+    scalar ? undefined : (
+      Object.fromEntries(
+        recordEntries.map(({ name, expression }) => [
+          name,
+          expression.valueType,
+        ]),
+      )
+    );
   const orderBy = resolveCollectOrder(options.orderBy);
   const filter = resolveCollectFilter(options.filter);
   const scopeIdentity = resolveScope([
-    operand,
+    ...values,
     ...orderBy.map((order) => order.expression),
     ...(filter === undefined ? [] : [filter]),
   ]);
@@ -610,13 +734,22 @@ function collect<T extends Comparable | undefined, Scope extends string>(
     {
       ...(filter === undefined ? {} : { filter }),
       kind: "collect",
-      operand,
+      operand:
+        scalar ? operand : (
+          {
+            kind: "record",
+            fields: Object.fromEntries(
+              recordEntries.map(({ name, expression }) => [name, expression]),
+            ),
+          }
+        ),
       orderBy,
     },
     "array",
     false,
     scopeIdentity,
-    operand.valueType,
+    scalar ? operand.valueType : "object",
+    recordFields,
   );
 }
 
@@ -665,6 +798,7 @@ function coalesce<T, Scope extends string>(
     operands.every((operand) => operand.nullable),
     scopeIdentity,
     first.elementValueType,
+    first.elementFields,
   );
 }
 
@@ -691,6 +825,7 @@ function when<
     then.nullable || otherwise.nullable,
     scopeIdentity,
     then.elementValueType,
+    then.elementFields,
   );
 }
 

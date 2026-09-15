@@ -627,6 +627,11 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // root/schema exports, while adapter authoring gains SchemaProvisioning and
 // AdoptedSchemaWriteTransaction. The remaining entrypoint-specific changes below
 // are exact symbol-set fingerprints, not a relaxed count-only allowance.
+// Ordered record collections export CollectRecordFields, CollectedRecord, and
+// CollectRecordOperand directly from the root. Six Store-bearing secondary
+// entrypoints reach only CollectRecordOperand transitively, adding exactly
+// that one forgotten name to each fingerprint below. Removing that name from
+// each measured symbol set reproduces its previous fingerprint.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 493,
@@ -676,36 +681,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 853,
-    sha256: "585d2ff9c8ea36ccd811a78faa48a6ef02329b88fc44751cc9676a0d407972e6",
+    count: 854,
+    sha256: "2c18ceaa6c927a7ec22f8c182099ff7d26c3dca745ea7529bbf88f45bb8fd7fe",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 836,
-    sha256: "eae80ef7f7b8a85f52f37388b4c10a74d4de613023e371ddfe5e555bb5e49238",
+    count: 837,
+    sha256: "b55043608a58b4fb116875f8c3a61e4793a29b404d0529a144f098c7dba34e91",
   },
   "./postgres/pglite": {
-    count: 838,
-    sha256: "0981c697eebd51762a70a46e354fb22bd5f44ed0c2fa34dd06a6072d55256502",
+    count: 839,
+    sha256: "1f81d65952469ff5286bfd1a4b870dfd93ce7cb0c6c34c8b851518a570737eea",
   },
   "./profiler": {
-    count: 838,
-    sha256: "205af0a03f70b95bce121be369756fcf0a3460dbe04e4f74a85b14fc8d5fb2ee",
+    count: 839,
+    sha256: "b6baeae9dc1061486c80d1eeca0781549bf1456d2af443fc29305ee43c945bc4",
   },
   "./provenance": {
-    count: 847,
-    sha256: "1166769e3654147a826fe5c354ca4f44523843c439e9f6ccd8ad9468a9669245",
+    count: 848,
+    sha256: "c464054782a9c671e59918aff721b0c25aa3501376b63fd02bd25118d46a079b",
   },
   "./schema": {
     count: 283,
     sha256: "39bd9a3909ea18e3582ea1f258e31f8b3503a6594d6c0287378f8de77b152473",
   },
   "./sqlite/local": {
-    count: 838,
-    sha256: "0981c697eebd51762a70a46e354fb22bd5f44ed0c2fa34dd06a6072d55256502",
+    count: 839,
+    sha256: "1f81d65952469ff5286bfd1a4b870dfd93ce7cb0c6c34c8b851518a570737eea",
   },
 };
 

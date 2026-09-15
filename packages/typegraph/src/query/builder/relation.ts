@@ -119,6 +119,9 @@ function buildContext<Fields extends RelationProjection>(
         ...(column.elementValueType === undefined ?
           {}
         : { elementValueType: column.elementValueType }),
+        ...(column.elementFields === undefined ?
+          {}
+        : { elementFields: column.elementFields }),
       },
     ]),
   ) as RelationColumnContext<Fields>;
@@ -138,6 +141,9 @@ function relationColumns(
       ...(expression.elementValueType === undefined ?
         {}
       : { elementValueType: expression.elementValueType }),
+      ...(expression.elementFields === undefined ?
+        {}
+      : { elementFields: expression.elementFields }),
       nullable: expression.nullable,
     };
     if (
