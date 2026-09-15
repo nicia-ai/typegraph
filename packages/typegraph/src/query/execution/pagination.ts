@@ -30,6 +30,7 @@ import {
   decodeCursor,
   validateCursorColumns,
 } from "../cursor";
+import { resolveNullOrdering } from "../order";
 
 /**
  * Parses pagination options into internal format.
@@ -78,6 +79,7 @@ export function adjustOrderByForDirection(
   return orderBy.map((spec) => ({
     ...spec,
     direction: spec.direction === "asc" ? ("desc" as const) : ("asc" as const),
+    nulls: resolveNullOrdering(spec) === "first" ? "last" : "first",
   }));
 }
 
@@ -110,20 +112,14 @@ export function buildCursorPredicate(
 
     // Current column uses comparison
     const currentSpec = requireDefined(orderBy[index]);
-    const currentValue = values[index];
-    const isAsc = currentSpec.direction === "asc";
-    const isForward = direction === "forward";
-    // ASC + forward = gt | ASC + backward = lt
-    // DESC + forward = lt | DESC + backward = gt
-    const op = isAsc === isForward ? "gt" : "lt";
-
-    andConditions.push(
-      buildComparisonPredicate(
-        requireCursorField(currentSpec.field),
-        op,
-        currentValue,
-      ),
+    const comparison = buildPositionPredicate(
+      requireCursorField(currentSpec.field),
+      currentSpec,
+      values[index],
+      direction === "forward" ? "after" : "before",
     );
+    if (comparison === undefined) continue;
+    andConditions.push(comparison);
 
     // Combine with AND
     if (andConditions.length === 1) {
@@ -135,8 +131,11 @@ export function buildCursorPredicate(
 
   // Combine with OR
   const expression: PredicateExpression =
-    orConditions.length === 1 ?
-      requireDefined(orConditions[0])
+    orConditions.length === 0 ?
+      buildImpossiblePredicate(
+        requireCursorField(requireDefined(orderBy[0]).field),
+      )
+    : orConditions.length === 1 ? requireDefined(orConditions[0])
     : { __type: "or", predicates: orConditions };
 
   return {
@@ -166,21 +165,47 @@ function buildEqualityPredicate(
 /**
  * Builds a comparison predicate for cursor pagination.
  */
-function buildComparisonPredicate(
+function buildPositionPredicate(
   field: FieldRef,
-  op: "gt" | "lt",
+  spec: OrderSpec,
   value: unknown,
-): PredicateExpression {
+  position: "after" | "before",
+): PredicateExpression | undefined {
+  const nulls = resolveNullOrdering(spec);
   if (value === null || value === undefined) {
-    // For null, the comparison depends on NULLS FIRST/LAST behavior
-    // For simplicity, treat as IS NOT NULL for forward, fail for backward
-    return { __type: "null_check", op: "isNotNull", field };
+    const nonNullValuesMatch =
+      (position === "after" && nulls === "first") ||
+      (position === "before" && nulls === "last");
+    return nonNullValuesMatch ?
+        { __type: "null_check", op: "isNotNull", field }
+      : undefined;
   }
-  return {
+
+  const isAscending = spec.direction === "asc";
+  const comparison: PredicateExpression = {
     __type: "comparison",
-    op,
+    op: isAscending === (position === "after") ? "gt" : "lt",
     left: field,
     right: { __type: "literal", value: value as string | number | boolean },
+  };
+  const nullValuesMatch =
+    (position === "after" && nulls === "last") ||
+    (position === "before" && nulls === "first");
+  return nullValuesMatch ?
+      {
+        __type: "or",
+        predicates: [comparison, { __type: "null_check", op: "isNull", field }],
+      }
+    : comparison;
+}
+
+function buildImpossiblePredicate(field: FieldRef): PredicateExpression {
+  return {
+    __type: "and",
+    predicates: [
+      { __type: "null_check", op: "isNull", field },
+      { __type: "null_check", op: "isNotNull", field },
+    ],
   };
 }
 

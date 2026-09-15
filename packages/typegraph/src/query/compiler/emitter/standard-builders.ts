@@ -19,6 +19,7 @@ import {
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
 import { type DatabaseExpression } from "../../expressions";
+import { resolveNullOrdering } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
 import { validateAggregateOperand } from "../aggregate-validation";
 import {
@@ -903,8 +904,7 @@ export function buildStandardOrderBy(
       cteAlias,
     );
     const direction = sql.raw(orderSpec.direction.toUpperCase());
-    const nulls =
-      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
+    const nulls = resolveNullOrdering(orderSpec);
     const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
     parts.push(
       sql`(${field} IS NULL) ${nullsDirection}`,
@@ -929,8 +929,7 @@ export function buildStandardOrderBy(
   for (const orderSpec of aggregateOrderBy) {
     const column = quoteIdentifier(orderSpec.outputName);
     const direction = sql.raw(orderSpec.direction.toUpperCase());
-    const nulls =
-      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
+    const nulls = resolveNullOrdering(orderSpec);
     const nullsKeyword = sql.raw(
       nulls === "first" ? "NULLS FIRST" : "NULLS LAST",
     );
@@ -1102,8 +1101,7 @@ export function buildLateMaterializedOuterOrderBy(
   for (const [index, orderSpec] of orderBy.entries()) {
     const column = sql`${topk}.${sql.raw(`${LATE_MAT_SORT_KEY_PREFIX}${index}`)}`;
     const direction = sql.raw(orderSpec.direction.toUpperCase());
-    const nulls =
-      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
+    const nulls = resolveNullOrdering(orderSpec);
     const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
     parts.push(
       sql`(${column} IS NULL) ${nullsDirection}`,
@@ -1641,8 +1639,7 @@ function compileUserOrderBy(
       cteAlias,
     );
     const direction = sql.raw(orderSpec.direction.toUpperCase());
-    const nulls =
-      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
+    const nulls = resolveNullOrdering(orderSpec);
     const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
     fragments.push(
       sql`(${field} IS NULL) ${nullsDirection}`,

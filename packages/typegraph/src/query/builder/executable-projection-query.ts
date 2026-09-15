@@ -6,6 +6,7 @@ import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import type { DatabaseExpression } from "../expressions";
+import { resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
@@ -423,9 +424,7 @@ function buildProjectionEnvelope(ast: QueryAst) {
   const orderBy = ordering.map((order, index) => ({
     column: `__tg_order_${index}`,
     direction: order.direction,
-    nulls:
-      order.nulls ??
-      (order.direction === "asc" ? ("last" as const) : ("first" as const)),
+    nulls: resolveNullOrdering(order),
   }));
   return {
     ast: {

@@ -34,6 +34,7 @@ import {
 } from "../cursor";
 import { type SqlDialect } from "../dialect/types";
 import {
+  adjustOrderByForDirection,
   buildCursorPredicate,
   buildPaginatedResult,
   buildSelectContext,
@@ -52,6 +53,7 @@ import {
   transformPathColumns,
 } from "../execution";
 import { parseJsonPointer } from "../json-pointer";
+import { resolveNullOrdering } from "../order";
 import { type FieldTypeInfo } from "../schema-introspector";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
@@ -822,7 +824,7 @@ export class ExecutableQuery<
     const batchOrderBy = (ast.orderBy ?? []).map((order, index) => ({
       column: oneStatementBatchOrderColumn(index),
       direction: order.direction,
-      nulls: order.nulls ?? (order.direction === "asc" ? "last" : "first"),
+      nulls: resolveNullOrdering(order),
     }));
     const batchAst: QueryAst =
       batchOrderBy.length === 0 ?
@@ -1588,15 +1590,10 @@ export class ExecutableQuery<
   ): Promise<readonly Record<string, unknown>[]> {
     const ast = this.toAst();
 
-    // Adjust ORDER BY for backward pagination (reverse all directions)
-    let orderBy = this.#paginationOrderBy();
-    if (direction === "backward") {
-      orderBy = orderBy.map((spec) => ({
-        ...spec,
-        direction:
-          spec.direction === "asc" ? ("desc" as const) : ("asc" as const),
-      }));
-    }
+    const orderBy = adjustOrderByForDirection(
+      this.#paginationOrderBy(),
+      direction,
+    );
 
     // Build cursor predicates if we have cursor data
     let predicates = [...this.#state.predicates];
