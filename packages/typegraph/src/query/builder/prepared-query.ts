@@ -296,6 +296,19 @@ export function substituteDatabaseExpression<T, Scope extends string>(
             node: { ...node, operand: substitute(node.operand) },
           };
     }
+    case "collect": {
+      return {
+        ...expression,
+        node: {
+          ...node,
+          operand: substitute(node.operand),
+          orderBy: node.orderBy.map((order) => ({
+            ...order,
+            expression: substitute(order.expression) as typeof order.expression,
+          })),
+        },
+      };
+    }
     case "coalesce": {
       return {
         ...expression,
@@ -844,6 +857,11 @@ function collectParameterMetadataFromDatabaseExpression(
     }
     case "aggregate": {
       if (node.operand !== undefined) collect(node.operand);
+      return;
+    }
+    case "collect": {
+      collect(node.operand);
+      for (const order of node.orderBy) collect(order.expression);
       return;
     }
     case "conditional": {

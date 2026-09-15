@@ -80,6 +80,7 @@ function rawCapabilityDeclarationOnPredicateContextIsRejected(): void {
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
     windowFunctions: true,
+    orderedAggregates: true,
     // @ts-expect-error a `RecursiveTraversalCapability` (an unbranded
     // declaration) is not a `RecursiveTraversalVerdict`.
     recursiveTraversal: rawDeclaration,
@@ -92,6 +93,7 @@ function rawCapabilityDeclarationOnPredicateContextIsRejected(): void {
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
     windowFunctions: true,
+    orderedAggregates: true,
     recursiveTraversal: resolveRecursiveTraversal(SQLITE_CAPABILITIES),
   };
   void sanctioned;
@@ -101,6 +103,7 @@ function rawCapabilityDeclarationOnPredicateContextIsRejected(): void {
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
     windowFunctions: true,
+    orderedAggregates: true,
     recursiveTraversal: assumeRecursiveTraversalSupported("test"),
   };
   void sanctionedAssumed;

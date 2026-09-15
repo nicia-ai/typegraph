@@ -108,6 +108,7 @@ function createContext(cteColumnPrefix?: string): PredicateCompilerContext {
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
     windowFunctions: true,
+    orderedAggregates: true,
   };
   if (cteColumnPrefix !== undefined) {
     return { ...base, cteColumnPrefix };
@@ -1278,6 +1279,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT 1 FROM users WHERE active = 1`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1295,6 +1297,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT 1 FROM deleted_users`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1312,6 +1315,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT user_id FROM admins`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1330,6 +1334,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT score FROM scores`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1361,6 +1366,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT blocked_id FROM blocklist`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1379,6 +1385,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT user_id, role FROM admins`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1413,6 +1420,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT name FROM people`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1443,6 +1451,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT profile FROM people`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1475,6 +1484,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT 1`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {

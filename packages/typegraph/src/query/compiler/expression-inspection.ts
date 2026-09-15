@@ -1,9 +1,15 @@
 import type { DatabaseExpression } from "../expressions";
 
+export function isAggregateExpression(expression: DatabaseExpression): boolean {
+  return (
+    expression.node.kind === "aggregate" || expression.node.kind === "collect"
+  );
+}
+
 export function expressionContainsAggregate(
   expression: DatabaseExpression,
 ): boolean {
-  if (expression.node.kind === "aggregate") return true;
+  if (isAggregateExpression(expression)) return true;
   let found = false;
   visitExpressionChildren(expression, (operand) => {
     if (expressionContainsAggregate(operand)) found = true;
@@ -36,6 +42,11 @@ export function visitExpressionChildren(
     }
     case "aggregate": {
       if (node.operand !== undefined) visit(node.operand);
+      return;
+    }
+    case "collect": {
+      visit(node.operand);
+      for (const order of node.orderBy) visit(order.expression);
       return;
     }
     case "conditional": {

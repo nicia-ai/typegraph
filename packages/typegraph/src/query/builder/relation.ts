@@ -109,11 +109,16 @@ function buildContext<Fields extends RelationProjection>(
   return Object.fromEntries(
     columns.map((column) => [
       column.outputName,
-      createFieldExpression(
-        outputField(column.outputName, column.valueType),
-        scopeIdentity,
-        column.nullable,
-      ),
+      {
+        ...createFieldExpression(
+          outputField(column.outputName, column.valueType),
+          scopeIdentity,
+          column.nullable,
+        ),
+        ...(column.elementValueType === undefined ?
+          {}
+        : { elementValueType: column.elementValueType }),
+      },
     ]),
   ) as RelationColumnContext<Fields>;
 }
@@ -129,6 +134,9 @@ function relationColumns(
     const base = {
       outputName,
       valueType: expression.valueType,
+      ...(expression.elementValueType === undefined ?
+        {}
+      : { elementValueType: expression.elementValueType }),
       nullable: expression.nullable,
     };
     if (

@@ -16,6 +16,7 @@ import { withPinnedReadInstant } from "./temporal";
 export type RelationColumn = Readonly<{
   outputName: string;
   valueType: ValueType;
+  elementValueType?: ValueType;
   nullable: boolean;
   /** Proven graph-node identity carried only from a direct graph field. */
   identity?: Readonly<{
@@ -63,17 +64,36 @@ type SetRelation = Readonly<{
 
 export type RelationAst = DerivedRelation | RelationSource | SetRelation;
 
+function relationSources(relation: RelationAst): readonly RelationSource[] {
+  switch (relation.kind) {
+    case "source": {
+      return [relation];
+    }
+    case "derived": {
+      return relationSources(relation.source);
+    }
+    case "set": {
+      return [
+        ...relationSources(relation.left),
+        ...relationSources(relation.right),
+      ];
+    }
+  }
+}
+
 const SOURCE_ALIAS = "typegraph_relation_source";
 
 function expressionContext(
   dialect: DatabaseExpressionCompilerContext["dialect"],
   allowAggregates: boolean,
+  orderedAggregates: boolean,
 ): DatabaseExpressionCompilerContext {
   return {
     allowAggregates,
     aggregateClause:
       allowAggregates ? "relation projection" : "relation filter and ordering",
     dialect,
+    orderedAggregates,
     compileFieldExpression(field) {
       if (
         field.alias !== "relation" ||
@@ -90,22 +110,28 @@ function compileExpression(
   expression: DatabaseExpression,
   dialect: DatabaseExpressionCompilerContext["dialect"],
   allowAggregates: boolean,
+  orderedAggregates: boolean,
 ): SqlFragment {
   return compileDatabaseExpression(
     expression,
-    expressionContext(dialect, allowAggregates),
+    expressionContext(dialect, allowAggregates, orderedAggregates),
   );
 }
 
 function compileOrder(
   orderBy: readonly RelationOrder[],
   dialect: DatabaseExpressionCompilerContext["dialect"],
+  orderedAggregates: boolean,
 ): SqlFragment {
   if (orderBy.length === 0) return sql.empty();
+  if (orderBy.some((order) => order.expression.elementValueType !== undefined))
+    throw new ConfigurationError(
+      "Relation ordering requires scalar keys; collection-valued ordering is unsupported.",
+    );
   return sql` ORDER BY ${sql.join(
     orderBy.map(
       (order) =>
-        sql`${compileExpression(order.expression, dialect, false)} ${sql.raw(order.direction.toUpperCase())} NULLS ${sql.raw(order.nulls.toUpperCase())}`,
+        sql`${compileExpression(order.expression, dialect, false, orderedAggregates)} ${sql.raw(order.direction.toUpperCase())} NULLS ${sql.raw(order.nulls.toUpperCase())}`,
     ),
     sql`, `,
   )}`;
@@ -114,6 +140,7 @@ function compileOrder(
 function compileDerived(
   relation: DerivedRelation,
   dialect: DatabaseExpressionCompilerContext["dialect"],
+  orderedAggregates: boolean,
 ): CompiledSelectSql {
   validateRelationAggregation(
     relation.projection.map(({ expression }) => expression),
@@ -123,25 +150,25 @@ function compileDerived(
   const projection = sql.join(
     relation.projection.map(
       ({ column, expression }) =>
-        sql`${compileExpression(expression, dialect, true)} AS ${sql.identifier(column.outputName)}`,
+        sql`${compileExpression(expression, dialect, true, orderedAggregates)} AS ${sql.identifier(column.outputName)}`,
     ),
     sql`, `,
   );
   const predicate =
     relation.predicate === undefined ?
       sql.empty()
-    : sql` WHERE ${compileExpression(relation.predicate, dialect, false)}`;
+    : sql` WHERE ${compileExpression(relation.predicate, dialect, false, orderedAggregates)}`;
   const groupBy =
     relation.groupBy === undefined || relation.groupBy.length === 0 ?
       sql.empty()
     : sql` GROUP BY ${sql.join(
         relation.groupBy.map((expression) =>
-          compileExpression(expression, dialect, false),
+          compileExpression(expression, dialect, false, orderedAggregates),
         ),
         sql`, `,
       )}`;
   return asCompiledSelectSql(
-    sql`SELECT ${relation.distinct ? sql.raw("DISTINCT ") : sql.empty()}${projection} FROM (${source}) AS ${sql.identifier(SOURCE_ALIAS)}${predicate}${groupBy}${compileOrder(relation.orderBy, dialect)} ${sql.join(compileLimitOffsetClauses(relation.limit, relation.offset, dialect), sql` `)}`,
+    sql`SELECT ${relation.distinct ? sql.raw("DISTINCT ") : sql.empty()}${projection} FROM (${source}) AS ${sql.identifier(SOURCE_ALIAS)}${predicate}${groupBy}${compileOrder(relation.orderBy, dialect, orderedAggregates)} ${sql.join(compileLimitOffsetClauses(relation.limit, relation.offset, dialect), sql` `)}`,
   );
 }
 
@@ -149,13 +176,14 @@ function compileDerived(
 function compileRelationInner(
   relation: RelationAst,
   dialect: DatabaseExpressionCompilerContext["dialect"],
+  orderedAggregates: boolean,
 ): CompiledSelectSql {
   switch (relation.kind) {
     case "source": {
       return compileQuery(relation.query, relation.graphId, relation.options);
     }
     case "derived": {
-      return compileDerived(relation, dialect);
+      return compileDerived(relation, dialect, orderedAggregates);
     }
     case "set": {
       const left = compileRelation(relation.left, dialect);
@@ -186,7 +214,12 @@ export function compileRelation(
   relation: RelationAst,
   dialect: DatabaseExpressionCompilerContext["dialect"],
 ): CompiledSelectSql {
-  return withPinnedReadInstant(() => compileRelationInner(relation, dialect));
+  const orderedAggregates = relationSources(relation).every(
+    (source) => source.options.orderedAggregates === true,
+  );
+  return withPinnedReadInstant(() =>
+    compileRelationInner(relation, dialect, orderedAggregates),
+  );
 }
 
 export function assertCompatibleRelationColumns(
@@ -202,6 +235,7 @@ export function assertCompatibleRelationColumns(
     if (
       leftColumn.outputName !== rightColumn?.outputName ||
       leftColumn.valueType !== rightColumn.valueType ||
+      leftColumn.elementValueType !== rightColumn.elementValueType ||
       leftColumn.nullable !== rightColumn.nullable
     ) {
       throw new ConfigurationError(

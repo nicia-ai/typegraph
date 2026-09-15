@@ -95,6 +95,7 @@ function createContext(
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
     windowFunctions: true,
+    orderedAggregates: true,
     recursiveTraversal: assumeRecursiveTraversalSupported(
       "recursive compiler unit test",
     ),

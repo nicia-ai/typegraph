@@ -161,6 +161,11 @@ export const sqliteDialect: DialectAdapter = {
     return sql`COALESCE((SELECT json_group_array(json(batch_json)) FROM (SELECT ${object} AS batch_json FROM ${row} ORDER BY ${row}.${sql.identifier(orderColumn)})), json('[]'))`;
   },
 
+  orderedScalarJsonArray(value, valueType, orderBy) {
+    void valueType;
+    return sql`COALESCE(json_group_array(${value} ORDER BY ${sql.join(orderBy, sql`, `)}), json('[]'))`;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

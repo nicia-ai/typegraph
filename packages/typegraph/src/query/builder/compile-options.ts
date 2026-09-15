@@ -33,6 +33,10 @@ export function buildCompileOptions(
     dialect: config.dialect ?? "sqlite",
     schema: config.schema,
     windowFunctions: config.backend?.capabilities.windowFunctions ?? true,
+    orderedAggregates:
+      config.backend === undefined ?
+        false
+      : config.backend.capabilities.orderedAggregates === true,
     recursiveTraversal:
       config.backend === undefined ?
         COMPILER_DEFAULT_RECURSIVE_TRAVERSAL

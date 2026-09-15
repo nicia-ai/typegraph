@@ -18,12 +18,14 @@ import {
   type AggregateResult,
   avg,
   type BatchableQuery,
+  type CollectOptions,
   count,
   createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
   type EdgeId,
+  expr,
   field,
   fieldRef,
   max,
@@ -36,6 +38,11 @@ import {
 } from "../src";
 import { ConfigurationError } from "../src/errors";
 import type { TraversalBuilder } from "../src/query/builder/traversal-builder";
+import type {
+  AggregateOperator,
+  CollectExpressionNode,
+  DatabaseExpression,
+} from "../src/query/expressions";
 import { buildKindRegistry } from "../src/registry";
 import type { Edge } from "../src/store/types";
 import { matchingObject } from "./test-utils";
@@ -120,6 +127,12 @@ function identityNotEnabled(): unknown {
   });
 }
 
+function preserveCollectOptions<Scope extends string>(
+  options: CollectOptions<Scope>,
+): CollectOptions<Scope> {
+  return options;
+}
+
 // ============================================================
 // Type-Level Tests
 // ============================================================
@@ -163,6 +176,64 @@ describe("Query Builder Type Safety", () => {
     expectTypeOf<EdgeRow["minimumSalary"]>().toEqualTypeOf<
       number | undefined
     >();
+
+    const collectionQuery = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "person")
+      .aggregate((fields) => ({
+        names: expr.collect(
+          fields.person.name,
+          preserveCollectOptions({
+            orderBy: [{ expression: fields.person.name }],
+          }),
+        ),
+        joined: expr.collect(fields.person.joinedAt, {
+          orderBy: [{ expression: fields.person.joinedAt, nulls: "first" }],
+        }),
+      }));
+    type CollectionRow = Awaited<
+      ReturnType<typeof collectionQuery.execute>
+    >[number];
+    void collectionQuery;
+    expectTypeOf<CollectionRow["names"]>().toEqualTypeOf<readonly string[]>();
+    expectTypeOf<CollectionRow["joined"]>().toEqualTypeOf<
+      readonly (Date | undefined)[]
+    >();
+
+    type CollectIsAggregateOperator =
+      "collect" extends AggregateOperator ? true : false;
+    expectTypeOf<CollectIsAggregateOperator>().toEqualTypeOf<false>();
+    function assertExpressionNodeNarrowing(
+      node: DatabaseExpression["node"],
+    ): void {
+      if (node.kind === "collect") {
+        expectTypeOf(node).toEqualTypeOf<CollectExpressionNode>();
+        expectTypeOf(node.orderBy).toEqualTypeOf<
+          CollectExpressionNode["orderBy"]
+        >();
+        // @ts-expect-error - collection nodes have no aggregate operator
+        void node.operator;
+      }
+      if (node.kind === "aggregate") {
+        expectTypeOf(node.operator).toEqualTypeOf<AggregateOperator>();
+        // @ts-expect-error - scalar aggregate nodes carry no collection ordering
+        void node.orderBy;
+      }
+    }
+    void assertExpressionNodeNarrowing;
+
+    function assertCollectionInputTypes(): void {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "person")
+        .aggregate((fields) => ({
+          // @ts-expect-error - COLLECT requires at least one explicit ordering expression
+          emptyOrder: expr.collect(fields.person.name, { orderBy: [] }),
+          // @ts-expect-error - COLLECT accepts scalar operands, not arrays
+          structured: expr.collect(fields.person.tags, {
+            orderBy: [{ expression: fields.person.name }],
+          }),
+        }));
+    }
+    void assertCollectionInputTypes;
   });
 
   describe("Operational Identity capability", () => {

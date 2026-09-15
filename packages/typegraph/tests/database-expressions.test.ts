@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import { createStore, defineGraph, defineNode } from "../src";
 import type { FieldRef } from "../src/query/ast";
+import { decodeExpressionValue } from "../src/query/builder/executable-projection-query";
 import { createFieldExpression, expr } from "../src/query/expressions";
+import { createTestBackend } from "./test-utils";
 
 function field<T>(
   alias: string,
@@ -69,6 +73,79 @@ describe("database expressions", () => {
     expect(expr.literal(new Date("2025-01-01T00:00:00.000Z")).valueType).toBe(
       "date",
     );
+  });
+
+  it("uses distinct public AST shapes for collection and scalar aggregates", () => {
+    const operand = expr.literal("Ada");
+    const order = expr.literal(1);
+    const collection = expr.collect(operand, {
+      orderBy: [{ expression: order, direction: "desc", nulls: "first" }],
+    });
+    const aggregate = expr.sum(order);
+
+    expect(collection.node).toEqual({
+      kind: "collect",
+      operand,
+      orderBy: [{ expression: order, direction: "desc", nulls: "first" }],
+    });
+    expect(collection.node).not.toHaveProperty("operator");
+    expect(aggregate.node).toEqual({
+      kind: "aggregate",
+      operand: order,
+      operator: "sum",
+    });
+    expect(aggregate.node).not.toHaveProperty("orderBy");
+  });
+
+  it("does not apply collection element decoding to ordinary JSON array fields", () => {
+    const tags = createFieldExpression<readonly (string | null)[], "document">(
+      {
+        __type: "field_ref",
+        alias: "document",
+        path: ["props", "tags"],
+        valueType: "array",
+        elementType: "string",
+      },
+      Symbol("document query"),
+      false,
+    );
+
+    expect(tags.elementValueType).toBeUndefined();
+    expect(decodeExpressionValue('["first",null]', tags)).toEqual([
+      "first",
+      // eslint-disable-next-line unicorn/no-null -- ordinary JSON null must remain JSON null.
+      null,
+    ]);
+  });
+
+  it("keeps reserved expression metadata separate from object fields", () => {
+    const Document = defineNode("ExpressionMetadataDocument", {
+      schema: z.object({
+        metadata: z.object({ elementValueType: z.string() }),
+      }),
+    });
+    const graph = defineGraph({
+      id: "expression-metadata-field",
+      nodes: { ExpressionMetadataDocument: { type: Document } },
+      edges: {},
+    });
+    const store = createStore(graph, createTestBackend());
+
+    const query = store
+      .query()
+      .from("ExpressionMetadataDocument", "document")
+      .project((fields) => ({
+        explicitSchemaField: fields.document.metadata.$get("elementValueType"),
+        metadata: fields.document.metadata,
+      }));
+
+    expect(query.getExpressionProjection()[0]?.expression.node).toMatchObject({
+      field: { jsonPointer: "/metadata/elementValueType" },
+      kind: "field",
+    });
+    expect(
+      query.getExpressionProjection()[1]?.expression.elementValueType,
+    ).toBeUndefined();
   });
 
   it("rejects invalid runtime operands, types, and mixed scopes", () => {

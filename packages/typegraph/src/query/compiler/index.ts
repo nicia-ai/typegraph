@@ -182,6 +182,8 @@ export type CompileQueryOptions = Readonly<{
    * `ROW_NUMBER()`. Defaults to true for direct compiler callers.
    */
   windowFunctions?: boolean | undefined;
+  /** Whether ordered scalar collection aggregates are supported. Defaults to true for direct compiler callers. */
+  orderedAggregates?: boolean | undefined;
   /**
    * Declared embedding slots `(kind, fieldPath) -> descriptor` used by
    * the `field.similarTo(...)` CTE to know which kinds in an alias
@@ -226,6 +228,7 @@ export const COMPILE_QUERY_OPTION_KEYS = [
   "fulltextStrategy",
   "vectorStrategy",
   "windowFunctions",
+  "orderedAggregates",
   "vectorSlots",
   "fulltextLanguages",
   "recordedReadBinding",
@@ -422,6 +425,7 @@ function compileQueryInExpressionContext(
       {}
     : { vectorStrategy: options_.vectorStrategy }),
     windowFunctions: options_.windowFunctions ?? true,
+    orderedAggregates: options_.orderedAggregates ?? true,
     recursiveTraversal:
       options_.recursiveTraversal ?? COMPILER_DEFAULT_RECURSIVE_TRAVERSAL,
     ...(recursiveResultAlias === undefined ? {} : { recursiveResultAlias }),
@@ -641,6 +645,7 @@ export function propagateOptions(
       {}
     : { vectorStrategy: options_.vectorStrategy }),
     windowFunctions: options_.windowFunctions ?? true,
+    orderedAggregates: options_.orderedAggregates ?? true,
     recursiveTraversal:
       options_.recursiveTraversal ?? COMPILER_DEFAULT_RECURSIVE_TRAVERSAL,
     ...(options_.vectorSlots === undefined ?

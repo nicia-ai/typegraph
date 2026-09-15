@@ -33,7 +33,10 @@ import { libsqlVectorStrategy } from "../../query/dialect/vector/libsql-strategy
 import { requireDefined } from "../../utils/presence";
 import { isSqliteMissingEdgeMatchIdentityColumnError } from "../../utils/sql-errors";
 import { generateSqliteMigrationSQL } from "../drizzle/ddl";
-import { type AnySqliteDatabase } from "../drizzle/execution";
+import {
+  type AnySqliteDatabase,
+  ORDERED_AGGREGATE_PROBE_SQL,
+} from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
 import {
   createSqliteBackend,
@@ -71,6 +74,15 @@ async function installLibsqlBaseSchema(
     // marker-error arm is intentionally dormant at v1: it becomes reachable
     // when a later release can observe a missing or stale older marker.
     await requireDefined(backend.bootstrapTables)();
+  }
+}
+
+async function detectOrderedAggregates(client: Client): Promise<boolean> {
+  try {
+    await client.execute(ORDERED_AGGREGATE_PROBE_SQL);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -149,7 +161,9 @@ export async function createLibsqlBackend(
 ): Promise<LibsqlBackendResult> {
   const tables = options.tables ?? defaultTables;
   const db = drizzle(client);
+  const orderedAggregates = await detectOrderedAggregates(client);
   const backend = createSqliteBackend(db, {
+    capabilities: { orderedAggregates },
     executionProfile: {
       isSync: false,
       transactionMode: isLocalLibsqlClient(client) ? "sql" : "drizzle",

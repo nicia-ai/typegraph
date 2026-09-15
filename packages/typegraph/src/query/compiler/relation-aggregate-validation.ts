@@ -3,6 +3,7 @@ import { isPortableCountDistinctValueType } from "../aggregate-value-types";
 import type { DatabaseExpression } from "../expressions";
 import {
   expressionContainsAggregate,
+  isAggregateExpression,
   visitExpressionChildren,
 } from "./expression-inspection";
 
@@ -35,7 +36,7 @@ export function validateRelationAggregation(
   );
   function validate(expression: DatabaseExpression): void {
     if (
-      expression.node.kind === "aggregate" ||
+      isAggregateExpression(expression) ||
       grouped.has(JSON.stringify(expression.node))
     )
       return;

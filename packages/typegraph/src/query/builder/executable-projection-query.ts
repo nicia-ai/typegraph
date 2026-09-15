@@ -2,7 +2,7 @@ import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
-import type { QueryAst, SortDirection } from "../ast";
+import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import type { DatabaseExpression } from "../expressions";
@@ -358,11 +358,44 @@ export function decodeExpressionValue(
 ): unknown {
   if (value === null || value === undefined) return undefined;
   switch (expression.valueType) {
-    case "number": {
-      return Number(value);
+    case "boolean":
+    case "date":
+    case "number":
+    case "string": {
+      return decodeScalarExpressionValue(value, expression.valueType);
     }
+    case "object":
+    case "embedding": {
+      return typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+    }
+    case "array": {
+      const parsed =
+        typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+      if (!Array.isArray(parsed) || expression.elementValueType === undefined)
+        return parsed;
+      const elementValueType = expression.elementValueType;
+      return parsed.map((element) =>
+        element === null || element === undefined ?
+          undefined
+        : decodeScalarExpressionValue(element, elementValueType),
+      );
+    }
+    case "unknown": {
+      return value;
+    }
+  }
+}
+
+function decodeScalarExpressionValue(
+  value: unknown,
+  valueType: ValueType,
+): unknown {
+  switch (valueType) {
     case "boolean": {
       return value === true || value === 1 || value === "true" || value === "1";
+    }
+    case "number": {
+      return Number(value);
     }
     case "date": {
       return (
@@ -372,12 +405,12 @@ export function decodeExpressionValue(
         : value
       );
     }
-    case "object":
-    case "array":
-    case "embedding": {
-      return typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+    case "string": {
+      return value;
     }
-    case "string":
+    case "array":
+    case "embedding":
+    case "object":
     case "unknown": {
       return value;
     }

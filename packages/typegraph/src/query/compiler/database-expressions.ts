@@ -1,5 +1,8 @@
-import { UnsupportedPredicateError } from "../../errors";
-import { assertPortableCountDistinctValueType } from "../aggregate-value-types";
+import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
+import {
+  assertPortableCountDistinctValueType,
+  assertPortableScalarValueType,
+} from "../aggregate-value-types";
 import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import {
@@ -7,8 +10,10 @@ import {
   type DatabaseExpression,
   type DatabaseExpressionNode,
   type DatabaseLiteral,
+  resolveCollectOrder,
 } from "../expressions";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { isAggregateExpression } from "./expression-inspection";
 import { compileFieldValue } from "./predicates";
 
 export type DatabaseExpressionCompilerContext = Readonly<{
@@ -16,6 +21,7 @@ export type DatabaseExpressionCompilerContext = Readonly<{
   cteColumnPrefix?: string;
   allowAggregates?: boolean;
   aggregateClause?: string;
+  orderedAggregates?: boolean;
   /** Resolves fields for non-graph sources such as derived relation outputs. */
   compileFieldExpression?: (
     field: FieldRef,
@@ -116,6 +122,18 @@ function compileNode(
     return compileNode(expression, context, aggregateDepth);
   }
 
+  if (isAggregateExpression(expression)) {
+    if (context.allowAggregates === false) {
+      throw new UnsupportedPredicateError(
+        `Aggregate expressions are not allowed in ${context.aggregateClause ?? "this query"} clauses`,
+      );
+    }
+    if (aggregateDepth > 0) {
+      throw new UnsupportedPredicateError(
+        "Nested aggregate expressions are not supported",
+      );
+    }
+  }
   switch (node.kind) {
     case "field": {
       const resolved = context.compileFieldExpression?.(node.field, expression);
@@ -176,17 +194,28 @@ function compileNode(
         : sql.raw("IS NOT NULL");
       return sql`(${compile(node.operand)} ${operator})`;
     }
+    case "collect": {
+      if (context.orderedAggregates !== true)
+        throw new ConfigurationError(
+          "COLLECT requires ordered aggregate support from the active backend profile.",
+          { capability: "orderedAggregates", orderedAggregates: false },
+        );
+      assertPortableScalarValueType(node.operand.valueType, "COLLECT");
+      const ordering = resolveCollectOrder(node.orderBy).map((order) => {
+        const { direction, nulls } = order;
+        const directionSql =
+          direction === "asc" ? sql.raw("ASC") : sql.raw("DESC");
+        const nullsSql =
+          nulls === "first" ? sql.raw("NULLS FIRST") : sql.raw("NULLS LAST");
+        return sql`${compileNode(order.expression, context, aggregateDepth + 1)} ${directionSql} ${nullsSql}`;
+      });
+      return context.dialect.orderedScalarJsonArray(
+        compileNode(node.operand, context, aggregateDepth + 1),
+        node.operand.valueType,
+        ordering,
+      );
+    }
     case "aggregate": {
-      if (context.allowAggregates === false) {
-        throw new UnsupportedPredicateError(
-          `Aggregate expressions are not allowed in ${context.aggregateClause ?? "this query"} clauses`,
-        );
-      }
-      if (aggregateDepth > 0) {
-        throw new UnsupportedPredicateError(
-          "Nested aggregate expressions are not supported",
-        );
-      }
       const operand =
         node.operand === undefined ?
           sql.raw("*")

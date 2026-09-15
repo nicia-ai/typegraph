@@ -201,6 +201,14 @@ export interface DialectAdapter {
     orderColumn: string,
   ) => SqlFragment;
 
+  /** Aggregates scalar values into an ordered JSON array, preserving NULL elements. */
+  readonly orderedScalarJsonArray: (
+    this: void,
+    value: SqlFragment,
+    valueType: ValueType,
+    orderBy: readonly SqlFragment[],
+  ) => SqlFragment;
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

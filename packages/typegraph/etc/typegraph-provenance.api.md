@@ -178,6 +178,7 @@ type BackendCapabilities = Readonly<{
         unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
     }>;
     windowFunctions: boolean;
+    orderedAggregates?: boolean;
     clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
@@ -649,6 +650,20 @@ type CoalesceExpressionNode = Readonly<{
 // @public
 type Collation = "binary" | "caseInsensitive";
 
+// @public (undocumented)
+type CollectExpressionNode = Readonly<{
+    kind: "collect";
+    operand: DatabaseExpression;
+    orderBy: readonly CollectOrder[];
+}>;
+
+// @public (undocumented)
+type CollectOrder<Scope extends string = string> = Readonly<{
+    expression: DatabaseExpression<boolean | Date | number | string | undefined, Scope>;
+    direction?: "asc" | "desc";
+    nulls?: "first" | "last";
+}>;
+
 // @public
 type CommitSchemaVersionExpected = Readonly<{
     kind: "initial";
@@ -744,6 +759,7 @@ type CompileQueryOptions = Readonly<{
     fulltextStrategy?: FulltextStrategy | false | undefined;
     vectorStrategy?: VectorStrategy | undefined;
     windowFunctions?: boolean | undefined;
+    orderedAggregates?: boolean | undefined;
     vectorSlots?: VectorSlotMap | undefined;
     fulltextLanguages?: ReadonlyMap<string, string> | undefined;
     recordedReadBinding?: RecordedReadBinding | undefined;
@@ -993,6 +1009,7 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
     __type: "database_expression";
     node: DatabaseExpressionNode;
     valueType: ValueType;
+    elementValueType?: ValueType;
     nullable: boolean;
     scopeIdentity: symbol;
     __value?: T;
@@ -1000,7 +1017,7 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
 }>;
 
 // @public (undocumented)
-type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
+type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
 
 // @public
 type DatabaseExpressionPredicate = Readonly<{
@@ -4981,6 +4998,7 @@ type RelationAst = DerivedRelation | RelationSource | SetRelation;
 type RelationColumn = Readonly<{
     outputName: string;
     valueType: ValueType;
+    elementValueType?: ValueType;
     nullable: boolean;
     identity?: Readonly<{
         component: "id" | "kind";

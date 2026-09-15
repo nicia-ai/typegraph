@@ -166,6 +166,9 @@ their result type because an empty input produces SQL `NULL`.
 and unknown dynamic values are refused because SQLite text equality and PostgreSQL JSON equality do
 not define the same distinct groups for structured values.
 
+For ordered scalar lists, use [`expr.collect()` on a relation](/queries/relations#ordered-scalar-collections).
+Collection ordering is explicit and independent of result-row ordering.
+
 ## Scope safety
 
 Each field expression belongs to the query scope that created it. TypeGraph refuses expression
@@ -211,3 +214,10 @@ query's bindings.
 
 Expression builders do not accept raw SQL. This keeps parameter binding, decoding, and SQLite /
 PostgreSQL behavior on the same compiler path.
+
+## Collection expression nodes
+
+`expr.collect(value, options)` returns `DatabaseExpression<readonly T[], Scope>`. Reusable helpers
+can import `CollectOptions<Scope>` for its required, nonempty `orderBy` tuple. Collection expressions
+expose a distinct `node.kind: "collect"`, with `operand` and `orderBy`. Ordinary `"aggregate"` nodes
+retain their operator and optional operand; collection-only options do not appear on them.

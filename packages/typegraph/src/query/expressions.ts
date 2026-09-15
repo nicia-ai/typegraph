@@ -1,4 +1,8 @@
-import { assertPortableCountDistinctValueType } from "./aggregate-value-types";
+import { UnsupportedPredicateError } from "../errors";
+import {
+  assertPortableCountDistinctValueType,
+  assertPortableScalarValueType,
+} from "./aggregate-value-types";
 import type { FieldRef, QueryAst, ValueType } from "./ast";
 
 type DatabaseJsonValue =
@@ -16,6 +20,26 @@ export type ExpressionComparisonOperator =
   "eq" | "gt" | "gte" | "lt" | "lte" | "neq";
 export type AggregateOperator =
   "avg" | "count" | "countDistinct" | "max" | "min" | "sum";
+
+export type CollectOrder<Scope extends string = string> = Readonly<{
+  expression: DatabaseExpression<
+    boolean | Date | number | string | undefined,
+    Scope
+  >;
+  direction?: "asc" | "desc";
+  nulls?: "first" | "last";
+}>;
+
+/** Options for ordered scalar collection aggregation. */
+export type CollectOptions<Scope extends string = string> = Readonly<{
+  orderBy: readonly [CollectOrder<Scope>, ...CollectOrder<Scope>[]];
+}>;
+
+export type CollectExpressionNode = Readonly<{
+  kind: "collect";
+  operand: DatabaseExpression;
+  orderBy: readonly CollectOrder[];
+}>;
 
 type FieldExpressionNode = Readonly<{
   kind: "field";
@@ -93,6 +117,7 @@ export type DatabaseExpressionNode =
   | ArithmeticExpressionNode
   | BooleanExpressionNode
   | CoalesceExpressionNode
+  | CollectExpressionNode
   | ComparisonExpressionNode
   | ConditionalExpressionNode
   | ExistsSubqueryExpressionNode
@@ -113,6 +138,8 @@ export type DatabaseExpression<
   __type: "database_expression";
   node: DatabaseExpressionNode;
   valueType: ValueType;
+  /** Scalar element type carried by collection-valued expressions. */
+  elementValueType?: ValueType;
   nullable: boolean;
   scopeIdentity: symbol;
   /** @internal Carries the public result type without runtime data. */
@@ -151,6 +178,7 @@ function createExpression<T, Scope extends string>(
   valueType: ValueType,
   nullable: boolean,
   scopeIdentity: symbol,
+  elementValueType?: ValueType,
 ): DatabaseExpression<T, Scope> {
   return {
     __type: "database_expression",
@@ -158,6 +186,7 @@ function createExpression<T, Scope extends string>(
     nullable,
     scopeIdentity,
     valueType,
+    ...(elementValueType === undefined ? {} : { elementValueType }),
   };
 }
 
@@ -202,6 +231,16 @@ function assertSameValueType(
       "Database expression operands have incompatible value types",
     );
   }
+  if (
+    valueType === "array" &&
+    expressions.some(
+      (expression) =>
+        expression.elementValueType !== expressions[0]?.elementValueType,
+    )
+  )
+    throw new TypeError(
+      "Database array expression operands have incompatible element value types",
+    );
   return valueType;
 }
 
@@ -343,6 +382,7 @@ export function createScalarSubqueryExpression<T, Scope extends string>(
     projected.valueType,
     true,
     parentScopeIdentity,
+    projected.elementValueType,
   );
 }
 
@@ -509,6 +549,56 @@ function countDistinct<Scope extends string>(
   >;
 }
 
+/** Validates and resolves collection ordering for builders and raw expression compilation. */
+export function resolveCollectOrder<Scope extends string>(
+  orderBy: readonly CollectOrder<Scope>[] | undefined,
+): readonly Readonly<{
+  expression: CollectOrder<Scope>["expression"];
+  direction: "asc" | "desc";
+  nulls: "first" | "last";
+}>[] {
+  if (!Array.isArray(orderBy) || orderBy.length === 0)
+    throw new UnsupportedPredicateError(
+      "COLLECT requires at least one ordering expression",
+    );
+  return orderBy.map((order: CollectOrder<Scope>) => {
+    assertPortableScalarValueType(
+      order.expression.valueType,
+      "COLLECT ordering",
+    );
+    const direction = order.direction ?? "asc";
+    if (!["asc", "desc"].includes(direction))
+      throw new UnsupportedPredicateError(
+        "COLLECT ordering direction must be asc or desc",
+      );
+    const nulls = order.nulls ?? (direction === "asc" ? "last" : "first");
+    if (!["first", "last"].includes(nulls))
+      throw new UnsupportedPredicateError(
+        "COLLECT null ordering must be first or last",
+      );
+    return { expression: order.expression, direction, nulls };
+  });
+}
+
+function collect<T extends Comparable | undefined, Scope extends string>(
+  operand: DatabaseExpression<T, Scope>,
+  options: CollectOptions<Scope>,
+): DatabaseExpression<readonly T[], Scope> {
+  assertPortableScalarValueType(operand.valueType, "COLLECT");
+  const orderBy = resolveCollectOrder(options.orderBy);
+  const scopeIdentity = resolveScope([
+    operand,
+    ...orderBy.map((order) => order.expression),
+  ]);
+  return createExpression(
+    { kind: "collect", operand, orderBy },
+    "array",
+    false,
+    scopeIdentity,
+    operand.valueType,
+  );
+}
+
 function numericAggregate<Scope extends string>(
   operator: "avg" | "sum",
   operand: NumericExpression<Scope>,
@@ -553,6 +643,7 @@ function coalesce<T, Scope extends string>(
     valueType,
     operands.every((operand) => operand.nullable),
     scopeIdentity,
+    first.elementValueType,
   );
 }
 
@@ -578,6 +669,7 @@ function when<
     valueType,
     then.nullable || otherwise.nullable,
     scopeIdentity,
+    then.elementValueType,
   );
 }
 
@@ -613,6 +705,7 @@ export const expr = {
   avg: <Scope extends string>(operand: NumericExpression<Scope>) =>
     numericAggregate("avg", operand),
   coalesce,
+  collect,
   count,
   countDistinct,
   divide: <

@@ -8,6 +8,7 @@ export { createSessionAtomicBatchAdapter } from "./session-atomic-batch";
 export {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
+  ORDERED_AGGREGATE_PROBE_SQL,
   type SqliteExecutionAdapter,
   type SqliteExecutionProfile,
   type SqliteExecutionProfileHints,

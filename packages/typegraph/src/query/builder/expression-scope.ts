@@ -57,6 +57,12 @@ export function assertExpressionScope(
         assertExpressionScope(node.operand, scope);
       return;
     }
+    case "collect": {
+      assertExpressionScope(node.operand, scope);
+      for (const order of node.orderBy)
+        assertExpressionScope(order.expression, scope);
+      return;
+    }
     case "conditional": {
       assertExpressionScope(node.condition, scope);
       assertExpressionScope(node.then, scope);

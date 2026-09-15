@@ -583,10 +583,24 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // the public opt-in batch option and qualified recursive-path result; the public
 // caller types are exported at the root, while duplicating them across unrelated
 // entrypoints would enlarge those surfaces. No forgotten name was removed.
+// Ordered scalar collection adds one private factory name, `collect`, to the
+// root expression object's inferred public shape (+1: 489 -> 490). The root
+// directly exports its caller-facing `CollectOrder` type. The six secondary
+// Store-bearing entrypoints render that type through the same expression
+// surface without re-exporting it, so each gains `CollectOrder` instead (+1).
+// No other forgotten-export set changes: the aggregate AST metadata and
+// collection element metadata reuse types already present in those graphs.
+// Splitting collection aggregation into its own public AST discriminant adds
+// the internal `CollectExpressionNode` to the root and the same six
+// Store-bearing secondary entrypoints (+1 each). `CollectOptions` is exported
+// directly at the root and does not propagate into the secondary declaration
+// graphs. Removing `"collect"` from `AggregateOperator` and `orderBy` from
+// `AggregateExpressionNode` changes existing declarations without changing
+// the forgotten-name set. No other entrypoint changes.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 489,
-    sha256: "e6e7176191a9d7ad6c58db972adea98da07aec7fdf7b454fc0b285bcb5dcf252",
+    count: 491,
+    sha256: "1134afd94eb8eee72df2b78df9777d118885e5a4865ec26e14a54bbabc92dc9a",
   },
   "./adapters/drizzle/engine": {
     count: 331,
@@ -632,36 +646,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 840,
-    sha256: "841237968e18c408a4a02f9b666d7e7c1be5386433e9ccdac78a3e36aaaf6977",
+    count: 842,
+    sha256: "af8dfb7fa71f08f2d5ab92eef1ddd3836056cf525cdbdad09bbcf7ea714d9e58",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 823,
-    sha256: "69aa18bd5a3214fa1e94f1f2e668247d4bc78b98a0eff17a042dacbf9864324c",
+    count: 825,
+    sha256: "40e09ef57aa047ea9b871a465cb13ee0e6c83944e5562597483d67e1fd05cb2f",
   },
   "./postgres/pglite": {
-    count: 822,
-    sha256: "97db6d760d1f63e1a93f12fb2b1d6e5cb6139c4c560c019e784bfb073100458d",
+    count: 824,
+    sha256: "6952b3f65160c3d81fbc836af9cf741a879334a794c66f00b4889d74ece83a50",
   },
   "./profiler": {
-    count: 825,
-    sha256: "8e4129ca2dbf8c3fcbbcbbb34e8efa684f41aada00400675ba4b0185a43b275d",
+    count: 827,
+    sha256: "4d595f23ef488927a9ced34205c03d266761d0222aecb032122a92b4e885e4bf",
   },
   "./provenance": {
-    count: 831,
-    sha256: "29e07935cac4ff96d0e448d9e535f298c589bb4460bae6f5e476028b974b22a0",
+    count: 833,
+    sha256: "22118969a397f0b1f0312e423549983b903a1c3316889cff28fd61abdb5cee41",
   },
   "./schema": {
     count: 282,
     sha256: "912798b14b4548dc5f66ce6ff9db71dd7561b7d0f1303fd165aa9f58b37390de",
   },
   "./sqlite/local": {
-    count: 822,
-    sha256: "97db6d760d1f63e1a93f12fb2b1d6e5cb6139c4c560c019e784bfb073100458d",
+    count: 824,
+    sha256: "6952b3f65160c3d81fbc836af9cf741a879334a794c66f00b4889d74ece83a50",
   },
 };
 

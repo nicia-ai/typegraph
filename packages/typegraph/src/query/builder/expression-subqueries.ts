@@ -1,5 +1,6 @@
 import { ConfigurationError } from "../../errors";
 import type { QueryAst } from "../ast";
+import { isAggregateExpression } from "../compiler/expression-inspection";
 import {
   createExistsSubqueryExpression,
   createScalarSubqueryExpression,
@@ -143,8 +144,7 @@ export function createExpressionSubqueryHelpers<
     const { ast, projection } = buildRelation(build);
     const projected = requireSingleProjection<T>(projection);
     const ungroupedAggregate =
-      ast.groupBy === undefined &&
-      projected.expression.node.kind === "aggregate";
+      ast.groupBy === undefined && isAggregateExpression(projected.expression);
     if (!ungroupedAggregate && (ast.limit === undefined || ast.limit > 1)) {
       throw new ConfigurationError(
         "$scalar() requires limit(1) or an ungrouped aggregate subquery.",
