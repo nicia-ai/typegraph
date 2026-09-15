@@ -242,6 +242,63 @@ does not call them “merged”: `MergeReport.merged` is reserved for the actual
 effects returned after a successful transaction. Coalescing and idempotent
 identity operations can make actual counts differ from the proposal.
 
+### Merge after schema evolution in one caller transaction
+
+Prepare the evolution first, then call
+`planMergeForEvolution(target, evolutionPlan, branches, options?)` outside the
+write transaction. This route resolves writes against the graph produced by
+the evolution plan while checking the current target's durable data and
+revision fence. The serialized merge plan names the resulting schema
+version/hash. If the target schema or revision changes during planning, the
+planner refuses the artifact; replan outside the transaction.
+Branches forked from the original baseline can merge existing kinds. To
+include a newly added kind, call
+`branchForEvolution(target, evolutionPlan, makeBackend)` before the caller
+transaction, then add data on that isolated branch. The planner accepts
+branches from either one matching baseline; a mixed set of old-schema and
+resulting-schema forks is refused.
+
+```typescript
+const evolutionPlan = await target.planEvolution(extension);
+const futureBranch = unwrap(
+  await branchForEvolution(target, evolutionPlan, makeIsolatedBackend),
+);
+try {
+  await futureBranch.store.getNodeCollectionOrThrow("Tag").create({ label: "New" });
+  const mergePlan = unwrap(
+    await planMergeForEvolution(target, evolutionPlan, [futureBranch]),
+  );
+
+  await db.transaction(async (nativeTx) => {
+    const { result: report, receipt } = await target.withEvolvedTransaction(
+      nativeTx,
+      evolutionPlan,
+      (tx) => applyMergePlanInTransaction(target, tx, mergePlan),
+    );
+    await nativeTx.insert(mergeRuns).values({
+      mergedNodes: report.merged.nodes,
+      schemaVersion: receipt.schema.version,
+    });
+  });
+} finally {
+  await futureBranch.close();
+}
+```
+
+Apply the merge before other graph writes in the evolved callback. The
+applier uses the evolved graph and checks the plan's resulting schema and
+revision fences on the same caller session. Passing a merge plan for the old
+schema refuses before merge mutation. Evolution's schema CAS is not treated
+as a prior callback entity write. Roll back the entire native transaction on
+any refusal; the schema change, merge, recorded capture, and application SQL
+then roll back together. The report and receipt are provisional until the
+outer commit succeeds. An adapter configured with
+`schemaProvisioning: "transactional"` can provision required identity or vector
+storage on the same native session before the merge callback. The default
+DML-only policy refuses such requirements before the schema fence or merge
+mutation. Bootstrap base storage before adopting either route; run generic
+eager index maintenance separately after the outer commit.
+
 For a frozen ancestor and a live destination, use the named incremental planner:
 
 ```typescript

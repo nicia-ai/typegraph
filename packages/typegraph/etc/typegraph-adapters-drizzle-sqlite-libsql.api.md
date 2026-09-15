@@ -11,8 +11,23 @@ import { LibSQLDatabase } from 'drizzle-orm/libsql';
 
 // @public
 type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
+    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
+    adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
+        waitBudgetMs: number;
+    }>) => Promise<AdoptedSchemaWriteTransaction>;
+}>;
+
+// @public
+type AdoptedSchemaWriteTransaction = Readonly<{
+    backend: SchemaWriteTransactionBackend & Readonly<{
+        commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+        ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
+            onDrift?: "throw" | "skip";
+        }>) => Promise<void>;
+    }>;
+    activeSchema: SchemaVersionRow | undefined;
 }>;
 
 // @public (undocumented)
@@ -4628,6 +4643,7 @@ type KindRemovalRow = Readonly<{
 
 // @public
 export type LibsqlBackendOptions = Readonly<{
+    schemaProvisioning?: SchemaProvisioning;
     tables?: SqliteTables;
 }>;
 
@@ -4937,6 +4953,9 @@ type SchemaKindEmptinessProbe = Readonly<{
     rows: "nonDeleted" | "all";
 }>;
 
+// @public
+type SchemaProvisioning = "dml-only" | "transactional";
+
 // @public (undocumented)
 type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
 
@@ -4955,6 +4974,14 @@ type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWrite" | 
 
 // @public
 type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
+
+// @internal
+type SchemaWriteTransactionBackend = TransactionBackend & Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+    tableExists: (this: void, tableName: string) => Promise<boolean>;
+    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+    deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
+}>;
 
 // @public
 type SerializedClosures = Readonly<{

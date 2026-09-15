@@ -26,9 +26,11 @@ import {
 import { ConfigurationError } from "../errors";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
+import type { EvolutionPlan } from "../schema/evolution-plan";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
+import type { Store } from "./store";
 import {
   type InternalSubgraphOptions,
   type SubgraphProject,
@@ -53,6 +55,8 @@ export const STORE_RUNTIME: unique symbol =
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
+  /** Constructs a plan-owned resulting-schema view for outside-transaction merge planning. */
+  evolutionPlanningTarget?: (plan: EvolutionPlan) => Store<G>;
   /**
    * @internal Whether TypeGraph itself performs recorded-time capture for
    * this store — recorded relations, a TypeGraph clock, the write-fence/
@@ -421,6 +425,8 @@ type TransactionNodeOperationHookRunner = <T>(
 ) => Promise<T>;
 
 const transactionStoreOwners = new WeakMap<object, object>();
+const evolvedTransactionOriginalOwners = new WeakMap<object, object>();
+const evolvedTransactionStores = new WeakMap<object, object>();
 const activeTransactionContexts = new WeakSet<object>();
 
 /** Binds the hidden context port to the Store that created its collections. */
@@ -430,6 +436,44 @@ export function bindTransactionStore<G extends GraphDef>(
 ): void {
   const runtime = requireDefined(transaction[TRANSACTION_RUNTIME]);
   transactionStoreOwners.set(runtime, storeRuntime(store));
+}
+
+/** Binds an evolved callback to its original Store and temporary evolved view. */
+export function bindEvolvedTransactionStore<TStore extends object>(
+  transaction: TransactionRuntimePort,
+  originalStore: TStore,
+  evolvedStore: TStore,
+): void {
+  const runtime = requireDefined(transaction[TRANSACTION_RUNTIME]);
+  transactionStoreOwners.set(runtime, storeRuntime(evolvedStore));
+  evolvedTransactionOriginalOwners.set(runtime, storeRuntime(originalStore));
+  evolvedTransactionStores.set(runtime, evolvedStore);
+}
+
+/** Resolves the Store whose graph actually owns an active callback context. */
+export function resolveEvolvedTransactionStore<TStore extends object>(
+  transaction: TransactionRuntimePort,
+  originalStore: TStore,
+): TStore {
+  const runtime = transaction[TRANSACTION_RUNTIME];
+  if (runtime === undefined || !activeTransactionContexts.has(runtime)) {
+    throw new ConfigurationError(
+      "The merge transaction must belong to an active callback of the target Store.",
+      { capability: "mergeTransactionStore" },
+    );
+  }
+  const originalRuntime = storeRuntime(originalStore);
+  if (transactionStoreOwners.get(runtime) === originalRuntime) {
+    return originalStore;
+  }
+  if (evolvedTransactionOriginalOwners.get(runtime) === originalRuntime) {
+    const evolvedStore = evolvedTransactionStores.get(runtime);
+    if (evolvedStore !== undefined) return evolvedStore as TStore;
+  }
+  throw new ConfigurationError(
+    "The merge transaction must belong to an active callback of the target Store.",
+    { capability: "mergeTransactionStore" },
+  );
 }
 
 /** The callback boundary owns the lifetime of every measurable context overlay. */
@@ -443,25 +487,6 @@ export async function runInTransactionContext<
     return await fn(context);
   } finally {
     activeTransactionContexts.delete(runtime);
-  }
-}
-
-/** Refuses contexts whose collections and metadata belong to another Store. */
-export function assertTransactionStore<G extends GraphDef>(
-  transaction: TransactionRuntimePort,
-  store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
-): void {
-  const runtime = transaction[TRANSACTION_RUNTIME];
-  const belongsToStore =
-    runtime !== undefined &&
-    transactionStoreOwners.get(runtime) === storeRuntime(store);
-  const isActive =
-    runtime !== undefined && activeTransactionContexts.has(runtime);
-  if (!belongsToStore || !isActive) {
-    throw new ConfigurationError(
-      "The merge transaction must belong to an active callback of the target Store.",
-      { capability: "mergeTransactionStore" },
-    );
   }
 }
 

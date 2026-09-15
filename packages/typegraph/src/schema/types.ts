@@ -789,3 +789,9 @@ export type SerializedSchema = Readonly<{
  * to detect if the schema has actually changed.
  */
 export type SchemaHash = string;
+
+/** The version and content hash of one stored schema snapshot. */
+export type SchemaIdentity = Readonly<{
+  version: number;
+  hash: SchemaHash;
+}>;

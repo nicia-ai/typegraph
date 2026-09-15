@@ -16,6 +16,7 @@
  */
 import { randomUUID } from "node:crypto";
 
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import {
@@ -30,6 +31,7 @@ import {
 import { z } from "zod";
 
 import {
+  createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
   createVerifiedStore,
@@ -38,10 +40,15 @@ import {
   embedding,
   pgvectorStrategy,
   StoreNotInitializedError,
+  UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { defineGraphExtension } from "../../../src/graph-extension";
+import { sql as portableSql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
+import { errorChain } from "../../../src/utils/sql-errors";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
@@ -70,6 +77,20 @@ const PER_FIELD_TABLE = pgvectorStrategy.tableName(
   "embedding",
 );
 const CONTRIB_MAT_TABLE = "typegraph_contribution_materializations";
+const AdoptedVectorExtension = defineGraphExtension({
+  nodes: {
+    RuntimeAddedVector: {
+      properties: {
+        vector: {
+          type: "array",
+          items: { type: "number" },
+          embedding: { dimensions: 3 },
+          optional: true,
+        },
+      },
+    },
+  },
+});
 
 let ownerPool: Pool | undefined;
 let leastPrivPool: Pool | undefined;
@@ -168,10 +189,12 @@ describe.runIf(process.env["POSTGRES_URL"])(
       return createPostgresBackend(drizzle(pool));
     }
 
-    function runtimeBackend(): ReturnType<typeof createPostgresBackend> {
+    function runtimeBackend(
+      schemaProvisioning: "dml-only" | "transactional" = "dml-only",
+    ): ReturnType<typeof createPostgresBackend> {
       const pool = leastPrivConnection();
       transientPools.push(pool);
-      return createPostgresBackend(drizzle(pool));
+      return createPostgresBackend(drizzle(pool), { schemaProvisioning });
     }
 
     beforeEach(async () => {
@@ -199,6 +222,89 @@ describe.runIf(process.env["POSTGRES_URL"])(
           `CREATE TABLE tg_lp_probe (id text)`,
         ),
       ).rejects.toMatchObject({ code: "42501" });
+    });
+
+    it("pins the adopted schema fence to the caller transaction and refuses DDL under a DML-only role", async () => {
+      const pool = leastPrivConnection();
+      transientPools.push(pool);
+      const db = drizzle(pool);
+      const backend = createPostgresBackend(db, {
+        schemaProvisioning: "transactional",
+      });
+      const adopt = requireDefined(backend.adoptSchemaWriteTransaction);
+      const slot = {
+        graphId: VecGraph.id,
+        nodeKind: "Doc",
+        fieldPath: "embedding",
+        dimensions: 4,
+        metric: "cosine",
+        indexType: "none",
+      } as const;
+      const failure = await db
+        .transaction(async (nativeTx) => {
+          const adopted = await adopt(nativeTx, VecGraph.id, {
+            waitBudgetMs: 2000,
+          });
+          const heldLocks = await nativeTx.execute<{
+            advisory_count: number;
+          }>(sql`
+            SELECT count(*)::integer AS advisory_count FROM pg_locks
+            WHERE pid = pg_backend_pid() AND locktype = 'advisory'
+              AND granted AND mode = 'ExclusiveLock'
+          `);
+          expect(heldLocks.rows[0]?.advisory_count).toBeGreaterThan(0);
+          await requireDefined(adopted.backend.ensureVectorSlotContributions)(
+            [slot],
+            {
+              onDrift: "throw",
+            },
+          );
+        })
+        .then(
+          () => "unexpected success",
+          (error: unknown) => error,
+        );
+      expect(
+        [...errorChain(failure)].some(
+          (link) =>
+            typeof link === "object" &&
+            link !== null &&
+            "code" in link &&
+            link.code === "42501",
+        ),
+      ).toBe(true);
+      const marker = await requireDefined(ownerPool).query(
+        `SELECT 1 FROM ${CONTRIB_MAT_TABLE} WHERE graph_id = $1`,
+        [VecGraph.id],
+      );
+      expect(marker.rowCount).toBe(0);
+    });
+
+    it("refuses a DML-only role's physical evolution before adopting its fence", async () => {
+      await createStoreWithSchema(VecGraph, ownerBackend());
+      const backend = runtimeBackend();
+      const [store] = await createAdapterStoreWithSchema(VecGraph, backend);
+      const before = await backend.getActiveSchema(VecGraph.id);
+      const plan = await store.planEvolution(AdoptedVectorExtension);
+      expect(plan.status).toBe("change");
+      await backend.transactionWithNative(async (target, nativeTx) => {
+        await expect(
+          store.withEvolvedTransaction(nativeTx, plan, () =>
+            Promise.resolve("unreached"),
+          ),
+        ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+        const heldLocks = await target.execute<{
+          advisory_count: number;
+        }>(
+          asCompiledRowsSql(portableSql`
+          SELECT count(*)::integer AS advisory_count FROM pg_locks
+          WHERE pid = pg_backend_pid() AND locktype = 'advisory'
+            AND granted AND mode = 'ExclusiveLock'
+        `),
+        );
+        expect(heldLocks[0]?.advisory_count).toBe(0);
+      });
+      expect(await backend.getActiveSchema(VecGraph.id)).toEqual(before);
     });
 
     it("owner provisions; the USAGE-only role then upserts + searches with zero DDL", async () => {

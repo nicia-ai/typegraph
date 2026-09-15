@@ -79,6 +79,12 @@ type InventoryEntry = Readonly<{
 
 const INVENTORY: readonly InventoryEntry[] = [
   {
+    file: "store/execution-lifetime.ts",
+    line: "const backend = deriveBackend(sourceBackend, guardedMembers as T);",
+    reason:
+      "The evolved callback guards every execution member while preserving its transaction/resource provenance and explicitly carrying capture bindings.",
+  },
+  {
     file: "backend/drizzle/engine/create-sql-backend.ts",
     line: "return deriveBackend(backend, buildQueuedWriteUnits(backend, queue));",
     reason:
