@@ -2323,7 +2323,9 @@ an `hnsw` slot, needing a transaction to scope it), while `{ tunable: false, rea
 knob and is what makes `efSearch` a typed refusal there. A hand-written strategy that omits the field no longer
 compiles.
 
-Both bundled backends advertise `windowFunctions: true`. Vector, fulltext, and hybrid relevance-ranking
+Both bundled backends advertise `windowFunctions: true`. Relation `topPerPartition()` refuses execution
+with `UnsupportedBackendCapabilityError` when a custom backend sets `windowFunctions: false`.
+Vector, fulltext, and hybrid relevance-ranking
 queries use `ROW_NUMBER()` internally and throw `ConfigurationError` before SQL generation if a custom backend profile
 sets `windowFunctions: false` — there the window output *is* the result (the relevance k-cutoff / rank ordinal), so
 there is no correct fallback.

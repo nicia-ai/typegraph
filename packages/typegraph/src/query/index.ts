@@ -134,6 +134,8 @@ export {
   type RelationColumnContext,
   type RelationProjection,
   type RelationProjectionResult,
+  type TopPerPartitionOptions,
+  type TopPerPartitionOrder,
 } from "./builder/relation";
 export { UnionableQuery } from "./builder/unionable-query";
 

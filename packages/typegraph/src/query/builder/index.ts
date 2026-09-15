@@ -35,6 +35,8 @@ export {
   type RelationProjection,
   type RelationProjectionResult,
   type RelationProvenance,
+  type TopPerPartitionOptions,
+  type TopPerPartitionOrder,
 } from "./relation";
 export { TraversalBuilder } from "./traversal-builder";
 export { UnionableQuery } from "./unionable-query";

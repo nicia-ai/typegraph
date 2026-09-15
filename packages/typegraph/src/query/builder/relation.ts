@@ -1,6 +1,9 @@
 import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
-import { ConfigurationError } from "../../errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+} from "../../errors";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import { isPortableCountDistinctValueType } from "../aggregate-value-types";
 import type { QueryAst, SortDirection } from "../ast";
@@ -10,6 +13,7 @@ import {
   type RelationAst,
   type RelationColumn,
   type RelationOrder,
+  type TopPerPartitionRelation,
 } from "../compiler/relations";
 import { getDialect } from "../dialect";
 import {
@@ -22,7 +26,10 @@ import { sql } from "../sql-fragment";
 import { asCompiledSelectSql } from "../sql-intent";
 import { buildCompileOptions } from "./compile-options";
 import { decodeExpressionValue } from "./executable-projection-query";
-import { assertExpressionScope } from "./expression-scope";
+import {
+  assertExpressionScope,
+  isDatabaseExpression,
+} from "./expression-scope";
 import {
   type PreparedBindings,
   type PreparedParameterDeclaration,
@@ -54,6 +61,33 @@ export type RelationColumnContext<Fields extends RelationProjection> = {
     DatabaseExpression<Value, Scope>
   : never;
 };
+
+/**
+ * A scalar ordering term used to choose winners within each partition.
+ * Defaults to ascending with NULLS LAST; descending defaults to NULLS FIRST.
+ * @public
+ */
+export type TopPerPartitionOrder = Readonly<{
+  expression: DatabaseExpression;
+  direction?: SortDirection;
+  nulls?: "first" | "last";
+}>;
+
+/**
+ * Selects up to `limit` rows per partition using explicit scalar keys and ordering.
+ * Include a stable final tie-breaker; tied rows do not expand the positive safe-integer limit.
+ * @public
+ */
+export type TopPerPartitionOptions<Fields extends RelationProjection> =
+  Readonly<{
+    partitionBy: (
+      columns: RelationColumnContext<Fields>,
+    ) => readonly [DatabaseExpression, ...DatabaseExpression[]];
+    orderBy: (
+      columns: RelationColumnContext<Fields>,
+    ) => readonly [TopPerPartitionOrder, ...TopPerPartitionOrder[]];
+    limit: number;
+  }>;
 
 export type RelationProvenance = Readonly<{
   graphId: string;
@@ -201,6 +235,29 @@ function relationQueries(relation: RelationAst): readonly QueryAst[] {
     case "derived": {
       return relationQueries(relation.source);
     }
+    case "topPerPartition": {
+      return relationQueries(relation.source);
+    }
+  }
+}
+
+function relationHasTopPerPartition(relation: RelationAst): boolean {
+  switch (relation.kind) {
+    case "source": {
+      return false;
+    }
+    case "derived": {
+      return relationHasTopPerPartition(relation.source);
+    }
+    case "set": {
+      return (
+        relationHasTopPerPartition(relation.left) ||
+        relationHasTopPerPartition(relation.right)
+      );
+    }
+    case "topPerPartition": {
+      return true;
+    }
   }
 }
 
@@ -223,6 +280,13 @@ function relationExpressions(
         ...relation.projection.map(({ expression }) => expression),
         ...(relation.predicate === undefined ? [] : [relation.predicate]),
         ...(relation.groupBy ?? []),
+        ...relation.orderBy.map(({ expression }) => expression),
+      ];
+    }
+    case "topPerPartition": {
+      return [
+        ...relationExpressions(relation.source),
+        ...relation.partitionBy,
         ...relation.orderBy.map(({ expression }) => expression),
       ];
     }
@@ -276,6 +340,19 @@ function bindRelation(
         })),
       };
     }
+    case "topPerPartition": {
+      return {
+        ...relation,
+        source: bindRelation(relation.source, bindings),
+        partitionBy: relation.partitionBy.map((expression) =>
+          substituteDatabaseExpression(expression, bindings),
+        ),
+        orderBy: relation.orderBy.map((order) => ({
+          ...order,
+          expression: substituteDatabaseExpression(order.expression, bindings),
+        })),
+      };
+    }
   }
 }
 
@@ -312,6 +389,25 @@ function assertPortableDistinctColumns(
   if (unsupported !== undefined)
     throw new ConfigurationError(
       `${operation} requires portable scalar projected columns; "${unsupported.outputName}" has type ${unsupported.valueType}.`,
+    );
+}
+
+function assertPartitionScalarKey(
+  value: unknown,
+  scopeIdentity: symbol,
+  role: "partition" | "ordering",
+): asserts value is DatabaseExpression {
+  if (!isDatabaseExpression(value))
+    throw new ConfigurationError(
+      `topPerPartition() requires expression ${role} keys.`,
+    );
+  assertExpressionScope(value, scopeIdentity);
+  if (
+    !isPortableCountDistinctValueType(value.valueType) ||
+    value.elementValueType !== undefined
+  )
+    throw new ConfigurationError(
+      `topPerPartition() requires scalar ${role} keys.`,
     );
 }
 
@@ -522,6 +618,95 @@ export class ExecutableRelationQuery<
     });
   }
 
+  /**
+   * Selects up to N rows per partition after applying current input modifiers.
+   * Later filters remove winners without replacement. Add ordering after this stage
+   * to control result order. Requires backend window-function support.
+   * @public
+   */
+  topPerPartition(
+    options: TopPerPartitionOptions<Fields>,
+  ): ExecutableRelationQuery<Fields, Result> {
+    const runtimeOptions: unknown = options;
+    if (
+      runtimeOptions === undefined ||
+      runtimeOptions === null ||
+      typeof runtimeOptions !== "object" ||
+      Object.keys(options).some(
+        (key) => key !== "partitionBy" && key !== "orderBy" && key !== "limit",
+      ) ||
+      typeof options.partitionBy !== "function" ||
+      typeof options.orderBy !== "function"
+    )
+      throw new ConfigurationError(
+        "topPerPartition() requires partitionBy, orderBy, and limit options only.",
+      );
+    if (!Number.isSafeInteger(options.limit) || options.limit <= 0)
+      throw new ConfigurationError(
+        "topPerPartition() limit must be a positive safe integer.",
+      );
+    if (this.#definition.mapped === true || this.#state.groupBy !== undefined)
+      throw new ConfigurationError(
+        "topPerPartition() cannot rank a post-execution mapped relation or pending groupBy().",
+      );
+    const partitionBy = options.partitionBy(this.#context);
+    const requestedOrders = options.orderBy(this.#context);
+    if (
+      !Array.isArray(partitionBy) ||
+      partitionBy.length === 0 ||
+      !Array.isArray(requestedOrders) ||
+      requestedOrders.length === 0
+    )
+      throw new ConfigurationError(
+        "topPerPartition() requires nonempty partition and ordering keys.",
+      );
+    for (const expression of partitionBy) {
+      assertPartitionScalarKey(expression, this.#scopeIdentity, "partition");
+    }
+    const orderBy = requestedOrders.map((order) => {
+      const runtimeOrder: unknown = order;
+      if (
+        runtimeOrder === undefined ||
+        runtimeOrder === null ||
+        typeof runtimeOrder !== "object" ||
+        Object.keys(order).some(
+          (key) =>
+            key !== "expression" && key !== "direction" && key !== "nulls",
+        )
+      )
+        throw new ConfigurationError(
+          "topPerPartition() has an invalid ordering option.",
+        );
+      const { expression, direction = "asc", nulls } = order;
+      assertPartitionScalarKey(expression, this.#scopeIdentity, "ordering");
+      validateSortDirection(direction);
+      const runtimeNulls: unknown = nulls;
+      if (
+        runtimeNulls !== undefined &&
+        runtimeNulls !== "first" &&
+        runtimeNulls !== "last"
+      )
+        throw new ConfigurationError(
+          "topPerPartition() has invalid null placement.",
+        );
+      const nullPlacement = resolveNullOrdering({ direction, nulls });
+      return { expression, direction, nulls: nullPlacement };
+    });
+    const source = this.#materialize();
+    const ast: TopPerPartitionRelation = {
+      kind: "topPerPartition",
+      source,
+      columns: this.#definition.columns,
+      partitionBy: [...partitionBy],
+      orderBy,
+      limit: options.limit,
+    };
+    return createExecutableRelation({
+      ...this.#definition,
+      ast,
+    });
+  }
+
   distinct(): ExecutableRelationQuery<Fields, Result> {
     assertPortableDistinctColumns(this.#definition.columns, "distinct()");
     const outputNames = new Set(
@@ -637,6 +822,11 @@ export class ExecutableRelationQuery<
   }
 
   compile() {
+    return this.#compileForBackend(this.#definition.config.backend);
+  }
+
+  #compileForBackend(backend: GraphBackend | TransactionBackend | undefined) {
+    this.#assertWindowFunctionsSupported(backend);
     if (
       collectParameterMetadata(
         relationQueries(this.#materialize()),
@@ -716,7 +906,9 @@ export class ExecutableRelationQuery<
       throw new ConfigurationError(
         "A relation cannot execute on a different database or transaction target.",
       );
-    const operation = backend.execute<Record<string, unknown>>(this.compile());
+    const operation = backend.execute<Record<string, unknown>>(
+      this.#compileForBackend(backend),
+    );
     const rows =
       this.#definition.provenance.recordedAsOf === undefined ?
         await operation
@@ -886,6 +1078,20 @@ export class ExecutableRelationQuery<
         "Relation execution requires a backend; use store.query().",
       );
     return this.#definition.config.backend;
+  }
+
+  #assertWindowFunctionsSupported(
+    backend: GraphBackend | TransactionBackend | undefined = this.#definition
+      .config.backend,
+  ): void {
+    if (
+      backend?.capabilities.windowFunctions === false &&
+      relationHasTopPerPartition(this.#materialize())
+    )
+      throw new UnsupportedBackendCapabilityError(
+        "topPerPartition()",
+        "windowFunctions",
+      );
   }
 }
 

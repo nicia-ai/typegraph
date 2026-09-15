@@ -632,10 +632,15 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // entrypoints reach only CollectRecordOperand transitively, adding exactly
 // that one forgotten name to each fingerprint below. Removing that name from
 // each measured symbol set reproduces its previous fingerprint.
+// Partitioned top-N introduces TopPerPartitionRelation as a transitive
+// forgotten export at the root. Six Store-bearing secondary entrypoints also
+// reach TopPerPartitionOptions and TopPerPartitionOrder without exporting them
+// directly. Removing these exact new names from each measured symbol set
+// reproduces its previous fingerprint; all other entrypoints are unchanged.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 493,
-    sha256: "d15aed6043343196643a32b1c2443c35ee10f8256db8e8247140a8e55ea07c6a",
+    count: 494,
+    sha256: "15dd212b4c1f079ed1c5edfc2d56380765327229167f411ebc079373a51a735e",
   },
   "./adapters/drizzle/engine": {
     count: 331,
@@ -681,36 +686,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 854,
-    sha256: "2c18ceaa6c927a7ec22f8c182099ff7d26c3dca745ea7529bbf88f45bb8fd7fe",
+    count: 857,
+    sha256: "8464e127db7da4c2944df5cf2db0e0b80f1d0f50b6f86108ffffe48788f20a2c",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 837,
-    sha256: "b55043608a58b4fb116875f8c3a61e4793a29b404d0529a144f098c7dba34e91",
+    count: 840,
+    sha256: "7a9bd940206c700d875145cc38f3352456984c0799ec7c754c9377824a5ab6be",
   },
   "./postgres/pglite": {
-    count: 839,
-    sha256: "1f81d65952469ff5286bfd1a4b870dfd93ce7cb0c6c34c8b851518a570737eea",
+    count: 842,
+    sha256: "98ccedbffc8852a8ac7319aa3999690c566f79f4ab9ac53adc31900e8845055c",
   },
   "./profiler": {
-    count: 839,
-    sha256: "b6baeae9dc1061486c80d1eeca0781549bf1456d2af443fc29305ee43c945bc4",
+    count: 842,
+    sha256: "1344914233d8272fb4af8a1df0a97406ec51886ae52c17edac1cf0593d7253a2",
   },
   "./provenance": {
-    count: 848,
-    sha256: "c464054782a9c671e59918aff721b0c25aa3501376b63fd02bd25118d46a079b",
+    count: 851,
+    sha256: "c94226f640ab3f929bf144aa1132ee3bcb35449f40e5e9baaaede5258be90ebc",
   },
   "./schema": {
     count: 283,
     sha256: "39bd9a3909ea18e3582ea1f258e31f8b3503a6594d6c0287378f8de77b152473",
   },
   "./sqlite/local": {
-    count: 839,
-    sha256: "1f81d65952469ff5286bfd1a4b870dfd93ce7cb0c6c34c8b851518a570737eea",
+    count: 842,
+    sha256: "98ccedbffc8852a8ac7319aa3999690c566f79f4ab9ac53adc31900e8845055c",
   },
 };
 

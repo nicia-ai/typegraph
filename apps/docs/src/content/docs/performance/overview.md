@@ -524,7 +524,10 @@ remove, and measure both forms when database work dominates.
 
 When the response needs a list of matching child records per parent, use a relation grouped by the
 parent key and [`expr.collect()` with named scalar fields](/queries/relations#ordered-collections).
-That aggregates the selected fields into ordered records in one query. For several independent,
+That aggregates the selected fields into ordered records in one query. Apply
+[`topPerPartition()`](/queries/relations#top-n-per-parent) before grouping when each parent needs
+only its highest-priority or most recent N children. The database chooses winners before returning
+results; it may still scan and sort all candidates. For several independent,
 bounded subgraphs, keep using the `batchOnce(read => roots.map(root => read.subgraph(...)))` pattern
 above; record collection does not replace subgraph hydration.
 

@@ -4,7 +4,7 @@ description: Combine, filter, aggregate, and batch explicit SQL results
 ---
 
 Call `asRelation()` on a database projection to work with its output columns. A relation supports
-SQL filtering, projection, aggregation, ordering, deduplication, and set operations. Its callbacks
+SQL filtering, projection, aggregation, ordering, deduplication, top-N per partition, and set operations. Its callbacks
 see the projected columns, with their original value types and SQL nullability.
 
 ```typescript
@@ -211,6 +211,83 @@ implicit truncation or response-byte limit. Arbitrary object/nested collection e
 limits are outside this API. Structured equality restrictions still apply: collection columns
 cannot be used as relation ordering keys, with `distinct()`, distinct set operations, grouping keys, or the existing
 scalar-only paging contract. Use compatible `unionAll()` to retain collection rows without equality.
+
+## Top-N per parent
+
+Use `topPerPartition()` to select up to N rows independently for each parent in one SQL query.
+Partition keys identify the parent; the stage's ordering chooses its winning children. Both callbacks
+must return nonempty tuples of scalar expressions. Include the parent's kind as well as its ID when
+IDs can overlap across node kinds.
+
+```typescript
+const recentPurchases = purchases.topPerPartition({
+  partitionBy: (columns) => [columns.customerId],
+  orderBy: (columns) => [
+    { expression: columns.purchasedAt, direction: "desc", nulls: "last" },
+    { expression: columns.id },
+  ],
+  limit: 3,
+});
+
+const rows = await recentPurchases
+  .orderBy((columns) => columns.customerId)
+  .orderBy((columns) => columns.purchasedAt, "desc", "last")
+  .orderBy((columns) => columns.id)
+  .execute();
+```
+
+`limit` must be a positive safe integer. Import `TopPerPartitionOptions<Fields>` to type reusable
+options for a projected relation, and `TopPerPartitionOrder` for reusable ordering entries. The stage
+uses `ROW_NUMBER()`: ties do not expand the limit.
+Supply a stable final tie-breaker, usually the child's ID, to choose repeatable winners. Use kind
+and ID for multi-kind children whose IDs can overlap. The API cannot prove that your ordering is unique.
+Nullable partition keys group together, and ordering
+accepts the same explicit null positions and defaults as relation ordering. The ranking column is
+private and never appears in the result.
+
+Stage ordering chooses winners; it does not guarantee final result order. Add relation `orderBy()`
+after the stage to order returned rows. A `where()` before `topPerPartition()` chooses candidates;
+a `where()` afterward removes winners without selecting replacements. For example, filter purchases
+by a minimum amount before ranking to retrieve the latest three qualifying purchases, or after
+ranking to inspect which of the latest three qualify.
+
+Source `distinct()`, limits, and offsets apply before ranking. A source limit is global and can
+remove a parent's candidates entirely. Limits and offsets added after ranking apply globally to
+the winners. Complete any pending `groupBy()` with `aggregate()` or `project()` before ranking;
+post-execution JavaScript `map()` results cannot be ranked in SQL.
+
+Ranked rows can feed ordered record collections, keeping the per-parent bound in SQL:
+
+```typescript
+const histories = await recentPurchases
+  .groupBy((columns) => [columns.customerId])
+  .aggregate((columns) => ({
+    customerId: columns.customerId,
+    purchases: expr.collect({
+      id: columns.id,
+      amount: columns.amount,
+      purchasedAt: columns.purchasedAt,
+    }, {
+      orderBy: [
+        { expression: columns.purchasedAt, direction: "desc", nulls: "last" },
+        { expression: columns.id },
+      ],
+    }),
+  }))
+  .orderBy((columns) => columns.customerId)
+  .execute();
+```
+
+For optional traversals, partition by the parent's identity. A childless parent's placeholder row
+survives ranking. Keep `filter: expr.isNotNull(columns.taskId)` inside `expr.collect()` to turn that
+placeholder into `[]`, as in the optional-traversal example above. Filtering the placeholder out of
+the relation would remove the parent.
+
+Ranked relations preserve projected types and codecs and support prepared queries and `batchOnce()`.
+They require [`windowFunctions: true`](/backend-setup#backend-capabilities); unsupported backends
+throw `UnsupportedBackendCapabilityError` before execution. This bounds returned rows per partition, but the database
+may still scan and sort all candidates. It does not impose a response-byte budget or add an
+aggregate-local collection limit.
 
 ## Typed prepared composition
 

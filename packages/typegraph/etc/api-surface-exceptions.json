@@ -126,5 +126,61 @@
     "kind": "required-member-added",
     "reason": "Custom StoreEvolution implementations must provide planned evolution and read-only schema refresh; Stores returned by TypeGraph already provide both methods.",
     "issue": "#704"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ExecutableRelationQuery",
+    "member": "topPerPartition",
+    "kind": "required-member-added",
+    "reason": "This concrete library class has private state and supplies the new method; external structural implementations are unsupported, and subclasses inherit it.",
+    "issue": "#695"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ExecutableRelationQuery",
+    "member": "topPerPartition",
+    "kind": "required-member-added",
+    "reason": "This concrete library class has private state and supplies the new method; external structural implementations are unsupported, and subclasses inherit it.",
+    "issue": "#695"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ExecutableRelationQuery",
+    "member": "topPerPartition",
+    "kind": "required-member-added",
+    "reason": "This concrete library class has private state and supplies the new method; external structural implementations are unsupported, and subclasses inherit it.",
+    "issue": "#695"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ExecutableRelationQuery",
+    "member": "topPerPartition",
+    "kind": "required-member-added",
+    "reason": "This concrete library class has private state and supplies the new method; external structural implementations are unsupported, and subclasses inherit it.",
+    "issue": "#695"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ExecutableRelationQuery",
+    "member": "topPerPartition",
+    "kind": "required-member-added",
+    "reason": "This concrete library class has private state and supplies the new method; external structural implementations are unsupported, and subclasses inherit it.",
+    "issue": "#695"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ExecutableRelationQuery",
+    "member": "topPerPartition",
+    "kind": "required-member-added",
+    "reason": "This concrete library class has private state and supplies the new method; external structural implementations are unsupported, and subclasses inherit it.",
+    "issue": "#695"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ExecutableRelationQuery",
+    "member": "topPerPartition",
+    "kind": "required-member-added",
+    "reason": "This concrete library class has private state and supplies the new method; external structural implementations are unsupported, and subclasses inherit it.",
+    "issue": "#695"
   }
 ]

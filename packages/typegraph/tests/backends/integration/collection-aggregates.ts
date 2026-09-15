@@ -13,6 +13,80 @@ export function registerCollectionAggregateIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Ordered collection aggregates", () => {
+    it("collects ranked child records while preserving childless parent groups", async () => {
+      const store = context.getStore();
+      const parent = await store.nodes.Person.create({ name: "Parent" });
+      const childless = await store.nodes.Person.create({ name: "Childless" });
+      for (const props of [
+        { name: "Third", age: 30, isActive: true },
+        { name: "First", age: 10, isActive: false },
+        { name: "Second", age: 20 },
+      ]) {
+        const child = await store.nodes.Person.create(props);
+        await store.edges.knows.create(parent, child, {});
+      }
+      const observedAt = new Date("2026-02-01T00:00:00.000Z");
+      const ranked = store
+        .query()
+        .from("Person", "parent")
+        .whereNode("parent", (person) =>
+          person.id.in([parent.id, childless.id]),
+        )
+        .optionalTraverse("knows", "edge", { expand: "none" })
+        .to("Person", "child")
+        .project((fields) => ({
+          parentId: fields.parent.id,
+          parentName: fields.parent.name,
+          childId: fields.child.id,
+          childName: fields.child.name,
+          age: fields.child.age,
+          active: fields.child.isActive,
+          observedAt: expr.literal(observedAt),
+        }))
+        .asRelation()
+        .topPerPartition({
+          partitionBy: (columns) => [columns.parentId],
+          orderBy: (columns) => [
+            { expression: columns.age },
+            { expression: columns.childId },
+          ],
+          limit: 2,
+        })
+        .groupBy((columns) => [columns.parentId, columns.parentName])
+        .aggregate((columns) => ({
+          parent: columns.parentName,
+          children: expr.collect(
+            {
+              name: columns.childName,
+              active: columns.active,
+              observedAt: columns.observedAt,
+            },
+            {
+              orderBy: [
+                { expression: columns.age },
+                { expression: columns.childId },
+              ],
+              filter: expr.isNotNull(columns.childId),
+            },
+          ),
+        }))
+        .orderBy((columns) => columns.parent);
+      const expected = [
+        { parent: "Childless", children: [] },
+        {
+          parent: "Parent",
+          children: [
+            { name: "First", active: false, observedAt },
+            { name: "Second", active: undefined, observedAt },
+          ],
+        },
+      ];
+      expect(await ranked.execute()).toEqual(expected);
+      expect(await store.batchOnce(() => [ranked] as const)).toEqual([
+        expected,
+      ]);
+    });
+
     it("collects ordered scalar values with duplicates and nullable elements", async () => {
       const store = context.getStore();
       for (const person of [

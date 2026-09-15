@@ -3054,6 +3054,7 @@ export class ExecutableRelationQuery<Fields extends RelationProjection, Result =
     stream(options?: Readonly<{
         pageSize?: number;
     }>): AsyncIterable<Result>;
+    topPerPartition(options: TopPerPartitionOptions<Fields>): ExecutableRelationQuery<Fields, Result>;
     // (undocumented)
     toSQL(): Readonly<{
         sql: string;
@@ -7196,7 +7197,7 @@ type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 type RelationalIndexMethod = "btree" | "gin" | "trigram";
 
 // @public (undocumented)
-type RelationAst = DerivedRelation | RelationSource | SetRelation;
+type RelationAst = DerivedRelation | RelationSource | SetRelation | TopPerPartitionRelation;
 
 // @public (undocumented)
 type RelationColumn = Readonly<{
@@ -8847,6 +8848,30 @@ type TemporalOptions = Readonly<{
 
 // @public (undocumented)
 function toNumber<Scope extends string>(operand: DatabaseExpression<number | string | undefined, Scope>): NumericExpression<Scope>;
+
+// @public
+export type TopPerPartitionOptions<Fields extends RelationProjection> = Readonly<{
+    partitionBy: (columns: RelationColumnContext<Fields>) => readonly [DatabaseExpression, ...DatabaseExpression[]];
+    orderBy: (columns: RelationColumnContext<Fields>) => readonly [TopPerPartitionOrder, ...TopPerPartitionOrder[]];
+    limit: number;
+}>;
+
+// @public
+export type TopPerPartitionOrder = Readonly<{
+    expression: DatabaseExpression;
+    direction?: SortDirection;
+    nulls?: "first" | "last";
+}>;
+
+// @public (undocumented)
+type TopPerPartitionRelation = Readonly<{
+    kind: "topPerPartition";
+    source: RelationAst;
+    columns: readonly RelationColumn[];
+    partitionBy: readonly DatabaseExpression[];
+    orderBy: readonly RelationOrder[];
+    limit: number;
+}>;
 
 // @public (undocumented)
 const TRANSACTION_RUNTIME: unique symbol;
