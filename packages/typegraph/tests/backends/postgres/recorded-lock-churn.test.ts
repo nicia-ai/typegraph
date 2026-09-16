@@ -26,6 +26,7 @@ import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const GRAPH_WRITE_NAMESPACE = "typegraph:recorded-graph-write";
+const RECORDED_CLOCK_NAMESPACE = "typegraph:recorded-clock";
 
 let pool: Pool | undefined;
 let isPostgresAvailable = false;
@@ -89,6 +90,16 @@ function graphWriteLockCount(statements: readonly LoggedStatement[]): number {
     (statement) =>
       statement.query.includes("pg_advisory_xact_lock") &&
       statement.params.includes(GRAPH_WRITE_NAMESPACE),
+  ).length;
+}
+
+function recordedClockLockCount(
+  statements: readonly LoggedStatement[],
+): number {
+  return statements.filter(
+    (statement) =>
+      statement.query.includes("pg_advisory_xact_lock") &&
+      statement.params.includes(RECORDED_CLOCK_NAMESPACE),
   ).length;
 }
 
@@ -199,6 +210,34 @@ describe("recorded graph-write advisory lock churn", () => {
       );
     });
     expect(graphWriteLockCount(statements)).toBe(1);
+  });
+
+  it("does not reacquire the graph-write lock for a requested revision", async (ctx) => {
+    const activePool = requirePostgres(ctx);
+    const statements: LoggedStatement[] = [];
+    const backend = createPostgresBackend(
+      drizzle(activePool, {
+        logger: {
+          logQuery(query: string, params: unknown[]) {
+            statements.push({ query, params });
+          },
+        },
+      }),
+    );
+    const [store] = await createStoreWithSchema(
+      buildGraph("requested_revision_lock_churn"),
+      backend,
+      { history: true },
+    );
+
+    statements.length = 0;
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "first" }, { id: "first" });
+      tx.requestRecordedRevision();
+    });
+
+    expect(graphWriteLockCount(statements)).toBe(1);
+    expect(recordedClockLockCount(statements)).toBe(1);
   });
 
   it("still serializes: the lock statement is present before row writes", async (ctx) => {
