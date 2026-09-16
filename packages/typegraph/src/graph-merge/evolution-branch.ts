@@ -1,9 +1,9 @@
 import type { GraphDef } from "../core/define-graph";
 import type { EvolutionPlan } from "../schema/evolution-plan";
-import { storeRuntime } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import { branch } from "./branch";
 import { type BranchError, MergePlanCapabilityError } from "./errors";
+import { evolutionPlanningTarget } from "./evolution-target";
 import type { Result } from "./result";
 import { err } from "./result";
 import type { BranchOptions, GraphBranch } from "./types";
@@ -20,20 +20,12 @@ export async function branchForEvolution<G extends GraphDef>(
   makeBackend: MakeBackend,
   options?: BranchOptions,
 ): Promise<Result<GraphBranch<G>, BranchError | MergePlanCapabilityError>> {
-  const planningTarget = storeRuntime(store).evolutionPlanningTarget;
-  if (planningTarget === undefined) {
-    return err(
-      new MergePlanCapabilityError(
-        "This Store cannot construct a resulting-schema branch.",
-        { details: { capability: "evolutionPlanningTarget" } },
-      ),
-    );
-  }
   try {
-    const candidate = planningTarget(plan);
+    const candidate = evolutionPlanningTarget(store, plan);
     const result = await branch(candidate, makeBackend, options);
     return result;
   } catch (error) {
+    if (error instanceof MergePlanCapabilityError) return err(error);
     return err(
       new MergePlanCapabilityError(
         "Could not fork a resulting-schema branch.",

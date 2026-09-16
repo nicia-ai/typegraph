@@ -299,6 +299,49 @@ DML-only policy refuses such requirements before the schema fence or merge
 mutation. Bootstrap base storage before adopting either route; run generic
 eager index maintenance separately after the outer commit.
 
+### Candidate write sets for a planned schema
+
+`planCandidateWriteSetForEvolution()` is the branch-free counterpart for a
+bounded candidate batch. First use
+`captureCandidateWriteSetTargetForEvolution(target, evolutionPlan)` when
+authoring the JSON document; it records the evolution plan's resulting schema
+identity rather than the currently active one. The planner stages the candidate
+against that resulting graph and returns the same resulting-schema merge
+artifact accepted by `withEvolvedTransaction()`.
+
+```typescript
+const evolutionPlan = await target.planEvolution(extension);
+const writeSet = {
+  formatVersion: 1 as const,
+  sourceId: "import-batch-42",
+  target: captureCandidateWriteSetTargetForEvolution(target, evolutionPlan),
+  nodes: [{
+    kind: "Tag",
+    id: "import-batch-42:tag-1",
+    properties: { label: "Research" },
+    validFrom: "2026-01-01T00:00:00.000Z",
+  }],
+  edges: [],
+};
+const mergePlan = unwrap(await planCandidateWriteSetForEvolution({
+  target,
+  evolutionPlan,
+  makeBackend: makeIsolatedBackend,
+  writeSet,
+}));
+
+await db.transaction(async (nativeTx) =>
+  target.withEvolvedTransaction(nativeTx, evolutionPlan, (tx) =>
+    applyMergePlanInTransaction(target, tx, mergePlan),
+  ),
+);
+```
+
+The schema change and accepted candidate writes share the caller's one
+transaction and recorded revision. If another writer changes the target while
+planning, `MergePlanningStaleError` is an expected concurrency result: discard
+the candidate plan, recapture the target for a new evolution plan, and replan.
+
 For a frozen ancestor and a live destination, use the named incremental planner:
 
 ```typescript
@@ -315,9 +358,11 @@ const applied = await applyMergePlan(target, planned.data);
 
 The same target revision must still be current when the reviewed plan is
 applied. If it moved during planning, planning returns
-`MergePlanningStaleError` and no artifact. If it moved afterwards,
-`applyMergePlan()` returns `StaleMergePlanError` before plan writes. Re-plan,
-review the new digest and proposal, then apply the new artifact; never edit an
+`MergePlanningStaleError` and no artifact. This is an expected retry-and-replan
+outcome under concurrency: recapture the target, create a new plan, and review
+its new digest before retrying. If it moved afterwards, `applyMergePlan()`
+returns `StaleMergePlanError` before plan writes. Re-plan, review the new
+digest and proposal, then apply the new artifact; never edit an
 old plan or retry it as though it still represented the target. A successful
 plan is single-use: a second or concurrent application is stale.
 
@@ -1853,7 +1898,7 @@ commit after a partially applied failure:
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |
 | `MergeConflictError`         | A conflict could not be resolved under the configured policy.                                                                                                                                                                                                                 |
 | `MergePlanCapabilityError`   | Public planning was requested for a target without the durable revision guarantee needed across processes and time. Enable `revisionTracking` or `history`.                                                                                                                   |
-| `MergePlanningStaleError`    | The target moved while planning was reading it. No plan was returned; plan again from the new revision.                                                                                                                                                                       |
+| `MergePlanningStaleError`    | The target moved while planning was reading it. This is an expected retry-and-replan outcome under concurrent writers: no plan was returned, so recapture the target and create a new plan before retrying.                                                                    |
 | `StaleMergePlanError`        | The target revision changed after planning, or this plan was already applied. Review a newly-created plan.                                                                                                                                                                    |
 | `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/origin mismatches.                                                                                                                       |
 | `CandidateSourceError`       | A built-in candidate source failed; details identify its source id, entity kind, and operation.                                                                                                                                                                               |

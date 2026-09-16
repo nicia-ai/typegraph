@@ -115,6 +115,7 @@ import {
 } from "./errors";
 import type { CandidateDiagnostic, CandidateDiagnostics } from "./evidence";
 import { compareMatchEvidence } from "./evidence";
+import { evolutionPlanningTarget } from "./evolution-target";
 import { unwrapMergeBranches } from "./ingestion-branch";
 import {
   assertIdentityEndpointsNotDeleted,
@@ -3543,19 +3544,10 @@ export async function planMergeForEvolution<G extends GraphDef>(
       ),
     );
   }
-  const planningTarget = storeRuntime(store).evolutionPlanningTarget;
-  if (planningTarget === undefined) {
-    return err(
-      new MergePlanCapabilityError(
-        "This Store cannot construct a resulting-schema merge planning view.",
-        { details: { capability: "evolutionPlanningTarget" } },
-      ),
-    );
-  }
   let target: Store<G>;
   let baselineFence: MergePlanTargetFence;
   try {
-    target = planningTarget(evolutionPlan);
+    target = evolutionPlanningTarget(store, evolutionPlan);
     baselineFence = await captureMergePlanTargetFence(store);
   } catch (error) {
     return err(

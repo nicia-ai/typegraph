@@ -408,7 +408,7 @@ if (isErr(applied)) {
 | Error | Code | Meaning |
 | --- | --- | --- |
 | `MergePlanCapabilityError` | `GRAPH_MERGE_PLAN_CAPABILITY` | The target cannot supply a durable revision fence for a cross-time plan. Enable `revisionTracking` or `history`; the contiguous `merge()` wrappers retain their documented compatibility behavior. |
-| `MergePlanningStaleError` | `GRAPH_MERGE_PLANNING_STALE` | The target revision changed between the planner's opening and closing observations. No artifact is returned. |
+| `MergePlanningStaleError` | `GRAPH_MERGE_PLANNING_STALE` | The target revision changed between the planner's opening and closing observations. This is an expected retry-and-replan outcome under concurrency: no artifact is returned, so recapture the target and create a new plan before retrying. |
 | `StaleMergePlanError` | `GRAPH_MERGE_PLAN_STALE` | The target moved after planning, the plan already succeeded, or another concurrent application won. No plan writes committed. |
 | `InvalidMergePlanError` | `GRAPH_MERGE_PLAN_INVALID` | The value failed the versioned plan schema or a semantic invariant. |
 | `UnsupportedMergePlanVersionError` | `GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED` | `formatVersion` is not supported by this TypeGraph version. |
