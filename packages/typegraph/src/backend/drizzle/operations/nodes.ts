@@ -813,6 +813,7 @@ export function buildResolvedNodeUpdateBatch(
       WHERE ${tables.nodes.graphId} = ${first.graphId}
         AND ${tables.nodes.kind} = ${first.kind}
         AND ${tables.nodes.deletedAt} IS NULL
+      ORDER BY ${tables.nodes.id}
       ${rowLockClause}
     )
     UPDATE ${tables.nodes}

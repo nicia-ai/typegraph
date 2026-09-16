@@ -1370,6 +1370,18 @@ describe("Store with PostgreSQL Backend", () => {
 
       const result = await batch;
       expect(resolvedBatchResultSizes).toEqual([0]);
+      const resolvedBatchStatement = batchStatements.find((statement) =>
+        statement.includes("expected_updates"),
+      );
+      expect(resolvedBatchStatement).toBeDefined();
+      const orderByPosition = requireDefined(resolvedBatchStatement).indexOf(
+        "ORDER BY",
+      );
+      const rowLockPosition = requireDefined(resolvedBatchStatement).indexOf(
+        "FOR UPDATE",
+      );
+      expect(orderByPosition).toBeGreaterThanOrEqual(0);
+      expect(rowLockPosition).toBeGreaterThan(orderByPosition);
       expect(result).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
