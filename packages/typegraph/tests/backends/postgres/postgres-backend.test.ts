@@ -1374,6 +1374,9 @@ describe("Store with PostgreSQL Backend", () => {
         statement.includes("expected_updates"),
       );
       expect(resolvedBatchStatement).toBeDefined();
+      expect(resolvedBatchStatement).toContain(
+        'ORDER BY "typegraph_nodes"."id"',
+      );
       const orderByPosition = requireDefined(resolvedBatchStatement).indexOf(
         "ORDER BY",
       );
