@@ -93,8 +93,8 @@ import {
   resolveEdgeEndpointIds,
   resolveHeterogeneousEdgeRead,
 } from "../edge-endpoint-sets";
-import { nowIso as defaultNowIso } from "../row-mappers";
 import { resolvedNodeUpdateBatchFitsBindBudget } from "../resolved-node-update-batch";
+import { nowIso as defaultNowIso } from "../row-mappers";
 import { countSchemaKindRows } from "../schema-kind-emptiness";
 import type {
   CheckUniqueBatchParams,
