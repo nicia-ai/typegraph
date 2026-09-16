@@ -212,7 +212,7 @@ describe("recorded graph-write advisory lock churn", () => {
     expect(graphWriteLockCount(statements)).toBe(1);
   });
 
-  it("does not reacquire the graph-write lock for a requested revision", async (ctx) => {
+  it("keeps requested revision and graph-write lock ownership distinct", async (ctx) => {
     const activePool = requirePostgres(ctx);
     const statements: LoggedStatement[] = [];
     const backend = createPostgresBackend(
@@ -231,13 +231,34 @@ describe("recorded graph-write advisory lock churn", () => {
     );
 
     statements.length = 0;
-    await store.transaction(async (tx) => {
-      await tx.nodes.Person.create({ name: "first" }, { id: "first" });
+    await store.transaction((tx) => {
       tx.requestRecordedRevision();
+      return Promise.resolve();
     });
 
+    expect(graphWriteLockCount(statements)).toBe(0);
+    expect(recordedClockLockCount(statements)).toBe(1);
+
+    statements.length = 0;
+    await store.transaction(async (tx) => {
+      tx.requestRecordedRevision();
+      await tx.nodes.Person.create({ name: "first" }, { id: "first" });
+    });
+
+    const graphLockIndex = statements.findIndex(
+      (statement) =>
+        statement.query.includes("pg_advisory_xact_lock") &&
+        statement.params.includes(GRAPH_WRITE_NAMESPACE),
+    );
+    const clockLockIndex = statements.findIndex(
+      (statement) =>
+        statement.query.includes("pg_advisory_xact_lock") &&
+        statement.params.includes(RECORDED_CLOCK_NAMESPACE),
+    );
     expect(graphWriteLockCount(statements)).toBe(1);
     expect(recordedClockLockCount(statements)).toBe(1);
+    expect(graphLockIndex).toBeGreaterThanOrEqual(0);
+    expect(clockLockIndex).toBeGreaterThan(graphLockIndex);
   });
 
   it("still serializes: the lock statement is present before row writes", async (ctx) => {
