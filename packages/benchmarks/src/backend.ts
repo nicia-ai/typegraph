@@ -154,7 +154,7 @@ export async function createBackendResources(
         // Best effort cleanup after connection/init failures.
       });
       throw new Error(
-        `Failed to initialize PostgreSQL perf backend at ${getPostgresUrl()}. ` +
+        "Failed to initialize PostgreSQL perf backend. " +
           "Ensure POSTGRES_URL points to a reachable database.",
         { cause: error },
       );
@@ -197,7 +197,7 @@ export async function createBackendResources(
       // Best effort cleanup after connection/init failures.
     });
     throw new Error(
-      `Failed to initialize PostgreSQL perf backend (postgres-js driver) at ${getPostgresUrl()}. ` +
+      "Failed to initialize PostgreSQL perf backend (postgres-js driver). " +
         "Ensure POSTGRES_URL points to a reachable database.",
       { cause: error },
     );

@@ -686,14 +686,22 @@ both response size and elapsed time before choosing it.
 | Disjoint roots, full 256-byte payload | About 21–25% more | Default batching |
 | 75% overlap, identities only | About 10–18% more | Default batching; measure latency |
 
-These are small local SQLite and PostgreSQL measurements, not universal thresholds.
-Bytes measure JSON encoding at the backend boundary, not protocol traffic; the
-identity-only cases were faster with sharing despite their larger encoded responses.
+These response-size differences appeared in small local SQLite and PostgreSQL runs
+and a same-region remote Neon PostgreSQL run; they are not universal thresholds.
+Bytes measure JSON encoding at the backend boundary, not protocol traffic. In the
+remote run, shared batches were faster at the median in all three shapes, including
+the disjoint and identity-only shapes whose encoded responses grew. Default
+`batchOnce()` was faster at the median than concurrent direct subgraph calls in all
+three shapes. The remote client egress was observed in Bend, Oregon, and the pooled
+database endpoint was in Oregon; a simple pooled `SELECT 1` round trip measured
+24 ms at the median. Tail latency varied, so compare elapsed time and response
+size on the deployment route that matters to your application.
 See the [SQLite report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-sqlite-2026-09-14.md)
 and [PostgreSQL report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-postgres-2026-09-14.md)
-for timings, methodology, and reproduction commands. PostgreSQL measurements use a
-local server and a separately labeled delay simulation; real remote behavior remains
-unmeasured.
+for local timings and methodology, and the [remote Neon report](https://github.com/nicia-ai/typegraph/blob/cffd0082906bffd5f5e993dfeede1e01e6e6f300/packages/benchmarks/reports/subgraph-batch-neon-oregon-2026-09-15.md)
+for 40 raw samples per shape and mode, placement, and reproduction commands. The
+older PostgreSQL report also includes a separately labeled delay simulation; the
+Neon measurements used actual network calls without injected delay.
 
 Sharing also requires compatible options. Different edge sets, depths, temporal
 coordinates, projections, or edge windows can keep reads in separate groups even
