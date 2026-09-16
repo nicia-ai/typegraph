@@ -82,6 +82,21 @@ results with `expr.and`, `or`, and `not`. Use `isNull` and `isNotNull` for optio
 Comparisons with a nullable operand produce `boolean | undefined`, matching SQL's three-valued
 logic. Null checks always produce a Boolean.
 
+## Array membership expressions
+
+`expr.arrayContains(array, element)` tests an array expression against another database expression.
+It is useful when the element comes from the candidate row or a correlated outer row; unlike the
+field accessor `tags.contains("value")`, it does not encode the element as a fixed JSON literal.
+Missing arrays simply do not match.
+
+```typescript
+.where((e) => expr.arrayContains(e.document.tags, e.person.id))
+
+.where((e) =>
+  expr.arrayContains(e.document.tags, expr.literal("reference")),
+)
+```
+
 ## Arithmetic and conversion
 
 Use `add`, `subtract`, `multiply`, and `divide` with numeric expressions. Division produces

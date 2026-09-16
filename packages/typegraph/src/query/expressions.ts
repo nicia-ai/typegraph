@@ -127,6 +127,11 @@ type ComparisonExpressionNode = Readonly<{
   left: DatabaseExpression;
   right: DatabaseExpression;
 }>;
+type ArrayContainsExpressionNode = Readonly<{
+  kind: "array_contains";
+  array: DatabaseExpression;
+  element: DatabaseExpression;
+}>;
 type BooleanExpressionNode = Readonly<{
   kind: "boolean";
   operator: "and" | "or";
@@ -177,6 +182,7 @@ type ScalarSubqueryExpressionNode = Readonly<{
 export type DatabaseExpressionNode =
   | AggregateExpressionNode
   | ArithmeticExpressionNode
+  | ArrayContainsExpressionNode
   | BooleanExpressionNode
   | CoalesceExpressionNode
   | CollectExpressionNode
@@ -419,6 +425,7 @@ export function createFieldExpression<T, Scope extends string>(
     field.valueType ?? "unknown",
     nullable,
     scopeIdentity,
+    field.elementType,
   );
 }
 
@@ -538,6 +545,39 @@ function comparison<
     { kind: "comparison", left, operator, right },
     "boolean",
     left.nullable || right.nullable,
+    scopeIdentity,
+  );
+}
+
+type ArrayExpressionElement<ArrayValue> =
+  ArrayValue extends readonly (infer Element)[] ? Element : never;
+
+function arrayContains<
+  ArrayValue extends readonly unknown[] | undefined,
+  Scope extends string,
+>(
+  array: DatabaseExpression<ArrayValue, Scope>,
+  element: DatabaseExpression<
+    ArrayExpressionElement<ArrayValue> | undefined,
+    Scope
+  >,
+): DatabaseExpression<boolean, Scope> {
+  const scopeIdentity = resolveScope([array, element]);
+  if (array.valueType !== "array")
+    throw new TypeError("arrayContains requires an array expression");
+  if (
+    array.elementValueType === undefined ||
+    array.elementValueType === "unknown"
+  )
+    throw new TypeError("arrayContains requires a known array element type");
+  if (array.elementValueType !== element.valueType)
+    throw new TypeError(
+      "arrayContains operands have incompatible element types",
+    );
+  return createExpression<boolean, Scope>(
+    { array, element, kind: "array_contains" },
+    "boolean",
+    false,
     scopeIdentity,
   );
 }
@@ -858,6 +898,7 @@ export const expr = {
   and: <Scope extends string>(
     ...operands: readonly DatabaseExpression<boolean | undefined, Scope>[]
   ) => booleanComposition("and", operands),
+  arrayContains,
   avg: <Scope extends string>(operand: NumericExpression<Scope>) =>
     numericAggregate("avg", operand),
   coalesce,

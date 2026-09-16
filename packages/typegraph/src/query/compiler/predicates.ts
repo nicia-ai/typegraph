@@ -617,6 +617,10 @@ export function compilePredicateExpression(
       return compileComparisonPredicate(expr, dialect, cteColumnPrefix);
     }
 
+    case "tuple_comparison": {
+      return compileTupleComparisonPredicate(expr, dialect, cteColumnPrefix);
+    }
+
     case "string_op": {
       const field = compileFieldTextValue(
         expr.field,
@@ -895,6 +899,35 @@ function compileComparisonPredicate(
     );
   }
   return sql`${left} ${sql.raw(opSql)} ${convertedRight}`;
+}
+
+function compileTupleComparisonPredicate(
+  expr: Extract<PredicateExpression, { __type: "tuple_comparison" }>,
+  dialect: DialectAdapter,
+  cteColumnPrefix?: string,
+): SqlFragment {
+  if (expr.fields.length !== expr.values.length)
+    throw new UnsupportedPredicateError(
+      "Tuple comparisons require equally sized field and value tuples",
+    );
+  const fields = expr.fields.map((field, index) =>
+    compileFieldValue(
+      field,
+      dialect,
+      resolveComparisonValueType(field, requireDefined(expr.values[index])),
+      undefined,
+      undefined,
+      cteColumnPrefix,
+    ),
+  );
+  const values = expr.values.map(
+    (value) => sql`${convertValueForSql(value.value, dialect)}`,
+  );
+  return dialect.rowValueComparison(
+    expr.op === "gt" ? ">" : "<",
+    fields,
+    values,
+  );
 }
 
 /**
@@ -1235,6 +1268,7 @@ function extractStructuralPredicates<T extends PredicateExpression>(
         return;
       }
       case "comparison":
+      case "tuple_comparison":
       case "string_op":
       case "null_check":
       case "between":

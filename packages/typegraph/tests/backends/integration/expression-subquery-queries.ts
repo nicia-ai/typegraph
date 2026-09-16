@@ -7,6 +7,47 @@ export function registerExpressionSubqueryQueryIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Expression subqueries", () => {
+    it("matches optional arrays against literal and correlated row expressions", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create({ name: "Aster" });
+      await store.nodes.Person.create({ name: "Birch" });
+      await store.nodes.Document.create({ tags: ["Aster"], title: "Tagged" });
+      await store.nodes.Document.create({ title: "Untyped" });
+
+      const literalMatches = await store
+        .query()
+        .from("Document", "document")
+        .where((expressions) =>
+          expr.arrayContains(expressions.document.tags, expr.literal("Aster")),
+        )
+        .project((expressions) => ({ title: expressions.document.title }))
+        .execute();
+      expect(literalMatches).toEqual([{ title: "Tagged" }]);
+
+      const rows = await store
+        .query()
+        .from("Person", "person")
+        .project((expressions) => ({
+          hasTaggedDocument: expressions.$exists((subquery, outer) =>
+            subquery
+              .from("Document", "document")
+              .where((inner) =>
+                expr.arrayContains(inner.document.tags, outer.person.name),
+              )
+              .project((inner) => ({ id: inner.document.id }))
+              .limit(1),
+          ),
+          name: expressions.person.name,
+        }))
+        .orderBy((expressions) => expressions.person.name)
+        .execute();
+
+      expect(rows).toEqual([
+        { hasTaggedDocument: true, name: "Aster" },
+        { hasTaggedDocument: false, name: "Birch" },
+      ]);
+    });
+
     it("correlates exists and scalar projections when inner aliases reuse outer names", async () => {
       const store = context.getStore();
       await store.nodes.Person.create({ age: 31, name: "Alice" });

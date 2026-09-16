@@ -355,6 +355,27 @@ export interface DialectAdapter {
   ) => SqlFragment;
 
   /**
+   * Checks whether a JSON array contains a value supplied by another SQL
+   * expression. Unlike {@link jsonArrayContains}, the value is never encoded
+   * as a JSON literal, so field references and correlated outer references
+   * retain their row-by-row meaning.
+   */
+  readonly jsonArrayContainsExpression: (
+    this: void,
+    column: SqlFragment,
+    value: SqlFragment,
+    valueType: ValueType,
+  ) => SqlFragment;
+
+  /** Emits a row-value comparison for compatible lexicographic cursor keys. */
+  readonly rowValueComparison: (
+    this: void,
+    operator: ">" | "<",
+    left: readonly SqlFragment[],
+    right: readonly SqlFragment[],
+  ) => SqlFragment;
+
+  /**
    * Checks if a JSON array contains all specified values.
    *
    * @example

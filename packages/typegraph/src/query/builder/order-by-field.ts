@@ -32,6 +32,11 @@ const DECLARED_PROPERTY_SHADOWABLE_SYSTEM_ORDER_FIELDS = new Set([
   "updated_at",
   "deleted_at",
 ]);
+const NULLABLE_SYSTEM_ORDER_FIELDS = new Set([
+  "deleted_at",
+  "valid_from",
+  "valid_to",
+]);
 
 /**
  * Resolves an orderable physical system column, or `undefined` when `field`
@@ -56,7 +61,10 @@ export function resolveSystemOrderField(
     COMMON_SYSTEM_ORDER_FIELDS.get(field) ??
     (isEdge ? EDGE_SYSTEM_ORDER_FIELDS.get(field) : undefined);
   return valueType === undefined ? undefined : (
-      fieldRef(alias, [field], { valueType })
+      fieldRef(alias, [field], {
+        nullable: NULLABLE_SYSTEM_ORDER_FIELDS.has(field),
+        valueType,
+      })
     );
 }
 
@@ -75,6 +83,9 @@ export function buildOrderSpec(
         jsonPointer: jsonPointer([field]),
         valueType: typeInfo?.valueType,
         elementType: typeInfo?.elementType,
+        ...(typeInfo === undefined ?
+          {}
+        : { nullable: typeInfo.nullable === true }),
       }),
     direction,
   };

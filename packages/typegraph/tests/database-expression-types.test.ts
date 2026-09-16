@@ -28,6 +28,20 @@ const nullableStringField = createFieldExpression<string | undefined, "person">(
   scopeIdentity,
   true,
 );
+const optionalStringArrayField = createFieldExpression<
+  readonly string[] | undefined,
+  "person"
+>(
+  {
+    __type: "field_ref",
+    alias: "person",
+    elementType: "string",
+    path: ["props", "labels"],
+    valueType: "array",
+  } satisfies FieldRef<readonly string[] | undefined>,
+  scopeIdentity,
+  true,
+);
 
 test("expression result types include SQL null where applicable", () => {
   expectTypeOf(expr.add(numberField, expr.literal(2))).toEqualTypeOf<
@@ -52,6 +66,9 @@ test("expression result types include SQL null where applicable", () => {
   expectTypeOf(
     expr.coalesce(nullableStringField, expr.literal("unknown")),
   ).toEqualTypeOf<DatabaseExpression<string, "person">>();
+  expectTypeOf(
+    expr.arrayContains(optionalStringArrayField, nullableStringField),
+  ).toEqualTypeOf<DatabaseExpression<boolean, "person">>();
 });
 
 function invalidOperands(): void {
@@ -67,6 +84,8 @@ function invalidOperands(): void {
   expr.min(expr.literal(true));
   // @ts-expect-error COUNT DISTINCT rejects structured values
   expr.countDistinct(expr.literal({ key: "value" }));
+  // @ts-expect-error array membership requires matching element expressions
+  expr.arrayContains(optionalStringArrayField, numberField);
 }
 
 test("invalid expression operands fail type checking", () => {

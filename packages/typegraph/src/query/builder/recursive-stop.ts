@@ -23,6 +23,10 @@ function assertSupportedStopPredicate(
         assertStopFieldAlias(expression.right, alias);
       return;
     }
+    case "tuple_comparison": {
+      for (const field of expression.fields) assertStopFieldAlias(field, alias);
+      return;
+    }
     case "string_op":
     case "null_check":
     case "between":

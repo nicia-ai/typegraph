@@ -182,6 +182,17 @@ function compileNode(
     case "comparison": {
       return sql`(${compile(node.left)} ${comparisonOperator(node.operator)} ${compile(node.right)})`;
     }
+    case "array_contains": {
+      if (node.array.elementValueType === undefined)
+        throw new UnsupportedPredicateError(
+          "Array membership requires a known element type",
+        );
+      return context.dialect.jsonArrayContainsExpression(
+        compile(node.array),
+        compile(node.element),
+        node.array.elementValueType,
+      );
+    }
     case "boolean": {
       const separator = node.operator === "and" ? sql` AND ` : sql` OR `;
       return sql`(${sql.join(

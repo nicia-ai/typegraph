@@ -188,6 +188,7 @@ function validateStructuralPredicatePlacement(
       return;
     }
     case "comparison":
+    case "tuple_comparison":
     case "string_op":
     case "null_check":
     case "between":
