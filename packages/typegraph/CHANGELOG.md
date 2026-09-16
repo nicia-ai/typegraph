@@ -2,6 +2,19 @@
 
 ## 0.64.0
 
+### Highlights
+
+TypeGraph 0.64 lets set-based node updates take their candidates directly from the query DSL. Pass a same-Store or same-transaction query to `NodeCollection.updateWhere({ candidates, patch })` to reuse correlated cross-kind predicates, including relationships that are not stored as edges. TypeGraph projects the query back to root node identities, intersects it with any `where` or relationship selectors, and sends the result through the existing atomic update pipeline so validation, uniqueness, history, full-text, vectors, and revisions still succeed or roll back together.
+
+Store analysis can now share the transaction snapshot that gives its results meaning. Transaction contexts expose `describe()` and `validateStore()`, allowing population statistics and every validation page to run on the pinned session. Use repeatable-read or serializable isolation and consume all pages inside the callback when concurrent writes must not change the dataset between statements.
+
+Shared backend storage now has an explicit deployment lifecycle. Full-text tables are physically materialized once per deployment and activated independently for each graph, so later graphs can become ready without repeating privileged DDL; vector storage remains graph-scoped. Custom backends also gain the `endpointSetRead` capability bundle and `runEndpointSetReadConformance`, giving bulk endpoint reads one declared support verdict and a portable contract test.
+
+### Upgrade notes
+
+- Before serving full-text traffic through a DML-only role, run `createStoreWithSchema(graph, privilegedBackend)` after upgrading so TypeGraph can attest the deployment-scoped full-text table and activate each graph that uses it. `createStore()` remains a zero-I/O attach and does not repair missing markers. Custom table-contribution strategies may set `scope: "deployment"` only when one physical table is shared across graphs; omitting `scope` preserves the existing graph-scoped behavior.
+- Custom backends that support `store.edges.<Kind>.bulkFindFrom()` or `bulkFindTo()` must expose `findEdgesByEndpointSet` on the executing backend object and should run `runEndpointSetReadConformance` in their adapter test suite. Backends that omit the member remain valid for singleton reads, while set-oriented endpoint reads refuse with `ENDPOINT_SET_READ_UNSUPPORTED`.
+
 ### Minor Changes
 
 - [#712](https://github.com/nicia-ai/typegraph/pull/712) [`295f646`](https://github.com/nicia-ai/typegraph/commit/295f646c0add46fbd115654790c983ddd50972e7) Thanks [@pdlug](https://github.com/pdlug)! - Add deployment-scoped contribution ownership. Shared full-text storage is physically materialized once and separately activated per graph, allowing subsequent graph opens to run without DDL privileges while vector contributions remain graph-scoped.
