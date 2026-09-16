@@ -1385,22 +1385,18 @@ describe("Store with PostgreSQL Backend", () => {
       );
       expect(orderByPosition).toBeGreaterThanOrEqual(0);
       expect(rowLockPosition).toBeGreaterThan(orderByPosition);
-      expect(result).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            id: "version-gated-row-a",
-            name: "batch-a",
-            email: "initial-a@example.com",
-            meta: expect.objectContaining({ version: 2 }),
-          }),
-          expect.objectContaining({
-            id: "version-gated-row-b",
-            name: "batch-b",
-            email: "writer@example.com",
-            meta: expect.objectContaining({ version: 3 }),
-          }),
-        ]),
+      const firstResult = requireDefined(
+        result.find((node) => node.id === "version-gated-row-a"),
       );
+      const secondResult = requireDefined(
+        result.find((node) => node.id === "version-gated-row-b"),
+      );
+      expect(firstResult.name).toBe("batch-a");
+      expect(firstResult.email).toBe("initial-a@example.com");
+      expect(firstResult.meta.version).toBe(2);
+      expect(secondResult.name).toBe("batch-b");
+      expect(secondResult.email).toBe("writer@example.com");
+      expect(secondResult.meta.version).toBe(3);
       expect(
         batchStatements.some((statement) =>
           statement.includes("pg_advisory_xact_lock"),
