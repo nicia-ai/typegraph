@@ -362,7 +362,7 @@ type NodeResurrectWork = Readonly<{
   uniqueConstraints: readonly UniqueConstraint[];
 }>;
 
-export type ResolvedNodeUpdateBatchWork = Readonly<{
+type ResolvedNodeUpdateBatchWork = Readonly<{
   schema: z.ZodType<Record<string, unknown>>;
   uniqueConstraints: readonly UniqueConstraint[];
   entries: readonly ResolvedNodeUpdateBatchEntry[];
