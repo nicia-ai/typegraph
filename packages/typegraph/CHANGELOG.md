@@ -1,5 +1,31 @@
 # @nicia-ai/typegraph
 
+## 0.63.0
+
+### Highlights
+
+TypeGraph 0.63 can shape bounded child records for many parents in one query. `relation.topPerPartition({ partitionBy, orderBy, limit })` chooses up to N rows independently for each parent, and `expr.collect({ id, name }, { orderBy, filter })` assembles those rows into ordered, typed record arrays. The result composes with prepared queries and `batchOnce()`, avoiding a separate child query for each parent.
+
+Record collections retain scalar codecs, including Date and Boolean fields, and decode admitted SQL NULL fields as `undefined`. Filter missing children inside `expr.collect()` to keep a parent with no matches and return `[]`. Ranking bounds the rows returned per partition; it can still scan and sort candidate rows, so provide a stable ordering key and measure the query on representative data.
+
+### Upgrade notes
+
+- Implement `orderedRecordJsonArray` in custom `DialectAdapter` implementations. It must preserve record field names and scalar values, apply collection-local ordering and filtering, and return `[]` for empty input.
+- Update expression AST visitors that inspect `CollectExpressionNode.operand` to handle both scalar expressions and `CollectRecordOperand` (`kind: "record"`, with named `fields`).
+- Advertise `capabilities.windowFunctions: true` on custom backends only when the active engine supports the window functions used by `topPerPartition()`; otherwise the new method refuses before SQL. For repeatable winners, include a stable final key in `orderBy`, and add relation ordering if the final result order matters.
+
+### Minor Changes
+
+- [#708](https://github.com/nicia-ai/typegraph/pull/708) [`9d4f328`](https://github.com/nicia-ai/typegraph/commit/9d4f3280e1e917ebdbffa8bcd9271c1b82cf34a1) Thanks [@pdlug](https://github.com/pdlug)! - Add ordered record collections with `expr.collect({ field: scalarExpression }, { orderBy, filter })`. Explicit flat record projections retain named scalar fields, decode Date and Boolean values, and preserve admitted SQL NULL fields as `undefined`. Record collections work through relation composition, prepared execution, and `batchOnce()`.
+  
+  Custom `DialectAdapter` implementations must add the required `orderedRecordJsonArray` method when upgrading. This method emits the ordered, optionally filtered JSON record aggregate and returns `[]` for empty input.
+  
+  Consumers inspecting expression ASTs must narrow `CollectExpressionNode.operand`: it can now be a scalar expression or a `CollectRecordOperand` with `kind: "record"` and named `fields`.
+
+- [#709](https://github.com/nicia-ai/typegraph/pull/709) [`4a6568e`](https://github.com/nicia-ai/typegraph/commit/4a6568e6db6f69664b02b7d21a3731bbc5dd4a01) Thanks [@pdlug](https://github.com/pdlug)! - Add `relation.topPerPartition({ partitionBy, orderBy, limit })` to retrieve up to N rows per parent in one query. Explicit partition keys and ordering select winners independently for each parent, and the result can feed ordered record collections, prepared queries, and batches without losing scalar codecs.
+  
+  Filters, distinctness, and ranges before the stage select its candidates; filters afterward remove winners without replacement. Include a stable final ordering key for repeatable winners and add relation ordering to control the final result order. Backends must advertise `windowFunctions: true`; unsupported profiles refuse execution before SQL.
+
 ## 0.62.0
 
 ### Highlights
