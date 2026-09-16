@@ -1223,6 +1223,31 @@ export const CAPABILITY_BUNDLES: readonly [{
             readonly member: "ensureRevisionOriginsTable";
         }];
     }];
+}, {
+    readonly id: "endpointSetRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "findEdgesByEndpointSet";
+        readonly members: readonly ["findEdgesByEndpointSet"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "bulk endpoint read";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/edge-collection.ts";
+            readonly member: "findEdgesByEndpointSet";
+        }];
+    }];
 }];
 
 // @public (undocumented)
@@ -1698,6 +1723,9 @@ export type ContributionRepopulationStats = Readonly<{
 }>;
 
 // @public
+export type ContributionScope = "deployment" | "graph";
+
+// @public
 export type CountEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -1837,6 +1865,9 @@ export type DeleteUniqueParams = Readonly<{
     concreteKind: string;
     nodeId: string;
 }>;
+
+// @public
+export const DEPLOYMENT_CONTRIBUTION_GRAPH_ID = "__typegraph_deployment__";
 
 // @public
 export interface DialectAdapter {
@@ -2077,7 +2108,79 @@ export type EdgeRow = Readonly<{
 }>;
 
 // @public
+export const ENDPOINT_SET_READ: {
+    readonly id: "endpointSetRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "findEdgesByEndpointSet";
+        readonly members: readonly ["findEdgesByEndpointSet"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "bulk endpoint read";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/edge-collection.ts";
+            readonly member: "findEdgesByEndpointSet";
+        }];
+    }];
+};
+
+// @public
 export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
+
+// @public (undocumented)
+export class EndpointSetReadConformanceError extends TypeGraphError {
+    constructor(message: string, details?: Readonly<Record<string, unknown>>);
+}
+
+// @public (undocumented)
+export type EndpointSetReadConformanceFixture = Readonly<{
+    backend: GraphBackend;
+    equal: EndpointSetReadEquality;
+    successes: readonly EndpointSetReadConformanceSuccess[];
+    refusals: readonly EndpointSetReadConformanceRefusal[];
+}>;
+
+// @public (undocumented)
+export type EndpointSetReadConformanceRefusal = Readonly<{
+    name: string;
+    params: FindEdgesByEndpointSetParams;
+    errorMatches?: (error: unknown) => boolean;
+}>;
+
+// @public (undocumented)
+export type EndpointSetReadConformanceReport = Readonly<{
+    passed: readonly string[];
+}>;
+
+// @public (undocumented)
+export type EndpointSetReadConformanceSuccess = Readonly<{
+    name: string;
+    params: FindEdgesByEndpointSetParams;
+    expected: readonly EdgeRow[];
+}>;
+
+// @public
+export type EndpointSetReadEquality = (actual: readonly EdgeRow[], expected: readonly EdgeRow[]) => boolean;
+
+// @public (undocumented)
+type EndpointSetReadExtraMember = ExtraMember<typeof ENDPOINT_SET_READ, keyof ExtrasOf<typeof ENDPOINT_SET_READ>>;
+
+// @public (undocumented)
+export function endpointSetReadMembers(port: Readonly<Partial<Pick<GraphBackend, EndpointSetReadExtraMember>>>, verdict: BundleVerdictOf<typeof ENDPOINT_SET_READ>): PartialBundleBinding<EndpointSetReadExtraMember>;
+
+// @public (undocumented)
+export function endpointSetReadVerdict(backend: GraphBackend): BundleVerdictOf<typeof ENDPOINT_SET_READ>;
 
 // @public (undocumented)
 const ENGINE_REVISION_BRAND: unique symbol;
@@ -3621,6 +3724,9 @@ export function runAtomicMutationProgramConformance(fixture: AtomicMutationProgr
 // @public
 export function runAtomicTransportConformance<TSnapshot = unknown, TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined>(fixture: AtomicTransportConformanceFixture<TSnapshot, TParameterSnapshot>): Promise<AtomicTransportConformanceReport>;
 
+// @public
+export function runEndpointSetReadConformance(fixture: EndpointSetReadConformanceFixture): Promise<EndpointSetReadConformanceReport>;
+
 // @public (undocumented)
 export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;
 
@@ -4014,6 +4120,7 @@ export type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_
 
 // @public
 export type TableContribution = Readonly<{
+    scope?: ContributionScope;
     logicalName: string;
     owner: string;
     tableName: string;
@@ -4388,12 +4495,6 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly workstream: "WS5b";
         readonly bundle: "temporaryStatements";
         readonly ceiling: 3;
-    };
-    readonly findEdgesByEndpointSet: {
-        readonly kind: "deferred";
-        readonly workstream: "WS5b";
-        readonly bundle: "endpointSetRead";
-        readonly ceiling: 1;
     };
     readonly findEdgesByHeterogeneousEndpointSet: {
         readonly kind: "deferred";
@@ -4989,7 +5090,6 @@ type WriteFenceTarget = Readonly<{
 // @public
 export const WS5B_SEED_BUNDLES: {
     readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet"];
-    readonly endpointSetRead: readonly ["findEdgesByEndpointSet"];
     readonly heterogeneousEndpointSetRead: readonly ["findEdgesByHeterogeneousEndpointSet"];
     readonly vectorOperations: readonly ["upsertEmbedding", "deleteEmbedding", "upsertEmbeddingBatch", "deleteEmbeddingBatch", "vectorSearch", "vectorStrategy", "createVectorIndex", "dropVectorIndex"];
     readonly hybridSearch: readonly ["hybridSearch"];
@@ -5006,7 +5106,7 @@ export const WS5B_SEED_BUNDLES: {
 };
 
 // @public
-export type Ws5bBundleId = "batchEntityWrite" | "endpointSetRead" | "heterogeneousEndpointSetRead" | "vectorOperations" | "hybridSearch" | "vectorSlotContributions" | "fulltextOperations" | "fulltextProvisioning" | "databaseExtensions" | "contributionProvisioning" | "indexMaterialization" | "ddlExecution" | "temporaryStatements" | "rawStatementReuse" | "trustedImport";
+export type Ws5bBundleId = "batchEntityWrite" | "heterogeneousEndpointSetRead" | "vectorOperations" | "hybridSearch" | "vectorSlotContributions" | "fulltextOperations" | "fulltextProvisioning" | "databaseExtensions" | "contributionProvisioning" | "indexMaterialization" | "ddlExecution" | "temporaryStatements" | "rawStatementReuse" | "trustedImport";
 
 // (No @packageDocumentation comment for this package)
 
