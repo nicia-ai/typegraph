@@ -69,6 +69,12 @@ export function extractPropertyAccesses(
     accesses.push(...extracted);
   }
 
+  if (ast.resultPredicate !== undefined) {
+    accesses.push(
+      ...extractFromExpression(ast.resultPredicate, undefined, ast),
+    );
+  }
+
   // Extract from orderBy (sorts)
   if (ast.orderBy) {
     for (const order of ast.orderBy) {
@@ -139,6 +145,16 @@ function extractFromExpression(
       const extracted = extractFromFieldRef(expr.left, "filter", ast);
       if (extracted) {
         accesses.push({ ...extracted, predicateType: expr.op });
+      }
+      break;
+    }
+
+    case "tuple_comparison": {
+      for (const field of expr.fields) {
+        const extracted = extractFromFieldRef(field, "filter", ast);
+        if (extracted) {
+          accesses.push({ ...extracted, predicateType: expr.op });
+        }
       }
       break;
     }
@@ -313,6 +329,11 @@ function extractFromDatabaseExpression(
     case "comparison": {
       collect(node.left);
       collect(node.right);
+      break;
+    }
+    case "array_contains": {
+      collect(node.array);
+      collect(node.element);
       break;
     }
     case "boolean":

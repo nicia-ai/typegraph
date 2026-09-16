@@ -1,18 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import type { FieldRef, OrderSpec } from "../src/query/ast";
+import { resolveSystemOrderField } from "../src/query/builder/order-by-field";
 import { compileDatabaseExpression } from "../src/query/compiler/database-expressions";
 import {
   compilePredicateExpression,
   type PredicateCompilerContext,
 } from "../src/query/compiler/predicates";
 import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
+import { type CursorData } from "../src/query/cursor";
 import { postgresDialect } from "../src/query/dialect/postgres";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
-import { createFieldExpression, expr } from "../src/query/expressions";
-import { resolveSystemOrderField } from "../src/query/builder/order-by-field";
-import { type CursorData } from "../src/query/cursor";
 import { buildCursorPredicate } from "../src/query/execution/pagination";
+import { createFieldExpression, expr } from "../src/query/expressions";
 import { sql } from "../src/query/sql-fragment";
 import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 
