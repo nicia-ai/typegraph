@@ -27,6 +27,7 @@ import {
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import {
   buildCursorFromRow,
+  buildCursorFromValues,
   type CursorData,
   decodeCursor,
   requireCursorField,
@@ -78,8 +79,10 @@ import {
 import { executeQueryTerminal } from "./terminal-query";
 import {
   type AliasMap,
+  type CompiledOneStatementRead,
   type EdgeAliasMap,
   type NodeCandidateSelection,
+  type OneStatementBatchableQuery,
   type PaginatedResult,
   type PaginateOptions,
   type QueryBuilderConfig,
@@ -1655,6 +1658,128 @@ export class ExecutableQuery<
           this.#state.traversals,
         ),
     );
+  }
+
+  /**
+   * Builds a cold cursor-page read that can execute independently or as one
+   * member of `store.batchOnce()`.
+   */
+  page(
+    options: PaginateOptions,
+  ): CompiledOneStatementRead<PaginatedResult<R>> &
+    Required<Pick<OneStatementBatchableQuery<PaginatedResult<R>>, "execute">> {
+    this.#refuseCheckedReadSurface("paginate");
+    validatePaginationOptions(this.#state, options);
+    if (this.#hasParameterReferences())
+      throw new ConfigurationError(
+        "Cursor pagination requires bound values, not param() references.",
+        { operation: "page" },
+      );
+    if (!this.#config.backend) {
+      throw new Error(
+        "Cannot build page read: no backend configured. " +
+          "Use store.query() or pass a backend to createQueryBuilder().",
+      );
+    }
+    if (this.#state.orderBy.length === 0) {
+      throw new ValidationError(
+        "Cursor pagination requires ORDER BY. Add .orderBy() before .page()",
+        {
+          issues: [
+            {
+              path: "orderBy",
+              message: "ORDER BY is required for cursor pagination",
+            },
+          ],
+        },
+        {
+          suggestion: `Add .orderBy(alias, field) before .page() to specify sort order.`,
+        },
+      );
+    }
+
+    const isBackward =
+      options.last !== undefined || options.before !== undefined;
+    const pageLimit = options.first ?? options.last ?? DEFAULT_PAGINATION_LIMIT;
+    const cursor = options.after ?? options.before;
+    const paginationOrderBy = this.#paginationOrderBy();
+    const cursorData = cursor === undefined ? undefined : decodeCursor(cursor);
+    if (cursorData !== undefined)
+      validateCursorColumns(cursorData, paginationOrderBy);
+    const direction = isBackward ? "backward" : "forward";
+    const orderBy = adjustOrderByForDirection(paginationOrderBy, direction);
+    const predicates =
+      cursorData === undefined ?
+        this.#state.predicates
+      : [
+          ...this.#state.predicates,
+          buildCursorPredicate(
+            cursorData,
+            paginationOrderBy,
+            direction,
+            this.#state.startAlias,
+          ),
+        ];
+    const pagedQuery = new ExecutableQuery(
+      this.#config,
+      {
+        ...this.#state,
+        predicates,
+        orderBy,
+        limit: pageLimit + 1,
+        offset: undefined,
+      },
+      this.#selectFn,
+    );
+
+    return {
+      execute: () => this.paginate(options),
+      compileOneStatementBatchItem: () => {
+        const item = requireDefined(
+          pagedQuery.compileOneStatementBatchItem?.(),
+        );
+        const cursorOutputNames = orderBy.map((_spec, index) =>
+          oneStatementBatchOrderColumn(index),
+        );
+        function cursorFromRow(
+          row: Record<string, unknown>,
+          cursorDirection: "f" | "b",
+        ): string {
+          return buildCursorFromValues(
+            cursorOutputNames.map((outputName) => row[outputName]),
+            paginationOrderBy,
+            cursorDirection,
+          );
+        }
+        return {
+          ...item,
+          hiddenOutputNames: cursorOutputNames,
+          mapRows: (rows: readonly Record<string, unknown>[]) => {
+            const hasMore = rows.length > pageLimit;
+            const fetchedRows = hasMore ? rows.slice(0, pageLimit) : rows;
+            const orderedRows =
+              isBackward ? fetchedRows.toReversed() : fetchedRows;
+            const data = item.mapRows(orderedRows);
+            const firstRow = orderedRows[0];
+            const lastRow = orderedRows.at(-1);
+            const previousCursor =
+              firstRow === undefined ? undefined : cursorFromRow(firstRow, "b");
+            const nextCursor =
+              lastRow === undefined ? undefined : cursorFromRow(lastRow, "f");
+            return {
+              data,
+              nextCursor: hasMore || isBackward ? nextCursor : undefined,
+              prevCursor:
+                cursor !== undefined || (isBackward && hasMore) ?
+                  previousCursor
+                : undefined,
+              hasNextPage: isBackward ? cursor !== undefined : hasMore,
+              hasPrevPage: isBackward ? hasMore : cursor !== undefined,
+            };
+          },
+        };
+      },
+    };
   }
 
   /**

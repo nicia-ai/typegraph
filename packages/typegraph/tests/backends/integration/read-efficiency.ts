@@ -7,6 +7,83 @@ export function registerReadEfficiencyIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("set-oriented read efficiency", () => {
+    it("embeds independent cursor pages in one statement", async () => {
+      const statements: string[] = [];
+      const store = await context.createStore(integrationTestGraph, {
+        hooks: {
+          onQueryStart: (query) => {
+            statements.push(query.sql);
+          },
+        },
+      });
+      await store.nodes.Person.bulkCreate([
+        { props: { name: "Ada", age: 31 } },
+        { props: { name: "Grace", age: 37 } },
+        { props: { name: "Linus", age: 55 } },
+      ]);
+      await store.nodes.Company.create({ name: "Example Company" });
+      const people = store
+        .query()
+        .from("Person", "person")
+        .orderBy("person", "age", "asc")
+        .select((fields) => ({
+          name: fields.person.name,
+          age: fields.person.age,
+        }));
+
+      const standalonePage = await people.page({ first: 1 }).execute();
+      expect(standalonePage.data).toEqual([{ name: "Ada", age: 31 }]);
+      expect(standalonePage.hasNextPage).toBe(true);
+      statements.length = 0;
+
+      const [firstPage, companies] = await store.batchOnce(() => [
+        people.page({ first: 2 }),
+        store
+          .query()
+          .from("Company", "company")
+          .select((fields) => fields.company.name),
+      ]);
+
+      expect(firstPage.data).toEqual([
+        { name: "Ada", age: 31 },
+        { name: "Grace", age: 37 },
+      ]);
+      expect(firstPage.hasNextPage).toBe(true);
+      expect(firstPage.hasPrevPage).toBe(false);
+      expect(companies).toEqual(["Example Company"]);
+      expect(statements).toHaveLength(1);
+      const nextCursor = firstPage.nextCursor;
+      if (nextCursor === undefined)
+        throw new Error("Expected a next-page cursor");
+
+      statements.length = 0;
+      const [secondPage] = await store.batchOnce(() => [
+        people.page({
+          first: 2,
+          after: nextCursor,
+        }),
+      ]);
+      expect(secondPage.data).toEqual([{ name: "Linus", age: 55 }]);
+      expect(secondPage.hasNextPage).toBe(false);
+      expect(secondPage.hasPrevPage).toBe(true);
+      expect(statements).toHaveLength(1);
+      const previousCursor = secondPage.prevCursor;
+      if (previousCursor === undefined)
+        throw new Error("Expected a previous-page cursor");
+
+      statements.length = 0;
+      const [previousPage] = await store.batchOnce(() => [
+        people.page({ last: 2, before: previousCursor }),
+      ]);
+      expect(previousPage.data).toEqual([
+        { name: "Ada", age: 31 },
+        { name: "Grace", age: 37 },
+      ]);
+      expect(previousPage.hasNextPage).toBe(true);
+      expect(previousPage.hasPrevPage).toBe(false);
+      expect(statements).toHaveLength(1);
+    });
+
     it("shares hydration only when requested and preserves independent nested data", async () => {
       const statements: string[] = [];
       const store = await context.createStore(integrationTestGraph, {

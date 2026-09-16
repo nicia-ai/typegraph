@@ -96,6 +96,8 @@ export type OneStatementBatchableQuery<R = unknown> = Readonly<{
       executionTarget: object;
     }>;
     outputNames: readonly string[];
+    /** Internal columns carried through the batch envelope for result mapping. */
+    hiddenOutputNames?: readonly string[];
     orderBy: readonly Readonly<{
       column: string;
       direction: "asc" | "desc";
