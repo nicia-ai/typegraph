@@ -120,9 +120,11 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * optional, engine-supplied bags of read-only queries, never routed through
  * the write pipeline. `recordedTime` (129→130) joined the same class for the
  * same reason: an engine-supplied bag of a read-only source function and a
- * revision-clock read.
+ * revision-clock read. `updateResolvedNodesBatch` (130→131) joined the
+ * graph-entity write surface: it is the guarded row statement for portable
+ * resolved batches and is routed through recorded capture like updateNode.
  */
-const MEMBER_COUNT = 130;
+const MEMBER_COUNT = 131;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

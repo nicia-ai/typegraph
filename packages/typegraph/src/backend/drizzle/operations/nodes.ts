@@ -23,6 +23,7 @@ import type {
   HardDeleteNodeParams,
   InsertNodeParams,
   NodePropertyExpectation,
+  ResolvedNodeUpdateBatchParams,
   SchemaWriteFenceParams,
   UpdateNodeParams,
   UpdateNodeSetParams,
@@ -768,6 +769,56 @@ export function buildAtomicNodeResolvedUpdateBatch(
         WHERE ${nodes.graphId} = ${first.graphId}
           AND ${nodes.kind} = ${first.kind}
           AND ${nodes.deletedAt} IS NULL
+          AND (${sql.join(expectedRows, sql` OR `)})
+      ) = ${entries.length}
+    RETURNING *
+  `;
+}
+
+/**
+ * Builds the portable half of a resolved update batch. Unlike the atomic
+ * program form this deliberately has no schema fence: its caller already owns
+ * the graph write transaction and may be capture-wrapped. The version count
+ * gate still makes every replacement one all-or-nothing row transition.
+ */
+export function buildResolvedNodeUpdateBatch(
+  tables: Tables,
+  params: ResolvedNodeUpdateBatchParams,
+  timestamp: string,
+): SQL {
+  const entries = params.entries;
+  const first = entries[0];
+  if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
+  const postimages = entries.map((entry) => ({
+    id: entry.id,
+    propsJson: JSON.stringify(entry.props),
+  }));
+  const propsCases = postimages.map(
+    (postimage) =>
+      sql`WHEN ${postimage.id} THEN ${castBoundValueForColumn(tables.nodes.props, postimage.propsJson)}`,
+  );
+  const expectedRows = entries.map(
+    (entry) =>
+      sql`(${tables.nodes.id} = ${entry.id} AND ${tables.nodes.version} = ${entry.expectedVersion})`,
+  );
+  return sql`
+    UPDATE ${tables.nodes}
+    SET ${quotedColumn(tables.nodes.props)} = CASE ${tables.nodes.id}
+          ${sql.join(propsCases, sql` `)}
+          ELSE ${tables.nodes.props}
+        END,
+        ${quotedColumn(tables.nodes.updatedAt)} = ${timestamp},
+        ${quotedColumn(tables.nodes.version)} = ${tables.nodes.version} + ${sql.raw(String(NODE_VERSION_INCREMENT))}
+    WHERE ${tables.nodes.graphId} = ${first.graphId}
+      AND ${tables.nodes.kind} = ${first.kind}
+      AND ${tables.nodes.deletedAt} IS NULL
+      AND ${tables.nodes.id} IN (${sql.join(entries.map((entry) => sql`${entry.id}`), sql`, `)})
+      AND (
+        SELECT COUNT(*)
+        FROM ${tables.nodes}
+        WHERE ${tables.nodes.graphId} = ${first.graphId}
+          AND ${tables.nodes.kind} = ${first.kind}
+          AND ${tables.nodes.deletedAt} IS NULL
           AND (${sql.join(expectedRows, sql` OR `)})
       ) = ${entries.length}
     RETURNING *

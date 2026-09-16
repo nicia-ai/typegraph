@@ -94,6 +94,7 @@ import {
   resolveHeterogeneousEdgeRead,
 } from "../edge-endpoint-sets";
 import { nowIso as defaultNowIso } from "../row-mappers";
+import { resolvedNodeUpdateBatchFitsBindBudget } from "../resolved-node-update-batch";
 import { countSchemaKindRows } from "../schema-kind-emptiness";
 import type {
   CheckUniqueBatchParams,
@@ -142,6 +143,7 @@ import type {
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
   ReadConstraintFenceViolationsParams,
+  ResolvedNodeUpdateBatchParams,
   SchemaKindEmptinessProbe,
   SchemaVersionRow,
   SchemaWriteFenceParams,
@@ -598,6 +600,7 @@ export type CommonOperationBackend = Pick<
   | "purgeEdgeClaims"
   | "updateEdge"
   | "updateNode"
+  | "updateResolvedNodesBatch"
   | "updateNodeSet"
 > &
   Readonly<{
@@ -4660,6 +4663,47 @@ export function createCommonOperationBackend(
           },
         );
       return rowMappers.toNodeRow(row);
+    },
+
+    async updateResolvedNodesBatch(
+      params: ResolvedNodeUpdateBatchParams,
+    ): Promise<readonly NodeRow[]> {
+      if (params.entries.length === 0) return [];
+      const first = requireDefined(params.entries[0]);
+      if (
+        !resolvedNodeUpdateBatchFitsBindBudget(
+          params.entries.length,
+          maxBindParameters,
+        )
+      ) {
+        throw new ConfigurationError(
+          "Resolved node update batch exceeds the backend bind-parameter budget",
+          {
+            operation: "updateResolvedNodesBatch",
+            capability: "maxBindParameters",
+            maxBindParameters,
+          },
+        );
+      }
+      if (
+        params.entries.some(
+          (entry) =>
+            entry.graphId !== first.graphId || entry.kind !== first.kind,
+        ) ||
+        new Set(params.entries.map((entry) => entry.id)).size !==
+          params.entries.length
+      ) {
+        throw new ConfigurationError(
+          "Resolved node update batches require distinct ids from one graph and kind",
+          { operation: "updateResolvedNodesBatch", kind: first.kind },
+        );
+      }
+      const query = operationStrategy.buildResolvedNodeUpdateBatch(
+        params,
+        nowIso(),
+      );
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      return rows.map((row) => rowMappers.toNodeRow(row));
     },
 
     async updateNodeSet(

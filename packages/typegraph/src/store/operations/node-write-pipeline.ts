@@ -30,6 +30,7 @@ import {
   type LiveNodeRow,
   type NodePropertyExpectation,
   type NodeRow,
+  type ResolvedNodeUpdateBatchEntry,
   rowPropsToObject,
   type TombstonedNodeRow,
   type TransactionBackend,
@@ -453,6 +454,87 @@ export async function applyNodeUpdate(
   ]);
 
   return row;
+}
+
+/**
+ * Applies distinct, already-resolved live-node replacements as one row write,
+ * then rebuilds the same claim and projection fans as a set update. Returning
+ * `undefined` is the portable version-gate miss: callers re-read and recover
+ * through the established per-row race semantics rather than treating it as a
+ * partial success.
+ */
+export async function applyResolvedNodeUpdateBatch(
+  ctx: NodeWriteContext,
+  args: Readonly<{
+    schema: z.ZodType<Record<string, unknown>>;
+    uniqueConstraints: readonly UniqueConstraint[];
+    entries: readonly ResolvedNodeUpdateBatchEntry[];
+  }>,
+  backend: Backend,
+): Promise<readonly NodeRow[] | undefined> {
+  const updateResolvedNodesBatch = backend.updateResolvedNodesBatch;
+  if (updateResolvedNodesBatch === undefined) return;
+  const rows = await updateResolvedNodesBatch({ entries: args.entries });
+  if (rows.length === 0) return;
+  if (rows.length !== args.entries.length) {
+    throw new ConfigurationError(
+      "Resolved node update batch returned a partial result",
+      { operation: "updateResolvedNodesBatch" },
+    );
+  }
+  const items = rows.map((row) => {
+    const props = rowPropsToObject(row.props);
+    const validatedProps = validateNodeProps(args.schema, props, {
+      kind: row.kind,
+      operation: "update",
+      id: row.id,
+    });
+    if (!canonicalEqual(validatedProps, props)) {
+      throw new ValidationError(
+        `Resolved update would persist a non-canonical ${row.kind} row`,
+        {
+          entityType: "node",
+          kind: row.kind,
+          operation: "update",
+          id: row.id,
+          issues: [
+            {
+              path: "props",
+              message: "The complete row requires schema normalization",
+            },
+          ],
+        },
+      );
+    }
+    return {
+      kind: row.kind,
+      id: row.id,
+      props: validatedProps,
+      constraints: args.uniqueConstraints,
+      uniqueConstraints: args.uniqueConstraints,
+      schema: args.schema,
+    };
+  });
+  if (args.uniqueConstraints.length > 0) {
+    await validateResolvedNodeClaims(
+      createUniquenessContext(
+        ctx.graphId,
+        ctx.registry,
+        backend,
+        ctx.uniqueSidecarBatch,
+      ),
+      items,
+      [],
+    );
+    await hardDeleteClaimsByNodeIds(
+      uniquenessContext(ctx, backend),
+      items[0]?.kind ?? "",
+      items.map((item) => item.id),
+    );
+  }
+  await withNodeCreateClaimsBatch(ctx, items, backend, alreadyAppliedRowWrite);
+  await applyNodeInsertSyncFansBatch(ctx, items, backend);
+  return rows;
 }
 
 /**

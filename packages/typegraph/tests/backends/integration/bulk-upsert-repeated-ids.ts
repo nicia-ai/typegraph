@@ -563,6 +563,62 @@ export function registerBulkUpsertRepeatedIdIntegrationTests(
     });
 
     describe("with history capture", () => {
+      it("preserves recorded after-images for distinct resolved updates", async (ctx) => {
+        const store = await context.createHistoryStore(integrationTestGraph);
+        if (store.backend.capabilities.fulltext?.supported !== true) {
+          ctx.skip();
+        }
+        const initial = ["hist-batch-a", "hist-batch-b"] as const;
+        await store.nodes.Article.bulkUpsertById(
+          initial.map((id, index) => ({
+            id,
+            props: {
+              title: `Initial title ${index}`,
+              body: `Initial body ${index}`,
+              category: "science",
+              published: true,
+            },
+          })),
+        );
+        const updated = await store.nodes.Article.bulkUpsertById(
+          initial.map((id, index) => ({
+            id,
+            props: {
+              title: `Revised title ${index}`,
+              body: `Revised body ${index}`,
+              category: "science",
+              published: true,
+            },
+          })),
+        );
+
+        expect(updated.map((node) => node.meta.version)).toEqual([2, 2]);
+        for (const [index, id] of initial.entries()) {
+          expect(await readRecordedRevisions(store, "Article", id)).toEqual([
+            {
+              op: "create",
+              version: 1,
+              props: {
+                title: `Initial title ${index}`,
+                body: `Initial body ${index}`,
+                category: "science",
+                published: true,
+              },
+            },
+            {
+              op: "update",
+              version: 2,
+              props: {
+                title: `Revised title ${index}`,
+                body: `Revised body ${index}`,
+                category: "science",
+                published: true,
+              },
+            },
+          ]);
+        }
+      });
+
       it("records a repeated new id as one created revision holding the final state", async () => {
         const store = await context.createHistoryStore(integrationTestGraph);
 

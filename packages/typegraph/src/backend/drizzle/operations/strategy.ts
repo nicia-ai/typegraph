@@ -52,6 +52,7 @@ import type {
   InsertUniqueParams,
   ManagedNodeCreatePlan,
   PurgeEdgeClaimsParams,
+  ResolvedNodeUpdateBatchParams,
   RecordContributionMaterializationParams,
   SchemaWriteFenceParams,
   SqlDialect,
@@ -158,6 +159,7 @@ import {
   buildInsertNodesBatchWithSchemaFence,
   buildInsertNodeWithSchemaFence,
   buildReadAtomicNodeMutationPostimages,
+  buildResolvedNodeUpdateBatch,
   buildUpdateNode,
   buildUpdateNodeSet,
 } from "./nodes";
@@ -377,6 +379,10 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildUpdateNodeSet: (
     params: CompareAndSetNodeParams | UpdateNodeSetParams,
+    timestamp: string,
+  ) => SQL;
+  buildResolvedNodeUpdateBatch: (
+    params: ResolvedNodeUpdateBatchParams,
     timestamp: string,
   ) => SQL;
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
@@ -672,6 +678,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildGetNodes,
   buildUpdateNode,
   buildAtomicNodeResolvedUpdateBatch,
+  buildResolvedNodeUpdateBatch,
   buildAssertAtomicNodeMutationPostimages,
   buildAssertAtomicNodeProjectionEvidence,
   buildReadAtomicNodeMutationPostimages,
@@ -1106,6 +1113,9 @@ function createCommonOperationStrategy(
       timestamp: string,
     ): SQL {
       return buildUpdateNodeSet(tables, dialect, params, timestamp);
+    },
+    buildResolvedNodeUpdateBatch(params, timestamp): SQL {
+      return buildResolvedNodeUpdateBatch(tables, params, timestamp);
     },
     buildDeleteContributionMaterialization,
     buildInsertContributionMaterialization,

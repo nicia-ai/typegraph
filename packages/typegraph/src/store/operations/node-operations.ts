@@ -76,6 +76,7 @@ import {
 } from "../../backend/capabilities/resolve";
 import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
 import { deriveBackend } from "../../backend/derive-backend";
+import { resolvedNodeUpdateBatchFitsBindBudget } from "../../backend/resolved-node-update-batch";
 import {
   type EdgeRow as BackendEdgeRow,
   type GraphBackend,
@@ -3620,6 +3621,50 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
             [...distinctIds],
           )
         : undefined;
+      const canBatchResolvedUpdates =
+        resolvedRows !== undefined &&
+        resolvedNodeUpdateBatchFitsBindBudget(
+          entries.length,
+          target.capabilities.maxBindParameters,
+        ) &&
+        entries.every(
+          (entry) =>
+            !entry.clearDeleted &&
+            entry.input.validFrom === undefined &&
+            entry.input.validTo === undefined &&
+            entry.input.clearValidTo !== true,
+        );
+      if (canBatchResolvedUpdates) {
+        const resolvedEntries = entries.map((entry) => {
+          const existing = resolvedRows.get(entry.input.id);
+          if (existing === undefined || !isLiveNodeRow(existing)) {
+            throw new NodeNotFoundError(entry.input.kind, entry.input.id);
+          }
+          const props =
+            entry.replacementProps ??
+            resolveNodeUpdateProps(ctx, existing, entry.input.props)
+              .validatedProps;
+          return {
+            graphId: ctx.graphId,
+            kind: entry.input.kind,
+            id: entry.input.id,
+            props,
+            expectedVersion: existing.version,
+          };
+        });
+        const registration = getNodeRegistration(ctx.graph, first.input.kind);
+        const rows = await session.reviseResolvedNodes({
+          schema: registration.type.schema,
+          uniqueConstraints: registration.unique ?? [],
+          entries: resolvedEntries,
+        });
+        if (rows !== undefined) {
+          const byId = new Map(rows.map((row) => [row.id, row]));
+          return entries.map((entry) =>
+            rowToNode(requireDefined(byId.get(entry.input.id))),
+          );
+        }
+      }
       const nodes: Node[] = [];
       for (const entry of entries) {
         nodes.push(

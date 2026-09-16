@@ -78,6 +78,8 @@ const COUNTED_METHODS = [
   "upsertFulltextBatch",
   "upsertEmbedding",
   "upsertEmbeddingBatch",
+  "updateNode",
+  "updateResolvedNodesBatch",
 ] as const;
 
 /**
@@ -234,6 +236,90 @@ describe("bulkCreate side-effect batching", () => {
       expect(counts["upsertEmbeddingBatch"]).toBe(1);
       expect(counts["upsertEmbedding"]).toBe(0);
     });
+  });
+});
+
+describe("resolved bulk update batching", () => {
+  it("keeps history-tracked whole-row updates at a bounded write count", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(raw);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      const inputs = Array.from({ length: BATCH_SIZE }, (_, index) => ({
+        id: `history-doc-${index}`,
+        props: {
+          title: `before ${index}`,
+          body: `body ${index}`,
+          embedding: [index, 1, 2, 3],
+        },
+      }));
+      await store.nodes.Doc.bulkUpsertById(inputs);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      const updated = await store.nodes.Doc.bulkUpsertById(
+        inputs.map((input, index) => ({
+          ...input,
+          props: {
+            title: `after ${index}`,
+            body: `revised ${index}`,
+            embedding: [index, 4, 5, 6],
+          },
+        })),
+      );
+
+      expect(updated).toHaveLength(BATCH_SIZE);
+      expect(counts["updateResolvedNodesBatch"]).toBe(1);
+      expect(counts["updateNode"]).toBe(0);
+      expect(counts["upsertFulltextBatch"]).toBe(1);
+      expect(counts["upsertEmbeddingBatch"]).toBe(1);
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it("falls back before a resolved batch exceeds the advertised bind budget", async () => {
+    const { backend: raw } = createLocalSqliteBackend({
+      capabilities: { maxBindParameters: 100 },
+    });
+    try {
+      const { backend, counts } = withCallCounts(raw);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        revisionTracking: true,
+      });
+      const inputs = Array.from({ length: BATCH_SIZE }, (_, index) => ({
+        id: `budget-doc-${index}`,
+        props: {
+          title: `before ${index}`,
+          body: `body ${index}`,
+          embedding: [index, 1, 2, 3],
+        },
+      }));
+      await store.nodes.Doc.bulkUpsertById(inputs);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      await store.nodes.Doc.bulkUpsertById(
+        inputs.map((input, index) => ({
+          ...input,
+          props: {
+            title: `after ${index}`,
+            body: `revised ${index}`,
+            embedding: [index, 4, 5, 6],
+          },
+        })),
+      );
+
+      // The resolved statement costs 206 binds, so the one owner of the
+      // budget calculation retains the established per-row fallback.
+      expect(counts["updateResolvedNodesBatch"]).toBe(0);
+      expect(counts["updateNode"]).toBe(BATCH_SIZE);
+    } finally {
+      await raw.close();
+    }
   });
 });
 

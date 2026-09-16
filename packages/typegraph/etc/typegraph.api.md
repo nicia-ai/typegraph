@@ -3983,6 +3983,7 @@ export type GraphBackend = Readonly<{
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
+    updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
     compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
@@ -4401,7 +4402,7 @@ export function havingLt(aggregate: AggregateExpr, value: number): AggregateComp
 export function havingLte(aggregate: AggregateExpr, value: number): AggregateComparisonPredicate;
 
 // @public
-const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "lineage", "recordedTime", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
+const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "lineage", "recordedTime", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "updateResolvedNodesBatch", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
 
 // @public (undocumented)
 export type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
@@ -5977,7 +5978,7 @@ export type NodeCurrentReads<N extends NodeType, CN extends string = string> = P
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
 export type NodeGetOrCreateByConstraintOptions = Readonly<{
@@ -7391,6 +7392,20 @@ type ResolvedEmbeddingIndex = Readonly<{
 
 // @public
 type ResolveDepthAlias<DC, A extends string> = DC extends string ? DC : DC extends true ? `${A}_depth` : never;
+
+// @public
+export type ResolvedNodeUpdateBatchEntry = Readonly<{
+    graphId: string;
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+    expectedVersion: number;
+}>;
+
+// @public
+export type ResolvedNodeUpdateBatchParams = Readonly<{
+    entries: readonly ResolvedNodeUpdateBatchEntry[];
+}>;
 
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{

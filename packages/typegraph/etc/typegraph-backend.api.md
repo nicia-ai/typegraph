@@ -2628,6 +2628,7 @@ export type GraphBackend = Readonly<{
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
+    updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
     compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
@@ -3297,7 +3298,7 @@ export type NodeCreateCommandResult = Readonly<{
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -3680,6 +3681,20 @@ export function requireWriteFence(plan: WriteFencePlan, operation: string, requi
 
 // @public
 export function resolveBundle<const D extends CapabilityBundleDefinition>(backend: GraphBackend, definition: D): BundleVerdictOf<D>;
+
+// @public
+export type ResolvedNodeUpdateBatchEntry = Readonly<{
+    graphId: string;
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+    expectedVersion: number;
+}>;
+
+// @public
+export type ResolvedNodeUpdateBatchParams = Readonly<{
+    entries: readonly ResolvedNodeUpdateBatchEntry[];
+}>;
 
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
@@ -4616,6 +4631,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly bundle: "batchEntityWrite";
         readonly ceiling: 6;
     };
+    readonly updateResolvedNodesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 6;
+    };
     readonly upsertEmbedding: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
@@ -5089,7 +5110,7 @@ type WriteFenceTarget = Readonly<{
 
 // @public
 export const WS5B_SEED_BUNDLES: {
-    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet"];
+    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet", "updateResolvedNodesBatch"];
     readonly heterogeneousEndpointSetRead: readonly ["findEdgesByHeterogeneousEndpointSet"];
     readonly vectorOperations: readonly ["upsertEmbedding", "deleteEmbedding", "upsertEmbeddingBatch", "deleteEmbeddingBatch", "vectorSearch", "vectorStrategy", "createVectorIndex", "dropVectorIndex"];
     readonly hybridSearch: readonly ["hybridSearch"];
