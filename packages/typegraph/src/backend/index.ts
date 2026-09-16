@@ -99,6 +99,9 @@ export {
   contributionHealthVerdict,
   createClaimsVerdictThunk,
   type DeferredUnbundledMember,
+  ENDPOINT_SET_READ,
+  endpointSetReadMembers,
+  endpointSetReadVerdict,
   type ExtraMember,
   type ExtrasOf,
   type ExtraVerdict,
@@ -238,6 +241,17 @@ export {
   runAtomicTransportConformance,
 } from "./conformance/atomic-transport";
 export type {
+  EndpointSetReadConformanceFixture,
+  EndpointSetReadConformanceRefusal,
+  EndpointSetReadConformanceReport,
+  EndpointSetReadConformanceSuccess,
+  EndpointSetReadEquality,
+} from "./conformance/endpoint-set-read";
+export {
+  EndpointSetReadConformanceError,
+  runEndpointSetReadConformance,
+} from "./conformance/endpoint-set-read";
+export type {
   ExactRootRegistrationProvenanceFixture,
   ExactRootRegistrationProvenanceReport,
 } from "./conformance/exact-root-provenance";
@@ -260,11 +274,13 @@ export {
   type RepairRelationScope,
 } from "./repair-validity-windows";
 export type {
+  ContributionScope,
   StrategyTableContribution,
   TableContribution,
 } from "./table-contribution";
 export {
   BASE_CONTRIBUTION_OWNER,
+  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
   FULLTEXT_CONTRIBUTION_NAME,
 } from "./table-contribution";
 export type {

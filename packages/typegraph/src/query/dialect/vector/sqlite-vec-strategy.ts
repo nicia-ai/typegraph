@@ -204,6 +204,7 @@ export const sqliteVecStrategy: VectorStrategy = {
     // virtual table *is* the index — no separate CREATE INDEX is emitted.
     return [
       {
+        scope: "graph",
         logicalName: `${VECTOR_CONTRIBUTION_PREFIX}:${slot.nodeKind}.${slot.fieldPath}`,
         owner: "sqlite-vec",
         tableName: table,

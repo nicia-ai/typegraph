@@ -1048,9 +1048,17 @@ transactional set-update backend support as `updateWhere()`.
 #### `updateWhere(params)`
 
 Updates a set of current, live nodes in one transactional operation and returns
-the number of rows changed. A selector is mandatory: provide `where`, one or
-more independent `exists` relationship predicates, or the explicit
-`all: true` acknowledgement.
+the number of rows changed. A selector is mandatory: provide `candidates`,
+`where`, one or more independent `exists` relationship predicates, or the
+explicit `all: true` acknowledgement. `candidates` accepts a query created by
+the same Store (or transaction) that selects one concrete node kind; its root
+node ids are intersected with any other selectors in the same atomic write.
+Candidate queries must contain concrete predicate values and select rows
+directly. TypeGraph refuses `param()` references because `updateWhere()` has no
+binding argument, and refuses `groupBy()` / `having()` because replacing an
+aggregate projection with root node ids would change the query's grouping
+semantics. Queries created by `withCheckedReads()` are also refused: embedding
+one in a mutation would bypass the checked read's schema-version fence.
 
 ```typescript
 const result = await store.nodes.Person.updateWhere({
@@ -1067,6 +1075,17 @@ const result = await store.nodes.Person.updateWhere({
   ],
 });
 // { affectedCount: number }
+
+const candidates = store
+  .query()
+  .from("Person", "person")
+  .whereNode("person", (person) => person.age.gte(18))
+  .select((context) => context.person.id);
+
+await store.nodes.Person.updateWhere({
+  candidates,
+  patch: { active: true },
+});
 ```
 
 Each `exists` entry is evaluated independently and ANDed with the other

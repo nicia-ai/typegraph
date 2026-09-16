@@ -144,7 +144,7 @@ export type FulltextStrategy = Readonly<{
    * The tables this strategy owns, as Drizzle-free, already
    * authoritative `TableContribution`s (`logicalName`, `owner`,
    * resolved `tableName`, idempotent `createDdl` for the table **and
-   * its supporting indexes**, `runtimeEnsure`). A strategy never
+   * its supporting indexes**, `runtimeEnsure`, `scope`). A strategy never
    * constructs a Drizzle table itself; drizzle-kit visibility, when
    * applicable, is the schema barrel's responsibility (the default
    * Postgres strategy's `schema/postgres.ts` exports a matching
@@ -437,6 +437,7 @@ export const tsvectorStrategy: FulltextStrategy = {
     // this strategy-owned one.
     return [
       {
+        scope: "deployment",
         logicalName: FULLTEXT_CONTRIBUTION_NAME,
         owner: "tsvector",
         tableName: primaryTableName,
@@ -678,6 +679,7 @@ export const fts5Strategy: FulltextStrategy = {
     // can create it.
     return [
       {
+        scope: "deployment",
         logicalName: FULLTEXT_CONTRIBUTION_NAME,
         owner: "fts5",
         tableName: primaryTableName,

@@ -18,6 +18,7 @@ import {
 } from "../backend/branded";
 import { bindExtra, bindExtraIfReachable } from "../backend/capabilities/bind";
 import type {
+  ENDPOINT_SET_READ,
   RECORDED_REVISION_ORIGINS,
   STATEMENT_EXECUTION,
   UNIQUE_SIDECAR_BATCH,
@@ -41,6 +42,7 @@ import {
   type ClaimsVerdictThunk,
   contributionHealthVerdict,
   createClaimsVerdictThunk,
+  endpointSetReadVerdict,
   recordedRevisionOriginsVerdict,
   requireExtras,
   statementExecutionVerdict,
@@ -933,6 +935,10 @@ export type BatchReadBuilder<G extends GraphDef> = Readonly<{
 
 type TransactionReadMethods<G extends GraphDef> = Readonly<{
   query: () => InitialQueryBuilder<G, "open">;
+  describe: () => Promise<StoreDescription>;
+  validateStore: (
+    options: ValidateStoreOptions,
+  ) => Promise<StoreValidationPage>;
   batchOnce: <const Queries extends OneStatementBatchReads>(
     build: (read: BatchReadBuilder<G>) => Queries,
     options?: BatchOnceOptions,
@@ -1270,6 +1276,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * write and read actually executes through.
    */
   readonly #batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  readonly #endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
   readonly #uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   /** Root verdict minted once; transaction targets bind its member separately. */
   readonly #statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
@@ -1464,6 +1471,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       : asGraphWriteBackend(backend);
     this.#claimsVerdict = createClaimsVerdictThunk(this.#backend);
     this.#batchPointRead = batchPointReadVerdict(this.#backend);
+    this.#endpointSetRead = endpointSetReadVerdict(this.#backend);
     this.#uniqueSidecarBatch = uniqueSidecarBatchVerdict(this.#backend);
     this.#statementExecution = statementExecution;
     this.#contributionHealth = contributionHealthVerdict(this.#baseBackend);
@@ -2133,6 +2141,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#registry,
         this.#backend,
         this.#batchPointRead,
+        this.#endpointSetRead,
         this.#edgeOperations,
       );
     }
@@ -2480,11 +2489,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return validateStoreImpl(this.#analysisContext(), options);
   }
 
-  #analysisContext() {
+  #analysisContext(
+    backend: Pick<
+      GraphBackend,
+      "dialect" | "execute" | "getActiveSchema"
+    > = this.#baseBackend,
+  ) {
     return {
       graph: this.#graph,
       graphId: this.graphId,
-      backend: this.#baseBackend,
+      backend,
       schema: this.#sqlSchema(),
       introspect: () => this.introspect(),
     };
@@ -4457,6 +4471,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   ): TransactionReadMethods<G> {
     return {
       query: () => this.#createQueryForBackend(txBackend, undefined, attempt),
+      describe: () => describeStore(this.#analysisContext(txBackend)),
+      validateStore: (options) =>
+        validateStoreImpl(this.#analysisContext(txBackend), options),
       batchOnce: (build, options) =>
         this.#batchOnceForBackend(txBackend, attempt, build, options),
       neighbors: (source, options) => {
@@ -4548,6 +4565,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#registry,
       txBackend,
       this.#batchPointRead,
+      this.#endpointSetRead,
       txEdgeOperations,
     );
 

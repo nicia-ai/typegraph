@@ -14,7 +14,7 @@
  * disposition's code, a `fallback` row asserts the degradation, and a
  * per-extra row reads that extra's own `disposition` — never a bare
  * `fallback` string, so the kit cannot acquire a second vocabulary for the
- * same decision. Three of the six pilot bundles (`claims`,
+ * same decision. Three of the seven pilot bundles (`claims`,
  * `statementExecution`, `recordedRevisionOrigins`) are `gated`, so "bundle
  * absent" is not representable for them — the kit must not synthesize an
  * absent-bundle row for a gated bundle. Certification requires an explicit
@@ -67,6 +67,7 @@ export {
   type BundleBinding,
   claimsMembers,
   contributionHealthMembers,
+  endpointSetReadMembers,
   type PartialBundleBinding,
   recordedRevisionOriginsMembers,
   statementExecutionMembers,
@@ -85,6 +86,7 @@ export {
   CLAIMS,
   CONTRIBUTION_HEALTH,
   type DeferredUnbundledMember,
+  ENDPOINT_SET_READ,
   type GatedBundleDefinition,
   type GraduatedBundleDefinition,
   type OptionalGraphBackendMember,
@@ -132,6 +134,7 @@ export {
   type ClaimsVerdictThunk,
   contributionHealthVerdict,
   createClaimsVerdictThunk,
+  endpointSetReadVerdict,
   type ExtraMember,
   type ExtrasOf,
   type ExtraVerdict,

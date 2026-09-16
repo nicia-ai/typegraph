@@ -19,6 +19,7 @@ import {
   type CapabilityBundleExtra,
   CLAIMS,
   CONTRIBUTION_HEALTH,
+  ENDPOINT_SET_READ,
   type OptionalGraphBackendMember,
   RECORDED_REVISION_ORIGINS,
   STATEMENT_EXECUTION,
@@ -415,7 +416,7 @@ export function requireExtras<
 }
 
 // ---------------------------------------------------------------------------
-// The six named verdict accessors — GraphBackend-only, no exceptions (I15).
+// The seven named verdict accessors — GraphBackend-only, no exceptions (I15).
 // ---------------------------------------------------------------------------
 
 export function claimsVerdict(
@@ -434,6 +435,12 @@ export function batchPointReadVerdict(
   backend: GraphBackend,
 ): BundleVerdictOf<typeof BATCH_POINT_READ> {
   return resolveBundle(backend, BATCH_POINT_READ);
+}
+
+export function endpointSetReadVerdict(
+  backend: GraphBackend,
+): BundleVerdictOf<typeof ENDPOINT_SET_READ> {
+  return resolveBundle(backend, ENDPOINT_SET_READ);
 }
 
 export function statementExecutionVerdict(

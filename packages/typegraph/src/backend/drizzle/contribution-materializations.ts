@@ -54,7 +54,10 @@ import {
 } from "../capabilities/write-fence";
 import { deriveTransactionSessionBackend } from "../derive-backend";
 import { formatPostgresTimestamp, nowIso } from "../row-mappers";
-import type { StrategyTableContribution } from "../table-contribution";
+import {
+  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+  type StrategyTableContribution,
+} from "../table-contribution";
 import {
   type ContributionDiagnostic,
   type ContributionDiagnosticState,
@@ -381,11 +384,21 @@ function identityOf(
   contribution: StrategyTableContribution,
 ): ContributionMaterializationIdentity {
   return {
-    graphId,
+    graphId:
+      contribution.scope === "deployment" ?
+        DEPLOYMENT_CONTRIBUTION_GRAPH_ID
+      : graphId,
     logicalName: contribution.logicalName,
     owner: contribution.owner,
     tableName: contribution.tableName,
   };
+}
+
+function markerGraphId(
+  graphId: string,
+  contribution: StrategyTableContribution,
+): string {
+  return identityOf(graphId, contribution).graphId;
 }
 
 /**
@@ -942,9 +955,30 @@ export function createContributionMaterializer(
     );
   }
 
+  /** Read graph-local and deployment-wide markers explicitly. */
+  async function getMarkerRowsForGraph(
+    graphId: string,
+    includeDeployment = false,
+  ): Promise<readonly ContributionMaterializationRow[]> {
+    const graphRows = await deps.getMarkers(graphId);
+    if (!includeDeployment || graphId === DEPLOYMENT_CONTRIBUTION_GRAPH_ID) {
+      return graphRows;
+    }
+    const deploymentRows = await deps.getMarkers(
+      DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+    );
+    return [
+      ...graphRows,
+      ...deploymentRows.filter(
+        (row) => row.graphId === DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+      ),
+    ];
+  }
+
   type ResolvedContribution = Readonly<{
     contribution: StrategyTableContribution;
     key: string;
+    markerGraphId: string;
     signature: string;
     cacheRevision: number;
   }>;
@@ -970,11 +1004,13 @@ export function createContributionMaterializer(
   ): Promise<readonly ResolvedContribution[]> {
     return Promise.all(
       contributions.map(async (contribution) => {
-        const key = contributionKey(graphId, contribution);
+        const markerId = markerGraphId(graphId, contribution);
+        const key = contributionKey(markerId, contribution);
         const cacheRevision = currentCacheRevision(key);
         return {
           contribution,
           key,
+          markerGraphId: markerId,
           signature: await resolveContributionSignature(key, contribution),
           cacheRevision,
         };
@@ -1099,11 +1135,10 @@ export function createContributionMaterializer(
   }
 
   function indexMarkerRows(
-    graphId: string,
     rows: readonly ContributionMaterializationRow[],
   ): ReadonlyMap<string, ContributionMaterializationRow> {
     return new Map(
-      rows.map((row) => [contributionKey(graphId, row), row] as const),
+      rows.map((row) => [contributionKey(row.graphId, row), row] as const),
     );
   }
 
@@ -1112,7 +1147,10 @@ export function createContributionMaterializer(
    * is its own verdict so boot can create it while hot-path asserts translate
    * it to `StoreNotInitializedError`. All other database faults propagate.
    */
-  async function readMarkerRows(graphId: string): Promise<
+  async function readMarkerRows(
+    graphId: string,
+    includeDeployment = false,
+  ): Promise<
     | Readonly<{
         kind: "rows";
         rows: ReadonlyMap<string, ContributionMaterializationRow>;
@@ -1122,7 +1160,9 @@ export function createContributionMaterializer(
     try {
       return {
         kind: "rows",
-        rows: indexMarkerRows(graphId, await deps.getMarkers(graphId)),
+        rows: indexMarkerRows(
+          await getMarkerRowsForGraph(graphId, includeDeployment),
+        ),
       };
     } catch (error) {
       if (!isMissingTableError(error)) throw error;
@@ -1150,7 +1190,142 @@ export function createContributionMaterializer(
       onDrift?: "throw" | "skip";
       bypassCache?: boolean;
     }>,
+    physicalOnly = false,
   ): Promise<void> {
+    if (
+      !physicalOnly &&
+      graphId === DEPLOYMENT_CONTRIBUTION_GRAPH_ID
+    ) {
+      throw new ConfigurationError(
+        `Graph id "${graphId}" is reserved for deployment contribution markers.`,
+        { code: "RESERVED_GRAPH_ID" },
+      );
+    }
+    // Deployment-scoped contributions have one physical marker shared by all
+    // graphs, plus a graph-local activation marker. Materialize the physical
+    // artifact under the deployment key first, then activate this graph with
+    // a marker write that performs no DDL. This keeps DML-only graph opens
+    // independent of CREATE privileges while retaining graph-local evidence.
+    if (!physicalOnly) {
+      const deploymentContributions = contributions.filter(
+        (contribution) => contribution.scope === "deployment",
+      );
+      const graphContributions = contributions.filter(
+        (contribution) => contribution.scope !== "deployment",
+      );
+      if (deploymentContributions.length > 0) {
+        const deploymentReady =
+          options?.force !== true && options?.bypassCache !== true &&
+          await Promise.all(
+            deploymentContributions.map(async (contribution) => {
+              const signature = await resolveContributionSignature(
+                contributionKey(graphId, contribution),
+                contribution,
+              );
+              return (
+                initializedSignatures.get(
+                  contributionKey(
+                    DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+                    contribution,
+                  ),
+                ) === signature &&
+                initializedSignatures.get(
+                  contributionKey(graphId, contribution),
+                ) === signature
+              );
+            }),
+          ).then((states) => states.every(Boolean));
+        if (deploymentReady) {
+          if (graphContributions.length === 0) return;
+          await ensureContributions(graphId, graphContributions, options, true);
+          return;
+        }
+        // Adopt the pre-scope marker written by older TypeGraph releases.
+        // Its successful timestamp is already a physical-storage attestation;
+        // copy only that durable fact to the deployment key. A stale legacy
+        // signature is copied too, so the normal drift guard refuses instead
+        // of blindly CREATE-ing over an unknown physical shape.
+        const legacyRead = await readMarkerRows(graphId, true);
+        if (legacyRead.kind === "rows") {
+          for (const contribution of deploymentContributions) {
+            const legacy = legacyRead.rows.get(
+              contributionKey(graphId, contribution),
+            );
+            const deployment = legacyRead.rows.get(
+              contributionKey(
+                DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+                contribution,
+              ),
+            );
+            if (
+              legacy?.materializedAt !== undefined &&
+              deployment === undefined
+            ) {
+              await deps.recordMarker({
+                ...identityOf(
+                  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+                  contribution,
+                ),
+                signature: legacy.signature,
+                attemptedAt: legacy.lastAttemptedAt,
+                materializedAt: legacy.materializedAt,
+                error: legacy.lastError,
+              });
+            }
+          }
+        }
+        await ensureContributions(
+          DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+          deploymentContributions,
+          options,
+          true,
+        );
+        const physicalRows = indexMarkerRows(
+          await getMarkerRowsForGraph(graphId, true),
+        );
+        const attemptedAt = nowIso();
+        for (const contribution of deploymentContributions) {
+          const physicalKey = contributionKey(
+            DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+            contribution,
+          );
+          const key = contributionKey(graphId, contribution);
+          const signature = await resolveContributionSignature(key, contribution);
+          const physical = physicalRows.get(physicalKey);
+          if (evaluateContributionState(physical, signature) !== "initialized") {
+            continue;
+          }
+          const logical = physicalRows.get(key);
+          if (evaluateContributionState(logical, signature) === "initialized") {
+            cacheInitializedSignature({
+              contribution,
+              key,
+              markerGraphId: graphId,
+              signature,
+              cacheRevision: currentCacheRevision(key),
+            });
+            continue;
+          }
+          await deps.recordMarker({
+            ...identityOf(graphId, { ...contribution, scope: "graph" }),
+            signature,
+            attemptedAt,
+            materializedAt: attemptedAt,
+            error: undefined,
+          });
+          cacheInitializedSignature({
+            contribution,
+            key,
+            markerGraphId: graphId,
+            signature,
+            cacheRevision: currentCacheRevision(key),
+          });
+        }
+      }
+      if (graphContributions.length === 0) return;
+      await ensureContributions(graphId, graphContributions, options, true);
+      return;
+    }
     const force = options?.force === true;
     const bypassCache = options?.bypassCache === true;
     const entries = await resolveContributionEntries(graphId, contributions);
@@ -1200,8 +1375,7 @@ export function createContributionMaterializer(
     // refresh every pending contribution in one query rather than one query
     // per slot.
     const existingRows = indexMarkerRows(
-      graphId,
-      await deps.getMarkers(graphId),
+      await getMarkerRowsForGraph(graphId),
     );
     for (const entry of pending) {
       const outcome = await materializeOne(
@@ -1246,7 +1420,10 @@ export function createContributionMaterializer(
     );
     if (pending.length === 0) return;
 
-    const read = await readMarkerRows(graphId);
+    const read = await readMarkerRows(
+      graphId,
+      contributions.some((contribution) => contribution.scope === "deployment"),
+    );
     if (read.kind === "missing-table") {
       const first = pending[0];
       if (first === undefined) return;
@@ -1255,7 +1432,18 @@ export function createContributionMaterializer(
 
     for (const entry of pending) {
       const { key, signature } = entry;
-      const state = evaluateContributionState(read.rows.get(key), signature);
+      const physicalState = evaluateContributionState(
+        read.rows.get(key),
+        signature,
+      );
+      const state =
+        entry.contribution.scope === "deployment" &&
+        physicalState === "initialized" ?
+          evaluateContributionState(
+            read.rows.get(contributionKey(graphId, entry.contribution)),
+            signature,
+          )
+        : physicalState;
       if (state !== "initialized") {
         throw contributionRefusalError(graphId, entry, state);
       }
@@ -1264,10 +1452,22 @@ export function createContributionMaterializer(
   }
 
   async function ensureRuntimeContributions(graphId: string): Promise<void> {
+    if (graphId === DEPLOYMENT_CONTRIBUTION_GRAPH_ID) {
+      throw new ConfigurationError(
+        `Graph id "${graphId}" is reserved for deployment contribution markers.`,
+        { code: "RESERVED_GRAPH_ID" },
+      );
+    }
     await ensureContributions(graphId, runtimeContributions());
   }
 
   async function assertInitialized(graphId: string): Promise<void> {
+    if (graphId === DEPLOYMENT_CONTRIBUTION_GRAPH_ID) {
+      throw new ConfigurationError(
+        `Graph id "${graphId}" is reserved for deployment contribution markers.`,
+        { code: "RESERVED_GRAPH_ID" },
+      );
+    }
     await assertContributions(graphId, runtimeContributions());
   }
 
@@ -1412,17 +1612,30 @@ export function createContributionMaterializer(
       vectorSlots: readonly VectorSlot[];
     }>,
   ): Promise<readonly AtomicContributionEvidence[]> {
-    return Promise.all(
-      nodeProjectionContributions(graphId, projections).map(
-        async (contribution) => {
-          const key = contributionKey(graphId, contribution);
-          return {
-            ...identityOf(graphId, contribution),
-            signature: await resolveContributionSignature(key, contribution),
-          };
-        },
-      ),
-    );
+    const evidence: AtomicContributionEvidence[] = [];
+    for (const contribution of nodeProjectionContributions(
+      graphId,
+      projections,
+    )) {
+      const key = contributionKey(graphId, contribution);
+      const signature = await resolveContributionSignature(key, contribution);
+      if (contribution.scope === "deployment") {
+        evidence.push({
+          ...identityOf(DEPLOYMENT_CONTRIBUTION_GRAPH_ID, contribution),
+          signature,
+        });
+      }
+      evidence.push({
+        ...identityOf(
+          graphId,
+          contribution.scope === "deployment" ?
+            { ...contribution, scope: "graph" }
+          : contribution,
+        ),
+        signature,
+      });
+    }
+    return evidence;
   }
 
   async function diagnoseNodeProjectionEvidence(
@@ -1433,12 +1646,16 @@ export function createContributionMaterializer(
     }>,
   ): Promise<void> {
     const contributions = nodeProjectionContributions(graphId, projections);
-    const keys = contributions.map((contribution) =>
+    const keys = contributions.flatMap((contribution) => [
       contributionKey(graphId, contribution),
-    );
+      contributionKey(markerGraphId(graphId, contribution), contribution),
+    ]);
     invalidateContributionCache(keys, false);
     const entries = await resolveContributionEntries(graphId, contributions);
-    const read = await readMarkerRows(graphId);
+    const read = await readMarkerRows(
+      graphId,
+      contributions.some((contribution) => contribution.scope === "deployment"),
+    );
     if (read.kind === "missing-table") {
       invalidateContributionCache(keys, true);
       const first = entries[0];
@@ -1456,15 +1673,41 @@ export function createContributionMaterializer(
         }>
       | undefined;
     for (const entry of entries) {
-      const state = evaluateContributionState(
+      const physicalState = evaluateContributionState(
         read.rows.get(entry.key),
         entry.signature,
       );
+      const state =
+        entry.contribution.scope === "deployment" &&
+        physicalState === "initialized" ?
+          evaluateContributionState(
+            read.rows.get(contributionKey(graphId, entry.contribution)),
+            entry.signature,
+          )
+        : physicalState;
       if (state === "initialized") {
         cacheInitializedSignature(entry);
+        if (entry.contribution.scope === "deployment") {
+          cacheInitializedSignature({
+            ...entry,
+            key: contributionKey(graphId, entry.contribution),
+            markerGraphId: graphId,
+            cacheRevision: currentCacheRevision(
+              contributionKey(graphId, entry.contribution),
+            ),
+          });
+        }
         continue;
       }
-      invalidateContributionCache([entry.key], true);
+      invalidateContributionCache(
+        [
+          entry.key,
+          ...(entry.contribution.scope === "deployment" ?
+            [contributionKey(graphId, entry.contribution)]
+          : []),
+        ],
+        true,
+      );
       firstRefusal ??= { entry, state };
     }
     if (firstRefusal !== undefined) {
@@ -1535,19 +1778,39 @@ export function createContributionMaterializer(
     for (const [id, targets] of targetsByGraph) {
       // A never-bootstrapped marker table means no contribution is marked,
       // which the per-target verdict already models as an empty row set.
-      const read = await readMarkerRows(id);
+      const read = await readMarkerRows(
+        id,
+        targets.some(
+          (target) => target.contribution.scope === "deployment",
+        ),
+      );
       const rows =
         read.kind === "rows" ?
           read.rows
         : new Map<string, ContributionMaterializationRow>();
       for (const { contribution, projection, kind, fieldPath } of targets) {
         const key = contributionKey(id, contribution);
-        const row = rows.get(key);
-        const state = diagnoseContribution(
-          row,
-          await resolveContributionSignature(key, contribution),
-          await tableExists(contribution.tableName),
+        const signature = await resolveContributionSignature(key, contribution);
+        const physicalKey = contributionKey(
+          markerGraphId(id, contribution),
+          contribution,
         );
+        const physicalRow = rows.get(physicalKey);
+        const row =
+          contribution.scope === "deployment" ? physicalRow : rows.get(key);
+        const physicalExists = await tableExists(contribution.tableName);
+        const physicalState = diagnoseContribution(
+          row,
+          signature,
+          physicalExists,
+        );
+        const state =
+          physicalState === undefined && contribution.scope === "deployment" &&
+          physicalExists &&
+          evaluateContributionState(rows.get(key), signature) !==
+            "initialized" ?
+            "missing-marker"
+          : physicalState;
         if (state === undefined) continue;
         diagnosed.push({
           graphId: id,
@@ -1900,7 +2163,9 @@ export function createContributionMaterializer(
       // whether a rebuild that may not recreate the storage owes a refusal,
       // and a catalog probe cannot run inside the fence against a table that
       // may not exist without aborting the transaction on PostgreSQL.
-      const markers = indexMarkerRows(graphId, await deps.getMarkers(graphId));
+      const markers = indexMarkerRows(
+        await getMarkerRowsForGraph(graphId, true),
+      );
       const sharedTable = deps.fulltextTableName;
       const sharedTableExisted = await deps.tableExists(sharedTable);
 
@@ -2024,8 +2289,8 @@ export function createContributionMaterializer(
         // answers every query with nothing.
         const stats = await repopulate(tx);
 
-        const now = nowIso();
         for (const { contribution, signature } of stamps) {
+          const now = nowIso();
           await record({
             ...identityOf(graphId, contribution),
             signature,
@@ -2033,6 +2298,17 @@ export function createContributionMaterializer(
             materializedAt: now,
             error: undefined,
           });
+          if (contribution.scope === "deployment") {
+            // Rebuild stamps the shared physical attestation and refreshes
+            // this graph's logical activation separately.
+            await record({
+              ...identityOf(graphId, { ...contribution, scope: "graph" }),
+              signature,
+              attemptedAt: now,
+              materializedAt: now,
+              error: undefined,
+            });
+          }
         }
         return {
           rebuilt: stamps.map(({ contribution }) => contribution.tableName),

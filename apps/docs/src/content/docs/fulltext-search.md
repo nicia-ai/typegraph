@@ -168,8 +168,9 @@ Also useful for:
 `store.search.rebuildFulltext()` fixes *content*. It cannot fix storage
 that is missing, unattested, or provisioned at the wrong shape — and it
 throws `StoreNotInitializedError` when it is, because the hot-path gate
-refuses fulltext writes until the durable contribution marker attests the
-table. To find out which situation you are in without writing anything:
+refuses fulltext writes until both the deployment marker attests the shared
+table and the graph-local activation marker admits this graph. To find out
+which situation you are in without writing anything:
 
 ```typescript
 const health = await store.probeContributions();
@@ -221,8 +222,10 @@ No extensions required. The built-in `tsvector` type and GIN indexes
 work on every managed Postgres (RDS, Supabase, Neon, Cloud SQL, Aiven).
 
 The fulltext table's DDL ships in `bootstrapTables()` and the migration
-SQL; `createStoreWithSchema` is what then records the durable
-materialization marker that fulltext operations check (see above):
+SQL. The first privileged `createStoreWithSchema` boot records one
+deployment-scoped physical marker for that shared table plus a graph-local
+activation marker. Later graphs reuse the physical attestation and need only
+the DML activation write; fulltext operations require both markers (see above):
 
 ```typescript
 import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
@@ -796,10 +799,10 @@ Capabilities (`phraseQueries`, `prefixQueries`, `highlighting`,
 ### `StoreNotInitializedError: fulltext storage … is not initialized`
 
 The database was never booted through `createStoreWithSchema`, so the
-durable fulltext-materialization marker is missing (or it is `stale` —
-the strategy/DDL changed since it was recorded, or `failed` — the last
-boot-time attempt errored). Bare `createStore()` deliberately does **not**
-self-heal this on the hot path.
+deployment-scoped physical marker or this graph's activation marker is missing
+(or it is `stale` — the strategy/DDL changed since it was recorded, or
+`failed` — the last boot-time attempt errored). Bare `createStore()`
+deliberately does **not** self-heal this on the hot path.
 
 Fix: call `createStoreWithSchema(graph, backend)` once at application
 startup — outside request handlers and adopted transactions — before any

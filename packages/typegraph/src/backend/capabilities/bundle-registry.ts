@@ -26,8 +26,8 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 15 of the 98 optional
- * `GraphBackend` members are bundled here; the other 83 are classified in
+ * This is the PILOT of a larger sweep (WS5b): 16 of the 98 optional
+ * `GraphBackend` members are bundled here; the other 82 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
  */
@@ -196,7 +196,7 @@ export type CapabilityBundleDefinition =
   | GraduatedBundleDefinition<string, OptionalGraphBackendMember>;
 
 // ---------------------------------------------------------------------------
-// The six pilot bundles — measured, per §Baselines, against this tree.
+// The seven pilot bundles — measured, per §Baselines, against this tree.
 // ---------------------------------------------------------------------------
 
 /**
@@ -488,6 +488,46 @@ export const BATCH_POINT_READ = {
 } as const satisfies CapabilityBundleDefinition;
 
 /**
+ * Set-oriented endpoint reads are a separate family from point hydration.
+ * A backend may implement `getNodes`/`getEdges` while deliberately omitting
+ * this operation: the collection API promises one set-oriented read per
+ * bind-budget chunk and therefore refuses instead of silently issuing an
+ * unbounded singleton loop.
+ */
+export const ENDPOINT_SET_READ = {
+  id: "endpointSetRead",
+  kind: "graduated",
+  crossCheck: "none",
+  portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH",
+  extras: [
+    {
+      id: "findEdgesByEndpointSet",
+      members: ["findEdgesByEndpointSet"],
+      disposition: {
+        kind: "refuse",
+        code: "ENDPOINT_SET_READ_UNSUPPORTED",
+      },
+    },
+  ],
+  operations: [
+    {
+      operation: "bulk endpoint read",
+      disposition: {
+        kind: "refuse",
+        code: "ENDPOINT_SET_READ_UNSUPPORTED",
+      },
+      requires: ["findEdgesByEndpointSet"],
+      sites: [
+        {
+          file: "store/collections/edge-collection.ts",
+          member: "findEdgesByEndpointSet",
+        },
+      ],
+    },
+  ],
+} as const satisfies CapabilityBundleDefinition;
+
+/**
  * Core `executeStatement`. `IDENTITY_REQUIRES_STATEMENT_EXECUTION` and
  * `IDENTITY_REQUIRES_ATOMIC_BACKEND` are the existing `details.code` values
  * at `identity/sql-target.ts:101` and `store/store.ts:921`; the remaining
@@ -763,7 +803,7 @@ export const RECORDED_REVISION_ORIGINS = {
   ],
 } as const satisfies CapabilityBundleDefinition;
 
-/** The pilot registry: six bundles, 15 members, 30 operation rows. */
+/** The pilot registry: seven bundles, 16 members, 31 operation rows. */
 export const CAPABILITY_BUNDLES = [
   CLAIMS,
   UNIQUE_SIDECAR_BATCH,
@@ -771,12 +811,13 @@ export const CAPABILITY_BUNDLES = [
   STATEMENT_EXECUTION,
   CONTRIBUTION_HEALTH,
   RECORDED_REVISION_ORIGINS,
+  ENDPOINT_SET_READ,
 ] as const;
 
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 83, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 82, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -787,10 +828,9 @@ export type ReasonedUnbundledMember = Readonly<{
   accesses: number;
 }>;
 
-/** The 15 WS5b bundle ids, retained from the round-4 sweep table. */
+/** The 14 remaining WS5b bundle ids, retained from the round-4 sweep table. */
 export type Ws5bBundleId =
   | "batchEntityWrite"
-  | "endpointSetRead"
   | "heterogeneousEndpointSetRead"
   | "vectorOperations"
   | "hybridSearch"
@@ -818,7 +858,7 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 32 `reasoned` + 50 `deferred` members
+ * The 32 `reasoned` + 49 `deferred` members
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
  * access; resolving the write-fence spelling through the fence plan then
@@ -846,7 +886,7 @@ export type UnbundledOptionalMember =
  * (`profile.provisioning.recordedTime` in `create-sql-backend.ts` and both
  * dialects' transaction-scoped threading) is off `EngineProvisioning`, a
  * type the receiver test's arm (b) does not recognize by name — still 93,
- * 15 + 83 = 98 members total.
+ * 16 + 82 = 98 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   adoptBaseSchema: {
@@ -1194,12 +1234,6 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     bundle: "temporaryStatements",
     ceiling: 3,
   },
-  findEdgesByEndpointSet: {
-    kind: "deferred",
-    workstream: "WS5b",
-    bundle: "endpointSetRead",
-    ceiling: 1,
-  },
   findEdgesByHeterogeneousEndpointSet: {
     kind: "deferred",
     workstream: "WS5b",
@@ -1359,7 +1393,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
 } as const satisfies Record<string, UnbundledOptionalMember>;
 
 /**
- * The appendix's 15 WS5b bundles, as (bundle id → member names) — written
+ * The appendix's 14 remaining WS5b bundles, as (bundle id → member names) — written
  * INDEPENDENTLY of `UNBUNDLED_OPTIONAL_MEMBERS`'s `deferred` entries, so the
  * totality proof below is not a tautology: grouping the `deferred` entries
  * by `bundle` must reproduce this table exactly.
@@ -1379,7 +1413,6 @@ export const WS5B_SEED_BUNDLES = {
     "compareAndSetNode",
     "updateNodeSet",
   ],
-  endpointSetRead: ["findEdgesByEndpointSet"],
   heterogeneousEndpointSetRead: ["findEdgesByHeterogeneousEndpointSet"],
   vectorOperations: [
     "upsertEmbedding",
@@ -1493,7 +1526,7 @@ type _totality = Assert<
   >
 >;
 
-// (ii) Pairwise disjointness, across the partition and across the six bundles.
+// (ii) Pairwise disjointness, across the partition and across the seven bundles.
 type _partitionDisjoint1 = Assert<
   Disjoint<BundledMember, ReasonedMember | DeferredMember>
 >;
@@ -1507,6 +1540,7 @@ type _bundleDisjoint1 = Assert<
     | (typeof STATEMENT_EXECUTION)["core"][number]
     | (typeof CONTRIBUTION_HEALTH)["extras"][number]["members"][number]
     | (typeof RECORDED_REVISION_ORIGINS)["core"][number]
+    | (typeof ENDPOINT_SET_READ)["extras"][number]["members"][number]
   >
 >;
 type _bundleDisjoint2 = Assert<
@@ -1516,6 +1550,7 @@ type _bundleDisjoint2 = Assert<
     | (typeof STATEMENT_EXECUTION)["core"][number]
     | (typeof CONTRIBUTION_HEALTH)["extras"][number]["members"][number]
     | (typeof RECORDED_REVISION_ORIGINS)["core"][number]
+    | (typeof ENDPOINT_SET_READ)["extras"][number]["members"][number]
   >
 >;
 type _bundleDisjoint3 = Assert<
@@ -1524,6 +1559,7 @@ type _bundleDisjoint3 = Assert<
     | (typeof STATEMENT_EXECUTION)["core"][number]
     | (typeof CONTRIBUTION_HEALTH)["extras"][number]["members"][number]
     | (typeof RECORDED_REVISION_ORIGINS)["core"][number]
+    | (typeof ENDPOINT_SET_READ)["extras"][number]["members"][number]
   >
 >;
 type _bundleDisjoint4 = Assert<
@@ -1531,12 +1567,14 @@ type _bundleDisjoint4 = Assert<
     (typeof STATEMENT_EXECUTION)["core"][number],
     | (typeof CONTRIBUTION_HEALTH)["extras"][number]["members"][number]
     | (typeof RECORDED_REVISION_ORIGINS)["core"][number]
+    | (typeof ENDPOINT_SET_READ)["extras"][number]["members"][number]
   >
 >;
 type _bundleDisjoint5 = Assert<
   Disjoint<
     (typeof CONTRIBUTION_HEALTH)["extras"][number]["members"][number],
-    (typeof RECORDED_REVISION_ORIGINS)["core"][number]
+    | (typeof RECORDED_REVISION_ORIGINS)["core"][number]
+    | (typeof ENDPOINT_SET_READ)["extras"][number]["members"][number]
   >
 >;
 

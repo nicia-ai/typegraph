@@ -150,7 +150,7 @@ export class StoreAnalysisCursorStaleError extends TypeGraphError {
 type AnalysisContext<G extends GraphDef> = Readonly<{
   graph: G;
   graphId: string;
-  backend: GraphBackend;
+  backend: Pick<GraphBackend, "dialect" | "execute" | "getActiveSchema">;
   schema: SqlSchema;
   introspect: () => SchemaIntrospection;
 }>;

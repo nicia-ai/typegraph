@@ -584,14 +584,12 @@ export function createSqliteTables(
   );
 
   /**
-   * Per-deployment durable marker that a strategy-owned table
-   * contribution (#129 — the FTS5 virtual table today) has been
-   * materialized against this database (#135). Replaces the in-memory
-   * per-backend `fulltextEnsured` latch with a queryable database fact.
-   * Keyed on `(graph_id, logical_name, owner, table_name)`; `signature`
-   * stays out of the key so same-identity drift is a loud error, not a
-   * silent re-materialize. Same COALESCE-on-failure preservation rule
-   * as `indexMaterializations`.
+   * Durable markers for strategy-owned table contributions (#129). A
+   * deployment-scoped physical contribution uses the reserved deployment
+   * graph id, while a graph row records logical activation. Keyed on
+   * `(graph_id, logical_name, owner, table_name)`; `signature` stays out of
+   * the key so same-identity drift is a loud error, not a silent
+   * re-materialize.
    */
   const contributionMaterializations = sqliteTable(
     n.contributionMaterializations,

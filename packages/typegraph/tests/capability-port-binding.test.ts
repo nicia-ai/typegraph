@@ -11,6 +11,7 @@ import {
   BATCH_POINT_READ,
   CLAIMS,
   CONTRIBUTION_HEALTH,
+  ENDPOINT_SET_READ,
   RECORDED_REVISION_ORIGINS,
   STATEMENT_EXECUTION,
   UNIQUE_SIDECAR_BATCH,
@@ -75,7 +76,7 @@ function assertNoFunctions(value: unknown, path: string): void {
 }
 
 describe("capability verdicts never carry function-valued fields (T22)", () => {
-  it("deep-walks all six resolved verdicts against a real SQLite backend", () => {
+  it("deep-walks all seven resolved verdicts against a real SQLite backend", () => {
     const backend = createTestBackend();
     const verdicts = [
       resolveBundle(backend, CLAIMS),
@@ -84,8 +85,9 @@ describe("capability verdicts never carry function-valued fields (T22)", () => {
       resolveBundle(backend, STATEMENT_EXECUTION),
       resolveBundle(backend, CONTRIBUTION_HEALTH),
       resolveBundle(backend, RECORDED_REVISION_ORIGINS),
+      resolveBundle(backend, ENDPOINT_SET_READ),
     ];
-    expect(verdicts).toHaveLength(6);
+    expect(verdicts).toHaveLength(7);
     for (const [index, verdict] of verdicts.entries()) {
       assertNoFunctions(verdict, `verdicts[${index}]`);
     }

@@ -17,6 +17,7 @@ import {
   type CapabilityBundleId,
   CLAIMS,
   CONTRIBUTION_HEALTH,
+  ENDPOINT_SET_READ,
   type GatedBundleDefinition,
   type OptionalGraphBackendMember,
   RECORDED_REVISION_ORIGINS,
@@ -266,6 +267,23 @@ export function batchPointReadMembers(
     BATCH_POINT_READ.id,
   );
   return bound as unknown as PartialBundleBinding<BatchPointReadExtraMember>;
+}
+
+type EndpointSetReadExtraMember = ExtraMember<
+  typeof ENDPOINT_SET_READ,
+  keyof ExtrasOf<typeof ENDPOINT_SET_READ>
+>;
+
+export function endpointSetReadMembers(
+  port: Readonly<Partial<Pick<GraphBackend, EndpointSetReadExtraMember>>>,
+  verdict: BundleVerdictOf<typeof ENDPOINT_SET_READ>,
+): PartialBundleBinding<EndpointSetReadExtraMember> {
+  const bound = bindPresentExtraVerdicts(
+    port,
+    verdict.extras,
+    ENDPOINT_SET_READ.id,
+  );
+  return bound as unknown as PartialBundleBinding<EndpointSetReadExtraMember>;
 }
 
 type ContributionHealthExtraMember = ExtraMember<

@@ -145,6 +145,22 @@ export type BatchResults<Queries extends readonly BatchableQuery<unknown>[]> = {
   : never;
 };
 
+/** Provenance and root identity for a set-update candidate source. */
+export type NodeCandidateSelection = Readonly<{
+  graphId: string;
+  executionTarget: object | undefined;
+  kind: string;
+  idColumn: string;
+  temporalMode: "current" | "asOf" | "includeEnded" | "includeTombstones";
+  recordedAsOf: string | undefined;
+}>;
+
+/** A Store-created query that can provide candidate node ids to a set update. */
+export type NodeCandidateQuery = Readonly<{
+  compileNodeCandidateIds: (readInstant?: string) => CompiledSelectSql;
+  toNodeCandidateSelection: () => NodeCandidateSelection;
+}>;
+
 // ============================================================
 // Edge Target Type Helpers
 // ============================================================

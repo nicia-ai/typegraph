@@ -134,9 +134,11 @@ export {
 
 export type { RecursiveTraversalVerdict } from "./backend/capabilities/recursive-traversal";
 export type {
+  ContributionScope,
   StrategyTableContribution,
   TableContribution,
 } from "./backend/table-contribution";
+export { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "./backend/table-contribution";
 export type {
   AdapterBackend,
   AdapterBackendTransactions,
@@ -784,6 +786,8 @@ export type {
   JsonPointerSegmentsFor,
   NodeAccessor,
   NodeAlias,
+  NodeCandidateQuery,
+  NodeCandidateSelection,
   NodePropsFor,
   OneStatementBatchableQuery,
   OneStatementBatchResults,

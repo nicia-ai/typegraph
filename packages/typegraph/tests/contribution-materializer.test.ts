@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ContributionUnavailableError,
+  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
   fts5Strategy,
   pgvectorStrategy,
   StoreNotInitializedError,
@@ -34,6 +35,7 @@ import {
 } from "../src/query/dialect/vector-strategy";
 
 const GRAPH_ID = "contrib-mat-unit";
+const SECOND_GRAPH_ID = "contrib-mat-second-graph";
 const FULLTEXT_TABLE = "typegraph_node_fulltext";
 
 // SQLite's missing-relation message — what `isMissingTableError` keys on
@@ -388,7 +390,7 @@ describe("atomic node projection evidence diagnosis", () => {
     await expect(
       materializer.assertNodeInsertProjections(GRAPH_ID, projections),
     ).resolves.toBeUndefined();
-    expect(spies.getMarkers).toHaveBeenCalledOnce();
+    expect(spies.getMarkers).toHaveBeenCalledTimes(2);
   });
 
   it("rejects an older in-flight positive cache write during diagnosis", async () => {
@@ -447,7 +449,7 @@ describe("atomic node projection evidence diagnosis", () => {
       name: "StoreNotInitializedError",
       details: { reason: "stale" },
     });
-    expect(spies.getMarkers).toHaveBeenCalledTimes(3);
+    expect(spies.getMarkers).toHaveBeenCalledTimes(5);
 
     diagnosticRead.resolve([...markers.values()]);
     await expect(diagnosis).rejects.toMatchObject({
@@ -458,6 +460,21 @@ describe("atomic node projection evidence diagnosis", () => {
 });
 
 describe("#149 ensureRuntimeContributions is read-only when already materialized", () => {
+  it("activates a second graph without repeating deployment DDL", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const first = createMockMaterializer(markers);
+    await first.materializer.ensureRuntimeContributions(GRAPH_ID);
+
+    const second = createMockMaterializer(markers);
+    await second.materializer.ensureRuntimeContributions(SECOND_GRAPH_ID);
+
+    expect(second.spies.execDdl).not.toHaveBeenCalled();
+    expect(second.spies.ensureMarkerTable).not.toHaveBeenCalled();
+    expect(
+      [...markers.values()].filter((row) => row.graphId === SECOND_GRAPH_ID),
+    ).toHaveLength(1);
+  });
+
   it("a fresh materializer over an already-materialized graph runs zero DDL", async () => {
     const markers = new Map<string, ContributionMaterializationRow>();
 
@@ -467,7 +484,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
     await cold.materializer.ensureRuntimeContributions(GRAPH_ID);
     expect(cold.spies.ensureMarkerTable).toHaveBeenCalledTimes(1);
     expect(cold.spies.execDdl).toHaveBeenCalled();
-    expect(markers.size).toBe(1);
+    expect(markers.size).toBe(2);
 
     // Warm reopen with a FRESH materializer instance — the per-request
     // "new backend, empty per-instance cache" case the issue is about.
@@ -558,7 +575,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
     expect(ensureMarkerTable).toHaveBeenCalledTimes(1);
     expect(execDdl).toHaveBeenCalled();
     expect(recordMarker).toHaveBeenCalled();
-    expect(markers.size).toBe(1);
+    expect(markers.size).toBe(2);
   });
 
   it("falls through to DDL when the marker table is missing behind a DrizzleQueryError (Postgres)", async () => {
@@ -618,7 +635,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
     ).resolves.toBeUndefined();
     expect(ensureMarkerTable).toHaveBeenCalledTimes(1);
     expect(execDdl).toHaveBeenCalled();
-    expect(markers.size).toBe(1);
+    expect(markers.size).toBe(2);
   });
 
   it("propagates a non-missing-table read fault without attempting DDL", async () => {
@@ -1387,7 +1404,7 @@ describe("verifyContributions audits currently declared contributions", () => {
       .filter((contribution) => contribution.runtimeEnsure);
     for (const contribution of contributions) {
       recordMarkerInto(markers, {
-        graphId: GRAPH_ID,
+        graphId: DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
         logicalName: contribution.logicalName,
         owner: contribution.owner,
         tableName: contribution.tableName,

@@ -49,6 +49,7 @@ import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
 import type {
   BatchableQuery,
   NodeAccessor,
+  NodeCandidateQuery,
   OneStatementBatchReads,
   OneStatementBatchResults,
 } from "../query/builder/types";
@@ -73,6 +74,11 @@ import type {
   EdgeCollectionLookup,
   RequiredEdgeCollectionLookup,
 } from "./store";
+import type {
+  StoreDescription,
+  StoreValidationPage,
+  ValidateStoreOptions,
+} from "./store-analysis";
 import type {
   SubgraphOptions,
   SubgraphProject,
@@ -977,13 +983,19 @@ export type NodeCollection<
   ) => Promise<boolean>;
 
   /**
-   * Updates every current node selected by the supplied predicates in one
-   * set-based write. Relationship clauses are independent EXISTS predicates
-   * and are ANDed with each other and with `where`.
+   * Updates every current node selected by the supplied selectors in one
+   * set-based write. A same-store candidate query can provide correlated
+   * cross-kind selection; relationship clauses are independent EXISTS
+   * predicates and are ANDed with each other and with `where`.
    */
   updateWhere: (
     params: Readonly<{
       patch: Partial<z.input<N["schema"]>>;
+      /**
+       * A Store-created query selecting candidate nodes of this collection's
+       * kind. The query is intersected with `where`/`exists` when supplied.
+       */
+      candidates?: NodeCandidateQuery;
       where?: (
         accessor: string extends N["kind"] ? DynamicNodeAccessor
         : NodeAccessor<N>,
@@ -2271,6 +2283,12 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
 export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
   Readonly<{
     query: () => InitialQueryBuilder<G, "open">;
+    /** Describes current population through this transaction's pinned session. */
+    describe: () => Promise<StoreDescription>;
+    /** Validates current records through this transaction's pinned session. */
+    validateStore: (
+      options: ValidateStoreOptions,
+    ) => Promise<StoreValidationPage>;
     batchOnce: <const Queries extends OneStatementBatchReads>(
       build: (read: BatchReadBuilder<G>) => Queries,
       options?: BatchOnceOptions,

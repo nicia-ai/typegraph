@@ -96,6 +96,7 @@ const PINNED_REFUSAL_TABLE: readonly (readonly [string, string, string])[] = [
     "resolved node write",
     "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED",
   ],
+  ["endpointSetRead", "bulk endpoint read", "ENDPOINT_SET_READ_UNSUPPORTED"],
   [
     "statementExecution",
     "identity statement execution",

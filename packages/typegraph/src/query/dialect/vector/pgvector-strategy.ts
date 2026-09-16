@@ -226,6 +226,7 @@ export const pgvectorStrategy: VectorStrategy = {
 
     return [
       {
+        scope: "graph",
         logicalName: `${VECTOR_CONTRIBUTION_PREFIX}:${slot.nodeKind}.${slot.fieldPath}`,
         owner: "pgvector",
         tableName: table,

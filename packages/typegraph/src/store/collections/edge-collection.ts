@@ -5,7 +5,11 @@
  */
 import { type z } from "zod";
 
-import { type BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
+import { endpointSetReadMembers } from "../../backend/capabilities/bind";
+import {
+  type BATCH_POINT_READ,
+  type ENDPOINT_SET_READ,
+} from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type EdgeEndpointSide,
@@ -96,6 +100,8 @@ export type EdgeCollectionConfig = Readonly<{
   backend: GraphBackend | TransactionBackend;
   /** Threaded `batchPointRead` verdict — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  /** Threaded endpoint-set read verdict, resolved against the graph backend. */
+  endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
   defaultTemporalMode: TemporalMode;
   rowToEdge: (row: EdgeRow) => Edge;
   /** See EdgeOperations.maybeRefreshStatisticsAfterBulk. */
@@ -503,13 +509,18 @@ export function createEdgeCollection<
     if (references.length === 0) return [];
 
     const method = side === "from" ? "bulkFindFrom" : "bulkFindTo";
-    const readEndpointSet = backend.findEdgesByEndpointSet;
-    if (readEndpointSet === undefined) {
+    const endpointReadBinding = endpointSetReadMembers(
+      backend,
+      config.endpointSetRead,
+    );
+    const endpointRead = endpointReadBinding.findEdgesByEndpointSet;
+    if (endpointRead === undefined) {
       throw new ConfigurationError(
         `store.edges.${kind}.${method}() requires a backend that can read a set of ` +
           `endpoints with set-oriented statements, and this backend does not implement ` +
           `findEdgesByEndpointSet.`,
         {
+          code: "ENDPOINT_SET_READ_UNSUPPORTED",
           backend: backend.dialect,
           capability: "findEdgesByEndpointSet",
           kind,
@@ -547,7 +558,7 @@ export function createEdgeCollection<
     for (const [endpointKind, endpointIds] of groupEndpointIdsByKind(
       references,
     )) {
-      const rows = await readEndpointSet({
+      const rows = await endpointRead({
         graphId,
         kind,
         side,

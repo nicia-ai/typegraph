@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../backend/table-contribution";
 import { assertWhereFieldDeclared } from "../constraints";
 import { ConfigurationError } from "../errors/index";
 import { type GraphExtension } from "../graph-extension/extension-types";
@@ -563,6 +564,12 @@ export function defineGraph<
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
 ): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
+  if (config.id === DEPLOYMENT_CONTRIBUTION_GRAPH_ID) {
+    throw new ConfigurationError(
+      `Graph id "${config.id}" is reserved for deployment contribution markers.`,
+      { code: "RESERVED_GRAPH_ID" },
+    );
+  }
   return defineGraphUnchecked(config);
 }
 
