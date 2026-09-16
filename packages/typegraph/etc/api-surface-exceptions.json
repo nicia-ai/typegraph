@@ -1,1 +1,10 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildResolvedNodeUpdateBatch",
+    "kind": "required-member-added",
+    "reason": "CommonOperationStrategy values are internal implementation objects created by the library's dialect factories; custom backends implement GraphBackend rather than this strategy type.",
+    "issue": "#718"
+  }
+]
