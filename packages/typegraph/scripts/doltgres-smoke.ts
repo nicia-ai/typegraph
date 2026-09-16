@@ -118,14 +118,16 @@
 //     `USING hnsw`; neither real index type is implemented, so an ANN index is not what
 //     you asked for even where the DDL would succeed.
 //
-// Two more gaps turn up only once the walk runs, both unfiled upstream at the time of
-// writing, and both pinned by the walk as SKIP rather than PASS:
+// Two more gaps turn up only once the walk runs. Both are filed upstream from this
+// branch and both are pinned by the walk as SKIP rather than PASS:
 //
-//   - `ORDER BY ... ASC NULLS LAST` is rejected with "at or near \"last\": syntax error:
-//     unimplemented". `DESC NULLS LAST` and bare `NULLS FIRST` both parse; only the
-//     explicit-`ASC` form is broken. TypeGraph emits it for every ascending order, so no
-//     ordered query runs.
-//   - SQLSTATE 23502 omits the `table`, `column` and `constraint` protocol fields. The
+//   - doltgresql#3388 — `ORDER BY ... ASC NULLS LAST` (and `DESC NULLS FIRST`) is
+//     rejected with "at or near \"last\": syntax error: unimplemented". The explicit
+//     spelling of PostgreSQL's DEFAULT null ordering is the one that fails; the
+//     non-default forms (`ASC NULLS FIRST`, `DESC NULLS LAST`) parse. TypeGraph emits
+//     `ASC NULLS LAST` for every ascending order, so no ordered query runs.
+//   - doltgresql#3389 — the wire `ErrorResponse` omits the `table`, `column`, `schema`
+//     and `constraint` protocol fields (for every mapped error, not only 23502). The
 //     guarded delete fires correctly — it is the raw NOT NULL sentinel that refuses the
 //     write — but `isNotNullColumnViolation` keys on those fields, so it cannot classify
 //     the refusal and the raw engine error surfaces instead of the typed connected-edge
@@ -590,7 +592,9 @@ async function probeFenceRowRace(): Promise<void> {
       const secondResult = await Promise.race([
         second.query<{ generation: string }>(upsert),
         new Promise<undefined>((resolve) =>
-          setTimeout(() => { resolve(undefined); }, 1500),
+          setTimeout(() => {
+            resolve(undefined);
+          }, 1500),
         ),
       ]);
       if (secondResult !== undefined) {
@@ -605,10 +609,7 @@ async function probeFenceRowRace(): Promise<void> {
       });
       return;
     }
-    await Promise.allSettled([
-      first.query(`COMMIT`),
-      second.query(`COMMIT`),
-    ]);
+    await Promise.allSettled([first.query(`COMMIT`), second.query(`COMMIT`)]);
     const final = await first.query<{ generation: string }>(
       `SELECT "generation" FROM "probe_race" WHERE "key" = 'k'`,
     );
@@ -1052,9 +1053,9 @@ async function runSmoke(pool: Pool, branchPool: Pool): Promise<void> {
     },
     (detail) =>
       detail.includes('at or near "last"') ?
-        "blocked: Doltgres rejects `ORDER BY ... ASC NULLS LAST` (explicit ASC + NULLS LAST) " +
-        "with a syntax error; DESC NULLS LAST and bare NULLS FIRST both parse, so only the " +
-        "ASC form is missing. Every ordered TypeGraph query emits it."
+        "blocked (doltgresql#3388): Doltgres rejects the explicit spelling of PostgreSQL's " +
+        "default null ordering (`ASC NULLS LAST`, and `DESC NULLS FIRST`); the non-default " +
+        "forms parse. Every ascending TypeGraph order emits `ASC NULLS LAST`."
       : undefined,
   );
 
@@ -1134,10 +1135,11 @@ async function runSmoke(pool: Pool, branchPool: Pool): Promise<void> {
     },
     (detail) =>
       detail.includes("is non-nullable but attempted to set a value of null") ?
-        "blocked: Doltgres emits SQLSTATE 23502 for TypeGraph's guarded-delete NOT NULL " +
-        "sentinel but omits the `table`/`column`/`constraint` protocol fields, so " +
-        "isNotNullColumnViolation cannot classify it and the raw error surfaces instead of " +
-        "the connected-edge refusal. The guard itself fired; only the diagnosis is lost."
+        "blocked (doltgresql#3389): Doltgres emits SQLSTATE 23502 for TypeGraph's " +
+        "guarded-delete NOT NULL sentinel but omits the `table`/`column`/`schema` protocol " +
+        "fields, so isNotNullColumnViolation cannot classify it and the raw error surfaces " +
+        "instead of the connected-edge refusal. The guard itself fired; only the diagnosis " +
+        "is lost."
       : undefined,
   );
 
