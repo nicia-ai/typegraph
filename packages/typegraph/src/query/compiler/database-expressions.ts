@@ -191,15 +191,13 @@ function compileNode(
           "Array membership requires a known element type",
         );
       assertPortableArrayMembershipElementType(elementType);
-      const compileArrayMembership =
-        context.dialect.jsonArrayContainsExpression;
-      if (compileArrayMembership === undefined) {
+      if (context.dialect.jsonArrayContainsExpression === undefined) {
         throw new ConfigurationError(
           "The active dialect adapter does not support the jsonArrayContainsExpression capability.",
           { capability: "jsonArrayContainsExpression" },
         );
       }
-      return compileArrayMembership(
+      return context.dialect.jsonArrayContainsExpression(
         compile(node.array),
         compile(node.element),
         elementType,

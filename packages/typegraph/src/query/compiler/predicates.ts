@@ -923,10 +923,13 @@ function compileTupleComparisonPredicate(
   const values = expr.values.map(
     (value) => sql`${convertValueForSql(value.value, dialect)}`,
   );
-  const rowValueComparison = dialect.rowValueComparison;
-  if (rowValueComparison === undefined)
+  if (dialect.rowValueComparison === undefined)
     return compileTupleComparisonFallback(expr.op, fields, values);
-  return rowValueComparison(expr.op === "gt" ? ">" : "<", fields, values);
+  return dialect.rowValueComparison(
+    expr.op === "gt" ? ">" : "<",
+    fields,
+    values,
+  );
 }
 
 /** Preserves lexicographic cursor semantics for adapters without row values. */

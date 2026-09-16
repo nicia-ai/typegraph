@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ConfigurationError } from "../src/errors";
-import type { FieldRef, OrderSpec } from "../src/query/ast";
+import type { FieldRef, OrderSpec, ValueType } from "../src/query/ast";
 import { resolveSystemOrderField } from "../src/query/builder/order-by-field";
 import { compileDatabaseExpression } from "../src/query/compiler/database-expressions";
 import {
@@ -12,9 +12,10 @@ import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
 import { type CursorData } from "../src/query/cursor";
 import { postgresDialect } from "../src/query/dialect/postgres";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
+import type { DialectAdapter } from "../src/query/dialect/types";
 import { buildCursorPredicate } from "../src/query/execution/pagination";
 import { createFieldExpression, expr } from "../src/query/expressions";
-import { sql } from "../src/query/sql-fragment";
+import { sql, type SqlFragment } from "../src/query/sql-fragment";
 import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 
 const SCOPE = Symbol("array and cursor expression test");
@@ -74,6 +75,42 @@ function withoutRowValueComparison() {
   return dialect;
 }
 
+type ReceiverSensitiveDialect = DialectAdapter &
+  Readonly<{ arrayCalls: number; tupleCalls: number }>;
+
+function receiverSensitiveDialect(): ReceiverSensitiveDialect {
+  const adapter = {
+    ...sqliteDialect,
+    arrayCalls: 0,
+    jsonArrayContainsExpression(
+      this: { arrayCalls: number },
+      column: SqlFragment,
+      value: SqlFragment,
+      valueType: ValueType,
+    ) {
+      this.arrayCalls += 1;
+      const compileArrayMembership = sqliteDialect.jsonArrayContainsExpression;
+      if (compileArrayMembership === undefined)
+        throw new Error("Bundled SQLite dialect lacks array membership");
+      return compileArrayMembership(column, value, valueType);
+    },
+    rowValueComparison(
+      this: { tupleCalls: number },
+      operator: ">" | "<",
+      left: readonly SqlFragment[],
+      right: readonly SqlFragment[],
+    ) {
+      this.tupleCalls += 1;
+      const compileRowValues = sqliteDialect.rowValueComparison;
+      if (compileRowValues === undefined)
+        throw new Error("Bundled SQLite dialect lacks row-value comparison");
+      return compileRowValues(operator, left, right);
+    },
+    tupleCalls: 0,
+  };
+  return adapter as unknown as ReceiverSensitiveDialect;
+}
+
 function orderedFields(
   options: Readonly<{
     direction?: "asc" | "desc";
@@ -127,6 +164,26 @@ describe("expression array membership", () => {
     expect(() => compileDatabaseExpression(expression, { dialect })).toThrow(
       /jsonArrayContainsExpression/u,
     );
+  });
+
+  it("keeps optional adapter hooks bound to their adapter", () => {
+    const dialect = receiverSensitiveDialect();
+    const expression = expr.arrayContains(
+      createFieldExpression(ARRAY_FIELD, SCOPE, true),
+      createFieldExpression(CANDIDATE_FIELD, SCOPE, false),
+    );
+    const predicate = buildCursorPredicate(
+      CURSOR,
+      orderedFields(),
+      "forward",
+      "item",
+    );
+
+    compileDatabaseExpression(expression, { dialect });
+    compilePredicateExpression(predicate.expression, context(dialect));
+
+    expect(dialect.arrayCalls).toBe(1);
+    expect(dialect.tupleCalls).toBe(1);
   });
 });
 
