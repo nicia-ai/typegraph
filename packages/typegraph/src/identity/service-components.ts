@@ -96,6 +96,22 @@ export class UnionFind {
   }
 
   components(): ReadonlyMap<string, readonly PlainNodeRef[]> {
+    const distinct = this.distinctComponents();
+    const byMember = new Map<string, readonly PlainNodeRef[]>();
+    for (const group of distinct.values()) {
+      for (const member of group) byMember.set(refKey(member), group);
+    }
+    return byMember;
+  }
+
+  /**
+   * Returns each connected component once, keyed by its union-find root.
+   *
+   * Consumers that only need the classes (rather than looking one up by every
+   * member) must use this representation. Expanding a class once per seed is
+   * needlessly quadratic when many seeds belong to one large component.
+   */
+  distinctComponents(): ReadonlyMap<string, readonly PlainNodeRef[]> {
     const groups = new Map<string, PlainNodeRef[]>();
     for (const [key, ref] of this.#refs) {
       const root = this.#find(key);
@@ -103,18 +119,43 @@ export class UnionFind {
       group.push(ref);
       groups.set(root, group);
     }
-    const byMember = new Map<string, readonly PlainNodeRef[]>();
-    for (const group of groups.values()) {
+    const byRoot = new Map<string, readonly PlainNodeRef[]>();
+    for (const [root, group] of groups) {
       const sorted = group.toSorted((left, right) =>
         compareReferences(left, right),
       );
-      for (const member of sorted) byMember.set(refKey(member), sorted);
+      byRoot.set(root, sorted);
     }
-    return byMember;
+    return byRoot;
   }
 }
 
 export function buildComponents(
+  structuralNodes: readonly PlainNodeRef[],
+  assertions: readonly Pick<
+    IdentityAssertionStorageRow,
+    "rel" | "a_kind" | "a_id" | "b_kind" | "b_id"
+  >[],
+  sameIdAcrossKinds: "fold" | "ignore",
+): ReadonlyMap<string, readonly PlainNodeRef[]> {
+  const distinct = buildDistinctComponents(
+    structuralNodes,
+    assertions,
+    sameIdAcrossKinds,
+  );
+  const byMember = new Map<string, readonly PlainNodeRef[]>();
+  for (const group of distinct.values()) {
+    for (const member of group) byMember.set(refKey(member), group);
+  }
+  return byMember;
+}
+
+/**
+ * Builds connected components without expanding each component for every
+ * member. This is the preferred form for maintenance and write paths that
+ * need to scan distinct classes.
+ */
+export function buildDistinctComponents(
   structuralNodes: readonly PlainNodeRef[],
   assertions: readonly Pick<
     IdentityAssertionStorageRow,
@@ -144,7 +185,7 @@ export function buildComponents(
       { kind: assertion.b_kind, id: assertion.b_id },
     );
   }
-  return unionFind.components();
+  return unionFind.distinctComponents();
 }
 
 /**

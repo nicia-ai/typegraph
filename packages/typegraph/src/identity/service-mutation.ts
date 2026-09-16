@@ -35,6 +35,7 @@ import {
 } from "./separation";
 import {
   buildComponents,
+  buildDistinctComponents,
   classHasDisjointKinds,
   componentFor,
   loadLiveReferences,
@@ -53,6 +54,7 @@ import {
   compareReferences,
   containsRef,
   loadAssertionsTouching,
+  loadCurrentStructuralClassComponents,
   loadCurrentStructuralClasses,
   loadSpanningDifferentAssertion,
   MAX_ASSERTION_INSERT_CHUNK_SIZE,
@@ -960,7 +962,7 @@ export async function replaceSeparationForReferences(
   references: readonly PlainNodeRef[],
 ): Promise<void> {
   if (references.length === 0) return;
-  const classes = await loadCurrentStructuralClasses(
+  const classes = await loadCurrentStructuralClassComponents(
     target,
     schema,
     graphId,
@@ -1050,16 +1052,14 @@ export async function replaceAffectedClosure(
 ): Promise<void> {
   if (references.length === 0) return;
   const affectedByKey = new Map<string, PlainNodeRef>();
-  const classes = await loadCurrentStructuralClasses(
+  const classes = await loadCurrentStructuralClassComponents(
     target,
     schema,
     graphId,
     references,
   );
-  for (const ref of references) {
-    for (const member of requireDefined(classes.get(refKey(ref)))) {
-      affectedByKey.set(refKey(member), member);
-    }
+  for (const component of classes.values()) {
+    for (const member of component) affectedByKey.set(refKey(member), member);
   }
   const affected = [...affectedByKey.values()];
   const structuralNodes = await loadLiveReferences(
@@ -1095,7 +1095,7 @@ export async function replaceAffectedClosure(
       `,
     );
   }
-  const components = buildComponents(
+  const components = buildDistinctComponents(
     structuralNodes,
     assertions,
     sameIdAcrossKinds,

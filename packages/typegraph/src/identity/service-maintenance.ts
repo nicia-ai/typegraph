@@ -48,7 +48,7 @@ import type { Backend, RawClosureClassRow } from "./service-read";
 import {
   clampValidTo,
   loadAssertionsTouching,
-  loadCurrentStructuralClasses,
+  loadCurrentStructuralClassComponents,
   lockIdentityGraph,
   refKey,
 } from "./service-read";
@@ -221,7 +221,7 @@ async function loadAffectedIdentityClasses<G extends GraphDef>(
   target: Backend,
   seeds: readonly PlainNodeRef[],
 ): Promise<AffectedIdentityClasses> {
-  const classes = await loadCurrentStructuralClasses(
+  const classes = await loadCurrentStructuralClassComponents(
     target,
     ctx.schema,
     ctx.graphId,
