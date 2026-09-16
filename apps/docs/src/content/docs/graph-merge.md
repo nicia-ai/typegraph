@@ -309,6 +309,11 @@ identity rather than the currently active one. The planner stages the candidate
 against that resulting graph and returns the same resulting-schema merge
 artifact accepted by `withEvolvedTransaction()`.
 
+Candidate resolution still includes the committed target as an accepted source.
+Existing unique matches and property conflicts are therefore visible in the
+reviewed plan before the evolution transaction begins, rather than surfacing as
+late write-time failures.
+
 ```typescript
 const evolutionPlan = await target.planEvolution(extension);
 const writeSet = {

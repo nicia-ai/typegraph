@@ -339,6 +339,91 @@ export function registerGraphMergePlanIntegrationTests(
       ).toMatchObject({ label: "Accepted candidate" });
     });
 
+    it("resolves evolved candidates against committed nodes before applying", async () => {
+      const backend = context.getBackend();
+      const [target] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      await target.nodes.Person.create(
+        { name: "Accepted", email: "shared@example.test" },
+        { id: "accepted" },
+      );
+      const evolutionPlan = await target.planEvolution(
+        defineGraphExtension({
+          nodes: {
+            Tag: { properties: { label: { type: "string" } } },
+          },
+        }),
+      );
+      const mergePlan = unwrap(
+        await planCandidateWriteSetForEvolution({
+          target,
+          evolutionPlan,
+          makeBackend: () => context.createIsolatedBackend(),
+          writeSet: {
+            formatVersion: 1,
+            sourceId: "committed-person-candidate",
+            target: captureCandidateWriteSetTargetForEvolution(
+              target,
+              evolutionPlan,
+            ),
+            nodes: [
+              {
+                kind: "Person",
+                id: "incoming-person",
+                properties: {
+                  name: "Incoming",
+                  email: "shared@example.test",
+                },
+                validFrom: "2026-01-01T00:00:00.000Z",
+              },
+            ],
+            edges: [],
+          },
+          options: {
+            resolve: {
+              Person: {
+                similarity: { kind: "custom", score: () => 1 },
+                threshold: 1,
+              },
+            },
+          },
+        }),
+      );
+      expect(mergePlan.review.conflicts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "Person",
+            property: "name",
+            resolution: "Accepted",
+          }),
+        ]),
+      );
+      expect(
+        mergePlan.review.resolutions.some(
+          (resolution) => resolution.canonicalId === "accepted",
+        ),
+      ).toBe(true);
+      if (backend.adoptSchemaWriteTransaction === undefined) return;
+
+      const outcome = await backend.transactionWithNative(
+        async (_txBackend, nativeTransaction) =>
+          target.withEvolvedTransaction(
+            nativeTransaction,
+            evolutionPlan,
+            (tx) => applyMergePlanInTransaction(target, tx, mergePlan),
+          ),
+      );
+      expect(outcome.result.merged.nodes).toBe(1);
+      expect(
+        await target.nodes.Person.getById(asNodeId("incoming-person")),
+      ).toBeUndefined();
+      expect(
+        await target.nodes.Person.getById(asNodeId("accepted")),
+      ).toMatchObject({ name: "Accepted", email: "shared@example.test" });
+    });
+
     it("refuses candidate planning when the evolution baseline becomes stale", async () => {
       const target = await context.createStore(graph, {
         revisionTracking: true,
@@ -375,14 +460,9 @@ export function registerGraphMergePlanIntegrationTests(
           const isolated = await context.createIsolatedBackend();
           if (!advanced) {
             advanced = true;
-            await target.evolve(
-              defineGraphExtension({
-                nodes: {
-                  Category: {
-                    properties: { name: { type: "string", optional: true } },
-                  },
-                },
-              }),
+            await target.nodes.Person.create(
+              { name: "Concurrent", email: "concurrent@example.test" },
+              { id: "concurrent-person" },
             );
           }
           return isolated;
@@ -393,7 +473,7 @@ export function registerGraphMergePlanIntegrationTests(
       if (!isErr(planned)) throw new Error("Expected stale planning refusal.");
       expect(planned.error).toBeInstanceOf(MergePlanningStaleError);
       expect(advanced).toBe(true);
-      expect(await target.nodes.Person.count()).toBe(0);
+      expect(await target.nodes.Person.count()).toBe(1);
     });
 
     it("refuses an evolved merge when the durable target revision changes after planning", async () => {

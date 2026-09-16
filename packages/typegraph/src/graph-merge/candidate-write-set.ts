@@ -11,7 +11,11 @@ import { computeSchemaComponent } from "./base-version";
 import { CandidateWriteSetError, MergeError } from "./errors";
 import { evolutionPlanningTarget } from "./evolution-target";
 import { ingestionBranch } from "./ingestion-branch";
-import { planMergeForEvolution, planMergeIncremental } from "./merge";
+import {
+  captureMergePlanTargetFence,
+  planMergeIncremental,
+  planMergeIncrementalForEvolution,
+} from "./merge";
 import type { MergePlanArtifact } from "./plan-schema";
 import type { Result } from "./result";
 import { err, isErr } from "./result";
@@ -280,8 +284,9 @@ export async function planCandidateWriteSet<G extends GraphDef>(
  * evolution will produce.
  *
  * Candidate data is staged in an isolated working copy of the resulting graph,
- * then resolved through {@link planMergeForEvolution}. The returned ordinary
- * merge artifact carries the resulting schema fence, so
+ * then resolved against accepted target sources through the evolution-aware
+ * incremental planner. The returned ordinary merge artifact carries the
+ * resulting schema fence, so
  * `withEvolvedTransaction()` and `applyMergePlanInTransaction()` can commit
  * schema and accepted candidate writes in one caller transaction and revision.
  */
@@ -299,12 +304,14 @@ export async function planCandidateWriteSetForEvolution<G extends GraphDef>(
   const writeSet = parsed.data;
   let resultingTarget: Store<G>;
   let expectedTarget: CandidateWriteSetTarget;
+  let planningFence: Awaited<ReturnType<typeof captureMergePlanTargetFence>>;
   try {
     resultingTarget = evolutionPlanningTarget(args.target, args.evolutionPlan);
     expectedTarget = candidateWriteSetTargetForEvolution(
       resultingTarget,
       args.evolutionPlan,
     );
+    planningFence = await captureMergePlanTargetFence(args.target);
   } catch (error) {
     return err(
       error instanceof MergeError ? error : (
@@ -369,11 +376,12 @@ export async function planCandidateWriteSetForEvolution<G extends GraphDef>(
         ),
       );
     }
-    return await planMergeForEvolution(
+    return await planMergeIncrementalForEvolution(
       args.target,
       args.evolutionPlan,
       [candidate],
       args.options,
+      planningFence,
     );
   } catch (error) {
     return err(
