@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("33 reasoned entries sum to 96 accesses; 49 deferred entries sum to 218", () => {
+  it("33 reasoned entries sum to 96 accesses; 49 deferred entries sum to 223", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -156,8 +156,9 @@ describe("capability bundle totality (T9)", () => {
     // Adopted evolution hands the identity DDL factory into the transaction
     // and inspects its required storage on that session: 94 -> 96.
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(96);
-    // Adopted vector provisioning adds its root capability check and fenced
-    // session provisioning selection: 217 -> 219.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(218);
+    // Compiled projection/relation templates add four raw-statement reuse
+    // sites (row and scalar terminals), while import adds one heterogeneous
+    // endpoint-set prefetch: 218 -> 223.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(223);
   });
 });

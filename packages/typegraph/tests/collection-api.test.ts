@@ -16,6 +16,7 @@ import {
 } from "../src";
 import {
   deriveBackend,
+  type ExactBackendOverlay,
   projectBackendWithout,
 } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/sqlite";
@@ -66,6 +67,41 @@ const testGraph = defineGraph({
     },
   },
 });
+
+function observeNodeSetPlans(
+  baseBackend: GraphBackend,
+  plans: string[],
+): GraphBackend {
+  function wrapTarget<T extends GraphBackend | TransactionBackend>(
+    target: T,
+  ): T {
+    return deriveBackend<T, Partial<T>>(target, {
+      updateNodeSet(params) {
+        plans.push(
+          params.candidateIds.chunks
+            .filter((chunk) => chunk.kind === "text")
+            .map((chunk) => chunk.value)
+            .join(""),
+        );
+        return requireDefined(target.updateNodeSet)(params);
+      },
+    } as ExactBackendOverlay<T, Partial<T>>);
+  }
+
+  return deriveBackend(baseBackend, {
+    updateNodeSet(params) {
+      plans.push(
+        params.candidateIds.chunks
+          .filter((chunk) => chunk.kind === "text")
+          .map((chunk) => chunk.value)
+          .join(""),
+      );
+      return requireDefined(baseBackend.updateNodeSet)(params);
+    },
+    transaction: (fn, options) =>
+      baseBackend.transaction((target) => fn(wrapTarget(target)), options),
+  } satisfies ExactBackendOverlay<GraphBackend, Partial<GraphBackend>>);
+}
 
 // ============================================================
 // Node Collection Tests (SQLite)
@@ -261,6 +297,47 @@ describe("Node Collections (SQLite)", () => {
   });
 
   describe("store.nodes.*.updateWhere()", () => {
+    it("uses candidates directly when no additional base predicate is given", async () => {
+      const plans: string[] = [];
+      const plannedStore = createStore(
+        testGraph,
+        observeNodeSetPlans(backend, plans),
+      );
+      const alice = await plannedStore.nodes.Person.create({
+        name: "Alice",
+        age: 35,
+      });
+      const bob = await plannedStore.nodes.Person.create({
+        name: "Bob",
+        age: 35,
+      });
+      const candidates = plannedStore
+        .query()
+        .from("Person", "person")
+        .whereNode("person", (person) => person.name.eq("Alice"))
+        .select((query) => query.person.id);
+
+      await expect(
+        plannedStore.nodes.Person.updateWhere({
+          candidates,
+          patch: { age: 36 },
+        }),
+      ).resolves.toEqual({ affectedCount: 1 });
+
+      expect(plans).toHaveLength(1);
+      expect(plans[0]).not.toContain("INTERSECT");
+      await expect(
+        plannedStore.nodes.Person.getById(alice.id),
+      ).resolves.toMatchObject({
+        age: 36,
+      });
+      await expect(
+        plannedStore.nodes.Person.getById(bob.id),
+      ).resolves.toMatchObject({
+        age: 35,
+      });
+    });
+
     it("ANDs property filters with independent relationship predicates", async () => {
       const acme = await store.nodes.Company.create({
         name: "Acme",

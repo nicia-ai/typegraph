@@ -41,6 +41,11 @@ import {
   substituteDatabaseExpression,
   validateQueryBindings,
 } from "./prepared-query";
+import {
+  buildReadInstantTemplate,
+  type CompiledTemplate,
+  fillTemplateParams,
+} from "./read-instant-template";
 import { renderQuerySql } from "./render-query-sql";
 import type { QueryBuilderConfig } from "./types";
 import { validateQueryRange, validateSortDirection } from "./validation";
@@ -120,6 +125,9 @@ type RelationState = Readonly<{
 }>;
 
 const EMPTY_STATE: RelationState = { distinct: false, orderBy: [] };
+
+/** Sentinel distinguishing a template that was not built from one that cannot be built. */
+const NOT_COMPUTED = Symbol("NOT_COMPUTED");
 
 function relationScope(): symbol {
   return Symbol("derived relation expression scope");
@@ -379,6 +387,45 @@ function bindState(
   };
 }
 
+/** Rewrites every source to emit its live read instant as a reusable placeholder. */
+function withPlaceholderReadInstants(relation: RelationAst): RelationAst {
+  switch (relation.kind) {
+    case "source": {
+      return {
+        ...relation,
+        options: { ...relation.options, readInstant: "placeholder" },
+      };
+    }
+    case "set": {
+      return {
+        ...relation,
+        left: withPlaceholderReadInstants(relation.left),
+        right: withPlaceholderReadInstants(relation.right),
+      };
+    }
+    case "derived": {
+      return {
+        ...relation,
+        source: withPlaceholderReadInstants(relation.source),
+      };
+    }
+    case "topPerPartition": {
+      return {
+        ...relation,
+        source: withPlaceholderReadInstants(relation.source),
+      };
+    }
+  }
+}
+
+/** Whether a relation contains a live source whose valid-time instant must remain fresh. */
+function relationNeedsCurrentReadInstant(relation: RelationAst): boolean {
+  return relationQueries(relation).some(
+    (query) =>
+      query.temporalMode.mode === "current" && query.recordedAsOf === undefined,
+  );
+}
+
 function assertPortableDistinctColumns(
   columns: readonly RelationColumn[],
   operation: string,
@@ -444,6 +491,11 @@ export class ExecutableRelationQuery<
   readonly #scopeIdentity: symbol;
   readonly #state: RelationState;
   readonly #context: RelationColumnContext<Fields>;
+  #template: CompiledTemplate | undefined | typeof NOT_COMPUTED = NOT_COMPUTED;
+  readonly #scalarTemplates = new Map<
+    "count" | "exists",
+    CompiledTemplate | undefined
+  >();
 
   constructor(
     definition: RelationDefinition<Fields, Result>,
@@ -822,24 +874,19 @@ export class ExecutableRelationQuery<
   }
 
   compile() {
-    return this.#compileForBackend(this.#definition.config.backend);
+    return this.#compileForBackend(
+      this.#definition.config.backend,
+      this.#materialize(),
+    );
   }
 
-  #compileForBackend(backend: GraphBackend | TransactionBackend | undefined) {
-    this.#assertWindowFunctionsSupported(backend);
-    if (
-      collectParameterMetadata(
-        relationQueries(this.#materialize()),
-        relationExpressions(this.#materialize()),
-      ).names.size > 0
-    )
-      throw new ConfigurationError(
-        "Relation contains unbound parameters; use prepare().execute(bindings).",
-      );
-    return compileRelation(
-      this.#materialize(),
-      getDialect(this.#definition.config.dialect ?? "sqlite"),
-    );
+  #compileForBackend(
+    backend: GraphBackend | TransactionBackend | undefined,
+    relation: RelationAst,
+  ) {
+    this.#assertWindowFunctionsSupported(backend, relation);
+    this.#assertRelationBound(relation);
+    return compileRelation(relation, getDialect(this.#dialect()));
   }
 
   toSQL(): Readonly<{ sql: string; params: readonly unknown[] }> {
@@ -883,8 +930,15 @@ export class ExecutableRelationQuery<
     };
     return {
       bind,
-      execute: (bindings: Readonly<Record<string, unknown>>) =>
-        bind(bindings).execute(),
+      execute: async (bindings: Readonly<Record<string, unknown>>) => {
+        validateQueryBindings(queries, bindings, expressions);
+        const rows = await this.#fetchRows(
+          this.#requireBackend(),
+          definition.ast,
+          bindings,
+        );
+        return rows.map((row) => definition.decodeRow(row));
+      },
     };
   }
 
@@ -906,16 +960,7 @@ export class ExecutableRelationQuery<
       throw new ConfigurationError(
         "A relation cannot execute on a different database or transaction target.",
       );
-    const operation = backend.execute<Record<string, unknown>>(
-      this.#compileForBackend(backend),
-    );
-    const rows =
-      this.#definition.provenance.recordedAsOf === undefined ?
-        await operation
-      : await withRecordedRelationsPrecondition(operation, {
-          dialect: backend.dialect,
-          surface: "recorded-relation",
-        });
+    const rows = await this.#fetchRows(backend, this.#materialize());
     return rows.map((row) => this.#definition.decodeRow(row));
   }
 
@@ -1027,14 +1072,24 @@ export class ExecutableRelationQuery<
       throw new ConfigurationError(
         "Derived relation terminals are unavailable inside withCheckedReads().",
       );
-    const relation = this.compile();
-    const compiled = asCompiledSelectSql(
-      operation === "count" ?
-        sql`SELECT COUNT(*) AS __tg_scalar FROM (${relation}) AS typegraph_relation_count`
-      : sql`SELECT CASE WHEN EXISTS (${relation}) THEN 1 ELSE 0 END AS __tg_scalar`,
-    );
     const backend = this.#requireBackend();
-    const operationPromise = backend.execute<Record<string, unknown>>(compiled);
+    const relation = this.#materialize();
+    this.#assertWindowFunctionsSupported(backend, relation);
+    this.#assertRelationBound(relation);
+    const executeRaw = backend.executeRaw;
+    const template =
+      executeRaw === undefined ? undefined : (
+        this.#resolveScalarTemplate(relation, operation)
+      );
+    const operationPromise =
+      template !== undefined && executeRaw !== undefined ?
+        executeRaw<Record<string, unknown>>(
+          template.sql,
+          fillTemplateParams(template.params, {}, this.#dialect()),
+        )
+      : backend.execute<Record<string, unknown>>(
+          this.#compileScalar(relation, operation),
+        );
     const rows =
       this.#definition.provenance.recordedAsOf === undefined ?
         await operationPromise
@@ -1043,6 +1098,37 @@ export class ExecutableRelationQuery<
           surface: "recorded-relation-terminal",
         });
     return Number(rows[0]?.["__tg_scalar"] ?? 0);
+  }
+
+  #compileScalar(
+    relation: RelationAst,
+    operation: "count" | "exists",
+    placeholderReadInstant = false,
+  ) {
+    const compiledRelation = compileRelation(
+      placeholderReadInstant ? withPlaceholderReadInstants(relation) : relation,
+      getDialect(this.#dialect()),
+    );
+    return asCompiledSelectSql(
+      operation === "count" ?
+        sql`SELECT COUNT(*) AS __tg_scalar FROM (${compiledRelation}) AS typegraph_relation_count`
+      : sql`SELECT CASE WHEN EXISTS (${compiledRelation}) THEN 1 ELSE 0 END AS __tg_scalar`,
+    );
+  }
+
+  #resolveScalarTemplate(
+    relation: RelationAst,
+    operation: "count" | "exists",
+  ): CompiledTemplate | undefined {
+    if (this.#scalarTemplates.has(operation))
+      return this.#scalarTemplates.get(operation);
+    const template = buildReadInstantTemplate({
+      compile: () => this.#compileScalar(relation, operation, true),
+      backend: this.#definition.config.backend,
+      needsReadInstant: relationNeedsCurrentReadInstant(relation),
+    });
+    this.#scalarTemplates.set(operation, template);
+    return template;
   }
 
   compileOneStatementBatchItem() {
@@ -1080,13 +1166,94 @@ export class ExecutableRelationQuery<
     return this.#definition.config.backend;
   }
 
+  #dialect(): "sqlite" | "postgres" {
+    return this.#definition.config.dialect ?? "sqlite";
+  }
+
+  /** Resolves the per-instance placeholder template for this immutable relation. */
+  #resolveTemplate(relation: RelationAst): CompiledTemplate | undefined {
+    if (this.#template !== NOT_COMPUTED) return this.#template;
+    this.#template = buildReadInstantTemplate({
+      compile: () =>
+        compileRelation(
+          withPlaceholderReadInstants(relation),
+          getDialect(this.#dialect()),
+        ),
+      backend: this.#definition.config.backend,
+      needsReadInstant: relationNeedsCurrentReadInstant(relation),
+    });
+    return this.#template;
+  }
+
+  /**
+   * Executes either the cached raw template or a freshly compiled concrete
+   * relation. Binding substitution is deliberately confined to the fallback:
+   * the raw path retains user placeholders so one prepared relation serves
+   * every binding set and receives a fresh current-time instant per call.
+   */
+  async #fetchRows(
+    backend: GraphBackend | TransactionBackend,
+    relation: RelationAst,
+    bindings?: Readonly<Record<string, unknown>>,
+  ): Promise<readonly Record<string, unknown>[]> {
+    this.#assertWindowFunctionsSupported(backend, relation);
+    const metadata = collectParameterMetadata(
+      relationQueries(relation),
+      relationExpressions(relation),
+    );
+    if (bindings === undefined) this.#assertRelationBound(relation, metadata);
+
+    const executeRaw = backend.executeRaw;
+    const template =
+      executeRaw === undefined ? undefined : this.#resolveTemplate(relation);
+    const operation =
+      template !== undefined && executeRaw !== undefined ?
+        executeRaw<Record<string, unknown>>(
+          template.sql,
+          fillTemplateParams(
+            template.params,
+            bindings ?? {},
+            this.#dialect(),
+            metadata.listParameters,
+          ),
+        )
+      : backend.execute<Record<string, unknown>>(
+          compileRelation(
+            bindings === undefined ? relation : (
+              bindRelation(relation, bindings)
+            ),
+            getDialect(this.#dialect()),
+          ),
+        );
+    return this.#definition.provenance.recordedAsOf === undefined ?
+        operation
+      : withRecordedRelationsPrecondition(operation, {
+          dialect: backend.dialect,
+          surface: "recorded-relation",
+        });
+  }
+
+  #assertRelationBound(
+    relation: RelationAst,
+    metadata = collectParameterMetadata(
+      relationQueries(relation),
+      relationExpressions(relation),
+    ),
+  ): void {
+    if (metadata.names.size === 0) return;
+    throw new ConfigurationError(
+      "Relation contains unbound parameters; use prepare().execute(bindings).",
+    );
+  }
+
   #assertWindowFunctionsSupported(
     backend: GraphBackend | TransactionBackend | undefined = this.#definition
       .config.backend,
+    relation = this.#materialize(),
   ): void {
     if (
       backend?.capabilities.windowFunctions === false &&
-      relationHasTopPerPartition(this.#materialize())
+      relationHasTopPerPartition(relation)
     )
       throw new UnsupportedBackendCapabilityError(
         "topPerPartition()",

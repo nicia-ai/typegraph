@@ -651,11 +651,20 @@ export function createNodeCollection<
             .compile(),
         );
       }
-      compiledBranches.unshift(
-        base
-          .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
-          .compile(),
-      );
+      // A candidate selection is already constrained to this collection's
+      // kind and the current temporal coordinate (validated above). When it is
+      // the only selection predicate, adding the unfiltered kind scan and
+      // intersecting it back in is redundant. The candidate branch remains the
+      // first branch so relation predicates still intersect with it below.
+      if (candidateQuery === undefined || where !== undefined) {
+        compiledBranches.unshift(
+          base
+            .select(
+              (ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id,
+            )
+            .compile(),
+        );
+      }
       const projectCandidateId = (
         branch: CompiledSelectSql,
         index: number,
