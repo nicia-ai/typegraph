@@ -1047,6 +1047,7 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
     __type: "database_expression";
     node: DatabaseExpressionNode;
     valueType: ValueType;
+    arrayElementType?: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
     nullable: boolean;

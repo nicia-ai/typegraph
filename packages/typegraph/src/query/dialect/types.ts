@@ -360,7 +360,7 @@ export interface DialectAdapter {
    * as a JSON literal, so field references and correlated outer references
    * retain their row-by-row meaning.
    */
-  readonly jsonArrayContainsExpression: (
+  readonly jsonArrayContainsExpression?: (
     this: void,
     column: SqlFragment,
     value: SqlFragment,
@@ -368,7 +368,7 @@ export interface DialectAdapter {
   ) => SqlFragment;
 
   /** Emits a row-value comparison for compatible lexicographic cursor keys. */
-  readonly rowValueComparison: (
+  readonly rowValueComparison?: (
     this: void,
     operator: ">" | "<",
     left: readonly SqlFragment[],

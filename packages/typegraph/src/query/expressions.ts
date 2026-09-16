@@ -206,6 +206,8 @@ export type DatabaseExpression<
   __type: "database_expression";
   node: DatabaseExpressionNode;
   valueType: ValueType;
+  /** @internal Element typing for array operands; separate from result decoding. */
+  arrayElementType?: ValueType;
   /** Element type carried by collection-valued expressions; records also carry field codecs. */
   elementValueType?: ValueType;
   /** Scalar codecs for fields of each collected record. */
@@ -250,6 +252,7 @@ function createExpression<T, Scope extends string>(
   scopeIdentity: symbol,
   elementValueType?: ValueType,
   elementFields?: Readonly<Record<string, ValueType>>,
+  arrayElementType?: ValueType,
 ): DatabaseExpression<T, Scope> {
   return {
     __type: "database_expression",
@@ -257,6 +260,7 @@ function createExpression<T, Scope extends string>(
     nullable,
     scopeIdentity,
     valueType,
+    ...(arrayElementType === undefined ? {} : { arrayElementType }),
     ...(elementValueType === undefined ? {} : { elementValueType }),
     ...(elementFields === undefined ? {} : { elementFields }),
   };
@@ -330,6 +334,16 @@ function assertSameValueType(
   )
     throw new TypeError(
       "Database array expression operands have incompatible element value types",
+    );
+  if (
+    valueType === "array" &&
+    expressions.some(
+      (expression) =>
+        expression.arrayElementType !== firstExpression.arrayElementType,
+    )
+  )
+    throw new TypeError(
+      "Database array expression operands have incompatible array element types",
     );
   return valueType;
 }
@@ -425,6 +439,9 @@ export function createFieldExpression<T, Scope extends string>(
     field.valueType ?? "unknown",
     nullable,
     scopeIdentity,
+    undefined,
+    undefined,
+    field.elementType,
   );
 }
 
@@ -432,11 +449,34 @@ export function createFieldExpression<T, Scope extends string>(
 export function arrayExpressionElementType(
   expression: DatabaseExpression,
 ): ValueType | undefined {
+  if (expression.arrayElementType !== undefined)
+    return expression.arrayElementType;
   if (expression.node.kind === "field")
     return expression.node.field.elementType;
   if (expression.node.kind === "outer_reference")
     return arrayExpressionElementType(expression.node.expression);
+  if (expression.node.kind === "coalesce") {
+    const [first] = expression.node.operands;
+    return first === undefined ? undefined : arrayExpressionElementType(first);
+  }
+  if (expression.node.kind === "conditional")
+    return arrayExpressionElementType(expression.node.then);
   return undefined;
+}
+
+/** @internal Refuses array membership types without portable scalar equality. */
+export function assertPortableArrayMembershipElementType(
+  elementType: ValueType,
+): void {
+  if (
+    elementType === "array" ||
+    elementType === "embedding" ||
+    elementType === "object"
+  ) {
+    throw new UnsupportedPredicateError(
+      `Array membership does not support structured ${elementType} elements`,
+    );
+  }
 }
 
 /** @internal Rebinds an outer field into a child expression scope. */
@@ -456,6 +496,9 @@ export function createOuterReferenceExpression<T, Scope extends string>(
     expression.valueType,
     expression.nullable,
     childScopeIdentity,
+    expression.elementValueType,
+    expression.elementFields,
+    expression.arrayElementType,
   );
 }
 
@@ -485,6 +528,7 @@ export function createScalarSubqueryExpression<T, Scope extends string>(
     parentScopeIdentity,
     projected.elementValueType,
     projected.elementFields,
+    projected.arrayElementType,
   );
 }
 
@@ -578,6 +622,7 @@ function arrayContains<
   const elementType = arrayExpressionElementType(array);
   if (elementType === undefined || elementType === "unknown")
     throw new TypeError("arrayContains requires a known array element type");
+  assertPortableArrayMembershipElementType(elementType);
   if (elementType !== element.valueType)
     throw new TypeError(
       "arrayContains operands have incompatible element types",
@@ -847,6 +892,7 @@ function coalesce<T, Scope extends string>(
     scopeIdentity,
     first.elementValueType,
     first.elementFields,
+    first.arrayElementType,
   );
 }
 
@@ -874,6 +920,7 @@ function when<
     scopeIdentity,
     then.elementValueType,
     then.elementFields,
+    then.arrayElementType,
   );
 }
 

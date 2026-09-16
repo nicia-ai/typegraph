@@ -289,7 +289,7 @@ export const postgresDialect: DialectAdapter = {
 
   jsonArrayContainsExpression(column, value, valueType) {
     const scalar = postgresJsonScalar(value, valueType);
-    return sql`EXISTS (SELECT 1 FROM jsonb_array_elements(${column}) AS tg_element(value) WHERE tg_element.value = to_jsonb(${scalar}))`;
+    return sql`CASE WHEN jsonb_typeof(${column}) = 'array' THEN EXISTS (SELECT 1 FROM jsonb_array_elements(${column}) AS tg_element(value) WHERE tg_element.value = to_jsonb(${scalar})) ELSE FALSE END`;
   },
 
   rowValueComparison(operator, left, right) {

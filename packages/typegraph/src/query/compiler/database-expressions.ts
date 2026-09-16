@@ -8,6 +8,7 @@ import { type DialectAdapter } from "../dialect/types";
 import {
   type AggregateOperator,
   arrayExpressionElementType,
+  assertPortableArrayMembershipElementType,
   type DatabaseExpression,
   type DatabaseExpressionNode,
   type DatabaseLiteral,
@@ -189,7 +190,16 @@ function compileNode(
         throw new UnsupportedPredicateError(
           "Array membership requires a known element type",
         );
-      return context.dialect.jsonArrayContainsExpression(
+      assertPortableArrayMembershipElementType(elementType);
+      const compileArrayMembership =
+        context.dialect.jsonArrayContainsExpression;
+      if (compileArrayMembership === undefined) {
+        throw new ConfigurationError(
+          "The active dialect adapter does not support the jsonArrayContainsExpression capability.",
+          { capability: "jsonArrayContainsExpression" },
+        );
+      }
+      return compileArrayMembership(
         compile(node.array),
         compile(node.element),
         elementType,

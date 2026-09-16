@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { expr } from "../../../src";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../../../src/query/sql-intent";
 import type { IntegrationTestContext } from "./test-context";
 
 export function registerExpressionSubqueryQueryIntegrationTests(
@@ -46,6 +49,51 @@ export function registerExpressionSubqueryQueryIntegrationTests(
         { hasTaggedDocument: true, name: "Aster" },
         { hasTaggedDocument: false, name: "Birch" },
       ]);
+    });
+
+    it("treats stored JSON null and scalar array values as non-matches", async () => {
+      const store = context.getStore();
+      const matching = await store.nodes.Document.create({
+        tags: ["Aster"],
+        title: "Array",
+      });
+      const jsonNull = await store.nodes.Document.create({ title: "Null" });
+      const scalar = await store.nodes.Document.create({ title: "Scalar" });
+      const executeStatement = store.backend.executeStatement;
+      if (executeStatement === undefined)
+        throw new Error("Integration backend does not support raw statements");
+      const schema = createSqlSchema(store.backend.tableNames);
+
+      await executeStatement(
+        asCompiledStatementSql(sql`
+          UPDATE ${schema.nodesTable}
+          SET props = ${JSON.stringify({
+            // eslint-disable-next-line unicorn/no-null -- stored JSON null is the case under test.
+            tags: null,
+            title: "Null",
+          })}
+          WHERE graph_id = ${store.graphId} AND id = ${jsonNull.id}
+        `),
+      );
+      await executeStatement(
+        asCompiledStatementSql(sql`
+          UPDATE ${schema.nodesTable}
+          SET props = ${JSON.stringify({ tags: "Aster", title: "Scalar" })}
+          WHERE graph_id = ${store.graphId} AND id = ${scalar.id}
+        `),
+      );
+
+      const rows = await store
+        .query()
+        .from("Document", "document")
+        .where((expressions) =>
+          expr.arrayContains(expressions.document.tags, expr.literal("Aster")),
+        )
+        .project((expressions) => ({ title: expressions.document.title }))
+        .execute();
+
+      expect(matching.id).toBeDefined();
+      expect(rows).toEqual([{ title: "Array" }]);
     });
 
     it("correlates exists and scalar projections when inner aliases reuse outer names", async () => {

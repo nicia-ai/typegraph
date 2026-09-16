@@ -42,6 +42,20 @@ const optionalStringArrayField = createFieldExpression<
   scopeIdentity,
   true,
 );
+const fallbackStringArrayField = createFieldExpression<
+  readonly string[],
+  "person"
+>(
+  {
+    __type: "field_ref",
+    alias: "person",
+    elementType: "string",
+    path: ["props", "fallbackLabels"],
+    valueType: "array",
+  } satisfies FieldRef<readonly string[]>,
+  scopeIdentity,
+  false,
+);
 
 test("expression result types include SQL null where applicable", () => {
   expectTypeOf(expr.add(numberField, expr.literal(2))).toEqualTypeOf<
@@ -68,6 +82,12 @@ test("expression result types include SQL null where applicable", () => {
   ).toEqualTypeOf<DatabaseExpression<string, "person">>();
   expectTypeOf(
     expr.arrayContains(optionalStringArrayField, nullableStringField),
+  ).toEqualTypeOf<DatabaseExpression<boolean, "person">>();
+  expectTypeOf(
+    expr.arrayContains(
+      expr.coalesce(optionalStringArrayField, fallbackStringArrayField),
+      nullableStringField,
+    ),
   ).toEqualTypeOf<DatabaseExpression<boolean, "person">>();
 });
 

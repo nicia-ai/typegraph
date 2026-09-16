@@ -250,7 +250,7 @@ export const sqliteDialect: DialectAdapter = {
   },
 
   jsonArrayContainsExpression(column, value) {
-    return sql`EXISTS (SELECT 1 FROM json_each(${column}) WHERE json_each.value = ${value})`;
+    return sql`CASE WHEN json_valid(${column}) THEN CASE WHEN json_type(${column}) = 'array' THEN EXISTS (SELECT 1 FROM json_each(${column}) WHERE json_each.value = ${value}) ELSE FALSE END ELSE FALSE END`;
   },
 
   rowValueComparison(operator, left, right) {

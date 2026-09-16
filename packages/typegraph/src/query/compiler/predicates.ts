@@ -923,11 +923,33 @@ function compileTupleComparisonPredicate(
   const values = expr.values.map(
     (value) => sql`${convertValueForSql(value.value, dialect)}`,
   );
-  return dialect.rowValueComparison(
-    expr.op === "gt" ? ">" : "<",
-    fields,
-    values,
-  );
+  const rowValueComparison = dialect.rowValueComparison;
+  if (rowValueComparison === undefined)
+    return compileTupleComparisonFallback(expr.op, fields, values);
+  return rowValueComparison(expr.op === "gt" ? ">" : "<", fields, values);
+}
+
+/** Preserves lexicographic cursor semantics for adapters without row values. */
+function compileTupleComparisonFallback(
+  operator: "gt" | "lt",
+  fields: readonly SqlFragment[],
+  values: readonly SqlFragment[],
+): SqlFragment {
+  const comparison = sql.raw(operator === "gt" ? ">" : "<");
+  const terms = fields.map((field, index) => {
+    const prefix = fields
+      .slice(0, index)
+      .map(
+        (prefixField, prefixIndex) =>
+          sql`${prefixField} = ${requireDefined(values[prefixIndex])}`,
+      );
+    const currentValue = requireDefined(values[index]);
+    const current = sql`${field} ${comparison} ${currentValue}`;
+    return prefix.length === 0 ?
+        current
+      : sql`(${sql.join([...prefix, current], sql` AND `)})`;
+  });
+  return sql`(${sql.join(terms, sql` OR `)})`;
 }
 
 /**

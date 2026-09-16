@@ -87,7 +87,10 @@ logic. Null checks always produce a Boolean.
 `expr.arrayContains(array, element)` tests an array expression against another database expression.
 It is useful when the element comes from the candidate row or a correlated outer row; unlike the
 field accessor `tags.contains("value")`, it does not encode the element as a fixed JSON literal.
-Missing arrays simply do not match.
+Missing arrays, stored JSON `null`, and non-array JSON values simply do not match. Array elements
+must be scalar; structured elements are rejected because portable structural equality is not defined.
+Adapters that omit expression array membership support refuse this expression with a configuration
+error instead of silently changing its meaning.
 
 ```typescript
 .where((e) => expr.arrayContains(e.document.tags, e.person.id))

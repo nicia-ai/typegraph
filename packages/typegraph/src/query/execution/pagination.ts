@@ -17,6 +17,7 @@ import {
   type PredicateExpression,
   type TupleComparisonPredicate,
 } from "../ast";
+import { isNullableSystemOrderField } from "../builder/order-by-field";
 import type {
   AliasMap,
   EdgeAliasMap,
@@ -205,6 +206,7 @@ function isTupleComparableField(field: OrderSpec["field"]): boolean {
   return (
     field.path.length === 1 &&
     isTupleScalarValueType(field.valueType) &&
+    !isNullableSystemOrderField(requireDefined(field.path[0])) &&
     ["id", "kind", "created_at", "updated_at"].includes(
       requireDefined(field.path[0]),
     )

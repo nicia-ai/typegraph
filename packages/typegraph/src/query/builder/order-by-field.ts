@@ -38,6 +38,11 @@ const NULLABLE_SYSTEM_ORDER_FIELDS = new Set([
   "valid_to",
 ]);
 
+/** Identifies physical system columns whose row-value comparisons are unsafe. */
+export function isNullableSystemOrderField(field: string): boolean {
+  return NULLABLE_SYSTEM_ORDER_FIELDS.has(field);
+}
+
 /**
  * Resolves an orderable physical system column, or `undefined` when `field`
  * names a user property. Declared properties retain precedence over temporal
@@ -62,7 +67,7 @@ export function resolveSystemOrderField(
     (isEdge ? EDGE_SYSTEM_ORDER_FIELDS.get(field) : undefined);
   return valueType === undefined ? undefined : (
       fieldRef(alias, [field], {
-        nullable: NULLABLE_SYSTEM_ORDER_FIELDS.has(field),
+        nullable: isNullableSystemOrderField(field),
         valueType,
       })
     );

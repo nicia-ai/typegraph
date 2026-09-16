@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { ConfigurationError } from "../src/errors";
 import type { FieldRef, OrderSpec } from "../src/query/ast";
 import { resolveSystemOrderField } from "../src/query/builder/order-by-field";
 import { compileDatabaseExpression } from "../src/query/compiler/database-expressions";
@@ -63,6 +64,16 @@ function context(
   };
 }
 
+function withoutArrayMembershipExpression() {
+  const { jsonArrayContainsExpression: _removed, ...dialect } = sqliteDialect;
+  return dialect;
+}
+
+function withoutRowValueComparison() {
+  const { rowValueComparison: _removed, ...dialect } = sqliteDialect;
+  return dialect;
+}
+
 function orderedFields(
   options: Readonly<{
     direction?: "asc" | "desc";
@@ -102,6 +113,21 @@ describe("expression array membership", () => {
     expect(postgres).toContain("jsonb_array_elements(document_props)");
     expect(postgres).toContain("to_jsonb(CAST(candidate_props AS text))");
   });
+
+  it("refuses adapters that do not declare expression array membership", () => {
+    const expression = expr.arrayContains(
+      createFieldExpression(ARRAY_FIELD, SCOPE, true),
+      createFieldExpression(CANDIDATE_FIELD, SCOPE, false),
+    );
+    const dialect = withoutArrayMembershipExpression();
+
+    expect(() => compileDatabaseExpression(expression, { dialect })).toThrow(
+      ConfigurationError,
+    );
+    expect(() => compileDatabaseExpression(expression, { dialect })).toThrow(
+      /jsonArrayContainsExpression/u,
+    );
+  });
 });
 
 describe("cursor tuple comparisons", () => {
@@ -121,6 +147,25 @@ describe("cursor tuple comparisons", () => {
     expect(toSqlWithParams(compiled)).toEqual({
       params: ["item-2", "Record"],
       sql: "(item_id, item_kind) > (?, ?)",
+    });
+  });
+
+  it("falls back to the lexicographic OR ladder without row-value support", () => {
+    const predicate = buildCursorPredicate(
+      CURSOR,
+      orderedFields(),
+      "forward",
+      "item",
+    );
+    const dialect = withoutRowValueComparison();
+
+    expect(
+      toSqlWithParams(
+        compilePredicateExpression(predicate.expression, context(dialect)),
+      ),
+    ).toEqual({
+      params: ["item-2", "item-2", "Record"],
+      sql: "(item_id > ? OR (item_id = ? AND item_kind > ?))",
     });
   });
 
