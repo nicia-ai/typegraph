@@ -482,34 +482,28 @@ export async function applyResolvedNodeUpdateBatch(
       { operation: "updateResolvedNodesBatch" },
     );
   }
+  const entriesById = new Map(
+    args.entries.map((entry) => [entry.id, entry] as const),
+  );
   const items = rows.map((row) => {
+    const entry = entriesById.get(row.id);
+    if (entry?.kind !== row.kind) {
+      throw new ConfigurationError(
+        "Resolved node update batch returned an unexpected row",
+        { operation: "updateResolvedNodesBatch", rowId: row.id },
+      );
+    }
     const props = rowPropsToObject(row.props);
-    const validatedProps = validateNodeProps(args.schema, props, {
-      kind: row.kind,
-      operation: "update",
-      id: row.id,
-    });
-    if (!canonicalEqual(validatedProps, props)) {
-      throw new ValidationError(
-        `Resolved update would persist a non-canonical ${row.kind} row`,
-        {
-          entityType: "node",
-          kind: row.kind,
-          operation: "update",
-          id: row.id,
-          issues: [
-            {
-              path: "props",
-              message: "The complete row requires schema normalization",
-            },
-          ],
-        },
+    if (!canonicalEqual(entry.props, props)) {
+      throw new ConfigurationError(
+        "Resolved node update batch returned props that differ from its input",
+        { operation: "updateResolvedNodesBatch", rowId: row.id },
       );
     }
     return {
       kind: row.kind,
       id: row.id,
-      props: validatedProps,
+      props,
       constraints: args.uniqueConstraints,
       uniqueConstraints: args.uniqueConstraints,
       schema: args.schema,

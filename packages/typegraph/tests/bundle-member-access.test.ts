@@ -39,12 +39,12 @@ const REASONED_FLOOR = 96;
 // Projection and relation toSQL() share renderQuerySql's guarded capability read
 // and invocation. Adding relation execution does not add scattered compileSql
 // accesses or raise its measured deferred ceiling of 9.
-// Adopted vector evolution checks the root capability before fencing and
-// invokes the adopted same-session facet only when the plan owes a slot.
-const DEFERRED_LIVE_TOTAL = 215;
-const DEFERRED_DECLARED_TOTAL = 218;
+// The resolved-node batch update reads its optional port at five guarded call
+// sites and reserves one additional access in its declared ceiling.
+const DEFERRED_LIVE_TOTAL = 220;
+const DEFERRED_DECLARED_TOTAL = 224;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 325;
+const TOTAL_ROW_COUNT = 330;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -191,7 +191,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 322)", () => {
+  it("the class partition covers every scanned row (total 330)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.
