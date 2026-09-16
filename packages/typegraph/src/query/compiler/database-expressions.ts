@@ -7,6 +7,7 @@ import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import {
   type AggregateOperator,
+  arrayExpressionElementType,
   type DatabaseExpression,
   type DatabaseExpressionNode,
   type DatabaseLiteral,
@@ -183,14 +184,15 @@ function compileNode(
       return sql`(${compile(node.left)} ${comparisonOperator(node.operator)} ${compile(node.right)})`;
     }
     case "array_contains": {
-      if (node.array.elementValueType === undefined)
+      const elementType = arrayExpressionElementType(node.array);
+      if (elementType === undefined)
         throw new UnsupportedPredicateError(
           "Array membership requires a known element type",
         );
       return context.dialect.jsonArrayContainsExpression(
         compile(node.array),
         compile(node.element),
-        node.array.elementValueType,
+        elementType,
       );
     }
     case "boolean": {

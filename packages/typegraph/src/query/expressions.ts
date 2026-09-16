@@ -425,8 +425,18 @@ export function createFieldExpression<T, Scope extends string>(
     field.valueType ?? "unknown",
     nullable,
     scopeIdentity,
-    field.elementType,
   );
+}
+
+/** @internal Reads array operand typing without turning it into result-decoding metadata. */
+export function arrayExpressionElementType(
+  expression: DatabaseExpression,
+): ValueType | undefined {
+  if (expression.node.kind === "field")
+    return expression.node.field.elementType;
+  if (expression.node.kind === "outer_reference")
+    return arrayExpressionElementType(expression.node.expression);
+  return undefined;
 }
 
 /** @internal Rebinds an outer field into a child expression scope. */
@@ -565,12 +575,10 @@ function arrayContains<
   const scopeIdentity = resolveScope([array, element]);
   if (array.valueType !== "array")
     throw new TypeError("arrayContains requires an array expression");
-  if (
-    array.elementValueType === undefined ||
-    array.elementValueType === "unknown"
-  )
+  const elementType = arrayExpressionElementType(array);
+  if (elementType === undefined || elementType === "unknown")
     throw new TypeError("arrayContains requires a known array element type");
-  if (array.elementValueType !== element.valueType)
+  if (elementType !== element.valueType)
     throw new TypeError(
       "arrayContains operands have incompatible element types",
     );
