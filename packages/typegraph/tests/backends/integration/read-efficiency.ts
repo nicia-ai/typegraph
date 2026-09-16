@@ -84,6 +84,80 @@ export function registerReadEfficiencyIntegrationTests(
       expect(statements).toHaveLength(1);
     });
 
+    it("snapshots page options for standalone and batched execution", async () => {
+      const store = await context.createStore(integrationTestGraph);
+      await store.nodes.Person.bulkCreate([
+        { id: "snapshot-a", props: { name: "Ada", age: 31 } },
+        { id: "snapshot-b", props: { name: "Grace", age: 37 } },
+        { id: "snapshot-c", props: { name: "Linus", age: 55 } },
+      ]);
+      const people = store
+        .query()
+        .from("Person", "person")
+        .orderBy("person", "age", "asc")
+        .select((fields) => fields.person.name);
+      const options = { first: 1 };
+      const page = people.page(options);
+
+      options.first = 3;
+
+      const standalone = await page.execute();
+      expect(standalone.data).toEqual(["Ada"]);
+      const [batched] = await store.batchOnce(() => [page]);
+      expect(batched.data).toEqual(["Ada"]);
+    });
+
+    it("shares cursor semantics for nullable non-unique omitted sort keys", async () => {
+      const store = await context.createStore(integrationTestGraph);
+      await store.nodes.Person.bulkCreate([
+        { id: "cursor-a", props: { name: "Ada", age: 30 } },
+        { id: "cursor-b", props: { name: "Babbage", age: 30 } },
+        { id: "cursor-c", props: { name: "Curie", age: 40 } },
+        { id: "cursor-null", props: { name: "No age" } },
+      ]);
+      const people = store
+        .query()
+        .from("Person", "person")
+        .orderBy("person", "age", "asc")
+        .select((fields) => fields.person.name);
+
+      const first = await people.paginate({ first: 2 });
+      expect(first.data).toEqual(["Ada", "Babbage"]);
+      const nextCursor = first.nextCursor;
+      if (nextCursor === undefined)
+        throw new Error("Expected a next-page cursor");
+
+      const [second] = await store.batchOnce(() => [
+        people.page({ first: 2, after: nextCursor }),
+      ]);
+      expect(second.data).toEqual(["Curie", "No age"]);
+      const previousCursor = second.prevCursor;
+      if (previousCursor === undefined)
+        throw new Error("Expected a previous-page cursor");
+
+      const previous = await people
+        .page({ last: 2, before: previousCursor })
+        .execute();
+      expect(previous.data).toEqual(["Ada", "Babbage"]);
+
+      const empty = store
+        .query()
+        .from("Person", "person")
+        .whereNode("person", (person) => person.name.eq("missing"))
+        .orderBy("person", "age", "asc")
+        .select((fields) => fields.person.name)
+        .page({ first: 2 });
+      expect(await empty.execute()).toEqual({
+        data: [],
+        nextCursor: undefined,
+        prevCursor: undefined,
+        hasNextPage: false,
+        hasPrevPage: false,
+      });
+      const [emptyBatch] = await store.batchOnce(() => [empty]);
+      expect(emptyBatch).toEqual(await empty.execute());
+    });
+
     it("shares hydration only when requested and preserves independent nested data", async () => {
       const statements: string[] = [];
       const store = await context.createStore(integrationTestGraph, {
