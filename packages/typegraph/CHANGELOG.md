@@ -1,5 +1,17 @@
 # @nicia-ai/typegraph
 
+## 0.64.0
+
+### Minor Changes
+
+- [#712](https://github.com/nicia-ai/typegraph/pull/712) [`295f646`](https://github.com/nicia-ai/typegraph/commit/295f646c0add46fbd115654790c983ddd50972e7) Thanks [@pdlug](https://github.com/pdlug)! - Add deployment-scoped contribution ownership. Shared full-text storage is physically materialized once and separately activated per graph, allowing subsequent graph opens to run without DDL privileges while vector contributions remain graph-scoped.
+
+- [#712](https://github.com/nicia-ai/typegraph/pull/712) [`295f646`](https://github.com/nicia-ai/typegraph/commit/295f646c0add46fbd115654790c983ddd50972e7) Thanks [@pdlug](https://github.com/pdlug)! - Add the `endpointSetRead` capability bundle and the framework-agnostic `runEndpointSetReadConformance` fixture for custom backends. Bulk endpoint reads now resolve one capability verdict and refuse with a typed error when set-oriented reads are unavailable.
+
+- [#712](https://github.com/nicia-ai/typegraph/pull/712) [`295f646`](https://github.com/nicia-ai/typegraph/commit/295f646c0add46fbd115654790c983ddd50972e7) Thanks [@pdlug](https://github.com/pdlug)! - Allow `NodeCollection.updateWhere()` to take a same-graph, same-execution-target query as its candidate source. Candidate queries can use correlated cross-kind predicates without stored edges; TypeGraph forces their root-node identity projection and intersects it with existing `where` and relationship selectors before running the ordinary atomic set-update pipeline.
+
+- [#712](https://github.com/nicia-ai/typegraph/pull/712) [`295f646`](https://github.com/nicia-ai/typegraph/commit/295f646c0add46fbd115654790c983ddd50972e7) Thanks [@pdlug](https://github.com/pdlug)! - Expose `describe()` and `validateStore()` on transaction contexts so population statistics and validation pages can run through the pinned transaction session. Callers can request repeatable-read or serializable isolation and consume all analysis work inside one callback when they need a stable data snapshot.
+
 ## 0.63.0
 
 ### Highlights
