@@ -3638,6 +3638,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
             entry.input.validTo === undefined &&
             entry.input.clearValidTo !== true,
         );
+      let batchMissed = false;
       if (canBatchResolvedUpdates) {
         const resolvedEntries = entries.map((entry) => {
           const existing = resolvedRows.get(entry.input.id);
@@ -3691,8 +3692,14 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
               rowToNode(requireDefined(byId.get(entry.input.id))),
             );
           }
+          batchMissed = true;
         }
       }
+      // A zero-row version-gated batch means a peer changed at least one row
+      // after the shared preimage read. The portable recovery below must start
+      // from the rows that are CURRENT now: carrying the old preimage would
+      // turn a partial upsert into a stale full replacement.
+      const fallbackRows = batchMissed ? undefined : resolvedRows;
       const nodes: Node[] = [];
       for (const entry of entries) {
         nodes.push(
@@ -3709,7 +3716,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
                 : { replacementProps: entry.replacementProps }),
               }
             : undefined,
-            resolvedRows?.get(entry.input.id),
+            fallbackRows?.get(entry.input.id),
           ),
         );
         if (entry.clearDeleted && ctx.identity !== undefined) {

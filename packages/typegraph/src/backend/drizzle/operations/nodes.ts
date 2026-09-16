@@ -785,6 +785,7 @@ export function buildResolvedNodeUpdateBatch(
   tables: Tables,
   params: ResolvedNodeUpdateBatchParams,
   timestamp: string,
+  rowLockClause: SQL,
 ): SQL {
   const entries = params.entries;
   const first = entries[0];
@@ -812,6 +813,7 @@ export function buildResolvedNodeUpdateBatch(
       WHERE ${tables.nodes.graphId} = ${first.graphId}
         AND ${tables.nodes.kind} = ${first.kind}
         AND ${tables.nodes.deletedAt} IS NULL
+      ${rowLockClause}
     )
     UPDATE ${tables.nodes}
     SET ${quotedColumn(tables.nodes.props)} = (
@@ -825,6 +827,12 @@ export function buildResolvedNodeUpdateBatch(
       AND ${tables.nodes.kind} = ${first.kind}
       AND ${tables.nodes.deletedAt} IS NULL
       AND ${tables.nodes.id} IN (SELECT ${id} FROM ${eligible})
+      AND EXISTS (
+        SELECT 1
+        FROM ${expected}
+        WHERE ${expected}.${id} = ${tables.nodes.id}
+          AND ${expected}.${expectedVersion} = ${tables.nodes.version}
+      )
       AND (SELECT COUNT(*) FROM ${eligible}) = ${entries.length}
     RETURNING *
   `;

@@ -752,6 +752,16 @@ const TABLE_EXISTS_QUERIES = {
     sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`,
 } satisfies Record<SqlDialect, (tableName: string) => SQL>;
 
+/**
+ * PostgreSQL must lock the complete version-eligible set before the outer
+ * count gate can admit any update. SQLite owns its single writer before this
+ * statement runs, so its token is deliberately empty.
+ */
+const RESOLVED_NODE_UPDATE_LOCK_CLAUSES = {
+  postgres: sql`FOR UPDATE`,
+  sqlite: sql.empty(),
+} satisfies Record<SqlDialect, SQL>;
+
 function createCommonOperationStrategy(
   tables: Tables,
   dialect: SqlDialect,
@@ -1115,7 +1125,12 @@ function createCommonOperationStrategy(
       return buildUpdateNodeSet(tables, dialect, params, timestamp);
     },
     buildResolvedNodeUpdateBatch(params, timestamp): SQL {
-      return buildResolvedNodeUpdateBatch(tables, params, timestamp);
+      return buildResolvedNodeUpdateBatch(
+        tables,
+        params,
+        timestamp,
+        RESOLVED_NODE_UPDATE_LOCK_CLAUSES[dialect],
+      );
     },
     buildDeleteContributionMaterialization,
     buildInsertContributionMaterialization,
