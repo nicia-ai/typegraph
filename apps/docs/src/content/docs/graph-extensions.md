@@ -144,8 +144,10 @@ initialized with a different schema is refused. On PostgreSQL the clone
 statement takes the same graph advisory-lock key as schema commits; SQLite's
 schema and marker writes are serialized by its writer lock.
 
-Templates clone the source graph's durable runtime-contribution markers along
-with its schema row. A target can therefore be reopened with
+Templates clone the source graph's graph-local runtime-contribution activation
+markers along with its schema row. Deployment-scoped physical attestations,
+such as the shared fulltext table marker, already belong to the database and
+are not duplicated per template target. A target can therefore be reopened with
 `createVerifiedStore` or `createVerifiedAdapterStore` from a later serverless
 isolate without another schema reconciliation or provisioning DDL step.
 Registration and instantiation are DML-only. They assert the deployment-wide
@@ -836,14 +838,39 @@ claimed cross-request snapshot, so concurrent inserts, updates, and deletes can
 affect later pages. Each page still reads the schema coordinate before and after
 its data statement and refuses a concurrent schema flip.
 
-Both analysis methods are current-only. They are absent from `StoreView` and
-transaction callback facades; recorded/as-of population analysis is deferred
-until it can be backed by an equally explicit temporal contract. Because the
-consistency boundary is sequential SQL statements plus schema bracketing, these
-methods also work on non-interactive transactional adapters. Calling
-`store.describe()` through an enclosing root `store` inside a transaction
-callback does not join that transaction: where the adapter permits the call,
-it reads through the root backend outside the callback's transaction.
+Both analysis methods are current-only. They are absent from `StoreView`;
+recorded/as-of population analysis is deferred until it can be backed by an
+equally explicit temporal contract. Root-store calls use sequential SQL
+statements plus schema bracketing, so they also work on non-interactive
+transactional adapters.
+
+Transaction callbacks expose the same methods through their pinned session.
+Choose `repeatable_read` or `serializable` when every `describe()` aggregate or
+every `validateStore()` page must observe one database snapshot, and consume
+all validation pages before the callback returns:
+
+```ts
+await store.transaction(
+  async (tx) => {
+    const description = await tx.describe();
+    let cursor: string | undefined;
+    do {
+      const page = await tx.validateStore({
+        entity: "node",
+        kind: "Person",
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    return description;
+  },
+  { isolationLevel: "repeatable_read", accessMode: "read_only" },
+);
+```
+
+Calling root `store.describe()` from inside a transaction callback still does
+not join that transaction; use `tx.describe()` or `tx.validateStore()` for the
+bound-session behavior.
 
 ## `store.materializeIndexes(options?)`
 

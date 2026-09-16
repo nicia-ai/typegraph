@@ -33,6 +33,7 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
   searchable,
   StoreNotInitializedError,
   tsvectorStrategy,
@@ -143,10 +144,11 @@ describe.runIf(process.env["POSTGRES_URL"])(
       if (!postgresAvailable || !pool) return;
       await dropFulltextTable(pool);
       // Each test starts genuinely uninitialized: drop the durable
-      // marker a prior test's createStoreWithSchema may have written.
+      // physical attestation and graph activation a prior test's
+      // createStoreWithSchema may have written.
       await pool.query(
-        `DELETE FROM ${CONTRIB_MAT_TABLE} ` + `WHERE graph_id = $1`,
-        [FtGraph.id],
+        `DELETE FROM ${CONTRIB_MAT_TABLE} ` + `WHERE graph_id IN ($1, $2)`,
+        [FtGraph.id, DEPLOYMENT_CONTRIBUTION_GRAPH_ID],
       );
     });
 

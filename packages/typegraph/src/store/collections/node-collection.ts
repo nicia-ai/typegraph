@@ -8,6 +8,7 @@ import { type z } from "zod";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
+import { backendDerivationRoot } from "../../backend/derive-backend";
 import {
   type GraphBackend,
   type NodeRow as BackendNodeRow,
@@ -543,15 +544,75 @@ export function createNodeCollection<
         );
       }
       const exists = params.exists ?? [];
-      if (params.where === undefined && exists.length === 0 && !params.all) {
+      if (
+        params.where === undefined &&
+        exists.length === 0 &&
+        params.candidates === undefined &&
+        !params.all
+      ) {
         throw new ConfigurationError(
-          `store.nodes.${kind}.updateWhere() requires where, exists, or explicit all: true`,
+          `store.nodes.${kind}.updateWhere() requires candidates, where, exists, or explicit all: true`,
           { kind, operation: "updateWhere" },
         );
       }
 
       const rootAlias = "update_candidate";
       const readInstant = nowIso();
+      const candidateIdColumn = `${rootAlias}_id`;
+      const compiledBranches: CompiledSelectSql[] = [];
+
+      const candidateQuery = params.candidates;
+      if (candidateQuery !== undefined) {
+        const selection = candidateQuery.toNodeCandidateSelection();
+        const expectedTarget = backendDerivationRoot(backend);
+        if (selection.graphId !== graphId) {
+          throw new ConfigurationError(
+            "updateWhere() candidates must belong to the same graph as the collection.",
+            {
+              kind,
+              operation: "updateWhere",
+              expectedGraphId: graphId,
+              receivedGraphId: selection.graphId,
+            },
+          );
+        }
+        if (
+          selection.executionTarget === undefined ||
+          selection.executionTarget !== expectedTarget
+        ) {
+          throw new ConfigurationError(
+            "updateWhere() candidates must be created by this Store or transaction.",
+            { kind, operation: "updateWhere" },
+          );
+        }
+        if (selection.kind !== kind) {
+          throw new ConfigurationError(
+            "updateWhere() candidates must select the collection's node kind.",
+            {
+              kind,
+              operation: "updateWhere",
+              candidateKind: selection.kind,
+            },
+          );
+        }
+        if (
+          selection.temporalMode !== "current" ||
+          selection.recordedAsOf !== undefined
+        ) {
+          throw new ConfigurationError(
+            "updateWhere() candidates must use the current temporal coordinate.",
+            { kind, operation: "updateWhere" },
+          );
+        }
+        const compiledCandidateQuery =
+          candidateQuery.compileNodeCandidateIds(readInstant);
+        compiledBranches.push(
+          asCompiledSelectSql(
+            sql`SELECT ${sql.identifier(selection.idColumn)} AS ${sql.identifier(candidateIdColumn)} FROM (${compiledCandidateQuery}) AS ${sql.identifier("update_selected_candidates")}`,
+          ),
+        );
+      }
+
       let base = createQuery()
         .fromDynamic(kind, rootAlias)
         .temporal("asOf", readInstant);
@@ -561,8 +622,6 @@ export function createNodeCollection<
           evaluateNodePredicate<N>(accessor, where),
         );
       }
-      const candidateIdColumn = `${rootAlias}_id`;
-      const compiledBranches: CompiledSelectSql[] = [];
       for (const [index, relation] of exists.entries()) {
         const edgeAlias = `update_edge_${index}`;
         const relatedAlias = `update_related_${index}`;

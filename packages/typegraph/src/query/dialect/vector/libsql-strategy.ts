@@ -180,6 +180,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
 
     return [
       {
+        scope: "graph",
         logicalName: `${VECTOR_CONTRIBUTION_PREFIX}:${slot.nodeKind}.${slot.fieldPath}`,
         owner: "libsql-native",
         tableName: table,

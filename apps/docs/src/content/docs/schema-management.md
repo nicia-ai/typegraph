@@ -165,10 +165,11 @@ Only `createStoreWithSchema()` runs DDL. `createStore()` is a
 synchronous zero-I/O attach; `createVerifiedStore()` is a SELECT-only
 attach (zero DDL — reads the base-schema marker, active graph schema, and
 contribution markers, nothing else). Graph-template registration and
-instantiation are also DML-only;
-instantiation copies the source graph's durable contribution markers so a
-target can be reopened by `createVerifiedStore()` from a later serverless
-isolate. To run the application under a least-privilege, DML-only role, do the
+instantiation are also DML-only; instantiation copies the source graph's
+graph-local activation markers while deployment-scoped physical attestations
+remain shared by the database. A target can therefore be reopened by
+`createVerifiedStore()` from a later serverless isolate. To run the application
+under a least-privilege, DML-only role, do the
 privileged migration step once with `createStoreWithSchema(graph, adminBackend)`
 to adopt and stamp the current base schema before using the template APIs at
 runtime. See

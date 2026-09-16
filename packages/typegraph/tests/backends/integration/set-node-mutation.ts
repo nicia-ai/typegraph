@@ -1,6 +1,15 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
+import { z } from "zod";
 
-import { compareAndSetAbsent, ConfigurationError } from "../../../src";
+import {
+  compareAndSetAbsent,
+  ConfigurationError,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  expr,
+  subClassOf,
+} from "../../../src";
 import type {
   CompareAndSetNodeParams,
   GraphBackend,
@@ -231,6 +240,390 @@ export function registerSetNodeMutationIntegrationTests(
         age: 35,
         email: "bob@example.com",
       });
+    });
+
+    it("updates candidates selected by a same-store cross-kind property query", async () => {
+      const corpus = defineNode("Corpus", {
+        schema: z.object({ name: z.string(), state: z.string() }),
+      });
+      const artifactChunk = defineNode("ArtifactChunk", {
+        schema: z.object({ corpusId: z.string(), text: z.string() }),
+      });
+      const graph = defineGraph({
+        id: "update_where_property_candidates",
+        nodes: {
+          Corpus: { type: corpus },
+          ArtifactChunk: { type: artifactChunk },
+        },
+        edges: {},
+      });
+      const store = await context.createStore(graph);
+      const selected = await store.nodes.Corpus.create({
+        name: "selected",
+        state: "pending",
+      });
+      const unselected = await store.nodes.Corpus.create({
+        name: "unselected",
+        state: "pending",
+      });
+      await store.nodes.ArtifactChunk.create({
+        corpusId: selected.id,
+        text: "chunk",
+      });
+
+      const candidates = store
+        .query()
+        .from("Corpus", "corpus")
+        .where((expression) =>
+          expression.$exists((subquery, outer) =>
+            subquery
+              .from("ArtifactChunk", "chunk")
+              .whereNode("chunk", (_chunk, inner) =>
+                expr.eq(inner.chunk.corpusId, outer.corpus.id),
+              )
+              .project((inner) => ({ id: inner.chunk.id })),
+          ),
+        )
+        // The candidate compiler projects the root id independently of this
+        // result selector, so an ordinary projection cannot break the write.
+        .select((context) => context.corpus.name);
+
+      await store.nodes.Corpus.updateWhere({
+        candidates,
+        patch: { state: "processed" },
+      });
+
+      await expect(
+        store.nodes.Corpus.getById(selected.id),
+      ).resolves.toMatchObject({ state: "processed" });
+      await expect(
+        store.nodes.Corpus.getById(unselected.id),
+      ).resolves.toMatchObject({ state: "pending" });
+    });
+
+    it("intersects candidate queries with both where and an exists selector", async () => {
+      const corpus = defineNode("CandidateCorpus", {
+        schema: z.object({ name: z.string(), state: z.string() }),
+      });
+      const artifactChunk = defineNode("CandidateArtifactChunk", {
+        schema: z.object({ corpusId: z.string(), text: z.string() }),
+      });
+      const reviewer = defineNode("CandidateReviewer", {
+        schema: z.object({ name: z.string() }),
+      });
+      const reviewedBy = defineEdge("candidateReviewedBy", {
+        schema: z.object({}),
+      });
+      const graph = defineGraph({
+        id: "update_where_candidate_intersections",
+        nodes: {
+          CandidateCorpus: { type: corpus },
+          CandidateArtifactChunk: { type: artifactChunk },
+          CandidateReviewer: { type: reviewer },
+        },
+        edges: {
+          candidateReviewedBy: {
+            type: reviewedBy,
+            from: [corpus],
+            to: [reviewer],
+          },
+        },
+      });
+      const store = await context.createStore(graph);
+      const approvedReviewer = await store.nodes.CandidateReviewer.create({
+        name: "approved",
+      });
+      const otherReviewer = await store.nodes.CandidateReviewer.create({
+        name: "pending review",
+      });
+
+      const selected = await store.nodes.CandidateCorpus.create({
+        name: "selected",
+        state: "pending",
+      });
+      const wrongState = await store.nodes.CandidateCorpus.create({
+        name: "wrong state",
+        state: "complete",
+      });
+      const wrongRelatedNode = await store.nodes.CandidateCorpus.create({
+        name: "wrong related node",
+        state: "pending",
+      });
+      const noCandidate = await store.nodes.CandidateCorpus.create({
+        name: "no artifact chunk",
+        state: "pending",
+      });
+
+      for (const candidate of [selected, wrongState, wrongRelatedNode]) {
+        await store.nodes.CandidateArtifactChunk.create({
+          corpusId: candidate.id,
+          text: `chunk for ${candidate.name}`,
+        });
+      }
+      await store.edges.candidateReviewedBy.create(selected, approvedReviewer);
+      await store.edges.candidateReviewedBy.create(
+        wrongState,
+        approvedReviewer,
+      );
+      await store.edges.candidateReviewedBy.create(
+        wrongRelatedNode,
+        otherReviewer,
+      );
+      await store.edges.candidateReviewedBy.create(
+        noCandidate,
+        approvedReviewer,
+      );
+
+      const candidates = store
+        .query()
+        .from("CandidateCorpus", "corpus")
+        .where((expression) =>
+          expression.$exists((subquery, outer) =>
+            subquery
+              .from("CandidateArtifactChunk", "chunk")
+              .whereNode("chunk", (_chunk, inner) =>
+                expr.eq(inner.chunk.corpusId, outer.corpus.id),
+              )
+              .project((inner) => ({ id: inner.chunk.id })),
+          ),
+        )
+        .select((query) => query.corpus.name);
+
+      const result = await store.nodes.CandidateCorpus.updateWhere({
+        candidates,
+        where: (candidate) => candidate.state.eq("pending"),
+        exists: [
+          {
+            edgeKind: "candidateReviewedBy",
+            direction: "out",
+            relatedKind: "CandidateReviewer",
+            whereRelated: (related) =>
+              related.field("name").string().eq("approved"),
+          },
+        ],
+        patch: { state: "processed" },
+      });
+
+      expect(result).toEqual({ affectedCount: 1 });
+      await expect(
+        store.nodes.CandidateCorpus.getById(selected.id),
+      ).resolves.toMatchObject({ state: "processed" });
+      await expect(
+        store.nodes.CandidateCorpus.getById(wrongState.id),
+      ).resolves.toMatchObject({ state: "complete" });
+      await expect(
+        store.nodes.CandidateCorpus.getById(wrongRelatedNode.id),
+      ).resolves.toMatchObject({ state: "pending" });
+      await expect(
+        store.nodes.CandidateCorpus.getById(noCandidate.id),
+      ).resolves.toMatchObject({ state: "pending" });
+    });
+
+    it("treats an empty candidate selection as a no-op", async () => {
+      const record = defineNode("EmptyCandidateRecord", {
+        schema: z.object({ name: z.string(), state: z.string() }),
+      });
+      const graph = defineGraph({
+        id: "update_where_empty_candidates",
+        nodes: { EmptyCandidateRecord: { type: record } },
+        edges: {},
+      });
+      const store = await context.createStore(graph);
+      const existing = await store.nodes.EmptyCandidateRecord.create({
+        name: "not selected",
+        state: "pending",
+      });
+      const candidates = store
+        .query()
+        .from("EmptyCandidateRecord", "record")
+        .whereNode("record", (candidate) => candidate.name.eq("does not exist"))
+        .select((query) => query.record.id);
+
+      await expect(
+        store.nodes.EmptyCandidateRecord.updateWhere({
+          candidates,
+          patch: { state: "processed" },
+        }),
+      ).resolves.toEqual({ affectedCount: 0 });
+      await expect(
+        store.nodes.EmptyCandidateRecord.getById(existing.id),
+      ).resolves.toMatchObject({ state: "pending" });
+    });
+
+    it("refuses includeSubClasses candidates before changing any concrete kind", async () => {
+      const content = defineNode("CandidateContent", {
+        schema: z.object({ name: z.string() }),
+      });
+      const article = defineNode("CandidateArticle", {
+        schema: z.object({ name: z.string() }),
+      });
+      const graph = defineGraph({
+        id: "update_where_polymorphic_candidates",
+        nodes: {
+          CandidateContent: { type: content },
+          CandidateArticle: { type: article },
+        },
+        edges: {},
+        ontology: [subClassOf(article, content)],
+      });
+      const store = await context.createStore(graph);
+      const baseNode = await store.nodes.CandidateContent.create({
+        name: "base",
+      });
+      const subclassNode = await store.nodes.CandidateArticle.create({
+        name: "subclass",
+      });
+      const candidates = store
+        .query()
+        .from("CandidateContent", "content", { includeSubClasses: true })
+        .select((query) => query.content.id);
+
+      await expect(
+        store.nodes.CandidateContent.updateWhere({
+          candidates,
+          patch: { name: "must not change" },
+        }),
+      ).rejects.toThrow("one concrete node kind");
+      await expect(
+        store.nodes.CandidateContent.getById(baseNode.id),
+      ).resolves.toMatchObject({ name: "base" });
+      await expect(
+        store.nodes.CandidateArticle.getById(subclassNode.id),
+      ).resolves.toMatchObject({ name: "subclass" });
+    });
+
+    it("refuses parameterized candidate queries before executing the set update", async () => {
+      const store = context.getStore();
+      const candidates = store
+        .query()
+        .from("Person", "person")
+        .whereNode("person", (_person, expressions) =>
+          expr.gte(expressions.person.age, expr.param("minimumAge", "number")),
+        )
+        .select((query) => query.person.id);
+
+      await expect(
+        store.nodes.Person.updateWhere({
+          candidates,
+          patch: { isActive: false },
+        }),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        code: "CONFIGURATION_ERROR",
+        details: {
+          code: "SET_UPDATE_CANDIDATE_PARAMETERS_UNSUPPORTED",
+          operation: "updateWhere",
+        },
+      });
+    });
+
+    it("refuses grouped candidate queries before changing grouping semantics", async () => {
+      const store = context.getStore();
+      const candidates = store
+        .query()
+        .from("Person", "person")
+        .groupBy("person", "age")
+        .select((query) => query.person.id);
+
+      await expect(
+        store.nodes.Person.updateWhere({
+          candidates,
+          patch: { isActive: false },
+        }),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        code: "CONFIGURATION_ERROR",
+        details: {
+          code: "SET_UPDATE_CANDIDATE_GROUPING_UNSUPPORTED",
+          operation: "updateWhere",
+        },
+      });
+    });
+
+    it("refuses checked-read candidates before applying a set update", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create({
+        name: "Checked candidate",
+        age: 40,
+        email: "checked@example.com",
+      });
+
+      await store.withCheckedReads(undefined, async (reads) => {
+        const candidates = reads
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.id.eq(person.id))
+          .select((query) => query.person.id);
+
+        await expect(
+          store.nodes.Person.updateWhere({
+            candidates,
+            patch: { age: 41 },
+          }),
+        ).rejects.toMatchObject({
+          name: "ConfigurationError",
+          code: "CONFIGURATION_ERROR",
+          details: {
+            code: "SET_UPDATE_CANDIDATE_CHECKED_READS_UNSUPPORTED",
+            operation: "updateWhere",
+          },
+        });
+      });
+
+      await expect(
+        store.nodes.Person.getById(person.id),
+      ).resolves.toMatchObject({ age: 40 });
+    });
+
+    it("refuses candidate queries with mismatched kind or graph provenance", async () => {
+      const store = context.getStore();
+      const personCandidates = store
+        .query()
+        .from("Person", "person")
+        .select((context) => context.person.id);
+
+      await expect(
+        store.nodes.Company.updateWhere({
+          candidates: personCandidates,
+          patch: { name: "not applied" },
+        }),
+      ).rejects.toThrow("collection's node kind");
+
+      const otherGraph = defineGraph({
+        id: "different_candidate_graph",
+        nodes: {
+          Person: {
+            type: defineNode("Person", {
+              schema: z.object({ name: z.string() }),
+            }),
+          },
+        },
+        edges: {},
+      });
+      const otherStore = await context.createStore(otherGraph);
+      const otherCandidates = otherStore
+        .query()
+        .from("Person", "person")
+        .select((context) => context.person.id);
+
+      await expect(
+        store.nodes.Person.updateWhere({
+          candidates: otherCandidates,
+          patch: { age: 99 },
+        }),
+      ).rejects.toThrow("same graph");
+
+      const historicalCandidates = store
+        .query()
+        .from("Person", "person")
+        .temporal("asOf", "2020-01-01T00:00:00.000Z")
+        .select((context) => context.person.id);
+      await expect(
+        store.nodes.Person.updateWhere({
+          candidates: historicalCandidates,
+          patch: { age: 99 },
+        }),
+      ).rejects.toThrow("current temporal coordinate");
     });
 
     it("updates nodes selected by property and relationship predicates", async () => {

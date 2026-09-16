@@ -36,6 +36,7 @@ import {
   ContributionUnavailableError,
   defineGraph,
   defineNode,
+  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
   resolveGraphVectorSlots,
   searchable,
 } from "../../../src";
@@ -111,6 +112,13 @@ function entryFor(
   physicalName: string,
 ): ContributionDiagnostic | undefined {
   return diagnostics.find((entry) => entry.physicalName === physicalName);
+}
+
+/** Marker namespace containing the physical attestation for a contribution. */
+function markerGraphId(contribution: StrategyTableContribution): string {
+  return contribution.scope === "deployment" ?
+      DEPLOYMENT_CONTRIBUTION_GRAPH_ID
+    : integrationTestGraph.id;
 }
 
 /** One projection's probe entry, or `undefined` when it was not assessed. */
@@ -196,7 +204,7 @@ async function markStale(
     context.getBackend().recordContributionMaterialization,
     "backend must record contribution markers",
   )({
-    graphId: integrationTestGraph.id,
+    graphId: markerGraphId(contribution),
     logicalName: contribution.logicalName,
     owner: contribution.owner,
     tableName: contribution.tableName,
@@ -216,7 +224,7 @@ async function markerFor(
     context.getBackend().getContributionMaterialization,
     "backend must read contribution markers",
   )({
-    graphId: integrationTestGraph.id,
+    graphId: markerGraphId(contribution),
     logicalName: contribution.logicalName,
     owner: contribution.owner,
     tableName: contribution.tableName,
@@ -263,7 +271,7 @@ export function registerContributionDiagnosticIntegrationTests(
       snapshots = await Promise.all(
         contributions.map((contribution) =>
           read({
-            graphId: integrationTestGraph.id,
+            graphId: markerGraphId(contribution),
             logicalName: contribution.logicalName,
             owner: contribution.owner,
             tableName: contribution.tableName,
@@ -366,7 +374,7 @@ export function registerContributionDiagnosticIntegrationTests(
         context.getBackend().recordContributionMaterialization,
         "backend must record contribution markers",
       )({
-        graphId: integrationTestGraph.id,
+        graphId: markerGraphId(contribution),
         logicalName: contribution.logicalName,
         owner: contribution.owner,
         tableName: contribution.tableName,
@@ -459,7 +467,7 @@ export function registerContributionDiagnosticIntegrationTests(
         context.getBackend().recordContributionMaterialization,
         "backend must record contribution markers",
       )({
-        graphId: integrationTestGraph.id,
+        graphId: markerGraphId(contribution),
         logicalName: contribution.logicalName,
         owner: contribution.owner,
         tableName: contribution.tableName,
@@ -939,7 +947,7 @@ export function registerContributionDiagnosticIntegrationTests(
           return Promise.all(
             contributions.map((contribution) =>
               read({
-                graphId: integrationTestGraph.id,
+                graphId: markerGraphId(contribution),
                 logicalName: contribution.logicalName,
                 owner: contribution.owner,
                 tableName: contribution.tableName,

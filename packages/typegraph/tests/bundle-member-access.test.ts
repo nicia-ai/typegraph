@@ -3,7 +3,7 @@
  * `tests/capability-operation-cover.test.ts` (T11b), which is pinned to the
  * CHECKED-IN baseline fixture and never re-scans the tree. This
  * suite calls `scanBundleMemberAccesses` directly and pins every one of the
- * six buckets it partitions `src/**`'s `OptionalGraphBackendMember` accesses
+ * six classes it partitions `src/**`'s `OptionalGraphBackendMember` accesses
  * into, so a scattered read that regresses I6's "no new pilot residue"
  * invariant — or a `deferred` ceiling a future change quietly exceeds (T21)
  * — fails here, not just in a human's re-reading of the registry.
@@ -41,10 +41,10 @@ const REASONED_FLOOR = 96;
 // accesses or raise its measured deferred ceiling of 9.
 // Adopted vector evolution checks the root capability before fencing and
 // invokes the adopted same-session facet only when the plan owes a slot.
-const DEFERRED_LIVE_TOTAL = 216;
-const DEFERRED_DECLARED_TOTAL = 219;
+const DEFERRED_LIVE_TOTAL = 215;
+const DEFERRED_DECLARED_TOTAL = 218;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 326;
+const TOTAL_ROW_COUNT = 325;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",

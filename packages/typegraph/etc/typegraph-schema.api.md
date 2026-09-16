@@ -317,6 +317,9 @@ type ContributionRepopulationStats = Readonly<{
 }>;
 
 // @public
+type ContributionScope = "deployment" | "graph";
+
+// @public
 type CountEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -2503,6 +2506,7 @@ type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "
 
 // @public
 type TableContribution = Readonly<{
+    scope?: ContributionScope;
     logicalName: string;
     owner: string;
     tableName: string;

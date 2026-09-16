@@ -97,6 +97,8 @@ export {
   type FieldAccessor,
   type NodeAccessor,
   type NodeAlias,
+  type NodeCandidateQuery,
+  type NodeCandidateSelection,
   type NodePropsFor,
   type NumberFieldAccessor,
   type ObjectFieldAccessor,

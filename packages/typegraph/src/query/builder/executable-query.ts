@@ -79,6 +79,7 @@ import { executeQueryTerminal } from "./terminal-query";
 import {
   type AliasMap,
   type EdgeAliasMap,
+  type NodeCandidateSelection,
   type PaginatedResult,
   type PaginateOptions,
   type QueryBuilderConfig,
@@ -404,6 +405,45 @@ export class ExecutableQuery<
     // reusable placeholder template execute() caches — see #templateFor.
     const ast = this.toAst();
     return compileQuery(ast, this.#config.graphId, this.#compileOptions());
+  }
+
+  /**
+   * Compiles only the root node identity for use by a set-based mutation.
+   * This deliberately ignores the JavaScript selector supplied to
+   * `.select(...)`: candidate identity is always the root id, so changing a
+   * result projection cannot make the mutation reference a missing column.
+   */
+  compileNodeCandidateIds(readInstant?: string): CompiledSelectSql {
+    const ast = this.toAst();
+    const idColumn = `${ast.start.alias}_id`;
+    return compileQuery(
+      {
+        ...ast,
+        ...(readInstant === undefined ?
+          {}
+        : {
+            temporalMode: {
+              mode: "asOf",
+              asOf: readInstant,
+            },
+          }),
+        projection: {
+          fields: [
+            {
+              outputName: idColumn,
+              source: {
+                __type: "field_ref",
+                alias: ast.start.alias,
+                path: ["id"],
+                valueType: "string",
+              },
+            },
+          ],
+        },
+      },
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
   }
 
   /**
@@ -786,6 +826,73 @@ export class ExecutableQuery<
         this.#config.backend === undefined ?
           undefined
         : backendDerivationRoot(this.#config.backend),
+    };
+  }
+
+  /**
+   * Describes this query as a candidate source for a set-based node update.
+   * Candidate updates use the root node identity, so one concrete root kind is
+   * required even when the query traverses other kinds.
+   */
+  toNodeCandidateSelection(): NodeCandidateSelection {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
+      undefined
+    ) {
+      throw new ConfigurationError(
+        "Queries from withCheckedReads() cannot be used as updateWhere() candidates.",
+        {
+          code: "SET_UPDATE_CANDIDATE_CHECKED_READS_UNSUPPORTED",
+          operation: "updateWhere",
+        },
+      );
+    }
+    const ast = this.toAst();
+    if (hasParameterReferences(ast)) {
+      throw new ConfigurationError(
+        "Set-update candidate queries cannot contain param() references; use concrete predicate values.",
+        {
+          code: "SET_UPDATE_CANDIDATE_PARAMETERS_UNSUPPORTED",
+          operation: "updateWhere",
+        },
+      );
+    }
+    if (ast.groupBy !== undefined || ast.having !== undefined) {
+      throw new ConfigurationError(
+        "Set-update candidate queries cannot use groupBy() or having(); select node rows directly.",
+        {
+          code: "SET_UPDATE_CANDIDATE_GROUPING_UNSUPPORTED",
+          operation: "updateWhere",
+        },
+      );
+    }
+    if (ast.start.kinds.length !== 1 || ast.start.includeSubClasses) {
+      throw new ConfigurationError(
+        "A set-update candidate query must select one concrete node kind.",
+        {
+          operation: "updateWhere",
+          candidateKinds: ast.start.kinds,
+          includeSubClasses: ast.start.includeSubClasses,
+        },
+      );
+    }
+    const kind = ast.start.kinds[0];
+    if (kind === undefined) {
+      throw new ConfigurationError(
+        "A set-update candidate query must have a node source.",
+        { operation: "updateWhere" },
+      );
+    }
+    return {
+      graphId: this.#config.graphId,
+      executionTarget:
+        this.#config.backend === undefined ?
+          undefined
+        : backendDerivationRoot(this.#config.backend),
+      kind,
+      idColumn: `${ast.start.alias}_id`,
+      temporalMode: ast.temporalMode.mode,
+      recordedAsOf: ast.recordedAsOf,
     };
   }
 

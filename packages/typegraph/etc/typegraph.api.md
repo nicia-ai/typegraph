@@ -1184,6 +1184,9 @@ export type ContributionRepopulationStats = Readonly<{
 }>;
 
 // @public
+export type ContributionScope = "deployment" | "graph";
+
+// @public
 export class ContributionUnavailableError extends TypeGraphError {
     constructor(graphId: string, physicalName: string, options?: Readonly<{
         cause?: unknown;
@@ -1829,6 +1832,9 @@ type DeleteUniqueParams = Readonly<{
     concreteKind: string;
     nodeId: string;
 }>;
+
+// @public
+export const DEPLOYMENT_CONTRIBUTION_GRAPH_ID = "__typegraph_deployment__";
 
 // @public
 type DeprecatedKindsChange = Readonly<{
@@ -2925,6 +2931,7 @@ export class ExecutableProjectionQuery<Fields extends DatabaseProjection, Contex
 export class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = {}, RecursiveAliases extends RecursiveAliasMap = {}, R = unknown> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R);
     compile(): CompiledSelectSql;
+    compileNodeCandidateIds(readInstant?: string): CompiledSelectSql;
     // @internal
     compileOneStatementBatchItem?(): Readonly<{
         query: CompiledSelectSql;
@@ -2961,6 +2968,7 @@ export class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeA
     prepare(): PreparedQuery<R>;
     stream(options?: StreamOptions): AsyncIterable<R>;
     toAst(): QueryAst;
+    toNodeCandidateSelection(): NodeCandidateSelection;
     toSQL(): Readonly<{
         sql: string;
         params: readonly unknown[];
@@ -5809,6 +5817,22 @@ export type NodeBulkFindByIndexOptions = Readonly<{
 }>;
 
 // @public
+export type NodeCandidateQuery = Readonly<{
+    compileNodeCandidateIds: (readInstant?: string) => CompiledSelectSql;
+    toNodeCandidateSelection: () => NodeCandidateSelection;
+}>;
+
+// @public
+export type NodeCandidateSelection = Readonly<{
+    graphId: string;
+    executionTarget: object | undefined;
+    kind: string;
+    idColumn: string;
+    temporalMode: "current" | "asOf" | "includeEnded" | "includeTombstones";
+    recordedAsOf: string | undefined;
+}>;
+
+// @public
 type NodeChange = Readonly<{
     type: ChangeType;
     kind: string;
@@ -5834,6 +5858,7 @@ export type NodeCollection<N extends NodeType, CN extends string = string> = Rea
     }>) => Promise<boolean>;
     updateWhere: (params: Readonly<{
         patch: Partial<z.input<N["schema"]>>;
+        candidates?: NodeCandidateQuery;
         where?: (accessor: string extends N["kind"] ? DynamicNodeAccessor : NodeAccessor<N>) => Predicate;
         exists?: readonly Readonly<{
             edgeKind: string;
@@ -8805,6 +8830,7 @@ export type SystemIndexTable = "nodes" | "edges" | "recordedNodes" | "recordedEd
 
 // @public
 export type TableContribution = Readonly<{
+    scope?: ContributionScope;
     logicalName: string;
     owner: string;
     tableName: string;
@@ -8917,6 +8943,8 @@ export type TransactionConflictErrorDetails = Readonly<{
 // @public
 export type TransactionContext<G extends GraphDef> = TransactionCollections<G> & Readonly<{
     query: () => InitialQueryBuilder<G, "open">;
+    describe: () => Promise<StoreDescription>;
+    validateStore: (options: ValidateStoreOptions) => Promise<StoreValidationPage>;
     batchOnce: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
     countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;

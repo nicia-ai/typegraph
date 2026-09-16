@@ -89,7 +89,10 @@ describe("TableContribution — Postgres (tsvectorStrategy)", () => {
 
   it("marks the fulltext slot runtimeEnsure but base tables not", () => {
     const contributions = postgresContributions(createPostgresTables());
-    expect(fulltextContribution(contributions).runtimeEnsure).toBe(true);
+    expect(fulltextContribution(contributions)).toMatchObject({
+      runtimeEnsure: true,
+      scope: "deployment",
+    });
     const base = contributions.filter(
       (contribution) => contribution.owner === "base",
     );
@@ -109,6 +112,7 @@ describe("TableContribution — SQLite (fts5Strategy)", () => {
     if (fulltext === undefined) throw new Error("no fulltext contribution");
 
     expect(fulltext.owner).toBe("fts5");
+    expect(fulltext.scope).toBe("deployment");
     expect(fulltext.createDdl.join("\n")).toContain(
       "CREATE VIRTUAL TABLE IF NOT EXISTS",
     );

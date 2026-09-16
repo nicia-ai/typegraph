@@ -603,23 +603,12 @@ export function createPostgresTables(
   );
 
   /**
-   * Per-deployment durable marker that a strategy-owned table
-   * contribution (#129 — fulltext today) has been materialized against
-   * this database (#135). The single source of truth replacing the old
-   * in-memory per-backend `fulltextEnsured` latch: "is fulltext storage
-   * materialized?" is now a queryable database fact, written only by
-   * the async boot path and read (cached) by the fulltext hot-path
-   * gate.
-   *
-   * Keyed on `(graph_id, logical_name, owner, table_name)` — unlike
-   * `indexMaterializations` (physical index name is database-global),
-   * a contribution's identity is graph-scoped: two graphs can each own
-   * a logically-identical fulltext table. `signature` is deliberately
-   * NOT in the key: a same-identity row with a different signature is
-   * detectable drift, surfaced as a loud error rather than a silent
-   * re-materialize. `materialized_at` is null until the first success;
-   * the COALESCE-on-failure rule preserves it across failed retries,
-   * mirroring `indexMaterializations`.
+   * Durable markers for strategy-owned table contributions (#129). A
+   * deployment-scoped physical contribution uses the reserved deployment
+   * graph id, while a graph row records logical activation. Keyed on
+   * `(graph_id, logical_name, owner, table_name)`; `signature` is
+   * deliberately NOT in the key so same-identity drift is detectable
+   * rather than silently re-materialized.
    */
   const contributionMaterializations = pgTable(
     n.contributionMaterializations,

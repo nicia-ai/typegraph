@@ -505,12 +505,13 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
           /^\s*select/i.test(statement) &&
           statement.includes(CONTRIBUTION_MARKER_TABLE),
       );
-      // One marker read per OUTER attempt: the nested `runSchemaWriteTransaction`
-      // ran once, propagated the fence-row conflict unchanged, and the outer
-      // attempt redid its own pre-reads on its own replay. Had the pre-reads
-      // stayed OUTSIDE the retried closure (read once, before the fenced
-      // transaction), this would read 1 regardless of how many attempts ran.
-      expect(markerReads.length).toBe(2);
+      // Two marker reads per OUTER attempt, one for the graph activation and
+      // one for the deployment-scoped physical contribution. The nested
+      // `runSchemaWriteTransaction` ran once, propagated the fence-row conflict
+      // unchanged, and the outer attempt redid both pre-reads on its replay.
+      // Had the pre-reads stayed OUTSIDE the retried closure, this would read 2
+      // regardless of how many attempts ran.
+      expect(markerReads.length).toBe(4);
     } finally {
       await client.close();
     }

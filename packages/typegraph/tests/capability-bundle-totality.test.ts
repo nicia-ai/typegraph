@@ -29,14 +29,14 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("15 pilot + 83 unbundled = 98, with no member counted twice", () => {
+  it("16 pilot + 82 unbundled = 98, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
-    expect(bundledSet.size).toBe(15);
+    expect(bundledSet.size).toBe(16);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(83);
+    expect(unbundledNames.length).toBe(82);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
@@ -108,12 +108,12 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("33 reasoned entries sum to 96 accesses; 50 deferred entries sum to 219", () => {
+  it("33 reasoned entries sum to 96 accesses; 49 deferred entries sum to 218", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
     expect(reasoned.length).toBe(33);
-    expect(deferred.length).toBe(50);
+    expect(deferred.length).toBe(49);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
     // on one physical line) and `ensureIdentityTables` 3->4
@@ -158,6 +158,6 @@ describe("capability bundle totality (T9)", () => {
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(96);
     // Adopted vector provisioning adds its root capability check and fenced
     // session provisioning selection: 217 -> 219.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(219);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(218);
   });
 });

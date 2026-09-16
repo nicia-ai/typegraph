@@ -27,10 +27,10 @@
  * `claimsVerdict(...)` call, which only a direct import of the raw accessor
  * can spell.
  *
- * B8 extends the ratchet to all six named verdict accessors
+ * B8 extends the ratchet to all seven named verdict accessors
  * (`batchPointReadVerdict`, `uniqueSidecarBatchVerdict`,
  * `statementExecutionVerdict`, `contributionHealthVerdict`,
- * `recordedRevisionOriginsVerdict`, alongside `claimsVerdict`), each of which
+ * `recordedRevisionOriginsVerdict`, `endpointSetReadVerdict`, alongside `claimsVerdict`), each of which
  * genuinely does resolve eagerly (no thunk — B8's rationale is that no pilot
  * bundle below has a `crossCheck`), so a blanket zero-tolerance ban would be
  * false: `store.ts`'s constructor, `guards.ts`'s construction gates,
@@ -78,6 +78,7 @@ const ONE_OWNER_BANNED_NAMES = new Set([
   "statementExecutionVerdict",
   "contributionHealthVerdict",
   "recordedRevisionOriginsVerdict",
+  "endpointSetReadVerdict",
 ]);
 
 /**
@@ -100,6 +101,7 @@ const ONE_OWNER_MINTING_ALLOWLIST = new Map<string, number>([
   ["store/store.ts#contributionHealthVerdict", 1],
   ["store/store.ts#recordedRevisionOriginsVerdict", 1],
   ["store/store.ts#statementExecutionVerdict", 1],
+  ["store/store.ts#endpointSetReadVerdict", 1],
   ["store/recorded-capture/guards.ts#statementExecutionVerdict", 2],
   ["store/recorded-capture/guards.ts#recordedRevisionOriginsVerdict", 1],
   ["store/recorded-capture.ts#batchPointReadVerdict", 1],

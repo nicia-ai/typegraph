@@ -676,6 +676,9 @@ type ContributionRepopulationStats = Readonly<{
 export type ContributionRuntime = Omit<CreateContributionMembersDeps, "dialect" | "fulltextStrategy" | "vectorStrategy" | "fenceTarget" | "ensureTable" | "execute" | "operationStrategy" | "schemaWriteTransaction">;
 
 // @public
+type ContributionScope = "deployment" | "graph";
+
+// @public
 type ConvergeEdgeCreateParams = Readonly<{
     params: InsertEdgeParams;
     match: EdgeConvergenceMatch;
@@ -9034,6 +9037,7 @@ type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "
 
 // @public
 type TableContribution = Readonly<{
+    scope?: ContributionScope;
     logicalName: string;
     owner: string;
     tableName: string;

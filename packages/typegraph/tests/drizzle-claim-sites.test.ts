@@ -61,7 +61,7 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "apps/docs/src/content/docs/fulltext-search.md",
-    line: 668,
+    line: 671,
     text: "from the " + CLAIM_WORD + "-free backend-authoring entrypoint.",
   },
   {
@@ -111,7 +111,7 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "packages/typegraph/tests/table-contribution.test.ts",
-    line: 122,
+    line: 126,
     text:
       "// through `ownedTables` (" +
       CLAIM_WORD +

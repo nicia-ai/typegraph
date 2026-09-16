@@ -28,6 +28,7 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
   fts5Strategy,
   MigrationError,
   searchable,
@@ -66,6 +67,12 @@ const Document = defineNode("Doc", {
 
 const FtGraph = defineGraph({
   id: "fulltext-bootstrap-gap",
+  nodes: { Doc: { type: Document } },
+  edges: {},
+});
+
+const SecondFtGraph = defineGraph({
+  id: "sqlite_fulltext_bootstrap_second",
   nodes: { Doc: { type: Document } },
   edges: {},
 });
@@ -116,12 +123,21 @@ describe("#135 durable fulltext materialization (SQLite)", () => {
       materialized_at: string | null;
       last_error: string | null;
     }[];
-    expect(markers).toHaveLength(1);
-    expect(markers[0]?.graph_id).toBe(FtGraph.id);
-    expect(markers[0]?.logical_name).toBe("fulltext");
-    expect(markers[0]?.owner).toBe(fts5Strategy.name);
-    expect(markers[0]?.materialized_at).not.toBeNull();
-    expect(markers[0]?.last_error).toBeNull();
+    expect(markers).toHaveLength(2);
+    const deploymentMarker = markers.find(
+      (marker) => marker.graph_id === DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+    );
+    const graphMarker = markers.find(
+      (marker) => marker.graph_id === FtGraph.id,
+    );
+    expect(deploymentMarker?.logical_name).toBe("fulltext");
+    expect(deploymentMarker?.owner).toBe(fts5Strategy.name);
+    expect(deploymentMarker?.materialized_at).not.toBeNull();
+    expect(deploymentMarker?.last_error).toBeNull();
+    expect(graphMarker?.logical_name).toBe("fulltext");
+    expect(graphMarker?.owner).toBe(fts5Strategy.name);
+    expect(graphMarker?.materialized_at).not.toBeNull();
+    expect(graphMarker?.last_error).toBeNull();
 
     // And the searchable() write lands without error.
     await store.nodes.Doc.create({ title: "hello world" });
@@ -132,6 +148,40 @@ describe("#135 durable fulltext materialization (SQLite)", () => {
     expect(fulltext).toHaveLength(1);
     expect(fulltext[0]?.content).toBe("hello world");
 
+    sqlite.close();
+  });
+
+  it("activates a second graph without repeating fulltext DDL", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    await createStoreWithSchema(FtGraph, backend);
+
+    // A fresh backend instance represents a new runtime process. The shared
+    // table is already physically attested; opening this graph should only
+    // add its graph-local activation marker.
+    const secondBackend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const [secondStore] = await createStoreWithSchema(
+      SecondFtGraph,
+      secondBackend,
+    );
+    await secondStore.nodes.Doc.create({ title: "second graph" });
+
+    const markers = sqlite
+      .prepare(
+        `SELECT graph_id FROM ${CONTRIB_MAT_TABLE} ` +
+          `WHERE logical_name = 'fulltext' ORDER BY graph_id`,
+      )
+      .all() as readonly { graph_id: string }[];
+    expect(markers.map((row) => row.graph_id)).toEqual([
+      "__typegraph_deployment__",
+      FtGraph.id,
+      SecondFtGraph.id,
+    ]);
     sqlite.close();
   });
 
@@ -314,7 +364,7 @@ describe("#135 signature drift is a loud error, never silently re-blessed", () =
       return sqlite
         .prepare(
           `SELECT signature, materialized_at, last_error FROM ` +
-            `${CONTRIB_MAT_TABLE} WHERE graph_id = '${FtGraph.id}'`,
+            `${CONTRIB_MAT_TABLE} WHERE graph_id = '${DEPLOYMENT_CONTRIBUTION_GRAPH_ID}'`,
         )
         .all() as readonly {
         signature: string;

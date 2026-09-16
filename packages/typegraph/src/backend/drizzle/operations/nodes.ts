@@ -897,11 +897,10 @@ export function buildAssertAtomicNodeProjectionEvidence(
   if (first === undefined) {
     return sql`SELECT 1 WHERE FALSE`;
   }
-  if (evidence.some((entry) => entry.graphId !== first.graphId)) {
-    throw new CompilerInvariantError(
-      "Atomic node projection evidence crossed graph storage.",
-    );
-  }
+  // Deployment-scoped contributions are attested under the deployment
+  // marker key while the graph's logical activation remains graph-scoped.
+  // One atomic assertion may therefore intentionally contain marker rows
+  // from two graph-id namespaces.
   const expectedMarkers = evidence.map(
     (entry) => sql`
       (

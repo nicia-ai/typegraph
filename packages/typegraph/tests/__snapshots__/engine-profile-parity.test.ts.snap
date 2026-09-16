@@ -1603,6 +1603,18 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
   },
   {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
+  },
+  {
     "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_contribution_materializations" (
   "graph_id" TEXT NOT NULL,
@@ -1618,7 +1630,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [
-      "engine_profile_parity_script",
+      "__typegraph_deployment__",
     ],
     "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
   },
@@ -1643,6 +1655,30 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_node_fulltext_kind_idx" ON "typegraph_node_fulltext" ("graph_id", "node_kind");",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+      "fulltext",
+      "tsvector",
+      "typegraph_node_fulltext",
+      "e552ac23db646e657a018b806bbc0539",
+      "<<TIMESTAMP>>",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "insert into "typegraph_contribution_materializations" ("graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error") values ($1, $2, $3, $4, $5, $6, $7, default) on conflict ("graph_id","logical_name","owner","table_name") do update set "signature" = excluded."signature", "materialized_at" = excluded."materialized_at", "last_attempted_at" = excluded."last_attempted_at", "last_error" = excluded."last_error"",
+  },
+  {
+    "params": [
+      "engine_profile_parity_script",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
   },
   {
     "params": [
@@ -2687,6 +2723,18 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
   },
   {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
+  },
+  {
     "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_contribution_materializations" (
   "graph_id" TEXT NOT NULL,
@@ -2702,7 +2750,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   },
   {
     "params": [
-      "engine_profile_parity_template_source",
+      "__typegraph_deployment__",
     ],
     "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
   },
@@ -2727,6 +2775,30 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_node_fulltext_kind_idx" ON "typegraph_node_fulltext" ("graph_id", "node_kind");",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+      "fulltext",
+      "tsvector",
+      "typegraph_node_fulltext",
+      "e552ac23db646e657a018b806bbc0539",
+      "<<TIMESTAMP>>",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "insert into "typegraph_contribution_materializations" ("graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error") values ($1, $2, $3, $4, $5, $6, $7, default) on conflict ("graph_id","logical_name","owner","table_name") do update set "signature" = excluded."signature", "materialized_at" = excluded."materialized_at", "last_attempted_at" = excluded."last_attempted_at", "last_error" = excluded."last_error"",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
   },
   {
     "params": [
@@ -3687,6 +3759,18 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
     "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
   },
   {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
+  },
+  {
     "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_contribution_materializations" (
   "graph_id" TEXT NOT NULL,
@@ -3702,7 +3786,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   },
   {
     "params": [
-      "engine_profile_parity_script",
+      "__typegraph_deployment__",
     ],
     "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
   },
@@ -3717,6 +3801,30 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   content,
   tokenize='porter unicode61 remove_diacritics 2'
 );",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+      "fulltext",
+      "fts5",
+      "typegraph_node_fulltext",
+      "98fcbf03ae80b355e3c3d3931ca487bb",
+      "<<TIMESTAMP>>",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "insert into "typegraph_contribution_materializations" ("graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error") values (?, ?, ?, ?, ?, ?, ?, null) on conflict ("typegraph_contribution_materializations"."graph_id", "typegraph_contribution_materializations"."logical_name", "typegraph_contribution_materializations"."owner", "typegraph_contribution_materializations"."table_name") do update set "signature" = excluded."signature", "materialized_at" = excluded."materialized_at", "last_attempted_at" = excluded."last_attempted_at", "last_error" = excluded."last_error"",
+  },
+  {
+    "params": [
+      "engine_profile_parity_script",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
   },
   {
     "params": [
@@ -4617,6 +4725,18 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
     "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
   },
   {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
+  },
+  {
     "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_contribution_materializations" (
   "graph_id" TEXT NOT NULL,
@@ -4632,7 +4752,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   },
   {
     "params": [
-      "engine_profile_parity_template_source",
+      "__typegraph_deployment__",
     ],
     "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
   },
@@ -4647,6 +4767,30 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   content,
   tokenize='porter unicode61 remove_diacritics 2'
 );",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+      "fulltext",
+      "fts5",
+      "typegraph_node_fulltext",
+      "98fcbf03ae80b355e3c3d3931ca487bb",
+      "<<TIMESTAMP>>",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "insert into "typegraph_contribution_materializations" ("graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error") values (?, ?, ?, ?, ?, ?, ?, null) on conflict ("typegraph_contribution_materializations"."graph_id", "typegraph_contribution_materializations"."logical_name", "typegraph_contribution_materializations"."owner", "typegraph_contribution_materializations"."table_name") do update set "signature" = excluded."signature", "materialized_at" = excluded."materialized_at", "last_attempted_at" = excluded."last_attempted_at", "last_error" = excluded."last_error"",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
+  },
+  {
+    "params": [
+      "__typegraph_deployment__",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
   },
   {
     "params": [

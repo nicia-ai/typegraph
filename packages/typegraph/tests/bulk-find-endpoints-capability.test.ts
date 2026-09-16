@@ -90,6 +90,7 @@ describe("bulk endpoint reads on a backend without the capability", () => {
 
     expect(error).toBeInstanceOf(ConfigurationError);
     expect((error as ConfigurationError).details).toMatchObject({
+      code: "ENDPOINT_SET_READ_UNSUPPORTED",
       capability: "findEdgesByEndpointSet",
       operation: "bulkFindFrom",
     });

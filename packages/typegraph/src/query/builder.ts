@@ -79,6 +79,8 @@ export type {
   IdentityTraversalOption,
   NodeAccessor,
   NodeAlias,
+  NodeCandidateQuery,
+  NodeCandidateSelection,
   NodePropsFor,
   OneStatementBatchableQuery,
   OneStatementBatchReads,

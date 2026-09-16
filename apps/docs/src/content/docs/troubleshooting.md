@@ -478,14 +478,18 @@ application workflow.
 
 ### The store opens clean but a fulltext or vector read fails
 
-**Cause:** The durable contribution marker still says `initialized`
-while the physical table it names is gone — a partial restore, a
+**Cause:** The durable physical contribution marker still says `initialized`
+while the table it names is gone — a partial restore, a
 hand-run `DROP`, or a schema-scoped restore that missed the
 strategy-owned tables. Nothing on the open path probes the catalog:
 boot and the runtime asserts short-circuit on a per-instance signature
-cache and then on the marker row alone, which keeps the hot path free
+cache and then on durable marker rows alone, which keeps the hot path free
 of catalog round trips. The cost is that this database opens
 completely clean and fails at the first read or write that depends on the affected slot.
+
+For deployment-scoped storage such as the shared fulltext table, readiness is
+the conjunction of that physical marker and a graph-local activation marker.
+Vector tables remain graph-scoped and use one graph-local physical marker.
 
 **Diagnosis:** `store.verifyContributions()` reports detected drift or a
 recorded failed attempt among contributions currently expected by the active

@@ -50,10 +50,21 @@ export const FULLTEXT_CONTRIBUTION_NAME = "fulltext";
 /** `owner` of core/base schema tables (not strategy-owned). */
 export const BASE_CONTRIBUTION_OWNER = "base";
 
+/** Ownership scope for a strategy-owned physical contribution. */
+export type ContributionScope = "deployment" | "graph";
+
+/** Durable-marker key used for deployment-scoped physical contributions. */
+export const DEPLOYMENT_CONTRIBUTION_GRAPH_ID = "__typegraph_deployment__";
+
 /**
  * A single table TypeGraph owns.
  */
 export type TableContribution = Readonly<{
+  /**
+   * Whether physical storage is shared by the deployment or owned by one
+   * graph. Omitted by older custom strategies, which retain graph scope.
+   */
+  scope?: ContributionScope;
   /**
    * Stable, graph- and deployment-independent identity for the logical
    * slot this contribution fills (e.g. `"fulltext"`). NOT the physical

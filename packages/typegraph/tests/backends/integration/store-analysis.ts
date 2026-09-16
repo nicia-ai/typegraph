@@ -27,6 +27,39 @@ export function registerStoreAnalysisIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Store analysis", () => {
+    it("binds analysis reads to the current transaction session", async () => {
+      const store = await context.createStore(analysisGraph);
+
+      await expect(
+        store.transaction(async (tx) => {
+          await tx.nodes.Audited.create({ name: "Uncommitted" });
+
+          const description = await tx.describe();
+          const audited = description.statistics.nodes.find(
+            (entry) => entry.kind === "Audited",
+          );
+          expect(audited?.count).toBe(1);
+
+          const validation = await tx.validateStore({
+            entity: "node",
+            kind: "Audited",
+          });
+          expect(validation).toMatchObject({
+            scannedCount: 1,
+            violations: [],
+          });
+
+          throw new Error("roll back analysis fixture");
+        }),
+      ).rejects.toThrow("roll back analysis fixture");
+
+      const afterRollback = await store.describe();
+      const audited = afterRollback.statistics.nodes.find(
+        (entry) => entry.kind === "Audited",
+      );
+      expect(audited?.count).toBe(0);
+    });
+
     it("describes per-kind counts and declared-property coverage at one schema coordinate", async () => {
       const store = context.getStore();
       const alice = await store.nodes.Person.create({

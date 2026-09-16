@@ -1907,7 +1907,7 @@ claim outright for this reason.
 
 A **capability bundle** groups a set of `GraphBackend` members that one operation family needs
 together, with one verdict resolver and one member accessor, so a caller never re-derives "does
-this backend support X" from a scattered `undefined` check. Six pilot bundles ship in this
+this backend support X" from a scattered `undefined` check. Seven pilot bundles ship in this
 release:
 
 | Bundle                    | Kind       | Disposition                                                                                                                                                                 |
@@ -1918,21 +1918,22 @@ release:
 | `batchPointRead`          | graduated  | `getNodes` absent falls back to per-id `getNode`; `getEdges` absent falls back to per-id `getEdge`                                                                           |
 | `uniqueSidecarBatch`      | graduated  | `insertUniqueBatch` absent falls back to `issueClaimsIndividually`; `checkUniqueBatch` absent falls back to a per-key loop; `hardDeleteUniquesByNodeIds` absent refuses with the operation's own typed error |
 | `contributionHealth`      | graduated  | `verifyContributions` / `repairContributions` / `rebuildContribution` absent each refuse with the operation's own typed error; `probeContributions` absent falls back to `{ entries: [] }` |
+| `endpointSetRead`         | graduated  | `findEdgesByEndpointSet` absent refuses set-oriented `bulkFindFrom` / `bulkFindTo` with `ENDPOINT_SET_READ_UNSUPPORTED`; singleton reads remain available |
 
 The port-mismatch rule that governs every bundle's member accessor is keyed to the disposition,
 not blanket: a `refuse`-disposition row whose backend object cannot actually reach the member
 throws that bundle's own `portSurfaceCode` (`CONSTRAINT_CLAIM_SURFACE_MISMATCH` for `claims`,
-`BUNDLE_PORT_SURFACE_MISMATCH` for the other five); a `fallback`-disposition row whose port cannot
+`BUNDLE_PORT_SURFACE_MISMATCH` for the other six); a `fallback`-disposition row whose port cannot
 reach the member takes its declared fallback instead of throwing — the verdict said the member
 was there, the object it binds against says otherwise, and a fallback row is defined to degrade
 rather than assert.
 
-This bundle model ships for **six of the twenty-one** member-bearing operation families measured
-in this workstream; the remaining fifteen are a named follow-up workstream, not a silent gap —
+This bundle model ships for **seven of the twenty-one** member-bearing operation families measured
+in this workstream; the remaining fourteen are a named follow-up workstream, not a silent gap —
 their members keep working exactly as before, unbundled, with an access-count ceiling that
 prevents new scattered checks from accumulating ahead of that follow-up.
 
-A backend author does not need to do anything for these six bundles today: both bundled backends
+A backend author does not need to do anything for these seven bundles today: both bundled backends
 already carry every core member each bundle's `dialects` scope requires. The atomic transport
 conformance runner is the foundation for certifying a **third-party** backend: the author supplies
 engine-specific statements, state observers, and exact-root provenance checks, while the runner
@@ -2123,6 +2124,16 @@ interactive transaction and an exact-root atomic batch are independent facts:
 a backend may provide either, both, or neither. Each Store operation selects
 the boundary its own semantics require instead of treating one mechanism as a
 universal substitute for the other.
+
+Endpoint-set reads have a small, independent conformance fixture for custom
+backends. Import `runEndpointSetReadConformance` from the `backend` entrypoint
+and provide the exact backend, one or more successful `FindEdgesByEndpointSetParams`
+cases, and at least one refusal case. The runner checks that the backend exposes
+`findEdgesByEndpointSet`, preserves the expected edge rows, and refuses invalid
+requests using the adapter's typed error. It does not create a schema or assume
+a driver, so the same fixture can run against any engine. A backend that omits
+the member remains valid for singleton reads; Store bulk endpoint reads refuse
+with `ENDPOINT_SET_READ_UNSUPPORTED`.
 
 ### Declared constraints require an interactive transaction
 
@@ -2605,6 +2616,17 @@ reopen it through a managed factory before resuming version-fenced writes.
   Store — the managed factory's boot step refuses to open while a
   contribution is `stale`. See
   [Contribution health: probe, repair, rebuild](/troubleshooting#contribution-health-probe-repair-rebuild).
+
+  Strategy contributions declare an ownership `scope`: `"graph"` (the
+  default for older custom strategies) provisions one physical contribution
+  per graph, while `"deployment"` provisions shared physical storage once
+  under TypeGraph's reserved deployment marker and records a separate
+  graph-local activation marker. The built-in full-text strategies use
+  deployment scope; vector slots remain graph-scoped. A subsequent graph open
+  reads both attestations and performs no DDL, so it can run under a
+  DML-only role without disabling full-text search. The reserved marker key is
+  exported as `DEPLOYMENT_CONTRIBUTION_GRAPH_ID`; graph definitions must not
+  use that id.
 
 ### Contribution capability parity
 

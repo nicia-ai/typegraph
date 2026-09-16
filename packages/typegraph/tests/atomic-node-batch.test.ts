@@ -1537,7 +1537,9 @@ describe("plain node batch store contract", () => {
       ).rejects.toBeInstanceOf(StoreNotInitializedError);
 
       expect(batch).toHaveBeenCalledOnce();
-      expect(execute).toHaveBeenCalledOnce();
+      // Deployment-scoped fulltext evidence is read separately from this
+      // graph's activation marker during post-rollback diagnosis.
+      expect(execute).toHaveBeenCalledTimes(2);
       await expect(
         fixture.store.nodes.SearchDocument.getById("missing-marker" as never),
       ).resolves.toBeUndefined();

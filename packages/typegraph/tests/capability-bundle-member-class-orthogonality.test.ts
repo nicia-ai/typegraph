@@ -34,9 +34,9 @@ function classFor(member: string): readonly string[] {
 }
 
 describe("pilot bundle members × GRAPH_BACKEND_MEMBER_CLASSES orthogonality", () => {
-  it("every one of the 15 pilot members appears in exactly one member class", () => {
+  it("every one of the 16 pilot members appears in exactly one member class", () => {
     const members = pilotMembers();
-    expect(members.length).toBe(15);
+    expect(members.length).toBe(16);
 
     const map: Record<string, string> = {};
     for (const member of members) {
@@ -66,6 +66,7 @@ describe("pilot bundle members × GRAPH_BACKEND_MEMBER_CLASSES orthogonality", (
       rebuildContribution: "maintenance",
       probeContributions: "read",
       ensureRevisionOriginsTable: "provisioning",
+      findEdgesByEndpointSet: "read",
     });
   });
 });

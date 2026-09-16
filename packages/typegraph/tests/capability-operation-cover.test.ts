@@ -1,7 +1,7 @@
 /**
  * T11b — expands every operation row's `sites` against the CHECKED-IN
  * baseline fixture (never the live scan — that is B9's), and checks the
- * cover of the fixture's 58 `pilot` keys: each covered exactly once, no
+ * cover of the fixture's 59 `pilot` keys: each covered exactly once, no
  * stale `(file, member)` attribution, and the 2 `statically-required` keys
  * plus the 1 `not-an-access` key excluded BY NAME rather than by falling
  * out of the count.
@@ -97,7 +97,7 @@ describe("capability operation cover against the checked-in baseline (T11b)", ()
   it("covers every one of the 58 `pilot` keys exactly once", () => {
     const baseline = loadBaseline();
     const pilotRows = baseline.rows.filter((row) => row.class === "pilot");
-    expect(pilotRows).toHaveLength(58);
+    expect(pilotRows).toHaveLength(59);
 
     const { coveredKeys, staleAttributions } = expandCover(baseline);
     expect(staleAttributions, "stale attributions").toEqual([]);
@@ -141,8 +141,8 @@ describe("capability operation cover against the checked-in baseline (T11b)", ()
     expect(nonPilotCount).toBe(3);
   });
 
-  it("58 + 2 + 1 = 61", () => {
+  it("59 + 2 + 1 = 62", () => {
     const baseline = loadBaseline();
-    expect(baseline.rows).toHaveLength(61);
+    expect(baseline.rows).toHaveLength(62);
   });
 });

@@ -72,6 +72,8 @@ export type {
   InitialQueryBuilder,
   NodeAccessor,
   NodeAlias,
+  NodeCandidateQuery,
+  NodeCandidateSelection,
   NodePropsFor,
   OneStatementBatchableQuery,
   OneStatementBatchResults,
