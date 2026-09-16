@@ -64,7 +64,10 @@ import {
   withNodeClaimTransition,
   withNodeCreateClaimsBatch,
 } from "../claims/node-claims";
-import { validateResolvedNodeClaims } from "../claims/resolved-node-claims";
+import {
+  resolvedNodeUniqueSidecarBatchIsReachable,
+  validateResolvedNodeClaims,
+} from "../claims/resolved-node-claims";
 import {
   deleteNodeEmbeddings,
   getEmbeddingFields,
@@ -472,6 +475,15 @@ export async function applyResolvedNodeUpdateBatch(
   }>,
   backend: Backend,
 ): Promise<readonly NodeRow[] | undefined> {
+  if (
+    args.uniqueConstraints.length > 0 &&
+    !resolvedNodeUniqueSidecarBatchIsReachable(uniquenessContext(ctx, backend))
+  ) {
+    throw new ConfigurationError(
+      "Resolved node writes require batched uniqueness operations",
+      { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
+    );
+  }
   const updateResolvedNodesBatch = backend.updateResolvedNodesBatch;
   if (updateResolvedNodesBatch === undefined) return;
   const rows = await updateResolvedNodesBatch({ entries: args.entries });

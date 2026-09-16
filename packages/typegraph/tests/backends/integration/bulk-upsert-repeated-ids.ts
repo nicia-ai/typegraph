@@ -563,6 +563,27 @@ export function registerBulkUpsertRepeatedIdIntegrationTests(
     });
 
     describe("with history capture", () => {
+      it("updates more than one thousand distinct existing rows", async () => {
+        const store = await context.createHistoryStore(integrationTestGraph);
+        const entries = Array.from({ length: 1001 }, (_, index) => ({
+          id: `large-resolved-${index}`,
+          props: { name: `Initial ${index}`, age: index },
+        }));
+        await store.nodes.Person.bulkUpsertById(entries);
+
+        const updated = await store.nodes.Person.bulkUpsertById(
+          entries.map((entry, index) => ({
+            id: entry.id,
+            props: { name: `Revised ${index}`, age: index + 1 },
+          })),
+        );
+
+        expect(updated).toHaveLength(entries.length);
+        expect(updated[0]).toMatchObject({ name: "Revised 0" });
+        expect(updated.at(-1)).toMatchObject({ name: "Revised 1000" });
+        expect(updated.every((node) => node.meta.version === 2)).toBe(true);
+      });
+
       it("preserves recorded after-images for distinct resolved updates", async (ctx) => {
         const store = await context.createHistoryStore(integrationTestGraph);
         if (store.backend.capabilities.fulltext?.supported !== true) {

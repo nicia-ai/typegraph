@@ -4,8 +4,8 @@
  */
 const RESOLVED_NODE_UPDATE_BATCH_FIXED_BIND_COUNT = 6;
 
-/** Each entry contributes CASE id/props, IN id, and id/version gate binds. */
-const RESOLVED_NODE_UPDATE_BATCH_ENTRY_BIND_COUNT = 5;
+/** Each entry contributes one relational id/props/version row. */
+const RESOLVED_NODE_UPDATE_BATCH_ENTRY_BIND_COUNT = 3;
 
 /**
  * The one owner of whether the portable resolved-update statement fits the

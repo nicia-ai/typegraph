@@ -67,6 +67,21 @@ function isWrapped(
  * wrap the identical set of write methods, so the drift fails loudly here.
  */
 describe("recorded-capture write-surface parity", () => {
+  it("keeps an empty direct resolved-update batch as a no-op", async () => {
+    const backend = createTestBackend();
+    await backend.transaction(async (target) => {
+      const scope = createRecordedTransactionScope(
+        target,
+        batchPointReadVerdict(backend),
+        createSqlSchema(backend.tableNames),
+      );
+      await expect(
+        scope.backend.updateResolvedNodesBatch?.({ entries: [] }),
+      ).resolves.toEqual([]);
+      expect(await scope.flush()).toEqual(new Map());
+    });
+  });
+
   it("restores pending capture when a TypeGraph savepoint rolls back", async () => {
     const backend = createTestBackend();
     const statementExecution = statementExecutionVerdict(backend);

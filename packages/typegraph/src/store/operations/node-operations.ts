@@ -165,6 +165,10 @@ import {
   probeUniqueKey,
   refuseNodeCreateClaimError,
 } from "../claims/node-claims";
+import {
+  resolvedNodeUniqueSidecarBatchIsReachable,
+  resolvedNodeUpdatePreservesClaimKeys,
+} from "../claims/resolved-node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
   type NodeSetUpdateRequest,
@@ -3653,16 +3657,40 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
           };
         });
         const registration = getNodeRegistration(ctx.graph, first.input.kind);
-        const rows = await session.reviseResolvedNodes({
-          schema: registration.type.schema,
-          uniqueConstraints: registration.unique ?? [],
-          entries: resolvedEntries,
-        });
-        if (rows !== undefined) {
-          const byId = new Map(rows.map((row) => [row.id, row]));
-          return entries.map((entry) =>
-            rowToNode(requireDefined(byId.get(entry.input.id))),
+        const uniqueSidecarsReachable =
+          registration.unique === undefined ||
+          registration.unique.length === 0 ||
+          resolvedNodeUniqueSidecarBatchIsReachable(
+            createUniquenessContext(
+              ctx.graphId,
+              ctx.registry,
+              target,
+              ctx.uniqueSidecarBatch,
+            ),
           );
+        const preservesClaimKeys = resolvedEntries.every((entry) => {
+          const existing = requireDefined(resolvedRows.get(entry.id));
+          return resolvedNodeUpdatePreservesClaimKeys(
+            ctx.registry,
+            entry.kind,
+            entry.id,
+            rowPropsToObject(existing.props),
+            entry.props,
+            registration.unique ?? [],
+          );
+        });
+        if (uniqueSidecarsReachable && preservesClaimKeys) {
+          const rows = await session.reviseResolvedNodes({
+            schema: registration.type.schema,
+            uniqueConstraints: registration.unique ?? [],
+            entries: resolvedEntries,
+          });
+          if (rows !== undefined) {
+            const byId = new Map(rows.map((row) => [row.id, row]));
+            return entries.map((entry) =>
+              rowToNode(requireDefined(byId.get(entry.input.id))),
+            );
+          }
         }
       }
       const nodes: Node[] = [];

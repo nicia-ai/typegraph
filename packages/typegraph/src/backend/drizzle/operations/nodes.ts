@@ -789,38 +789,43 @@ export function buildResolvedNodeUpdateBatch(
   const entries = params.entries;
   const first = entries[0];
   if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
-  const postimages = entries.map((entry) => ({
-    id: entry.id,
-    propsJson: JSON.stringify(entry.props),
-  }));
-  const propsCases = postimages.map(
-    (postimage) =>
-      sql`WHEN ${postimage.id} THEN ${castBoundValueForColumn(tables.nodes.props, postimage.propsJson)}`,
-  );
+  const expected = sql.identifier("expected_updates");
+  const eligible = sql.identifier("eligible_updates");
+  const id = sql.identifier("id");
+  const props = sql.identifier("props");
+  const expectedVersion = sql.identifier("expected_version");
+  const expectedColumns = sql.join([id, props, expectedVersion], sql`, `);
   const expectedRows = entries.map(
     (entry) =>
-      sql`(${tables.nodes.id} = ${entry.id} AND ${tables.nodes.version} = ${entry.expectedVersion})`,
+      sql`(${castBoundValueForColumn(tables.nodes.id, entry.id)}, ${castBoundValueForColumn(tables.nodes.props, JSON.stringify(entry.props))}, ${castBoundValueForColumn(tables.nodes.version, entry.expectedVersion)})`,
   );
   return sql`
+    WITH ${expected} (${expectedColumns}) AS (
+      VALUES ${sql.join(expectedRows, sql`, `)}
+    ),
+    ${eligible} (${id}) AS (
+      SELECT ${expected}.${id}
+      FROM ${tables.nodes}
+      JOIN ${expected}
+        ON ${tables.nodes.id} = ${expected}.${id}
+       AND ${tables.nodes.version} = ${expected}.${expectedVersion}
+      WHERE ${tables.nodes.graphId} = ${first.graphId}
+        AND ${tables.nodes.kind} = ${first.kind}
+        AND ${tables.nodes.deletedAt} IS NULL
+    )
     UPDATE ${tables.nodes}
-    SET ${quotedColumn(tables.nodes.props)} = CASE ${tables.nodes.id}
-          ${sql.join(propsCases, sql` `)}
-          ELSE ${tables.nodes.props}
-        END,
+    SET ${quotedColumn(tables.nodes.props)} = (
+          SELECT ${expected}.${props}
+          FROM ${expected}
+          WHERE ${expected}.${id} = ${tables.nodes.id}
+        ),
         ${quotedColumn(tables.nodes.updatedAt)} = ${timestamp},
         ${quotedColumn(tables.nodes.version)} = ${tables.nodes.version} + ${sql.raw(String(NODE_VERSION_INCREMENT))}
     WHERE ${tables.nodes.graphId} = ${first.graphId}
       AND ${tables.nodes.kind} = ${first.kind}
       AND ${tables.nodes.deletedAt} IS NULL
-      AND ${tables.nodes.id} IN (${sql.join(entries.map((entry) => sql`${entry.id}`), sql`, `)})
-      AND (
-        SELECT COUNT(*)
-        FROM ${tables.nodes}
-        WHERE ${tables.nodes.graphId} = ${first.graphId}
-          AND ${tables.nodes.kind} = ${first.kind}
-          AND ${tables.nodes.deletedAt} IS NULL
-          AND (${sql.join(expectedRows, sql` OR `)})
-      ) = ${entries.length}
+      AND ${tables.nodes.id} IN (SELECT ${id} FROM ${eligible})
+      AND (SELECT COUNT(*) FROM ${eligible}) = ${entries.length}
     RETURNING *
   `;
 }

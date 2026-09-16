@@ -325,6 +325,7 @@ export function buildRecordedWriteMembers(
       {}
     : {
         async updateResolvedNodesBatch(params) {
+          if (params.entries.length === 0) return [];
           const first = requireDefined(params.entries[0]);
           await hooks.beforeOne?.(first.graphId);
           const rows = await requireDefined(target.updateResolvedNodesBatch)(
