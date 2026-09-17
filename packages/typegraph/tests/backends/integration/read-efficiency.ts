@@ -158,6 +158,73 @@ export function registerReadEfficiencyIntegrationTests(
       expect(emptyBatch).toEqual(await empty.execute());
     });
 
+    it("shares tuple-eligible cursors between standalone and batched pages", async () => {
+      const statements: string[] = [];
+      const store = await context.createStore(integrationTestGraph, {
+        hooks: {
+          onQueryStart: (query) => {
+            statements.push(query.sql);
+          },
+        },
+      });
+      await store.nodes.Product.bulkCreate([
+        {
+          id: "tuple-a",
+          props: { category: "first", name: "Alpha", price: 10 },
+        },
+        {
+          id: "tuple-b",
+          props: { category: "second", name: "Alpha", price: 10 },
+        },
+        {
+          id: "tuple-c",
+          props: { category: "third", name: "Beta", price: 10 },
+        },
+        {
+          id: "tuple-d",
+          props: { category: "fourth", name: "Alpha", price: 20 },
+        },
+      ]);
+      const products = store
+        .query()
+        .from("Product", "product")
+        .orderBy("product", "price", "asc")
+        .orderBy("product", "name", "asc")
+        .select((fields) => ({
+          category: fields.product.category,
+          name: fields.product.name,
+        }));
+
+      const standaloneFirst = await products.page({ first: 1 }).execute();
+      expect(standaloneFirst.data).toEqual([
+        { category: "first", name: "Alpha" },
+      ]);
+      const standaloneCursor = standaloneFirst.nextCursor;
+      if (standaloneCursor === undefined)
+        throw new Error("Expected a cursor from the standalone page");
+
+      statements.length = 0;
+      const [batchedSecond] = await store.batchOnce(() => [
+        products.page({ after: standaloneCursor, first: 1 }),
+      ]);
+      expect(batchedSecond.data).toEqual([
+        { category: "second", name: "Alpha" },
+      ]);
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toMatch(/\)\s*>\s*\(/u);
+      const batchedCursor = batchedSecond.nextCursor;
+      if (batchedCursor === undefined)
+        throw new Error("Expected a cursor from the batched page");
+
+      const standaloneThird = await products
+        .page({ after: batchedCursor, first: 2 })
+        .execute();
+      expect(standaloneThird.data).toEqual([
+        { category: "third", name: "Beta" },
+        { category: "fourth", name: "Alpha" },
+      ]);
+    });
+
     it("shares hydration only when requested and preserves independent nested data", async () => {
       const statements: string[] = [];
       const store = await context.createStore(integrationTestGraph, {
