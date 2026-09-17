@@ -11,10 +11,13 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   type FieldRef,
+  type LiteralValue,
   type NodePredicate,
   type OrderSpec,
   type PredicateExpression,
+  type TupleComparisonPredicate,
 } from "../ast";
+import { isNullableSystemOrderField } from "../builder/order-by-field";
 import type {
   AliasMap,
   EdgeAliasMap,
@@ -95,6 +98,15 @@ export function buildCursorPredicate(
 ): NodePredicate {
   const values = cursorData.vals;
 
+  const tupleComparison = buildTupleComparisonPredicate(
+    values,
+    orderBy,
+    direction,
+  );
+  if (tupleComparison !== undefined) {
+    return { targetAlias, expression: tupleComparison };
+  }
+
   // Build OR of progressively longer AND conditions
   const orConditions: PredicateExpression[] = [];
 
@@ -142,6 +154,72 @@ export function buildCursorPredicate(
     targetAlias,
     expression,
   };
+}
+
+/** Uses row values only when SQL NULL semantics cannot change the ordering. */
+function buildTupleComparisonPredicate(
+  values: readonly unknown[],
+  orderBy: readonly OrderSpec[],
+  direction: "forward" | "backward",
+): TupleComparisonPredicate | undefined {
+  if (orderBy.length < 2 || values.length !== orderBy.length) return;
+  const [first] = orderBy;
+  if (first === undefined) return;
+  if (
+    orderBy.some(
+      (spec, index) =>
+        spec.direction !== first.direction ||
+        spec.nulls !== undefined ||
+        !isTupleComparableField(spec.field) ||
+        values[index] === null ||
+        values[index] === undefined,
+    )
+  ) {
+    return;
+  }
+  const fields = orderBy.map((spec) => requireCursorField(spec.field)) as [
+    FieldRef,
+    ...FieldRef[],
+  ];
+  const tupleValues = values.map((value) => ({
+    __type: "literal" as const,
+    value: value as string | number | boolean,
+  })) as [LiteralValue, ...LiteralValue[]];
+  const afterAscending =
+    (direction === "forward" && first.direction === "asc") ||
+    (direction === "backward" && first.direction === "desc");
+  return {
+    __type: "tuple_comparison",
+    fields,
+    op: afterAscending ? "gt" : "lt",
+    values: tupleValues,
+  };
+}
+
+function isTupleComparableField(field: OrderSpec["field"]): boolean {
+  if (field.__type !== "field_ref") return false;
+  if (field.nullable === true) return false;
+  if (field.nullable === false) return isTupleScalarValueType(field.valueType);
+  // System identity and creation columns are physically NOT NULL. Existing
+  // manually assembled ASTs may predate the nullable marker, so retain this
+  // narrow compatibility path without making user properties eligible.
+  return (
+    field.path.length === 1 &&
+    isTupleScalarValueType(field.valueType) &&
+    !isNullableSystemOrderField(requireDefined(field.path[0])) &&
+    ["id", "kind", "created_at", "updated_at"].includes(
+      requireDefined(field.path[0]),
+    )
+  );
+}
+
+function isTupleScalarValueType(valueType: FieldRef["valueType"]): boolean {
+  return (
+    valueType === "boolean" ||
+    valueType === "date" ||
+    valueType === "number" ||
+    valueType === "string"
+  );
 }
 
 /**
@@ -242,21 +320,34 @@ export function buildPaginatedResult<
     row: Record<string, unknown>,
   ) => SelectContext<Aliases, EdgeAliases>,
 ): PaginatedResult<R> {
-  let nextCursor: string | undefined;
-  let previousCursor: string | undefined;
+  return buildPaginatedResultFromRows(
+    data,
+    orderedRows,
+    hasMore,
+    isBackward,
+    cursor,
+    (row, direction) =>
+      buildCursorFromContext(buildContext(row), orderBy, direction),
+  );
+}
 
-  if (orderedRows.length > 0) {
-    const firstRow = requireDefined(orderedRows[0]);
-    const lastRow = requireDefined(orderedRows.at(-1));
-
-    // Build cursors using mapped result context
-    const firstContext = buildContext(firstRow);
-    const lastContext = buildContext(lastRow);
-
-    // Extract values for ORDER BY columns from the context
-    previousCursor = buildCursorFromContext(firstContext, orderBy, "b");
-    nextCursor = buildCursorFromContext(lastContext, orderBy, "f");
-  }
+/**
+ * Constructs a paginated result from rows and a caller-owned cursor encoder.
+ */
+export function buildPaginatedResultFromRows<R, Row>(
+  data: readonly R[],
+  orderedRows: readonly Row[],
+  hasMore: boolean,
+  isBackward: boolean,
+  cursor: string | undefined,
+  buildCursor: (row: Row, direction: "f" | "b") => string,
+): PaginatedResult<R> {
+  const firstRow = orderedRows[0];
+  const lastRow = orderedRows.at(-1);
+  const previousCursor =
+    firstRow === undefined ? undefined : buildCursor(firstRow, "b");
+  const nextCursor =
+    lastRow === undefined ? undefined : buildCursor(lastRow, "f");
 
   return {
     data,

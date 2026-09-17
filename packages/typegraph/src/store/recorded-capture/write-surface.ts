@@ -8,6 +8,7 @@ import {
   type HardDeleteNodeParams,
   type InsertEdgeParams,
   type InsertNodeParams,
+  type ResolvedNodeUpdateBatchParams,
   type TransactionBackend,
   type UpdateEdgeParams,
   type UpdateNodeParams,
@@ -51,6 +52,7 @@ export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertNodesBatchReturning",
   "compareAndSetNode",
   "updateNodeSet",
+  "updateResolvedNodesBatch",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -85,6 +87,7 @@ type GraphEntityWriteParam =
   | InsertNodeParams
   | UpdateNodeParams
   | UpdateNodeSetParams
+  | ResolvedNodeUpdateBatchParams
   | DeleteNodeParams
   | HardDeleteNodeParams
   | InsertEdgeParams

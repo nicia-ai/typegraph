@@ -200,6 +200,7 @@ const WATCHED_MEMBERS = [
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "updateNode",
+  "updateResolvedNodesBatch",
   "updateNodeSet",
   "deleteNode",
   "hardDeleteNode",
@@ -647,6 +648,39 @@ const CASES: Record<keyof WriteSession, Case> = {
     // The set update writes its row FIRST — the after-images its claims are
     // computed from are not knowable before the statement runs — so every claim
     // here is a post-row one, and the fans still follow them.
+    postRowClaims: ["hardDeleteUniquesByNodeIds", "insertUniqueBatch"],
+    postRowFans: ["upsertFulltextBatch", "upsertEmbeddingBatch"],
+    plan: NODE_PLAN,
+  },
+  reviseResolvedNodes: {
+    run: async (raw) => {
+      const { row } = await seed(raw, "resolved");
+      return (session) =>
+        session.reviseResolvedNodes({
+          schema,
+          uniqueConstraints,
+          entries: [
+            {
+              graphId: GRAPH_ID,
+              kind: "Doc",
+              id: row.id,
+              props: {
+                ...documentProps("resolved"),
+                title: "resolved-revised",
+                email: "resolved-revised@example.com",
+              },
+              expectedVersion: row.version,
+            },
+          ],
+        });
+    },
+    sidecars: [
+      "hardDeleteUniquesByNodeIds",
+      "insertUniqueBatch",
+      "upsertFulltextBatch",
+      "upsertEmbeddingBatch",
+    ],
+    row: "updateResolvedNodesBatch",
     postRowClaims: ["hardDeleteUniquesByNodeIds", "insertUniqueBatch"],
     postRowFans: ["upsertFulltextBatch", "upsertEmbeddingBatch"],
     plan: NODE_PLAN,

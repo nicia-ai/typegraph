@@ -19,6 +19,7 @@ export {
   buildCursorFromContext,
   buildCursorPredicate,
   buildPaginatedResult,
+  buildPaginatedResultFromRows,
   createStreamIterable,
   getStreamBatchSize,
   parsePaginateOptions,

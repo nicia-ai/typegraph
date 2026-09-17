@@ -435,6 +435,7 @@ type FieldRefOptions = Readonly<{
   jsonPointer?: JsonPointer | undefined;
   valueType?: ValueType | undefined;
   elementType?: ValueType | undefined;
+  nullable?: boolean | undefined;
 }>;
 
 export function fieldRef<Value = unknown>(
@@ -453,6 +454,7 @@ export function fieldRef<Value = unknown>(
     ...(options?.elementType !== undefined && {
       elementType: options.elementType,
     }),
+    ...(options?.nullable !== undefined && { nullable: options.nullable }),
   };
 }
 

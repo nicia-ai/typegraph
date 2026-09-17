@@ -67,6 +67,7 @@ import {
   type QueryExecutionBackend,
   type RawQueryExecutionBackend,
   type RawStatementExecutionBackend,
+  type ResolvedNodeUpdateBatchEntry,
   type SchemaReadBackend,
   type SchemaWriteFenceParams,
   type SqlCompilationBackend,
@@ -119,6 +120,7 @@ import {
   applyNodeSetUpdate,
   applyNodeSoftDelete,
   applyNodeUpdate,
+  applyResolvedNodeUpdateBatch,
   createNodeWriteContext,
   type NodeDeletePolicy,
   type NodeSetUpdateResult,
@@ -360,6 +362,12 @@ type NodeResurrectWork = Readonly<{
   uniqueConstraints: readonly UniqueConstraint[];
 }>;
 
+type ResolvedNodeUpdateBatchWork = Readonly<{
+  schema: z.ZodType<Record<string, unknown>>;
+  uniqueConstraints: readonly UniqueConstraint[];
+  entries: readonly ResolvedNodeUpdateBatchEntry[];
+}>;
+
 /**
  * One edge insert: the row params and the cardinality claim the row owes.
  *
@@ -421,6 +429,9 @@ export type NodeWriteSession = Readonly<{
     work: NodeSetUpdateWork,
     fences: NodeSetUpdateFences,
   ) => Promise<NodeSetUpdateResult>;
+  reviseResolvedNodes: (
+    work: ResolvedNodeUpdateBatchWork,
+  ) => Promise<readonly NodeRow[] | undefined>;
 }>;
 
 export type EdgeWriteSession = Readonly<{
@@ -729,6 +740,9 @@ export function createWriteSession(
       );
       return applyNodeSetUpdate(writeContext, work, target);
     },
+
+    reviseResolvedNodes: (work) =>
+      applyResolvedNodeUpdateBatch(writeContext, work, target),
 
     // An edge write obliges no DERIVED data, so these apply no sync fans — but a
     // constrained kind owes its cardinality claim, at the same PRE-INSERT

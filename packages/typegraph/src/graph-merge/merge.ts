@@ -115,6 +115,7 @@ import {
 } from "./errors";
 import type { CandidateDiagnostic, CandidateDiagnostics } from "./evidence";
 import { compareMatchEvidence } from "./evidence";
+import { evolutionPlanningTarget } from "./evolution-target";
 import { unwrapMergeBranches } from "./ingestion-branch";
 import {
   assertIdentityEndpointsNotDeleted,
@@ -2884,6 +2885,34 @@ export function sameMergePlanTargetFence(
   );
 }
 
+function evolutionPlanMatchesPlanningFence(
+  evolutionPlan: EvolutionPlan,
+  fence: MergePlanTargetFence,
+): boolean {
+  return (
+    fence.graphId === evolutionPlan.graphId &&
+    fence.schema.version === evolutionPlan.baseline.version &&
+    fence.schema.hash === evolutionPlan.baseline.hash
+  );
+}
+
+function evolutionResultingFence(
+  evolutionPlan: EvolutionPlan,
+  baselineFence: MergePlanTargetFence,
+): MergePlanTargetFence {
+  return {
+    ...baselineFence,
+    schema: {
+      managed: true,
+      version:
+        evolutionPlan.status === "change" ?
+          evolutionPlan.result.version
+        : evolutionPlan.baseline.version,
+      hash: evolutionPlan.result.hash,
+    },
+  };
+}
+
 export async function assertPlanningFenceUnchanged<G extends GraphDef>(
   target: Store<G>,
   startingFence: MergePlanTargetFence,
@@ -3543,19 +3572,10 @@ export async function planMergeForEvolution<G extends GraphDef>(
       ),
     );
   }
-  const planningTarget = storeRuntime(store).evolutionPlanningTarget;
-  if (planningTarget === undefined) {
-    return err(
-      new MergePlanCapabilityError(
-        "This Store cannot construct a resulting-schema merge planning view.",
-        { details: { capability: "evolutionPlanningTarget" } },
-      ),
-    );
-  }
   let target: Store<G>;
   let baselineFence: MergePlanTargetFence;
   try {
-    target = planningTarget(evolutionPlan);
+    target = evolutionPlanningTarget(store, evolutionPlan);
     baselineFence = await captureMergePlanTargetFence(store);
   } catch (error) {
     return err(
@@ -3567,11 +3587,7 @@ export async function planMergeForEvolution<G extends GraphDef>(
       ),
     );
   }
-  if (
-    baselineFence.graphId !== evolutionPlan.graphId ||
-    baselineFence.schema.version !== evolutionPlan.baseline.version ||
-    baselineFence.schema.hash !== evolutionPlan.baseline.hash
-  ) {
+  if (!evolutionPlanMatchesPlanningFence(evolutionPlan, baselineFence)) {
     return err(
       new MergePlanningStaleError(
         "The evolution plan baseline no longer matches the active merge target schema.",
@@ -3579,17 +3595,7 @@ export async function planMergeForEvolution<G extends GraphDef>(
       ),
     );
   }
-  const resultingFence: MergePlanTargetFence = {
-    ...baselineFence,
-    schema: {
-      managed: true,
-      version:
-        evolutionPlan.status === "change" ?
-          evolutionPlan.result.version
-        : evolutionPlan.baseline.version,
-      hash: evolutionPlan.result.hash,
-    },
-  };
+  const resultingFence = evolutionResultingFence(evolutionPlan, baselineFence);
   const baselinePrecondition = await validateBaseVersions(store, branches);
   const precondition =
     isErr(baselinePrecondition) ?
@@ -3616,6 +3622,125 @@ export async function planMergeForEvolution<G extends GraphDef>(
       return resolvedMergeArtifact(
         resolved,
         "snapshot",
+        resultingFence,
+        anchors,
+      );
+    },
+  );
+}
+
+/**
+ * Candidate-specific evolution planning: retains incremental committed-target
+ * matching while binding the returned artifact to the schema the evolution will
+ * commit. General evolution merges remain snapshot merges by design.
+ */
+export async function planMergeIncrementalForEvolution<G extends GraphDef>(
+  store: Store<G>,
+  evolutionPlan: EvolutionPlan,
+  branchInputs: readonly MergeBranch<G>[],
+  optionsInput: MergeOptions<G> = {},
+  startingFence?: MergePlanTargetFence,
+): Promise<Result<MergePlanArtifact, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
+  const normalized = tryNormalize(optionsInput, ["target"]);
+  if (isErr(normalized)) return err(normalized.error);
+  const options = normalized.data;
+  if (options.onBasePropertyConflict !== "flag") {
+    return err(incrementalBaseConflictPolicyError(options));
+  }
+  let target: Store<G>;
+  let baselineFence: MergePlanTargetFence;
+  try {
+    target = evolutionPlanningTarget(store, evolutionPlan);
+    baselineFence = startingFence ?? (await captureMergePlanTargetFence(store));
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to prepare an evolution merge target: ${describeCause(error)}`,
+          { cause: error, details: { capability: "evolutionPlanningTarget" } },
+        )
+      ),
+    );
+  }
+  if (!evolutionPlanMatchesPlanningFence(evolutionPlan, baselineFence)) {
+    return err(
+      new MergePlanningStaleError(
+        "The evolution plan baseline no longer matches the active merge target schema.",
+        { details: { startingFence: baselineFence } },
+      ),
+    );
+  }
+  try {
+    await assertPlanningFenceUnchanged(store, baselineFence);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergeError(
+          `Unable to verify the evolution merge planning fence: ${describeCause(error)}`,
+          { cause: error },
+        )
+      ),
+    );
+  }
+  const forkPrecondition = await validateForkPointVersions(target, branches);
+  if (isErr(forkPrecondition)) {
+    try {
+      await assertPlanningFenceUnchanged(store, baselineFence);
+    } catch (error) {
+      return err(
+        error instanceof MergeError ? error : (
+          new MergeError(
+            `Unable to verify the evolution merge planning fence: ${describeCause(error)}`,
+            { cause: error },
+          )
+        ),
+      );
+    }
+    return err(forkPrecondition.error);
+  }
+  const forkVersion = forkPrecondition.data;
+  const forkSchema = await computeSchemaComponent(target);
+  if (forkSchema !== evolutionPlan.result.hash) {
+    return err(incrementalSchemaError());
+  }
+  const targetBranch: GraphBranch<G> = {
+    id: COMMITTED_TARGET_BRANCH,
+    base: forkVersion,
+    store: target,
+    close: (): Promise<void> => Promise.resolve(),
+  };
+  const resultingFence = evolutionResultingFence(evolutionPlan, baselineFence);
+  const anchors: MergePlanAnchors = {
+    kind: "incremental",
+    forkPoint: {
+      graphId: target.graphId,
+      baseVersion: forkVersion,
+      schema: resultingFence.schema,
+    },
+    branches: [...branches]
+      .sort((left, right) => compareStrings(left.id, right.id))
+      .map((branch) => ({
+        branchId: branch.id,
+        baseVersion: forkVersion,
+      })),
+  };
+  return resolveMerge(
+    target,
+    target,
+    [targetBranch, ...branches],
+    options,
+    true,
+    {
+      targetBranchId: COMMITTED_TARGET_BRANCH,
+      forkPoint: { store: target, version: forkVersion },
+    },
+    undefined,
+    async (resolved) => {
+      await assertPlanningFenceUnchanged(store, baselineFence);
+      return resolvedMergeArtifact(
+        resolved,
+        "incremental",
         resultingFence,
         anchors,
       );

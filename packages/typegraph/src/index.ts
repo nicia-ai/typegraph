@@ -217,6 +217,8 @@ export type {
   RawStatementExecutionBackend,
   RecursiveTraversalCapability,
   RemovalMaterializationBackend,
+  ResolvedNodeUpdateBatchEntry,
+  ResolvedNodeUpdateBatchParams,
   SchemaCommitBackend,
   SchemaKindEmptinessProbe,
   SchemaProvisioning,

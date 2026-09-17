@@ -242,6 +242,19 @@ type ArithmeticExpressionNode = Readonly<{
 type ArithmeticOperator = "add" | "divide" | "multiply" | "subtract";
 
 // @public (undocumented)
+function arrayContains<ArrayValue extends readonly unknown[] | undefined, Scope extends string>(array: DatabaseExpression<ArrayValue, Scope>, element: DatabaseExpression<ArrayExpressionElement<ArrayValue> | undefined, Scope>): DatabaseExpression<boolean, Scope>;
+
+// @public (undocumented)
+type ArrayContainsExpressionNode = Readonly<{
+    kind: "array_contains";
+    array: DatabaseExpression;
+    element: DatabaseExpression;
+}>;
+
+// @public (undocumented)
+type ArrayExpressionElement<ArrayValue> = ArrayValue extends readonly (infer Element)[] ? Element : never;
+
+// @public (undocumented)
 type ArrayFieldAccessor<U> = NullFieldAccessor & Readonly<{
     contains: (value: U) => Predicate;
     containsAny: (values: readonly U[]) => Predicate;
@@ -1632,6 +1645,7 @@ export type DatabaseExpression<out T = unknown, out Scope extends string = strin
     __type: "database_expression";
     node: DatabaseExpressionNode;
     valueType: ValueType;
+    arrayElementType?: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
     nullable: boolean;
@@ -1641,7 +1655,7 @@ export type DatabaseExpression<out T = unknown, out Scope extends string = strin
 }>;
 
 // @public (undocumented)
-type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
+type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | ArrayContainsExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
 
 // @public
 type DatabaseExpressionPredicate = Readonly<{
@@ -2963,6 +2977,7 @@ export class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeA
         executionTarget: object | undefined;
     }>;
     orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(alias: A, field: string, direction?: SortDirection): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R>;
+    page(options: PaginateOptions): CompiledOneStatementRead<PaginatedResult<R>> & Required<Pick<OneStatementBatchableQuery<PaginatedResult<R>>, "execute">>;
     paginate(options: PaginateOptions): Promise<PaginatedResult<R>>;
     pipe<NewR = R>(fragment: (query: ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R>) => ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, NewR>): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, NewR>;
     prepare(): PreparedQuery<R>;
@@ -3111,6 +3126,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3122,6 +3138,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3129,10 +3146,12 @@ export const expr: {
         __value?: boolean | undefined;
         __scope?: Scope;
     }>;
+    readonly arrayContains: typeof arrayContains;
     readonly avg: <Scope extends string>(operand: NumericExpression<Scope>) => Readonly<{
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3148,6 +3167,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3159,6 +3179,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3170,6 +3191,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3181,6 +3203,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3195,6 +3218,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3206,6 +3230,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3217,6 +3242,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3228,6 +3254,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3239,6 +3266,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3250,6 +3278,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3262,6 +3291,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3274,6 +3304,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3285,6 +3316,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3633,6 +3665,7 @@ export type FieldRef<Value = unknown, Alias extends string = string, Path extend
     jsonPointer?: JsonPointer | undefined;
     valueType?: ValueType | undefined;
     elementType?: ValueType | undefined;
+    nullable?: boolean | undefined;
     readonly __value?: {
         bivarianceHack(value: Value): void;
     }["bivarianceHack"];
@@ -3647,6 +3680,7 @@ type FieldRefOptions = Readonly<{
     jsonPointer?: JsonPointer | undefined;
     valueType?: ValueType | undefined;
     elementType?: ValueType | undefined;
+    nullable?: boolean | undefined;
 }>;
 
 // @public (undocumented)
@@ -3983,6 +4017,7 @@ export type GraphBackend = Readonly<{
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
+    updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
     compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
@@ -4401,7 +4436,7 @@ export function havingLt(aggregate: AggregateExpr, value: number): AggregateComp
 export function havingLte(aggregate: AggregateExpr, value: number): AggregateComparisonPredicate;
 
 // @public
-const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "lineage", "recordedTime", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
+const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "lineage", "recordedTime", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "updateResolvedNodesBatch", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
 
 // @public (undocumented)
 export type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
@@ -5977,7 +6012,7 @@ export type NodeCurrentReads<N extends NodeType, CN extends string = string> = P
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
 export type NodeGetOrCreateByConstraintOptions = Readonly<{
@@ -6360,6 +6395,7 @@ export type OneStatementBatchableQuery<R = unknown> = Readonly<{
             executionTarget: object;
         }>;
         outputNames: readonly string[];
+        hiddenOutputNames?: readonly string[];
         orderBy: readonly Readonly<{
             column: string;
             direction: "asc" | "desc";
@@ -6580,7 +6616,7 @@ export type Predicate = Readonly<{
 }>;
 
 // @public
-type PredicateExpression = ComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
+type PredicateExpression = ComparisonPredicate | TupleComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
 
 // @public (undocumented)
 export type PreparedBindings<Parameters extends PreparedParameterDeclaration> = {
@@ -7391,6 +7427,20 @@ type ResolvedEmbeddingIndex = Readonly<{
 
 // @public
 type ResolveDepthAlias<DC, A extends string> = DC extends string ? DC : DC extends true ? `${A}_depth` : never;
+
+// @public
+export type ResolvedNodeUpdateBatchEntry = Readonly<{
+    graphId: string;
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+    expectedVersion: number;
+}>;
+
+// @public
+export type ResolvedNodeUpdateBatchParams = Readonly<{
+    entries: readonly ResolvedNodeUpdateBatchEntry[];
+}>;
 
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
@@ -9058,6 +9108,14 @@ export type TrustedImportSession = Readonly<{
 
 // @public (undocumented)
 export const tsvectorStrategy: FulltextStrategy;
+
+// @public
+type TupleComparisonPredicate = Readonly<{
+    __type: "tuple_comparison";
+    op: "gt" | "lt";
+    fields: readonly [FieldRef, ...FieldRef[]];
+    values: readonly [LiteralValue, ...LiteralValue[]];
+}>;
 
 // @public
 export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<R["type"], EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType, EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType, EdgeAllowedPairs<R>>;

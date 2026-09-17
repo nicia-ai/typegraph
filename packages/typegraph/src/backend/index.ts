@@ -428,6 +428,8 @@ export type {
   RecursiveTraversalCapability,
   ReleaseIndexMaterializationClaimParams,
   RemovalMaterializationBackend,
+  ResolvedNodeUpdateBatchEntry,
+  ResolvedNodeUpdateBatchParams,
   RowProps,
   SchemaCommitBackend,
   SchemaCommitPreflightBackend,

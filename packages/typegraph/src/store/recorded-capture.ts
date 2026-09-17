@@ -853,6 +853,23 @@ export function createRecordedBackend(
       return capture((target) => target.updateNode(params));
     },
 
+    ...(backend.updateResolvedNodesBatch === undefined ?
+      {}
+    : {
+        async updateResolvedNodesBatch(params) {
+          return capture((target) => {
+            const updateResolvedNodesBatch = target.updateResolvedNodesBatch;
+            if (updateResolvedNodesBatch === undefined) {
+              throw new ConfigurationError(
+                "Recorded resolved node update batch capability disappeared inside a transaction",
+                { operation: "updateResolvedNodesBatch" },
+              );
+            }
+            return updateResolvedNodesBatch(params);
+          });
+        },
+      }),
+
     ...(backend.updateNodeSet === undefined ?
       {}
     : {

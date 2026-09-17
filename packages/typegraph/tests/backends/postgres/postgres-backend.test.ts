@@ -15,6 +15,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   defineEdge,
   defineGraph,
   defineNode,
@@ -1264,6 +1265,147 @@ describe("Store with PostgreSQL Backend", () => {
     expect(updated.name).toBe("Alice Smith");
     expect(updated.age).toBe(30);
     expect(updated.meta.version).toBe(2);
+  });
+
+  it("falls back without a partial resolved batch after concurrent row updates", async (ctx) => {
+    requirePostgres(ctx);
+    const batchStatements: string[] = [];
+    const batchPool = new Pool({ connectionString: TEST_DATABASE_URL });
+    const writerPool = new Pool({ connectionString: TEST_DATABASE_URL });
+    const batchDb = drizzle(batchPool, {
+      logger: {
+        logQuery(query: string): void {
+          batchStatements.push(query);
+        },
+      },
+    });
+    const writerDb = drizzle(writerPool);
+    const snapshotRead = createGate();
+    const releaseSnapshot = createGate();
+    const writerUpdated = createGate();
+    const releaseWriter = createGate();
+    const resolvedBatchResultSizes: number[] = [];
+    let pauseBatchRead = false;
+    const baseBackend = createPostgresBackend(batchDb);
+    const observedBackend = deriveBackend(baseBackend, {
+      transaction<T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+        options?: TransactionOptions,
+      ): Promise<T> {
+        return baseBackend.transaction(
+          (tx) =>
+            fn(
+              deriveBackend(tx, {
+                async getNodes(graphId, kind, ids) {
+                  const rows = await requireDefined(tx.getNodes)(
+                    graphId,
+                    kind,
+                    ids,
+                  );
+                  if (pauseBatchRead && kind === "Person") {
+                    snapshotRead.open();
+                    await releaseSnapshot.opened;
+                  }
+                  return rows;
+                },
+                async updateResolvedNodesBatch(params) {
+                  const rows = await requireDefined(
+                    tx.updateResolvedNodesBatch,
+                  )(params);
+                  resolvedBatchResultSizes.push(rows.length);
+                  return rows;
+                },
+              }),
+            ),
+          options,
+        );
+      },
+    });
+
+    try {
+      // Neither store enables history, revision tracking, or a constraint.
+      // This leaves the two connections free to contend at the row itself.
+      const [batchStore] = await createStoreWithSchema(
+        testGraph,
+        observedBackend,
+      );
+      const [writerStore] = await createStoreWithSchema(
+        testGraph,
+        createPostgresBackend(writerDb),
+      );
+      await batchStore.nodes.Person.create(
+        { name: "initial-a", email: "initial-a@example.com" },
+        { id: "version-gated-row-a" },
+      );
+      await batchStore.nodes.Person.create(
+        { name: "initial-b", email: "initial-b@example.com" },
+        { id: "version-gated-row-b" },
+      );
+      batchStatements.splice(0);
+      pauseBatchRead = true;
+
+      const batch = batchStore.nodes.Person.bulkUpsertById([
+        { id: "version-gated-row-a", props: { name: "batch-a" } },
+        { id: "version-gated-row-b", props: { name: "batch-b" } },
+      ]);
+      await snapshotRead.opened;
+
+      const writer = writerStore.transaction(async (tx) => {
+        await tx.nodes.Person.update(asNodeId("version-gated-row-b"), {
+          name: "writer",
+          email: "writer@example.com",
+        });
+        writerUpdated.open();
+        await releaseWriter.opened;
+      });
+      await writerUpdated.opened;
+      releaseSnapshot.open();
+
+      // The batch statement has read both version-1 rows, then blocks on the
+      // second row's writer lock. It must not update the uncontended first row
+      // after the second row's eligibility moves.
+      expect(await raceTimeout(batch, 200)).toBe(TIMEOUT_SENTINEL);
+      releaseWriter.open();
+      await writer;
+
+      const result = await batch;
+      expect(resolvedBatchResultSizes).toEqual([0]);
+      const resolvedBatchStatement = batchStatements.find((statement) =>
+        statement.includes("expected_updates"),
+      );
+      expect(resolvedBatchStatement).toBeDefined();
+      expect(resolvedBatchStatement).toContain(
+        'ORDER BY "typegraph_nodes"."id"',
+      );
+      const orderByPosition = requireDefined(resolvedBatchStatement).indexOf(
+        "ORDER BY",
+      );
+      const rowLockPosition = requireDefined(resolvedBatchStatement).indexOf(
+        "FOR UPDATE",
+      );
+      expect(orderByPosition).toBeGreaterThanOrEqual(0);
+      expect(rowLockPosition).toBeGreaterThan(orderByPosition);
+      const firstResult = requireDefined(
+        result.find((node) => node.id === "version-gated-row-a"),
+      );
+      const secondResult = requireDefined(
+        result.find((node) => node.id === "version-gated-row-b"),
+      );
+      expect(firstResult.name).toBe("batch-a");
+      expect(firstResult.email).toBe("initial-a@example.com");
+      expect(firstResult.meta.version).toBe(2);
+      expect(secondResult.name).toBe("batch-b");
+      expect(secondResult.email).toBe("writer@example.com");
+      expect(secondResult.meta.version).toBe(3);
+      expect(
+        batchStatements.some((statement) =>
+          statement.includes("pg_advisory_xact_lock"),
+        ),
+      ).toBe(false);
+    } finally {
+      await batchPool.end();
+      await writerPool.end();
+    }
   });
 
   it("soft deletes nodes", async (ctx) => {

@@ -221,18 +221,41 @@ function personMembership(id: string, labelId: string) {
 function expectAuxiliaryTableDroppedBeforeWorkingTable(
   statements: readonly string[],
 ): void {
-  const neighborDropIndex = statements.findIndex((statement) =>
-    statement.includes('DROP TABLE IF EXISTS "typegraph_iterative_n_'),
+  const workingTablePrefix = "typegraph_iterative_";
+  const neighborTablePrefix = "typegraph_iterative_n_";
+  const drops = statements.flatMap((statement, index) => {
+    const identifier = /^DROP TABLE IF EXISTS "([^"]+)"/u.exec(statement)?.[1];
+    return identifier === undefined ? [] : [{ identifier, index }];
+  });
+  const workingDrop = drops.find((drop) => {
+    if (!drop.identifier.startsWith(workingTablePrefix)) return false;
+    const suffix = drop.identifier.slice(workingTablePrefix.length);
+    const neighborIdentifier = `${neighborTablePrefix}${suffix}`;
+    return drops.some(
+      (candidate) => candidate.identifier === neighborIdentifier,
+    );
+  });
+  expect(workingDrop).toBeDefined();
+  if (workingDrop === undefined) return;
+
+  const suffix = workingDrop.identifier.slice(workingTablePrefix.length);
+  const neighborIdentifier = `${neighborTablePrefix}${suffix}`;
+  const neighborDrop = drops.find(
+    (drop) => drop.identifier === neighborIdentifier,
   );
-  const workingDropIndex = statements.findIndex(
-    (statement, index) =>
-      index > neighborDropIndex &&
-      statement.includes('DROP TABLE IF EXISTS "typegraph_iterative_') &&
-      !statement.includes('"typegraph_iterative_n_'),
-  );
-  expect(neighborDropIndex).toBeGreaterThan(-1);
-  expect(workingDropIndex).toBeGreaterThan(neighborDropIndex);
+  expect(neighborDrop).toBeDefined();
+  if (neighborDrop === undefined) return;
+  expect(neighborDrop.index).toBeLessThan(workingDrop.index);
 }
+
+describe("temporary table cleanup assertion", () => {
+  it("matches a working suffix that starts with the neighbor prefix", () => {
+    expectAuxiliaryTableDroppedBeforeWorkingTable([
+      'DROP TABLE IF EXISTS "typegraph_iterative_n_n_regression"',
+      'DROP TABLE IF EXISTS "typegraph_iterative_n_regression"',
+    ]);
+  });
+});
 
 // ============================================================
 // Test Setup

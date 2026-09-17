@@ -1889,6 +1889,7 @@ export interface DialectAdapter {
     readonly jsonArrayContains: (this: void, column: SqlFragment, value: unknown) => SqlFragment;
     readonly jsonArrayContainsAll: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
     readonly jsonArrayContainsAny: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
+    readonly jsonArrayContainsExpression?: (this: void, column: SqlFragment, value: SqlFragment, valueType: ValueType) => SqlFragment;
     readonly jsonArrayLength: (this: void, column: SqlFragment) => SqlFragment;
     readonly jsonExtract: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractBoolean: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
@@ -1922,6 +1923,7 @@ export interface DialectAdapter {
     }>) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly quoteIdentifier: (this: void, name: string) => string;
+    readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
     readonly supportsVectors: boolean;
@@ -2628,6 +2630,7 @@ export type GraphBackend = Readonly<{
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
+    updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
     compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
@@ -3297,7 +3300,7 @@ export type NodeCreateCommandResult = Readonly<{
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -3680,6 +3683,20 @@ export function requireWriteFence(plan: WriteFencePlan, operation: string, requi
 
 // @public
 export function resolveBundle<const D extends CapabilityBundleDefinition>(backend: GraphBackend, definition: D): BundleVerdictOf<D>;
+
+// @public
+export type ResolvedNodeUpdateBatchEntry = Readonly<{
+    graphId: string;
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+    expectedVersion: number;
+}>;
+
+// @public
+export type ResolvedNodeUpdateBatchParams = Readonly<{
+    entries: readonly ResolvedNodeUpdateBatchEntry[];
+}>;
 
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
@@ -4488,7 +4505,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "rawStatementReuse";
-        readonly ceiling: 7;
+        readonly ceiling: 11;
     };
     readonly executeTemporaryStatement: {
         readonly kind: "deferred";
@@ -4500,7 +4517,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "heterogeneousEndpointSetRead";
-        readonly ceiling: 4;
+        readonly ceiling: 5;
     };
     readonly fulltextSearch: {
         readonly kind: "deferred";
@@ -4611,6 +4628,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly ceiling: 6;
     };
     readonly updateNodeSet: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 6;
+    };
+    readonly updateResolvedNodesBatch: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "batchEntityWrite";
@@ -5089,7 +5112,7 @@ type WriteFenceTarget = Readonly<{
 
 // @public
 export const WS5B_SEED_BUNDLES: {
-    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet"];
+    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet", "updateResolvedNodesBatch"];
     readonly heterogeneousEndpointSetRead: readonly ["findEdgesByHeterogeneousEndpointSet"];
     readonly vectorOperations: readonly ["upsertEmbedding", "deleteEmbedding", "upsertEmbeddingBatch", "deleteEmbeddingBatch", "vectorSearch", "vectorStrategy", "createVectorIndex", "dropVectorIndex"];
     readonly hybridSearch: readonly ["hybridSearch"];

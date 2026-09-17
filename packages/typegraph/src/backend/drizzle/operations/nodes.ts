@@ -23,6 +23,7 @@ import type {
   HardDeleteNodeParams,
   InsertNodeParams,
   NodePropertyExpectation,
+  ResolvedNodeUpdateBatchParams,
   SchemaWriteFenceParams,
   UpdateNodeParams,
   UpdateNodeSetParams,
@@ -770,6 +771,70 @@ export function buildAtomicNodeResolvedUpdateBatch(
           AND ${nodes.deletedAt} IS NULL
           AND (${sql.join(expectedRows, sql` OR `)})
       ) = ${entries.length}
+    RETURNING *
+  `;
+}
+
+/**
+ * Builds the portable half of a resolved update batch. Unlike the atomic
+ * program form this deliberately has no schema fence: its caller already owns
+ * the graph write transaction and may be capture-wrapped. The version count
+ * gate still makes every replacement one all-or-nothing row transition.
+ */
+export function buildResolvedNodeUpdateBatch(
+  tables: Tables,
+  params: ResolvedNodeUpdateBatchParams,
+  timestamp: string,
+  rowLockClause: SQL,
+): SQL {
+  const entries = params.entries;
+  const first = entries[0];
+  if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
+  const expected = sql.identifier("expected_updates");
+  const eligible = sql.identifier("eligible_updates");
+  const id = sql.identifier("id");
+  const props = sql.identifier("props");
+  const expectedVersion = sql.identifier("expected_version");
+  const expectedColumns = sql.join([id, props, expectedVersion], sql`, `);
+  const expectedRows = entries.map(
+    (entry) =>
+      sql`(${castBoundValueForColumn(tables.nodes.id, entry.id)}, ${castBoundValueForColumn(tables.nodes.props, JSON.stringify(entry.props))}, ${castBoundValueForColumn(tables.nodes.version, entry.expectedVersion)})`,
+  );
+  return sql`
+    WITH ${expected} (${expectedColumns}) AS (
+      VALUES ${sql.join(expectedRows, sql`, `)}
+    ),
+    ${eligible} (${id}) AS (
+      SELECT ${expected}.${id}
+      FROM ${tables.nodes}
+      JOIN ${expected}
+        ON ${tables.nodes.id} = ${expected}.${id}
+       AND ${tables.nodes.version} = ${expected}.${expectedVersion}
+      WHERE ${tables.nodes.graphId} = ${first.graphId}
+        AND ${tables.nodes.kind} = ${first.kind}
+        AND ${tables.nodes.deletedAt} IS NULL
+      ORDER BY ${tables.nodes.id}
+      ${rowLockClause}
+    )
+    UPDATE ${tables.nodes}
+    SET ${quotedColumn(tables.nodes.props)} = (
+          SELECT ${expected}.${props}
+          FROM ${expected}
+          WHERE ${expected}.${id} = ${tables.nodes.id}
+        ),
+        ${quotedColumn(tables.nodes.updatedAt)} = ${timestamp},
+        ${quotedColumn(tables.nodes.version)} = ${tables.nodes.version} + ${sql.raw(String(NODE_VERSION_INCREMENT))}
+    WHERE ${tables.nodes.graphId} = ${first.graphId}
+      AND ${tables.nodes.kind} = ${first.kind}
+      AND ${tables.nodes.deletedAt} IS NULL
+      AND ${tables.nodes.id} IN (SELECT ${id} FROM ${eligible})
+      AND EXISTS (
+        SELECT 1
+        FROM ${expected}
+        WHERE ${expected}.${id} = ${tables.nodes.id}
+          AND ${expected}.${expectedVersion} = ${tables.nodes.version}
+      )
+      AND (SELECT COUNT(*) FROM ${eligible}) = ${entries.length}
     RETURNING *
   `;
 }

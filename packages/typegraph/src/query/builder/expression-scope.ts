@@ -43,6 +43,11 @@ export function assertExpressionScope(
       assertExpressionScope(node.right, scope);
       return;
     }
+    case "array_contains": {
+      assertExpressionScope(node.array, scope);
+      assertExpressionScope(node.element, scope);
+      return;
+    }
     case "boolean":
     case "coalesce": {
       for (const operand of node.operands)
