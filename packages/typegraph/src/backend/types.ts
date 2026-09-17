@@ -856,6 +856,25 @@ export type UpdateNodeSetResult = Readonly<{
   rows: readonly NodeRow[];
 }>;
 
+/** One resolved, whole-row replacement in a guarded node batch. */
+export type ResolvedNodeUpdateBatchEntry = Readonly<{
+  graphId: string;
+  kind: string;
+  id: string;
+  props: Readonly<Record<string, unknown>>;
+  /** The preimage version the batch must still observe for every member. */
+  expectedVersion: number;
+}>;
+
+/**
+ * Replaces several distinct live rows in one statement and returns their
+ * after-images. The all-or-nothing version gate makes this safe to use before
+ * rebuilding shared sidecars in a portable transaction.
+ */
+export type ResolvedNodeUpdateBatchParams = Readonly<{
+  entries: readonly ResolvedNodeUpdateBatchEntry[];
+}>;
+
 /**
  * Parameters for deleting a node (soft delete).
  */
@@ -2290,6 +2309,10 @@ export type GraphBackend = Readonly<{
     this: void,
     params: UpdateNodeSetParams,
   ) => Promise<UpdateNodeSetResult>;
+  updateResolvedNodesBatch?: (
+    this: void,
+    params: ResolvedNodeUpdateBatchParams,
+  ) => Promise<readonly NodeRow[]>;
   compareAndSetNode?: (
     this: void,
     params: CompareAndSetNodeParams,
@@ -3617,6 +3640,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "updateNode"
+  | "updateResolvedNodesBatch"
   | "compareAndSetNode"
   | "updateNodeSet"
   | "deleteNode"

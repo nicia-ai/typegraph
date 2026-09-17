@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   createStoreWithSchema,
   defineGraph,
   defineNode,
@@ -26,6 +27,7 @@ import {
 import {
   deriveBackend,
   type ExactBackendOverlay,
+  projectBackendWithout,
 } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
@@ -78,6 +80,8 @@ const COUNTED_METHODS = [
   "upsertFulltextBatch",
   "upsertEmbedding",
   "upsertEmbeddingBatch",
+  "updateNode",
+  "updateResolvedNodesBatch",
 ] as const;
 
 /**
@@ -234,6 +238,165 @@ describe("bulkCreate side-effect batching", () => {
       expect(counts["upsertEmbeddingBatch"]).toBe(1);
       expect(counts["upsertEmbedding"]).toBe(0);
     });
+  });
+});
+
+describe("resolved bulk update batching", () => {
+  it("keeps history-tracked whole-row updates at a bounded write count", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(raw);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      const inputs = Array.from({ length: BATCH_SIZE }, (_, index) => ({
+        id: `history-doc-${index}`,
+        props: {
+          title: `before ${index}`,
+          body: `body ${index}`,
+          embedding: [index, 1, 2, 3],
+        },
+      }));
+      await store.nodes.Doc.bulkUpsertById(inputs);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      const updated = await store.nodes.Doc.bulkUpsertById(
+        inputs.map((input, index) => ({
+          ...input,
+          props: {
+            title: `after ${index}`,
+            body: `revised ${index}`,
+            embedding: [index, 4, 5, 6],
+          },
+        })),
+      );
+
+      expect(updated).toHaveLength(BATCH_SIZE);
+      expect(counts["updateResolvedNodesBatch"]).toBe(1);
+      expect(counts["updateNode"]).toBe(0);
+      expect(counts["upsertFulltextBatch"]).toBe(1);
+      expect(counts["upsertEmbeddingBatch"]).toBe(1);
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it("falls back before a resolved batch exceeds the advertised bind budget", async () => {
+    const { backend: raw } = createLocalSqliteBackend({
+      capabilities: { maxBindParameters: 100 },
+    });
+    try {
+      const { backend, counts } = withCallCounts(raw);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        revisionTracking: true,
+      });
+      const inputs = Array.from({ length: BATCH_SIZE }, (_, index) => ({
+        id: `budget-doc-${index}`,
+        props: {
+          title: `before ${index}`,
+          body: `body ${index}`,
+          embedding: [index, 1, 2, 3],
+        },
+      }));
+      await store.nodes.Doc.bulkUpsertById(inputs);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      await store.nodes.Doc.bulkUpsertById(
+        inputs.map((input, index) => ({
+          ...input,
+          props: {
+            title: `after ${index}`,
+            body: `revised ${index}`,
+            embedding: [index, 4, 5, 6],
+          },
+        })),
+      );
+
+      // The resolved statement costs 126 binds, so the one owner of the
+      // budget calculation retains the established per-row fallback.
+      expect(counts["updateResolvedNodesBatch"]).toBe(0);
+      expect(counts["updateNode"]).toBe(BATCH_SIZE);
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it("falls back before row mutation when a transaction port lacks a required unique sidecar", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const narrowed = deriveBackend(raw, {
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) => fn(projectBackendWithout(target, ["checkUniqueBatch"])),
+            options,
+          ),
+      });
+      const { backend, counts } = withCallCounts(narrowed);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      await store.nodes.Person.bulkUpsertById([
+        { id: "port-a", props: { name: "A", email: "a@example.com" } },
+        { id: "port-b", props: { name: "B", email: "b@example.com" } },
+      ]);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      const updated = await store.nodes.Person.bulkUpsertById([
+        { id: "port-a", props: { name: "A2", email: "a@example.com" } },
+        { id: "port-b", props: { name: "B2", email: "b@example.com" } },
+      ]);
+
+      expect(updated.map((node) => node.id)).toEqual(["port-a", "port-b"]);
+      expect(counts["updateResolvedNodesBatch"]).toBe(0);
+      expect(counts["updateNode"]).toBe(2);
+      await expect(
+        store.nodes.Person.getById(asNodeId("port-a")),
+      ).resolves.toMatchObject({ name: "A2", email: "a@example.com" });
+      await expect(
+        store.nodes.Person.getById(asNodeId("port-b")),
+      ).resolves.toMatchObject({ name: "B2", email: "b@example.com" });
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it("retains bulkUpsertById's sequential unique-key behavior when a batch could otherwise swap keys", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(raw);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      await store.nodes.Person.bulkUpsertById([
+        { id: "swap-a", props: { name: "A", email: "a@example.com" } },
+        { id: "swap-b", props: { name: "B", email: "b@example.com" } },
+      ]);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      await expect(
+        store.nodes.Person.bulkUpsertById([
+          { id: "swap-a", props: { name: "A", email: "b@example.com" } },
+          { id: "swap-b", props: { name: "B", email: "a@example.com" } },
+        ]),
+      ).rejects.toBeInstanceOf(UniquenessError);
+
+      expect(counts["updateResolvedNodesBatch"]).toBe(0);
+      await expect(
+        store.nodes.Person.getById(asNodeId("swap-a")),
+      ).resolves.toMatchObject({ email: "a@example.com" });
+      await expect(
+        store.nodes.Person.getById(asNodeId("swap-b")),
+      ).resolves.toMatchObject({ email: "b@example.com" });
+    } finally {
+      await raw.close();
+    }
   });
 });
 

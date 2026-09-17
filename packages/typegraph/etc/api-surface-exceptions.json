@@ -54,5 +54,13 @@
     "kind": "required-member-added",
     "reason": "ExecutableQuery is a concrete library-created class with private state; consumers receive instances from TypeGraph and external structural implementations are unsupported.",
     "issue": "#717"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildResolvedNodeUpdateBatch",
+    "kind": "required-member-added",
+    "reason": "CommonOperationStrategy values are internal implementation objects created by the library's dialect factories; custom backends implement GraphBackend rather than this strategy type.",
+    "issue": "#718"
   }
 ]

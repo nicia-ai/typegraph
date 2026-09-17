@@ -1354,6 +1354,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     bundle: "batchEntityWrite",
     ceiling: 6,
   },
+  updateResolvedNodesBatch: {
+    kind: "deferred",
+    workstream: "WS5b",
+    bundle: "batchEntityWrite",
+    ceiling: 6,
+  },
   upsertEmbedding: {
     kind: "deferred",
     workstream: "WS5b",
@@ -1412,6 +1418,7 @@ export const WS5B_SEED_BUNDLES = {
     "insertEdgeNoReturn",
     "compareAndSetNode",
     "updateNodeSet",
+    "updateResolvedNodesBatch",
   ],
   heterogeneousEndpointSetRead: ["findEdgesByHeterogeneousEndpointSet"],
   vectorOperations: [

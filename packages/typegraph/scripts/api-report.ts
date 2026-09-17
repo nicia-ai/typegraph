@@ -645,38 +645,41 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // Array membership and tuple cursor predicates add their AST nodes to the
 // public query graph. The root also reaches their operand helper types; each
 // Store-bearing secondary entrypoint reaches the two predicate node types.
+// Resolved node update batch contracts become reachable through the six
+// Store-bearing secondary entrypoints. The fingerprints below record the
+// complete measured symbol sets after that portable batch surface was added.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 498,
     sha256: "e2ee0a6260d1f2eb843c6b2870bc813d520ec07421203d3c277fc64a5ac96a3e",
   },
   "./adapters/drizzle/engine": {
-    count: 332,
-    sha256: "987bd55b4608a4dcd79dc16e3dfe4b47137da3191698fb6daa75db0f4b7ab007",
+    count: 334,
+    sha256: "2ff6b57b2d5736d778999b807eb5bfa406b80cf181f8796b1a0028010114da90",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 261,
-    sha256: "c68bc82aa140d2096e92e50f6fb5d8b3f918a1f6b6ca73670864e2e6c229227c",
+    count: 263,
+    sha256: "f2d8dbc61db2fb2c4dcf75d8bea97587d8e1f679047f975c1ba9e4218700f46e",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 265,
-    sha256: "21e6588732803efa06d641b9ba78ebc0e7dabd0078b139f2b29bb8a6b66f494b",
+    count: 267,
+    sha256: "cdf6cdf7af04854074fac9929e8d8d5851a49acee1f68d9949745302d1da16b1",
   },
   "./adapters/drizzle/sqlite": {
-    count: 262,
-    sha256: "2d294d7daa958c4225d54a215d516f070e52254725dfa468df7007d7e08f3347",
+    count: 264,
+    sha256: "114e5dbc7ddb6f104fa674a9df15dd5d6793280f672b5d86df23c29f36566990",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 265,
-    sha256: "02d1204073d214d47a789c8fd8e8bfec1df4487bd69f4895494591a8fada74b1",
+    count: 267,
+    sha256: "6040d2fc60be7390d9c64a009d77665e6b4a51c110c348139086b53b475fdc15",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 265,
-    sha256: "02d1204073d214d47a789c8fd8e8bfec1df4487bd69f4895494591a8fada74b1",
+    count: 267,
+    sha256: "6040d2fc60be7390d9c64a009d77665e6b4a51c110c348139086b53b475fdc15",
   },
   "./backend": {
     count: 18,
@@ -694,36 +697,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 862,
-    sha256: "7b7239846f09a9264c2a1adce0d1159289e3ae2ef25b7eea2b949525124a9ce8",
+    count: 864,
+    sha256: "2f0b975d26120f6beffcc1fedde8d562948a79fb36c699e916a6ec58f2436bc7",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 845,
-    sha256: "e28dfa0b09a1c091bf24ce6871617507e9d1471b38465e78704cb90bbe428f65",
+    count: 847,
+    sha256: "81b7a100211e0013af6219e654e937f44c0979a1e1c66aff0a852590424a9bdb",
   },
   "./postgres/pglite": {
-    count: 847,
-    sha256: "0511d078a14d78cd17917692b8588d4bc9194dd8865108c7bf4a97f34ac0bb2c",
+    count: 849,
+    sha256: "eecb66fdb5bd74a8d8b01af43fba4f36085e04607b5afe4edf4bd38722748e6d",
   },
   "./profiler": {
-    count: 847,
-    sha256: "7cead86020c8c74d9d4d3c9eeb58f2e5e1b7082c047b40b796bcc13926217c68",
+    count: 849,
+    sha256: "ee889459ad35ef1a1b35f9cda1fbbbbb61be8232e79bd1d0ee0f911409181f15",
   },
   "./provenance": {
-    count: 856,
-    sha256: "d64d63da0a7c1d1b588e1208fd8b3ff1496c64fc5de40cce284749517a4ebdcd",
+    count: 858,
+    sha256: "bbf2ef1352628e45921ced7a5e5a9fa68d181c7dd1234e6ef20229025d73569f",
   },
   "./schema": {
-    count: 284,
-    sha256: "982b6ead7ad367a6d9e87ba099e72309dbcf4ad4e0979eaa1169a9036fd0a81b",
+    count: 286,
+    sha256: "21e1e9735f0550fcb675f56d78f9b96fefe6fb14260edcbbc3c439e58892ab79",
   },
   "./sqlite/local": {
-    count: 847,
-    sha256: "0511d078a14d78cd17917692b8588d4bc9194dd8865108c7bf4a97f34ac0bb2c",
+    count: 849,
+    sha256: "eecb66fdb5bd74a8d8b01af43fba4f36085e04607b5afe4edf4bd38722748e6d",
   },
 };
 

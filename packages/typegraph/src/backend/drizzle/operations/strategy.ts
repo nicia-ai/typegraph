@@ -53,6 +53,7 @@ import type {
   ManagedNodeCreatePlan,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
+  ResolvedNodeUpdateBatchParams,
   SchemaWriteFenceParams,
   SqlDialect,
   UpdateEdgeParams,
@@ -158,6 +159,7 @@ import {
   buildInsertNodesBatchWithSchemaFence,
   buildInsertNodeWithSchemaFence,
   buildReadAtomicNodeMutationPostimages,
+  buildResolvedNodeUpdateBatch,
   buildUpdateNode,
   buildUpdateNodeSet,
 } from "./nodes";
@@ -377,6 +379,10 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildUpdateNodeSet: (
     params: CompareAndSetNodeParams | UpdateNodeSetParams,
+    timestamp: string,
+  ) => SQL;
+  buildResolvedNodeUpdateBatch: (
+    params: ResolvedNodeUpdateBatchParams,
     timestamp: string,
   ) => SQL;
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
@@ -672,6 +678,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildGetNodes,
   buildUpdateNode,
   buildAtomicNodeResolvedUpdateBatch,
+  buildResolvedNodeUpdateBatch,
   buildAssertAtomicNodeMutationPostimages,
   buildAssertAtomicNodeProjectionEvidence,
   buildReadAtomicNodeMutationPostimages,
@@ -744,6 +751,16 @@ const TABLE_EXISTS_QUERIES = {
   sqlite: (tableName: string): SQL =>
     sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`,
 } satisfies Record<SqlDialect, (tableName: string) => SQL>;
+
+/**
+ * PostgreSQL must lock the complete version-eligible set before the outer
+ * count gate can admit any update. SQLite owns its single writer before this
+ * statement runs, so its token is deliberately empty.
+ */
+const RESOLVED_NODE_UPDATE_LOCK_CLAUSES = {
+  postgres: sql`FOR UPDATE`,
+  sqlite: sql.empty(),
+} satisfies Record<SqlDialect, SQL>;
 
 function createCommonOperationStrategy(
   tables: Tables,
@@ -1106,6 +1123,14 @@ function createCommonOperationStrategy(
       timestamp: string,
     ): SQL {
       return buildUpdateNodeSet(tables, dialect, params, timestamp);
+    },
+    buildResolvedNodeUpdateBatch(params, timestamp): SQL {
+      return buildResolvedNodeUpdateBatch(
+        tables,
+        params,
+        timestamp,
+        RESOLVED_NODE_UPDATE_LOCK_CLAUSES[dialect],
+      );
     },
     buildDeleteContributionMaterialization,
     buildInsertContributionMaterialization,

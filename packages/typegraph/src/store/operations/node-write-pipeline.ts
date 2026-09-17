@@ -30,6 +30,7 @@ import {
   type LiveNodeRow,
   type NodePropertyExpectation,
   type NodeRow,
+  type ResolvedNodeUpdateBatchEntry,
   rowPropsToObject,
   type TombstonedNodeRow,
   type TransactionBackend,
@@ -63,7 +64,10 @@ import {
   withNodeClaimTransition,
   withNodeCreateClaimsBatch,
 } from "../claims/node-claims";
-import { validateResolvedNodeClaims } from "../claims/resolved-node-claims";
+import {
+  resolvedNodeUniqueSidecarBatchIsReachable,
+  validateResolvedNodeClaims,
+} from "../claims/resolved-node-claims";
 import {
   deleteNodeEmbeddings,
   getEmbeddingFields,
@@ -453,6 +457,90 @@ export async function applyNodeUpdate(
   ]);
 
   return row;
+}
+
+/**
+ * Applies distinct, already-resolved live-node replacements as one row write,
+ * then rebuilds the same claim and projection fans as a set update. Returning
+ * `undefined` is the portable version-gate miss: callers re-read and recover
+ * through the established per-row race semantics rather than treating it as a
+ * partial success.
+ */
+export async function applyResolvedNodeUpdateBatch(
+  ctx: NodeWriteContext,
+  args: Readonly<{
+    schema: z.ZodType<Record<string, unknown>>;
+    uniqueConstraints: readonly UniqueConstraint[];
+    entries: readonly ResolvedNodeUpdateBatchEntry[];
+  }>,
+  backend: Backend,
+): Promise<readonly NodeRow[] | undefined> {
+  if (
+    args.uniqueConstraints.length > 0 &&
+    !resolvedNodeUniqueSidecarBatchIsReachable(uniquenessContext(ctx, backend))
+  ) {
+    throw new ConfigurationError(
+      "Resolved node writes require batched uniqueness operations",
+      { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
+    );
+  }
+  const updateResolvedNodesBatch = backend.updateResolvedNodesBatch;
+  if (updateResolvedNodesBatch === undefined) return;
+  const rows = await updateResolvedNodesBatch({ entries: args.entries });
+  if (rows.length === 0) return;
+  if (rows.length !== args.entries.length) {
+    throw new ConfigurationError(
+      "Resolved node update batch returned a partial result",
+      { operation: "updateResolvedNodesBatch" },
+    );
+  }
+  const entriesById = new Map(
+    args.entries.map((entry) => [entry.id, entry] as const),
+  );
+  const items = rows.map((row) => {
+    const entry = entriesById.get(row.id);
+    if (entry?.kind !== row.kind) {
+      throw new ConfigurationError(
+        "Resolved node update batch returned an unexpected row",
+        { operation: "updateResolvedNodesBatch", rowId: row.id },
+      );
+    }
+    const props = rowPropsToObject(row.props);
+    if (!canonicalEqual(entry.props, props)) {
+      throw new ConfigurationError(
+        "Resolved node update batch returned props that differ from its input",
+        { operation: "updateResolvedNodesBatch", rowId: row.id },
+      );
+    }
+    return {
+      kind: row.kind,
+      id: row.id,
+      props,
+      constraints: args.uniqueConstraints,
+      uniqueConstraints: args.uniqueConstraints,
+      schema: args.schema,
+    };
+  });
+  if (args.uniqueConstraints.length > 0) {
+    await validateResolvedNodeClaims(
+      createUniquenessContext(
+        ctx.graphId,
+        ctx.registry,
+        backend,
+        ctx.uniqueSidecarBatch,
+      ),
+      items,
+      [],
+    );
+    await hardDeleteClaimsByNodeIds(
+      uniquenessContext(ctx, backend),
+      items[0]?.kind ?? "",
+      items.map((item) => item.id),
+    );
+  }
+  await withNodeCreateClaimsBatch(ctx, items, backend, alreadyAppliedRowWrite);
+  await applyNodeInsertSyncFansBatch(ctx, items, backend);
+  return rows;
 }
 
 /**

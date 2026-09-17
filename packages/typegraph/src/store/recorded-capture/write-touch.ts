@@ -165,6 +165,7 @@ export type RecordedWriteMembersOverlay = Pick<
       | "insertNodeNoReturn"
       | "insertNodesBatch"
       | "insertNodesBatchReturning"
+      | "updateResolvedNodesBatch"
       | "updateNodeSet"
       | "compareAndSetNode"
       | "insertEdgeNoReturn"
@@ -319,6 +320,23 @@ export function buildRecordedWriteMembers(
       sink.touchNode(params.graphId, params.kind, params.id, row);
       return row;
     },
+
+    ...(target.updateResolvedNodesBatch === undefined ?
+      {}
+    : {
+        async updateResolvedNodesBatch(params) {
+          if (params.entries.length === 0) return [];
+          const first = requireDefined(params.entries[0]);
+          await hooks.beforeOne?.(first.graphId);
+          const rows = await requireDefined(target.updateResolvedNodesBatch)(
+            params,
+          );
+          for (const row of rows) {
+            sink.touchNode(row.graph_id, row.kind, row.id, row);
+          }
+          return rows;
+        },
+      }),
 
     ...(target.updateNodeSet === undefined ?
       {}

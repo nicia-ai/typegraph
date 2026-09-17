@@ -76,6 +76,7 @@ import {
 } from "../../backend/capabilities/resolve";
 import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
 import { deriveBackend } from "../../backend/derive-backend";
+import { resolvedNodeUpdateBatchFitsBindBudget } from "../../backend/resolved-node-update-batch";
 import {
   type EdgeRow as BackendEdgeRow,
   type GraphBackend,
@@ -164,6 +165,10 @@ import {
   probeUniqueKey,
   refuseNodeCreateClaimError,
 } from "../claims/node-claims";
+import {
+  resolvedNodeUniqueSidecarBatchIsReachable,
+  resolvedNodeUpdatePreservesClaimKeys,
+} from "../claims/resolved-node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
   type NodeSetUpdateRequest,
@@ -3620,6 +3625,81 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
             [...distinctIds],
           )
         : undefined;
+      const canBatchResolvedUpdates =
+        resolvedRows !== undefined &&
+        resolvedNodeUpdateBatchFitsBindBudget(
+          entries.length,
+          target.capabilities.maxBindParameters,
+        ) &&
+        entries.every(
+          (entry) =>
+            !entry.clearDeleted &&
+            entry.input.validFrom === undefined &&
+            entry.input.validTo === undefined &&
+            entry.input.clearValidTo !== true,
+        );
+      let batchMissed = false;
+      if (canBatchResolvedUpdates) {
+        const resolvedEntries = entries.map((entry) => {
+          const existing = resolvedRows.get(entry.input.id);
+          if (existing === undefined || !isLiveNodeRow(existing)) {
+            throw new NodeNotFoundError(entry.input.kind, entry.input.id);
+          }
+          const props =
+            entry.replacementProps ??
+            resolveNodeUpdateProps(ctx, existing, entry.input.props)
+              .validatedProps;
+          return {
+            graphId: ctx.graphId,
+            kind: entry.input.kind,
+            id: entry.input.id,
+            props,
+            expectedVersion: existing.version,
+          };
+        });
+        const registration = getNodeRegistration(ctx.graph, first.input.kind);
+        const uniqueSidecarsReachable =
+          registration.unique === undefined ||
+          registration.unique.length === 0 ||
+          resolvedNodeUniqueSidecarBatchIsReachable(
+            createUniquenessContext(
+              ctx.graphId,
+              ctx.registry,
+              target,
+              ctx.uniqueSidecarBatch,
+            ),
+          );
+        const preservesClaimKeys = resolvedEntries.every((entry) => {
+          const existing = requireDefined(resolvedRows.get(entry.id));
+          return resolvedNodeUpdatePreservesClaimKeys(
+            ctx.registry,
+            entry.kind,
+            entry.id,
+            rowPropsToObject(existing.props),
+            entry.props,
+            registration.unique ?? [],
+          );
+        });
+        if (uniqueSidecarsReachable && preservesClaimKeys) {
+          const rows = await session.reviseResolvedNodes({
+            schema: registration.type.schema,
+            uniqueConstraints: registration.unique ?? [],
+            entries: resolvedEntries,
+          });
+          if (rows !== undefined) {
+            const byId = new Map(rows.map((row) => [row.id, row]));
+            return entries.map((entry) =>
+              rowToNode(requireDefined(byId.get(entry.input.id))),
+            );
+          }
+          batchMissed = true;
+        }
+      }
+      // A zero-row version-gated batch means a peer changed at least one row
+      // after the shared preimage read. The portable recovery below must start
+      // from the rows that are CURRENT now: carrying the old preimage would
+      // turn a partial upsert into a stale full replacement.
+      const fallbackRows = batchMissed ? undefined : resolvedRows;
       const nodes: Node[] = [];
       for (const entry of entries) {
         nodes.push(
@@ -3636,7 +3716,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
                 : { replacementProps: entry.replacementProps }),
               }
             : undefined,
-            resolvedRows?.get(entry.input.id),
+            fallbackRows?.get(entry.input.id),
           ),
         );
         if (entry.clearDeleted && ctx.identity !== undefined) {

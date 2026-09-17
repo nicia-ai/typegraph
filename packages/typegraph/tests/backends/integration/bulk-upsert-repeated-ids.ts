@@ -563,6 +563,83 @@ export function registerBulkUpsertRepeatedIdIntegrationTests(
     });
 
     describe("with history capture", () => {
+      it("updates more than one thousand distinct existing rows", async () => {
+        const store = await context.createHistoryStore(integrationTestGraph);
+        const entries = Array.from({ length: 1001 }, (_, index) => ({
+          id: `large-resolved-${index}`,
+          props: { name: `Initial ${index}`, age: index },
+        }));
+        await store.nodes.Person.bulkUpsertById(entries);
+
+        const updated = await store.nodes.Person.bulkUpsertById(
+          entries.map((entry, index) => ({
+            id: entry.id,
+            props: { name: `Revised ${index}`, age: index + 1 },
+          })),
+        );
+
+        expect(updated).toHaveLength(entries.length);
+        expect(updated[0]).toMatchObject({ name: "Revised 0" });
+        expect(updated.at(-1)).toMatchObject({ name: "Revised 1000" });
+        expect(updated.every((node) => node.meta.version === 2)).toBe(true);
+      });
+
+      it("preserves recorded after-images for distinct resolved updates", async (ctx) => {
+        const store = await context.createHistoryStore(integrationTestGraph);
+        if (store.backend.capabilities.fulltext?.supported !== true) {
+          ctx.skip();
+        }
+        const initial = ["hist-batch-a", "hist-batch-b"] as const;
+        await store.nodes.Article.bulkUpsertById(
+          initial.map((id, index) => ({
+            id,
+            props: {
+              title: `Initial title ${index}`,
+              body: `Initial body ${index}`,
+              category: "science",
+              published: true,
+            },
+          })),
+        );
+        const updated = await store.nodes.Article.bulkUpsertById(
+          initial.map((id, index) => ({
+            id,
+            props: {
+              title: `Revised title ${index}`,
+              body: `Revised body ${index}`,
+              category: "science",
+              published: true,
+            },
+          })),
+        );
+
+        expect(updated.map((node) => node.meta.version)).toEqual([2, 2]);
+        for (const [index, id] of initial.entries()) {
+          expect(await readRecordedRevisions(store, "Article", id)).toEqual([
+            {
+              op: "create",
+              version: 1,
+              props: {
+                title: `Initial title ${index}`,
+                body: `Initial body ${index}`,
+                category: "science",
+                published: true,
+              },
+            },
+            {
+              op: "update",
+              version: 2,
+              props: {
+                title: `Revised title ${index}`,
+                body: `Revised body ${index}`,
+                category: "science",
+                published: true,
+              },
+            },
+          ]);
+        }
+      });
+
       it("records a repeated new id as one created revision holding the final state", async () => {
         const store = await context.createHistoryStore(integrationTestGraph);
 
