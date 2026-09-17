@@ -27,6 +27,7 @@ import {
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import {
   buildCursorFromRow,
+  buildCursorFromValues,
   type CursorData,
   decodeCursor,
   requireCursorField,
@@ -37,6 +38,7 @@ import {
   adjustOrderByForDirection,
   buildCursorPredicate,
   buildPaginatedResult,
+  buildPaginatedResultFromRows,
   buildSelectContext,
   buildSelectiveFields,
   containsSelectableAliasObject,
@@ -78,8 +80,10 @@ import {
 import { executeQueryTerminal } from "./terminal-query";
 import {
   type AliasMap,
+  type CompiledOneStatementRead,
   type EdgeAliasMap,
   type NodeCandidateSelection,
+  type OneStatementBatchableQuery,
   type PaginatedResult,
   type PaginateOptions,
   type QueryBuilderConfig,
@@ -1278,44 +1282,31 @@ export class ExecutableQuery<
       throw error;
     }
 
-    let nextCursor: string | undefined;
-    let previousCursor: string | undefined;
-
-    if (orderedRows.length > 0) {
-      try {
-        previousCursor = this.#buildCursorFromSelectiveRow(
-          requireDefined(orderedRows[0]),
-          selectiveFields,
-          "b",
-        );
-        nextCursor = this.#buildCursorFromSelectiveRow(
-          requireDefined(orderedRows.at(-1)),
-          selectiveFields,
-          "f",
-        );
-      } catch (error) {
-        if (error instanceof MissingSelectiveFieldError) {
-          this.#cachedSelectiveFieldsForPagination = undefined;
-          return undefined;
-        }
-        if (error instanceof UnsupportedPredicateError) {
-          this.#cachedSelectiveFieldsForPagination = undefined;
-          return undefined;
-        }
-        throw error;
+    try {
+      return buildPaginatedResultFromRows(
+        data,
+        orderedRows,
+        hasMore,
+        isBackward,
+        cursor,
+        (row, cursorDirection) =>
+          this.#buildCursorFromSelectiveRow(
+            row,
+            selectiveFields,
+            cursorDirection,
+          ),
+      );
+    } catch (error) {
+      if (error instanceof MissingSelectiveFieldError) {
+        this.#cachedSelectiveFieldsForPagination = undefined;
+        return undefined;
       }
+      if (error instanceof UnsupportedPredicateError) {
+        this.#cachedSelectiveFieldsForPagination = undefined;
+        return undefined;
+      }
+      throw error;
     }
-
-    return {
-      data,
-      nextCursor: hasMore || isBackward ? nextCursor : undefined,
-      prevCursor:
-        cursor !== undefined || (isBackward && hasMore) ?
-          previousCursor
-        : undefined,
-      hasNextPage: isBackward ? cursor !== undefined : hasMore,
-      hasPrevPage: isBackward ? hasMore : cursor !== undefined,
-    };
   }
 
   #recordOrderByFieldsForPagination(tracker: FieldAccessTracker): boolean {
@@ -1664,6 +1655,122 @@ export class ExecutableQuery<
   }
 
   /**
+   * Builds a cold cursor-page read that can execute independently or as one
+   * member of `store.batchOnce()`.
+   */
+  page(
+    options: PaginateOptions,
+  ): CompiledOneStatementRead<PaginatedResult<R>> &
+    Required<Pick<OneStatementBatchableQuery<PaginatedResult<R>>, "execute">> {
+    this.#refuseCheckedReadSurface("page");
+    const pageOptions = { ...options };
+    validatePaginationOptions(this.#state, pageOptions);
+    if (this.#hasParameterReferences())
+      throw new ConfigurationError(
+        "Cursor pagination requires bound values, not param() references.",
+        { operation: "page" },
+      );
+    if (!this.#config.backend) {
+      throw new Error(
+        "Cannot build page read: no backend configured. " +
+          "Use store.query() or pass a backend to createQueryBuilder().",
+      );
+    }
+    if (this.#state.orderBy.length === 0) {
+      throw new ValidationError(
+        "Cursor pagination requires ORDER BY. Add .orderBy() before .page()",
+        {
+          issues: [
+            {
+              path: "orderBy",
+              message: "ORDER BY is required for cursor pagination",
+            },
+          ],
+        },
+        {
+          suggestion: `Add .orderBy(alias, field) before .page() to specify sort order.`,
+        },
+      );
+    }
+
+    const isBackward =
+      pageOptions.last !== undefined || pageOptions.before !== undefined;
+    const pageLimit =
+      pageOptions.first ?? pageOptions.last ?? DEFAULT_PAGINATION_LIMIT;
+    const cursor = pageOptions.after ?? pageOptions.before;
+    const paginationOrderBy = this.#paginationOrderBy();
+    const cursorData = cursor === undefined ? undefined : decodeCursor(cursor);
+    if (cursorData !== undefined)
+      validateCursorColumns(cursorData, paginationOrderBy);
+    const direction = isBackward ? "backward" : "forward";
+    const orderBy = adjustOrderByForDirection(paginationOrderBy, direction);
+    const predicates =
+      cursorData === undefined ?
+        this.#state.predicates
+      : [
+          ...this.#state.predicates,
+          buildCursorPredicate(
+            cursorData,
+            paginationOrderBy,
+            direction,
+            this.#state.startAlias,
+          ),
+        ];
+    const pagedQuery = new ExecutableQuery(
+      this.#config,
+      {
+        ...this.#state,
+        predicates,
+        orderBy,
+        limit: pageLimit + 1,
+        offset: undefined,
+      },
+      this.#selectFn,
+    );
+
+    return {
+      execute: () => this.paginate(pageOptions),
+      compileOneStatementBatchItem: () => {
+        const item = requireDefined(
+          pagedQuery.compileOneStatementBatchItem?.(),
+        );
+        const cursorOutputNames = orderBy.map((_spec, index) =>
+          oneStatementBatchOrderColumn(index),
+        );
+        function cursorFromRow(
+          row: Record<string, unknown>,
+          cursorDirection: "f" | "b",
+        ): string {
+          return buildCursorFromValues(
+            cursorOutputNames.map((outputName) => row[outputName]),
+            paginationOrderBy,
+            cursorDirection,
+          );
+        }
+        return {
+          ...item,
+          hiddenOutputNames: cursorOutputNames,
+          mapRows: (rows: readonly Record<string, unknown>[]) => {
+            const hasMore = rows.length > pageLimit;
+            const fetchedRows = hasMore ? rows.slice(0, pageLimit) : rows;
+            const orderedRows =
+              isBackward ? fetchedRows.toReversed() : fetchedRows;
+            const data = item.mapRows(orderedRows);
+            return buildPaginatedResultFromRows(
+              data,
+              orderedRows,
+              hasMore,
+              isBackward,
+              cursor,
+              (row, cursorDirection) => cursorFromRow(row, cursorDirection),
+            );
+          },
+        };
+      },
+    };
+  }
+
+  /**
    * Returns an async iterator that streams results in batches.
    *
    * Uses cursor pagination internally for efficient memory usage.
@@ -1695,7 +1802,7 @@ export class ExecutableQuery<
     );
   }
 
-  #refuseCheckedReadSurface(surface: "paginate" | "stream"): void {
+  #refuseCheckedReadSurface(surface: "page" | "paginate" | "stream"): void {
     if (
       getQueryBuilderInternalContext(this.#config).expectedSchemaVersion ===
       undefined
@@ -1703,7 +1810,7 @@ export class ExecutableQuery<
       return;
     }
     throw new ConfigurationError(
-      `${surface === "paginate" ? "Pagination" : "Streaming"} is unavailable inside withCheckedReads().`,
+      `${surface === "stream" ? "Streaming" : "Pagination"} is unavailable inside withCheckedReads().`,
       { operation: `withCheckedReads.${surface}` },
     );
   }

@@ -2961,6 +2961,7 @@ const results = await store
 | `count()` | `Promise<number>` | Count matching results |
 | `exists()` | `Promise<boolean>` | Check if any results exist |
 | `paginate(options)` | `Promise<PaginatedResult<T>>` | Cursor-based pagination |
+| `page(options)` | `CompiledOneStatementRead<PaginatedResult<T>>` with `execute()` | Cold cursor page; executes alone or in `batchOnce()` |
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
 | `prepare()` | `PreparedQuery<T>` | Validate query AST once for repeated execution with different parameters |
 

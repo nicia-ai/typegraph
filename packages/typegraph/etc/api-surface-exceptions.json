@@ -1,5 +1,61 @@
 [
   {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "page",
+    "kind": "required-member-added",
+    "reason": "ExecutableQuery is a concrete library-created class with private state; consumers receive instances from TypeGraph and external structural implementations are unsupported.",
+    "issue": "#717"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "page",
+    "kind": "required-member-added",
+    "reason": "ExecutableQuery is a concrete library-created class with private state; consumers receive instances from TypeGraph and external structural implementations are unsupported.",
+    "issue": "#717"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "page",
+    "kind": "required-member-added",
+    "reason": "ExecutableQuery is a concrete library-created class with private state; consumers receive instances from TypeGraph and external structural implementations are unsupported.",
+    "issue": "#717"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "page",
+    "kind": "required-member-added",
+    "reason": "ExecutableQuery is a concrete library-created class with private state; consumers receive instances from TypeGraph and external structural implementations are unsupported.",
+    "issue": "#717"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "page",
+    "kind": "required-member-added",
+    "reason": "ExecutableQuery is a concrete library-created class with private state; consumers receive instances from TypeGraph and external structural implementations are unsupported.",
+    "issue": "#717"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "page",
+    "kind": "required-member-added",
+    "reason": "ExecutableQuery is a concrete library-created class with private state; consumers receive instances from TypeGraph and external structural implementations are unsupported.",
+    "issue": "#717"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ExecutableQuery",
+    "member": "page",
+    "kind": "required-member-added",
+    "reason": "ExecutableQuery is a concrete library-created class with private state; consumers receive instances from TypeGraph and external structural implementations are unsupported.",
+    "issue": "#717"
+  },
+  {
     "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
     "declaration": "CommonOperationStrategy",
     "member": "buildResolvedNodeUpdateBatch",

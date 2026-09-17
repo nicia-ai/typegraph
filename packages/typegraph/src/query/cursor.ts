@@ -242,6 +242,20 @@ export function buildCursorFromRow(
   });
 }
 
+/** Builds a cursor when the ordered values were projected independently. */
+export function buildCursorFromValues(
+  values: readonly unknown[],
+  orderSpecs: readonly OrderSpec[],
+  direction: "f" | "b",
+): string {
+  return encodeCursor({
+    v: CURSOR_VERSION,
+    d: direction,
+    vals: values,
+    cols: orderSpecs.map((spec) => buildColumnId(spec)),
+  });
+}
+
 /**
  * Validates that cursor columns match the query's ORDER BY columns.
  *
