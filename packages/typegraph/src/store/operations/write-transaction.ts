@@ -194,6 +194,54 @@ export async function withTransactionSchemaFenceLease<T>(
   }
 }
 
+/**
+ * Leases a schema fence acquired before a caller-owned history callback.
+ *
+ * The adopted history path acquires its fence before invoking user code, so a
+ * savepoint created by that callback cannot predate the lock. That is the one
+ * adopted-transaction shape where reusing the lock is savepoint-safe. The
+ * lease is bound to the exact targets the callback can resolve, including
+ * derived capture and execution-lifetime targets plus the raw target used by
+ * identity mutations, and is removed when the callback and its capture flush
+ * finish.
+ *
+ * This deliberately does not require the first-party factory mark: adopted
+ * transaction backends are marked caller-owned even when their root backend
+ * came from a bundled factory. The safety proof here is the pre-callback
+ * acquisition and the bounded history scope, not backend provenance.
+ */
+export async function withPreAcquiredTransactionSchemaFenceLease<T>(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  targets: readonly TransactionBackend[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  const expectedVersion = ctx.schemaVersion;
+  if (expectedVersion === undefined) return fn();
+
+  const leases = new Map<string, Promise<void>>([
+    [schemaFenceLeaseKey(ctx.graphId, expectedVersion), Promise.resolve()],
+  ]);
+  const uniqueTargets = [...new Set(targets)];
+  const previousLeases = new Map<
+    TransactionBackend,
+    Map<string, Promise<void>> | undefined
+  >();
+  for (const target of uniqueTargets) {
+    previousLeases.set(target, leasedSchemaFences.get(target));
+    leasedSchemaFences.set(target, leases);
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const target of uniqueTargets) {
+      if (leasedSchemaFences.get(target) !== leases) continue;
+      const previous = previousLeases.get(target);
+      if (previous === undefined) leasedSchemaFences.delete(target);
+      else leasedSchemaFences.set(target, previous);
+    }
+  }
+}
+
 /** A managed revision is allocated only when its outer callback completes. */
 export function hasPendingWriteTransactionRevision(
   target: TransactionBackend,

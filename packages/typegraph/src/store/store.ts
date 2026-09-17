@@ -346,6 +346,7 @@ import {
   batchRefusalSuffix,
   resolveBatchWriteVerdict,
   runInWriteTransaction,
+  withPreAcquiredTransactionSchemaFenceLease,
   withTransactionSchemaFenceLease,
   withWriteTransactionSession,
   type WriteTransactionContext,
@@ -4362,8 +4363,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       originalStore === undefined ? undefined : (
         scopeBackendExecution(writeTarget)
       );
+    const contextBackend = executionScope?.backend ?? writeTarget;
     const context = this.#buildTransactionContext(
-      executionScope?.backend ?? writeTarget,
+      contextBackend,
       externalTx,
       undefined,
       receiptRecorder,
@@ -4371,44 +4373,69 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (originalStore !== undefined) {
       bindEvolvedTransactionStore(context, originalStore, this);
     }
-    const result = await runInTransactionContext(
-      context,
-      async (activeContext) => {
-        try {
-          return await invoke(activeContext);
-        } finally {
-          executionScope?.seal();
-        }
-      },
-    );
-    // Flush allocates the recorded commit instant for this transaction's graph
-    // under TypeGraph-owned capture; under engine-native it is
-    // `recordedTime.revisionNow` read on this SAME adopted session, still
-    // inside the caller's transaction — so it answers with the PENDING
-    // revision this transaction's writes will land at once it commits, not
-    // the last one already committed before it opened. The engine-native
-    // counterpart to `flush()`, called once for this store's one graph, and
-    // only when the mutation witness actually saw a write (TypeGraph-owned
-    // capture may also answer an explicit revision request without a touched
-    // entity. Either way
-    // `transactionOutcome` reads this store's instant out of the returned map
-    // (undefined when nothing was captured or requested) into `receipt.recorded`.
-    const recordedByGraph =
-      mutationWitness?.mutated === true ?
-        new Map([[this.graphId, await this.#engineRecordedInstant(txBackend)]])
-      : await scope.flush();
-    // Seal the context so a write through a retained `tx` after this returns
-    // fails loud instead of persisting a row the snapshotted receipt can't
-    // count. Under history capture the capture session already sealed on flush
-    // (its guard throws before the live write); this covers the non-history
-    // path, which has no capture session.
-    if (!this.#captureEnabled) receiptRecorder.seal();
-    return transactionOutcome(
-      result,
-      receiptRecorder,
-      recordedByGraph,
-      this.graphId,
-    );
+    const finish = async (): Promise<TransactionOutcome<T>> => {
+      const result = await runInTransactionContext(
+        context,
+        async (activeContext) => {
+          try {
+            return await invoke(activeContext);
+          } finally {
+            executionScope?.seal();
+          }
+        },
+      );
+      // Flush allocates the recorded commit instant for this transaction's graph
+      // under TypeGraph-owned capture; under engine-native it is
+      // `recordedTime.revisionNow` read on this SAME adopted session, still
+      // inside the caller's transaction — so it answers with the PENDING
+      // revision this transaction's writes will land at once it commits, not
+      // the last one already committed before it opened. The engine-native
+      // counterpart to `flush()`, called once for this store's one graph, and
+      // only when the mutation witness actually saw a write (TypeGraph-owned
+      // capture may also answer an explicit revision request without a touched
+      // entity. Either way
+      // `transactionOutcome` reads this store's instant out of the returned map
+      // (undefined when nothing was captured or requested) into `receipt.recorded`.
+      const recordedByGraph =
+        mutationWitness?.mutated === true ?
+          new Map([
+            [this.graphId, await this.#engineRecordedInstant(txBackend)],
+          ])
+        : await scope.flush();
+      // Seal the context so a write through a retained `tx` after this returns
+      // fails loud instead of persisting a row the snapshotted receipt can't
+      // count. Under history capture the capture session already sealed on flush
+      // (its guard throws before the live write); this covers the non-history
+      // path, which has no capture session.
+      if (!this.#captureEnabled) receiptRecorder.seal();
+      return transactionOutcome(
+        result,
+        receiptRecorder,
+        recordedByGraph,
+        this.graphId,
+      );
+    };
+    // The schema fence above was acquired before the caller callback. That
+    // makes reuse safe for this history-capture scope: a callback-created
+    // savepoint is necessarily later than the lock, so rolling back to it
+    // cannot release the lock. Seed the lease on the actual derived capture
+    // target, which is what collection writes receive. A savepoint created
+    // before entering this method through the raw external handle is outside
+    // the recorded-capture callback contract and is not covered by this
+    // lease. Seed every exact target a managed mutation can resolve to,
+    // including the raw identity target and the evolved execution-lifetime
+    // target. Adapter/native and non-history adopted paths retain their
+    // per-write fence behavior.
+    return this.#captureEnabled ?
+        withPreAcquiredTransactionSchemaFenceLease(
+          {
+            graphId: this.graphId,
+            schemaVersion: this.#schemaMetadata.schemaVersion,
+          },
+          [txBackend, scope.backend, writeTarget, contextBackend],
+          finish,
+        )
+      : finish();
   }
 
   /**

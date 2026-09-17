@@ -13,12 +13,18 @@
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
+import {
+  createAdapterStoreWithSchema,
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+} from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
@@ -109,6 +115,81 @@ function schemaFenceLockCount(statements: readonly LoggedStatement[]): number {
 }
 
 describe("recorded graph-write advisory lock churn", () => {
+  it("leases the pre-callback history fence on the derived target", async (ctx) => {
+    const activePool = requirePostgres(ctx);
+    const statements: LoggedStatement[] = [];
+    const db = drizzle(activePool, {
+      logger: {
+        logQuery(query: string, params: unknown[]) {
+          statements.push({ query, params });
+        },
+      },
+    });
+    const backend = createPostgresBackend(db);
+    const [store] = await createAdapterStoreWithSchema(
+      buildGraph("adopted_schema_fence_lease"),
+      backend,
+      { history: true },
+    );
+
+    statements.length = 0;
+    await db.transaction(async (externalTx) => {
+      await store.withRecordedTransaction(externalTx, async (tx) => {
+        // The fence is acquired before this callback. Rolling back a savepoint
+        // created here therefore cannot release it, and both writes can reuse
+        // the lease on the capture-derived target.
+        await externalTx.execute(sql`SAVEPOINT adopted_fence_probe`);
+        await externalTx.execute(
+          sql`ROLLBACK TO SAVEPOINT adopted_fence_probe`,
+        );
+        await tx.nodes.Person.create({ name: "first" }, { id: "adopted-1" });
+        await tx.nodes.Person.create({ name: "second" }, { id: "adopted-2" });
+      });
+    });
+
+    expect(schemaFenceLockCount(statements)).toBe(1);
+
+    // The lease belongs to the derived transaction target and is cleared when
+    // the adopted callback finishes: a later caller transaction must acquire
+    // its own schema fence.
+    statements.length = 0;
+    await db.transaction(async (externalTx) => {
+      await store.withRecordedTransaction(externalTx, async (tx) => {
+        await tx.nodes.Person.create({ name: "later" }, { id: "adopted-3" });
+      });
+    });
+    expect(schemaFenceLockCount(statements)).toBe(1);
+  });
+
+  it("keeps per-write fencing for a non-history adopted transaction", async (ctx) => {
+    const activePool = requirePostgres(ctx);
+    const statements: LoggedStatement[] = [];
+    const db = drizzle(activePool, {
+      logger: {
+        logQuery(query: string, params: unknown[]) {
+          statements.push({ query, params });
+        },
+      },
+    });
+    const backend = createPostgresBackend(db);
+    const [store] = await createAdapterStoreWithSchema(
+      buildGraph("adopted_schema_fence_non_history"),
+      backend,
+    );
+
+    statements.length = 0;
+    await db.transaction(async (externalTx) => {
+      await store.withRecordedTransaction(externalTx, async (tx) => {
+        await tx.nodes.Person.create({ name: "first" }, { id: "plain-1" });
+        await tx.nodes.Person.create({ name: "second" }, { id: "plain-2" });
+      });
+    });
+
+    // Non-history adoption has no pre-callback fence to make savepoint-safe,
+    // so each managed write retains the conservative per-write probe.
+    expect(schemaFenceLockCount(statements)).toBe(2);
+  });
+
   it("leases one schema fence to every write in a TypeGraph-owned transaction", async (ctx) => {
     const activePool = requirePostgres(ctx);
     const statements: LoggedStatement[] = [];
