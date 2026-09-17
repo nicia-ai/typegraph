@@ -803,7 +803,8 @@ function runInWriteTransactionAttempt<T>(
         !options?.schemaFenceInFirstWrite &&
         expectedSchemaVersion !== undefined &&
         acquiresLock &&
-        !("transaction" in target)
+        !("transaction" in target) &&
+        !hasLeasedSchemaFence(ctx, target)
       ) ?
         {
           acquire: target.lockSchemaVersionAndGraphWrite,
