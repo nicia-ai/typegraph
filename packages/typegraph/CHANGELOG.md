@@ -2,6 +2,20 @@
 
 ## 0.65.0
 
+### Highlights
+
+TypeGraph 0.65 makes reviewed candidate writes evolution-aware. Plan candidate data against the schema produced by a pending evolution, then apply the schema and accepted writes together in one caller-owned transaction and recorded revision. If concurrent schema or data changes invalidate the planning snapshot, TypeGraph now reports an explicit retry-and-replan outcome.
+
+Query composition gains cold cursor pages for `batchOnce()`, portable array-membership expressions, and native tuple comparisons for eligible keyset cursors. Cursor pages can execute independently or share one statement with companion reads while preserving the same results and cursor shape, and array membership can compare against candidate-row or correlated outer-row expressions.
+
+Eligible existing rows in `bulkUpsertById()` now update as a version-gated batch while retaining history, uniqueness, full-text, and vector synchronization. Other cases continue through the portable row-wise path, while broader caching and set-oriented reads reduce repeated work across identity repair, query execution, candidate-scoped updates, and constrained-edge imports.
+
+### Upgrade notes
+
+- For candidate writes planned alongside an evolution, create the target with `captureCandidateWriteSetTargetForEvolution(target, evolutionPlan)` and plan it with `planCandidateWriteSetForEvolution()`. Apply the returned artifact inside the matching evolved transaction. Treat `MergePlanningStaleError` (`GRAPH_MERGE_PLANNING_STALE`) as a concurrency signal: discard the artifact, recapture the target, and replan.
+- Custom dialect adapters that support `expr.arrayContains()` with expression operands should implement the optional `jsonArrayContainsExpression` hook with the documented JSON-array semantics. Adapters that omit it remain compatible, but compiling this expression refuses with a typed configuration error.
+- Custom backends may implement the optional `updateResolvedNodesBatch` member to accelerate eligible `bulkUpsertById()` updates. Preserve the expected-version gate across the complete input and return no partial result when any row is ineligible; omitting the member retains the row-wise fallback.
+
 ### Minor Changes
 
 - [#718](https://github.com/nicia-ai/typegraph/pull/718) [`8eb7ead`](https://github.com/nicia-ai/typegraph/commit/8eb7eada54f38503c129a11ae8d2a79c88ed9b31) Thanks [@pdlug](https://github.com/pdlug)! - Batch distinct existing-row updates in `bulkUpsertById()` while preserving version guards, recorded history, uniqueness claims, full-text indexes, and vector projections.
