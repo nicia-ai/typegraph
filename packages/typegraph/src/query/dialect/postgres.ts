@@ -31,6 +31,37 @@ const SCALAR_SQL_TYPES: Readonly<
   string: "text",
 };
 
+/** Gives expression membership a concrete PostgreSQL JSON scalar type. */
+function postgresJsonScalar(
+  value: SqlFragment,
+  valueType: ValueType,
+): SqlFragment {
+  switch (valueType) {
+    case "boolean": {
+      return sql`CAST(${value} AS boolean)`;
+    }
+    case "date": {
+      // Date arrays are serialized with Date#toJSON(), whose UTC millisecond
+      // form differs from PostgreSQL's ordinary timestamptz text rendering.
+      return sql`to_char(CAST(${value} AS timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+    }
+    case "number": {
+      return sql`CAST(${value} AS numeric)`;
+    }
+    case "string": {
+      return sql`CAST(${value} AS text)`;
+    }
+    case "array":
+    case "embedding":
+    case "object":
+    case "unknown": {
+      throw new Error(
+        `JSON array expression membership requires a scalar element type, got ${valueType}`,
+      );
+    }
+  }
+}
+
 function buildTextJsonArray(values: readonly SqlFragment[]): SqlFragment {
   return sql`jsonb_build_array(${sql.join(
     values.map((value) => sql`CAST(${value} AS text)`),
@@ -254,6 +285,15 @@ export const postgresDialect: DialectAdapter = {
     // @> checks if left contains right
     const jsonValue = JSON.stringify([value]);
     return sql`${column} @> ${jsonValue}::jsonb`;
+  },
+
+  jsonArrayContainsExpression(column, value, valueType) {
+    const scalar = postgresJsonScalar(value, valueType);
+    return sql`CASE WHEN jsonb_typeof(${column}) = 'array' THEN EXISTS (SELECT 1 FROM jsonb_array_elements(${column}) AS tg_element(value) WHERE tg_element.value = to_jsonb(${scalar})) ELSE FALSE END`;
+  },
+
+  rowValueComparison(operator, left, right) {
+    return sql`(${sql.join(left, sql`, `)}) ${sql.raw(operator)} (${sql.join(right, sql`, `)})`;
   },
 
   jsonArrayContainsAll(column, values) {

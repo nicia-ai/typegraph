@@ -242,6 +242,19 @@ type ArithmeticExpressionNode = Readonly<{
 type ArithmeticOperator = "add" | "divide" | "multiply" | "subtract";
 
 // @public (undocumented)
+function arrayContains<ArrayValue extends readonly unknown[] | undefined, Scope extends string>(array: DatabaseExpression<ArrayValue, Scope>, element: DatabaseExpression<ArrayExpressionElement<ArrayValue> | undefined, Scope>): DatabaseExpression<boolean, Scope>;
+
+// @public (undocumented)
+type ArrayContainsExpressionNode = Readonly<{
+    kind: "array_contains";
+    array: DatabaseExpression;
+    element: DatabaseExpression;
+}>;
+
+// @public (undocumented)
+type ArrayExpressionElement<ArrayValue> = ArrayValue extends readonly (infer Element)[] ? Element : never;
+
+// @public (undocumented)
 type ArrayFieldAccessor<U> = NullFieldAccessor & Readonly<{
     contains: (value: U) => Predicate;
     containsAny: (values: readonly U[]) => Predicate;
@@ -1632,6 +1645,7 @@ export type DatabaseExpression<out T = unknown, out Scope extends string = strin
     __type: "database_expression";
     node: DatabaseExpressionNode;
     valueType: ValueType;
+    arrayElementType?: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
     nullable: boolean;
@@ -1641,7 +1655,7 @@ export type DatabaseExpression<out T = unknown, out Scope extends string = strin
 }>;
 
 // @public (undocumented)
-type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
+type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | ArrayContainsExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
 
 // @public
 type DatabaseExpressionPredicate = Readonly<{
@@ -3112,6 +3126,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3123,6 +3138,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3130,10 +3146,12 @@ export const expr: {
         __value?: boolean | undefined;
         __scope?: Scope;
     }>;
+    readonly arrayContains: typeof arrayContains;
     readonly avg: <Scope extends string>(operand: NumericExpression<Scope>) => Readonly<{
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3149,6 +3167,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3160,6 +3179,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3171,6 +3191,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3182,6 +3203,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3196,6 +3218,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3207,6 +3230,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3218,6 +3242,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3229,6 +3254,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3240,6 +3266,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3251,6 +3278,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3263,6 +3291,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3275,6 +3304,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3286,6 +3316,7 @@ export const expr: {
         __type: "database_expression";
         node: DatabaseExpressionNode;
         valueType: ValueType;
+        arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
         nullable: boolean;
@@ -3634,6 +3665,7 @@ export type FieldRef<Value = unknown, Alias extends string = string, Path extend
     jsonPointer?: JsonPointer | undefined;
     valueType?: ValueType | undefined;
     elementType?: ValueType | undefined;
+    nullable?: boolean | undefined;
     readonly __value?: {
         bivarianceHack(value: Value): void;
     }["bivarianceHack"];
@@ -3648,6 +3680,7 @@ type FieldRefOptions = Readonly<{
     jsonPointer?: JsonPointer | undefined;
     valueType?: ValueType | undefined;
     elementType?: ValueType | undefined;
+    nullable?: boolean | undefined;
 }>;
 
 // @public (undocumented)
@@ -6582,7 +6615,7 @@ export type Predicate = Readonly<{
 }>;
 
 // @public
-type PredicateExpression = ComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
+type PredicateExpression = ComparisonPredicate | TupleComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
 
 // @public (undocumented)
 export type PreparedBindings<Parameters extends PreparedParameterDeclaration> = {
@@ -9060,6 +9093,14 @@ export type TrustedImportSession = Readonly<{
 
 // @public (undocumented)
 export const tsvectorStrategy: FulltextStrategy;
+
+// @public
+type TupleComparisonPredicate = Readonly<{
+    __type: "tuple_comparison";
+    op: "gt" | "lt";
+    fields: readonly [FieldRef, ...FieldRef[]];
+    values: readonly [LiteralValue, ...LiteralValue[]];
+}>;
 
 // @public
 export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<R["type"], EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType, EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType, EdgeAllowedPairs<R>>;

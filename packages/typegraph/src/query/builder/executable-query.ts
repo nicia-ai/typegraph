@@ -1525,7 +1525,13 @@ export class ExecutableQuery<
       field: FieldRef;
     } {
       return {
-        field: { __type: "field_ref", alias: startAlias, path: [fieldName] },
+        field: {
+          __type: "field_ref",
+          alias: startAlias,
+          nullable: false,
+          path: [fieldName],
+          valueType: "string",
+        },
         direction: "asc",
       };
     }

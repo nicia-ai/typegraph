@@ -182,5 +182,31 @@ export function registerPaginationIntegrationTests(
       expect(page1.data[1]?.price).toBe(900);
       expect(page1.data[2]?.price).toBe(800);
     });
+
+    it("executes descending multi-column cursor pages", async () => {
+      const store = context.getStore();
+      const query = store
+        .query()
+        .from("Product", "product")
+        .orderBy("product", "price", "desc")
+        .orderBy("product", "name", "desc")
+        .select((fields) => ({
+          name: fields.product.name,
+          price: fields.product.price,
+        }));
+
+      const first = await query.paginate({ first: 3 });
+      const second = await query.paginate({
+        after: requireDefined(first.nextCursor),
+        first: 3,
+      });
+
+      expect(first.data.map((product) => product.price)).toEqual([
+        1000, 900, 800,
+      ]);
+      expect(second.data.map((product) => product.price)).toEqual([
+        700, 600, 500,
+      ]);
+    });
   });
 }

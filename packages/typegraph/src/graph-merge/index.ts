@@ -32,13 +32,16 @@ export type {
   CandidateWriteSet,
   CandidateWriteSetTarget,
   PlanCandidateWriteSetArgs,
+  PlanCandidateWriteSetForEvolutionArgs,
 } from "./candidate-write-set";
 export {
   CANDIDATE_WRITE_SET_FORMAT_VERSION,
   CandidateWriteSetSchema,
   CandidateWriteSetTargetSchema,
   captureCandidateWriteSetTarget,
+  captureCandidateWriteSetTargetForEvolution,
   planCandidateWriteSet,
+  planCandidateWriteSetForEvolution,
 } from "./candidate-write-set";
 export type { MergeConstraintConflictErrorDetails } from "./errors";
 export {

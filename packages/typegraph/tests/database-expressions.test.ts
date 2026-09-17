@@ -5,6 +5,8 @@ import { createStore, defineGraph, defineNode } from "../src";
 import { UnsupportedPredicateError } from "../src/errors";
 import type { FieldRef } from "../src/query/ast";
 import { decodeExpressionValue } from "../src/query/builder/executable-projection-query";
+import { compileDatabaseExpression } from "../src/query/compiler/database-expressions";
+import { sqliteDialect } from "../src/query/dialect/sqlite";
 import {
   collectOperandExpressions,
   createFieldExpression,
@@ -177,6 +179,69 @@ describe("database expressions", () => {
       // eslint-disable-next-line unicorn/no-null -- ordinary JSON null must remain JSON null.
       null,
     ]);
+  });
+
+  it("preserves array operand typing through coalesce without adding a decoder", () => {
+    const primary = createFieldExpression<
+      readonly string[] | undefined,
+      "document"
+    >(
+      {
+        __type: "field_ref",
+        alias: "document",
+        elementType: "string",
+        path: ["props", "tags"],
+        valueType: "array",
+      },
+      Symbol("primary array"),
+      true,
+    );
+    const fallback = createFieldExpression<readonly string[], "document">(
+      {
+        __type: "field_ref",
+        alias: "document",
+        elementType: "string",
+        path: ["props", "fallbackTags"],
+        valueType: "array",
+      },
+      primary.scopeIdentity,
+      false,
+    );
+    const candidate = createFieldExpression<string, "document">(
+      field("document", "title", "string"),
+      primary.scopeIdentity,
+      false,
+    );
+    const combined = expr.coalesce(primary, fallback);
+
+    expect(combined.arrayElementType).toBe("string");
+    expect(combined.elementValueType).toBeUndefined();
+    expect(() =>
+      compileDatabaseExpression(expr.arrayContains(combined, candidate), {
+        dialect: sqliteDialect,
+      }),
+    ).not.toThrow();
+  });
+
+  it("refuses structured array membership elements before SQL compilation", () => {
+    const records = createFieldExpression<
+      readonly Readonly<Record<string, string>>[],
+      "document"
+    >(
+      {
+        __type: "field_ref",
+        alias: "document",
+        elementType: "object",
+        path: ["props", "records"],
+        valueType: "array",
+      },
+      Symbol("structured array"),
+      false,
+    );
+
+    expect(() =>
+      expr.arrayContains(records, expr.literal({ key: "value" })),
+    ).toThrow(UnsupportedPredicateError);
   });
 
   it("keeps reserved expression metadata separate from object fields", () => {

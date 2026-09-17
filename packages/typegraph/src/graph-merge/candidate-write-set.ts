@@ -5,11 +5,17 @@ import {
   importGraph,
   InterchangeIdentitySchema,
 } from "../interchange";
+import type { EvolutionPlan } from "../schema/evolution-plan";
 import { isCanonicalIsoDate } from "../utils/date";
 import { computeSchemaComponent } from "./base-version";
-import { CandidateWriteSetError, type MergeError } from "./errors";
+import { CandidateWriteSetError, MergeError } from "./errors";
+import { evolutionPlanningTarget } from "./evolution-target";
 import { ingestionBranch } from "./ingestion-branch";
-import { planMergeIncremental } from "./merge";
+import {
+  captureMergePlanTargetFence,
+  planMergeIncremental,
+  planMergeIncrementalForEvolution,
+} from "./merge";
 import type { MergePlanArtifact } from "./plan-schema";
 import type { Result } from "./result";
 import { err, isErr } from "./result";
@@ -89,6 +95,16 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
   options?: Omit<MergeOptions<G>, "target">;
 }>;
 
+/** Object-form arguments for candidate planning against a planned evolution. */
+export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<
+  PlanCandidateWriteSetArgs<G>,
+  "target"
+> &
+  Readonly<{
+    target: Store<G>;
+    evolutionPlan: EvolutionPlan;
+  }>;
+
 /** Captures the schema identity a candidate write set must name. */
 export async function captureCandidateWriteSetTarget<G extends GraphDef>(
   target: Store<G>,
@@ -101,6 +117,30 @@ export async function captureCandidateWriteSetTarget<G extends GraphDef>(
     schemaVersion:
       activeSchema?.version ?? target.introspect().schemaVersion ?? 1,
     schemaHash: await computeSchemaComponent(target),
+  };
+}
+
+/**
+ * Captures the schema identity a candidate write set must name after a planned
+ * evolution commits. The plan remains nonserializable; this JSON-safe target
+ * identity lets a caller author and review candidate data before that commit.
+ */
+export function captureCandidateWriteSetTargetForEvolution<G extends GraphDef>(
+  target: Store<G>,
+  evolutionPlan: EvolutionPlan,
+): CandidateWriteSetTarget {
+  const resultingTarget = evolutionPlanningTarget(target, evolutionPlan);
+  return candidateWriteSetTargetForEvolution(resultingTarget, evolutionPlan);
+}
+
+function candidateWriteSetTargetForEvolution<G extends GraphDef>(
+  resultingTarget: Store<G>,
+  evolutionPlan: EvolutionPlan,
+): CandidateWriteSetTarget {
+  return {
+    graphId: resultingTarget.graphId,
+    schemaVersion: evolutionPlan.result.version,
+    schemaHash: evolutionPlan.result.hash,
   };
 }
 
@@ -228,6 +268,129 @@ export async function planCandidateWriteSet<G extends GraphDef>(
           { cause: error },
         )
       ),
+    );
+  } finally {
+    try {
+      await candidate.close();
+    } catch {
+      // A disposable backend close failure must not replace the planner's
+      // success or its original typed refusal.
+    }
+  }
+}
+
+/**
+ * Plans a serializable candidate write set against the graph a reviewed
+ * evolution will produce.
+ *
+ * Candidate data is staged in an isolated working copy of the resulting graph,
+ * then resolved against accepted target sources through the evolution-aware
+ * incremental planner. The returned ordinary merge artifact carries the
+ * resulting schema fence, so
+ * `withEvolvedTransaction()` and `applyMergePlanInTransaction()` can commit
+ * schema and accepted candidate writes in one caller transaction and revision.
+ */
+export async function planCandidateWriteSetForEvolution<G extends GraphDef>(
+  args: PlanCandidateWriteSetForEvolutionArgs<G>,
+): Promise<Result<MergePlanArtifact, MergeError>> {
+  const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);
+  if (!parsed.success) {
+    return err(
+      new CandidateWriteSetError("The candidate write set is malformed.", {
+        details: { issues: parsed.error.issues },
+      }),
+    );
+  }
+  const writeSet = parsed.data;
+  let resultingTarget: Store<G>;
+  let expectedTarget: CandidateWriteSetTarget;
+  let planningFence: Awaited<ReturnType<typeof captureMergePlanTargetFence>>;
+  try {
+    resultingTarget = evolutionPlanningTarget(args.target, args.evolutionPlan);
+    expectedTarget = candidateWriteSetTargetForEvolution(
+      resultingTarget,
+      args.evolutionPlan,
+    );
+    planningFence = await captureMergePlanTargetFence(args.target);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new CandidateWriteSetError(
+          "Unable to prepare the planned evolution target schema.",
+          { cause: error },
+        )
+      ),
+    );
+  }
+  if (!sameCandidateTarget(writeSet.target, expectedTarget)) {
+    return err(
+      new CandidateWriteSetError(
+        "The candidate write set targets a different planned evolution schema.",
+        {
+          details: { expected: expectedTarget, received: writeSet.target },
+          suggestion:
+            "Rebuild the candidate write set against the planned evolution schema, then plan it again.",
+        },
+      ),
+    );
+  }
+
+  let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
+  try {
+    created = await ingestionBranch(resultingTarget, args.makeBackend, {
+      id: asBranchId(writeSet.sourceId),
+    });
+  } catch (error) {
+    return err(
+      new CandidateWriteSetError(
+        "Unable to create the transient candidate staging store.",
+        { cause: error },
+      ),
+    );
+  }
+  if (isErr(created)) {
+    return err(
+      new CandidateWriteSetError(
+        "Unable to create the transient candidate staging store.",
+        { cause: created.error },
+      ),
+    );
+  }
+  const candidate = created.data;
+  try {
+    const imported = await importGraph(
+      candidate,
+      interchangeDocument(writeSet),
+      {
+        onConflict: "update",
+        onUnknownProperty: "error",
+        validateReferences: true,
+        refreshStatistics: false,
+      },
+    );
+    if (!imported.success) {
+      return err(
+        new CandidateWriteSetError(
+          "The candidate write set could not be staged against the planned evolution schema.",
+          { details: { errors: imported.errors } },
+        ),
+      );
+    }
+    return await planMergeIncrementalForEvolution(
+      args.target,
+      args.evolutionPlan,
+      [candidate],
+      args.options,
+      planningFence,
+    );
+  } catch (error) {
+    return err(
+      error instanceof CandidateWriteSetError || error instanceof MergeError ?
+        error
+      : new CandidateWriteSetError(
+          "Candidate write-set staging or evolution planning failed.",
+          { cause: error },
+        ),
     );
   } finally {
     try {

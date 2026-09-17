@@ -14,12 +14,15 @@ import { defineGraphExtension } from "../../../src/graph-extension/define-graph-
 import {
   applyMergePlanInTransaction,
   branchForEvolution,
+  captureCandidateWriteSetTargetForEvolution,
+  planCandidateWriteSetForEvolution,
   planMergeForEvolution,
 } from "../../../src/graph-merge";
 import { branch } from "../../../src/graph-merge/branch";
 import {
   BranchError,
   MergePlanCapabilityError,
+  MergePlanningStaleError,
   MergePlanSchemaMismatchError,
   StaleMergePlanError,
 } from "../../../src/graph-merge/errors";
@@ -249,6 +252,228 @@ export function registerGraphMergePlanIntegrationTests(
       expect(
         await target.nodes.Person.getById(asNodeId("evolved-ada")),
       ).toBeDefined();
+    });
+
+    it("plans candidate data against an evolved schema and applies both changes in one revision", async () => {
+      const backend = context.getBackend();
+      const [target] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      const evolutionPlan = await target.planEvolution(
+        defineGraphExtension({
+          nodes: {
+            Tag: { properties: { label: { type: "string" } } },
+          },
+        }),
+      );
+      const writeSet = {
+        formatVersion: 1 as const,
+        sourceId: "candidate-tags",
+        target: captureCandidateWriteSetTargetForEvolution(
+          target,
+          evolutionPlan,
+        ),
+        nodes: [
+          {
+            kind: "Tag",
+            id: "candidate-tag",
+            properties: { label: "Accepted candidate" },
+            validFrom: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        edges: [],
+      };
+      const mergePlan = unwrap(
+        await planCandidateWriteSetForEvolution({
+          target,
+          evolutionPlan,
+          makeBackend: () => context.createIsolatedBackend(),
+          writeSet,
+        }),
+      );
+      expect(mergePlan.target.schema).toEqual({
+        managed: true,
+        version: evolutionPlan.result.version,
+        hash: evolutionPlan.result.hash,
+      });
+      if (backend.adoptSchemaWriteTransaction === undefined) {
+        let callbackCalled = false;
+        // eslint-disable-next-line vitest/no-conditional-expect -- backend capability refusal is one parity branch
+        await expect(
+          backend.transactionWithNative(async (_txBackend, nativeTransaction) =>
+            target.withEvolvedTransaction(
+              nativeTransaction,
+              evolutionPlan,
+              () => {
+                callbackCalled = true;
+                return Promise.resolve(undefined);
+              },
+            ),
+          ),
+        ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+        // eslint-disable-next-line vitest/no-conditional-expect -- callback must be untouched on refusal
+        expect(callbackCalled).toBe(false);
+        return;
+      }
+
+      const outcome = await backend.transactionWithNative(
+        async (_txBackend, nativeTransaction) =>
+          target.withEvolvedTransaction(
+            nativeTransaction,
+            evolutionPlan,
+            (tx) => applyMergePlanInTransaction(target, tx, mergePlan),
+          ),
+      );
+      expect(outcome.receipt.schema).toEqual({
+        version: evolutionPlan.result.version,
+        hash: evolutionPlan.result.hash,
+      });
+      expect(outcome.result.merged.nodes).toBe(1);
+      expect(outcome.receipt.recorded).toBeDefined();
+      const evolved = await target.refreshSchema({
+        minVersion: evolutionPlan.result.version,
+      });
+      expect(
+        await evolved.getNodeCollectionOrThrow("Tag").getById("candidate-tag"),
+      ).toMatchObject({ label: "Accepted candidate" });
+    });
+
+    it("resolves evolved candidates against committed nodes before applying", async () => {
+      const backend = context.getBackend();
+      const [target] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      await target.nodes.Person.create(
+        { name: "Accepted", email: "shared@example.test" },
+        { id: "accepted" },
+      );
+      const evolutionPlan = await target.planEvolution(
+        defineGraphExtension({
+          nodes: {
+            Tag: { properties: { label: { type: "string" } } },
+          },
+        }),
+      );
+      const mergePlan = unwrap(
+        await planCandidateWriteSetForEvolution({
+          target,
+          evolutionPlan,
+          makeBackend: () => context.createIsolatedBackend(),
+          writeSet: {
+            formatVersion: 1,
+            sourceId: "committed-person-candidate",
+            target: captureCandidateWriteSetTargetForEvolution(
+              target,
+              evolutionPlan,
+            ),
+            nodes: [
+              {
+                kind: "Person",
+                id: "incoming-person",
+                properties: {
+                  name: "Incoming",
+                  email: "shared@example.test",
+                },
+                validFrom: "2026-01-01T00:00:00.000Z",
+              },
+            ],
+            edges: [],
+          },
+          options: {
+            resolve: {
+              Person: {
+                similarity: { kind: "custom", score: () => 1 },
+                threshold: 1,
+              },
+            },
+          },
+        }),
+      );
+      expect(mergePlan.review.conflicts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "Person",
+            property: "name",
+            resolution: "Accepted",
+          }),
+        ]),
+      );
+      expect(
+        mergePlan.review.resolutions.some(
+          (resolution) => resolution.canonicalId === "accepted",
+        ),
+      ).toBe(true);
+      if (backend.adoptSchemaWriteTransaction === undefined) return;
+
+      const outcome = await backend.transactionWithNative(
+        async (_txBackend, nativeTransaction) =>
+          target.withEvolvedTransaction(
+            nativeTransaction,
+            evolutionPlan,
+            (tx) => applyMergePlanInTransaction(target, tx, mergePlan),
+          ),
+      );
+      expect(outcome.result.merged.nodes).toBe(1);
+      expect(
+        await target.nodes.Person.getById(asNodeId("incoming-person")),
+      ).toBeUndefined();
+      expect(
+        await target.nodes.Person.getById(asNodeId("accepted")),
+      ).toMatchObject({ name: "Accepted", email: "shared@example.test" });
+    });
+
+    it("refuses candidate planning when the evolution baseline becomes stale", async () => {
+      const target = await context.createStore(graph, {
+        revisionTracking: true,
+      });
+      const evolutionPlan = await target.planEvolution(
+        defineGraphExtension({
+          nodes: {
+            Tag: { properties: { label: { type: "string" } } },
+          },
+        }),
+      );
+      const writeSet = {
+        formatVersion: 1 as const,
+        sourceId: "stale-candidate-tags",
+        target: captureCandidateWriteSetTargetForEvolution(
+          target,
+          evolutionPlan,
+        ),
+        nodes: [
+          {
+            kind: "Tag",
+            id: "stale-candidate-tag",
+            properties: { label: "Stale" },
+            validFrom: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        edges: [],
+      };
+      let advanced = false;
+      const planned = await planCandidateWriteSetForEvolution({
+        target,
+        evolutionPlan,
+        makeBackend: async () => {
+          const isolated = await context.createIsolatedBackend();
+          if (!advanced) {
+            advanced = true;
+            await target.nodes.Person.create(
+              { name: "Concurrent", email: "concurrent@example.test" },
+              { id: "concurrent-person" },
+            );
+          }
+          return isolated;
+        },
+        writeSet,
+      });
+      expect(isErr(planned)).toBe(true);
+      if (!isErr(planned)) throw new Error("Expected stale planning refusal.");
+      expect(planned.error).toBeInstanceOf(MergePlanningStaleError);
+      expect(advanced).toBe(true);
+      expect(await target.nodes.Person.count()).toBe(1);
     });
 
     it("refuses an evolved merge when the durable target revision changes after planning", async () => {

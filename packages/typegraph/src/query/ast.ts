@@ -32,6 +32,8 @@ export type FieldRef<
   jsonPointer?: JsonPointer | undefined; // JSON Pointer into props
   valueType?: ValueType | undefined;
   elementType?: ValueType | undefined;
+  /** Whether this field can be absent in the current query row. */
+  nullable?: boolean | undefined;
   /** @internal Carries the public value type without affecting the AST. */
   readonly __value?: {
     bivarianceHack(value: Value): void;
@@ -94,6 +96,14 @@ export type ComparisonPredicate = Readonly<{
   op: ComparisonOp;
   left: FieldRef;
   right: FieldRef | LiteralValue | LiteralValue[] | ParameterRef;
+}>;
+
+/** A lexicographic comparison between equally sized scalar field/value tuples. */
+export type TupleComparisonPredicate = Readonly<{
+  __type: "tuple_comparison";
+  op: "gt" | "lt";
+  fields: readonly [FieldRef, ...FieldRef[]];
+  values: readonly [LiteralValue, ...LiteralValue[]];
 }>;
 
 /**
@@ -363,6 +373,7 @@ export const DEFAULT_RRF_WEIGHT = 1;
  */
 export type PredicateExpression =
   | ComparisonPredicate
+  | TupleComparisonPredicate
   | StringPredicate
   | NullPredicate
   | BetweenPredicate

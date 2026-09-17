@@ -1889,6 +1889,7 @@ export interface DialectAdapter {
     readonly jsonArrayContains: (this: void, column: SqlFragment, value: unknown) => SqlFragment;
     readonly jsonArrayContainsAll: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
     readonly jsonArrayContainsAny: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
+    readonly jsonArrayContainsExpression?: (this: void, column: SqlFragment, value: SqlFragment, valueType: ValueType) => SqlFragment;
     readonly jsonArrayLength: (this: void, column: SqlFragment) => SqlFragment;
     readonly jsonExtract: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractBoolean: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
@@ -1922,6 +1923,7 @@ export interface DialectAdapter {
     }>) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly quoteIdentifier: (this: void, name: string) => string;
+    readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
     readonly supportsVectors: boolean;
