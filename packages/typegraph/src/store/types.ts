@@ -187,6 +187,38 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
   validTo?: string;
 }>;
 
+/** One caller-identified member of the closed heterogeneous node upsert batch. */
+export type HeterogeneousNodeUpsertInput<
+  G extends GraphDef,
+  K extends NodeKinds<G> = NodeKinds<G>,
+> = {
+  [P in K]: G["nodes"][P] extends Readonly<{ type: infer N extends NodeType }> ?
+    Readonly<{
+      kind: P;
+      id: NodeId<N>;
+      props: z.input<N["schema"]>;
+    }>
+  : never;
+}[K];
+
+type HeterogeneousNodeForKind<G extends GraphDef, K extends NodeKinds<G>> =
+  G["nodes"][K] extends Readonly<{ type: infer N extends NodeType }> ? Node<N>
+  : never;
+
+/** Ordered postimages returned by the recorded heterogeneous batch. */
+export type HeterogeneousNodeUpsertResult<
+  G extends GraphDef,
+  Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+> = {
+  readonly [I in keyof Entries]: Entries[I] extends (
+    Readonly<{
+      kind: infer K extends NodeKinds<G>;
+    }>
+  ) ?
+    HeterogeneousNodeForKind<G, K>
+  : never;
+};
+
 /**
  * Input for updating a node.
  */
@@ -2321,9 +2353,20 @@ export type RecordedRevisionRequest = Readonly<{
   requestRecordedRevision: () => void;
 }>;
 
+/** The narrow, one-statement write envelope available only to recorded transactions. */
+export type RecordedHeterogeneousNodeWriteBatch<G extends GraphDef> = Readonly<{
+  writeNodeUpsertBatch: <
+    const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+  >(
+    entries: Entries,
+  ) => Promise<HeterogeneousNodeUpsertResult<G, Entries>>;
+}>;
+
 /** A portable transaction context bound to a history-enabled Store. */
 export type HistoryTransactionContext<G extends GraphDef> =
-  TransactionContext<G> & RecordedRevisionRequest;
+  TransactionContext<G> &
+    RecordedRevisionRequest &
+    RecordedHeterogeneousNodeWriteBatch<G>;
 
 /**
  * A transaction context exposed by an {@link AdapterStore}. In addition to the

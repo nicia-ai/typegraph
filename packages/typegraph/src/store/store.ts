@@ -129,6 +129,7 @@ import {
   UnsupportedBackendCapabilityError,
   ValidationError,
 } from "../errors";
+import { validateNodeProps } from "../errors/validation";
 import {
   buildIncompatibleChangeError,
   classifyModifications,
@@ -344,6 +345,7 @@ import {
 import {
   batchRefusalDetails,
   batchRefusalSuffix,
+  diagnoseFusedSchemaFenceNoRow,
   resolveBatchWriteVerdict,
   runInWriteTransaction,
   withPreAcquiredTransactionSchemaFenceLease,
@@ -372,6 +374,7 @@ import {
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
   withRecordedFlushObserver,
+  withRecordedNodeMutationTarget,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture";
 import { assertNoRecordedCoordinate } from "./recorded-coordinate-guard";
@@ -388,6 +391,7 @@ import {
   type StoreRuntime,
 } from "./runtime-port";
 import { StoreSearch } from "./search-facade";
+import { getSearchableFields } from "./fulltext-sync";
 import {
   describeStore,
   type StoreDescription,
@@ -434,6 +438,8 @@ import {
   type GraphNodeCollections,
   type GraphNodeReference,
   type HistoryStoreOptions,
+  type HeterogeneousNodeUpsertInput,
+  type HeterogeneousNodeUpsertResult,
   type HistoryTransactionContext,
   type HookContext,
   type LiveStoreOptions,
@@ -445,6 +451,7 @@ import {
   type QueryHookContext,
   type QueryOptions,
   type RecordedReadStoreOptions,
+  type RecordedHeterogeneousNodeWriteBatch,
   type RecordedRevisionRequest,
   type RecordedScanOptions,
   type RecordedScanPage,
@@ -4524,6 +4531,143 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
   }
 
+  /** One CTE-backed upsert envelope for plain history-store node kinds. */
+  async #writeNodeUpsertBatch<
+    const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+  >(
+    txBackend: TransactionBackend,
+    entries: Entries,
+    receiptRecorder: TransactionReceiptRecorder | undefined,
+  ): Promise<HeterogeneousNodeUpsertResult<G, Entries>> {
+    if (entries.length === 0)
+      return [] as HeterogeneousNodeUpsertResult<G, Entries>;
+    if (!this.#captureEnabled) {
+      throw new UnsupportedBackendCapabilityError(
+        "tx.writeNodeUpsertBatch()",
+        "recorded heterogeneous node upserts",
+        { history: this.#captureEnabled },
+      );
+    }
+    if (this.#coalescesUnchangedUpserts()) {
+      throw new ConfigurationError(
+        "writeNodeUpsertBatch does not support coalesceUnchangedUpserts.",
+        { code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_COALESCING" },
+      );
+    }
+    if (this.#graph.identity !== undefined) {
+      throw new ConfigurationError(
+        "writeNodeUpsertBatch does not support graphs with operational identity.",
+        { code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_IDENTITY" },
+      );
+    }
+    const schemaVersion = this.#schemaMetadata.schemaVersion;
+    if (schemaVersion === undefined) {
+      throw new ConfigurationError(
+        "writeNodeUpsertBatch requires an initialized schema-fenced Store.",
+        { code: "HETEROGENEOUS_NODE_BATCH_SCHEMA_UNAVAILABLE" },
+      );
+    }
+    const seen = new Set<string>();
+    const validated = entries.map((entry) => {
+      if (
+        "validFrom" in entry ||
+        "validTo" in entry ||
+        "clearValidTo" in entry ||
+        "onImmutableLowerBound" in entry
+      ) {
+        throw new ConfigurationError(
+          "writeNodeUpsertBatch does not support temporal write options.",
+          { code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_TEMPORAL_OPTIONS" },
+        );
+      }
+      if (!hasOwnKey(this.#graph.nodes, entry.kind)) {
+        throw new KindNotFoundError(entry.kind, "node", {
+          graphId: this.graphId,
+        });
+      }
+      const registration = this.#graph.nodes[entry.kind];
+      if (registration === undefined) {
+        throw new KindNotFoundError(entry.kind, "node", {
+          graphId: this.graphId,
+        });
+      }
+      if (
+        (registration.unique?.length ?? 0) > 0 ||
+        this.#registry.getDisjointKinds(entry.kind).length > 0 ||
+        resolveEmbeddingFields(registration.type.schema).length > 0 ||
+        getSearchableFields(registration.type.schema).length > 0
+      ) {
+        throw new ConfigurationError(
+          "writeNodeUpsertBatch only supports plain node kinds without identity claims or projections.",
+          {
+            code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_KIND",
+            kind: entry.kind,
+          },
+        );
+      }
+      const key = `${entry.kind}\u0000${entry.id}`;
+      if (seen.has(key)) {
+        throw new ValidationError(
+          `writeNodeUpsertBatch received duplicate node id "${entry.id}" for kind "${entry.kind}".`,
+          { entityType: "node", kind: entry.kind, id: entry.id, issues: [] },
+        );
+      }
+      seen.add(key);
+      return {
+        kind: entry.kind,
+        id: entry.id,
+        props: validateNodeProps(registration.type.schema, entry.props, {
+          kind: entry.kind,
+          id: entry.id,
+          operation: "create",
+        }),
+      };
+    });
+    receiptRecorder?.assertWritable();
+    if (txBackend.upsertHeterogeneousNodes === undefined) {
+      throw new UnsupportedBackendCapabilityError(
+        "tx.writeNodeUpsertBatch()",
+        "exact-session heterogeneous node upsert program",
+        { dialect: txBackend.dialect },
+      );
+    }
+    const rows = await withRecordedNodeMutationTarget(
+      txBackend,
+      this.graphId,
+      (target) => {
+        const upsert = target.upsertHeterogeneousNodes;
+        if (upsert === undefined) {
+          throw new UnsupportedBackendCapabilityError(
+            "tx.writeNodeUpsertBatch()",
+            "exact-session heterogeneous node upsert program",
+            { dialect: target.dialect },
+          );
+        }
+        return upsert({
+          entries: validated,
+          schemaFence: {
+            graphId: this.graphId,
+            expectedVersion: schemaVersion,
+          },
+        });
+      },
+    );
+    if (rows.length !== validated.length) {
+      await diagnoseFusedSchemaFenceNoRow(
+        { graphId: this.graphId, schemaVersion },
+        txBackend,
+      );
+      throw new ConfigurationError(
+        "writeNodeUpsertBatch did not observe its active schema fence.",
+        { code: "HETEROGENEOUS_NODE_BATCH_STALE_SCHEMA" },
+      );
+    }
+    for (const row of rows) receiptRecorder?.recordNode(row.kind, 1);
+    return rows.map((row) =>
+      rowToNode(row),
+    ) as unknown as HeterogeneousNodeUpsertResult<G, Entries>;
+  }
+
   /**
    * Builds the transaction context bound to a transaction-scoped backend.
    * Collections, fluent queries, and set-oriented reads all use that same
@@ -4626,6 +4770,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const base = {
       nodes,
       edges,
+      writeNodeUpsertBatch: <
+        const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+      >(
+        entries: Entries,
+      ) => this.#writeNodeUpsertBatch(txBackend, entries, receiptRecorder),
       ...this.#createTransactionReadSurface(txBackend, attempt),
       ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
       backend: createTransactionReadBackend(txBackend),
@@ -7290,6 +7439,7 @@ export type AdapterHistoryTransactionContext<
   "sql" | "sqlAvailability"
 > &
   RecordedRevisionRequest &
+  RecordedHeterogeneousNodeWriteBatch<G> &
   Readonly<{
     sqlAvailability: "history";
   }>;

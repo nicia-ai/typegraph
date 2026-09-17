@@ -23,6 +23,7 @@ import {
   type GraphBackend,
   type GraphCommand,
   type GraphCommandResult,
+  type HeterogeneousNodeUpsertParams,
   type InsertEdgeParams,
   type InsertNodeParams,
   type InternalTransactionOptions,
@@ -595,6 +596,33 @@ export function registerRecordedIdentityMutationWitness(
   recordedTransactionBindings.set(target, binding);
 }
 
+/**
+ * Runs one opaque node program against the session that owns recorded capture
+ * and publishes its returned after-images to that same session. The closed
+ * heterogeneous CTE cannot pass through per-method write overlays.
+ */
+export async function withRecordedNodeMutationTarget(
+  target: TransactionBackend,
+  graphId: string,
+  run: (target: TransactionBackend) => Promise<readonly NodeRow[]>,
+): Promise<readonly NodeRow[]> {
+  const binding = recordedTransactionBindings.get(target);
+  if (binding === undefined) return run(target);
+  binding.assertOpen();
+  if (binding.capture !== undefined) {
+    await lockRecordedGraphWrite(
+      binding.target,
+      graphId,
+      binding.capture.graphLocks,
+    );
+  }
+  const rows = await run(binding.target);
+  for (const row of rows) {
+    binding.sink.touchNode(row.graph_id, row.kind, row.id, row);
+  }
+  return rows;
+}
+
 function createRecordedTransactionBackend(
   target: TransactionBackend,
   session: RecordedCaptureSession,
@@ -852,6 +880,25 @@ export function createRecordedBackend(
     async updateNode(params) {
       return capture((target) => target.updateNode(params));
     },
+
+    ...(backend.upsertHeterogeneousNodes === undefined ?
+      {}
+    : {
+        async upsertHeterogeneousNodes(
+          params: HeterogeneousNodeUpsertParams,
+        ): Promise<readonly NodeRow[]> {
+          return capture((target) => {
+            const upsert = target.upsertHeterogeneousNodes;
+            if (upsert === undefined) {
+              throw new ConfigurationError(
+                "Recorded heterogeneous node upsert capability disappeared inside a transaction.",
+                { operation: "upsertHeterogeneousNodes" },
+              );
+            }
+            return upsert(params);
+          });
+        },
+      }),
 
     ...(backend.updateResolvedNodesBatch === undefined ?
       {}

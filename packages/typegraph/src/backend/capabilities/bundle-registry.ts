@@ -889,6 +889,11 @@ export type UnbundledOptionalMember =
  * 16 + 82 = 98 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  upsertHeterogeneousNodes: {
+    kind: "reasoned",
+    reason: "Exact-session PostgreSQL heterogeneous node upsert program.",
+    accesses: 1,
+  },
   adoptBaseSchema: {
     kind: "reasoned",
     reason:

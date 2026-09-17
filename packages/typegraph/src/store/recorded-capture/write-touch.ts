@@ -37,6 +37,7 @@ import {
   type GraphCommandPort,
   type GraphCommandResult,
   type HardDeleteNodeParams,
+  type HeterogeneousNodeUpsertParams,
   type InsertEdgeParams,
   type InsertNodeParams,
   type NodeRow,
@@ -167,6 +168,7 @@ export type RecordedWriteMembersOverlay = Pick<
       | "insertNodesBatchReturning"
       | "updateResolvedNodesBatch"
       | "updateNodeSet"
+      | "upsertHeterogeneousNodes"
       | "compareAndSetNode"
       | "insertEdgeNoReturn"
       | "insertEdgesBatch"
@@ -320,6 +322,23 @@ export function buildRecordedWriteMembers(
       sink.touchNode(params.graphId, params.kind, params.id, row);
       return row;
     },
+
+    ...(target.upsertHeterogeneousNodes === undefined ?
+      {}
+    : {
+        async upsertHeterogeneousNodes(
+          params: HeterogeneousNodeUpsertParams,
+        ): Promise<readonly NodeRow[]> {
+          await hooks.beforeOne?.(params.schemaFence.graphId);
+          const rows = await requireDefined(target.upsertHeterogeneousNodes)(
+            params,
+          );
+          for (const row of rows) {
+            sink.touchNode(row.graph_id, row.kind, row.id, row);
+          }
+          return rows;
+        },
+      }),
 
     ...(target.updateResolvedNodesBatch === undefined ?
       {}
