@@ -32,6 +32,11 @@ export function visitExpressionChildren(
       visit(node.right);
       return;
     }
+    case "array_contains": {
+      visit(node.array);
+      visit(node.element);
+      return;
+    }
     case "boolean":
     case "coalesce": {
       for (const operand of node.operands) visit(operand);

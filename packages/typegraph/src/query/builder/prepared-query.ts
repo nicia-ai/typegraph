@@ -137,6 +137,10 @@ function substitutePredicateExpression(
       return expr;
     }
 
+    case "tuple_comparison": {
+      return expr;
+    }
+
     case "string_op": {
       if (isParameterRef(expr.pattern)) {
         const value = readOwnProperty(bindings, expr.pattern.name);
@@ -267,6 +271,16 @@ export function substituteDatabaseExpression<T, Scope extends string>(
           ...node,
           left: substitute(node.left),
           right: substitute(node.right),
+        },
+      };
+    }
+    case "array_contains": {
+      return {
+        ...expression,
+        node: {
+          ...node,
+          array: substitute(node.array),
+          element: substitute(node.element),
         },
       };
     }
@@ -862,6 +876,11 @@ function collectParameterMetadataFromDatabaseExpression(
       collect(node.right);
       return;
     }
+    case "array_contains": {
+      collect(node.array);
+      collect(node.element);
+      return;
+    }
     case "boolean":
     case "coalesce": {
       for (const operand of node.operands) collect(operand);
@@ -960,6 +979,7 @@ function collectParameterMetadataFromExpression(
       return;
     }
     case "null_check":
+    case "tuple_comparison":
     case "array_op":
     case "object_op":
     case "aggregate_comparison":

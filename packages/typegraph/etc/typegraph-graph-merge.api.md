@@ -147,6 +147,13 @@ type ArithmeticExpressionNode = Readonly<{
 type ArithmeticOperator = "add" | "divide" | "multiply" | "subtract";
 
 // @public (undocumented)
+type ArrayContainsExpressionNode = Readonly<{
+    kind: "array_contains";
+    array: DatabaseExpression;
+    element: DatabaseExpression;
+}>;
+
+// @public (undocumented)
 type ArrayFieldAccessor<U> = NullFieldAccessor & Readonly<{
     contains: (value: U) => Predicate;
     containsAny: (values: readonly U[]) => Predicate;
@@ -835,6 +842,9 @@ type CapabilityExtraSpec = Readonly<Record<string, OptionalGraphBackendMember>>;
 export function captureCandidateWriteSetTarget<G extends GraphDef>(target: Store<G>): Promise<CandidateWriteSetTarget>;
 
 // @public
+export function captureCandidateWriteSetTargetForEvolution<G extends GraphDef>(target: Store<G>, evolutionPlan: EvolutionPlan): CandidateWriteSetTarget;
+
+// @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
 
 // @public
@@ -1323,6 +1333,7 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
     __type: "database_expression";
     node: DatabaseExpressionNode;
     valueType: ValueType;
+    arrayElementType?: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
     nullable: boolean;
@@ -1332,7 +1343,7 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
 }>;
 
 // @public (undocumented)
-type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
+type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | ArrayContainsExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
 
 // @public
 type DatabaseExpressionPredicate = Readonly<{
@@ -2777,6 +2788,7 @@ type FieldRef<Value = unknown, Alias extends string = string, Path extends reado
     jsonPointer?: JsonPointer | undefined;
     valueType?: ValueType | undefined;
     elementType?: ValueType | undefined;
+    nullable?: boolean | undefined;
     readonly __value?: {
         bivarianceHack(value: Value): void;
     }["bivarianceHack"];
@@ -5590,6 +5602,15 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
+export function planCandidateWriteSetForEvolution<G extends GraphDef>(args: PlanCandidateWriteSetForEvolutionArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+
+// @public
+export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target"> & Readonly<{
+    target: Store<G>;
+    evolutionPlan: EvolutionPlan;
+}>;
+
+// @public
 export function planCandidateWriteSetReview<G extends GraphDef>(args: PlanCandidateWriteSetReviewArgs<G>): Promise<Result<MergeReviewArtifact, MergeError>>;
 
 // @public (undocumented)
@@ -5641,7 +5662,7 @@ type Predicate = Readonly<{
 }>;
 
 // @public
-type PredicateExpression = ComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
+type PredicateExpression = ComparisonPredicate | TupleComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
 
 // @public (undocumented)
 type PreparedBindings<Parameters extends PreparedParameterDeclaration> = {
@@ -7794,6 +7815,14 @@ type TraversalExpansion = "none" | "implying" | "inverse" | "all";
 type TrustedImportSession = Readonly<{
     insertNodes: (params: readonly InsertNodeParams[]) => Promise<void>;
     insertEdges: (params: readonly InsertEdgeParams[]) => Promise<void>;
+}>;
+
+// @public
+type TupleComparisonPredicate = Readonly<{
+    __type: "tuple_comparison";
+    op: "gt" | "lt";
+    fields: readonly [FieldRef, ...FieldRef[]];
+    values: readonly [LiteralValue, ...LiteralValue[]];
 }>;
 
 // @public

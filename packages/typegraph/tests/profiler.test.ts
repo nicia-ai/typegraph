@@ -32,6 +32,7 @@ import {
   getUnindexedFilters,
 } from "../src/profiler/recommendations";
 import { type DeclaredIndex } from "../src/profiler/types";
+import type { QueryAst } from "../src/query/ast";
 import { fieldRef, stringField } from "../src/query/predicates";
 import { createStore, type Store } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
@@ -66,6 +67,7 @@ const Document = defineNode("Document", {
   schema: z.object({
     title: z.string(),
     embedding: embedding(3),
+    tags: z.array(z.string()).optional(),
   }),
 });
 
@@ -974,6 +976,85 @@ describe("QueryProfiler", () => {
 // ============================================================
 
 describe("AST Extractor", () => {
+  it("extracts every field from tuple comparisons", () => {
+    const emailPointer = jsonPointer(["email"]);
+    const agePointer = jsonPointer(["age"]);
+    const baseAst = store
+      .query()
+      .from("Person", "p")
+      .select((ctx) => ctx.p)
+      .toAst();
+    const ast = {
+      ...baseAst,
+      predicates: [
+        {
+          expression: {
+            __type: "tuple_comparison",
+            fields: [
+              fieldRef("p", ["props", "email"], {
+                jsonPointer: emailPointer,
+              }),
+              fieldRef("p", ["props", "age"], { jsonPointer: agePointer }),
+            ],
+            op: "gt",
+            values: [
+              { __type: "literal", value: "a@example.com" },
+              { __type: "literal", value: 18 },
+            ],
+          },
+          targetAlias: "p",
+        },
+      ],
+    } satisfies QueryAst;
+
+    const accesses = extractPropertyAccesses(ast);
+
+    expect(accesses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          context: "filter",
+          predicateType: "gt",
+          target: { __type: "prop", pointer: emailPointer },
+        }),
+        expect.objectContaining({
+          context: "filter",
+          predicateType: "gt",
+          target: { __type: "prop", pointer: agePointer },
+        }),
+      ]),
+    );
+  });
+
+  it("extracts both operands from array membership expressions", () => {
+    const tagsPointer = jsonPointer(["tags"]);
+    const titlePointer = jsonPointer(["title"]);
+    const query = store
+      .query()
+      .from("Document", "document")
+      .where((expressions) =>
+        expr.arrayContains(
+          expressions.document.tags,
+          expressions.document.title,
+        ),
+      )
+      .project((expressions) => ({ title: expressions.document.title }));
+
+    const accesses = extractPropertyAccesses(query.toAst());
+
+    expect(accesses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          context: "filter",
+          target: { __type: "prop", pointer: tagsPointer },
+        }),
+        expect.objectContaining({
+          context: "filter",
+          target: { __type: "prop", pointer: titlePointer },
+        }),
+      ]),
+    );
+  });
+
   it("extracts from comparison predicates", () => {
     const emailPointer = jsonPointer(["email"]);
     const builder = store.query().from("Person", "p");
