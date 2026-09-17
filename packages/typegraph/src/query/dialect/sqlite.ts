@@ -249,6 +249,14 @@ export const sqliteDialect: DialectAdapter = {
     return sql`EXISTS (SELECT 1 FROM json_each(${column}) WHERE json_each.value = ${value})`;
   },
 
+  jsonArrayContainsExpression(column, value) {
+    return sql`CASE WHEN json_valid(${column}) THEN CASE WHEN json_type(${column}) = 'array' THEN EXISTS (SELECT 1 FROM json_each(${column}) WHERE json_each.value = ${value}) ELSE FALSE END ELSE FALSE END`;
+  },
+
+  rowValueComparison(operator, left, right) {
+    return sql`(${sql.join(left, sql`, `)}) ${sql.raw(operator)} (${sql.join(right, sql`, `)})`;
+  },
+
   jsonArrayContainsAll(column, values) {
     if (values.length === 0) {
       return sql.raw("1=1");

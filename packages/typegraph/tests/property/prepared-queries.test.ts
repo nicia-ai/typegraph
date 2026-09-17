@@ -171,6 +171,9 @@ function collectFromExpr(
       }
       return;
     }
+    case "tuple_comparison": {
+      return;
+    }
     case "string_op": {
       if (typeof expression.pattern === "object") {
         names.add(expression.pattern.name);

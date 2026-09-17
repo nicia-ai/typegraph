@@ -92,6 +92,11 @@ export function markPredicateFieldsAsRequired(
       markFieldRefAsRequired(requiredColumnsByAlias, expression.left);
       return;
     }
+    case "tuple_comparison": {
+      for (const field of expression.fields)
+        markFieldRefAsRequired(requiredColumnsByAlias, field);
+      return;
+    }
     case "string_op":
     case "null_check":
     case "between":
@@ -259,6 +264,9 @@ function hasIdEqualityPredicate(
         expression.left.alias === alias &&
         isIdFieldRef(expression.left)
       );
+    }
+    case "tuple_comparison": {
+      return false;
     }
     case "and": {
       return expression.predicates.some((predicate) =>

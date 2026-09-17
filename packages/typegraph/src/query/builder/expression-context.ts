@@ -170,6 +170,7 @@ export function createExpressionAliasContext<
       ...(property ? { jsonPointer: jsonPointer(path) } : {}),
       valueType: info.valueType,
       elementType: info.elementType,
+      nullable: nullable || info.nullable === true,
     };
     const expression = transform(
       createFieldExpression(

@@ -45,6 +45,10 @@ function visitPredicateFields(
         visit(expression.right);
       return;
     }
+    case "tuple_comparison": {
+      for (const field of expression.fields) visit(field);
+      return;
+    }
     case "string_op":
     case "null_check":
     case "between":

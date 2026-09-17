@@ -7,6 +7,8 @@ import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import {
   type AggregateOperator,
+  arrayExpressionElementType,
+  assertPortableArrayMembershipElementType,
   type DatabaseExpression,
   type DatabaseExpressionNode,
   type DatabaseLiteral,
@@ -181,6 +183,25 @@ function compileNode(
     }
     case "comparison": {
       return sql`(${compile(node.left)} ${comparisonOperator(node.operator)} ${compile(node.right)})`;
+    }
+    case "array_contains": {
+      const elementType = arrayExpressionElementType(node.array);
+      if (elementType === undefined)
+        throw new UnsupportedPredicateError(
+          "Array membership requires a known element type",
+        );
+      assertPortableArrayMembershipElementType(elementType);
+      if (context.dialect.jsonArrayContainsExpression === undefined) {
+        throw new ConfigurationError(
+          "The active dialect adapter does not support the jsonArrayContainsExpression capability.",
+          { capability: "jsonArrayContainsExpression" },
+        );
+      }
+      return context.dialect.jsonArrayContainsExpression(
+        compile(node.array),
+        compile(node.element),
+        elementType,
+      );
     }
     case "boolean": {
       const separator = node.operator === "and" ? sql` AND ` : sql` OR `;

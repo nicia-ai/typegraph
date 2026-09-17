@@ -642,10 +642,13 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // its fixture types and a bundle-member helper. These declarations are
 // intentionally public or transitively reachable from public signatures; the
 // updated hashes below record the exact measured name sets from this run.
+// Array membership and tuple cursor predicates add their AST nodes to the
+// public query graph. The root also reaches their operand helper types; each
+// Store-bearing secondary entrypoint reaches the two predicate node types.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 494,
-    sha256: "15dd212b4c1f079ed1c5edfc2d56380765327229167f411ebc079373a51a735e",
+    count: 498,
+    sha256: "e2ee0a6260d1f2eb843c6b2870bc813d520ec07421203d3c277fc64a5ac96a3e",
   },
   "./adapters/drizzle/engine": {
     count: 332,
@@ -691,36 +694,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 860,
-    sha256: "64ff705468357de509cd82dd0b7aceae6814e2584bc64403f8c4daa42be736e2",
+    count: 862,
+    sha256: "7b7239846f09a9264c2a1adce0d1159289e3ae2ef25b7eea2b949525124a9ce8",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 843,
-    sha256: "08724cf6b448e59ba1b37c47dff48879e5453381031ecd06219a5c9df4f0aa4f",
+    count: 845,
+    sha256: "e28dfa0b09a1c091bf24ce6871617507e9d1471b38465e78704cb90bbe428f65",
   },
   "./postgres/pglite": {
-    count: 845,
-    sha256: "098aa78cb3ec433ab5f88ea4013bfa9e638956c12361b8818911a94f2fa6a826",
+    count: 847,
+    sha256: "0511d078a14d78cd17917692b8588d4bc9194dd8865108c7bf4a97f34ac0bb2c",
   },
   "./profiler": {
-    count: 845,
-    sha256: "93c72c0092489e8626df7990065f092f1d8946b55860f22eced58713989a5a20",
+    count: 847,
+    sha256: "7cead86020c8c74d9d4d3c9eeb58f2e5e1b7082c047b40b796bcc13926217c68",
   },
   "./provenance": {
-    count: 854,
-    sha256: "fb81bc510763cce815d178a74de65c6727aecd7130855040612dedbd084dbc08",
+    count: 856,
+    sha256: "d64d63da0a7c1d1b588e1208fd8b3ff1496c64fc5de40cce284749517a4ebdcd",
   },
   "./schema": {
     count: 284,
     sha256: "982b6ead7ad367a6d9e87ba099e72309dbcf4ad4e0979eaa1169a9036fd0a81b",
   },
   "./sqlite/local": {
-    count: 845,
-    sha256: "098aa78cb3ec433ab5f88ea4013bfa9e638956c12361b8818911a94f2fa6a826",
+    count: 847,
+    sha256: "0511d078a14d78cd17917692b8588d4bc9194dd8865108c7bf4a97f34ac0bb2c",
   },
 };
 
