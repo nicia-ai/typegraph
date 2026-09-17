@@ -320,21 +320,34 @@ export function buildPaginatedResult<
     row: Record<string, unknown>,
   ) => SelectContext<Aliases, EdgeAliases>,
 ): PaginatedResult<R> {
-  let nextCursor: string | undefined;
-  let previousCursor: string | undefined;
+  return buildPaginatedResultFromRows(
+    data,
+    orderedRows,
+    hasMore,
+    isBackward,
+    cursor,
+    (row, direction) =>
+      buildCursorFromContext(buildContext(row), orderBy, direction),
+  );
+}
 
-  if (orderedRows.length > 0) {
-    const firstRow = requireDefined(orderedRows[0]);
-    const lastRow = requireDefined(orderedRows.at(-1));
-
-    // Build cursors using mapped result context
-    const firstContext = buildContext(firstRow);
-    const lastContext = buildContext(lastRow);
-
-    // Extract values for ORDER BY columns from the context
-    previousCursor = buildCursorFromContext(firstContext, orderBy, "b");
-    nextCursor = buildCursorFromContext(lastContext, orderBy, "f");
-  }
+/**
+ * Constructs a paginated result from rows and a caller-owned cursor encoder.
+ */
+export function buildPaginatedResultFromRows<R, Row>(
+  data: readonly R[],
+  orderedRows: readonly Row[],
+  hasMore: boolean,
+  isBackward: boolean,
+  cursor: string | undefined,
+  buildCursor: (row: Row, direction: "f" | "b") => string,
+): PaginatedResult<R> {
+  const firstRow = orderedRows[0];
+  const lastRow = orderedRows.at(-1);
+  const previousCursor =
+    firstRow === undefined ? undefined : buildCursor(firstRow, "b");
+  const nextCursor =
+    lastRow === undefined ? undefined : buildCursor(lastRow, "f");
 
   return {
     data,

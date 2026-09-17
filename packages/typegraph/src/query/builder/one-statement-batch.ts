@@ -151,7 +151,7 @@ export async function executeOneStatementBatch<
     );
     const payload = dialect.orderedRowsJsonArray(
       rowsName,
-      item.outputNames,
+      [...item.outputNames, ...(item.hiddenOutputNames ?? [])],
       ORDER_COLUMN,
     );
     branches.push(sql`SELECT ${index} AS batch_index, ${payload} AS payload`);

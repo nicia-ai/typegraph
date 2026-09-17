@@ -198,6 +198,33 @@ if (lastPage.hasPrevPage && lastPage.prevCursor) {
 }
 ```
 
+### Batch cursor pages with `page()`
+
+`paginate()` executes immediately. Use `page()` to build the same cursor-bounded read without
+executing it, so the page can compose with other independent reads in one `batchOnce()` statement:
+
+```typescript
+const people = store
+  .query()
+  .from("Person", "person")
+  .orderBy("person", "name")
+  .select((fields) => fields.person);
+
+const [page, companies] = await store.batchOnce(() => [
+  people.page({ first: 20, after: cursor }),
+  store
+    .query()
+    .from("Company", "company")
+    .orderBy("company", "name")
+    .select((fields) => fields.company),
+]);
+```
+
+The returned page has the same `PaginatedResult` shape as `paginate()`. A page read also has an
+`execute()` method for independent execution. As with every `batchOnce()` member, all reads must
+belong to the same graph and execution target, and the combined statement must fit the backend's
+bind-parameter budget.
+
 ### Pagination Parameters
 
 | Parameter | Type     | Description                                  |
