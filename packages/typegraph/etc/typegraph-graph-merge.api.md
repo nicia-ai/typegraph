@@ -835,6 +835,9 @@ type CapabilityExtraSpec = Readonly<Record<string, OptionalGraphBackendMember>>;
 export function captureCandidateWriteSetTarget<G extends GraphDef>(target: Store<G>): Promise<CandidateWriteSetTarget>;
 
 // @public
+export function captureCandidateWriteSetTargetForEvolution<G extends GraphDef>(target: Store<G>, evolutionPlan: EvolutionPlan): CandidateWriteSetTarget;
+
+// @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
 
 // @public
@@ -5586,6 +5589,15 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
     makeBackend: MakeBackend;
     writeSet: unknown;
     options?: Omit<MergeOptions<G>, "target">;
+}>;
+
+// @public
+export function planCandidateWriteSetForEvolution<G extends GraphDef>(args: PlanCandidateWriteSetForEvolutionArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+
+// @public
+export type PlanCandidateWriteSetForEvolutionArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetArgs<G>, "target"> & Readonly<{
+    target: Store<G>;
+    evolutionPlan: EvolutionPlan;
 }>;
 
 // @public
