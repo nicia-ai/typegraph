@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -46,6 +47,7 @@ const Note = defineNode("Note", {
 });
 
 const knows = defineEdge("knows");
+const exclusive = defineEdge("exclusive");
 
 function buildGraph() {
   return defineGraph({
@@ -64,7 +66,15 @@ function buildGraph() {
       },
       Note: { type: Note },
     },
-    edges: { knows: { type: knows, from: [Person], to: [Person] } },
+    edges: {
+      knows: { type: knows, from: [Person], to: [Person] },
+      exclusive: {
+        type: exclusive,
+        from: [Person],
+        to: [Person],
+        cardinality: "one",
+      },
+    },
   });
 }
 
@@ -127,6 +137,9 @@ const COUNTED_METHODS = [
   "insertUniqueBatch",
   "upsertFulltext",
   "upsertFulltextBatch",
+  "countEdgesFrom",
+  "edgeExistsBetween",
+  "findEdgesByHeterogeneousEndpointSet",
 ] as const;
 
 function withCallCounts(backend: GraphBackend): {
@@ -182,6 +195,35 @@ async function withCountedStore<T>(
   } finally {
     await raw.close();
   }
+}
+
+function withHeterogeneousReadRefusal(
+  backend: GraphBackend,
+  errorCode: string,
+): { backend: GraphBackend; calls: () => number } {
+  let calls = 0;
+  function refusal(): never {
+    calls += 1;
+    throw new ConfigurationError("synthetic heterogeneous read refusal", {
+      code: errorCode,
+    });
+  }
+  function wrapTransaction(target: TransactionBackend): TransactionBackend {
+    return deriveBackend(target, {
+      findEdgesByHeterogeneousEndpointSet: refusal,
+    } satisfies ExactBackendOverlay<
+      TransactionBackend,
+      Partial<TransactionBackend>
+    >);
+  }
+  return {
+    backend: deriveBackend(backend, {
+      findEdgesByHeterogeneousEndpointSet: refusal,
+      transaction: (run, options) =>
+        backend.transaction((target) => run(wrapTransaction(target)), options),
+    } satisfies ExactBackendOverlay<GraphBackend, Partial<GraphBackend>>),
+    calls: () => calls,
+  };
 }
 
 const NODE_COUNT = 50;
@@ -283,6 +325,102 @@ describe("importGraph batching", () => {
       expect(counts["insertEdge"]).toBe(0);
       expect(counts["insertEdgesBatch"]).toBe(1);
     });
+  });
+
+  it("prefetches cardinality axes with one set-oriented read", async () => {
+    await withCountedStore(async (store, counts) => {
+      const result = await importGraph(
+        store,
+        payload(
+          Array.from({ length: NODE_COUNT }, (_, index) => personNode(index)),
+          Array.from({ length: NODE_COUNT }, (_, index) => ({
+            kind: "exclusive",
+            id: `exclusive-${index}`,
+            from: { kind: "Person", id: "p-0" },
+            to: { kind: "Person", id: `p-${index + 1}` },
+            properties: {},
+          })),
+        ),
+        importOptions(),
+      );
+
+      expect(result.edges.created).toBe(1);
+      expect(result.edges.updated).toBe(0);
+      expect(result.errors).toHaveLength(NODE_COUNT - 1);
+      // The first row's axis is checked from the prefetched set. Later rows
+      // are rejected by the pending overlay, so no per-row count query runs.
+      expect(counts["findEdgesByHeterogeneousEndpointSet"]).toBe(1);
+      expect(counts["countEdgesFrom"]).toBe(0);
+    });
+  });
+
+  it("falls back to singleton cardinality probes on bind-budget refusal", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const refused = withHeterogeneousReadRefusal(
+        raw,
+        "EDGE_HETEROGENEOUS_READ_BIND_BUDGET_EXCEEDED",
+      );
+      const [store] = await createStoreWithSchema(
+        buildGraph(),
+        refused.backend,
+      );
+      const result = await importGraph(
+        store,
+        payload(
+          [personNode(0), personNode(1)],
+          [
+            {
+              kind: "exclusive",
+              id: "exclusive-refusal-0",
+              from: { kind: "Person", id: "p-0" },
+              to: { kind: "Person", id: "p-1" },
+              properties: {},
+            },
+          ],
+        ),
+        importOptions(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.edges.created).toBe(1);
+      expect(refused.calls()).toBe(1);
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it("does not hide unrelated heterogeneous read failures", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const refused = withHeterogeneousReadRefusal(raw, "UNRELATED_FAILURE");
+      const [store] = await createStoreWithSchema(
+        buildGraph(),
+        refused.backend,
+      );
+
+      await expect(
+        importGraph(
+          store,
+          payload(
+            [personNode(0), personNode(1)],
+            [
+              {
+                kind: "exclusive",
+                id: "exclusive-unrelated-failure",
+                from: { kind: "Person", id: "p-0" },
+                to: { kind: "Person", id: "p-1" },
+                properties: {},
+              },
+            ],
+          ),
+          importOptions(),
+        ),
+      ).rejects.toThrow("synthetic heterogeneous read refusal");
+      expect(refused.calls()).toBe(1);
+    } finally {
+      await raw.close();
+    }
   });
 
   it("syncs searchable imports through the fulltext batch", async () => {

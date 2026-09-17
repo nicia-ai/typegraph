@@ -47,6 +47,7 @@ import {
   containsRef,
   isCurrentClosureCoordinate,
   loadAssertionsTouching,
+  loadCurrentStructuralClassComponents,
   loadCurrentStructuralClasses,
   loadCurrentVisibleMembers,
   loadHistoricalClasses,
@@ -117,7 +118,7 @@ async function bulkAssertPairs<G extends GraphDef>(
   const endpoints = normalizedPairs.flatMap(([a, b]) => [a, b]);
   await requireLiveEndpoints(target, ctx.schema, ctx.graphId, endpoints);
 
-  const classes = await loadCurrentStructuralClasses(
+  const classes = await loadCurrentStructuralClassComponents(
     target,
     ctx.schema,
     ctx.graphId,

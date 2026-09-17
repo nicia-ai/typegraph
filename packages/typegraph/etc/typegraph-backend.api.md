@@ -4505,7 +4505,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "rawStatementReuse";
-        readonly ceiling: 7;
+        readonly ceiling: 11;
     };
     readonly executeTemporaryStatement: {
         readonly kind: "deferred";
@@ -4517,7 +4517,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "heterogeneousEndpointSetRead";
-        readonly ceiling: 4;
+        readonly ceiling: 5;
     };
     readonly fulltextSearch: {
         readonly kind: "deferred";

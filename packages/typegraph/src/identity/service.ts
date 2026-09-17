@@ -36,6 +36,7 @@ export {
 } from "./service-maintenance";
 export { loadAssertionsByIds } from "./service-mutation";
 export {
+  loadCurrentStructuralClassComponents,
   loadCurrentStructuralClasses,
   lockIdentityEnablementNodes,
   lockIdentityGraph,

@@ -32,6 +32,13 @@ function createObservedBackend(): Readonly<{
       statementCount += 1;
       return source.execute<Row>(query);
     },
+    executeRaw: async <Row>(sqlText: string, params: readonly unknown[]) => {
+      statementCount += 1;
+      const executeRaw = source.executeRaw;
+      if (executeRaw === undefined)
+        throw new Error("Test backend must support raw execution");
+      return executeRaw<Row>(sqlText, params);
+    },
   });
   return { backend, statements: () => statementCount };
 }

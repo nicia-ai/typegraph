@@ -14,7 +14,18 @@ import { buildCompileOptions } from "./compile-options";
 import { assertExpressionScope, getExpressionScope } from "./expression-scope";
 import type { ExpressionProjectionEntries } from "./expression-subqueries";
 import { getQueryBuilderInternalContext } from "./internal-context";
-import { bindQueryParameters, hasParameterReferences } from "./prepared-query";
+import {
+  bindQueryParameters,
+  collectParameterMetadata,
+  hasParameterReferences,
+  validateQueryBindings,
+} from "./prepared-query";
+import {
+  buildQueryTemplate,
+  buildReadInstantTemplate,
+  type CompiledTemplate,
+  fillTemplateParams,
+} from "./read-instant-template";
 import {
   createProjectionRelation,
   type ExecutableRelationQuery,
@@ -32,6 +43,9 @@ export type ProjectionResult<Fields extends DatabaseProjection> = {
   : never;
 };
 
+/** Sentinel distinguishing a template that was not built from one that cannot be built. */
+const NOT_COMPUTED = Symbol("NOT_COMPUTED");
+
 /** Explicit SQL results: construction never executes a JavaScript row selector. */
 export class ExecutableProjectionQuery<
   Fields extends DatabaseProjection,
@@ -43,6 +57,12 @@ export class ExecutableProjectionQuery<
   readonly #fields: Fields;
   readonly #context: () => Context;
   readonly #mapper: ((row: ProjectionResult<Fields>) => Result) | undefined;
+  #rowsTemplate: CompiledTemplate | undefined | typeof NOT_COMPUTED =
+    NOT_COMPUTED;
+  readonly #scalarTemplates = new Map<
+    "count" | "exists",
+    CompiledTemplate | undefined
+  >();
 
   constructor(
     config: QueryBuilderConfig,
@@ -188,8 +208,8 @@ export class ExecutableProjectionQuery<
     const backend = this.#requireBackend();
     return {
       execute: async (bindings) => {
-        const bound = bindQueryParameters(ast, bindings);
-        const rows = await this.#fetchRows(backend, bound);
+        validateQueryBindings([ast], bindings);
+        const rows = await this.#fetchRows(backend, ast, bindings);
         return rows.map((row) => this.#decodeRow(row));
       },
     };
@@ -255,22 +275,45 @@ export class ExecutableProjectionQuery<
   #fetchRows(
     backend: GraphBackend | TransactionBackend,
     ast: QueryAst,
+    bindings?: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    this.#assertBound(ast);
+    if (bindings === undefined) this.#assertBound(ast);
     const checked = getQueryBuilderInternalContext(
       this.#config,
     ).expectedSchemaVersion;
+    if (checked === undefined) {
+      const executeRaw = backend.executeRaw;
+      const template =
+        executeRaw === undefined ? undefined : this.#resolveRowsTemplate(ast);
+      return this.#recorded(
+        template !== undefined && executeRaw !== undefined ?
+          executeRaw<Record<string, unknown>>(
+            template.sql,
+            fillTemplateParams(
+              template.params,
+              bindings ?? {},
+              this.#config.dialect ?? "sqlite",
+              collectParameterMetadata(ast).listParameters,
+            ),
+          )
+        : backend.execute<Record<string, unknown>>(
+            compileQuery(
+              bindings === undefined ? ast : bindQueryParameters(ast, bindings),
+              this.#config.graphId,
+              buildCompileOptions(this.#config),
+            ),
+          ),
+        backend,
+      );
+    }
+    const concreteAst =
+      bindings === undefined ? ast : bindQueryParameters(ast, bindings);
     const compiled = compileQuery(
-      ast,
+      concreteAst,
       this.#config.graphId,
       buildCompileOptions(this.#config),
     );
-    if (checked === undefined)
-      return this.#recorded(
-        backend.execute<Record<string, unknown>>(compiled),
-        backend,
-      );
-    const { ast: envelope, orderBy } = buildProjectionEnvelope(ast);
+    const { ast: envelope, orderBy } = buildProjectionEnvelope(concreteAst);
     const ordered =
       orderBy.length === 0 ?
         compiled
@@ -295,7 +338,7 @@ export class ExecutableProjectionQuery<
     return this.#recorded(
       executeSchemaCheckedRead({
         backend,
-        ast,
+        ast: concreteAst,
         graphId: this.#config.graphId,
         expectedVersion: checked.value,
         resultOrderBy,
@@ -308,37 +351,89 @@ export class ExecutableProjectionQuery<
       backend,
     );
   }
-  async #scalarTerminal(operation: "count" | "exists"): Promise<number> {
-    const ast = this.toAst();
-    this.#assertBound(ast);
-    const relation = compileQuery(
+  /**
+   * Builds at most one reusable template for this immutable projection shape.
+   * The template belongs to the configured backend compiler, while execution
+   * may use a transaction derived from it; the fresh read instant is filled
+   * only when the supplied backend can execute raw SQL text.
+   */
+  #resolveRowsTemplate(ast: QueryAst): CompiledTemplate | undefined {
+    if (this.#rowsTemplate !== NOT_COMPUTED) return this.#rowsTemplate;
+    this.#rowsTemplate = buildQueryTemplate(
       ast,
       this.#config.graphId,
       buildCompileOptions(this.#config),
+      this.#config.backend,
     );
-    const compiled = asCompiledSelectSql(
-      operation === "count" ?
-        sql`SELECT COUNT(*) AS __tg_scalar FROM (${relation}) AS projected`
-      : sql`SELECT CASE WHEN EXISTS (${relation}) THEN 1 ELSE 0 END AS __tg_scalar`,
-    );
+    return this.#rowsTemplate;
+  }
+  async #scalarTerminal(operation: "count" | "exists"): Promise<number> {
+    const ast = this.toAst();
+    this.#assertBound(ast);
     const backend = this.#requireBackend();
     const checked = getQueryBuilderInternalContext(
       this.#config,
     ).expectedSchemaVersion;
     const { orderBy: _orderBy, ...unordered } = ast;
+    const executeRaw = checked === undefined ? backend.executeRaw : undefined;
+    const template =
+      executeRaw === undefined ? undefined : (
+        this.#resolveScalarTemplate(ast, operation)
+      );
     const rows = await this.#recorded(
       checked === undefined ?
-        backend.execute<Record<string, unknown>>(compiled)
+        template !== undefined && executeRaw !== undefined ?
+          executeRaw<Record<string, unknown>>(
+            template.sql,
+            fillTemplateParams(
+              template.params,
+              {},
+              this.#config.dialect ?? "sqlite",
+            ),
+          )
+        : backend.execute<Record<string, unknown>>(
+            this.#compileScalar(ast, operation),
+          )
       : executeSchemaCheckedRead({
           backend,
           ast: unordered,
           graphId: this.#config.graphId,
           expectedVersion: checked.value,
           rowIdentityColumn: "__tg_scalar",
-          compile: () => compiled,
+          compile: () => this.#compileScalar(ast, operation),
         }),
     );
     return Number(rows[0]?.["__tg_scalar"] ?? 0);
+  }
+  #compileScalar(
+    ast: QueryAst,
+    operation: "count" | "exists",
+    readInstant: "literal" | "placeholder" = "literal",
+  ) {
+    const relation = compileQuery(ast, this.#config.graphId, {
+      ...buildCompileOptions(this.#config),
+      readInstant,
+    });
+    return asCompiledSelectSql(
+      operation === "count" ?
+        sql`SELECT COUNT(*) AS __tg_scalar FROM (${relation}) AS projected`
+      : sql`SELECT CASE WHEN EXISTS (${relation}) THEN 1 ELSE 0 END AS __tg_scalar`,
+    );
+  }
+  #resolveScalarTemplate(
+    ast: QueryAst,
+    operation: "count" | "exists",
+  ): CompiledTemplate | undefined {
+    if (this.#scalarTemplates.has(operation))
+      return this.#scalarTemplates.get(operation);
+    const template = buildReadInstantTemplate({
+      compile: () => this.#compileScalar(ast, operation, "placeholder"),
+      backend: this.#config.backend,
+      needsReadInstant:
+        ast.temporalMode.mode === "current" && ast.recordedAsOf === undefined,
+    });
+    this.#scalarTemplates.set(operation, template);
+    return template;
   }
   #decodeRow(row: Record<string, unknown>): Result {
     const decoded = Object.fromEntries(

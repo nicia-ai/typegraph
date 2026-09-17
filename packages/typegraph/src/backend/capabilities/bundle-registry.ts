@@ -1226,7 +1226,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "rawStatementReuse",
-    ceiling: 7,
+    // Query projections and derived relations now share the compiled-SQL
+    // template path for row and scalar terminals.
+    ceiling: 11,
   },
   executeTemporaryStatement: {
     kind: "deferred",
@@ -1238,7 +1240,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "heterogeneousEndpointSetRead",
-    ceiling: 4,
+    // Import prefetches existing endpoint pairs through the same bulk-read
+    // capability rather than issuing one probe per incoming edge.
+    ceiling: 5,
   },
   fulltextSearch: {
     kind: "deferred",

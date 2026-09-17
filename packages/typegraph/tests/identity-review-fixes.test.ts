@@ -17,8 +17,10 @@ import { IdentityContradictionError, ValidationError } from "../src/errors";
 import { asIdentityAssertionId } from "../src/identity";
 import {
   type IdentityTransferAssertion,
+  loadCurrentStructuralClassComponents,
   UnionFind,
 } from "../src/identity/service";
+import { buildDistinctComponents } from "../src/identity/service-components";
 import { disjointWith } from "../src/ontology";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
@@ -383,6 +385,62 @@ describe("identity review fixes", () => {
     }
     const [anyMember] = unionFind.components().values();
     expect(requireDefined(anyMember).length).toBe(chainLength + 1);
+  });
+
+  it("#7b exposes a large component once for class-oriented scans", () => {
+    const memberCount = 5000;
+    const members = Array.from({ length: memberCount }, (_, index) => ({
+      kind: "Person",
+      id: `member-${String(index).padStart(5, "0")}`,
+    }));
+    const assertions = members.slice(1).map((member, index) => ({
+      rel: "same" as const,
+      a_kind: members[index]?.kind ?? "Person",
+      a_id: members[index]?.id ?? "",
+      b_kind: member.kind,
+      b_id: member.id,
+    }));
+
+    const components = buildDistinctComponents(members, assertions, "ignore");
+
+    expect(components.size).toBe(1);
+    expect(requireDefined([...components.values()][0]).length).toBe(
+      memberCount,
+    );
+  });
+
+  it("#7c keeps distinct class loading correct for shared and singleton seeds", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const first = await store.nodes.Person.create({ name: "First" });
+    const alias = await store.nodes.Person.create({ name: "Alias" });
+    const singleton = await store.nodes.Person.create({ name: "Singleton" });
+    await store.identity.assertSame(first, alias);
+
+    const schema = createSqlSchema(store.backend.tableNames);
+    const components = await loadCurrentStructuralClassComponents(
+      store.backend,
+      schema,
+      store.graphId,
+      [
+        { kind: "Person", id: first.id },
+        { kind: "Person", id: alias.id },
+        { kind: "Person", id: singleton.id },
+      ],
+    );
+
+    expect(components.size).toBe(2);
+    const actualClasses = [...components.values()].map((members) =>
+      members.map((member) => member.id).toSorted(),
+    );
+    expect(
+      actualClasses.toSorted((left, right) =>
+        left.join("|").localeCompare(right.join("|")),
+      ),
+    ).toEqual(
+      [[first.id, alias.id].toSorted(), [singleton.id]].toSorted(
+        (left, right) => left.join("|").localeCompare(right.join("|")),
+      ),
+    );
   });
 
   it("#8 bulkAssertSame detects a different-assertion spanning the batch", async () => {

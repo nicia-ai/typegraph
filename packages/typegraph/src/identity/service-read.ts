@@ -92,6 +92,12 @@ type RawSeedClassMemberRow = RawClosureClassRow &
     seed_id: string;
   }>;
 
+type RawDistinctClassMemberRow = RawClosureClassRow &
+  Readonly<{
+    class_kind: string;
+    class_id: string;
+  }>;
+
 type RawHistoricalClassMemberRow = RawSeedClassMemberRow &
   Readonly<{ is_visible: unknown }>;
 
@@ -426,6 +432,78 @@ export async function loadCurrentStructuralClasses(
     [...classes].map(([seedKey, members]) => [
       seedKey,
       members.toSorted((left, right) => compareReferences(left, right)),
+    ]),
+  );
+}
+
+/**
+ * Loads each current class represented by the references exactly once.
+ *
+ * The public seed-indexed reader above intentionally preserves its
+ * per-reference result shape. Internal scans that only need the affected
+ * classes should use this reader: joining closure members to distinct class
+ * anchors avoids returning the same N-member class S times for S seeds.
+ */
+export async function loadCurrentStructuralClassComponents(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  references: readonly PlainNodeRef[],
+): Promise<ReadonlyMap<string, readonly PlainNodeRef[]>> {
+  const uniqueByKey = new Map<string, PlainNodeRef>();
+  for (const ref of references) uniqueByKey.set(refKey(ref), ref);
+  const uniqueReferences = [...uniqueByKey.values()];
+  if (uniqueReferences.length === 0) return new Map();
+  const chunkSize = identityChunkSize(target, {
+    fixedParameters: 2,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  const combined = new Map<string, Map<string, PlainNodeRef>>();
+  for (const refChunk of chunk(uniqueReferences, chunkSize)) {
+    const seedRows = sql.join(
+      refChunk.map((ref) => sql`(${ref.kind}, ${ref.id})`),
+      sql`, `,
+    );
+    const rows = await target.execute<RawDistinctClassMemberRow>(
+      asCompiledRowsSql(sql`
+        WITH seeds(seed_kind, seed_id) AS (
+          VALUES ${seedRows}
+        ), anchors AS (
+          SELECT COALESCE(anchor.class_kind, seeds.seed_kind) AS class_kind,
+                 COALESCE(anchor.class_id, seeds.seed_id) AS class_id
+          FROM seeds
+          LEFT JOIN ${schema.identityClosureTable} anchor
+            ON anchor.graph_id = ${graphId}
+           AND anchor.member_kind = seeds.seed_kind
+           AND anchor.member_id = seeds.seed_id
+        ), classes AS (
+          SELECT DISTINCT class_kind, class_id FROM anchors
+        )
+        SELECT classes.class_kind, classes.class_id,
+               COALESCE(member.member_kind, classes.class_kind) AS member_kind,
+               COALESCE(member.member_id, classes.class_id) AS member_id
+        FROM classes
+        LEFT JOIN ${schema.identityClosureTable} member
+          ON member.graph_id = ${graphId}
+         AND member.class_kind = classes.class_kind
+         AND member.class_id = classes.class_id
+      `),
+    );
+    for (const row of rows) {
+      const classKey = refKey({ kind: row.class_kind, id: row.class_id });
+      const members = combined.get(classKey) ?? new Map<string, PlainNodeRef>();
+      const member = { kind: row.member_kind, id: row.member_id };
+      members.set(refKey(member), member);
+      combined.set(classKey, members);
+    }
+  }
+  return new Map(
+    [...combined].map(([classKey, members]) => [
+      classKey,
+      [...members.values()].toSorted((left, right) =>
+        compareReferences(left, right),
+      ),
     ]),
   );
 }

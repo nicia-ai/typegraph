@@ -21,7 +21,11 @@
  * would be a second, unsorted, per-row claim in addition to the batch's.
  */
 import { deriveBackend } from "../../backend/derive-backend";
-import { type GraphBackend, type InsertEdgeParams } from "../../backend/types";
+import {
+  type EdgeRow,
+  type GraphBackend,
+  type InsertEdgeParams,
+} from "../../backend/types";
 import { type Cardinality } from "../../core/types";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type WriteTarget } from "./write-session";
@@ -85,6 +89,17 @@ export function createEdgeBatchValidationBackend(
     kind: string,
     id: string,
     row: Awaited<ReturnType<GraphBackend["getNode"]>>,
+  ) => void;
+  /**
+   * Seeds all cardinality probes needed by one batch from a set-oriented edge
+   * read. The request lists are explicit so absent sources and absent pairs
+   * are cached as zero/false too; otherwise the validation loop would still
+   * issue singleton probes for those negative cases.
+   */
+  seedCardinalityRows: (
+    countRequests: readonly Parameters<GraphBackend["countEdgesFrom"]>[0][],
+    uniqueRequests: readonly Parameters<GraphBackend["edgeExistsBetween"]>[0][],
+    rows: readonly EdgeRow[],
   ) => void;
 }> {
   const endpointCache = new Map<
@@ -205,6 +220,76 @@ export function createEdgeBatchValidationBackend(
     }
   }
 
+  function seedCardinalityRows(
+    countRequests: readonly Parameters<GraphBackend["countEdgesFrom"]>[0][],
+    uniqueRequests: readonly Parameters<GraphBackend["edgeExistsBetween"]>[0][],
+    rows: readonly EdgeRow[],
+  ): void {
+    const counts = new Map<string, Readonly<{ all: number; active: number }>>();
+    const pairs = new Set<string>();
+    for (const row of rows) {
+      if (row.deleted_at !== undefined) continue;
+      const sourceKey = encodeTupleKey([
+        row.graph_id,
+        row.kind,
+        row.from_kind,
+        row.from_id,
+      ]);
+      const previous = counts.get(sourceKey) ?? { all: 0, active: 0 };
+      counts.set(sourceKey, {
+        all: previous.all + 1,
+        active: previous.active + (row.valid_to === undefined ? 1 : 0),
+      });
+      pairs.add(
+        buildEdgeBetweenCacheKey(
+          row.graph_id,
+          row.kind,
+          row.from_kind,
+          row.from_id,
+          row.to_kind,
+          row.to_id,
+        ),
+      );
+    }
+    for (const params of countRequests) {
+      const sourceKey = encodeTupleKey([
+        params.graphId,
+        params.edgeKind,
+        params.fromKind,
+        params.fromId,
+      ]);
+      const sourceCounts = counts.get(sourceKey);
+      const count =
+        params.activeOnly === true ?
+          (sourceCounts?.active ?? 0)
+        : (sourceCounts?.all ?? 0);
+      countEdgesFromCache.set(buildCountEdgesFromCacheKey(params), count);
+    }
+    for (const params of uniqueRequests) {
+      const exists = pairs.has(
+        buildEdgeBetweenCacheKey(
+          params.graphId,
+          params.edgeKind,
+          params.fromKind,
+          params.fromId,
+          params.toKind,
+          params.toId,
+        ),
+      );
+      edgeExistsCache.set(
+        buildEdgeBetweenCacheKey(
+          params.graphId,
+          params.edgeKind,
+          params.fromKind,
+          params.fromId,
+          params.toKind,
+          params.toId,
+        ),
+        exists,
+      );
+    }
+  }
+
   const validationBackend = deriveBackend(backend, {
     getNode: getNodeCached,
     countEdgesFrom: countEdgesFromCached,
@@ -215,5 +300,6 @@ export function createEdgeBatchValidationBackend(
     backend: validationBackend,
     registerPendingEdgeForCardinality,
     seedEndpointRow,
+    seedCardinalityRows,
   };
 }

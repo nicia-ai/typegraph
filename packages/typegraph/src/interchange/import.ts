@@ -2698,6 +2698,20 @@ async function readEdgeMatchIdentityOwnerKeys(
 }
 
 /**
+ * The heterogeneous endpoint read is an optimization, not a required
+ * capability of import. A backend can expose it yet refuse a particular
+ * request when the selected edge-kind list leaves no bind budget. Only that
+ * declared refusal may fall back to the cardinality seam's singleton probes;
+ * all other failures remain real import failures.
+ */
+function isHeterogeneousReadBindBudgetRefusal(error: unknown): boolean {
+  return (
+    error instanceof ConfigurationError &&
+    error.details["code"] === "EDGE_HETEROGENEOUS_READ_BIND_BUDGET_EXCEEDED"
+  );
+}
+
+/**
  * Processes one batchSize slice of edges with batched round trips: one
  * `getNodes` per endpoint kind for reference liveness, one `getEdges` for
  * existence, one durable-owner endpoint read when needed, and one multi-row
@@ -2730,6 +2744,7 @@ async function processEdgeSlice(
   const {
     backend: cardinalityValidationBackend,
     registerPendingEdgeForCardinality,
+    seedCardinalityRows,
   } = createEdgeBatchValidationBackend(frame.target);
 
   // Pass 1 (synchronous): kind, endpoint-kind, endpoint-assignability,
@@ -2971,6 +2986,96 @@ async function processEdgeSlice(
     preparedCreates,
   )) {
     pendingMatchIdentityOwners.add(ownerKey);
+  }
+
+  // Cardinality probes are logically per row, but their database reads are
+  // independent until the pending overlay records an accepted row. Prime all
+  // source axes and exact pairs with one heterogeneous endpoint read so a
+  // large import pays one set-oriented round trip instead of one count/exists
+  // statement per distinct source or pair. A backend without this optional
+  // read keeps the existing cached singleton fallback in the validation seam.
+  const cardinalityCounts = new Map<
+    string,
+    Parameters<GraphBackend["countEdgesFrom"]>[0]
+  >();
+  const uniquePairs = new Map<
+    string,
+    Parameters<GraphBackend["edgeExistsBetween"]>[0]
+  >();
+  const sourceEndpoints = new Map<
+    string,
+    Readonly<{ kind: string; id: string }>
+  >();
+  const edgeKinds = new Set<string>();
+  for (const { candidate, cardinality } of preparedCreates) {
+    const { edge } = candidate;
+    if (cardinality === "many") continue;
+    edgeKinds.add(edge.kind);
+    const sourceKey = encodeTupleKey([edge.from.kind, edge.from.id]);
+    sourceEndpoints.set(sourceKey, {
+      kind: edge.from.kind,
+      id: edge.from.id,
+    });
+    if (cardinality === "unique") {
+      const params = {
+        graphId,
+        edgeKind: edge.kind,
+        fromKind: edge.from.kind,
+        fromId: edge.from.id,
+        toKind: edge.to.kind,
+        toId: edge.to.id,
+      } satisfies Parameters<GraphBackend["edgeExistsBetween"]>[0];
+      uniquePairs.set(
+        encodeTupleKey([
+          params.edgeKind,
+          params.fromKind,
+          params.fromId,
+          params.toKind,
+          params.toId,
+        ]),
+        params,
+      );
+      continue;
+    }
+    const params = {
+      graphId,
+      edgeKind: edge.kind,
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      activeOnly: cardinality === "oneActive",
+    } satisfies Parameters<GraphBackend["countEdgesFrom"]>[0];
+    cardinalityCounts.set(
+      encodeTupleKey([
+        params.edgeKind,
+        params.fromKind,
+        params.fromId,
+        params.activeOnly ? "1" : "0",
+      ]),
+      params,
+    );
+  }
+  const setRead = frame.target.findEdgesByHeterogeneousEndpointSet;
+  if (setRead !== undefined && sourceEndpoints.size > 0 && edgeKinds.size > 0) {
+    try {
+      const rows = await setRead({
+        graphId,
+        side: "from",
+        endpoints: [...sourceEndpoints.values()],
+        edgeKinds: [...edgeKinds],
+        excludeDeleted: false,
+        temporalMode: "includeTombstones",
+      });
+      seedCardinalityRows(
+        [...cardinalityCounts.values()],
+        [...uniquePairs.values()],
+        rows,
+      );
+    } catch (error) {
+      if (!isHeterogeneousReadBindBudgetRefusal(error)) throw error;
+      // Leave the caches empty. The validation wrapper will issue its normal
+      // per-axis/per-pair probes, preserving correctness for a backend whose
+      // heterogeneous request cannot fit its bind budget.
+    }
   }
 
   const accepted: PreparedEdgeImportCreate[] = [];
