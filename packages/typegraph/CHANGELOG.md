@@ -1,5 +1,21 @@
 # @nicia-ai/typegraph
 
+## 0.65.0
+
+### Minor Changes
+
+- [#718](https://github.com/nicia-ai/typegraph/pull/718) [`8eb7ead`](https://github.com/nicia-ai/typegraph/commit/8eb7eada54f38503c129a11ae8d2a79c88ed9b31) Thanks [@pdlug](https://github.com/pdlug)! - Batch distinct existing-row updates in `bulkUpsertById()` while preserving version guards, recorded history, uniqueness claims, full-text indexes, and vector projections.
+
+- [#717](https://github.com/nicia-ai/typegraph/pull/717) [`22af384`](https://github.com/nicia-ai/typegraph/commit/22af384cfb4e37f34c56abdcbeee69090836a860) Thanks [@pdlug](https://github.com/pdlug)! - Add cold cursor-page reads that execute independently or compose with other reads in one `batchOnce()` statement.
+
+- [#714](https://github.com/nicia-ai/typegraph/pull/714) [`6036f98`](https://github.com/nicia-ai/typegraph/commit/6036f9841da1b3388a684596f15743a83ba721e2) Thanks [@pdlug](https://github.com/pdlug)! - Plan serializable candidate write sets against a pending schema evolution so the schema and accepted data can be applied in one adopted transaction and recorded revision. Document `MergePlanningStaleError` as a retry-and-replan concurrency outcome.
+
+- [#715](https://github.com/nicia-ai/typegraph/pull/715) [`8fe206d`](https://github.com/nicia-ai/typegraph/commit/8fe206dfd4b7f3eb62bf8e4de4afeb28b093a1e8) Thanks [@pdlug](https://github.com/pdlug)! - Add expression-level array membership for candidate and correlated row values, and optimize safe keyset cursor comparisons with native row-value tuples.
+
+### Patch Changes
+
+- [#719](https://github.com/nicia-ai/typegraph/pull/719) [`a15e382`](https://github.com/nicia-ai/typegraph/commit/a15e382900bef8bd0d3ef84485327fa360a0be6b) Thanks [@pdlug](https://github.com/pdlug)! - Reduce repeated work in identity closure repair, projection and relation query execution, candidate-scoped updates, and constrained-edge imports. Reused queries now cache their compiled SQL templates while preserving fresh temporal bindings, and large identity or import batches avoid duplicate component expansion and per-key cardinality reads.
+
 ## 0.64.0
 
 ### Highlights
