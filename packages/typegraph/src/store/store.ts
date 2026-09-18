@@ -250,7 +250,7 @@ import { serializeSchema } from "../schema/serializer";
 import { type SerializedSchema } from "../schema/types";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
-import { hasOwnKey } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import {
   createGraphAlgorithms,
@@ -1264,7 +1264,7 @@ function callerSuppliedParsedNodeProps(
   inputProps: Readonly<Record<string, unknown>>,
   parsedCreateProps: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
-  const updateProps: Record<string, unknown> = {};
+  const updateProps = createDataKeyedBag<unknown>();
   for (const property of Object.keys(inputProps)) {
     if (hasOwnKey(parsedCreateProps, property)) {
       updateProps[property] = parsedCreateProps[property];
