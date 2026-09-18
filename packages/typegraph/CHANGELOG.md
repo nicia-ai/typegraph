@@ -2,6 +2,17 @@
 
 ## 0.66.0
 
+### Highlights
+
+TypeGraph 0.66 adds `tx.writeNodeUpsertBatch()` for recorded PostgreSQL transactions. Submit caller-assigned IDs spanning multiple plain node kinds and receive ordered postimages from one statement, while inserts, live updates, resurrections, history capture, and receipt counts remain atomic. The narrow envelope is designed for latency-sensitive heterogeneous node ingestion and preserves the existing per-entity pipeline for constrained writes.
+
+Recorded transactions also lease their schema-fence evidence across managed writes and capture flushes. Reusing that evidence removes repeated fence probes from history-enabled adopted transaction loops while retaining conservative per-write fencing for non-history adopted transactions.
+
+### Upgrade notes
+
+- Use `tx.writeNodeUpsertBatch(entries)` only inside a recorded PostgreSQL transaction. The batch supports plain node kinds with caller-assigned IDs; it refuses operational-identity graphs, unique or disjointness claims, search or embedding projections, temporal options, unchanged-upsert coalescing, duplicate `(kind, id)` entries, stale schema fences, oversized batches, and unsupported backends. Split oversized inputs before retrying.
+- Custom backends may implement the optional exact-session heterogeneous upsert capability to support this method. Backends that omit it retain the existing portable write paths, and `tx.writeNodeUpsertBatch()` refuses with a typed unsupported-capability error.
+
 ### Minor Changes
 
 - [#722](https://github.com/nicia-ai/typegraph/pull/722) [`8ad6da1`](https://github.com/nicia-ai/typegraph/commit/8ad6da18fb352a7f593f0092f006e47b21ed7709) Thanks [@pdlug](https://github.com/pdlug)! - Add `tx.writeNodeUpsertBatch()` for one-statement, caller-ID upserts across plain node kinds inside a recorded PostgreSQL transaction.
