@@ -577,19 +577,40 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  describe.each([1, 2])(
-    "pre-identity storage at base version %i",
+  describe.each([undefined, 1, 2])(
+    "legacy recorded storage at base version %s",
     (version) => {
-      it.each([false, true])(
-        "adopts missing SQLite identity storage (custom names: %s)",
-        async (customNames) => {
+      it.each(
+        [false, true].flatMap((customNames) =>
+          [false, true].flatMap((openStore) =>
+            [false, true].map((missingHistory) => ({
+              customNames,
+              openStore,
+              missingHistory,
+            })),
+          ),
+        ),
+      )(
+        "adopts missing SQLite recorded storage ($customNames custom names, $openStore store open, $missingHistory history absent)",
+        async ({ customNames, openStore, missingHistory }) => {
           const tableName =
             customNames ?
               "legacy_identity_assertions"
             : "typegraph_recorded_identity_assertions";
-          const tables = createSqliteTables({
+          const tableNames = {
             recordedIdentityAssertions: tableName,
-          });
+            recordedNodes:
+              customNames ?
+                "legacy_recorded_nodes"
+              : "typegraph_recorded_nodes",
+            recordedEdges:
+              customNames ?
+                "legacy_recorded_edges"
+              : "typegraph_recorded_edges",
+          };
+          const missingTables =
+            missingHistory ? Object.values(tableNames) : [tableName];
+          const tables = createSqliteTables(tableNames);
           const { backend, db } = createLocalSqliteBackend({ tables });
           const client = sqliteClient(db);
           try {
@@ -597,57 +618,89 @@ describe("deployment-wide base-schema adoption", () => {
             const person = await store.nodes.Person.create({
               name: "Preserved",
             });
-            client.exec(`DROP TABLE "${tableName}"`);
-            client
-              .prepare(
-                "UPDATE typegraph_base_schema_versions SET version = ? WHERE installation = 1",
-              )
-              .run(version);
+            const expectedIndexes = missingTables.flatMap((name) =>
+              client
+                .prepare(
+                  "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?",
+                )
+                .all(name),
+            );
+            for (const name of missingTables)
+              client.exec(`DROP TABLE "${name}"`);
+            if (version === undefined) {
+              client.exec("DROP TABLE typegraph_base_schema_versions");
+            } else {
+              client
+                .prepare(
+                  "UPDATE typegraph_base_schema_versions SET version = ? WHERE installation = 1",
+                )
+                .run(version);
+            }
 
-            // Exercise offline adoption first: bootstrap must not conceal a missing step.
-            await requireDefined(backend.adoptBaseSchema)();
+            const bootstrapSpy = vi.spyOn(backend, "bootstrapTables");
+            if (openStore) await createStoreWithSchema(graph, backend);
+            else await requireDefined(backend.adoptBaseSchema)();
             await requireDefined(backend.adoptBaseSchema)();
 
             expect(
               markerVersion(client, "typegraph_base_schema_versions"),
             ).toBe(CURRENT_BASE_SCHEMA_VERSION);
-            for (const suffix of [
-              "entity_idx",
-              "a_idx",
-              "b_idx",
-              "since_idx",
-            ]) {
-              expect(
+            expect(
+              missingTables.flatMap((name) =>
                 client
                   .prepare(
-                    "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?",
                   )
-                  .get(systemIndexName(tableName, suffix)),
-              ).toEqual({ name: systemIndexName(tableName, suffix) });
+                  .all(name),
+              ),
+            ).toEqual(expect.arrayContaining(expectedIndexes));
+            for (const name of missingTables) {
+              expect(client.prepare(`SELECT * FROM "${name}"`).all()).toEqual(
+                [],
+              );
             }
-            expect(
-              client.prepare(`SELECT * FROM "${tableName}"`).all(),
-            ).toEqual([]);
             const [reopened] = await createStoreWithSchema(graph, backend);
             expect(await reopened.nodes.Person.getById(person.id)).toEqual(
               person,
             );
+            expect(bootstrapSpy).not.toHaveBeenCalled();
           } finally {
             await backend.close();
           }
         },
       );
 
-      it.each([false, true])(
-        "adopts missing PostgreSQL identity storage (custom names: %s)",
-        async (customNames) => {
+      it.each(
+        [false, true].flatMap((customNames) =>
+          [false, true].flatMap((openStore) =>
+            [false, true].map((missingHistory) => ({
+              customNames,
+              openStore,
+              missingHistory,
+            })),
+          ),
+        ),
+      )(
+        "adopts missing PostgreSQL recorded storage ($customNames custom names, $openStore store open, $missingHistory history absent)",
+        async ({ customNames, openStore, missingHistory }) => {
           const tableName =
             customNames ?
               "legacy_identity_assertions"
             : "typegraph_recorded_identity_assertions";
-          const tables = createPostgresTables({
+          const tableNames = {
             recordedIdentityAssertions: tableName,
-          });
+            recordedNodes:
+              customNames ?
+                "legacy_recorded_nodes"
+              : "typegraph_recorded_nodes",
+            recordedEdges:
+              customNames ?
+                "legacy_recorded_edges"
+              : "typegraph_recorded_edges",
+          };
+          const missingTables =
+            missingHistory ? Object.values(tableNames) : [tableName];
+          const tables = createPostgresTables(tableNames);
           const { backend, client } = await createLocalPgliteBackend({
             tables,
             vector: false,
@@ -657,13 +710,24 @@ describe("deployment-wide base-schema adoption", () => {
             const person = await store.nodes.Person.create({
               name: "Preserved",
             });
-            await client.exec(`DROP TABLE "${tableName}"`);
-            await client.query(
-              "UPDATE typegraph_base_schema_versions SET version = $1 WHERE installation = 1",
-              [version],
+            const expectedIndexes = await client.query<{ indexname: string }>(
+              "SELECT indexname FROM pg_indexes WHERE tablename = ANY($1::text[])",
+              [missingTables],
             );
+            for (const name of missingTables)
+              await client.exec(`DROP TABLE "${name}"`);
+            if (version === undefined) {
+              await client.exec("DROP TABLE typegraph_base_schema_versions");
+            } else {
+              await client.query(
+                "UPDATE typegraph_base_schema_versions SET version = $1 WHERE installation = 1",
+                [version],
+              );
+            }
 
-            await requireDefined(backend.adoptBaseSchema)();
+            const bootstrapSpy = vi.spyOn(backend, "bootstrapTables");
+            if (openStore) await createStoreWithSchema(graph, backend);
+            else await requireDefined(backend.adoptBaseSchema)();
             await requireDefined(backend.adoptBaseSchema)();
 
             const marker = await client.query<{ version: number }>(
@@ -671,24 +735,23 @@ describe("deployment-wide base-schema adoption", () => {
             );
             expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
             const indexes = await client.query<{ indexname: string }>(
-              "SELECT indexname FROM pg_indexes WHERE tablename = $1",
-              [tableName],
+              "SELECT indexname FROM pg_indexes WHERE tablename = ANY($1::text[])",
+              [missingTables],
             );
-            expect(indexes.rows.map((row) => row.indexname)).toEqual(
-              expect.arrayContaining(
-                ["entity_idx", "a_idx", "b_idx", "since_idx"].map((suffix) =>
-                  systemIndexName(tableName, suffix),
-                ),
-              ),
+            expect(indexes.rows).toEqual(
+              expect.arrayContaining(expectedIndexes.rows),
             );
-            const assertions = await client.query(
-              `SELECT * FROM "${tableName}"`,
-            );
-            expect(assertions.rows).toEqual([]);
+            for (const name of missingTables) {
+              const recordedRows = await client.query(
+                `SELECT * FROM "${name}"`,
+              );
+              expect(recordedRows.rows).toEqual([]);
+            }
             const [reopened] = await createStoreWithSchema(graph, backend);
             expect(await reopened.nodes.Person.getById(person.id)).toEqual(
               person,
             );
+            expect(bootstrapSpy).not.toHaveBeenCalled();
           } finally {
             await backend.close();
           }
