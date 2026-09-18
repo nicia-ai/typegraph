@@ -3,13 +3,13 @@
  * rows: two schema-fence predicates plus the lower bound and two timestamps
  * stamped by the data-modifying statement.
  */
-export const HETEROGENEOUS_NODE_UPSERT_BATCH_FIXED_BIND_COUNT = 5;
+const HETEROGENEOUS_NODE_UPSERT_BATCH_FIXED_BIND_COUNT = 5;
 
 /**
  * Each input row supplies its graph/id reference, both property documents, and
  * its caller-order ordinal.
  */
-export const HETEROGENEOUS_NODE_UPSERT_BATCH_ENTRY_BIND_COUNT = 6;
+const HETEROGENEOUS_NODE_UPSERT_BATCH_ENTRY_BIND_COUNT = 6;
 
 /** Exact parameter count emitted by the heterogeneous node upsert CTE. */
 export function heterogeneousNodeUpsertBatchBindParameterCount(
