@@ -27,10 +27,7 @@ import {
   reportFromArtifact,
   validateMergePlanForTarget,
 } from "./merge";
-import type {
-  MergePlanArtifact,
-  MergePlanArtifactV1,
-} from "./plan-schema";
+import type { MergePlanArtifact, MergePlanArtifactV1 } from "./plan-schema";
 import type { Result } from "./result";
 import { err, ok } from "./result";
 import type { GraphDef, Store } from "./typegraph-internal";

@@ -321,13 +321,15 @@ export type DurableWorkingCopyStrategy<
    * the plan through its portable transaction path.
    */
   merge?:
-    | ((args: Readonly<{
-        target: Store<G>;
-        branch: GraphBranch<G>;
-        descriptor: TStoreDescriptor;
-        expectedOrigin: DurableBranchOrigin;
-        plan: MergePlanArtifactV1;
-      }>) => Promise<NativeDurableMergeResult>)
+    | ((
+        args: Readonly<{
+          target: Store<G>;
+          branch: GraphBranch<G>;
+          descriptor: TStoreDescriptor;
+          expectedOrigin: DurableBranchOrigin;
+          plan: MergePlanArtifactV1;
+        }>,
+      ) => Promise<NativeDurableMergeResult>)
     | undefined;
 }>;
 
@@ -871,9 +873,7 @@ export function durableDescriptorRefusal(
 /** Extracts the TypeGraph-owned origin from a descriptor envelope. */
 export function durableOriginOfDescriptor<
   TStoreDescriptor extends DurableStoreDescriptor,
->(
-  descriptor: DurableBranchDescriptor<TStoreDescriptor>,
-): DurableBranchOrigin {
+>(descriptor: DurableBranchDescriptor<TStoreDescriptor>): DurableBranchOrigin {
   return {
     graphId: descriptor.graphId,
     definitionHash: descriptor.definitionHash,
