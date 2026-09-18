@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.67.0
+
+### Minor Changes
+
+- [#726](https://github.com/nicia-ai/typegraph/pull/726) [`595e6d9`](https://github.com/nicia-ai/typegraph/commit/595e6d9e5a68faf5ca118288bf921065b822ff61) Thanks [@pdlug](https://github.com/pdlug)! - Add durable graph-merge branches that can be serialized, reopened in a later process, and explicitly destroyed. Durable strategies attest the complete fork origin, prove the created working copy matches its stamped base, and declare either engine-level fencing or an allocation-wide exclusive writer lease. Approved plans can optionally use a strategy's proven-equivalent native database merge; unsupported native dimensions execute no host mutation and fall back to the complete portable plan application.
+
 ## 0.66.1
 
 ### Highlights
