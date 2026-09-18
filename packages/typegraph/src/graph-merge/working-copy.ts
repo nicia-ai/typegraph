@@ -125,10 +125,10 @@ export type MakeBackend = () => Promise<GraphBackend>;
  * This is the single owner of the post-fork equality decision. Host-native fork
  * calls are allowed to race with a write to the source branch; trusting the
  * requested base token would then relabel a newer or older snapshot as the
- * requested one. Both ephemeral and durable host forks call this after opening
- * the created store and refuse before handing the working copy to a caller.
+ * requested one. Ephemeral host forks call this after opening the created store
+ * and refuse before handing the working copy to a caller.
  */
-export async function assertWorkingCopyMatchesBase<G extends GraphDef>(
+async function assertWorkingCopyMatchesBase<G extends GraphDef>(
   workingCopy: Store<G>,
   base: BaseVersion,
 ): Promise<void> {
