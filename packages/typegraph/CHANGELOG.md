@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.66.1
+
+### Patch Changes
+
+- [#724](https://github.com/nicia-ai/typegraph/pull/724) [`e3ebddd`](https://github.com/nicia-ai/typegraph/commit/e3ebddda8f37833255dcdd75cd38b5f24a02c2e5) Thanks [@pdlug](https://github.com/pdlug)! - Fix upgrades from legacy databases that lack recorded-node or recorded-edge tables. Version-3 base-schema adoption now creates these tables and their structural indexes before installing changed-since indexes on SQLite and PostgreSQL, preserving existing data and custom table names. Failed upgrades left at base-schema version 2 can retry through normal adoption without an explicit `bootstrapTables()` workaround.
+
 ## 0.66.0
 
 ### Highlights
