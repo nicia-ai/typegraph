@@ -1,5 +1,23 @@
 # @nicia-ai/typegraph
 
+## 0.67.0
+
+### Highlights
+
+TypeGraph 0.67 adds durable graph-merge branches for workflows that outlive one process. `branchDurable()` creates a persistent working copy and a JSON-safe descriptor that can cross a queue, deployment, or machine boundary; `reopenDurableBranch()` restores the ordinary `GraphBranch` used by merge planning, and `destroyDurableBranch()` explicitly removes or archives the host allocation. The existing reviewable plan/apply lifecycle remains the source of truth for accepted graph changes.
+
+Durable strategies own host allocation and reconnection while TypeGraph validates the sealed graph, schema, branch, and base origin. Creation fences writes racing the allocation and accepts either an exact revision token or a complete semantic match when the persistent copy has its own revision namespace. Strategies can optionally attempt a proven-equivalent native merge; a mutation-free `unsupported` result returns to the complete portable apply path, while uncertain native failures never risk a second application.
+
+### Upgrade notes
+
+- Existing `branch()` and portable merge workflows require no changes. Use the durable APIs only when a working copy must survive closing its current backend or move between processes.
+- Custom durable strategies must return a non-secret, JSON-safe locator and attest the complete sealed origin on reopen and destroy. Each opened working copy must provide either sound cross-client engine fencing or an allocation-wide exclusive writer lease; closing releases access but intentionally leaves the persistent allocation available until `destroyDurableBranch()` succeeds.
+- Treat `DurableWorkingCopyStrategy.merge()` as an optional optimization. Return `unsupported` only when no merge SQL or host mutation ran. Return `applied` only after proving the complete host diff equals the approved TypeGraph write set and validating the target fence on the merged resource. Throw on failed or uncertain native outcomes; TypeGraph will not fall back after a possibly partial application. Apply callbacks and persisted provenance continue through the portable path.
+
+### Minor Changes
+
+- [#726](https://github.com/nicia-ai/typegraph/pull/726) [`595e6d9`](https://github.com/nicia-ai/typegraph/commit/595e6d9e5a68faf5ca118288bf921065b822ff61) Thanks [@pdlug](https://github.com/pdlug)! - Add durable graph-merge branches that can be serialized, reopened in a later process, and explicitly destroyed. Durable strategies attest the complete fork origin, prove the created working copy matches its stamped base, and declare either engine-level fencing or an allocation-wide exclusive writer lease. Approved plans can optionally use a strategy's proven-equivalent native database merge; unsupported native dimensions execute no host mutation and fall back to the complete portable plan application.
+
 ## 0.66.1
 
 ### Highlights
