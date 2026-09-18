@@ -43,6 +43,17 @@ export {
   planCandidateWriteSet,
   planCandidateWriteSetForEvolution,
 } from "./candidate-write-set";
+export type {
+  DurableBranch,
+  DurableBranchDescriptor,
+  DurableBranchOrigin,
+  DurableWorkingCopyStrategy,
+} from "./durable-branch";
+export {
+  branchDurable,
+  destroyDurableBranch,
+  reopenDurableBranch,
+} from "./durable-branch";
 export type { MergeConstraintConflictErrorDetails } from "./errors";
 export {
   BaseVersionMismatchError,

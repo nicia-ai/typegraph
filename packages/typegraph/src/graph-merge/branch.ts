@@ -116,27 +116,9 @@ export async function branch<G extends GraphDef>(
  */
 async function captureBranchForkState<G extends GraphDef>(
   store: GraphBranch<G>["store"],
-): Promise<
-  Readonly<{
-    schemaAnchor: Readonly<{ version: number; hash: string }> | undefined;
-    forkRevision: EngineRevision | undefined;
-  }>
-> {
+): Promise<BranchForkState> {
   try {
-    const schemaRow = await storeBackend(store).getActiveSchema(store.graphId);
-    const schemaAnchor =
-      schemaRow === undefined ? undefined : (
-        { version: schemaRow.version, hash: schemaRow.schema_hash }
-      );
-    const lineage = resolveLineage(store);
-    // The session is the working copy's own root backend — the same object
-    // `resolveLineage(store)` just resolved `lineage` off of, and the only
-    // session available this far outside any transaction.
-    const forkRevision =
-      lineage === undefined ? undefined : (
-        await lineage.revision(storeBackend(store))
-      );
-    return { schemaAnchor, forkRevision };
+    return await readBranchForkState(store);
   } catch (error) {
     try {
       await storeBackend(store).close();
@@ -145,4 +127,42 @@ async function captureBranchForkState<G extends GraphDef>(
     }
     throw error;
   }
+}
+
+/**
+ * The fork-time state `captureBranchForkState` reads: the committed schema row
+ * (the merge-time drift anchor) and, when the working copy resolves a `lineage`
+ * source, the engine revision it reports before any write.
+ */
+export type BranchForkState = Readonly<{
+  schemaAnchor: Readonly<{ version: number; hash: string }> | undefined;
+  forkRevision: EngineRevision | undefined;
+}>;
+
+/**
+ * Reads the fork-time state WITHOUT closing the working copy's backend on
+ * failure. The caller that owns the store is responsible for releasing it —
+ * `branch()` uses {@link captureBranchForkState}, which closes on failure as
+ * its own contract; the durable path owns the allocation outright and must
+ * both close the store AND abort the persistent working copy, so it reads
+ * through this seam and performs that cleanup itself rather than having a
+ * close happen behind its back (see `durable-branch.ts`'s `abandonAllocation`).
+ */
+export async function readBranchForkState<G extends GraphDef>(
+  store: GraphBranch<G>["store"],
+): Promise<BranchForkState> {
+  const schemaRow = await storeBackend(store).getActiveSchema(store.graphId);
+  const schemaAnchor =
+    schemaRow === undefined ? undefined : (
+      { version: schemaRow.version, hash: schemaRow.schema_hash }
+    );
+  const lineage = resolveLineage(store);
+  // The session is the working copy's own root backend — the same object
+  // `resolveLineage(store)` just resolved `lineage` off of, and the only
+  // session available this far outside any transaction.
+  const forkRevision =
+    lineage === undefined ? undefined : (
+      await lineage.revision(storeBackend(store))
+    );
+  return { schemaAnchor, forkRevision };
 }

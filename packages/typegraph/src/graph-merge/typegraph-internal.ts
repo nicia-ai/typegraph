@@ -70,7 +70,12 @@ export {
 export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 export { sortedReplacer } from "../schema/canonical";
-export { computeSchemaHash, serializeSchema } from "../schema/serializer";
+export {
+  computeSchemaHash,
+  getGraphDefinitionHash,
+  getSchemaHash,
+  serializeSchema,
+} from "../schema/serializer";
 export {
   type OntologyIntrospection,
   type UniqueIntrospection,
