@@ -1,4 +1,4 @@
-import { describe, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -33,7 +33,7 @@ function assertAcceptedCalls(): void {
       props: { title: "Nicia" },
     },
   ] as const);
-  expectTypeOf(result).resolves.toMatchTypeOf<readonly unknown[]>();
+  expectTypeOf(result).resolves.toExtend<readonly unknown[]>();
 
   void tx.writeNodeUpsertBatch([
     {
@@ -47,6 +47,7 @@ function assertAcceptedCalls(): void {
 
 describe("heterogeneous node upsert batch types", () => {
   it("accepts caller IDs across declared node kinds", () => {
+    expect(graph.id).toBe("heterogeneous-node-upsert-batch-types");
     expectTypeOf(assertAcceptedCalls).toBeFunction();
   });
 });

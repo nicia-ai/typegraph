@@ -4,8 +4,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  createAdapterStoreWithSchema,
   asNodeId,
+  createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
   type RecordedInstant,
@@ -53,7 +53,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
         },
       });
       const backend = createPostgresBackend(db, { vector: false });
-      const [store] = await createAdapterStoreWithSchema(graph, backend, { history: true });
+      const [store] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+      });
       await store.nodes.Person.create(
         { name: "before", age: 1 },
         { id: "person" },
@@ -79,9 +81,11 @@ describe.runIf(process.env["POSTGRES_URL"])(
       );
 
       expect(outcome.result).toHaveLength(2);
-      expect(
-        await store.nodes.Person.getById(asNodeId<typeof Person>("person")),
-      ).toMatchObject({ name: "after", age: undefined });
+      const resurrected = await store.nodes.Person.getById(
+        asNodeId<typeof Person>("person"),
+      );
+      expect(resurrected).toMatchObject({ name: "after" });
+      expect(resurrected).not.toHaveProperty("age");
       expect(
         await store.nodes.Company.getById(asNodeId<typeof Company>("company")),
       ).toMatchObject({ title: "Nicia" });
@@ -141,7 +145,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
         },
       });
       const backend = createPostgresBackend(db, { vector: false });
-      const [store] = await createAdapterStoreWithSchema(graph, backend, { history: true });
+      const [store] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+      });
       queries.length = 0;
 
       await expect(

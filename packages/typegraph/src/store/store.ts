@@ -276,6 +276,7 @@ import {
 } from "./evolution";
 import { scopeBackendExecution } from "./execution-lifetime";
 import { repopulateFulltextInTransaction } from "./fulltext-rebuild";
+import { getSearchableFields } from "./fulltext-sync";
 import {
   createHistoryStoreBackendProjection,
   type HistoryStoreBackend,
@@ -391,7 +392,6 @@ import {
   type StoreRuntime,
 } from "./runtime-port";
 import { StoreSearch } from "./search-facade";
-import { getSearchableFields } from "./fulltext-sync";
 import {
   describeStore,
   type StoreDescription,
@@ -437,9 +437,9 @@ import {
   type GraphEdgeForKinds,
   type GraphNodeCollections,
   type GraphNodeReference,
-  type HistoryStoreOptions,
   type HeterogeneousNodeUpsertInput,
   type HeterogeneousNodeUpsertResult,
+  type HistoryStoreOptions,
   type HistoryTransactionContext,
   type HookContext,
   type LiveStoreOptions,
@@ -450,8 +450,8 @@ import {
   type OperationHookContext,
   type QueryHookContext,
   type QueryOptions,
-  type RecordedReadStoreOptions,
   type RecordedHeterogeneousNodeWriteBatch,
+  type RecordedReadStoreOptions,
   type RecordedRevisionRequest,
   type RecordedScanOptions,
   type RecordedScanPage,

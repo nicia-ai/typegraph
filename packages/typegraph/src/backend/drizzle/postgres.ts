@@ -90,6 +90,7 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
+import { resolveStampedValidityLowerBound } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
@@ -161,9 +162,9 @@ import {
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type EngineRecordedTimeMembers,
+  type HeterogeneousNodeUpsertParams,
   type HybridSearchParams,
   type HybridSearchRow,
-  type HeterogeneousNodeUpsertParams,
   type IndexState,
   type InsertNodeParams,
   INTERNAL_TEMPORARY_WRITES,
@@ -3444,6 +3445,11 @@ function createPostgresOperationBackend(
       ) {
         if (params.entries.length === 0) return [];
         const timestamp = nowIso();
+        const storedLowerBound = resolveStampedValidityLowerBound(
+          undefined,
+          undefined,
+          timestamp,
+        );
         const inputRows = sql.join(
           params.entries.map((entry, index) =>
             sql`(${params.schemaFence.graphId}, ${entry.kind}, ${entry.id}, ${JSON.stringify(entry.props)}, ${index})`,
@@ -3466,7 +3472,7 @@ function createPostgresOperationBackend(
           ), "upserted" AS (
             INSERT INTO ${nodes} AS "target"
               (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at)
-            SELECT graph_id, kind, id, props::jsonb, 1, ${timestamp}, NULL, ${timestamp}, ${timestamp}
+            SELECT graph_id, kind, id, props::jsonb, 1, ${storedLowerBound}, NULL, ${timestamp}, ${timestamp}
             FROM "input_rows" CROSS JOIN "schema_fence"
             ON CONFLICT (graph_id, kind, id) DO UPDATE SET
               props = CASE WHEN "target".deleted_at IS NULL THEN "target".props || EXCLUDED.props ELSE EXCLUDED.props END,
