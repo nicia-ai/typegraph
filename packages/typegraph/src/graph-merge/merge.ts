@@ -4371,7 +4371,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
   };
 }
 
-function reportFromArtifact<G extends GraphDef>(
+export function reportFromArtifact<G extends GraphDef>(
   artifact: MergePlanArtifactV1,
   merged: MergedCounts,
   warnings: readonly string[],
@@ -4410,7 +4410,7 @@ function reportFromArtifact<G extends GraphDef>(
 }
 
 /** Validates a serialized merge plan and binds it to its target graph. */
-async function validateMergePlanForTarget<G extends GraphDef>(
+export async function validateMergePlanForTarget<G extends GraphDef>(
   target: Store<G>,
   input: MergePlanArtifact,
 ): Promise<MergePlanArtifactV1> {

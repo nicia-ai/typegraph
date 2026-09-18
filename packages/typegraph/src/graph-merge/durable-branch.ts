@@ -63,6 +63,7 @@
 import { computeBaseVersion } from "./base-version";
 import { readBranchForkState } from "./branch";
 import { BranchError, describeCause } from "./errors";
+import type { MergePlanArtifactV1 } from "./plan-schema";
 import type { Result } from "./result";
 import { err, ok } from "./result";
 import type {
@@ -71,28 +72,88 @@ import type {
   JsonValue,
   Store,
 } from "./typegraph-internal";
-import {
-  generateId,
-  getGraphDefinitionHash,
-  storeBackend,
-} from "./typegraph-internal";
+import { generateId, getGraphDefinitionHash } from "./typegraph-internal";
 import type {
   BaseVersion,
   BranchId,
   BranchOptions,
   GraphBranch,
+  MergedCounts,
 } from "./types";
 import { asBranchId } from "./types";
-import { coalescedWorkingCopyClose } from "./working-copy";
+import {
+  assertWorkingCopyMatchesBase,
+  coalescedWorkingCopyClose,
+} from "./working-copy";
 
 /**
  * A strategy-defined, JSON-serializable locator for one PERSISTENT working
  * copy. TypeGraph treats it as opaque data: it is carried inside a
  * {@link DurableBranchDescriptor} and handed back to the strategy on reopen and
  * destroy, never inspected. It must survive `JSON.parse(JSON.stringify(...))`
- * unchanged.
+ * unchanged. It MUST be a non-secret identifier: TypeGraph returns it to the
+ * caller. Connection strings, credentials, bearer tokens, and other secrets do
+ * not belong here; keep those in strategy-owned configuration and resolve this
+ * locator there. TypeGraph deliberately omits it from cleanup error details.
  */
-type StrategyStoreDescriptor = JsonValue;
+export type DurableStoreDescriptor = JsonValue;
+
+/**
+ * The write-access guarantee a strategy acquired for one opened working copy.
+ *
+ * `engine-fenced` means the database provides sound cross-client isolation and
+ * change fencing for the full Store planning/apply access pattern, across every
+ * connection and process that could mutate the working copy.
+ * `exclusive` means the host acquired an allocation-wide writer lease before
+ * returning. That lease MUST exclude every other process and backend instance,
+ * not merely serialize calls through one in-memory queue. TypeGraph releases it
+ * after the Store backend closes; a failed release is retried by the next
+ * `GraphBranch.close()` call.
+ *
+ * A backend that provides only `caller-serialized` access MUST use `exclusive`:
+ * each backend instance owns a different in-process queue, so that declaration
+ * alone does not serialize two durable reopen handles or two processes.
+ */
+export type DurableWorkingCopyAccess =
+  | Readonly<{ kind: "engine-fenced" }>
+  | Readonly<{
+      kind: "exclusive";
+      leaseId: string;
+      release: () => Promise<void>;
+    }>;
+
+/** Why an authoritative native merge attempt could not safely run. */
+export type NativeDurableMergeUnsupportedDimension =
+  | "branchOrigin"
+  | "graphScope"
+  | "nativeConflicts"
+  | "planSemantics"
+  | "targetFence";
+
+/**
+ * Result of a host-native merge optimization attempt.
+ *
+ * `unsupported` proves that NO native merge SQL or host mutation ran; TypeGraph
+ * then executes the complete portable plan application. `applied` proves the
+ * strategy atomically validated every dimension named by
+ * {@link DurableWorkingCopyStrategy.merge} and applied exactly the approved
+ * plan. A refusal or uncertain/partial execution throws instead of returning
+ * `unsupported`, because falling back after a possible native write would
+ * double-apply the plan.
+ */
+export type NativeDurableMergeResult =
+  | Readonly<{
+      outcome: "applied";
+      merged: MergedCounts;
+      warnings?: readonly string[] | undefined;
+    }>
+  | Readonly<{
+      outcome: "unsupported";
+      dimensions: readonly [
+        NativeDurableMergeUnsupportedDimension,
+        ...NativeDurableMergeUnsupportedDimension[],
+      ];
+    }>;
 
 /**
  * The complete immutable TypeGraph origin of one durable working copy — every
@@ -136,7 +197,7 @@ export type DurableBranchOrigin = Readonly<{
  * restores the distinction on reopen.
  */
 export type DurableBranchDescriptor<
-  TStoreDescriptor extends StrategyStoreDescriptor = StrategyStoreDescriptor,
+  TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 > = Readonly<{
   /** Stable strategy type tag; must equal the reopening strategy's `type`. */
   kind: string;
@@ -181,9 +242,11 @@ export type DurableBranchDescriptor<
  *      need not verify identity; it MUST tolerate a partially-sealed allocation.
  *      An `abort` failure does NOT mask the original capture/seal failure:
  *      TypeGraph returns a {@link BranchError} preserving that original failure
- *      as its `cause`, exposing the cleanup failure in `details.cleanupFailure`,
- *      and carrying the opaque locator/descriptor in `details.descriptor` so an
- *      operator can retry the release without reading backend internals.
+ *      as its `cause` and reports `details.allocationAborted: false`. The opaque
+ *      locator and raw cleanup error are deliberately NOT copied into error
+ *      details, where application logging could disclose host credentials or
+ *      other strategy-private data. Operator tooling can use the safe TypeGraph
+ *      branch id supplied to `create` to identify the orphan.
  *
  * `reopen` reconnects to an EXISTING working copy identified by `descriptor`
  * without cloning, and returns the complete origin the host PERSISTED for that
@@ -203,7 +266,7 @@ export type DurableBranchDescriptor<
  */
 export type DurableWorkingCopyStrategy<
   G extends GraphDef,
-  TStoreDescriptor extends StrategyStoreDescriptor = StrategyStoreDescriptor,
+  TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 > = Readonly<{
   type: string;
   version: number;
@@ -211,7 +274,13 @@ export type DurableWorkingCopyStrategy<
     baseStore: Store<G>,
     base: BaseVersion,
     branchId: BranchId,
-  ) => Promise<Readonly<{ store: Store<G>; descriptor: TStoreDescriptor }>>;
+  ) => Promise<
+    Readonly<{
+      store: Store<G>;
+      descriptor: TStoreDescriptor;
+      access: DurableWorkingCopyAccess;
+    }>
+  >;
   seal: (
     descriptor: TStoreDescriptor,
     origin: DurableBranchOrigin,
@@ -220,11 +289,48 @@ export type DurableWorkingCopyStrategy<
   reopen: (
     graph: G,
     descriptor: TStoreDescriptor,
-  ) => Promise<Readonly<{ store: Store<G>; origin: DurableBranchOrigin }>>;
+  ) => Promise<
+    Readonly<{
+      store: Store<G>;
+      origin: DurableBranchOrigin;
+      access: DurableWorkingCopyAccess;
+    }>
+  >;
   destroy: (
     descriptor: TStoreDescriptor,
     expectedOrigin: DurableBranchOrigin,
   ) => Promise<void>;
+  /**
+   * Optional authoritative host-native merge optimization.
+   *
+   * Before returning `applied`, the strategy MUST, atomically with the native
+   * merge operation:
+   *
+   * 1. attest `expectedOrigin` against the same allocation `branch.store` is
+   *    connected to;
+   * 2. validate `plan.target` on the exact target branch/session the host will
+   *    merge into;
+   * 3. prove the host-native diff contains exactly `plan.writes`, including all
+   *    TypeGraph sidecars and no rows belonging to another graph or application;
+   * 4. prove the plan needs no canonicalization, repointing, identity, callback,
+   *    provenance, or other semantic work the native merge would bypass; and
+   * 5. report the actual applied counts.
+   *
+   * A whole-database merge primitive therefore qualifies only for an allocation
+   * whose complete physical diff is owned by this graph and is byte-for-byte
+   * equivalent to the approved TypeGraph plan. If any dimension cannot be
+   * proven, return `unsupported` BEFORE executing host SQL; TypeGraph will apply
+   * the plan through its portable transaction path.
+   */
+  merge?:
+    | ((args: Readonly<{
+        target: Store<G>;
+        branch: GraphBranch<G>;
+        descriptor: TStoreDescriptor;
+        expectedOrigin: DurableBranchOrigin;
+        plan: MergePlanArtifactV1;
+      }>) => Promise<NativeDurableMergeResult>)
+    | undefined;
 }>;
 
 /**
@@ -234,7 +340,7 @@ export type DurableWorkingCopyStrategy<
  */
 export type DurableBranch<
   G extends GraphDef,
-  TStoreDescriptor extends StrategyStoreDescriptor = StrategyStoreDescriptor,
+  TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 > = Readonly<{
   branch: GraphBranch<G>;
   descriptor: DurableBranchDescriptor<TStoreDescriptor>;
@@ -262,7 +368,7 @@ export type DurableBranch<
  */
 export async function branchDurable<
   G extends GraphDef,
-  TStoreDescriptor extends StrategyStoreDescriptor = StrategyStoreDescriptor,
+  TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 >(
   baseStore: Store<G>,
   strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>,
@@ -285,6 +391,7 @@ export async function branchDurable<
   let created: Readonly<{
     store: Store<G>;
     descriptor: TStoreDescriptor;
+    access: DurableWorkingCopyAccess;
   }>;
   try {
     created = await strategy.create(baseStore, base, id);
@@ -302,6 +409,7 @@ export async function branchDurable<
   let forkState;
   let definitionHash: string;
   try {
+    await assertWorkingCopyMatchesBase(created.store, base);
     forkState = await readBranchForkState(created.store);
     definitionHash = await getGraphDefinitionHash(created.store.graph);
   } catch (error) {
@@ -326,7 +434,7 @@ export async function branchDurable<
     id,
     base,
     store: created.store,
-    close: coalescedWorkingCopyClose(created.store),
+    close: coalescedDurableClose(created.store, created.access),
     ...(forkState.schemaAnchor === undefined ?
       { schemaAnchor: undefined }
     : { schemaAnchor: forkState.schemaAnchor }),
@@ -382,13 +490,13 @@ export async function branchDurable<
  */
 export async function reopenDurableBranch<
   G extends GraphDef,
-  TStoreDescriptor extends StrategyStoreDescriptor = StrategyStoreDescriptor,
+  TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 >(
   graph: G,
   descriptor: DurableBranchDescriptor<TStoreDescriptor>,
   strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>,
 ): Promise<Result<GraphBranch<G>, BranchError>> {
-  const refusal = descriptorRefusal(descriptor, strategy);
+  const refusal = durableDescriptorRefusal(descriptor, strategy);
   if (refusal !== undefined) return err(refusal);
   if (descriptor.graphId !== graph.id) {
     return err(
@@ -400,7 +508,11 @@ export async function reopenDurableBranch<
       ),
     );
   }
-  let reopened: Readonly<{ store: Store<G>; origin: DurableBranchOrigin }>;
+  let reopened: Readonly<{
+    store: Store<G>;
+    origin: DurableBranchOrigin;
+    access: DurableWorkingCopyAccess;
+  }>;
   try {
     reopened = await strategy.reopen(graph, descriptor.store);
   } catch (error) {
@@ -416,7 +528,7 @@ export async function reopenDurableBranch<
       ),
     );
   }
-  const { store, origin } = reopened;
+  const { access, store, origin } = reopened;
   try {
     if (store.graphId !== graph.id) {
       throw new BranchError(
@@ -430,8 +542,8 @@ export async function reopenDurableBranch<
         },
       );
     }
-    const descriptorOrigin = originOfDescriptor(descriptor);
-    if (!originsEqual(descriptorOrigin, origin)) {
+    const descriptorOrigin = durableOriginOfDescriptor(descriptor);
+    if (!durableOriginsEqual(descriptorOrigin, origin)) {
       throw new BranchError(
         `Durable branch descriptor does not match the working copy the host attested for its store locator: the descriptor's TypeGraph fences disagree with the origin recorded at fork. This is a tampered, relabeled, or wrong-branch descriptor.`,
         {
@@ -444,9 +556,9 @@ export async function reopenDurableBranch<
       );
     }
     await assertGraphMatchesAttestedOrigin(graph, origin);
-    return ok(rebuildBranch(store, descriptor));
+    return ok(rebuildBranch(store, access, descriptor));
   } catch (error) {
-    await closeQuietly(store);
+    await closeDurableQuietly(store, access);
     return err(
       error instanceof BranchError ? error : (
         new BranchError(
@@ -474,15 +586,18 @@ export async function reopenDurableBranch<
  */
 export async function destroyDurableBranch<
   G extends GraphDef,
-  TStoreDescriptor extends StrategyStoreDescriptor = StrategyStoreDescriptor,
+  TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 >(
   descriptor: DurableBranchDescriptor<TStoreDescriptor>,
   strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>,
 ): Promise<Result<void, BranchError>> {
-  const refusal = descriptorRefusal(descriptor, strategy);
+  const refusal = durableDescriptorRefusal(descriptor, strategy);
   if (refusal !== undefined) return err(refusal);
   try {
-    await strategy.destroy(descriptor.store, originOfDescriptor(descriptor));
+    await strategy.destroy(
+      descriptor.store,
+      durableOriginOfDescriptor(descriptor),
+    );
     return ok(undefined);
   } catch (error) {
     return err(
@@ -499,36 +614,38 @@ export async function destroyDurableBranch<
  * connection, then asks the strategy to abort (delete) the persistent working
  * copy.
  *
- * The returned {@link BranchError} is TRUTHFUL about what happened and
- * RECOVERABLE when cleanup failed:
+ * The returned {@link BranchError} is truthful about what happened without
+ * copying strategy-private values into commonly logged error details:
  *
  *   - The original capture/seal failure is preserved as `cause`.
  *   - `details.allocationAborted` records whether `strategy.abort` actually
  *     succeeded, and the message never claims a failed abort removed the
  *     allocation.
- *   - A failed abort is exposed as `details.cleanupFailure` (the strategy's own
- *     error — TypeGraph does not swallow it), alongside the opaque
- *     `details.descriptor` the strategy needs to retry the release. The
- *     descriptor is the strategy's own locator, so exposing it leaks no
- *     backend internals TypeGraph owns.
+ *   - The opaque locator and raw cleanup error are deliberately omitted from
+ *     `details`, because framework errors are commonly logged. Strategy
+ *     operator tooling uses the safe `branchId` and `strategyType` instead.
  */
 async function abandonAllocation<
   G extends GraphDef,
-  TStoreDescriptor extends StrategyStoreDescriptor,
+  TStoreDescriptor extends DurableStoreDescriptor,
 >(
   strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>,
-  created: Readonly<{ store: Store<G>; descriptor: TStoreDescriptor }>,
+  created: Readonly<{
+    store: Store<G>;
+    descriptor: TStoreDescriptor;
+    access: DurableWorkingCopyAccess;
+  }>,
   branchId: BranchId,
   cause: unknown,
 ): Promise<BranchError> {
-  await closeQuietly(created.store);
-  let cleanupFailure: unknown;
+  await closeDurableQuietly(created.store, created.access);
   let aborted = false;
   try {
     await strategy.abort(created.descriptor);
     aborted = true;
-  } catch (error) {
-    cleanupFailure = error;
+  } catch {
+    // The raw strategy error may contain connection details. Report the safe
+    // cleanup status below without copying that value into a framework error.
   }
   return new BranchError(
     aborted ?
@@ -538,15 +655,14 @@ async function abandonAllocation<
       cause,
       details: {
         branchId,
-        descriptor: created.descriptor,
+        strategyType: strategy.type,
         allocationAborted: aborted,
-        ...(cleanupFailure === undefined ? {} : { cleanupFailure }),
       },
       ...(aborted ?
         {}
       : {
           suggestion:
-            "The strategy's abort failed, so the persistent allocation named by `details.descriptor` may still exist. Retry `strategy.abort` with that descriptor, or destroy the allocation through the strategy's own operator tooling.",
+            "The strategy's abort failed, so the persistent allocation for `details.branchId` may still exist. Inspect or remove it through the strategy's operator tooling.",
         }),
     },
   );
@@ -567,7 +683,7 @@ type DescriptorOwner = Readonly<{ type: string; version: number }>;
  * or malformed envelope must be caught before any host is touched. These checks
  * are about FORMAT only; fence soundness is decided against host attestation.
  */
-function descriptorRefusal(
+export function durableDescriptorRefusal(
   descriptor: unknown,
   strategy: DescriptorOwner,
 ): BranchError | undefined {
@@ -651,7 +767,9 @@ function descriptorRefusal(
 }
 
 /** Extracts the TypeGraph-owned origin from a descriptor envelope. */
-function originOfDescriptor<TStoreDescriptor extends StrategyStoreDescriptor>(
+export function durableOriginOfDescriptor<
+  TStoreDescriptor extends DurableStoreDescriptor,
+>(
   descriptor: DurableBranchDescriptor<TStoreDescriptor>,
 ): DurableBranchOrigin {
   return {
@@ -672,7 +790,7 @@ function originOfDescriptor<TStoreDescriptor extends StrategyStoreDescriptor>(
  * so a descriptor that dropped the key disagrees with a host that persisted the
  * anchor.
  */
-function originsEqual(
+export function durableOriginsEqual(
   descriptor: DurableBranchOrigin,
   attested: DurableBranchOrigin,
 ): boolean {
@@ -744,13 +862,14 @@ async function assertGraphMatchesAttestedOrigin<G extends GraphDef>(
  */
 function rebuildBranch<G extends GraphDef>(
   store: Store<G>,
-  descriptor: DurableBranchDescriptor<StrategyStoreDescriptor>,
+  access: DurableWorkingCopyAccess,
+  descriptor: DurableBranchDescriptor<DurableStoreDescriptor>,
 ): GraphBranch<G> {
   return {
     id: descriptor.branchId,
     base: descriptor.base,
     store,
-    close: coalescedWorkingCopyClose(store),
+    close: coalescedDurableClose(store, access),
     schemaAnchor: descriptor.schemaAnchor,
     ...(descriptor.forkRevision === undefined ?
       {}
@@ -759,15 +878,48 @@ function rebuildBranch<G extends GraphDef>(
 }
 
 /**
+ * Releases the opened backend and then its host-wide writer lease, once.
+ *
+ * The backend closes first so no live connection survives after the exclusive
+ * lease becomes available to another process. Each completed phase is retained
+ * across retries: if lease release fails, the next `close()` retries only that
+ * release and never calls a non-idempotent backend `close()` twice.
+ */
+function coalescedDurableClose<G extends GraphDef>(
+  store: Store<G>,
+  access: DurableWorkingCopyAccess,
+): () => Promise<void> {
+  const closeBackend = coalescedWorkingCopyClose(store);
+  let complete = false;
+  let accessReleased = false;
+  let inFlight: Promise<void> | undefined;
+  return async () => {
+    if (complete) return;
+    inFlight ??= (async () => {
+      await closeBackend();
+      if (access.kind === "exclusive" && !accessReleased) {
+        await access.release();
+        accessReleased = true;
+      }
+      complete = true;
+    })().finally(() => {
+      inFlight = undefined;
+    });
+    await inFlight;
+  };
+}
+
+/**
  * Releases a store's backend, swallowing a close failure so it cannot mask the
  * refusal being returned. The store belongs to this function on every failure
  * path inside `reopenDurableBranch` and `abandonAllocation`.
  */
-async function closeQuietly<G extends GraphDef>(
+async function closeDurableQuietly<G extends GraphDef>(
   store: Store<G>,
+  access: DurableWorkingCopyAccess,
 ): Promise<void> {
   try {
-    await storeBackend(store).close();
+    await coalescedDurableClose(store, access)();
   } catch {
     // Intentionally ignored — surface the original refusal.
   }

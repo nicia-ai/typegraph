@@ -86,11 +86,15 @@ TypeGraph ships semantic graph merge as a dedicated subpath:
 
 ```ts
 import {
+  applyDurableMergePlan,
   applyMergePlan,
   applyMergePlanInTransaction,
   branch,
+  branchDurable,
+  destroyDurableBranch,
   merge,
   planMerge,
+  reopenDurableBranch,
 } from "@nicia-ai/typegraph/graph-merge";
 ```
 
@@ -136,6 +140,17 @@ before other target-graph writes, then add graph writes or SQL and await the
 caller-owned commit. It throws on failure and leaves rollback and whole-
 transaction retry to the caller. This path refuses persisted provenance, while
 report-only provenance remains available.
+
+Long-running workflows can use `branchDurable()` to allocate a persistent
+working copy, serialize its descriptor, close the current connection, and
+reattach from a later process with `reopenDurableBranch()`. A
+`DurableWorkingCopyStrategy` owns the database's branch lifecycle and declares
+the cross-client fencing or exclusive writer lease that keeps planning sound.
+After review, `applyDurableMergePlan()` may use a strategy's native database
+merge only when it proves the host diff is exactly the approved TypeGraph plan;
+otherwise it applies the complete portable plan. Use `destroyDurableBranch()`
+for explicit teardown. The guide documents the requirements a branch-native
+database strategy must satisfy.
 
 It lives in the core package because the primitive is defined over TypeGraph
 stores, schemas, indexes, backends, and ontology semantics rather than as a

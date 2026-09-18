@@ -46,6 +46,7 @@ import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import type { GraphBackend } from "../../src/backend/types";
 import type { EngineRevision, LineageMembers } from "../../src/backend/types";
 import {
+  applyDurableMergePlan,
   applyMergePlan,
   asBaseVersion,
   asBranchId,
@@ -112,6 +113,7 @@ const FIXED_LINEAGE: LineageMembers = {
   revision: () => Promise.resolve(FIXED_REVISION),
   changesSince: () => Promise.resolve({ kind: "unbounded" }),
 };
+const ENGINE_FENCED_ACCESS = { kind: "engine-fenced" } as const;
 
 /** Simulates a JSON store round-trip of a descriptor. */
 function wire<T>(value: T): T {
@@ -223,6 +225,7 @@ function createFakeDurableHost(
             revisionTracking: true,
           }),
           descriptor: { locator },
+          access: ENGINE_FENCED_ACCESS,
         };
       }
       const seed = cloneWorkingCopyStrategy<G>(() =>
@@ -236,7 +239,11 @@ function createFakeDurableHost(
           .prepare("DELETE FROM typegraph_schema_versions WHERE graph_id = ?")
           .run(baseStore.graphId);
       }
-      return { store, descriptor: { locator } };
+      return {
+        store,
+        descriptor: { locator },
+        access: ENGINE_FENCED_ACCESS,
+      };
     },
     seal: async (descriptor, origin) => {
       if (sealFailure !== undefined) {
@@ -271,7 +278,7 @@ function createFakeDurableHost(
       const store = createStore(reopenedGraph, openDurableBackend(database), {
         revisionTracking: true,
       });
-      return { store, origin };
+      return { store, origin, access: ENGINE_FENCED_ACCESS };
     },
     destroy: async (descriptor, expectedOrigin) => {
       const database = requireDatabase(descriptor.locator);
@@ -382,7 +389,7 @@ function createFileBackedStrategy(
         Promise.resolve(openFileBackend(locator)),
       );
       const store = await seed.create(baseStore, base);
-      return { store, descriptor: locator };
+      return { store, descriptor: locator, access: ENGINE_FENCED_ACCESS };
     },
     seal: async (locator, origin) => {
       await writeFile(originPathOf(locator), JSON.stringify(origin), "utf8");
@@ -395,7 +402,7 @@ function createFileBackedStrategy(
       const store = createStore(reopenedGraph, openFileBackend(locator), {
         revisionTracking: true,
       });
-      return { store, origin };
+      return { store, origin, access: ENGINE_FENCED_ACCESS };
     },
     destroy: async (locator, expectedOrigin) => {
       // Atomic claim: rename the allocation out of its public locator BEFORE
@@ -502,10 +509,14 @@ describe("durable branch", () => {
       "Bob (durable)",
     );
 
-    const applied = await applyMergePlan(
-      baseStore,
-      wire(unwrap(await planMerge(baseStore, [reopened]))),
-    );
+    const plan = wire(unwrap(await planMerge(baseStore, [reopened])));
+    const applied = await applyDurableMergePlan({
+      target: baseStore,
+      branch: reopened,
+      descriptor: created.descriptor,
+      strategy: host.strategy,
+      plan,
+    });
     if (isErr(applied)) throw applied.error;
 
     expect((await baseStore.nodes.Person.getById(aliceId))?.name).toBe(
@@ -516,6 +527,109 @@ describe("durable branch", () => {
     );
 
     await reopened.close();
+  });
+
+  it("uses an authoritative native merge result when the strategy proves the complete plan", async () => {
+    const { baseStore, aliceId } = await seedBase();
+    let nativeCalls = 0;
+    const nativeStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
+      ...host.strategy,
+      merge: async ({ target, plan }) => {
+        nativeCalls += 1;
+        // The fake host has no native SQL primitive, so its authoritative test
+        // command delegates to the same exact-plan applier and reports what it
+        // actually committed. A database-native strategy replaces this body
+        // with its own diff-equivalence proof and merge primitive.
+        const applied = await applyMergePlan(target, plan);
+        if (isErr(applied)) throw applied.error;
+        return { outcome: "applied", merged: applied.data.merged };
+      },
+    };
+    const created = unwrap(await branchDurable(baseStore, nativeStrategy));
+    await created.branch.store.nodes.Person.update(aliceId, {
+      name: "native",
+    });
+    const plan = unwrap(await planMerge(baseStore, [created.branch]));
+
+    const applied = await applyDurableMergePlan({
+      target: baseStore,
+      branch: created.branch,
+      descriptor: created.descriptor,
+      strategy: nativeStrategy,
+      plan,
+    });
+
+    expect(isOk(applied)).toBe(true);
+    expect(nativeCalls).toBe(1);
+    expect((await baseStore.nodes.Person.getById(aliceId))?.name).toBe(
+      "native",
+    );
+    await created.branch.close();
+  });
+
+  it("re-enters the complete portable apply when native merge executes nothing and returns unsupported", async () => {
+    const { baseStore, aliceId } = await seedBase();
+    let nativeCalls = 0;
+    const nativeStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
+      ...host.strategy,
+      merge: () => {
+        nativeCalls += 1;
+        return Promise.resolve({
+          outcome: "unsupported",
+          dimensions: ["planSemantics"],
+        });
+      },
+    };
+    const created = unwrap(await branchDurable(baseStore, nativeStrategy));
+    await created.branch.store.nodes.Person.update(aliceId, {
+      name: "portable fallback",
+    });
+    const plan = unwrap(await planMerge(baseStore, [created.branch]));
+
+    const applied = await applyDurableMergePlan({
+      target: baseStore,
+      branch: created.branch,
+      descriptor: created.descriptor,
+      strategy: nativeStrategy,
+      plan,
+    });
+
+    expect(isOk(applied)).toBe(true);
+    expect(nativeCalls).toBe(1);
+    expect((await baseStore.nodes.Person.getById(aliceId))?.name).toBe(
+      "portable fallback",
+    );
+    await created.branch.close();
+  });
+
+  it("does not replay the portable plan after an uncertain native merge failure", async () => {
+    const { baseStore, aliceId } = await seedBase();
+    let nativeCalls = 0;
+    const nativeStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
+      ...host.strategy,
+      merge: () => {
+        nativeCalls += 1;
+        throw new Error("native outcome is unknown");
+      },
+    };
+    const created = unwrap(await branchDurable(baseStore, nativeStrategy));
+    await created.branch.store.nodes.Person.update(aliceId, {
+      name: "must not replay",
+    });
+    const plan = unwrap(await planMerge(baseStore, [created.branch]));
+
+    const applied = await applyDurableMergePlan({
+      target: baseStore,
+      branch: created.branch,
+      descriptor: created.descriptor,
+      strategy: nativeStrategy,
+      plan,
+    });
+
+    expect(isErr(applied)).toBe(true);
+    expect(nativeCalls).toBe(1);
+    expect((await baseStore.nodes.Person.getById(aliceId))?.name).toBe("Alice");
+    await created.branch.close();
   });
 
   it("refuses a wrong strategy, wrong descriptor version, malformed envelope, and wrong graph", async () => {
@@ -769,7 +883,7 @@ describe("durable branch", () => {
     expect(unmanaged.liveLocators()).toEqual([]);
   });
 
-  it("reports a failed abort truthfully: both failures and the retry locator are exposed, and the orphan is still abortable", async () => {
+  it("reports a failed abort without exposing strategy-private locator or error data", async () => {
     const { baseStore } = await seedBase();
     const sealFailure = new Error("seal boom");
     const abortFailure = new Error("abort boom");
@@ -784,25 +898,21 @@ describe("durable branch", () => {
     expect(isErr(result)).toBe(true);
     if (!isErr(result)) return;
     expect(result.error).toBeInstanceOf(BranchError);
-    // The original capture/seal failure is the cause; the cleanup failure is
-    // surfaced separately rather than swallowed.
+    // The original capture/seal failure remains the cause. The cleanup error
+    // and opaque locator are not copied into commonly-logged error details.
     expect(result.error.cause).toBe(sealFailure);
     expect(result.error.details["allocationAborted"]).toBe(false);
-    expect(result.error.details["cleanupFailure"]).toBe(abortFailure);
-    // The opaque locator is recoverable, and the message never claims a failed
-    // abort removed the allocation.
-    expect(result.error.details["descriptor"]).toEqual({
-      locator: "working-copy-1",
-    });
+    expect(result.error.details["strategyType"]).toBe(host.strategy.type);
+    expect(result.error.details).not.toHaveProperty("cleanupFailure");
+    expect(result.error.details).not.toHaveProperty("descriptor");
     expect(result.error.message).toContain("could NOT abort");
     expect(host.aborted()).toEqual([]);
     expect(host.liveLocators()).toEqual(["working-copy-1"]);
     expect(host.connectionCloses()).toBe(1);
 
-    // The exposed descriptor is exactly what an operator retries abort with.
-    await host.strategy.abort(
-      result.error.details["descriptor"] as LocatorDescriptor,
-    );
+    // Strategy-owned operator tooling can still remove the orphan without the
+    // framework publishing its locator in a general-purpose error object.
+    await host.strategy.abort({ locator: "working-copy-1" });
     expect(host.liveLocators()).toEqual([]);
   });
 
@@ -935,6 +1045,136 @@ describe("durable branch", () => {
     }
     expect(host.aborted()).toEqual(["working-copy-1"]);
     expect(host.liveLocators()).toEqual([]);
+    expect(host.connectionCloses()).toBe(1);
+  });
+
+  it("refuses and aborts a host fork that does not match the stamped base", async () => {
+    const { baseStore } = await seedBase();
+    const mismatchedStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
+      ...host.strategy,
+      create: async (source, base, branchId) => {
+        const created = await host.strategy.create(source, base, branchId);
+        await created.store.nodes.Person.create({ name: "not in the base" });
+        return created;
+      },
+    };
+
+    const result = await branchDurable(baseStore, mismatchedStrategy);
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      const cause = result.error.cause;
+      expect(cause).toBeInstanceOf(BranchError);
+      if (cause instanceof BranchError)
+        expect(cause.message).toContain("does not match its base");
+    }
+    expect(host.aborted()).toEqual(["working-copy-1"]);
+    expect(host.liveLocators()).toEqual([]);
+    expect(host.connectionCloses()).toBe(1);
+  });
+
+  it("lets a strategy hold one allocation-wide writer lease until close", async () => {
+    const { baseStore } = await seedBase();
+    let leased = false;
+    let releases = 0;
+    const exclusiveStrategy: DurableWorkingCopyStrategy<
+      G,
+      LocatorDescriptor
+    > = {
+      ...host.strategy,
+      create: async (source, base, branchId) => {
+        if (leased) throw new Error("working copy is already leased");
+        const created = await host.strategy.create(source, base, branchId);
+        leased = true;
+        return {
+          ...created,
+          access: {
+            kind: "exclusive",
+            leaseId: "lease-1",
+            release: () => {
+              leased = false;
+              releases += 1;
+              return Promise.resolve();
+            },
+          },
+        };
+      },
+      reopen: async (reopenedGraph, descriptor) => {
+        if (leased) throw new Error("working copy is already leased");
+        const reopened = await host.strategy.reopen(reopenedGraph, descriptor);
+        leased = true;
+        return {
+          ...reopened,
+          access: {
+            kind: "exclusive",
+            leaseId: `lease-${String(releases + 1)}`,
+            release: () => {
+              leased = false;
+              releases += 1;
+              return Promise.resolve();
+            },
+          },
+        };
+      },
+    };
+
+    const created = unwrap(await branchDurable(baseStore, exclusiveStrategy));
+    expect(leased).toBe(true);
+    await created.branch.close();
+    expect(leased).toBe(false);
+
+    const first = unwrap(
+      await reopenDurableBranch(
+        graph,
+        created.descriptor,
+        exclusiveStrategy,
+      ),
+    );
+    const concurrent = await reopenDurableBranch(
+      graph,
+      created.descriptor,
+      exclusiveStrategy,
+    );
+    expect(isErr(concurrent)).toBe(true);
+    await first.close();
+    await first.close();
+    expect(releases).toBe(2);
+  });
+
+  it("retries a failed exclusive lease release without closing the backend twice", async () => {
+    const { baseStore } = await seedBase();
+    let releaseAttempts = 0;
+    const exclusiveStrategy: DurableWorkingCopyStrategy<
+      G,
+      LocatorDescriptor
+    > = {
+      ...host.strategy,
+      create: async (source, base, branchId) => {
+        const created = await host.strategy.create(source, base, branchId);
+        return {
+          ...created,
+          access: {
+            kind: "exclusive",
+            leaseId: "retrying-lease",
+            release: () => {
+              releaseAttempts += 1;
+              if (releaseAttempts === 1)
+                return Promise.reject(new Error("lease release failed"));
+              return Promise.resolve();
+            },
+          },
+        };
+      },
+    };
+    const created = unwrap(await branchDurable(baseStore, exclusiveStrategy));
+
+    await expect(created.branch.close()).rejects.toThrow(
+      "lease release failed",
+    );
+    expect(host.connectionCloses()).toBe(1);
+    await created.branch.close();
+
+    expect(releaseAttempts).toBe(2);
     expect(host.connectionCloses()).toBe(1);
   });
 

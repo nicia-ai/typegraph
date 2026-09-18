@@ -73,7 +73,6 @@ export { sortedReplacer } from "../schema/canonical";
 export {
   computeSchemaHash,
   getGraphDefinitionHash,
-  getSchemaHash,
   serializeSchema,
 } from "../schema/serializer";
 export {

@@ -11,11 +11,16 @@ import {
   type TransactionContext,
 } from "..";
 import {
+  applyDurableMergePlan,
   applyMergePlan,
   applyMergePlanInTransaction,
   BranchError,
+  branchDurable,
   type CandidateDiagnostics,
   type EntityResolution,
+  destroyDurableBranch,
+  type DurableBranchDescriptor,
+  type DurableWorkingCopyStrategy,
   type GraphBranch,
   type MakeBackend,
   type MatchEvidence,
@@ -43,6 +48,7 @@ import {
   openProvenanceStore,
   planMerge,
   planMergeIncremental,
+  reopenDurableBranch,
   planCandidateWriteSetReview,
   revalidateCandidateWriteSetReview,
   type ProvenanceGraph,
@@ -103,6 +109,30 @@ expectType<ReconcileTypesMode>(normalized.reconcileTypes);
 expectType<Promise<Result<GraphBranch<typeof graph>, BranchError>>>(
   branch(store, makeBackend),
 );
+declare const durableDescriptor: DurableBranchDescriptor<
+  Readonly<{ branchName: string }>
+>;
+declare const durableStrategy: DurableWorkingCopyStrategy<
+  typeof graph,
+  Readonly<{ branchName: string }>
+>;
+expectType<
+  Promise<
+    Result<
+      Readonly<{
+        branch: GraphBranch<typeof graph>;
+        descriptor: DurableBranchDescriptor<Readonly<{ branchName: string }>>;
+      }>,
+      BranchError
+    >
+  >
+>(branchDurable(store, durableStrategy));
+expectType<Promise<Result<GraphBranch<typeof graph>, BranchError>>>(
+  reopenDurableBranch(graph, durableDescriptor, durableStrategy),
+);
+expectType<Promise<Result<void, BranchError>>>(
+  destroyDurableBranch(durableDescriptor, durableStrategy),
+);
 expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
   merge(store, branches, options),
 );
@@ -121,6 +151,15 @@ expectType<Promise<Result<MergePlanArtifact, MergeError>>>(
 declare const mergePlan: MergePlanArtifact;
 expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
   applyMergePlan(store, mergePlan),
+);
+expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+  applyDurableMergePlan({
+    target: store,
+    branch: branches[0]!,
+    descriptor: durableDescriptor,
+    strategy: durableStrategy,
+    plan: mergePlan,
+  }),
 );
 expectError(applyMergePlan(store, {} as unknown));
 expectError((mergePlan.digest = "tampered"));
