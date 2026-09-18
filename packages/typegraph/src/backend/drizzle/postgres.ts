@@ -1571,6 +1571,10 @@ export function buildPostgresEngineProfile(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
     sinceIndexDdl: [
+      generatePgCreateTableSQL(tables.recordedNodes),
+      ...generatePgCreateIndexSQL(tables.recordedNodes),
+      generatePgCreateTableSQL(tables.recordedEdges),
+      ...generatePgCreateIndexSQL(tables.recordedEdges),
       generatePgCreateTableSQL(tables.recordedIdentityAssertions),
       ...generatePgCreateIndexSQL(tables.recordedIdentityAssertions),
       ...sinceIndexAdoptionDdl({

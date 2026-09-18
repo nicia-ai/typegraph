@@ -1653,6 +1653,10 @@ export function buildSqliteEngineProfile(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generateSqliteCreateTableSQL(tables.fences),
     sinceIndexDdl: [
+      generateSqliteCreateTableSQL(tables.recordedNodes),
+      ...generateSqliteCreateIndexSQL(tables.recordedNodes),
+      generateSqliteCreateTableSQL(tables.recordedEdges),
+      ...generateSqliteCreateIndexSQL(tables.recordedEdges),
       generateSqliteCreateTableSQL(tables.recordedIdentityAssertions),
       ...generateSqliteCreateIndexSQL(tables.recordedIdentityAssertions),
       ...sinceIndexAdoptionDdl({

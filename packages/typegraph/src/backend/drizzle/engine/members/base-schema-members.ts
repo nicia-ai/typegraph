@@ -79,12 +79,12 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    */
   ensureEdgeMatchIdentityStorage: () => Promise<void>;
   /**
-   * DDL for version-3 adoption: ensure recorded identity-assertions storage
-   * and its structural indexes before creating the three changed-since indexes.
-   * Older installations can lack the identity-assertions relation even with a
-   * version-1 or version-2 marker: it originally shipped only in bootstrap DDL.
-   * Dialect factories generate its table and index DDL from the same schema
-   * definition as bootstrap, then append `sinceIndexAdoptionDdl` for the
+   * DDL for version-3 adoption: ensure recorded node, edge, and identity-assertion
+   * storage and its structural indexes before creating the changed-since indexes.
+   * Older installations can lack these relations even with a version-1 or
+   * version-2 marker: they originally shipped only in bootstrap DDL.
+   * Dialect factories generate their table and index DDL from the same schema
+   * definitions as bootstrap, then append `sinceIndexAdoptionDdl` for the
    * `(recordedNodes, recordedEdges, recordedIdentityAssertions)` since indexes.
    * Fresh bootstrap already creates all of this storage, so the statements
    * are only exercised by offline `adopt()`.
