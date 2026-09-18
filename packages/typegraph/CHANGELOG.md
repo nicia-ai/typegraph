@@ -1,5 +1,21 @@
 # @nicia-ai/typegraph
 
+## 0.66.1
+
+### Highlights
+
+TypeGraph 0.66.1 fixes store-opening failures when upgrading older SQLite or PostgreSQL databases that never received the recorded-node and recorded-edge tables. Base-schema adoption now creates the missing tables and indexes while preserving existing graph data and custom table names, including when recorded history is not enabled.
+
+### Upgrade notes
+
+- If an earlier upgrade failed with a missing recorded-table error, deploy 0.66.1 and retry your normal privileged store-open or `backend.adoptBaseSchema()` path. Adoption resumes from the installed marker, including databases left at base-schema version 2.
+- After upgrading and verifying successful adoption, remove any extra `bootstrapTables()` call added specifically to work around this failure. Keep bootstrap calls required by your normal provisioning workflow; runtime-only, least-privilege store opening still does not perform adoption.
+- Roll affected deployments forward. Do not roll back to 0.56.0 after the base-schema marker has advanced beyond version 1: that release refuses the newer marker.
+
+### Patch Changes
+
+- [#724](https://github.com/nicia-ai/typegraph/pull/724) [`e3ebddd`](https://github.com/nicia-ai/typegraph/commit/e3ebddda8f37833255dcdd75cd38b5f24a02c2e5) Thanks [@pdlug](https://github.com/pdlug)! - Fix upgrades from legacy databases that lack recorded-node or recorded-edge tables. Version-3 base-schema adoption now creates these tables and their structural indexes before installing changed-since indexes on SQLite and PostgreSQL, preserving existing data and custom table names. Failed upgrades left at base-schema version 2 can retry through normal adoption without an explicit `bootstrapTables()` workaround.
+
 ## 0.66.0
 
 ### Highlights
