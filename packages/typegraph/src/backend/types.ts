@@ -741,7 +741,10 @@ export type InsertNodeParams = Readonly<{
 export type HeterogeneousNodeUpsertEntry = Readonly<{
   kind: string;
   id: string;
+  /** Complete create-parsed document used for inserts and resurrections. */
   props: Readonly<Record<string, unknown>>;
+  /** Caller patch used only when the target row is already live. */
+  updateProps: Readonly<Record<string, unknown>>;
 }>;
 
 /** Exact-session input for the PostgreSQL heterogeneous node upsert lowering. */

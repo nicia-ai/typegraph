@@ -11,7 +11,7 @@ import {
   type RecordedInstant,
 } from "../../../src";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
-import { ValidationError } from "../../../src/errors";
+import { ConfigurationError, ValidationError } from "../../../src/errors";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
@@ -21,9 +21,19 @@ const Person = defineNode("Person", {
 const Company = defineNode("Company", {
   schema: z.object({ title: z.string() }),
 });
+const ConfiguredPerson = defineNode("ConfiguredPerson", {
+  schema: z.object({
+    name: z.string().transform((value) => value.trim()),
+    state: z.string().default("new"),
+  }),
+});
 const graph = defineGraph({
   id: "heterogeneous-node-upsert-batch",
-  nodes: { Person: { type: Person }, Company: { type: Company } },
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+    ConfiguredPerson: { type: ConfiguredPerson },
+  },
   edges: {},
 });
 const pool = new Pool({ connectionString: TEST_DATABASE_URL });
@@ -133,6 +143,112 @@ describe.runIf(process.env["POSTGRES_URL"])(
       await expect(
         store.nodes.Person.getById(asNodeId<typeof Person>("person")),
       ).resolves.toMatchObject({ name: "preserved", age: 2 });
+    });
+
+    it("preserves omitted defaulted fields on live rows while applying defaults on creates and resurrections", async () => {
+      const db = drizzle(pool);
+      const backend = createPostgresBackend(db, { vector: false });
+      const [store] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+      });
+      await store.nodes.ConfiguredPerson.create(
+        { name: "live", state: "preserved" },
+        { id: "live" },
+      );
+
+      await db.transaction(async (pgTx) =>
+        store.withRecordedTransaction(pgTx, async (tx) =>
+          tx.writeNodeUpsertBatch([
+            {
+              kind: "ConfiguredPerson",
+              id: asNodeId<typeof ConfiguredPerson>("live"),
+              props: { name: "  updated  " },
+            },
+            {
+              kind: "ConfiguredPerson",
+              id: asNodeId<typeof ConfiguredPerson>("created"),
+              props: { name: "  created  " },
+            },
+          ] as const),
+        ),
+      );
+
+      await expect(
+        store.nodes.ConfiguredPerson.getById(
+          asNodeId<typeof ConfiguredPerson>("live"),
+        ),
+      ).resolves.toMatchObject({ name: "updated", state: "preserved" });
+      await expect(
+        store.nodes.ConfiguredPerson.getById(
+          asNodeId<typeof ConfiguredPerson>("created"),
+        ),
+      ).resolves.toMatchObject({ name: "created", state: "new" });
+
+      await store.nodes.ConfiguredPerson.delete(
+        asNodeId<typeof ConfiguredPerson>("live"),
+      );
+      await db.transaction(async (pgTx) =>
+        store.withRecordedTransaction(pgTx, async (tx) =>
+          tx.writeNodeUpsertBatch([
+            {
+              kind: "ConfiguredPerson",
+              id: asNodeId<typeof ConfiguredPerson>("live"),
+              props: { name: "  resurrected  " },
+            },
+          ] as const),
+        ),
+      );
+      await expect(
+        store.nodes.ConfiguredPerson.getById(
+          asNodeId<typeof ConfiguredPerson>("live"),
+        ),
+      ).resolves.toMatchObject({ name: "resurrected", state: "new" });
+    });
+
+    it("refuses an over-budget batch before issuing its CTE", async () => {
+      const queries: string[] = [];
+      const db = drizzle(pool, {
+        logger: {
+          logQuery(query) {
+            queries.push(query);
+          },
+        },
+      });
+      const backend = createPostgresBackend(db, {
+        capabilities: { maxBindParameters: 10 },
+        vector: false,
+      });
+      const [store] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+      });
+      queries.length = 0;
+
+      await expect(
+        db.transaction(async (pgTx) =>
+          store.withRecordedTransaction(pgTx, async (tx) =>
+            tx.writeNodeUpsertBatch([
+              {
+                kind: "Person",
+                id: asNodeId<typeof Person>("over-budget"),
+                props: { name: "too many binds" },
+              },
+            ] as const),
+          ),
+        ),
+      ).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof ConfigurationError &&
+          error.details["capability"] === "maxBindParameters" &&
+          error.details["maxBindParameters"] === 10 &&
+          error.details["parameterCount"] === 11,
+      );
+
+      expect(
+        queries.some((query) => query.includes('WITH "schema_fence"')),
+      ).toBe(false);
+      await expect(
+        store.nodes.Person.getById(asNodeId<typeof Person>("over-budget")),
+      ).resolves.toBeUndefined();
     });
 
     it("refuses malformed and repeated entries before the CTE runs", async () => {

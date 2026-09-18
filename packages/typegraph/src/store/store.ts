@@ -59,6 +59,10 @@ import {
 } from "../backend/capabilities/write-fence";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
+  heterogeneousNodeUpsertBatchBindParameterCount,
+  heterogeneousNodeUpsertBatchFitsBindBudget,
+} from "../backend/heterogeneous-node-upsert-batch";
+import {
   createEdgeRowMapper,
   createNodeRowMapper,
   POSTGRES_ROW_MAPPER_CONFIG,
@@ -1249,6 +1253,25 @@ async function assertEvolvedSchemaRequiredKindsEmpty(
 }
 
 const IDENTITY_FACADES = new WeakMap<object, unknown>();
+
+/**
+ * Keeps a live upsert patch to exactly the keys the caller supplied, while
+ * retaining field-level Zod normalization from the complete create parse.
+ * Defaults only exist in `parsedCreateProps` because a caller omitted a key,
+ * so they cannot leak into the live-row merge.
+ */
+function callerSuppliedParsedNodeProps(
+  inputProps: Readonly<Record<string, unknown>>,
+  parsedCreateProps: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const updateProps: Record<string, unknown> = {};
+  for (const property of Object.keys(inputProps)) {
+    if (hasOwnKey(parsedCreateProps, property)) {
+      updateProps[property] = parsedCreateProps[property];
+    }
+  }
+  return updateProps;
+}
 
 class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   readonly [STORE_RUNTIME]: StoreRuntime<G>;
@@ -4613,16 +4636,41 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         );
       }
       seen.add(key);
+      const props = validateNodeProps(registration.type.schema, entry.props, {
+        kind: entry.kind,
+        id: entry.id,
+        operation: "create",
+      });
       return {
         kind: entry.kind,
         id: entry.id,
-        props: validateNodeProps(registration.type.schema, entry.props, {
-          kind: entry.kind,
-          id: entry.id,
-          operation: "create",
-        }),
+        props,
+        updateProps: callerSuppliedParsedNodeProps(entry.props, props),
       };
     });
+    if (
+      !heterogeneousNodeUpsertBatchFitsBindBudget(
+        validated.length,
+        txBackend.capabilities.maxBindParameters,
+      )
+    ) {
+      const maxBindParameters = txBackend.capabilities.maxBindParameters;
+      const parameterCount = heterogeneousNodeUpsertBatchBindParameterCount(
+        validated.length,
+      );
+      throw new ConfigurationError(
+        `writeNodeUpsertBatch uses ${parameterCount} bound parameters, exceeding this backend's limit of ${maxBindParameters}.`,
+        {
+          capability: "maxBindParameters",
+          maxBindParameters,
+          parameterCount,
+        },
+        {
+          suggestion:
+            "Split the operation into smaller batches before retrying.",
+        },
+      );
+    }
     receiptRecorder?.assertWritable();
     if (txBackend.upsertHeterogeneousNodes === undefined) {
       throw new UnsupportedBackendCapabilityError(
