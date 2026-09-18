@@ -1594,6 +1594,119 @@ wait — and commit a long-running workflow across multiple `store.transaction`
 calls instead of holding one open across such a wait.
 :::
 
+### Durable host-native branches
+
+`branchDurable()` is the persistent counterpart to `branch()`. A
+`DurableWorkingCopyStrategy` allocates a host branch, opens a Store on it, and
+returns a non-secret JSON locator. TypeGraph seals the immutable fork origin
+beside that allocation and returns a `DurableBranchDescriptor` that can cross a
+queue, process, deployment, or machine boundary.
+
+```typescript
+import {
+  applyDurableMergePlan,
+  branchDurable,
+  destroyDurableBranch,
+  planMerge,
+  reopenDurableBranch,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const created = unwrap(await branchDurable(base, durableStrategy));
+await created.branch.store.nodes.Person.create({ name: "Ada" });
+
+// Releases this process's connection and writer lease. The host branch stays.
+await created.branch.close();
+await queue.put(JSON.stringify(created.descriptor));
+
+// A later process reconstructs the ordinary GraphBranch used by planning.
+const descriptor = JSON.parse(await queue.get()) as typeof created.descriptor;
+const reopened = unwrap(
+  await reopenDurableBranch(graph, descriptor, durableStrategy),
+);
+const plan = unwrap(await planMerge(base, [reopened]));
+
+// Uses a proven-equivalent host-native merge when the strategy supports one;
+// otherwise applies the complete TypeGraph plan transactionally.
+const report = unwrap(
+  await applyDurableMergePlan({
+    target: base,
+    branch: reopened,
+    descriptor,
+    strategy: durableStrategy,
+    plan,
+  }),
+);
+
+await reopened.close();
+unwrap(await destroyDurableBranch(descriptor, durableStrategy));
+```
+
+Closing and destroying are deliberately separate. `GraphBranch.close()` closes
+the backend and releases its access lease, but leaves the persistent allocation
+reopenable. `destroyDurableBranch()` asks the strategy to attest the complete
+origin and delete or archive that allocation atomically. A descriptor is
+untrusted input: TypeGraph checks its graph definition, branch id, base token,
+schema anchor, and engine revision against the origin the host sealed. Swapping
+or relabeling a locator cannot authorize deletion of another allocation.
+
+The strategy locator must be JSON-safe and **must not contain secrets**. Use a
+branch id, database id, or other lookup key, then resolve credentials from
+strategy-owned configuration. TypeGraph returns the locator to application code
+so a connection URL, password, or bearer token placed there can escape through
+ordinary descriptor storage. Framework cleanup errors deliberately omit the
+locator and raw host cleanup error from diagnostic details.
+
+#### Exact forks and access leases
+
+After `strategy.create()` returns, TypeGraph recomputes `base@V` from the opened
+working copy and compares it with the token captured from the source before the
+fork call. A source write racing a native branch operation therefore refuses and
+aborts the allocation instead of sealing a branch from the wrong ancestor. The
+host remains responsible for physical fidelity outside `base@V`, just like
+`forkedWorkingCopyStrategy`.
+
+Every `create()` and `reopen()` also returns a `DurableWorkingCopyAccess`:
+
+- `engine-fenced` says the database provides sound cross-client isolation and
+  change fencing for the full Store planning/apply access pattern, across every
+  connection and process that could mutate the working copy.
+- `exclusive` carries an allocation-wide writer lease. The strategy must acquire
+  it before returning and exclude every other process and backend instance.
+  TypeGraph closes the backend first, then releases the lease; a failed release
+  is retried by the next `close()` call.
+
+Do not use `engine-fenced` merely because one backend object serializes its own
+calls. A `caller-serialized` backend owns one in-memory queue per backend
+instance, so two reopened pools or two processes still race. Such an engine must
+use a host-wide `exclusive` lease, and a concurrent reopen must wait or refuse.
+Merge planning also assumes the working copy is quiescent while it is diffed.
+
+#### Native merge is an optimization attempt
+
+A strategy may implement `merge()` to apply an approved plan through a database
+branch primitive. `applyDurableMergePlan()` validates the plan and descriptor,
+then calls that method only when no apply callbacks or persisted provenance were
+requested. The result has two outcomes:
+
+- `applied`: the strategy proved the branch origin and target fence on the
+  resources being merged, proved the complete physical diff is exactly the
+  approved TypeGraph write set, applied it atomically, and returned actual
+  counts.
+- `unsupported`: the strategy executed **no** merge SQL or host mutation.
+  TypeGraph re-enters the complete portable `applyMergePlan()` path.
+
+A thrown or uncertain native failure never falls back: the host may have applied
+part of a change, and replaying the portable plan could double-apply it.
+
+This boundary matters for whole-database branch engines. TypeGraph plans one
+graph and may canonicalize nodes, repoint edges, arbitrate conflicts, maintain
+identity state, run callbacks, or persist provenance. A raw database merge that
+bypasses those decisions is not equivalent. The strategy must return
+`unsupported` unless it can prove that the entire native diff—including schema,
+history, revision, identity, index, and contribution sidecars, plus the absence
+of other application graphs—is byte-for-byte represented by the approved plan.
+
 ### Constraint-aware ingestion branches
 
 For a bounded candidate batch, `planCandidateWriteSet()` hides the transient

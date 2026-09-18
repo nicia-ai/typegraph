@@ -139,6 +139,7 @@ error, which names the same package.
 - Overview: [What is TypeGraph?](https://typegraph.dev/overview)
 - Setup: [Getting Started](https://typegraph.dev/getting-started)
 - Query builder: [Queries Overview](https://typegraph.dev/queries/overview)
+- Parallel and durable reconciliation: [Graph Merge](https://typegraph.dev/graph-merge)
 - Typed expressions and relational composition: [Expressions](https://typegraph.dev/queries/expressions), [Relations](https://typegraph.dev/queries/relations)
 - Traversal and recursive paths: [Traverse](https://typegraph.dev/queries/traverse), [Recursive queries](https://typegraph.dev/queries/recursive)
 - Temporal and bitemporal history: [Temporal queries](https://typegraph.dev/queries/temporal)

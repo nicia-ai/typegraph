@@ -130,6 +130,19 @@ type AndPredicate = Readonly<{
 type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
 
 // @public
+export function applyDurableMergePlan<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(args: ApplyDurableMergePlanArgs<G, TStoreDescriptor>): Promise<Result<MergeReport<G>, MergeError>>;
+
+// @public
+export type ApplyDurableMergePlanArgs<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
+    target: Store<G>;
+    branch: GraphBranch<G>;
+    descriptor: DurableBranchDescriptor<TStoreDescriptor>;
+    strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>;
+    plan: MergePlanArtifact;
+    options?: MergePlanApplyOptions<NoInfer<G>> | undefined;
+}>;
+
+// @public
 export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact, options?: MergePlanApplyOptions<NoInfer<G>>): Promise<Result<MergeReport<G>, MergeError>>;
 
 // @public
@@ -474,6 +487,9 @@ type BooleanFieldAccessor<T extends boolean = boolean> = BaseFieldAccessor<T>;
 
 // @public
 export function branch<G extends GraphDef>(baseStore: GraphBranch<G>["store"], makeBackend: MakeBackend, options?: BranchOptions, strategy?: WorkingCopyStrategy<G>): Promise<Result<GraphBranch<G>, BranchError>>;
+
+// @public
+export function branchDurable<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(baseStore: Store<G>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>, options?: BranchOptions): Promise<Result<DurableBranch<G, TStoreDescriptor>, BranchError>>;
 
 // @public
 export class BranchError extends TypeGraphError {
@@ -1499,6 +1515,9 @@ type DerivedRelation = Readonly<{
 }>;
 
 // @public
+export function destroyDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>): Promise<Result<void, BranchError>>;
+
+// @public
 type DisjointOverlapRow = Readonly<{
     kinds: readonly [string, string];
     nodeId: string;
@@ -1527,8 +1546,81 @@ type DropVectorIndexParams = Readonly<{
 }>;
 
 // @public
+export type DurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
+    branch: GraphBranch<G>;
+    descriptor: DurableBranchDescriptor<TStoreDescriptor>;
+}>;
+
+// @public
+export type DurableBranchDescriptor<TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
+    kind: string;
+    version: number;
+    graphId: string;
+    definitionHash: string;
+    branchId: BranchId;
+    base: BaseVersion;
+    store: TStoreDescriptor;
+    schemaAnchor?: Readonly<{
+        version: number;
+        hash: string;
+    }> | undefined;
+    forkRevision?: EngineRevision | undefined;
+}>;
+
+// @public
+export type DurableBranchOrigin = Readonly<{
+    graphId: string;
+    definitionHash: string;
+    branchId: BranchId;
+    base: BaseVersion;
+    schemaAnchor: Readonly<{
+        version: number;
+        hash: string;
+    }> | undefined;
+    forkRevision: EngineRevision | undefined;
+}>;
+
+// @public
 type DurableEdgeBatchMembers = Readonly<{
     insertEdgesDurableBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
+}>;
+
+// @public
+export type DurableStoreDescriptor = JsonValue;
+
+// @public
+export type DurableWorkingCopyAccess = Readonly<{
+    kind: "engine-fenced";
+}> | Readonly<{
+    kind: "exclusive";
+    leaseId: string;
+    release: () => Promise<void>;
+}>;
+
+// @public
+export type DurableWorkingCopyStrategy<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
+    type: string;
+    version: number;
+    create: (baseStore: Store<G>, base: BaseVersion, branchId: BranchId) => Promise<Readonly<{
+        store: Store<G>;
+        descriptor: TStoreDescriptor;
+        access: DurableWorkingCopyAccess;
+    }>>;
+    seal: (descriptor: TStoreDescriptor, origin: DurableBranchOrigin) => Promise<void>;
+    abort: (descriptor: TStoreDescriptor) => Promise<void>;
+    reopen: (graph: G, descriptor: TStoreDescriptor) => Promise<Readonly<{
+        store: Store<G>;
+        origin: DurableBranchOrigin;
+        access: DurableWorkingCopyAccess;
+    }>>;
+    destroy: (descriptor: TStoreDescriptor, expectedOrigin: DurableBranchOrigin) => Promise<void>;
+    merge?: ((args: Readonly<{
+        target: Store<G>;
+        branch: GraphBranch<G>;
+        descriptor: TStoreDescriptor;
+        expectedOrigin: DurableBranchOrigin;
+        plan: MergePlanArtifactV1;
+    }>) => Promise<NativeDurableMergeResult>) | undefined;
 }>;
 
 // @public (undocumented)
@@ -4942,6 +5034,19 @@ type MetaEdgeProperties = Readonly<{
 }>;
 
 // @public
+export type NativeDurableMergeResult = Readonly<{
+    outcome: "applied";
+    merged: MergedCounts;
+    warnings?: readonly string[] | undefined;
+}> | Readonly<{
+    outcome: "unsupported";
+    dimensions: readonly [NativeDurableMergeUnsupportedDimension, ...NativeDurableMergeUnsupportedDimension[]];
+}>;
+
+// @public
+export type NativeDurableMergeUnsupportedDimension = "branchOrigin" | "graphScope" | "nativeConflicts" | "planSemantics" | "targetFence";
+
+// @public
 type NeighborNodeOrderField<G extends GraphDef> = {
     [K in keyof G["nodes"] & string]: Exclude<keyof Node<G["nodes"][K]["type"]>, "id" | "kind" | "meta"> & string;
 }[keyof G["nodes"] & string];
@@ -6237,6 +6342,9 @@ type RecordKindRemovalParams = Readonly<{
     removedAt: string | undefined;
     error: string | undefined;
 }>;
+
+// @public
+export function reopenDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(graph: G, descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>): Promise<Result<GraphBranch<G>, BranchError>>;
 
 // @public
 const RECURSIVE_TRAVERSAL_VERDICT: unique symbol;

@@ -119,6 +119,31 @@ export type WorkingCopyStrategy<G extends GraphDef> = Readonly<{
 export type MakeBackend = () => Promise<GraphBackend>;
 
 /**
+ * Proves that a host-created working copy was taken from the exact `base@V`
+ * TypeGraph stamped before asking the host to fork it.
+ *
+ * This is the single owner of the post-fork equality decision. Host-native fork
+ * calls are allowed to race with a write to the source branch; trusting the
+ * requested base token would then relabel a newer or older snapshot as the
+ * requested one. Both ephemeral and durable host forks call this after opening
+ * the created store and refuse before handing the working copy to a caller.
+ */
+export async function assertWorkingCopyMatchesBase<G extends GraphDef>(
+  workingCopy: Store<G>,
+  base: BaseVersion,
+): Promise<void> {
+  const workingCopyVersion = await computeBaseVersion(workingCopy);
+  if (workingCopyVersion === base) return;
+  throw new BranchError(
+    "Working copy does not match its base: computeBaseVersion disagrees " +
+      "between the host-created store and the base store it was forked " +
+      "from. The host may have forked a different revision or the source " +
+      "may have advanced while the fork was being allocated.",
+    { details: { workingCopyVersion, baseVersion: base } },
+  );
+}
+
+/**
  * The P0 default working-copy strategy: faithful clone via streamed interchange.
  *
  * On each `create(baseStore)`:
@@ -592,18 +617,7 @@ export function forkedWorkingCopyStrategy<
           );
         }
         const forkStore = createStore(baseStore.graph, backend, forkOptions);
-        const forkVersion = await computeBaseVersion(forkStore);
-        if (forkVersion !== base) {
-          throw new BranchError(
-            "Fork does not match its base: computeBaseVersion disagrees " +
-              "between the forked store and the base store it was forked " +
-              "from. This fence proves base-token equality (schema plus a " +
-              "revision anchor, or a live-content fingerprint) at the " +
-              "instant the fork was taken, not byte-for-byte physical " +
-              "identity — a working-copy fork is trusted to provide that.",
-            { details: { forkVersion, baseVersion: base } },
-          );
-        }
+        await assertWorkingCopyMatchesBase(forkStore, base);
         return forkStore;
       } catch (error) {
         try {

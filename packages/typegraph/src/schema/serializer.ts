@@ -749,6 +749,33 @@ export async function getSchemaHash(
 }
 
 /**
+ * The schema-version slot used only to serialize a graph for its
+ * {@link getGraphDefinitionHash}. The value is written into the serialized
+ * document but {@link computeSchemaHash} deliberately excludes `version` (and
+ * `generatedAt`), so the digest is blind to it.
+ */
+const DEFINITION_HASH_VERSION = 1;
+
+/**
+ * Deterministic, version-blind hash of a graph DEFINITION.
+ *
+ * A durable working copy must attest the caller's fork-time definition
+ * identity even when it committed no schema row: the identity of a graph
+ * definition does not depend on which schema version it happened to be
+ * persisted under. This returns exactly the schema-content digest
+ * {@link getSchemaHash} produces, at a fixed version slot, so two references
+ * to the same definition hash identically regardless of the version argument
+ * (which {@link computeSchemaHash} excludes) — and a graph that reuses another
+ * graph's id but declares different nodes/edges/constraints hashes
+ * differently.
+ */
+export async function getGraphDefinitionHash(
+  graph: GraphDef,
+): Promise<SchemaHash> {
+  return getSchemaHash(graph, DEFINITION_HASH_VERSION);
+}
+
+/**
  * Computes a hash of the schema content for change detection.
  *
  * Excludes version and generatedAt since those change on every save.

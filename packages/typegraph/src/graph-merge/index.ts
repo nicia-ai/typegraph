@@ -43,6 +43,23 @@ export {
   planCandidateWriteSet,
   planCandidateWriteSetForEvolution,
 } from "./candidate-write-set";
+export type {
+  DurableBranch,
+  DurableBranchDescriptor,
+  DurableBranchOrigin,
+  DurableStoreDescriptor,
+  DurableWorkingCopyAccess,
+  DurableWorkingCopyStrategy,
+  NativeDurableMergeResult,
+  NativeDurableMergeUnsupportedDimension,
+} from "./durable-branch";
+export {
+  branchDurable,
+  destroyDurableBranch,
+  reopenDurableBranch,
+} from "./durable-branch";
+export type { ApplyDurableMergePlanArgs } from "./durable-merge";
+export { applyDurableMergePlan } from "./durable-merge";
 export type { MergeConstraintConflictErrorDetails } from "./errors";
 export {
   BaseVersionMismatchError,
