@@ -5040,7 +5040,10 @@ export type NativeDurableMergeResult = Readonly<{
     warnings?: readonly string[] | undefined;
 }> | Readonly<{
     outcome: "unsupported";
-    dimensions: readonly [NativeDurableMergeUnsupportedDimension, ...NativeDurableMergeUnsupportedDimension[]];
+    dimensions: readonly [
+    NativeDurableMergeUnsupportedDimension,
+    ...NativeDurableMergeUnsupportedDimension[]
+    ];
 }>;
 
 // @public
@@ -6344,9 +6347,6 @@ type RecordKindRemovalParams = Readonly<{
 }>;
 
 // @public
-export function reopenDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(graph: G, descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>): Promise<Result<GraphBranch<G>, BranchError>>;
-
-// @public
 const RECURSIVE_TRAVERSAL_VERDICT: unique symbol;
 
 // @public
@@ -6501,6 +6501,9 @@ type ReleaseIndexMaterializationClaimParams = Readonly<{
 
 // @public (undocumented)
 type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
+
+// @public
+export function reopenDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(graph: G, descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>): Promise<Result<GraphBranch<G>, BranchError>>;
 
 // @public
 type ReportNodeIdentity = Readonly<{

@@ -1050,14 +1050,15 @@ describe("durable branch", () => {
 
   it("refuses and aborts a host fork that does not match the stamped base", async () => {
     const { baseStore } = await seedBase();
-    const mismatchedStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
-      ...host.strategy,
-      create: async (source, base, branchId) => {
-        const created = await host.strategy.create(source, base, branchId);
-        await created.store.nodes.Person.create({ name: "not in the base" });
-        return created;
-      },
-    };
+    const mismatchedStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> =
+      {
+        ...host.strategy,
+        create: async (source, base, branchId) => {
+          const created = await host.strategy.create(source, base, branchId);
+          await created.store.nodes.Person.create({ name: "not in the base" });
+          return created;
+        },
+      };
 
     const result = await branchDurable(baseStore, mismatchedStrategy);
 
@@ -1073,50 +1074,76 @@ describe("durable branch", () => {
     expect(host.connectionCloses()).toBe(1);
   });
 
+  it("refuses and aborts when the source advances during allocation", async () => {
+    const { baseStore } = await seedBase();
+    const racingStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
+      ...host.strategy,
+      create: async (source, base, branchId) => {
+        const created = await host.strategy.create(source, base, branchId);
+        await source.nodes.Person.create({ name: "raced the fork" });
+        return created;
+      },
+    };
+
+    const result = await branchDurable(baseStore, racingStrategy);
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      const cause = result.error.cause;
+      expect(cause).toBeInstanceOf(BranchError);
+      if (cause instanceof BranchError)
+        expect(cause.message).toContain("Base store changed");
+    }
+    expect(host.aborted()).toEqual(["working-copy-1"]);
+    expect(host.liveLocators()).toEqual([]);
+    expect(host.connectionCloses()).toBe(1);
+  });
+
   it("lets a strategy hold one allocation-wide writer lease until close", async () => {
     const { baseStore } = await seedBase();
     let leased = false;
     let releases = 0;
-    const exclusiveStrategy: DurableWorkingCopyStrategy<
-      G,
-      LocatorDescriptor
-    > = {
-      ...host.strategy,
-      create: async (source, base, branchId) => {
-        if (leased) throw new Error("working copy is already leased");
-        const created = await host.strategy.create(source, base, branchId);
-        leased = true;
-        return {
-          ...created,
-          access: {
-            kind: "exclusive",
-            leaseId: "lease-1",
-            release: () => {
-              leased = false;
-              releases += 1;
-              return Promise.resolve();
+    const exclusiveStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> =
+      {
+        ...host.strategy,
+        create: async (source, base, branchId) => {
+          if (leased) throw new Error("working copy is already leased");
+          const created = await host.strategy.create(source, base, branchId);
+          leased = true;
+          return {
+            ...created,
+            access: {
+              kind: "exclusive",
+              leaseId: "lease-1",
+              release: () => {
+                leased = false;
+                releases += 1;
+                return Promise.resolve();
+              },
             },
-          },
-        };
-      },
-      reopen: async (reopenedGraph, descriptor) => {
-        if (leased) throw new Error("working copy is already leased");
-        const reopened = await host.strategy.reopen(reopenedGraph, descriptor);
-        leased = true;
-        return {
-          ...reopened,
-          access: {
-            kind: "exclusive",
-            leaseId: `lease-${String(releases + 1)}`,
-            release: () => {
-              leased = false;
-              releases += 1;
-              return Promise.resolve();
+          };
+        },
+        reopen: async (reopenedGraph, descriptor) => {
+          if (leased) throw new Error("working copy is already leased");
+          const reopened = await host.strategy.reopen(
+            reopenedGraph,
+            descriptor,
+          );
+          leased = true;
+          return {
+            ...reopened,
+            access: {
+              kind: "exclusive",
+              leaseId: `lease-${String(releases + 1)}`,
+              release: () => {
+                leased = false;
+                releases += 1;
+                return Promise.resolve();
+              },
             },
-          },
-        };
-      },
-    };
+          };
+        },
+      };
 
     const created = unwrap(await branchDurable(baseStore, exclusiveStrategy));
     expect(leased).toBe(true);
@@ -1124,11 +1151,7 @@ describe("durable branch", () => {
     expect(leased).toBe(false);
 
     const first = unwrap(
-      await reopenDurableBranch(
-        graph,
-        created.descriptor,
-        exclusiveStrategy,
-      ),
+      await reopenDurableBranch(graph, created.descriptor, exclusiveStrategy),
     );
     const concurrent = await reopenDurableBranch(
       graph,
@@ -1144,28 +1167,26 @@ describe("durable branch", () => {
   it("retries a failed exclusive lease release without closing the backend twice", async () => {
     const { baseStore } = await seedBase();
     let releaseAttempts = 0;
-    const exclusiveStrategy: DurableWorkingCopyStrategy<
-      G,
-      LocatorDescriptor
-    > = {
-      ...host.strategy,
-      create: async (source, base, branchId) => {
-        const created = await host.strategy.create(source, base, branchId);
-        return {
-          ...created,
-          access: {
-            kind: "exclusive",
-            leaseId: "retrying-lease",
-            release: () => {
-              releaseAttempts += 1;
-              if (releaseAttempts === 1)
-                return Promise.reject(new Error("lease release failed"));
-              return Promise.resolve();
+    const exclusiveStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> =
+      {
+        ...host.strategy,
+        create: async (source, base, branchId) => {
+          const created = await host.strategy.create(source, base, branchId);
+          return {
+            ...created,
+            access: {
+              kind: "exclusive",
+              leaseId: "retrying-lease",
+              release: () => {
+                releaseAttempts += 1;
+                if (releaseAttempts === 1)
+                  return Promise.reject(new Error("lease release failed"));
+                return Promise.resolve();
+              },
             },
-          },
-        };
-      },
-    };
+          };
+        },
+      };
     const created = unwrap(await branchDurable(baseStore, exclusiveStrategy));
 
     await expect(created.branch.close()).rejects.toThrow(
