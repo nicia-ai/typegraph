@@ -35,7 +35,9 @@ const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
 // Adopted identity evolution adds a Store DDL-factory handoff and a same-session
 // catalog-driven provisioning decision, both guarded before schema commit.
-const REASONED_FLOOR = 96;
+// Exact-session heterogeneous node upserts add six guarded accesses across
+// Store dispatch and recorded wrappers: 96 -> 102.
+const REASONED_FLOOR = 102;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -45,7 +47,7 @@ const REASONED_FLOOR = 96;
 const DEFERRED_LIVE_TOTAL = 225;
 const DEFERRED_DECLARED_TOTAL = 229;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 335;
+const TOTAL_ROW_COUNT = 341;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",

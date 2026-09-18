@@ -886,9 +886,14 @@ export type UnbundledOptionalMember =
  * (`profile.provisioning.recordedTime` in `create-sql-backend.ts` and both
  * dialects' transaction-scoped threading) is off `EngineProvisioning`, a
  * type the receiver test's arm (b) does not recognize by name — still 93,
- * 16 + 82 = 98 members total.
+ * 16 + 84 = 100 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  upsertHeterogeneousNodes: {
+    kind: "reasoned",
+    reason: "Exact-session PostgreSQL heterogeneous node upsert program.",
+    accesses: 6,
+  },
   adoptBaseSchema: {
     kind: "reasoned",
     reason:

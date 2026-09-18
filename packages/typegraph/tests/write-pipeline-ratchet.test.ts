@@ -123,8 +123,10 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * revision-clock read. `updateResolvedNodesBatch` (130→131) joined the
  * graph-entity write surface: it is the guarded row statement for portable
  * resolved batches and is routed through recorded capture like updateNode.
+ * `upsertHeterogeneousNodes` (131→132) is the exact-session, closed node
+ * program and follows the same recorded-capture classification.
  */
-const MEMBER_COUNT = 131;
+const MEMBER_COUNT = 132;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

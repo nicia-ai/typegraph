@@ -44,7 +44,7 @@ type AdapterHistoryStoreTransactions<G extends GraphDef, TNativeTransaction> = R
 }>;
 
 // @public (undocumented)
-export type AdapterHistoryTransactionContext<G extends GraphDef, TNativeTransaction> = Omit<AdapterTransactionContext<G, TNativeTransaction>, "sql" | "sqlAvailability"> & RecordedRevisionRequest & Readonly<{
+export type AdapterHistoryTransactionContext<G extends GraphDef, TNativeTransaction> = Omit<AdapterTransactionContext<G, TNativeTransaction>, "sql" | "sqlAvailability"> & RecordedRevisionRequest & RecordedHeterogeneousNodeWriteBatch<G> & Readonly<{
     sqlAvailability: "history";
 }>;
 
@@ -4016,6 +4016,7 @@ export type GraphBackend = Readonly<{
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
+    upsertHeterogeneousNodes?: (this: void, params: HeterogeneousNodeUpsertParams) => Promise<readonly NodeRow[]>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
     updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
     compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
@@ -4435,8 +4436,45 @@ export function havingLt(aggregate: AggregateExpr, value: number): AggregateComp
 // @public
 export function havingLte(aggregate: AggregateExpr, value: number): AggregateComparisonPredicate;
 
+// @public (undocumented)
+type HeterogeneousNodeForKind<G extends GraphDef, K extends NodeKinds<G>> = G["nodes"][K] extends Readonly<{
+    type: infer N extends NodeType;
+}> ? Node<N> : never;
+
 // @public
-const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "lineage", "recordedTime", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "updateResolvedNodesBatch", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
+type HeterogeneousNodeUpsertEntry = Readonly<{
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+    updateProps: Readonly<Record<string, unknown>>;
+}>;
+
+// @public
+export type HeterogeneousNodeUpsertInput<G extends GraphDef, K extends NodeKinds<G> = NodeKinds<G>> = {
+    [P in K]: G["nodes"][P] extends Readonly<{
+        type: infer N extends NodeType;
+    }> ? Readonly<{
+        kind: P;
+        id: NodeId<N>;
+        props: z.input<N["schema"]>;
+    }> : never;
+}[K];
+
+// @public
+type HeterogeneousNodeUpsertParams = Readonly<{
+    entries: readonly HeterogeneousNodeUpsertEntry[];
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type HeterogeneousNodeUpsertResult<G extends GraphDef, Entries extends readonly HeterogeneousNodeUpsertInput<G>[]> = {
+    readonly [I in keyof Entries]: Entries[I] extends (Readonly<{
+        kind: infer K extends NodeKinds<G>;
+    }>) ? HeterogeneousNodeForKind<G, K> : never;
+};
+
+// @public
+const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "lineage", "recordedTime", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "upsertHeterogeneousNodes", "updateResolvedNodesBatch", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
 
 // @public (undocumented)
 export type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
@@ -4459,7 +4497,7 @@ export type HistoryStoreOptions = BaseStoreOptions & Readonly<{
 }>;
 
 // @public
-export type HistoryTransactionContext<G extends GraphDef> = TransactionContext<G> & RecordedRevisionRequest;
+export type HistoryTransactionContext<G extends GraphDef> = TransactionContext<G> & RecordedRevisionRequest & RecordedHeterogeneousNodeWriteBatch<G>;
 
 // @public
 export type HookContext = Readonly<{
@@ -6012,7 +6050,7 @@ export type NodeCurrentReads<N extends NodeType, CN extends string = string> = P
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
 export type NodeGetOrCreateByConstraintOptions = Readonly<{
@@ -7027,6 +7065,11 @@ type RecordedColumn = "graph_id" | "kind" | "id" | "valid_from" | "valid_to" | "
 
 // @public (undocumented)
 type RecordedEdgeColumn = RecordedColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
+
+// @public
+export type RecordedHeterogeneousNodeWriteBatch<G extends GraphDef> = Readonly<{
+    writeNodeUpsertBatch: <const Entries extends readonly HeterogeneousNodeUpsertInput<G>[]>(entries: Entries) => Promise<HeterogeneousNodeUpsertResult<G, Entries>>;
+}>;
 
 // @public
 export type RecordedInstant = string & {

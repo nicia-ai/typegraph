@@ -90,6 +90,7 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
+import { resolveStampedValidityLowerBound } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
@@ -161,6 +162,7 @@ import {
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type EngineRecordedTimeMembers,
+  type HeterogeneousNodeUpsertParams,
   type HybridSearchParams,
   type HybridSearchRow,
   type IndexState,
@@ -3437,6 +3439,66 @@ function createPostgresOperationBackend(
   // `catalog` does, and stays absent when the profile declares none.
   return {
     ...operations,
+    ...(transactionScoped ? {
+      async upsertHeterogeneousNodes(
+        params: HeterogeneousNodeUpsertParams,
+      ) {
+        if (params.entries.length === 0) return [];
+        const timestamp = nowIso();
+        const storedLowerBound = resolveStampedValidityLowerBound(
+          undefined,
+          undefined,
+          timestamp,
+        );
+        const inputRows = sql.join(
+          params.entries.map((entry, index) =>
+            sql`(${params.schemaFence.graphId}, ${entry.kind}, ${entry.id}, ${JSON.stringify(entry.props)}, ${JSON.stringify(entry.updateProps)}, ${index})`,
+          ),
+          sql`, `,
+        );
+        const nodes = sql.identifier(tableNames.nodes);
+        const schemaVersions = sql.identifier(
+          requireDefined(tableNames.schemaVersions),
+        );
+        const query = sql`
+          WITH "schema_fence" AS (
+            SELECT 1 FROM ${schemaVersions}
+            WHERE graph_id = ${params.schemaFence.graphId}
+              AND version = ${params.schemaFence.expectedVersion}
+              AND is_active = TRUE
+            FOR SHARE
+          ), "input_rows" (graph_id, kind, id, create_props, update_props, ord) AS (
+            VALUES ${inputRows}
+          ), "upserted" AS (
+            INSERT INTO ${nodes} AS "target"
+              (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at)
+            SELECT graph_id, kind, id, create_props::jsonb, 1, ${storedLowerBound}, NULL, ${timestamp}, ${timestamp}
+            FROM "input_rows" CROSS JOIN "schema_fence"
+            ON CONFLICT (graph_id, kind, id) DO UPDATE SET
+              props = CASE
+                WHEN "target".deleted_at IS NULL THEN "target".props || (
+                  SELECT update_props::jsonb FROM "input_rows"
+                  WHERE graph_id = "target".graph_id
+                    AND kind = "target".kind
+                    AND id = "target".id
+                )
+                ELSE EXCLUDED.props
+              END,
+              version = "target".version + 1,
+              valid_from = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_from ELSE EXCLUDED.valid_from END,
+              valid_to = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_to ELSE EXCLUDED.valid_to END,
+              deleted_at = NULL,
+              updated_at = EXCLUDED.updated_at
+            RETURNING *
+          )
+          SELECT "upserted".* FROM "upserted"
+          JOIN "input_rows" USING (graph_id, kind, id)
+          ORDER BY "input_rows".ord
+        `;
+        const rows = await execAll<Record<string, unknown>>(query);
+        return rows.map((row) => toNodeRow(row));
+      },
+    } : {}),
     ...vectorEmbeddingMethods,
     catalog:
       catalog ??

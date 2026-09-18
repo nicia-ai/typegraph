@@ -63,6 +63,7 @@ const COLUMN_MENTION = /validFrom|valid_from/;
  * window-writing leg only runs when the caller stated a bound.
  */
 const WRITER_INVENTORY = {
+  "drizzle/postgres.ts": { stamping: 1, stated: 0 },
   "drizzle/operations/nodes.ts": { stamping: 10, stated: 0 },
   "drizzle/operations/node-projections.ts": { stamping: 1, stated: 0 },
   "drizzle/operations/edges.ts": { stamping: 8, stated: 1 },
@@ -87,6 +88,12 @@ const WRITER_INVENTORY = {
  * line alone either.
  */
 const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
+  "drizzle/postgres.ts": [
+    // The heterogeneous CTE's column list and live-vs-resurrected forwarding
+    // expression; the stamped lower bound is owned immediately above them.
+    "(graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at)",
+    'valid_from = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_from ELSE EXCLUDED.valid_from END,',
+  ],
   "drizzle/operations/edge-claims.ts": [],
   "drizzle/operations/node-projections.ts": [],
   "drizzle/operations/nodes.ts": [
@@ -145,6 +152,7 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
  * Equality: a new one fails this test whether or not it writes anything.
  */
 const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
+  "drizzle/postgres.ts": "writer — exact-session heterogeneous node upsert CTE",
   "drizzle/operations/edge-claims.ts":
     "writer — fused cardinality claim and edge insert",
   "drizzle/operations/nodes.ts": "writer — ten stamping sites",
@@ -256,6 +264,6 @@ describe("the stamping-site inventory (I5)", () => {
     for (const role of Object.values(BACKEND_COLUMN_FILES)) {
       expect(role.length).toBeGreaterThan(0);
     }
-    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(15);
+    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(16);
   });
 });

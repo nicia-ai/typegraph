@@ -106,6 +106,7 @@ export const ENTITY_WRITE_MEMBERS = [
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "updateNode",
+  "upsertHeterogeneousNodes",
   "updateResolvedNodesBatch",
   "compareAndSetNode",
   "updateNodeSet",

@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("16 pilot + 83 unbundled = 99, with no member counted twice", () => {
+  it("16 pilot + 84 unbundled = 100, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(16);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(83);
+    expect(unbundledNames.length).toBe(84);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(99);
+    expect(bundledSet.size + unbundledNames.length).toBe(100);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("33 reasoned entries sum to 96 accesses; 50 deferred entries sum to 229", () => {
+  it("34 reasoned entries sum to 102 accesses; 50 deferred entries sum to 229", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(33);
+    expect(reasoned.length).toBe(34);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -155,7 +155,9 @@ describe("capability bundle totality (T9)", () => {
     // The checked-read schema binding adds one tableNames access: 93 -> 94.
     // Adopted evolution hands the identity DDL factory into the transaction
     // and inspects its required storage on that session: 94 -> 96.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(96);
+    // The exact-session heterogeneous node upsert adds six guarded backend
+    // member accesses across Store dispatch and recorded wrappers: 96 -> 102.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(102);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.

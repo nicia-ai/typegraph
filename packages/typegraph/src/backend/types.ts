@@ -737,6 +737,22 @@ export type InsertNodeParams = Readonly<{
   validTo?: string;
 }>;
 
+/** One validated plain caller-ID member of the heterogeneous node upsert CTE. */
+export type HeterogeneousNodeUpsertEntry = Readonly<{
+  kind: string;
+  id: string;
+  /** Complete create-parsed document used for inserts and resurrections. */
+  props: Readonly<Record<string, unknown>>;
+  /** Caller patch used only when the target row is already live. */
+  updateProps: Readonly<Record<string, unknown>>;
+}>;
+
+/** Exact-session input for the PostgreSQL heterogeneous node upsert lowering. */
+export type HeterogeneousNodeUpsertParams = Readonly<{
+  entries: readonly HeterogeneousNodeUpsertEntry[];
+  schemaFence: SchemaWriteFenceParams;
+}>;
+
 /**
  * A backend validity-end mutation. Omission preserves the stored end,
  * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
@@ -2305,6 +2321,11 @@ export type GraphBackend = Readonly<{
     params: readonly InsertNodeParams[],
   ) => Promise<readonly NodeRow[]>;
   updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
+  /** One data-modifying CTE for plain caller-ID node upserts across kinds. */
+  upsertHeterogeneousNodes?: (
+    this: void,
+    params: HeterogeneousNodeUpsertParams,
+  ) => Promise<readonly NodeRow[]>;
   updateNodeSet?: (
     this: void,
     params: UpdateNodeSetParams,
@@ -3640,6 +3661,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "updateNode"
+  | "upsertHeterogeneousNodes"
   | "updateResolvedNodesBatch"
   | "compareAndSetNode"
   | "updateNodeSet"

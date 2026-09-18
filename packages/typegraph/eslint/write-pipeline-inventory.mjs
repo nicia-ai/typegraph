@@ -13,7 +13,7 @@
  */
 
 /**
- * The 42 backend members no module outside the seam may call: the three WRITE
+ * The 43 backend members no module outside the seam may call: the three WRITE
  * classes of `src/backend/member-classes.ts` — graph-entity writes, their
  * sidecars (both claim relations included), and backend-owned bulk ingestion.
  */
@@ -28,6 +28,7 @@ export const WRITE_MEMBER_NAMES = [
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "updateNode",
+  "upsertHeterogeneousNodes",
   "updateResolvedNodesBatch",
   "compareAndSetNode",
   "updateNodeSet",
@@ -294,6 +295,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "insertNodeWithSchemaFence",
       "commands",
       "updateNode",
+      "upsertHeterogeneousNodes",
       "updateResolvedNodesBatch",
       "compareAndSetNode",
       "updateNodeSet",
@@ -327,6 +329,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "insertNodeWithSchemaFence",
       "commands",
       "updateNode",
+      "upsertHeterogeneousNodes",
       "updateResolvedNodesBatch",
       "compareAndSetNode",
       "updateNodeSet",
@@ -363,9 +366,9 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
   {
     path: "src/store/store.ts",
     reason:
-      "reembedVectorField maintenance and the lifecycle clear() path — store lifecycle, not a managed graph write.",
+      "reembedVectorField maintenance, lifecycle clear(), and the closed heterogeneous transaction program — store-owned orchestration outside an ordinary per-entity WritePlan.",
     permanent: true,
-    allowedMembers: ["upsertEmbedding"],
+    allowedMembers: ["upsertEmbedding", "upsertHeterogeneousNodes"],
   },
   {
     path: "src/graph-merge/provenance-store.ts",
