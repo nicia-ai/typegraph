@@ -381,6 +381,8 @@ export type {
   HardDeleteNodeParams,
   HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
+  HeterogeneousNodeUpsertEntry,
+  HeterogeneousNodeUpsertParams,
   HybridSearchParams,
   HybridSearchRow,
   IdentityTableNames,
