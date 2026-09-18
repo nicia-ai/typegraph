@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.66.0
+
+### Minor Changes
+
+- [#722](https://github.com/nicia-ai/typegraph/pull/722) [`8ad6da1`](https://github.com/nicia-ai/typegraph/commit/8ad6da18fb352a7f593f0092f006e47b21ed7709) Thanks [@pdlug](https://github.com/pdlug)! - Add `tx.writeNodeUpsertBatch()` for one-statement, caller-ID upserts across plain node kinds inside a recorded PostgreSQL transaction.
+
 ## 0.65.0
 
 ### Highlights
