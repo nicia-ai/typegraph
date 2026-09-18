@@ -1073,6 +1073,31 @@ describe("durable branch", () => {
     expect(host.connectionCloses()).toBe(1);
   });
 
+  it("refuses and aborts when the source advances during allocation", async () => {
+    const { baseStore } = await seedBase();
+    const racingStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
+      ...host.strategy,
+      create: async (source, base, branchId) => {
+        const created = await host.strategy.create(source, base, branchId);
+        await source.nodes.Person.create({ name: "raced the fork" });
+        return created;
+      },
+    };
+
+    const result = await branchDurable(baseStore, racingStrategy);
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      const cause = result.error.cause;
+      expect(cause).toBeInstanceOf(BranchError);
+      if (cause instanceof BranchError)
+        expect(cause.message).toContain("Base store changed");
+    }
+    expect(host.aborted()).toEqual(["working-copy-1"]);
+    expect(host.liveLocators()).toEqual([]);
+    expect(host.connectionCloses()).toBe(1);
+  });
+
   it("lets a strategy hold one allocation-wide writer lease until close", async () => {
     const { baseStore } = await seedBase();
     let leased = false;

@@ -1659,12 +1659,14 @@ locator and raw host cleanup error from diagnostic details.
 
 #### Exact forks and access leases
 
-After `strategy.create()` returns, TypeGraph recomputes `base@V` from the opened
-working copy and compares it with the token captured from the source before the
-fork call. A source write racing a native branch operation therefore refuses and
-aborts the allocation instead of sealing a branch from the wrong ancestor. The
-host remains responsible for physical fidelity outside `base@V`, just like
-`forkedWorkingCopyStrategy`.
+After `strategy.create()` returns, TypeGraph recomputes `base@V` from the source.
+A source write racing allocation therefore refuses and aborts the working copy
+instead of sealing a branch from the wrong ancestor. TypeGraph then accepts an
+exact matching working-copy token as the fast path. When a strategy creates an
+equivalent persistent copy with an independent revision namespace, TypeGraph
+instead verifies that its complete merge-visible graph state has no delta from
+the source, fencing the source again after enumeration. The host remains
+responsible for physical fidelity outside TypeGraph's graph semantics.
 
 Every `create()` and `reopen()` also returns a `DurableWorkingCopyAccess`:
 

@@ -14,6 +14,7 @@ import type {
   DurableBranchDescriptor,
   DurableStoreDescriptor,
   DurableWorkingCopyStrategy,
+  NativeDurableMergeResult,
 } from "./durable-branch";
 import {
   durableDescriptorRefusal,
@@ -120,21 +121,15 @@ export async function applyDurableMergePlan<
     return usePortableApply();
   }
 
+  let nativeResult: NativeDurableMergeResult;
   try {
-    const nativeResult = await strategy.merge({
+    nativeResult = await strategy.merge({
       target,
       branch,
       descriptor: descriptor.store,
       expectedOrigin: descriptorOrigin,
       plan: artifact,
     });
-    if (nativeResult.outcome === "unsupported") return usePortableApply();
-    return ok(
-      reportFromArtifact(artifact, nativeResult.merged, [
-        ...artifact.review.warnings,
-        ...(nativeResult.warnings ?? []),
-      ]),
-    );
   } catch (error) {
     return err(
       new MergeError(
@@ -147,4 +142,11 @@ export async function applyDurableMergePlan<
       ),
     );
   }
+  if (nativeResult.outcome === "unsupported") return usePortableApply();
+  return ok(
+    reportFromArtifact(artifact, nativeResult.merged, [
+      ...artifact.review.warnings,
+      ...(nativeResult.warnings ?? []),
+    ]),
+  );
 }

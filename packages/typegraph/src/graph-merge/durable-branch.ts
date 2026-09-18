@@ -60,12 +60,13 @@
  * Backend-specific mechanics remain entirely within the strategy.
  */
 
-import { computeBaseVersion } from "./base-version";
+import { computeBaseVersion, schemaComponentOf } from "./base-version";
 import { readBranchForkState } from "./branch";
 import { BranchError, describeCause } from "./errors";
 import type { MergePlanArtifactV1 } from "./plan-schema";
 import type { Result } from "./result";
 import { err, ok } from "./result";
+import { diffAgainstBase } from "./state-diff";
 import type {
   EngineRevision,
   GraphDef,
@@ -81,10 +82,7 @@ import type {
   MergedCounts,
 } from "./types";
 import { asBranchId } from "./types";
-import {
-  assertWorkingCopyMatchesBase,
-  coalescedWorkingCopyClose,
-} from "./working-copy";
+import { coalescedWorkingCopyClose } from "./working-copy";
 
 /**
  * A strategy-defined, JSON-serializable locator for one PERSISTENT working
@@ -409,7 +407,7 @@ export async function branchDurable<
   let forkState;
   let definitionHash: string;
   try {
-    await assertWorkingCopyMatchesBase(created.store, base);
+    await assertDurableWorkingCopyMatchesBase(baseStore, created.store, base);
     forkState = await readBranchForkState(created.store);
     definitionHash = await getGraphDefinitionHash(created.store.graph);
   } catch (error) {
@@ -458,6 +456,110 @@ export async function branchDurable<
     : { forkRevision: forkState.forkRevision }),
   };
   return ok({ branch, descriptor });
+}
+
+/**
+ * Proves a durable allocation was created from the stamped source state.
+ *
+ * A physical database fork preserves the complete `base@V` token, so that
+ * common path remains O(1). A strategy may instead build an equivalent
+ * persistent copy whose revision namespace is intentionally independent. For
+ * that case, compare the complete merge-visible graph state while fencing the
+ * source before and after enumeration. The strategy remains responsible for
+ * physical fidelity outside TypeGraph's graph semantics.
+ */
+async function assertDurableWorkingCopyMatchesBase<G extends GraphDef>(
+  baseStore: Store<G>,
+  workingCopy: Store<G>,
+  base: BaseVersion,
+): Promise<void> {
+  const sourceVersionBeforeDiff = await computeBaseVersion(baseStore);
+  if (sourceVersionBeforeDiff !== base) {
+    throw new BranchError(
+      "Base store changed while the durable working copy was being allocated.",
+      {
+        details: {
+          baseVersion: base,
+          liveBaseVersion: sourceVersionBeforeDiff,
+        },
+      },
+    );
+  }
+
+  if (workingCopy.graphId !== baseStore.graphId) {
+    throw new BranchError(
+      "Durable working copy belongs to a different graph than its base store.",
+      {
+        details: {
+          expectedGraphId: baseStore.graphId,
+          receivedGraphId: workingCopy.graphId,
+        },
+      },
+    );
+  }
+
+  const workingCopyVersion = await computeBaseVersion(workingCopy);
+  if (workingCopyVersion === base) return;
+  if (schemaComponentOf(workingCopyVersion) !== schemaComponentOf(base)) {
+    throw new BranchError(
+      "Durable working copy schema does not match its stamped base schema.",
+      {
+        details: {
+          baseSchema: schemaComponentOf(base),
+          workingCopySchema: schemaComponentOf(workingCopyVersion),
+        },
+      },
+    );
+  }
+
+  const diff = await diffAgainstBase(baseStore, workingCopy, false);
+  const sourceVersionAfterDiff = await computeBaseVersion(baseStore);
+  if (sourceVersionAfterDiff !== base) {
+    throw new BranchError(
+      "Base store changed while the durable working copy was being verified.",
+      {
+        details: {
+          baseVersion: base,
+          liveBaseVersion: sourceVersionAfterDiff,
+        },
+      },
+    );
+  }
+
+  const changed =
+    diff.nodes.new.length > 0 ||
+    diff.nodes.modified.length > 0 ||
+    diff.nodes.deleted.length > 0 ||
+    diff.nodes.windowed.length > 0 ||
+    diff.edges.new.length > 0 ||
+    diff.edges.modified.length > 0 ||
+    diff.edges.deleted.length > 0 ||
+    diff.edges.windowed.length > 0 ||
+    diff.identity.new.length > 0 ||
+    diff.identity.retracted.length > 0;
+  if (!changed) return;
+
+  throw new BranchError(
+    "Durable working copy does not match its stamped base graph state.",
+    {
+      details: {
+        baseVersion: base,
+        workingCopyVersion,
+        changedNodes:
+          diff.nodes.new.length +
+          diff.nodes.modified.length +
+          diff.nodes.deleted.length +
+          diff.nodes.windowed.length,
+        changedEdges:
+          diff.edges.new.length +
+          diff.edges.modified.length +
+          diff.edges.deleted.length +
+          diff.edges.windowed.length,
+        changedIdentityAssertions:
+          diff.identity.new.length + diff.identity.retracted.length,
+      },
+    },
+  );
 }
 
 /**
