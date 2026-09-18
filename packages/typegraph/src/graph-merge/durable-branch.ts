@@ -542,7 +542,7 @@ async function assertDurableWorkingCopyMatchesBase<G extends GraphDef>(
   if (!changed) return;
 
   throw new BranchError(
-    "Durable working copy does not match its stamped base graph state.",
+    "Durable working copy does not match its base: the stamped graph state differs.",
     {
       details: {
         baseVersion: base,
