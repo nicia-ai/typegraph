@@ -14,6 +14,7 @@ export { registerCapabilityRefusalIntegrationTests } from "./capability-refusals
 export { registerClaimCompensationIntegrationTests } from "./claim-compensation";
 export { registerClaimLookupPreferenceIntegrationTests } from "./claim-lookup-preference";
 export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identity";
+export { registerClearIntegrationTests } from "./clear";
 export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
 export { registerCollectionAggregateIntegrationTests } from "./collection-aggregates";
 export { registerConstraintFenceErrorIntegrationTests } from "./constraint-fence-errors";

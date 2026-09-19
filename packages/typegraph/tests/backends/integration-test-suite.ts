@@ -45,6 +45,7 @@ import {
   registerClaimCompensationIntegrationTests,
   registerClaimLookupPreferenceIntegrationTests,
   registerClaimOwnerIdentityIntegrationTests,
+  registerClearIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
   registerCollectionAggregateIntegrationTests,
   registerConstraintFenceErrorIntegrationTests,
@@ -353,6 +354,7 @@ export function createIntegrationTestSuite<
     registerSubgraphIntegrationTests(context);
     registerStoreViewIntegrationTests(context);
     registerStoreAnalysisIntegrationTests(context);
+    registerClearIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
     registerWeightedShortestPathExtractionIntegrationTests(context);
     registerFulltextIntegrationTests(context);
