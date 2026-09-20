@@ -1,6 +1,6 @@
 ---
 title: "Durable Branches: The Working Copy Outlives the Process"
-date: 2026-09-20
+date: 2026-11-10
 excerpt: "branch() gives you a working copy that lives and dies with the process that made it, which is the wrong shape for a review that waits a day and survives a deploy. 0.67 adds branchDurable(): a persistent working copy plus a JSON descriptor that can cross a queue and be reopened elsewhere. 0.68 adds operateDurableBranch(): apply a mutation and its evidence in one host transaction, keyed by an idempotency key, with the branch undestroyable until that evidence has been delivered."
 tags:
   - announcements

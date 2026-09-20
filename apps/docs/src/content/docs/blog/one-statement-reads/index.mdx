@@ -1,6 +1,6 @@
 ---
 title: "One Statement Per Page: Reads That Refuse to Become an N+1"
-date: 2026-09-18
+date: 2026-11-03
 excerpt: "A page that lists documents with their newest version, a version count and the three latest comments used to cost one statement for the list and four more for every row — 33 for eight documents. Releases 0.58 through 0.65 turn that into reads that name their shape (neighbors, per-parent top-N, ordered collections, bounded subgraphs, mixed-kind cursor pages) and a batchOnce() that embeds all of them in exactly one statement — or refuses, before any SQL, rather than quietly running them one at a time. All figures are statement counts measured at the SQLite driver, not wall-clock times."
 tags:
   - announcements

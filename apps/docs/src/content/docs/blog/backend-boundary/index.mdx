@@ -1,6 +1,6 @@
 ---
 title: "Declared, Not Inferred: What a Backend Has to Tell TypeGraph"
-date: 2026-09-17
+date: 2026-10-29
 excerpt: "Through 0.56, TypeGraph decided which lock to take, and how to introspect a schema, by asking which database it was running on — 38 branches in 14 files. 0.57 turns each question into a fact the backend states, and adds what an engine that settles write conflicts at commit needs: a portable row fence and a whole-unit retry. It does not yet let you build an engine from scratch."
 tags:
   - announcements

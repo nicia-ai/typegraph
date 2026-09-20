@@ -1,6 +1,6 @@
 ---
 title: "Claim Relations: The Constraint Holds Even When Nobody Took the Lock"
-date: 2026-08-21
+date: 2026-10-06
 excerpt: "A declared constraint used to be enforced by whoever held the per-graph write lock — which `importGraph` never does. Uniqueness, `disjointWith` and edge cardinality are now each reserved in a claim relation whose primary key admits one live claimant per axis, so the fence holds for lock-free writers too. And because upgrading repairs nothing, `store.verifyConstraintFences()` is the read-only audit that finds the violations already sitting in your database."
 tags:
   - announcements
@@ -149,7 +149,7 @@ which is how it came to be missing these constraints in the first place.
 
 - [Claim relations, and what they do not promise](/backend-setup#claim-relations-and-what-they-do-not-promise):
   the reference, including the parity matrix rows this mechanism owes you
-- [Declared constraints require `transactions`](/backend-setup#declared-constraints-require-transactions):
+- [Declared constraints require an interactive transaction](/backend-setup#declared-constraints-require-an-interactive-transaction):
   why a non-transactional backend refuses these declarations outright
 - [Ontology](/ontology): `disjointWith` and the rest of the declaration surface
 - [Interchange](/interchange): the import path these fences now cover

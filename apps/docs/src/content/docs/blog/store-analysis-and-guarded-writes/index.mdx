@@ -1,6 +1,6 @@
 ---
 title: "Look Before You Write: Store Analysis and Guarded Writes"
-date: 2026-09-16
+date: 2026-10-20
 excerpt: "An agent asked to clean up an account directory needs three things before it edits rows it doesn't own: what is in the graph, what no longer fits the schema, and a write that applies only if nothing moved. 0.54 adds store.describe(), store.validateStore(), compareAndSet(), and planCandidateWriteSet(); 0.64 lets the first two run inside a transaction. Run against 243 accounts with two rows the tightened schema rejects: the guarded repair wins once, the same repair from a stale read returns false and writes nothing, and a stale batch plan is refused."
 tags:
   - announcements

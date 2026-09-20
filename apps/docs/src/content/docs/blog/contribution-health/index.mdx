@@ -1,6 +1,6 @@
 ---
 title: "Probe, Repair, Rebuild: When the Search Index Isn't There Anymore"
-date: 2026-08-21
+date: 2026-10-08
 excerpt: "A store whose fulltext table was dropped out of band opens perfectly clean and fails at the first search. The marker row said initialization succeeded, and nothing ever looked at the catalog. Contribution health is the ladder that closes that gap — a read-only probe safe on a replica, a non-destructive repair for bookkeeping drift, and a scoped destructive rebuild for the one state repair can't fix."
 tags:
   - announcements

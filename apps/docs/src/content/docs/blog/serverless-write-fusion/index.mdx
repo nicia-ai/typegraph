@@ -1,6 +1,6 @@
 ---
 title: "One Exchange Instead of Six: Fusing Writes for Serverless Drivers"
-date: 2026-08-31
+date: 2026-10-15
 excerpt: "A single managed write cost five to six sequential round trips — begin, schema-fence probe, duplicate check, insert, commit. On a 45ms edge-to-database link that is a quarter-second before the row exists. 0.52.0 fused eligible node and edge writes into one atomic exchange on Neon HTTP, Cloudflare D1, and libSQL; 0.53.0 finishes the job, extending the same programs to singleton updates and deletes, upserts, read-free document replacement, claims and search projections, and pinned PostgreSQL sessions. All figures are transport-submission counts, not wall-clock benchmarks."
 tags:
   - announcements
@@ -221,7 +221,7 @@ transaction-fenced path it always used.
 This is a breaking schema change: adding, removing, or changing a match
 identity is refused while the affected edge kind holds rows. Export, hard
 delete, migrate the schema, then reimport — see
-[Upgrading an existing edge table for durable match identity](/backend-setup#upgrading-an-existing-edge-table-for-durable-match-identity)
+[Upgrading deployment-wide base storage](/backend-setup#upgrading-deployment-wide-base-storage)
 if your DDL is managed outside `createStoreWithSchema()`.
 
 ## If you maintain a custom backend
@@ -292,7 +292,7 @@ PostgreSQL, Neon, PGlite, SQLite, D1, libSQL — keeps its existing posture.
   and [Remote edge convergence](/performance/overview#remote-edge-convergence):
   eligibility rules and measured numbers for the fused paths
 - [Backend Setup → Authoritative command sessions](/backend-setup#authoritative-command-sessions)
-  and [Upgrading an existing edge table for durable match identity](/backend-setup#upgrading-an-existing-edge-table-for-durable-match-identity):
+  and [Upgrading deployment-wide base storage](/backend-setup#upgrading-deployment-wide-base-storage):
   the custom-backend contract and the schema migration path
 - [Changelog](/changelog#0530): the full 0.53.0 entry, and
   [0.52.0](/changelog#0520) for the release that started this work
