@@ -1,0 +1,456 @@
+---
+title: "Schema Evolution in One Transaction: The Kind, the Rows, and the Ledger Entry Commit Together"
+date: 2026-09-19
+excerpt: "0.62 lets a schema change, the graph writes that depend on it, recorded history, and your own SQL commit or roll back together. 0.65 carries that through reviewed candidate writes, with an explicit replan outcome when the plan goes stale."
+tags:
+  - announcements
+cover:
+  alt: "Two identical chains fan out from a plan node: a schema version, a grid of retraction rows, a recorded revision, and a ledger row. The upper chain is solid blue and committed. The lower chain is dashed, greyed and struck through, its ledger row marked failed, with a rollback arc carrying the failure back to the plan."
+  image: "./cover.png"
+social:
+  alt: "Schema Evolution in One Transaction: The Kind, the Rows, and the Ledger Entry Commit Together"
+  image: "./social.png"
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+[Runtime Schema Evolution](/blog/runtime-schema-evolution) ended with a graph
+that had grown kinds nobody designed up front, the last of them for retraction
+notices, proposed by an agent in the third stage of a clinical-trials demo. This
+post uses a reduced version of that: a `Retraction` kind added to a graph of
+publications. `store.evolve()` commits a kind like that the way it commits
+everything, in a transaction of its own, and hands back a new Store. When the schema change is the whole job, that's
+right. It stops being right when your service keeps its own bookkeeping next to
+the graph: say, a `schema_audit` table recording which schema version each
+import ran under.
+
+Do it in the obvious order and look at what a failure leaves behind. `evolve()`
+commits, then one transaction writes the retraction row and the audit row, then
+something downstream throws:
+
+```text
+evolve(), then a failed import:
+  active schema version  2
+  schema_audit rows      0
+  Retraction node rows   0
+```
+
+The schema is at version 2 and nothing else moved. There is now a `Retraction`
+kind that no ledger entry mentions and no row uses, and your bookkeeping and the
+database disagree about which schema exists. Nothing is corrupt; the schema
+change was just the one step that couldn't join the transaction around it. 0.62
+lets it join, and 0.62 and 0.65 extend the same idea to merges and to reviewed
+candidate writes.
+
+## Plan outside, apply inside
+
+The setup is small: a graph with one kind, the extension the agent proposed, and
+a Drizzle table for the audit ledger that lives in the same database.
+
+```typescript
+const Publication = defineNode("Publication", {
+  schema: z.object({ doi: z.string(), title: z.string() }),
+});
+
+const graph = defineGraph({
+  id: "trials",
+  nodes: { Publication: { type: Publication } },
+  edges: {},
+});
+
+const retractions = defineGraphExtension({
+  nodes: {
+    Retraction: {
+      properties: {
+        doi: { type: "string", minLength: 1 },
+        reason: { type: "string" },
+      },
+    },
+  },
+});
+
+const schemaAudit = sqliteTable("schema_audit", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  schemaVersion: integer("schema_version").notNull(),
+  recordedAt: text("recorded_at"),
+});
+```
+
+The change is split in two. `planEvolution()` runs before any transaction opens.
+It checks the extension against the active schema, writes nothing, and returns
+an immutable plan that names the schema it starts from and the one it will
+produce:
+
+```typescript
+const plan = await store.planEvolution(retractions);
+```
+
+```json
+{
+  "status": "change",
+  "graphId": "trials",
+  "baseline": { "version": 1, "hash": "89654f9e5c1debfb" },
+  "result": { "version": 2, "hash": "aec6b8d50bf21bf8" },
+  "requirements": [
+    { "kind": "new-kind", "entity": "node", "kindName": "Retraction" }
+  ]
+}
+```
+
+`requirements` lists what applying the plan needs from the database. Here it's a
+single `new-kind`, which describes an addition to the graph, not queued removal
+work. Per the 0.62 changelog, planning stays outside the write fence, and
+ordinary additions of kinds or optional scalar fields avoid entity scans and
+provisioning DDL.
+
+Applying it takes your transaction. better-sqlite3 is synchronous, so Drizzle's
+`db.transaction()` can't take an async callback, and a small helper drives
+`BEGIN`/`COMMIT`/`ROLLBACK` on the one connection. With node-postgres or libSQL
+you'd hand the `nativeTx` from `db.transaction(async (nativeTx) => …)` to the
+same methods; [Recipes → Cross-Store Transactions](/recipes#cross-store-transactions-drizzle--typegraph)
+covers both shapes. Everything in this post was run on SQLite.
+
+```typescript
+async function inTransaction<T>(
+  db: BetterSQLite3Database,
+  run: () => Promise<T>,
+): Promise<T> {
+  db.run(sql`BEGIN`);
+  try {
+    const result = await run();
+    db.run(sql`COMMIT`);
+    return result;
+  } catch (error) {
+    db.run(sql`ROLLBACK`);
+    throw error;
+  }
+}
+```
+
+```typescript
+const outcome = await inTransaction(db, async () => {
+  const applied = await store.withEvolvedTransaction(db, plan, async (tx) => {
+    const notices = tx.getNodeCollection("Retraction");
+    if (notices === undefined) throw new Error("Retraction kind missing");
+    await notices.create({ doi: "10.1/a", reason: "fabricated" });
+  });
+
+  db.insert(schemaAudit)
+    .values({
+      schemaVersion: applied.receipt.schema.version,
+      recordedAt: String(applied.receipt.recorded),
+    })
+    .run();
+  return applied;
+});
+
+const current = await store.refreshSchema({
+  minVersion: outcome.receipt.schema.version,
+});
+```
+
+Inside the callback, `tx` sees the resulting schema: `Retraction` is reachable by
+name even though the committed schema doesn't have it yet, and the write rides
+the same transaction as the schema change. The ledger insert runs on the same
+connection afterwards. The receipt carries the exact schema version and hash the
+transaction produced and, on a history store, the recorded-time anchor, so the
+audit row stores what the import actually ran under rather than what the code
+assumed.
+
+The receipt's schema identity and recorded anchor are provisional until your
+outer `COMMIT` succeeds. `refreshSchema()`
+publishes the new schema to the Store you keep around, once the commit is
+behind you: when the cached Store already matches `minVersion` it returns
+without reading, and otherwise it reads the active schema and refuses a missing
+or older version.
+
+Now make the last step fail. I threw an error after the ledger insert and ran
+the same plan twice, once failing and once clean:
+
+```text
+attempt 1 (fails after the callback):
+  receipt: schema v2, recorded r1:0000000000000002:2026-09-20T19:12:56.201Z
+after rollback:
+  active schema version  1
+  schema_audit rows      0
+  Retraction node rows   0
+attempt 2 (same plan):
+  receipt: schema v2, recorded r1:0000000000000002:2026-09-20T19:12:56.202Z
+after commit:
+  active schema version  2
+  schema_audit rows      1
+  Retraction node rows   1
+```
+
+The failed attempt got as far as a receipt (schema version 2, recorded
+revision 2) and a ledger row visible inside the transaction. None of it
+survived. I also queried the recorded-history table directly and found no
+`Retraction` rows in it. The retry reused the same plan, was allocated the same recorded revision, and
+committed. A receipt is evidence only after the outer commit.
+
+A plan is bound to the schema it was made from. If another writer evolves the
+graph first, applying it is refused with `StaleVersionError`
+(`STALE_SCHEMA_VERSION`, expected version 1, actual 2), and the transaction is
+yours to roll back and replan outside.
+
+## When nothing changes, and when only the schema does
+
+A pipeline that runs the same wiring on every deploy will mostly produce
+no-op plans. Plan the same extension against a Store that already has it and the
+plan comes back `"noop"`, with baseline and result identical. A no-op needs no
+exclusive schema fence, so ordinary recorded adoption is enough:
+
+```typescript
+const again = await current.planEvolution(retractions);
+if (again.status === "noop") {
+  await inTransaction(db, () =>
+    current.withRecordedTransaction(db, async (tx) => {
+      const notices = tx.getNodeCollection("Retraction");
+      if (notices === undefined) throw new Error("Retraction kind missing");
+      await notices.create({ doi: "10.1/b", reason: "duplicate publication" });
+    }),
+  );
+}
+```
+
+An explicit `waitBudgetMs` on a no-op plan is refused with
+`EVOLUTION_NOOP_FENCE_BUDGET_UNSUPPORTED`, because there is no fence for it to
+bound.
+
+The opposite case is an evolution that is itself the event. On a store with
+TypeGraph-owned history, `tx.requestRecordedRevision()` allocates a recorded
+anchor even when the transaction changes no entities:
+
+```typescript
+const { receipt } = await inTransaction(db, () =>
+  store.withEvolvedTransaction(db, plan, async (tx) => {
+    tx.requestRecordedRevision();
+  }),
+);
+// receipt.writes.total === 0, receipt.recorded is the checkpoint anchor
+```
+
+In my run that receipt reported zero writes, schema version 2, and a `recorded`
+anchor, so the schema change has a point on the recorded timeline.
+
+## Merges that bring their own kinds
+
+0.61 added `applyMergePlanInTransaction()`, which applies an approved merge plan
+inside a caller-owned transaction next to your own SQL. A merge plan is built
+against a specific target schema, though, so a merge introducing a kind the
+target doesn't have yet couldn't share a commit with the evolution that adds it.
+0.62 closes that gap: `branchForEvolution()` forks a branch that already has the
+planned kinds, `planMergeForEvolution()` builds the plan against the resulting
+schema, and the evolved callback applies it. Branches are staged on a scratch
+backend that you supply, here another in-memory SQLite database:
+
+```typescript
+const makeIsolatedBackend = async () => createLocalSqliteBackend().backend;
+```
+
+```typescript
+const evolutionPlan = await target.planEvolution(retractions);
+const futureBranch = unwrap(
+  await branchForEvolution(target, evolutionPlan, makeIsolatedBackend),
+);
+try {
+  await futureBranch.store
+    .getNodeCollectionOrThrow("Retraction")
+    .create({ doi: "10.1/a", reason: "fabricated" });
+
+  const mergePlan = unwrap(
+    await planMergeForEvolution(target, evolutionPlan, [futureBranch]),
+  );
+
+  await inTransaction(db, () =>
+    target.withEvolvedTransaction(db, evolutionPlan, (tx) =>
+      applyMergePlanInTransaction(target, tx, mergePlan),
+    ),
+  );
+} finally {
+  await futureBranch.close();
+}
+```
+
+The plan names the resulting schema, and it has to be applied before any other
+graph write in the callback. A plan built the ordinary way, with `planMerge()`
+against the old schema, is refused inside the evolved transaction before any
+mutation: `MergePlanSchemaMismatchError` (`GRAPH_MERGE_PLAN_SCHEMA_MISMATCH`),
+and the active version stayed at 1 in my run.
+
+## Reviewed candidate writes
+
+A candidate write set is the branch-free way to propose changes: a JSON document
+of nodes and edges, planned into a reviewable artifact and applied later. In the
+running scenario the agent proposes the `Retraction` records together with the
+kind that holds them, and a reviewer reads the plan before anything is written.
+0.65 plans that document against the schema the pending evolution will
+produce:
+
+```typescript
+const evolutionPlan = await target.planEvolution(retractions);
+
+const writeSet = {
+  formatVersion: 1 as const,
+  sourceId: "agent-proposal-7",
+  target: captureCandidateWriteSetTargetForEvolution(target, evolutionPlan),
+  nodes: [
+    {
+      kind: "Retraction",
+      id: "retraction-1",
+      properties: { doi: "10.1/a", reason: "fabricated" },
+      validFrom: "2026-01-01T00:00:00.000Z",
+    },
+  ],
+  edges: [],
+};
+
+const mergePlan = unwrap(
+  await planCandidateWriteSetForEvolution({
+    target,
+    evolutionPlan,
+    makeBackend: makeIsolatedBackend,
+    writeSet,
+  }),
+);
+```
+
+`captureCandidateWriteSetTargetForEvolution()` records the evolution plan's
+resulting schema identity instead of the active one. The artifact names version
+2 and the same hash the evolution plan promised, proposes one node upsert, and
+nothing has been written: the active schema is still version 1 and the Store
+still has no `Retraction` kind. Applying it is the same shape as the merge
+above, plus whatever your own SQL needs:
+
+```typescript
+const outcome = await inTransaction(db, async () => {
+  const applied = await target.withEvolvedTransaction(db, evolutionPlan, (tx) =>
+    applyMergePlanInTransaction(target, tx, mergePlan),
+  );
+  db.run(sql`INSERT INTO review_log (schema_version, merged_nodes)
+    VALUES (${applied.receipt.schema.version}, ${applied.result.merged.nodes})`);
+  return applied;
+});
+```
+
+Review takes time and the target moves, and there are two different outcomes,
+on purpose. If a write lands while the plan is being built,
+`planCandidateWriteSetForEvolution()` returns a `MergePlanningStaleError`
+(`GRAPH_MERGE_PLANNING_STALE`) in its result: discard the plan, recapture the
+target, replan. If the target changes after you already hold a finished plan,
+applying it throws `StaleMergePlanError` (`GRAPH_MERGE_PLAN_STALE`), and because
+it throws inside the outer transaction, the schema change rolls back with it.
+With a write injected after planning, the active version was still 1 afterwards.
+
+The replan loop for the first case:
+
+```typescript
+async function applyReviewedRetraction() {
+  for (;;) {
+    const evolutionPlan = await target.planEvolution(retractions);
+    const planned = await planCandidateWriteSetForEvolution({
+      target,
+      evolutionPlan,
+      makeBackend: makeIsolatedBackend,
+      writeSet: {
+        formatVersion: 1 as const,
+        sourceId: "agent-proposal-7",
+        target: captureCandidateWriteSetTargetForEvolution(
+          target,
+          evolutionPlan,
+        ),
+        nodes: [
+          {
+            kind: "Retraction",
+            id: "retraction-1",
+            properties: { doi: "10.1/a", reason: "fabricated" },
+            validFrom: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        edges: [],
+      },
+    });
+
+    if (isErr(planned)) {
+      if (planned.error instanceof MergePlanningStaleError) {
+        console.warn(`replanning: ${planned.error.code}`);
+        continue;
+      }
+      throw planned.error;
+    }
+
+    return inTransaction(db, () =>
+      target.withEvolvedTransaction(db, evolutionPlan, (tx) =>
+        applyMergePlanInTransaction(target, tx, planned.data),
+      ),
+    );
+  }
+}
+```
+
+```text
+replanning: GRAPH_MERGE_PLANNING_STALE
+```
+
+I injected a write into the first attempt's planning to force that. The second
+attempt planned and applied: one node merged, schema at version 2. The loop deliberately retries planning only. An
+apply-time refusal rolls the transaction back and reaches the caller, who can
+call the function again.
+
+## What it doesn't do
+
+- **Plans don't travel.** A plan is an opaque, non-serializable capability token.
+  It can move between compatible Stores from the same loaded module, but it
+  can't be serialized, cloned, or reconstructed, so plan and apply in one
+  process.
+- **The default adapter is DML-only.** A plan that needs a vector slot or
+  identity work is refused before the fence, any DDL, the callback, or any
+  mutation. I ran the refusal: `UnsupportedBackendCapabilityError` for
+  "transactional schema provisioning", with the active version unchanged at 1.
+  A privileged adapter configured with `schemaProvisioning: "transactional"`
+  can provision that storage on your transaction; I only exercised the
+  refusal, not that path. Bootstrap storage must exist before adopted
+  requests.
+- **Indexes stay outside.** Generic and concurrent eager indexes remain
+  explicit maintenance: call `materializeIndexes()` on the refreshed Store
+  after commit. `ref` and eager-index options passed to
+  `withEvolvedTransaction()` are refused.
+- **The callback is the boundary.** Finish every read and write before it
+  returns; escaped transaction contexts, deferred queries, and prepared
+  batches refuse to run afterwards. A callback failure must reject the outer
+  transaction. Catching it and committing proves nothing about rollback.
+- **It is your database's transaction, and nothing more.** The ledger row is
+  atomic with the schema change because they share a connection. A message
+  published to a queue from inside the callback is not.
+- **Driver support varies.** SQLite adoption needs the exact native connection
+  with an observable `inTransaction` state, as better-sqlite3 provides;
+  noninteractive HTTP drivers can't adopt schema transactions. Change plans
+  wait for the schema fence up to `waitBudgetMs` (5,000 ms by default), and a
+  `SchemaFenceTimeoutError` means roll back and retry the complete
+  transaction.
+
+## Upgrading
+
+Custom implementations of the `StoreEvolution` interface must add
+`planEvolution()` and `refreshSchema()`. Custom `AdapterBackend` and
+`SqlEngineProfile` implementations must now declare `schemaProvisioning`
+explicitly; the bundled adapters default to `"dml-only"`. Bootstrap TypeGraph's
+normal storage before serving adopted evolution requests, since they refuse
+rather than create missing base tables.
+
+## Try it
+
+- [Graph Extensions → Plan outside and apply inside a caller-owned transaction](/graph-extensions#plan-outside-and-apply-inside-a-caller-owned-transaction):
+  the plan shape, `waitBudgetMs`, and `refreshSchema()` semantics
+- [Graph Merge → Merge after schema evolution in one caller transaction](/graph-merge#merge-after-schema-evolution-in-one-caller-transaction)
+  and [Candidate write sets for a planned schema](/graph-merge#candidate-write-sets-for-a-planned-schema)
+- [Backend Setup → Adopted schema transactions](/backend-setup#adopted-schema-transactions):
+  per-driver requirements and the provisioning policy
+- [Changelog](/changelog#0620): the full 0.62.0 entry, and
+  [0.65.0](/changelog#0650) for evolution-aware candidate writes
+- [Runtime Schema Evolution](/blog/runtime-schema-evolution): where the
+  `Retraction` kind came from
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

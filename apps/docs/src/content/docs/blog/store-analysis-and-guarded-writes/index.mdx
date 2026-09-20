@@ -1,0 +1,494 @@
+---
+title: "Look Before You Write: Store Analysis and Guarded Writes"
+date: 2026-09-16
+excerpt: "An agent asked to clean up an account directory needs three things before it edits rows it doesn't own: what is in the graph, what no longer fits the schema, and a write that applies only if nothing moved. 0.54 adds store.describe(), store.validateStore(), compareAndSet(), and planCandidateWriteSet(); 0.64 lets the first two run inside a transaction. Run against 243 accounts with two rows the tightened schema rejects: the guarded repair wins once, the same repair from a stale read returns false and writes nothing, and a stale batch plan is refused."
+tags:
+  - announcements
+cover:
+  alt: "A dense field of record dots in a grid, most of them muted gray; two are ringed in red where they violate the schema, and a blue guard bracket closes around one of them as a blue check lands, while a second bracket over a neighboring dot has bounced off"
+  image: "./cover.png"
+social:
+  alt: "Look Before You Write: Store Analysis and Guarded Writes"
+  image: "./social.png"
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+An account directory has been running for a while. Last month someone
+tightened its rules: `email` must be a real address, `plan` is one of three
+values, `seats` must be positive. New writes obey. Rows stored under the old
+rules were never revisited, and nobody knows how many of them still don't
+fit. A background agent (or an on-call operator with a REPL) is asked to
+clean it up while sales reps keep editing the same accounts.
+
+That is three questions, each with its own way to go wrong. What is in this
+graph? Reading it all back doesn't scale as the schema and the data grow.
+What no longer fits? The store validates on write, so nothing looks at old
+rows. And how do I change a row without overwriting whatever a person did
+after I looked? 0.54 answers each with `store.describe()`,
+`store.validateStore()`, and `compareAndSet()` / `planCandidateWriteSet()`;
+0.64 lets the first two run inside a transaction. It is the same loop as
+[runtime schema evolution](/blog/runtime-schema-evolution), where an agent
+proposes changes to the schema itself: look, propose, and apply only if the
+world is where you left it.
+
+The graph is 240 accounts and 90 people created through the store, 60
+`memberOf` edges, and three legacy `Account` rows inserted through the
+backend directly, the way a writer running the old rules would have stored
+them. The outputs below come from running this code, lightly abridged,
+against it on SQLite.
+
+```typescript
+const Account = defineNode("Account", {
+  schema: z.object({
+    name: z.string().min(1),
+    email: z.email(),
+    plan: z.enum(["free", "team", "enterprise"]),
+    seats: z.number().int().positive(),
+    ownerId: z.string().optional(),
+  }),
+});
+
+const graph = defineGraph({
+  id: "accounts",
+  nodes: {
+    Account: {
+      type: Account,
+      unique: [
+        {
+          name: "account_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    Person: { type: Person },
+  },
+  edges: { memberOf: { type: memberOf, from: [Person], to: [Account] } },
+});
+```
+
+## What is in the graph
+
+```typescript
+const { statistics } = await store.describe();
+for (const kind of [...statistics.nodes, ...statistics.edges]) {
+  console.log(`${kind.entity} ${kind.kind}: ${kind.count}`);
+  for (const property of kind.properties) {
+    console.log(
+      `  ${property.path}  present=${property.presentCount}  coverage=${property.coverage.toFixed(2)}`,
+    );
+  }
+}
+```
+
+```text
+node Account: 243
+  /email  present=243  coverage=1.00
+  /name  present=243  coverage=1.00
+  /ownerId  present=60  coverage=0.25
+  /plan  present=243  coverage=1.00
+  /seats  present=243  coverage=1.00
+node Person: 90
+  /name  present=90  coverage=1.00
+  /title  present=30  coverage=0.33
+edge memberOf: 60
+  /role  present=30  coverage=0.50
+```
+
+Every declared kind gets a row count, and every directly addressable
+declared property gets a presence count, an explicit-`null` count, and a
+coverage figure (non-null rows over total rows). `/ownerId` at 0.25 says 60
+of 243 accounts have an owner. That is the kind of number an agent uses to
+decide where to spend its attention before it reads a single row.
+
+The counts are computed by the database, not by pulling rows into
+JavaScript. Counting statements through a wrapped `backend.execute`, the way
+`tests/store-analysis.test.ts` does, `describe()` on this graph is two data
+statements: one for every node kind, one for every edge kind. A schema with
+1,001 declared properties is split into four, because each statement's
+result columns are capped at 512, comfortably under PostgreSQL's limit of
+1,664. Each `validateStore()` page, below, is one statement.
+
+The result also carries the schema it was computed under:
+
+```text
+{
+  schemaVersion: 1,
+  schemaHash: '362110ec868c79a2',
+  schemaFence: '8a099b414bf5f3a6214b156f18613531'
+}
+```
+
+TypeGraph reads that coordinate before and after the aggregate statements
+and refuses the result if it changed, so you never get statistics that
+straddle a schema commit.
+
+## What no longer fits
+
+```typescript
+let cursor: string | undefined;
+do {
+  const page = await store.validateStore({
+    entity: "node",
+    kind: "Account",
+    pageSize: 100,
+    ...(cursor === undefined ? {} : { cursor }),
+  });
+  console.log(
+    `scanned ${page.scannedCount}, ${page.violations.length} violation(s)`,
+  );
+  for (const failure of page.violations) {
+    console.log(failure.id, failure.path, failure.reason);
+  }
+  cursor = page.nextCursor;
+} while (cursor !== undefined);
+```
+
+```text
+scanned 100, 0 violation(s)
+scanned 100, 0 violation(s)
+scanned 43, 3 violation(s)
+acct_legacy_1 /email Invalid email address
+acct_legacy_2 /plan Invalid option: expected one of "free"|"team"|"enterprise"
+acct_legacy_2 /seats Too small: expected number to be >0
+```
+
+Two records, three violations. `pageSize` counts records scanned, not
+violations returned, which is why the last page scanned 43 records and
+reported 3 failures: `acct_legacy_2` breaks two rules at once. Each failure
+carries the record id, an RFC 6901 pointer to the offending property, the
+Zod issue code, and the reason. The scan is a keyset walk, one bounded
+statement per page. The cursor is bound to the entity, kind, schema fence,
+and last scanned id, so a schema change mid-sweep raises
+`StoreAnalysisCursorStaleError` instead of quietly resuming against rules
+the first pages weren't checked under.
+
+The third legacy row, `acct_legacy_3`, isn't in the report. It carries a
+`salesforceId` that the schema doesn't declare. Undeclared properties are
+treated as healthy semi-structured data and never reported, even when the
+authored Zod object is strict. That is what lets you sweep a graph whose
+shape is evolving at runtime without every extra field showing up as a
+defect.
+
+## Fix a row without racing anyone
+
+The obvious repair is `getById()`, decide, `update()`. The gap between the
+read and the write is where a rep's edit gets overwritten.
+`compareAndSet()` closes it: the id, the expected values, and the update
+run as one set-based statement.
+
+```typescript
+const before = await store.nodes.Account.getById(id);
+const applied = await store.nodes.Account.compareAndSet(id, {
+  expected: { name: "Northwind", plan: "team", seats: 12 },
+  patch: { email: "ops@northwind.example" },
+});
+const after = await store.nodes.Account.getById(id);
+console.log(
+  `applied=${applied}  email=${after?.email}  version ${before?.meta.version} -> ${after?.meta.version}`,
+);
+```
+
+```text
+applied=true  email=ops@northwind.example  version 1 -> 2
+```
+
+For `acct_legacy_1` the agent guards on the three properties it read that
+are valid. The complete after-image still goes through ordinary validation,
+and the row's version advances. Now the case the guard exists for. An agent read
+`acct_legacy_2` and planned a repair; before it applied, a person fixed the
+row by hand, changing the email along the way. The agent's guard names the
+email it read:
+
+```typescript
+const applied = await store.nodes.Account.compareAndSet(id, {
+  expected: { name: "Contoso", email: "it@contoso.example" },
+  patch: { plan: "team", seats: 5 },
+});
+```
+
+```text
+applied=false  seats=20  version 2 -> 2  updatedAt changed=false
+```
+
+`false` means the row was missing or no longer matched, and in both cases
+nothing was written: the person's `seats=20` stands, the version didn't
+move, `updatedAt` didn't change. It is an ordinary outcome, not an
+exception. The agent's correct response is to re-read and re-plan. If you
+register `onBulkOperationEnd`, guards show up in the ordinary hook stream
+with the affected count, so hits and misses are observable without wrapping
+the call:
+
+```text
+compareAndSet Account affected=1
+compareAndSet Account affected=0
+```
+
+Absence is a value you have to state. `undefined` is refused because it can
+vanish while an object is assembled or serialized, so the guard uses an
+exported marker to require that a property isn't stored:
+
+```typescript
+const claim = (ownerId: string) =>
+  store.nodes.Account.compareAndSet("acct_1", {
+    expected: { ownerId: compareAndSetAbsent },
+    patch: { ownerId },
+  });
+
+console.log(await claim("rep-9"), await claim("rep-4"));
+```
+
+```text
+true false
+```
+
+Two agents claiming the same unowned account: one owns it, the other learns
+that immediately and moves on. No lock, no retry loop.
+
+Two behaviors are worth knowing before you build on this, both verified in
+the same run. The expected values are parsed through the property's current
+schema, so a guard can't name a value the schema already rejects. Guarding
+`acct_legacy_1` on its bad email is a `ValidationError` on `email`, which is
+why the repairs above guard on `name`, `plan`, and `seats` instead. And the
+after-image must be valid as a whole: patching only `plan` on
+`acct_legacy_2` fails on `seats`, before anything is written. A row with two
+violations gets one patch that fixes both.
+
+## Propose a batch without a branch
+
+A guard is the right size for one row. A partner feed offering a batch of
+accounts is a review problem: you want to see what would change before
+anything does. `planCandidateWriteSet()` takes a serializable write set,
+stages it in a disposable working copy, runs it through the ordinary merge
+planner, and hands back the ordinary plan artifact. It creates no durable
+branch and never writes to the target.
+
+```typescript
+const plan = unwrap(
+  await planCandidateWriteSet({
+    target: store,
+    makeBackend,
+    options,
+    writeSet: {
+      formatVersion: 1,
+      sourceId: "partner-feed",
+      target: await captureCandidateWriteSetTarget(store),
+      nodes: [
+        {
+          kind: "Account",
+          id: "partner:7",
+          properties: {
+            name: "Account 7 Holdings",
+            email: "ops+7@example.com",
+            plan: "enterprise",
+            seats: 40,
+          },
+          validFrom: "2026-09-01T00:00:00.000Z",
+        },
+        {
+          kind: "Account",
+          id: "partner:globex",
+          properties: {
+            name: "Globex",
+            email: "it@globex.example",
+            plan: "team",
+            seats: 25,
+          },
+          validFrom: "2026-09-01T00:00:00.000Z",
+        },
+      ],
+      edges: [],
+    },
+  }),
+);
+```
+
+`options` tells the planner that two `Account` nodes with the same email are
+the same account:
+
+```typescript
+const options = {
+  resolve: {
+    Account: {
+      similarity: {
+        kind: "custom",
+        score: (a, b) => (a.email === b.email ? 1 : 0),
+      },
+      threshold: 1,
+    },
+  },
+};
+```
+
+Without it the planner doesn't recognize `partner:7` as `acct_7`, and
+applying the plan fails on the `account_email` uniqueness constraint. One
+prerequisite, explained in the last section: I deleted `acct_legacy_3` first,
+so the graph holds 242 accounts, not 243. With the resolver in place:
+
+```text
+upserts: 2  accounts still 242
+acct_7 name: keep "Account 7", feed says "Account 7 Holdings"
+acct_7 plan: keep "team", feed says "enterprise"
+acct_7 seats: keep 12, feed says 40
+```
+
+Two upserts: a new account, and a match on `acct_7` that disagrees with the
+feed in three properties. By default the accepted values win and the
+disagreements go on the review, so the feed's "enterprise, 40 seats" is a
+line item for a reviewer, not a silent overwrite. The target still has 242
+accounts.
+
+Then the world moves. Some unrelated write lands (here, a guarded
+`acct_3` plan change), and applying the original plan is refused:
+
+```text
+StaleMergePlanError: The target revision changed after this merge plan was created; the plan was not applied.  accounts 242
+```
+
+Re-plan against the current graph, apply, and the count goes to 243:
+
+```text
+merged nodes=2  accounts 243
+```
+
+The plan is fenced on the target's revision, not on the rows it touches, so
+an unrelated write, like this one, invalidates it. For a bounded batch that
+is cheap to redo. When a
+human approval has to sit between planning and applying, that's the case
+[durable merge review](/blog/durable-merge-review) handles: the approval is
+persisted as evidence and a fresh plan is derived from it.
+
+## Inside a transaction
+
+Root-store analysis is a sequence of statements. When a sweep needs to see
+one consistent dataset, 0.64 exposes the same two methods on the transaction
+context:
+
+```typescript
+const summary = await store.transaction(
+  async (tx) => {
+    const { statistics } = await tx.describe();
+    let scanned = 0;
+    const violations: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await tx.validateStore({
+        entity: "node",
+        kind: "Account",
+        pageSize: 100,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      scanned += page.scannedCount;
+      violations.push(...page.violations.map((v) => `${v.id}${v.path}`));
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    return {
+      accounts: statistics.nodes.find((k) => k.kind === "Account")?.count,
+      scanned,
+      violations,
+    };
+  },
+  { isolationLevel: "repeatable_read", accessMode: "read_only" },
+);
+```
+
+```text
+{ accounts: 243, scanned: 243, violations: [] }
+```
+
+The violations are gone because the two repairs above landed by this point
+in the run. Use `repeatable_read` or `serializable` and consume every page
+inside the callback; that is what makes the pages one snapshot. Calling the
+root `store.describe()` from inside a transaction callback does not join the
+transaction.
+
+## Also in 0.54
+
+Graph-scoped annotations now flow through `defineGraph`,
+`defineGraphExtension`, the serialized schema, and introspection, so an
+extension can carry metadata about the graph and an agent reading
+`describe()` sees it:
+
+```typescript
+const evolved = await store.evolve(
+  defineGraphExtension({ annotations: { displayName: "Account directory" } }),
+);
+console.log((await evolved.describe()).schema.annotations);
+```
+
+```text
+{ displayName: 'Account directory' }
+```
+
+The release also adds schema-bound runtime-kind tokens, which keep extension
+node and edge types through collections, bulk edge reads, and one-hop
+traversals. That one I haven't exercised here; the
+[graph extensions guide](/graph-extensions) covers it.
+
+## What this doesn't do
+
+**Analysis is live data, not a snapshot.** At the root store, each
+`describe()` path batch and each `validateStore()` page is its own
+statement. The schema fence catches schema changes between them; it does not
+catch data changes, so a concurrent write can be visible to one page and not
+another. The transaction form above is the way to get a single snapshot.
+Both methods are current-state only and absent from `StoreView`; there is no
+as-of population analysis.
+
+**`describe()` covers directly addressable declared properties.** Coverage
+follows nested JSON Schema `properties` and deliberately doesn't invent
+semantics through `$ref`, unions, intersections, arrays, or conditionals.
+`validateStore()` remains the authority for those.
+
+**A guard protects what it can name.** Expected values are JSON scalars
+that must pass the property's current schema. That means you can't fence on
+the invalid value itself: if a person and an agent both repair the same bad
+field, a guard on its neighbors won't tell them apart. A kind whose Zod
+schema uses an object-level `.refine()` can't use `compareAndSet()` at all
+in this build; the call throws Zod's
+`.partial() cannot be used on object schemas containing refinements`
+rather than a typed TypeGraph error. Where the guard can't express the
+precondition, the revision-fenced plan above is the alternative.
+
+**Planning needs a graph that imports cleanly.** The working copy is seeded
+by cloning the whole target through interchange import, which rejects
+unknown properties. Before I deleted `acct_legacy_3`, the same call failed:
+
+```text
+CandidateWriteSetError: Unable to create the transient candidate staging store.
+BranchError: Failed to create constraint-aware ingestion branch
+BranchError: Failed to create working-copy branch of base store
+Error: Graph interchange stream aborted after a chunk reported import errors. Earlier chunks remain committ…
+```
+
+The message doesn't name the row. I found it by bisecting the seed data:
+with the two invalid rows repaired, planning still failed until the row
+with the undeclared `salesforceId` was gone. So `validateStore()`
+calling that row healthy holds for the store's own reads, and planning
+disagrees. The cost of the clone also scales with the target, which is why
+the guide recommends this for bounded review workflows and not as a
+hot-path comparison.
+
+## Upgrading
+
+`BulkOperationHookContext["operation"]` now includes `"compareAndSet"`, so
+an exhaustive `switch` over it needs the new case. During a mixed-version
+rollout, upgrade every process that can write schema versions to 0.54
+before enabling graph-scoped annotations; 0.54 preserves unknown top-level
+serialized-schema fields during reconciliation, and older writers don't.
+
+## Try it
+
+- [`describe()` and `validateStore()`](/graph-extensions#population-statistics-and-stored-data-validation),
+  including the transaction form
+- [`compareAndSet()`](/schemas-stores#compareandsetid-params) and the
+  `compareAndSetAbsent` marker
+- [`planCandidateWriteSet()`](/graph-merge#constraint-aware-ingestion-branches)
+  and the plan and apply lifecycle
+- [Example 27](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/27-durable-merge-review.ts),
+  which carries a candidate write set through review and apply
+
+<NewsletterSignup />
