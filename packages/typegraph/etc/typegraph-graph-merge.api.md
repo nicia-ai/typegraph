@@ -1637,7 +1637,7 @@ export class DurableEvidenceUndeliveredError extends BranchError {
 }
 
 // @public
-export type DurableOperationCapability<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
+export type DurableOperationCapability<TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
     operate: (args: Readonly<{
         descriptor: TStoreDescriptor;
         expectedOrigin: DurableBranchOrigin;
@@ -1752,7 +1752,7 @@ export type DurableWorkingCopyStrategy<G extends GraphDef, TStoreDescriptor exte
         expectedOrigin: DurableBranchOrigin;
         plan: MergePlanArtifactV1;
     }>) => Promise<NativeDurableMergeResult>) | undefined;
-    operations?: DurableOperationCapability<G, TStoreDescriptor> | undefined;
+    operations?: DurableOperationCapability<TStoreDescriptor> | undefined;
 }>;
 
 // @public (undocumented)

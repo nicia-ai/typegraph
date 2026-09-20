@@ -350,9 +350,7 @@ export type DurableWorkingCopyStrategy<
    * capability (or return `unsupported` from `operate`) rather than emulating
    * atomicity with callbacks or best effort. See `durable-operation.ts`.
    */
-  operations?:
-    | DurableOperationCapability<G, TStoreDescriptor>
-    | undefined;
+  operations?: DurableOperationCapability<TStoreDescriptor> | undefined;
 }>;
 
 /**

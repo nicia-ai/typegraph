@@ -64,14 +64,9 @@ import {
 } from "./errors";
 import type { Result } from "./result";
 import { err, isErr, ok } from "./result";
-import type {
-  EngineRevision,
-  GraphDef,
-  JsonValue,
-} from "./typegraph-internal";
+import type { EngineRevision, GraphDef, JsonValue } from "./typegraph-internal";
 import { sha256Hex } from "./typegraph-internal";
 import type { BaseVersion } from "./types";
-import { asBaseVersion } from "./types";
 
 /** Default page size for {@link scanDurableOperations}. */
 export const DURABLE_OPERATION_SCAN_DEFAULT_LIMIT = 100;
@@ -87,9 +82,7 @@ const OPERATION_DIGEST_HEX_LENGTH = 16;
  * outcome. Each names a guarantee TypeGraph will not fake.
  */
 export type DurableOperationUnsupportedDimension =
-  | "atomicMutation"
-  | "evidenceStore"
-  | "host";
+  "atomicMutation" | "evidenceStore" | "host";
 
 /**
  * The caller's operation request. `idempotencyKey` identifies the operation;
@@ -169,7 +162,6 @@ export type DurableOperationOutcome =
  * called.
  */
 export type DurableOperationCapability<
-  G extends GraphDef,
   TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 > = Readonly<{
   /**
@@ -249,21 +241,18 @@ export async function computeDurableOperationDigest(
 }
 
 /** The capability fields the public orchestrators require. */
-type OperationStrategy<
-  G extends GraphDef,
-  TStoreDescriptor extends DurableStoreDescriptor,
-> = Readonly<{
-  type: string;
-  version: number;
-  operations?: DurableOperationCapability<G, TStoreDescriptor> | undefined;
-}>;
+type OperationStrategy<TStoreDescriptor extends DurableStoreDescriptor> =
+  Readonly<{
+    type: string;
+    version: number;
+    operations?: DurableOperationCapability<TStoreDescriptor> | undefined;
+  }>;
 
 function requireDescriptorOwner<
-  G extends GraphDef,
   TStoreDescriptor extends DurableStoreDescriptor,
 >(
   descriptor: DurableBranchDescriptor<TStoreDescriptor>,
-  strategy: OperationStrategy<G, TStoreDescriptor>,
+  strategy: OperationStrategy<TStoreDescriptor>,
 ):
   | Readonly<{ ok: true; origin: DurableBranchOrigin }>
   | Readonly<{ ok: false; error: DurableOperationError }> {
@@ -354,8 +343,16 @@ function validateEvidence(
     );
   }
   try {
-    assertJsonValue(record["metadata"], "metadata", "Durable operation evidence");
-    assertJsonValue(record["mutation"], "mutation", "Durable operation evidence");
+    assertJsonValue(
+      record["metadata"],
+      "metadata",
+      "Durable operation evidence",
+    );
+    assertJsonValue(
+      record["mutation"],
+      "mutation",
+      "Durable operation evidence",
+    );
   } catch (error) {
     return new DurableOperationEvidenceError(
       `Durable operation evidence metadata is not JSON-safe: ${describeCause(error)}`,
@@ -373,14 +370,16 @@ function validateEvidence(
       { details: { idempotencyKey: expected.idempotencyKey } },
     );
   }
-  return validateCoordinates(record["before"], record, "before") ??
+  return (
+    validateCoordinates(record["before"], record, "before") ??
     validateCoordinates(record["after"], record, "after") ??
     (typeof record["delivered"] === "boolean" ?
       undefined
-      : new DurableOperationEvidenceError(
-          "Durable operation evidence is missing its delivered flag.",
-          { details: { idempotencyKey: expected.idempotencyKey } },
-        ));
+    : new DurableOperationEvidenceError(
+        "Durable operation evidence is missing its delivered flag.",
+        { details: { idempotencyKey: expected.idempotencyKey } },
+      ))
+  );
 }
 
 function validateCoordinates(
@@ -416,15 +415,6 @@ function validateCoordinates(
     );
   }
   return undefined;
-}
-
-/** Throws a typed error when evidence from a host is invalid. */
-function assertEvidence(
-  evidence: DurableBranchOperationEvidence,
-  expected: DurableBranchOperation,
-): void {
-  const refusal = validateEvidence(evidence, expected);
-  if (refusal !== undefined) throw refusal;
 }
 
 function unsupportedError(
@@ -549,7 +539,10 @@ export async function scanDurableOperations<
 >(
   descriptor: DurableBranchDescriptor<TStoreDescriptor>,
   strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>,
-  options: Readonly<{ after?: string | undefined; limit?: number | undefined }> = {},
+  options: Readonly<{
+    after?: string | undefined;
+    limit?: number | undefined;
+  }> = {},
 ): Promise<Result<DurableOperationScan, DurableOperationError>> {
   const owner = requireDescriptorOwner(descriptor, strategy);
   if (!owner.ok) return err(owner.error);
@@ -670,49 +663,4 @@ export async function durableBranchHasUndeliveredEvidence<
       ),
     );
   }
-}
-
-/**
- * Asserts evidence is JSON-safe and consistent with `request`, then narrows it.
- * Exported for strategy fixtures and tests that need the same validation the
- * public path applies.
- *
- * @internal
- */
-export function assertDurableOperationEvidence(
-  evidence: DurableBranchOperationEvidence,
-  request: DurableBranchOperation,
-): void {
-  assertEvidence(evidence, request);
-}
-
-/**
- * Mints a {@link BaseVersion} from a host-supplied coordinate string. Exported
- * so strategy fixtures can build evidence coordinates without reaching into
- * internal modules.
- *
- * @internal
- */
-export function durableCoordinates(
-  base: string,
-  revision?: EngineRevision,
-): DurableBranchCoordinates {
-  return revision === undefined ?
-      { base: asBaseVersion(base) }
-    : { base: asBaseVersion(base), revision };
-}
-
-/**
- * Convenience for tests and hosts: builds the canonical operation from a
- * request exactly as {@link operateDurableBranch} would. Exported so a fixture
- * can share the digest derivation instead of re-implementing it.
- *
- * @internal
- */
-export async function normalizeDurableOperation(
-  request: DurableBranchOperationRequest,
-): Promise<DurableBranchOperation> {
-  const normalized = await normalizeOperationRequest(request);
-  if (isErr(normalized)) throw normalized.error;
-  return normalized.data;
 }
