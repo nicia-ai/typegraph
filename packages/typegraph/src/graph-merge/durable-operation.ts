@@ -74,8 +74,8 @@ export const DURABLE_OPERATION_SCAN_DEFAULT_LIMIT = 100;
 /** Largest page a single {@link scanDurableOperations} call may request. */
 export const DURABLE_OPERATION_SCAN_MAX_LIMIT = 1000;
 
-/** Hex characters of the SHA-256 operation digest (128 bits). */
-const OPERATION_DIGEST_HEX_LENGTH = 16;
+/** Bytes of the SHA-256 operation digest (128 bits). */
+const OPERATION_DIGEST_BYTE_LENGTH = 16;
 
 /**
  * The dimensions whose absence a strategy reports through the `unsupported`
@@ -237,7 +237,7 @@ export async function computeDurableOperationDigest(
     metadata: request.metadata,
     mutation: request.mutation,
   });
-  return sha256Hex(canonical, OPERATION_DIGEST_HEX_LENGTH);
+  return sha256Hex(canonical, OPERATION_DIGEST_BYTE_LENGTH);
 }
 
 /** The capability fields the public orchestrators require. */
@@ -308,38 +308,59 @@ async function normalizeOperationRequest(
  * consistent with the operation that produced it. A host cannot forge a
  * different digest, echo a different request, or return non-JSON metadata.
  */
-function validateEvidence(
+function normalizeStoredEvidence(
   evidence: unknown,
-  expected: DurableBranchOperation,
-): DurableOperationEvidenceError | undefined {
-  if (typeof evidence !== "object" || evidence === null) {
-    return new DurableOperationEvidenceError(
-      "Durable operation evidence must be a JSON object.",
-      { details: { idempotencyKey: expected.idempotencyKey } },
+  expectedIdempotencyKey?: string,
+): Result<DurableBranchOperationEvidence, DurableOperationEvidenceError> {
+  if (
+    typeof evidence !== "object" ||
+    evidence === null ||
+    Array.isArray(evidence)
+  ) {
+    return err(
+      new DurableOperationEvidenceError(
+        "Durable operation evidence must be a JSON object.",
+        { details: { idempotencyKey: expectedIdempotencyKey } },
+      ),
     );
   }
   const record = evidence as Readonly<Record<string, unknown>>;
-  if (record["idempotencyKey"] !== expected.idempotencyKey) {
-    return new DurableOperationEvidenceError(
-      "Durable operation evidence does not carry the requested idempotency key.",
-      {
-        details: {
-          expectedKey: expected.idempotencyKey,
-          receivedKey: record["idempotencyKey"],
-        },
-      },
+  if (
+    typeof record["idempotencyKey"] !== "string" ||
+    record["idempotencyKey"].length === 0
+  ) {
+    return err(
+      new DurableOperationEvidenceError(
+        "Durable operation evidence needs a non-empty idempotency key.",
+        { details: { expectedKey: expectedIdempotencyKey } },
+      ),
     );
   }
-  if (record["operationDigest"] !== expected.operationDigest) {
-    return new DurableOperationEvidenceError(
-      "Durable operation evidence digest disagrees with the canonical request digest.",
-      {
-        details: {
-          idempotencyKey: expected.idempotencyKey,
-          expectedDigest: expected.operationDigest,
-          receivedDigest: record["operationDigest"],
+  if (
+    expectedIdempotencyKey !== undefined &&
+    record["idempotencyKey"] !== expectedIdempotencyKey
+  ) {
+    return err(
+      new DurableOperationEvidenceError(
+        "Durable operation evidence does not carry the requested idempotency key.",
+        {
+          details: {
+            expectedKey: expectedIdempotencyKey,
+            receivedKey: record["idempotencyKey"],
+          },
         },
-      },
+      ),
+    );
+  }
+  if (
+    typeof record["operationDigest"] !== "string" ||
+    record["operationDigest"].length === 0
+  ) {
+    return err(
+      new DurableOperationEvidenceError(
+        "Durable operation evidence needs a non-empty operation digest.",
+        { details: { idempotencyKey: record["idempotencyKey"] } },
+      ),
     );
   }
   try {
@@ -354,32 +375,60 @@ function validateEvidence(
       "Durable operation evidence",
     );
   } catch (error) {
-    return new DurableOperationEvidenceError(
-      `Durable operation evidence metadata is not JSON-safe: ${describeCause(error)}`,
-      { cause: error, details: { idempotencyKey: expected.idempotencyKey } },
+    return err(
+      new DurableOperationEvidenceError(
+        `Durable operation evidence content is not JSON-safe: ${describeCause(error)}`,
+        { cause: error, details: { idempotencyKey: record["idempotencyKey"] } },
+      ),
     );
   }
-  if (
-    canonicalValueKey(record["metadata"] as JsonValue) !==
-      canonicalValueKey(expected.metadata) ||
-    canonicalValueKey(record["mutation"] as JsonValue) !==
-      canonicalValueKey(expected.mutation)
-  ) {
-    return new DurableOperationEvidenceError(
-      "Durable operation evidence does not echo the canonical request content.",
-      { details: { idempotencyKey: expected.idempotencyKey } },
-    );
-  }
-  return (
+  const refusal =
     validateCoordinates(record["before"], record, "before") ??
     validateCoordinates(record["after"], record, "after") ??
     (typeof record["delivered"] === "boolean" ?
       undefined
     : new DurableOperationEvidenceError(
         "Durable operation evidence is missing its delivered flag.",
+        { details: { idempotencyKey: record["idempotencyKey"] } },
+      ));
+  if (refusal !== undefined) return err(refusal);
+  return ok(evidence as DurableBranchOperationEvidence);
+}
+
+function validateEvidenceForOperation(
+  evidence: unknown,
+  expected: DurableBranchOperation,
+): Result<DurableBranchOperationEvidence, DurableOperationEvidenceError> {
+  const normalized = normalizeStoredEvidence(evidence, expected.idempotencyKey);
+  if (isErr(normalized)) return normalized;
+  if (normalized.data.operationDigest !== expected.operationDigest) {
+    return err(
+      new DurableOperationEvidenceError(
+        "Durable operation evidence digest disagrees with the canonical request digest.",
+        {
+          details: {
+            idempotencyKey: expected.idempotencyKey,
+            expectedDigest: expected.operationDigest,
+            receivedDigest: normalized.data.operationDigest,
+          },
+        },
+      ),
+    );
+  }
+  if (
+    canonicalValueKey(normalized.data.metadata) !==
+      canonicalValueKey(expected.metadata) ||
+    canonicalValueKey(normalized.data.mutation) !==
+      canonicalValueKey(expected.mutation)
+  ) {
+    return err(
+      new DurableOperationEvidenceError(
+        "Durable operation evidence does not echo the canonical request content.",
         { details: { idempotencyKey: expected.idempotencyKey } },
-      ))
-  );
+      ),
+    );
+  }
+  return normalized;
 }
 
 function validateCoordinates(
@@ -407,10 +456,10 @@ function validateCoordinates(
   }
   if (
     record["revision"] !== undefined &&
-    typeof record["revision"] !== "string"
+    (typeof record["revision"] !== "string" || record["revision"].length === 0)
   ) {
     return new DurableOperationEvidenceError(
-      `Durable operation evidence ${side} coordinates revision must be a string.`,
+      `Durable operation evidence ${side} coordinates revision must be a non-empty string.`,
       { details: { idempotencyKey, side } },
     );
   }
@@ -482,9 +531,12 @@ export async function operateDurableBranch<
     );
   }
   if (outcome.outcome === "unsupported") return ok(outcome);
-  const refusal = validateEvidence(outcome.evidence, normalized.data);
-  if (refusal !== undefined) return err(refusal);
-  return ok(outcome);
+  const evidence = validateEvidenceForOperation(
+    outcome.evidence,
+    normalized.data,
+  );
+  if (isErr(evidence)) return evidence;
+  return ok({ ...outcome, evidence: evidence.data });
 }
 
 /**
@@ -508,13 +560,13 @@ export async function getDurableOperation<
     return err(unsupportedError("get", strategy.type));
   }
   try {
-    return ok(
-      await strategy.operations.get({
-        descriptor: descriptor.store,
-        expectedOrigin: owner.origin,
-        idempotencyKey,
-      }),
-    );
+    const evidence = await strategy.operations.get({
+      descriptor: descriptor.store,
+      expectedOrigin: owner.origin,
+      idempotencyKey,
+    });
+    if (evidence === undefined) return ok(undefined);
+    return normalizeStoredEvidence(evidence, idempotencyKey);
   } catch (error) {
     return err(
       error instanceof DurableOperationError ? error : (
@@ -570,13 +622,49 @@ export async function scanDurableOperations<
     return err(unsupportedError("scan", strategy.type));
   }
   try {
-    const page = await strategy.operations.scan({
+    const rawPage: unknown = await strategy.operations.scan({
       descriptor: descriptor.store,
       expectedOrigin: owner.origin,
       after: options.after,
       limit,
     });
-    return ok(page);
+    if (
+      typeof rawPage !== "object" ||
+      rawPage === null ||
+      Array.isArray(rawPage)
+    ) {
+      return err(
+        new DurableOperationEvidenceError(
+          "Durable operation scan returned a malformed page.",
+          { details: { limit } },
+        ),
+      );
+    }
+    const page = rawPage as Readonly<Record<string, unknown>>;
+    const rawOperations = page["operations"];
+    const cursor = page["cursor"];
+    if (
+      !Array.isArray(rawOperations) ||
+      rawOperations.length > limit ||
+      (cursor !== undefined &&
+        (typeof cursor !== "string" || cursor.length === 0))
+    ) {
+      return err(
+        new DurableOperationEvidenceError(
+          "Durable operation scan returned a malformed page.",
+          { details: { limit } },
+        ),
+      );
+    }
+    const operations: DurableBranchOperationEvidence[] = [];
+    for (const evidence of rawOperations) {
+      const normalized = normalizeStoredEvidence(evidence);
+      if (isErr(normalized)) return normalized;
+      operations.push(normalized.data);
+    }
+    return ok(
+      cursor === undefined ? { operations } : { operations, cursor: cursor },
+    );
   } catch (error) {
     return err(
       error instanceof DurableOperationError ? error : (
@@ -610,13 +698,23 @@ export async function markDurableOperationDelivered<
     return err(unsupportedError("markDelivered", strategy.type));
   }
   try {
-    return ok(
-      await strategy.operations.markDelivered({
-        descriptor: descriptor.store,
-        expectedOrigin: owner.origin,
-        idempotencyKey,
-      }),
-    );
+    const evidence = await strategy.operations.markDelivered({
+      descriptor: descriptor.store,
+      expectedOrigin: owner.origin,
+      idempotencyKey,
+    });
+    if (evidence === undefined) return ok(undefined);
+    const normalized = normalizeStoredEvidence(evidence, idempotencyKey);
+    if (isErr(normalized)) return normalized;
+    if (!normalized.data.delivered) {
+      return err(
+        new DurableOperationEvidenceError(
+          "Durable operation delivery marking returned undelivered evidence.",
+          { details: { idempotencyKey } },
+        ),
+      );
+    }
+    return normalized;
   } catch (error) {
     return err(
       error instanceof DurableOperationError ? error : (

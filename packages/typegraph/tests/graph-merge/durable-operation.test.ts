@@ -5,9 +5,9 @@
  * A recording in-memory strategy exercises the complete public contract —
  * unsupported with zero mutation, exact replay, digest conflict, stable scan
  * pagination, idempotent delivery marking, undelivered detection, and the
- * destroy/archive fence — without a database. Atomicity of the mutation and
- * the evidence row is proven separately against PostgreSQL in
- * `tests/backends/postgres/durable-operation.test.ts`.
+ * destroy/archive fence — without a database. A real PostgreSQL strategy test
+ * proving mutation-plus-evidence transaction atomicity remains an explicit
+ * integration gate for a first-party durable host.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -15,16 +15,16 @@ import { z } from "zod";
 import { defineGraph, defineNode } from "../../src";
 import {
   destroyDurableBranch,
+  durableBranchHasUndeliveredEvidence,
+  type DurableBranchOperation,
+  type DurableBranchOperationEvidence,
+  type DurableBranchOperationRequest,
+  type DurableBranchOrigin,
   DurableEvidenceUndeliveredError,
   DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
   DurableOperationUnsupportedError,
-  type DurableBranchOperation,
-  type DurableBranchOperationEvidence,
-  type DurableBranchOperationRequest,
-  type DurableBranchOrigin,
-  durableBranchHasUndeliveredEvidence,
   type DurableStoreDescriptor,
   type DurableWorkingCopyStrategy,
   getDurableOperation,
@@ -100,7 +100,9 @@ function createRecordingHost(): RecordingHost {
     }
   };
 
-  const evidenceFor = (request: DurableBranchOperation): DurableBranchOperationEvidence => ({
+  const evidenceFor = (
+    request: DurableBranchOperation,
+  ): DurableBranchOperationEvidence => ({
     idempotencyKey: request.idempotencyKey,
     operationDigest: request.operationDigest,
     metadata: request.metadata,
@@ -164,7 +166,8 @@ function createRecordingHost(): RecordingHost {
         const page = order.slice(start, start + limit);
         const operations = page.map((key) => {
           const evidence = byKey.get(key);
-          if (evidence === undefined) throw new Error(`missing evidence ${key}`);
+          if (evidence === undefined)
+            throw new Error(`missing evidence ${key}`);
           return evidence;
         });
         const lastIndex = start + page.length - 1;
@@ -175,7 +178,7 @@ function createRecordingHost(): RecordingHost {
       markDelivered: async ({ expectedOrigin, idempotencyKey }) => {
         assertOrigin(expectedOrigin);
         const existing = byKey.get(idempotencyKey);
-        if (existing === undefined) return undefined;
+        if (existing === undefined) return;
         if (existing.delivered) return existing;
         const delivered = { ...existing, delivered: true };
         byKey.set(idempotencyKey, delivered);
@@ -210,6 +213,21 @@ function request(
   };
 }
 
+function storedEvidence(
+  overrides: Partial<DurableBranchOperationEvidence> = {},
+): DurableBranchOperationEvidence {
+  return {
+    idempotencyKey: "op-1",
+    operationDigest: "digest-1",
+    metadata: { actor: "host" },
+    mutation: { kind: "createPerson", name: "Alice" },
+    before: { base: asBaseVersion("coordinate-before") },
+    after: { base: asBaseVersion("coordinate-after") },
+    delivered: false,
+    ...overrides,
+  };
+}
+
 const descriptor = {
   kind: "recording-durable-operation-host",
   version: 1,
@@ -224,7 +242,11 @@ const descriptor = {
 describe("durable branch operations", () => {
   it("applies the mutation once and returns immutable evidence with coordinates", async () => {
     const host = createRecordingHost();
-    const result = await operateDurableBranch(descriptor, host.strategy, request("op-1"));
+    const result = await operateDurableBranch(
+      descriptor,
+      host.strategy,
+      request("op-1"),
+    );
 
     expect(isOk(result)).toBe(true);
     if (!isOk(result)) return;
@@ -242,14 +264,25 @@ describe("durable branch operations", () => {
 
   it("replays the exact previously committed evidence without applying again", async () => {
     const host = createRecordingHost();
-    const first = await operateDurableBranch(descriptor, host.strategy, request("op-1"));
-    const second = await operateDurableBranch(descriptor, host.strategy, request("op-1"));
+    const first = await operateDurableBranch(
+      descriptor,
+      host.strategy,
+      request("op-1"),
+    );
+    const second = await operateDurableBranch(
+      descriptor,
+      host.strategy,
+      request("op-1"),
+    );
 
     expect(isOk(first) && first.data.outcome === "applied").toBe(true);
     expect(isOk(second) && second.data.outcome === "replayed").toBe(true);
-    if (isOk(first) && isOk(second) &&
+    if (
+      isOk(first) &&
+      isOk(second) &&
       first.data.outcome !== "unsupported" &&
-      second.data.outcome !== "unsupported") {
+      second.data.outcome !== "unsupported"
+    ) {
       expect(second.data.evidence).toEqual(first.data.evidence);
     }
     expect(host.appliedMutations()).toHaveLength(1);
@@ -280,16 +313,18 @@ describe("durable branch operations", () => {
 
   it("returns unsupported before any host call when the strategy has no operations capability", async () => {
     const host = createRecordingHost();
-    const withoutOperations: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> =
-      {
-        type: host.strategy.type,
-        version: host.strategy.version,
-        create: host.strategy.create,
-        seal: host.strategy.seal,
-        abort: host.strategy.abort,
-        reopen: host.strategy.reopen,
-        destroy: host.strategy.destroy,
-      };
+    const withoutOperations: DurableWorkingCopyStrategy<
+      G,
+      DurableStoreDescriptor
+    > = {
+      type: host.strategy.type,
+      version: host.strategy.version,
+      create: host.strategy.create,
+      seal: host.strategy.seal,
+      abort: host.strategy.abort,
+      reopen: host.strategy.reopen,
+      destroy: host.strategy.destroy,
+    };
 
     const result = await operateDurableBranch(
       descriptor,
@@ -310,10 +345,16 @@ describe("durable branch operations", () => {
   it("refuses non-JSON metadata before touching the host", async () => {
     const host = createRecordingHost();
     const unsafe = request("op-1", {
-      metadata: { createdAt: new Date() } as unknown as DurableBranchOperationRequest["metadata"],
+      metadata: {
+        createdAt: new Date(),
+      } as unknown as DurableBranchOperationRequest["metadata"],
     });
 
-    const result = await operateDurableBranch(descriptor, host.strategy, unsafe);
+    const result = await operateDurableBranch(
+      descriptor,
+      host.strategy,
+      unsafe,
+    );
 
     expect(isErr(result)).toBe(true);
     expect(host.appliedMutations()).toHaveLength(0);
@@ -356,7 +397,11 @@ describe("durable branch operations", () => {
     const host = createRecordingHost();
     const stale = { ...descriptor, base: asBaseVersion("tampered-base") };
 
-    const result = await operateDurableBranch(stale, host.strategy, request("op-1"));
+    const result = await operateDurableBranch(
+      stale,
+      host.strategy,
+      request("op-1"),
+    );
 
     expect(isErr(result)).toBe(true);
     expect(host.appliedMutations()).toHaveLength(0);
@@ -374,10 +419,9 @@ describe("durable branch operations", () => {
     });
     expect(isOk(first)).toBe(true);
     if (!isOk(first)) return;
-    expect(first.data.operations.map((operation) => operation.idempotencyKey)).toEqual([
-      "op-1",
-      "op-2",
-    ]);
+    expect(
+      first.data.operations.map((operation) => operation.idempotencyKey),
+    ).toEqual(["op-1", "op-2"]);
     expect(first.data.cursor).toBe("1");
 
     const second = await scanDurableOperations(descriptor, host.strategy, {
@@ -386,10 +430,9 @@ describe("durable branch operations", () => {
     });
     expect(isOk(second)).toBe(true);
     if (!isOk(second)) return;
-    expect(second.data.operations.map((operation) => operation.idempotencyKey)).toEqual([
-      "op-3",
-      "op-4",
-    ]);
+    expect(
+      second.data.operations.map((operation) => operation.idempotencyKey),
+    ).toEqual(["op-3", "op-4"]);
 
     const last = await scanDurableOperations(descriptor, host.strategy, {
       after: second.data.cursor,
@@ -397,9 +440,9 @@ describe("durable branch operations", () => {
     });
     expect(isOk(last)).toBe(true);
     if (!isOk(last)) return;
-    expect(last.data.operations.map((operation) => operation.idempotencyKey)).toEqual([
-      "op-5",
-    ]);
+    expect(
+      last.data.operations.map((operation) => operation.idempotencyKey),
+    ).toEqual(["op-5"]);
     expect(last.data.cursor).toBeUndefined();
   });
 
@@ -420,7 +463,7 @@ describe("durable branch operations", () => {
       descriptor,
       host.strategy,
     );
-    expect(isOk(beforeAny) && beforeAny.data === true).toBe(true);
+    expect(isOk(beforeAny) && beforeAny.data).toBe(true);
 
     const firstMark = await markDurableOperationDelivered(
       descriptor,
@@ -442,14 +485,14 @@ describe("durable branch operations", () => {
       descriptor,
       host.strategy,
     );
-    expect(isOk(stillUndelivered) && stillUndelivered.data === true).toBe(true);
+    expect(isOk(stillUndelivered) && stillUndelivered.data).toBe(true);
 
     await markDurableOperationDelivered(descriptor, host.strategy, "op-2");
     const noneLeft = await durableBranchHasUndeliveredEvidence(
       descriptor,
       host.strategy,
     );
-    expect(isOk(noneLeft) && noneLeft.data === false).toBe(true);
+    expect(isOk(noneLeft) && !noneLeft.data).toBe(true);
 
     const missing = await getDurableOperation(
       descriptor,
@@ -468,16 +511,18 @@ describe("durable branch operations", () => {
 
   it("refuses evidence access with a typed unsupported error when the capability is absent", async () => {
     const host = createRecordingHost();
-    const withoutOperations: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> =
-      {
-        type: host.strategy.type,
-        version: host.strategy.version,
-        create: host.strategy.create,
-        seal: host.strategy.seal,
-        abort: host.strategy.abort,
-        reopen: host.strategy.reopen,
-        destroy: host.strategy.destroy,
-      };
+    const withoutOperations: DurableWorkingCopyStrategy<
+      G,
+      DurableStoreDescriptor
+    > = {
+      type: host.strategy.type,
+      version: host.strategy.version,
+      create: host.strategy.create,
+      seal: host.strategy.seal,
+      abort: host.strategy.abort,
+      reopen: host.strategy.reopen,
+      destroy: host.strategy.destroy,
+    };
 
     const result = await getDurableOperation(
       descriptor,
@@ -516,9 +561,12 @@ describe("durable branch operations", () => {
 
     expect(isOk(left) && isOk(right)).toBe(true);
     expect(host.appliedMutations()).toHaveLength(1);
-    if (isOk(left) && isOk(right) &&
+    if (
+      isOk(left) &&
+      isOk(right) &&
       left.data.outcome !== "unsupported" &&
-      right.data.outcome !== "unsupported") {
+      right.data.outcome !== "unsupported"
+    ) {
       expect(left.data.evidence).toEqual(right.data.evidence);
       const outcomes = [left.data.outcome, right.data.outcome].sort();
       expect(outcomes).toEqual(["applied", "replayed"]);
@@ -527,24 +575,25 @@ describe("durable branch operations", () => {
 
   it("refuses when the host returns evidence inconsistent with the request", async () => {
     const host = createRecordingHost();
-    const lyingStrategy: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> = {
-      ...host.strategy,
-      operations: {
-        ...requireOperations(host.strategy),
-        operate: async ({ request: committed }) => ({
-          outcome: "applied",
-          evidence: {
-            idempotencyKey: committed.idempotencyKey,
-            operationDigest: "not-the-request-digest",
-            metadata: committed.metadata,
-            mutation: committed.mutation,
-            before: { base: asBaseVersion("a") },
-            after: { base: asBaseVersion("b") },
-            delivered: false,
-          },
-        }),
-      },
-    };
+    const lyingStrategy: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> =
+      {
+        ...host.strategy,
+        operations: {
+          ...requireOperations(host.strategy),
+          operate: async ({ request: committed }) => ({
+            outcome: "applied",
+            evidence: {
+              idempotencyKey: committed.idempotencyKey,
+              operationDigest: "not-the-request-digest",
+              metadata: committed.metadata,
+              mutation: committed.mutation,
+              before: { base: asBaseVersion("a") },
+              after: { base: asBaseVersion("b") },
+              delivered: false,
+            },
+          }),
+        },
+      };
 
     const result = await operateDurableBranch(
       descriptor,
@@ -556,11 +605,126 @@ describe("durable branch operations", () => {
       expect(result.error).toBeInstanceOf(DurableOperationEvidenceError);
     }
   });
+
+  it("refuses malformed evidence returned by get", async () => {
+    const host = createRecordingHost();
+    const strategy: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> = {
+      ...host.strategy,
+      operations: {
+        ...requireOperations(host.strategy),
+        get: async () => storedEvidence({ idempotencyKey: "other-key" }),
+      },
+    };
+
+    const result = await getDurableOperation(descriptor, strategy, "op-1");
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(DurableOperationEvidenceError);
+    }
+  });
+
+  it("refuses malformed evidence and cursors returned by scan", async () => {
+    const host = createRecordingHost();
+    const operations = requireOperations(host.strategy);
+    const invalidEvidence: DurableWorkingCopyStrategy<
+      G,
+      DurableStoreDescriptor
+    > = {
+      ...host.strategy,
+      operations: {
+        ...operations,
+        scan: async () => ({
+          operations: [
+            storedEvidence({
+              metadata: {
+                createdAt: new Date(),
+              } as unknown as DurableBranchOperationEvidence["metadata"],
+              before: { base: asBaseVersion("") },
+            }),
+          ],
+        }),
+      },
+    };
+    const invalidCursor: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> =
+      {
+        ...host.strategy,
+        operations: {
+          ...operations,
+          scan: async () => ({ operations: [], cursor: "" }),
+        },
+      };
+
+    const evidenceResult = await scanDurableOperations(
+      descriptor,
+      invalidEvidence,
+    );
+    const cursorResult = await scanDurableOperations(descriptor, invalidCursor);
+
+    expect(isErr(evidenceResult)).toBe(true);
+    expect(isErr(cursorResult)).toBe(true);
+    if (isErr(evidenceResult)) {
+      expect(evidenceResult.error).toBeInstanceOf(
+        DurableOperationEvidenceError,
+      );
+    }
+    if (isErr(cursorResult)) {
+      expect(cursorResult.error).toBeInstanceOf(DurableOperationEvidenceError);
+    }
+  });
+
+  it("refuses malformed evidence returned by markDelivered", async () => {
+    const host = createRecordingHost();
+    const wrongKey: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> = {
+      ...host.strategy,
+      operations: {
+        ...requireOperations(host.strategy),
+        markDelivered: async () =>
+          storedEvidence({ idempotencyKey: "other-key", delivered: true }),
+      },
+    };
+    const stillUndelivered: DurableWorkingCopyStrategy<
+      G,
+      DurableStoreDescriptor
+    > = {
+      ...host.strategy,
+      operations: {
+        ...requireOperations(host.strategy),
+        markDelivered: async () => storedEvidence(),
+      },
+    };
+
+    const wrongKeyResult = await markDurableOperationDelivered(
+      descriptor,
+      wrongKey,
+      "op-1",
+    );
+    const undeliveredResult = await markDurableOperationDelivered(
+      descriptor,
+      stillUndelivered,
+      "op-1",
+    );
+
+    expect(isErr(wrongKeyResult)).toBe(true);
+    expect(isErr(undeliveredResult)).toBe(true);
+    if (isErr(wrongKeyResult)) {
+      expect(wrongKeyResult.error).toBeInstanceOf(
+        DurableOperationEvidenceError,
+      );
+    }
+    if (isErr(undeliveredResult)) {
+      expect(undeliveredResult.error).toBeInstanceOf(
+        DurableOperationEvidenceError,
+      );
+    }
+  });
 });
 
 function requireOperations(
   strategy: DurableWorkingCopyStrategy<G, DurableStoreDescriptor>,
-): NonNullable<DurableWorkingCopyStrategy<G, DurableStoreDescriptor>["operations"]> {
+): NonNullable<
+  DurableWorkingCopyStrategy<G, DurableStoreDescriptor>["operations"]
+> {
   if (strategy.operations === undefined) {
     throw new Error("expected the recording strategy to define operations");
   }
