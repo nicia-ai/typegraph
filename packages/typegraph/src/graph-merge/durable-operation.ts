@@ -308,10 +308,12 @@ async function normalizeOperationRequest(
  * consistent with the operation that produced it. A host cannot forge a
  * different digest, echo a different request, or return non-JSON metadata.
  */
-function normalizeStoredEvidence(
+async function normalizeStoredEvidence(
   evidence: unknown,
   expectedIdempotencyKey?: string,
-): Result<DurableBranchOperationEvidence, DurableOperationEvidenceError> {
+): Promise<
+  Result<DurableBranchOperationEvidence, DurableOperationEvidenceError>
+> {
   if (
     typeof evidence !== "object" ||
     evidence === null ||
@@ -392,14 +394,35 @@ function normalizeStoredEvidence(
         { details: { idempotencyKey: record["idempotencyKey"] } },
       ));
   if (refusal !== undefined) return err(refusal);
-  return ok(evidence as DurableBranchOperationEvidence);
+  const normalized = evidence as DurableBranchOperationEvidence;
+  const canonicalDigest = await computeDurableOperationDigest(normalized);
+  if (normalized.operationDigest !== canonicalDigest) {
+    return err(
+      new DurableOperationEvidenceError(
+        "Durable operation evidence digest disagrees with its canonical content.",
+        {
+          details: {
+            idempotencyKey: normalized.idempotencyKey,
+            expectedDigest: canonicalDigest,
+            receivedDigest: normalized.operationDigest,
+          },
+        },
+      ),
+    );
+  }
+  return ok(normalized);
 }
 
-function validateEvidenceForOperation(
+async function validateEvidenceForOperation(
   evidence: unknown,
   expected: DurableBranchOperation,
-): Result<DurableBranchOperationEvidence, DurableOperationEvidenceError> {
-  const normalized = normalizeStoredEvidence(evidence, expected.idempotencyKey);
+): Promise<
+  Result<DurableBranchOperationEvidence, DurableOperationEvidenceError>
+> {
+  const normalized = await normalizeStoredEvidence(
+    evidence,
+    expected.idempotencyKey,
+  );
   if (isErr(normalized)) return normalized;
   if (normalized.data.operationDigest !== expected.operationDigest) {
     return err(
@@ -531,7 +554,7 @@ export async function operateDurableBranch<
     );
   }
   if (outcome.outcome === "unsupported") return ok(outcome);
-  const evidence = validateEvidenceForOperation(
+  const evidence = await validateEvidenceForOperation(
     outcome.evidence,
     normalized.data,
   );
@@ -566,7 +589,7 @@ export async function getDurableOperation<
       idempotencyKey,
     });
     if (evidence === undefined) return ok(undefined);
-    return normalizeStoredEvidence(evidence, idempotencyKey);
+    return await normalizeStoredEvidence(evidence, idempotencyKey);
   } catch (error) {
     return err(
       error instanceof DurableOperationError ? error : (
@@ -658,7 +681,7 @@ export async function scanDurableOperations<
     }
     const operations: DurableBranchOperationEvidence[] = [];
     for (const evidence of rawOperations) {
-      const normalized = normalizeStoredEvidence(evidence);
+      const normalized = await normalizeStoredEvidence(evidence);
       if (isErr(normalized)) return normalized;
       operations.push(normalized.data);
     }
@@ -704,7 +727,7 @@ export async function markDurableOperationDelivered<
       idempotencyKey,
     });
     if (evidence === undefined) return ok(undefined);
-    const normalized = normalizeStoredEvidence(evidence, idempotencyKey);
+    const normalized = await normalizeStoredEvidence(evidence, idempotencyKey);
     if (isErr(normalized)) return normalized;
     if (!normalized.data.delivered) {
       return err(
@@ -745,12 +768,17 @@ export async function durableBranchHasUndeliveredEvidence<
     return err(unsupportedError("hasUndelivered", strategy.type));
   }
   try {
-    return ok(
-      await strategy.operations.hasUndelivered({
-        descriptor: descriptor.store,
-        expectedOrigin: owner.origin,
-      }),
-    );
+    const hasUndelivered: unknown = await strategy.operations.hasUndelivered({
+      descriptor: descriptor.store,
+      expectedOrigin: owner.origin,
+    });
+    return typeof hasUndelivered === "boolean" ?
+        ok(hasUndelivered)
+      : err(
+          new DurableOperationEvidenceError(
+            "Durable operation undelivered query returned a non-boolean value.",
+          ),
+        );
   } catch (error) {
     return err(
       error instanceof DurableOperationError ? error : (

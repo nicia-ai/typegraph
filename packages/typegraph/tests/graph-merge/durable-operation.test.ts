@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import { defineGraph, defineNode } from "../../src";
 import {
+  computeDurableOperationDigest,
   destroyDurableBranch,
   durableBranchHasUndeliveredEvidence,
   type DurableBranchOperation,
@@ -213,17 +214,20 @@ function request(
   };
 }
 
-function storedEvidence(
+async function storedEvidence(
   overrides: Partial<DurableBranchOperationEvidence> = {},
-): DurableBranchOperationEvidence {
-  return {
+): Promise<DurableBranchOperationEvidence> {
+  const base = {
     idempotencyKey: "op-1",
-    operationDigest: "digest-1",
     metadata: { actor: "host" },
     mutation: { kind: "createPerson", name: "Alice" },
     before: { base: asBaseVersion("coordinate-before") },
     after: { base: asBaseVersion("coordinate-after") },
     delivered: false,
+  };
+  return {
+    ...base,
+    operationDigest: await computeDurableOperationDigest(base),
     ...overrides,
   };
 }
@@ -636,7 +640,7 @@ describe("durable branch operations", () => {
         ...operations,
         scan: async () => ({
           operations: [
-            storedEvidence({
+            await storedEvidence({
               metadata: {
                 createdAt: new Date(),
               } as unknown as DurableBranchOperationEvidence["metadata"],
@@ -716,6 +720,45 @@ describe("durable branch operations", () => {
       expect(undeliveredResult.error).toBeInstanceOf(
         DurableOperationEvidenceError,
       );
+    }
+  });
+
+  it("refuses read evidence whose digest does not bind its content", async () => {
+    const host = createRecordingHost();
+    const strategy: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> = {
+      ...host.strategy,
+      operations: {
+        ...requireOperations(host.strategy),
+        get: async () => storedEvidence({ operationDigest: "forged-digest" }),
+      },
+    };
+
+    const result = await getDurableOperation(descriptor, strategy, "op-1");
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(DurableOperationEvidenceError);
+    }
+  });
+
+  it("refuses a non-boolean undelivered verdict from the host", async () => {
+    const host = createRecordingHost();
+    const strategy: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> = {
+      ...host.strategy,
+      operations: {
+        ...requireOperations(host.strategy),
+        hasUndelivered: async () => "yes" as unknown as boolean,
+      },
+    };
+
+    const result = await durableBranchHasUndeliveredEvidence(
+      descriptor,
+      strategy,
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(DurableOperationEvidenceError);
     }
   });
 });
