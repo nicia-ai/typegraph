@@ -1,5 +1,23 @@
 # @nicia-ai/typegraph
 
+## 0.68.0
+
+### Highlights
+
+TypeGraph 0.68 adds atomic operations to durable graph-merge branches. `operateDurableBranch()` lets a durable host commit an opaque graph mutation and immutable evidence in one host transaction, so a process can recover and deliver committed work after a crash without inventing a second coordination protocol. Canonical request digests make retries exact: the same idempotency key replays its evidence, while a changed mutation or metadata payload conflicts without another write.
+
+The new evidence lifecycle is inspectable and bounded. Applications can read or page committed evidence, mark delivery monotonically, and ask whether any evidence remains undelivered. TypeGraph validates every host-returned outcome and preserves a typed destruction fence until downstream delivery is complete; unsupported hosts execute no mutation, and existing durable strategies remain valid without the optional capability.
+
+### Upgrade notes
+
+- Existing `DurableWorkingCopyStrategy` implementations require no changes unless they opt into `operations`. To opt in, commit the host mutation and its immutable evidence in one transaction, attest the descriptor's sealed origin, enforce exact idempotency replay and digest conflicts, and serialize operations against destruction.
+- Treat only `applied` and `replayed` outcomes from `operateDurableBranch()` as committed. An `unsupported` outcome guarantees that the host ran no mutation SQL; do not recreate the atomic guarantee with callbacks or a separate evidence write.
+- Deliver committed evidence with `scanDurableOperations()` or `getDurableOperation()`, then call `markDurableOperationDelivered()` only after the downstream transaction commits. A first application must remain undelivered, and `destroyDurableBranch()` refuses while any evidence is undelivered.
+
+### Minor Changes
+
+- [#731](https://github.com/nicia-ai/typegraph/pull/731) [`f8e800b`](https://github.com/nicia-ai/typegraph/commit/f8e800bca25f7168747624d1ab4dea525ec736c0) Thanks [@pdlug](https://github.com/pdlug)! - Add atomic durable-branch operations. A `DurableWorkingCopyStrategy` may now expose an optional `operations` capability that commits an opaque host mutation and its immutable evidence in one host transaction, keyed by idempotency. New public orchestrators `operateDurableBranch()`, `getDurableOperation()`, `scanDurableOperations()`, `markDurableOperationDelivered()`, and `durableBranchHasUndeliveredEvidence()` wrap it, with typed `DurableOperationError` subclasses for conflicts, unsupported capabilities, malformed evidence, and the undelivered-evidence destroy fence.
+
 ## 0.67.1
 
 ### Patch Changes
