@@ -2,6 +2,13 @@ packages:
   - packages/*
   - apps/*
 
+overrides:
+  # astro's @astrojs/markdown-satteri@0.4.x uses satteri 0.10, but
+  # @astrojs/starlight and starlight-blog still declare satteri ^0.9. Two
+  # native copies in one process crash blog prerendering ("Failed to convert
+  # napi value Object into rust type `u32`"). Remove once both accept 0.10.
+  satteri: 0.10.5
+
 onlyBuiltDependencies:
   - "@ladybugdb/core"
   - esbuild
