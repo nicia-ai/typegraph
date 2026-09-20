@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.67.1
+
+### Patch Changes
+
+- [#729](https://github.com/nicia-ai/typegraph/pull/729) [`0be1336`](https://github.com/nicia-ai/typegraph/commit/0be1336dbbfb0dedfbe5f473936dbabcd6e4be77) Thanks [@pdlug](https://github.com/pdlug)! - `store.clear()` now deletes the graph's durable contribution-materialization markers along with every other graph-scoped row. A cleared graph no longer leaves graph-local marker rows (full markers for graph-scoped contributions and activation markers for deployment-scoped ones) behind on SQLite or PostgreSQL; deployment-scoped physical markers are preserved because they attest shared storage the per-graph delete never touches, and the next privileged boot re-records the graph-local rows from them. On backends with interactive transactions, the delete runs in the same transaction as the rest of `clearGraph`; it also tolerates the marker table's absence on databases that never materialized a contribution.
+
 ## 0.67.0
 
 ### Highlights
