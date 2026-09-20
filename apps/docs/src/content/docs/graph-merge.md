@@ -1709,6 +1709,104 @@ bypasses those decisions is not equivalent. The strategy must return
 history, revision, identity, index, and contribution sidecars, plus the absence
 of other application graphs—is byte-for-byte represented by the approved plan.
 
+#### Atomic operations and immutable evidence
+
+A `DurableWorkingCopyStrategy` may also expose an optional `operations`
+capability (`DurableOperationCapability`). It lets a durable host combine one
+opaque graph mutation with its immutable operation evidence in a **single host
+transaction** — the branch's durable analogue of the native merge command above.
+TypeGraph owns descriptor validation, sealed-origin attestation, request
+canonicalization, and evidence validation; the host owns the database mechanics.
+
+```typescript
+import {
+  durableBranchHasUndeliveredEvidence,
+  getDurableOperation,
+  markDurableOperationDelivered,
+  operateDurableBranch,
+  scanDurableOperations,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const request = {
+  idempotencyKey: "statement-42",
+  // Host-defined, JSON-safe description of the graph change to apply.
+  mutation: { kind: "statement", op: "upsert", payload: { subject: "s-1" } },
+  // Host evidence, retained verbatim. TypeGraph never interprets either field.
+  metadata: { source: "etl", schemaVersion: 3 },
+};
+
+const outcome = unwrap(
+  await operateDurableBranch(descriptor, durableStrategy, request),
+);
+if (outcome.outcome === "unsupported") {
+  // The strategy executed no host SQL; TypeGraph refuses rather than emulating
+  // atomicity with callbacks or best effort.
+  throw new Error(`Missing capabilities: ${outcome.dimensions.join(", ")}`);
+}
+console.log(outcome.outcome); // "applied" | "replayed"
+console.log(outcome.evidence.delivered); // false
+```
+
+Both `mutation` and `metadata` are **JSON-safe host values**. TypeGraph never
+interprets their application fields; it canonicalizes `metadata` plus `mutation`
+into the `operationDigest` and otherwise carries them through untouched. The
+digest covers the complete request except the idempotency key, so reusing a key
+with a different mutation *or* different metadata conflicts. Non-JSON content is
+refused before any host call.
+
+`metadata` is retained as evidence; `mutation` is the host's own description of
+the graph change it must apply atomically with the evidence row. The strategy
+attests the caller's `expectedOrigin` against the allocation the descriptor
+names, exactly as reopen, destroy, and native merge do. Every committed
+operation returns `before`/`after` coordinates — the merge-visible `base`
+fingerprint and, when the working copy resolves lineage, the engine `revision`.
+TypeGraph validates that the returned evidence echoes the canonical request and
+digest; a host cannot forge a different digest, echo a different request, or
+return non-JSON metadata (`DurableOperationEvidenceError`).
+
+**Idempotency.** The strategy treats `idempotencyKey` as its unique key:
+
+- Identical key **and** digest: returns the previously committed evidence
+  unchanged (`outcome: "replayed"`) and re-applies nothing.
+- Identical key with a **different** digest: refuses with
+  `DurableOperationConflictError` and mutates nothing.
+
+**Evidence access and delivery.**
+
+- `getDurableOperation(descriptor, strategy, idempotencyKey)` reads one
+  operation's evidence, or `undefined` when it was never committed.
+- `scanDurableOperations(descriptor, strategy, { after?, limit? })` returns
+  `{ operations, cursor }` in the strategy's stable total order (commit order,
+  ties broken deterministically). Pass the opaque `cursor` back as `after` to
+  resume; an absent `cursor` means the scan reached the end. `limit` defaults to
+  `DURABLE_OPERATION_SCAN_DEFAULT_LIMIT` (100) and may not exceed
+  `DURABLE_OPERATION_SCAN_MAX_LIMIT` (1000); a larger page is refused.
+- `markDurableOperationDelivered(descriptor, strategy, idempotencyKey)` marks
+  one operation delivered, idempotently: marking an already-delivered operation
+  returns the same evidence and writes nothing, and an unknown key returns
+  `undefined`.
+- `durableBranchHasUndeliveredEvidence(descriptor, strategy)` reports whether
+  any committed evidence is still undelivered — the queryable half of the
+  destroy fence below.
+
+`operateDurableBranch()` is the only orchestrator that tolerates a missing
+capability: a strategy with no `operations` returns the explicit `unsupported`
+outcome (`dimensions: ["atomicMutation"]`) having executed no host call. `get`,
+`scan`, `markDelivered`, and `hasUndelivered` instead refuse with a typed
+`DurableOperationUnsupportedError`. TypeGraph never emulates the atomic
+guarantee.
+
+**Destroy fence.** A strategy with `operations` MUST refuse destruction while
+undelivered evidence remains, throwing `DurableEvidenceUndeliveredError`;
+`destroyDurableBranch()` preserves that typed refusal instead of flattening it
+into a generic branch failure, so the caller can still recover the evidence.
+Deliver (or archive) the outstanding evidence before destroying the branch.
+Concurrent `operate` and `destroy` are serialized by the host's own transaction:
+either the operation commits first (destroy then observes undelivered evidence
+and refuses) or destroy commits first (the operation fails against the removed
+allocation). No partial state is ever observable.
+
 ### Constraint-aware ingestion branches
 
 For a bounded candidate batch, `planCandidateWriteSet()` hides the transient
@@ -2024,6 +2122,11 @@ commit after a partially applied failure:
 | `CandidateSourceError`       | A built-in candidate source failed; details identify its source id, entity kind, and operation.                                                                                                                                                                               |
 | `CandidateWriteSetError`     | Code `GRAPH_MERGE_CANDIDATE_WRITE_SET`. Candidate JSON is malformed, targets another graph schema, cannot be staged, or violates the active graph contract. The accepted graph is unchanged.                                                                                  |
 | `MergeReviewError`           | Code `GRAPH_MERGE_REVIEW`. Durable review evidence is malformed, unsupported, incomplete, or inconsistent, or review options cannot be represented safely.                                                                                                                     |
+| `DurableOperationError`      | Code `GRAPH_MERGE_OPERATION`. Generic failure orchestrating a durable-branch operation: descriptor/request validation, strategy transport failure, or malformed evidence returned by a host.                                                                                    |
+| `DurableOperationConflictError` | Code `GRAPH_MERGE_OPERATION_CONFLICT`. An idempotency key was reused with a different operation digest. The previously committed operation is returned untouched; nothing new is written.                                                                                      |
+| `DurableOperationUnsupportedError` | Code `GRAPH_MERGE_OPERATION_UNSUPPORTED`. The strategy's `operations` capability lacks a requested member; TypeGraph refuses rather than emulating the atomic guarantee.                                                                                              |
+| `DurableOperationEvidenceError` | Code `GRAPH_MERGE_OPERATION_EVIDENCE`. A host returned malformed or request-inconsistent operation evidence.                                                                                                                                                                |
+| `DurableEvidenceUndeliveredError` | Code `GRAPH_MERGE_OPERATION_UNDELIVERED`. `destroyDurableBranch()` was refused because committed operation evidence is still undelivered. Deliver or archive it first; the typed refusal is preserved so the evidence stays recoverable.                                |
 | `MatchEvidenceError`         | Evidence could not be constructed safely, including a custom scorer returning `NaN` or infinity.                                                                                                                                                                              |
 | `MergeError`                 | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes.                                                                                                                                            |
 

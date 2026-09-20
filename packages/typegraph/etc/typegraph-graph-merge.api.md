@@ -1105,6 +1105,9 @@ type ComposableQuery = QueryAst | SetOperation;
 // @public
 export function computeBaseVersion<G extends GraphDef>(store: Store<G>): Promise<BaseVersion>;
 
+// @public
+export function computeDurableOperationDigest(request: DurableBranchOperationRequest): Promise<string>;
+
 // @public (undocumented)
 type ConditionalExpressionNode = Readonly<{
     kind: "conditional";
@@ -1546,9 +1549,21 @@ type DropVectorIndexParams = Readonly<{
 }>;
 
 // @public
+export const DURABLE_OPERATION_SCAN_DEFAULT_LIMIT = 100;
+
+// @public
+export const DURABLE_OPERATION_SCAN_MAX_LIMIT = 1000;
+
+// @public
 export type DurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
     branch: GraphBranch<G>;
     descriptor: DurableBranchDescriptor<TStoreDescriptor>;
+}>;
+
+// @public
+export type DurableBranchCoordinates = Readonly<{
+    base: BaseVersion;
+    revision?: EngineRevision | undefined;
 }>;
 
 // @public
@@ -1568,6 +1583,35 @@ export type DurableBranchDescriptor<TStoreDescriptor extends DurableStoreDescrip
 }>;
 
 // @public
+export function durableBranchHasUndeliveredEvidence<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>): Promise<Result<boolean, DurableOperationError>>;
+
+// @public
+export type DurableBranchOperation = Readonly<{
+    idempotencyKey: string;
+    operationDigest: string;
+    metadata: JsonValue;
+    mutation: JsonValue;
+}>;
+
+// @public
+export type DurableBranchOperationEvidence = Readonly<{
+    idempotencyKey: string;
+    operationDigest: string;
+    metadata: JsonValue;
+    mutation: JsonValue;
+    before: DurableBranchCoordinates;
+    after: DurableBranchCoordinates;
+    delivered: boolean;
+}>;
+
+// @public
+export type DurableBranchOperationRequest = Readonly<{
+    idempotencyKey: string;
+    metadata: JsonValue;
+    mutation: JsonValue;
+}>;
+
+// @public
 export type DurableBranchOrigin = Readonly<{
     graphId: string;
     definitionHash: string;
@@ -1584,6 +1628,93 @@ export type DurableBranchOrigin = Readonly<{
 type DurableEdgeBatchMembers = Readonly<{
     insertEdgesDurableBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
 }>;
+
+// @public
+export class DurableEvidenceUndeliveredError extends BranchError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_OPERATION_UNDELIVERED";
+}
+
+// @public
+export type DurableOperationCapability<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
+    operate: (args: Readonly<{
+        descriptor: TStoreDescriptor;
+        expectedOrigin: DurableBranchOrigin;
+        request: DurableBranchOperation;
+    }>) => Promise<DurableOperationOutcome>;
+    get: (args: Readonly<{
+        descriptor: TStoreDescriptor;
+        expectedOrigin: DurableBranchOrigin;
+        idempotencyKey: string;
+    }>) => Promise<DurableBranchOperationEvidence | undefined>;
+    scan: (args: Readonly<{
+        descriptor: TStoreDescriptor;
+        expectedOrigin: DurableBranchOrigin;
+        after?: string | undefined;
+        limit: number;
+    }>) => Promise<DurableOperationScan>;
+    markDelivered: (args: Readonly<{
+        descriptor: TStoreDescriptor;
+        expectedOrigin: DurableBranchOrigin;
+        idempotencyKey: string;
+    }>) => Promise<DurableBranchOperationEvidence | undefined>;
+    hasUndelivered: (args: Readonly<{
+        descriptor: TStoreDescriptor;
+        expectedOrigin: DurableBranchOrigin;
+    }>) => Promise<boolean>;
+}>;
+
+// @public
+export class DurableOperationConflictError extends DurableOperationError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_OPERATION_CONFLICT";
+}
+
+// @public
+export class DurableOperationError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: string;
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public
+export class DurableOperationEvidenceError extends DurableOperationError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_OPERATION_EVIDENCE";
+}
+
+// @public
+export type DurableOperationOutcome = Readonly<{
+    outcome: "applied" | "replayed";
+    evidence: DurableBranchOperationEvidence;
+}> | Readonly<{
+    outcome: "unsupported";
+    dimensions: readonly [
+    DurableOperationUnsupportedDimension,
+    ...DurableOperationUnsupportedDimension[]
+    ];
+}>;
+
+// @public
+export type DurableOperationScan = Readonly<{
+    operations: readonly DurableBranchOperationEvidence[];
+    cursor?: string | undefined;
+}>;
+
+// @public
+export type DurableOperationUnsupportedDimension = "atomicMutation" | "evidenceStore" | "host";
+
+// @public
+export class DurableOperationUnsupportedError extends DurableOperationError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_OPERATION_UNSUPPORTED";
+}
 
 // @public
 export type DurableStoreDescriptor = JsonValue;
@@ -1621,6 +1752,7 @@ export type DurableWorkingCopyStrategy<G extends GraphDef, TStoreDescriptor exte
         expectedOrigin: DurableBranchOrigin;
         plan: MergePlanArtifactV1;
     }>) => Promise<NativeDurableMergeResult>) | undefined;
+    operations?: DurableOperationCapability<G, TStoreDescriptor> | undefined;
 }>;
 
 // @public (undocumented)
@@ -3119,6 +3251,9 @@ type GatedBundleVerdict<MCore extends OptionalGraphBackendMember, X extends Capa
 }>;
 
 // @public
+export function getDurableOperation<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>, idempotencyKey: string): Promise<Result<DurableBranchOperationEvidence | undefined, DurableOperationError>>;
+
+// @public
 type GetNodeType<G extends GraphDef, K extends NodeKinds<G>> = G["nodes"][K]["type"];
 
 // @public
@@ -4303,6 +4438,9 @@ type MapRowToMeta<R extends Readonly<Record<string, unknown>>, M extends Readonl
 }>;
 
 // @public
+export function markDurableOperationDelivered<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>, idempotencyKey: string): Promise<Result<DurableBranchOperationEvidence | undefined, DurableOperationError>>;
+
+// @public
 type MatchesOptions = Readonly<{
     mode?: FulltextQueryMode;
     language?: string;
@@ -4469,6 +4607,11 @@ export const MERGE_ERROR_CODES: {
     readonly evidence: "GRAPH_MERGE_EVIDENCE";
     readonly candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET";
     readonly review: "GRAPH_MERGE_REVIEW";
+    readonly operation: "GRAPH_MERGE_OPERATION";
+    readonly operationConflict: "GRAPH_MERGE_OPERATION_CONFLICT";
+    readonly operationUnsupported: "GRAPH_MERGE_OPERATION_UNSUPPORTED";
+    readonly operationEvidence: "GRAPH_MERGE_OPERATION_EVIDENCE";
+    readonly operationUndelivered: "GRAPH_MERGE_OPERATION_UNDELIVERED";
 };
 
 // @public
@@ -5602,6 +5745,9 @@ export function openProvenanceStore<G extends GraphDef>(target: Store<G>): Promi
 export function openProvenanceStore(backend: GraphBackend, targetGraphId: string): Promise<Store<ProvenanceGraph>>;
 
 // @public
+export function operateDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>, request: DurableBranchOperationRequest): Promise<Result<DurableOperationOutcome, DurableOperationError>>;
+
+// @public
 type OperationHookContext = HookContext & Readonly<{
     operation: "create" | "update" | "delete";
     entity: KindEntity;
@@ -6676,6 +6822,12 @@ type ScalarSubqueryExpressionNode = Readonly<{
     kind: "scalar_subquery";
     subquery: QueryAst;
 }>;
+
+// @public
+export function scanDurableOperations<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>, options?: Readonly<{
+    after?: string | undefined;
+    limit?: number | undefined;
+}>): Promise<Result<DurableOperationScan, DurableOperationError>>;
 
 // @internal
 type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
