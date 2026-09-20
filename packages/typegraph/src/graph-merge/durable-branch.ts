@@ -62,7 +62,12 @@
 
 import { computeBaseVersion, schemaComponentOf } from "./base-version";
 import { readBranchForkState } from "./branch";
-import { BranchError, describeCause } from "./errors";
+import type { DurableOperationCapability } from "./durable-operation";
+import {
+  BranchError,
+  describeCause,
+  DurableEvidenceUndeliveredError,
+} from "./errors";
 import type { MergePlanArtifactV1 } from "./plan-schema";
 import type { Result } from "./result";
 import { err, ok } from "./result";
@@ -330,6 +335,23 @@ export type DurableWorkingCopyStrategy<
           plan: MergePlanArtifactV1;
         }>,
       ) => Promise<NativeDurableMergeResult>)
+    | undefined;
+  /**
+   * Optional atomic operation + evidence capability.
+   *
+   * When present, {@link import("./durable-operation").operateDurableBranch}
+   * commits the host's opaque graph mutation and its immutable evidence in one
+   * host transaction, keyed by idempotency. `destroy` MUST additionally refuse
+   * to remove the allocation while undelivered evidence remains, throwing
+   * {@link DurableEvidenceUndeliveredError}; closing a branch handle still only
+   * releases the connection.
+   *
+   * A strategy that cannot provide the atomic guarantee MUST omit this
+   * capability (or return `unsupported` from `operate`) rather than emulating
+   * atomicity with callbacks or best effort. See `durable-operation.ts`.
+   */
+  operations?:
+    | DurableOperationCapability<G, TStoreDescriptor>
     | undefined;
 }>;
 
@@ -704,6 +726,10 @@ export async function destroyDurableBranch<
     );
     return ok(undefined);
   } catch (error) {
+    // The undelivered-evidence fence is a deliberate, typed refusal: preserve
+    // it instead of flattening it into a generic branch failure, so the caller
+    // can still recover the evidence.
+    if (error instanceof DurableEvidenceUndeliveredError) return err(error);
     return err(
       new BranchError(
         `Failed to destroy durable working copy for branch "${descriptor.branchId}": ${describeCause(error)}`,

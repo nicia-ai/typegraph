@@ -36,6 +36,11 @@ export const MERGE_ERROR_CODES = {
   evidence: "GRAPH_MERGE_EVIDENCE",
   candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET",
   review: "GRAPH_MERGE_REVIEW",
+  operation: "GRAPH_MERGE_OPERATION",
+  operationConflict: "GRAPH_MERGE_OPERATION_CONFLICT",
+  operationUnsupported: "GRAPH_MERGE_OPERATION_UNSUPPORTED",
+  operationEvidence: "GRAPH_MERGE_OPERATION_EVIDENCE",
+  operationUndelivered: "GRAPH_MERGE_OPERATION_UNDELIVERED",
 } as const;
 
 /**
@@ -378,6 +383,77 @@ export class MatchEvidenceError extends MergeError {
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "MatchEvidenceError";
+  }
+}
+
+/**
+ * Generic failure raised while orchestrating a durable-branch operation:
+ * descriptor/request validation, strategy transport failure, or malformed
+ * evidence returned by a host.
+ */
+export class DurableOperationError extends MergeError {
+  protected static override readonly errorCategory = "user";
+  override readonly code: string = MERGE_ERROR_CODES.operation;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "DurableOperationError";
+  }
+}
+
+/**
+ * Raised when an idempotency key is reused with a different operation digest.
+ * The previously committed operation is returned untouched; the new request is
+ * refused before any graph mutation or evidence write.
+ */
+export class DurableOperationConflictError extends DurableOperationError {
+  override readonly code = MERGE_ERROR_CODES.operationConflict;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "DurableOperationConflictError";
+  }
+}
+
+/**
+ * Raised when a host cannot provide the atomic mutation-plus-evidence
+ * guarantee. It carries the dimensions the host cannot honor. The portable
+ * fallback is refusal; TypeGraph never emulates atomicity with callbacks or
+ * best effort.
+ */
+export class DurableOperationUnsupportedError extends DurableOperationError {
+  override readonly code = MERGE_ERROR_CODES.operationUnsupported;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "DurableOperationUnsupportedError";
+  }
+}
+
+/** Raised when a host returns malformed or request-inconsistent evidence. */
+export class DurableOperationEvidenceError extends DurableOperationError {
+  override readonly code = MERGE_ERROR_CODES.operationEvidence;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "DurableOperationEvidenceError";
+  }
+}
+
+/**
+ * Raised when archive/destroy is fenced by undelivered operation evidence.
+ *
+ * Extends {@link BranchError} so the established `destroyDurableBranch` result
+ * type already transports it: a strategy that refuses destruction while
+ * undelivered evidence remains preserves that refusal to the caller instead of
+ * having it flattened into a generic branch failure.
+ */
+export class DurableEvidenceUndeliveredError extends BranchError {
+  override readonly code = MERGE_ERROR_CODES.operationUndelivered;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "DurableEvidenceUndeliveredError";
   }
 }
 
