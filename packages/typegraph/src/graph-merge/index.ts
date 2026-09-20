@@ -60,12 +60,38 @@ export {
 } from "./durable-branch";
 export type { ApplyDurableMergePlanArgs } from "./durable-merge";
 export { applyDurableMergePlan } from "./durable-merge";
+export type {
+  DurableBranchCoordinates,
+  DurableBranchOperation,
+  DurableBranchOperationEvidence,
+  DurableBranchOperationRequest,
+  DurableOperationCapability,
+  DurableOperationOutcome,
+  DurableOperationScan,
+  DurableOperationUnsupportedDimension,
+} from "./durable-operation";
+export {
+  computeDurableOperationDigest,
+  DURABLE_OPERATION_SCAN_DEFAULT_LIMIT,
+  DURABLE_OPERATION_SCAN_MAX_LIMIT,
+  durableBranchHasUndeliveredEvidence,
+  getDurableOperation,
+  markDurableOperationDelivered,
+  operateDurableBranch,
+  scanDurableOperations,
+} from "./durable-operation";
 export type { MergeConstraintConflictErrorDetails } from "./errors";
 export {
   BaseVersionMismatchError,
   BranchError,
   CandidateSourceError,
   CandidateWriteSetError,
+  DurableEvidenceUndeliveredError,
+  DurableOperationConflictError,
+  DurableOperationError,
+  DurableOperationEvidenceError,
+  DurableOperationRequestError,
+  DurableOperationUnsupportedError,
   IdentityMergeConflictError,
   InvalidMergeOptionsError,
   InvalidMergePlanError,
