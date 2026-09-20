@@ -90,6 +90,7 @@ export {
   DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
+  DurableOperationRequestError,
   DurableOperationUnsupportedError,
   IdentityMergeConflictError,
   InvalidMergeOptionsError,

@@ -1670,6 +1670,8 @@ export class DurableOperationConflictError extends DurableOperationError {
     constructor(message: string, options?: MergeErrorOptions);
     // (undocumented)
     readonly code: "GRAPH_MERGE_OPERATION_CONFLICT";
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
 }
 
 // @public
@@ -1677,8 +1679,6 @@ export class DurableOperationError extends MergeError {
     constructor(message: string, options?: MergeErrorOptions);
     // (undocumented)
     readonly code: string;
-    // (undocumented)
-    protected static readonly errorCategory = "user";
 }
 
 // @public
@@ -1701,6 +1701,15 @@ export type DurableOperationOutcome = Readonly<{
 }>;
 
 // @public
+export class DurableOperationRequestError extends DurableOperationError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_OPERATION_REQUEST";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public
 export type DurableOperationScan = Readonly<{
     operations: readonly DurableBranchOperationEvidence[];
     cursor?: string | undefined;
@@ -1714,6 +1723,8 @@ export class DurableOperationUnsupportedError extends DurableOperationError {
     constructor(message: string, options?: MergeErrorOptions);
     // (undocumented)
     readonly code: "GRAPH_MERGE_OPERATION_UNSUPPORTED";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
 }
 
 // @public
@@ -4608,6 +4619,7 @@ export const MERGE_ERROR_CODES: {
     readonly candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET";
     readonly review: "GRAPH_MERGE_REVIEW";
     readonly operation: "GRAPH_MERGE_OPERATION";
+    readonly operationRequest: "GRAPH_MERGE_OPERATION_REQUEST";
     readonly operationConflict: "GRAPH_MERGE_OPERATION_CONFLICT";
     readonly operationUnsupported: "GRAPH_MERGE_OPERATION_UNSUPPORTED";
     readonly operationEvidence: "GRAPH_MERGE_OPERATION_EVIDENCE";

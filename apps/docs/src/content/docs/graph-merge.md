@@ -1745,7 +1745,9 @@ if (outcome.outcome === "unsupported") {
   throw new Error(`Missing capabilities: ${outcome.dimensions.join(", ")}`);
 }
 console.log(outcome.outcome); // "applied" | "replayed"
-console.log(outcome.evidence.delivered); // false
+// Newly applied evidence is always false. A replay returns the current
+// committed delivery state, which may already be true.
+console.log(outcome.evidence.delivered);
 ```
 
 Both `mutation` and `metadata` are **JSON-safe host values**. TypeGraph never
@@ -1768,9 +1770,16 @@ return non-JSON metadata (`DurableOperationEvidenceError`).
 **Idempotency.** The strategy treats `idempotencyKey` as its unique key:
 
 - Identical key **and** digest: returns the previously committed evidence
-  unchanged (`outcome: "replayed"`) and re-applies nothing.
+  (`outcome: "replayed"`) and re-applies nothing. Because delivery marking is
+  monotonic, a replay after delivery legitimately returns `delivered: true`.
 - Identical key with a **different** digest: refuses with
   `DurableOperationConflictError` and mutates nothing.
+
+A first application (`outcome: "applied"`) must return `delivered: false`.
+TypeGraph rejects `applied` evidence that is already delivered, so a host cannot
+bypass downstream delivery or the destroy fence. It also validates the complete
+host outcome envelope: malformed outcomes and empty, duplicate, or unknown
+`unsupported` dimensions return `DurableOperationEvidenceError`.
 
 **Evidence access and delivery.**
 
@@ -2122,10 +2131,11 @@ commit after a partially applied failure:
 | `CandidateSourceError`       | A built-in candidate source failed; details identify its source id, entity kind, and operation.                                                                                                                                                                               |
 | `CandidateWriteSetError`     | Code `GRAPH_MERGE_CANDIDATE_WRITE_SET`. Candidate JSON is malformed, targets another graph schema, cannot be staged, or violates the active graph contract. The accepted graph is unchanged.                                                                                  |
 | `MergeReviewError`           | Code `GRAPH_MERGE_REVIEW`. Durable review evidence is malformed, unsupported, incomplete, or inconsistent, or review options cannot be represented safely.                                                                                                                     |
-| `DurableOperationError`      | Code `GRAPH_MERGE_OPERATION`. Generic failure orchestrating a durable-branch operation: descriptor/request validation, strategy transport failure, or malformed evidence returned by a host.                                                                                    |
-| `DurableOperationConflictError` | Code `GRAPH_MERGE_OPERATION_CONFLICT`. An idempotency key was reused with a different operation digest. The previously committed operation is returned untouched; nothing new is written.                                                                                      |
+| `DurableOperationError`      | Code `GRAPH_MERGE_OPERATION`. System-category failure while calling a durable-operation host, including transport and strategy failures.                                                                                                                                    |
+| `DurableOperationRequestError` | Code `GRAPH_MERGE_OPERATION_REQUEST`. User-category refusal for an invalid durable-operation request, descriptor, or scan option.                                                                                                                                          |
+| `DurableOperationConflictError` | Code `GRAPH_MERGE_OPERATION_CONFLICT`. Constraint-category refusal when an idempotency key is reused with a different operation digest. The previously committed operation is returned untouched; nothing new is written.                                                         |
 | `DurableOperationUnsupportedError` | Code `GRAPH_MERGE_OPERATION_UNSUPPORTED`. The strategy's `operations` capability lacks a requested member; TypeGraph refuses rather than emulating the atomic guarantee.                                                                                              |
-| `DurableOperationEvidenceError` | Code `GRAPH_MERGE_OPERATION_EVIDENCE`. A host returned malformed or request-inconsistent operation evidence.                                                                                                                                                                |
+| `DurableOperationEvidenceError` | Code `GRAPH_MERGE_OPERATION_EVIDENCE`. System-category failure because a host returned malformed or request-inconsistent operation evidence.                                                                                                                                 |
 | `DurableEvidenceUndeliveredError` | Code `GRAPH_MERGE_OPERATION_UNDELIVERED`. `destroyDurableBranch()` was refused because committed operation evidence is still undelivered. Deliver or archive it first; the typed refusal is preserved so the evidence stays recoverable.                                |
 | `MatchEvidenceError`         | Evidence could not be constructed safely, including a custom scorer returning `NaN` or infinity.                                                                                                                                                                              |
 | `MergeError`                 | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes.                                                                                                                                            |

@@ -37,6 +37,7 @@ export const MERGE_ERROR_CODES = {
   candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET",
   review: "GRAPH_MERGE_REVIEW",
   operation: "GRAPH_MERGE_OPERATION",
+  operationRequest: "GRAPH_MERGE_OPERATION_REQUEST",
   operationConflict: "GRAPH_MERGE_OPERATION_CONFLICT",
   operationUnsupported: "GRAPH_MERGE_OPERATION_UNSUPPORTED",
   operationEvidence: "GRAPH_MERGE_OPERATION_EVIDENCE",
@@ -387,17 +388,26 @@ export class MatchEvidenceError extends MergeError {
 }
 
 /**
- * Generic failure raised while orchestrating a durable-branch operation:
- * descriptor/request validation, strategy transport failure, or malformed
- * evidence returned by a host.
+ * Generic operational failure raised while orchestrating a durable-branch
+ * operation, such as a strategy transport or host failure.
  */
 export class DurableOperationError extends MergeError {
-  protected static override readonly errorCategory = "user";
   override readonly code: string = MERGE_ERROR_CODES.operation;
 
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "DurableOperationError";
+  }
+}
+
+/** Raised when a durable-operation request or descriptor is invalid. */
+export class DurableOperationRequestError extends DurableOperationError {
+  protected static override readonly errorCategory = "user";
+  override readonly code = MERGE_ERROR_CODES.operationRequest;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "DurableOperationRequestError";
   }
 }
 
@@ -407,6 +417,7 @@ export class DurableOperationError extends MergeError {
  * refused before any graph mutation or evidence write.
  */
 export class DurableOperationConflictError extends DurableOperationError {
+  protected static override readonly errorCategory = "constraint";
   override readonly code = MERGE_ERROR_CODES.operationConflict;
 
   constructor(message: string, options: MergeErrorOptions = {}) {
@@ -422,6 +433,7 @@ export class DurableOperationConflictError extends DurableOperationError {
  * best effort.
  */
 export class DurableOperationUnsupportedError extends DurableOperationError {
+  protected static override readonly errorCategory = "user";
   override readonly code = MERGE_ERROR_CODES.operationUnsupported;
 
   constructor(message: string, options: MergeErrorOptions = {}) {

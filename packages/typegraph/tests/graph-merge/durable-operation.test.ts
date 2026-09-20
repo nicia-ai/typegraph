@@ -25,6 +25,8 @@ import {
   DurableOperationConflictError,
   DurableOperationError,
   DurableOperationEvidenceError,
+  type DurableOperationOutcome,
+  DurableOperationRequestError,
   DurableOperationUnsupportedError,
   type DurableStoreDescriptor,
   type DurableWorkingCopyStrategy,
@@ -292,6 +294,34 @@ describe("durable branch operations", () => {
     expect(host.appliedMutations()).toHaveLength(1);
   });
 
+  it("accepts delivered evidence only when replaying a committed operation", async () => {
+    const host = createRecordingHost();
+    const first = await operateDurableBranch(
+      descriptor,
+      host.strategy,
+      request("op-1"),
+    );
+    const delivered = await markDurableOperationDelivered(
+      descriptor,
+      host.strategy,
+      "op-1",
+    );
+    const replay = await operateDurableBranch(
+      descriptor,
+      host.strategy,
+      request("op-1"),
+    );
+
+    expect(isOk(first) && first.data.outcome === "applied").toBe(true);
+    expect(isOk(delivered) && delivered.data?.delivered).toBe(true);
+    expect(
+      isOk(replay) &&
+        replay.data.outcome === "replayed" &&
+        replay.data.evidence.delivered,
+    ).toBe(true);
+    expect(host.appliedMutations()).toHaveLength(1);
+  });
+
   it("refuses a reused idempotency key with a different digest and mutates nothing", async () => {
     const host = createRecordingHost();
     await operateDurableBranch(descriptor, host.strategy, request("op-1"));
@@ -361,6 +391,10 @@ describe("durable branch operations", () => {
     );
 
     expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(DurableOperationRequestError);
+      expect(result.error.category).toBe("user");
+    }
     expect(host.appliedMutations()).toHaveLength(0);
   });
 
@@ -372,6 +406,26 @@ describe("durable branch operations", () => {
       request(""),
     );
     expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(DurableOperationRequestError);
+      expect(result.error.category).toBe("user");
+    }
+    expect(host.appliedMutations()).toHaveLength(0);
+  });
+
+  it("returns a request error for a non-object operation request", async () => {
+    const host = createRecordingHost();
+    const result = await operateDurableBranch(
+      descriptor,
+      host.strategy,
+      null as unknown as DurableBranchOperationRequest,
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(DurableOperationRequestError);
+      expect(result.error.category).toBe("user");
+    }
     expect(host.appliedMutations()).toHaveLength(0);
   });
 
@@ -384,7 +438,8 @@ describe("durable branch operations", () => {
     );
     expect(isErr(wrongKind)).toBe(true);
     if (isErr(wrongKind)) {
-      expect(wrongKind.error).toBeInstanceOf(DurableOperationError);
+      expect(wrongKind.error).toBeInstanceOf(DurableOperationRequestError);
+      expect(wrongKind.error.category).toBe("user");
       expect(wrongKind.error.message).toContain("descriptor");
     }
 
@@ -537,6 +592,7 @@ describe("durable branch operations", () => {
     if (isErr(result)) {
       expect(result.error).toBeInstanceOf(DurableOperationUnsupportedError);
       expect(result.error.code).toBe("GRAPH_MERGE_OPERATION_UNSUPPORTED");
+      expect(result.error.category).toBe("user");
     }
   });
 
@@ -607,6 +663,133 @@ describe("durable branch operations", () => {
     expect(isErr(result)).toBe(true);
     if (isErr(result)) {
       expect(result.error).toBeInstanceOf(DurableOperationEvidenceError);
+      expect(result.error.category).toBe("system");
+    }
+  });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["array", []],
+    ["missing outcome", {}],
+    ["unknown outcome", { outcome: "other" }],
+    ["applied without evidence", { outcome: "applied" }],
+    ["unsupported without dimensions", { outcome: "unsupported" }],
+    [
+      "unsupported with empty dimensions",
+      {
+        outcome: "unsupported",
+        dimensions: [],
+      },
+    ],
+    [
+      "unsupported with an unknown dimension",
+      {
+        outcome: "unsupported",
+        dimensions: ["other"],
+      },
+    ],
+    [
+      "unsupported with duplicate dimensions",
+      {
+        outcome: "unsupported",
+        dimensions: ["host", "host"],
+      },
+    ],
+  ])(
+    "returns a typed error for a malformed %s outcome envelope",
+    async (_label, raw) => {
+      const host = createRecordingHost();
+      const strategy: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> = {
+        ...host.strategy,
+        operations: {
+          ...requireOperations(host.strategy),
+          operate: async () => raw as unknown as DurableOperationOutcome,
+        },
+      };
+
+      const result = await operateDurableBranch(
+        descriptor,
+        strategy,
+        request("op-1"),
+      );
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(DurableOperationEvidenceError);
+        expect(result.error.category).toBe("system");
+      }
+    },
+  );
+
+  it("refuses newly applied evidence that is already marked delivered", async () => {
+    const host = createRecordingHost();
+    const strategy: DurableWorkingCopyStrategy<G, DurableStoreDescriptor> = {
+      ...host.strategy,
+      operations: {
+        ...requireOperations(host.strategy),
+        operate: async ({ request: committed }) => ({
+          outcome: "applied",
+          evidence: {
+            idempotencyKey: committed.idempotencyKey,
+            operationDigest: committed.operationDigest,
+            metadata: committed.metadata,
+            mutation: committed.mutation,
+            before: { base: asBaseVersion("a") },
+            after: { base: asBaseVersion("b") },
+            delivered: true,
+          },
+        }),
+      },
+    };
+
+    const result = await operateDurableBranch(
+      descriptor,
+      strategy,
+      request("op-1"),
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(DurableOperationEvidenceError);
+      expect(result.error.category).toBe("system");
+    }
+  });
+
+  it("classifies host failures as system errors and digest conflicts as constraints", async () => {
+    const host = createRecordingHost();
+    const failedStrategy: DurableWorkingCopyStrategy<
+      G,
+      DurableStoreDescriptor
+    > = {
+      ...host.strategy,
+      operations: {
+        ...requireOperations(host.strategy),
+        operate: () => Promise.reject(new Error("transport unavailable")),
+      },
+    };
+
+    const failed = await operateDurableBranch(
+      descriptor,
+      failedStrategy,
+      request("op-failed"),
+    );
+    await operateDurableBranch(descriptor, host.strategy, request("op-1"));
+    const conflict = await operateDurableBranch(
+      descriptor,
+      host.strategy,
+      request("op-1", { metadata: { changed: true } }),
+    );
+
+    expect(isErr(failed)).toBe(true);
+    expect(isErr(conflict)).toBe(true);
+    if (isErr(failed)) {
+      expect(failed.error).toBeInstanceOf(DurableOperationError);
+      expect(failed.error.category).toBe("system");
+    }
+    if (isErr(conflict)) {
+      expect(conflict.error).toBeInstanceOf(DurableOperationConflictError);
+      expect(conflict.error.category).toBe("constraint");
     }
   });
 

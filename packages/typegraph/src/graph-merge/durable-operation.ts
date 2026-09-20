@@ -60,6 +60,7 @@ import {
   describeCause,
   DurableOperationError,
   DurableOperationEvidenceError,
+  DurableOperationRequestError,
   DurableOperationUnsupportedError,
 } from "./errors";
 import type { Result } from "./result";
@@ -120,7 +121,9 @@ export type DurableBranchCoordinates = Readonly<{
 /**
  * Immutable evidence of one committed operation. `delivered` is the only
  * mutating dimension, and it moves in one direction (`false` → `true`) under
- * {@link DurableOperationCapability.markDelivered}.
+ * {@link DurableOperationCapability.markDelivered}. A newly `applied`
+ * operation must return `false`; an exact `replayed` operation returns its
+ * current committed delivery state.
  */
 export type DurableBranchOperationEvidence = Readonly<{
   idempotencyKey: string;
@@ -175,7 +178,8 @@ export type DurableOperationCapability<
    *      applying nothing;
    *   3. refuse with {@link DurableOperationConflictError} when the key exists
    *      with a different digest, applying nothing; and
-   *   4. otherwise apply the mutation and evidence in ONE transaction.
+   *   4. otherwise apply the mutation and undelivered evidence in ONE
+   *      transaction, returning `outcome: "applied"` with `delivered: false`.
    */
   operate: (
     args: Readonly<{
@@ -255,12 +259,12 @@ function requireDescriptorOwner<
   strategy: OperationStrategy<TStoreDescriptor>,
 ):
   | Readonly<{ ok: true; origin: DurableBranchOrigin }>
-  | Readonly<{ ok: false; error: DurableOperationError }> {
+  | Readonly<{ ok: false; error: DurableOperationRequestError }> {
   const refusal = durableDescriptorRefusal(descriptor, strategy);
   if (refusal !== undefined) {
     return {
       ok: false,
-      error: new DurableOperationError(
+      error: new DurableOperationRequestError(
         "Durable operation descriptor validation failed.",
         { cause: refusal },
       ),
@@ -272,13 +276,25 @@ function requireDescriptorOwner<
 /** Validates JSON safety and shape of a caller-supplied operation request. */
 async function normalizeOperationRequest(
   request: DurableBranchOperationRequest,
-): Promise<Result<DurableBranchOperation, DurableOperationError>> {
+): Promise<Result<DurableBranchOperation, DurableOperationRequestError>> {
+  const rawRequest: unknown = request;
+  if (
+    typeof rawRequest !== "object" ||
+    rawRequest === null ||
+    Array.isArray(rawRequest)
+  ) {
+    return err(
+      new DurableOperationRequestError(
+        "Durable operation request must be a JSON object.",
+      ),
+    );
+  }
   if (
     typeof request.idempotencyKey !== "string" ||
     request.idempotencyKey.length === 0
   ) {
     return err(
-      new DurableOperationError(
+      new DurableOperationRequestError(
         "Durable operation request is malformed: idempotencyKey must be a non-empty string.",
         { details: { idempotencyKey: request.idempotencyKey } },
       ),
@@ -289,7 +305,7 @@ async function normalizeOperationRequest(
     assertJsonValue(request.mutation, "mutation", "Durable operation");
   } catch (error) {
     return err(
-      new DurableOperationError(
+      new DurableOperationRequestError(
         `Durable operation request is not JSON-safe: ${describeCause(error)}`,
         { cause: error, details: { idempotencyKey: request.idempotencyKey } },
       ),
@@ -454,6 +470,102 @@ async function validateEvidenceForOperation(
   return normalized;
 }
 
+const DURABLE_OPERATION_UNSUPPORTED_DIMENSIONS =
+  new Set<DurableOperationUnsupportedDimension>([
+    "atomicMutation",
+    "evidenceStore",
+    "host",
+  ]);
+
+function isDurableOperationUnsupportedDimension(
+  value: unknown,
+): value is DurableOperationUnsupportedDimension {
+  return (
+    typeof value === "string" &&
+    DURABLE_OPERATION_UNSUPPORTED_DIMENSIONS.has(
+      value as DurableOperationUnsupportedDimension,
+    )
+  );
+}
+
+/** Validates the complete result envelope returned by a host operation. */
+async function normalizeOperationOutcome(
+  outcome: unknown,
+  expected: DurableBranchOperation,
+): Promise<Result<DurableOperationOutcome, DurableOperationEvidenceError>> {
+  if (
+    typeof outcome !== "object" ||
+    outcome === null ||
+    Array.isArray(outcome)
+  ) {
+    return err(
+      new DurableOperationEvidenceError(
+        "Durable operation host returned a malformed outcome envelope.",
+        { details: { idempotencyKey: expected.idempotencyKey } },
+      ),
+    );
+  }
+
+  const record = outcome as Readonly<Record<string, unknown>>;
+  const outcomeKind = record["outcome"];
+  if (outcomeKind === "unsupported") {
+    const dimensions = record["dimensions"];
+    const normalizedDimensions =
+      Array.isArray(dimensions) ?
+        dimensions.filter((dimension) =>
+          isDurableOperationUnsupportedDimension(dimension),
+        )
+      : [];
+    const [firstDimension, ...remainingDimensions] = normalizedDimensions;
+    if (
+      !Array.isArray(dimensions) ||
+      firstDimension === undefined ||
+      normalizedDimensions.length !== dimensions.length ||
+      new Set(normalizedDimensions).size !== normalizedDimensions.length
+    ) {
+      return err(
+        new DurableOperationEvidenceError(
+          "Durable operation host returned malformed unsupported dimensions.",
+          { details: { idempotencyKey: expected.idempotencyKey } },
+        ),
+      );
+    }
+    return ok({
+      outcome: "unsupported",
+      dimensions: [firstDimension, ...remainingDimensions],
+    });
+  }
+
+  if (outcomeKind !== "applied" && outcomeKind !== "replayed") {
+    return err(
+      new DurableOperationEvidenceError(
+        "Durable operation host returned an unknown outcome.",
+        {
+          details: {
+            idempotencyKey: expected.idempotencyKey,
+            outcome: outcomeKind,
+          },
+        },
+      ),
+    );
+  }
+
+  const evidence = await validateEvidenceForOperation(
+    record["evidence"],
+    expected,
+  );
+  if (isErr(evidence)) return evidence;
+  if (outcomeKind === "applied" && evidence.data.delivered) {
+    return err(
+      new DurableOperationEvidenceError(
+        "Newly applied durable operation evidence must be undelivered.",
+        { details: { idempotencyKey: expected.idempotencyKey } },
+      ),
+    );
+  }
+  return ok({ outcome: outcomeKind, evidence: evidence.data });
+}
+
 function validateCoordinates(
   coordinates: unknown,
   evidence: Readonly<Record<string, unknown>>,
@@ -533,13 +645,13 @@ export async function operateDurableBranch<
     });
   }
 
-  let outcome: DurableOperationOutcome;
   try {
-    outcome = await strategy.operations.operate({
+    const outcome: unknown = await strategy.operations.operate({
       descriptor: descriptor.store,
       expectedOrigin: owner.origin,
       request: normalized.data,
     });
+    return await normalizeOperationOutcome(outcome, normalized.data);
   } catch (error) {
     return err(
       error instanceof DurableOperationError ? error : (
@@ -553,13 +665,6 @@ export async function operateDurableBranch<
       ),
     );
   }
-  if (outcome.outcome === "unsupported") return ok(outcome);
-  const evidence = await validateEvidenceForOperation(
-    outcome.evidence,
-    normalized.data,
-  );
-  if (isErr(evidence)) return evidence;
-  return ok({ ...outcome, evidence: evidence.data });
 }
 
 /**
@@ -624,7 +729,7 @@ export async function scanDurableOperations<
   const limit = options.limit ?? DURABLE_OPERATION_SCAN_DEFAULT_LIMIT;
   if (!Number.isInteger(limit) || limit < 1) {
     return err(
-      new DurableOperationError(
+      new DurableOperationRequestError(
         "Durable operation scan limit must be a positive integer.",
         { details: { limit } },
       ),
@@ -632,7 +737,7 @@ export async function scanDurableOperations<
   }
   if (limit > DURABLE_OPERATION_SCAN_MAX_LIMIT) {
     return err(
-      new DurableOperationError(
+      new DurableOperationRequestError(
         `Durable operation scan limit ${limit} exceeds the maximum of ${DURABLE_OPERATION_SCAN_MAX_LIMIT}.`,
         {
           details: { limit, max: DURABLE_OPERATION_SCAN_MAX_LIMIT },
