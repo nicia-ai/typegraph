@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.68.0
+
+### Minor Changes
+
+- [#731](https://github.com/nicia-ai/typegraph/pull/731) [`f8e800b`](https://github.com/nicia-ai/typegraph/commit/f8e800bca25f7168747624d1ab4dea525ec736c0) Thanks [@pdlug](https://github.com/pdlug)! - Add atomic durable-branch operations. A `DurableWorkingCopyStrategy` may now expose an optional `operations` capability that commits an opaque host mutation and its immutable evidence in one host transaction, keyed by idempotency. New public orchestrators `operateDurableBranch()`, `getDurableOperation()`, `scanDurableOperations()`, `markDurableOperationDelivered()`, and `durableBranchHasUndeliveredEvidence()` wrap it, with typed `DurableOperationError` subclasses for conflicts, unsupported capabilities, malformed evidence, and the undelivered-evidence destroy fence.
+
 ## 0.67.1
 
 ### Patch Changes
