@@ -53,7 +53,11 @@ export type {
   IdentityFacade,
 } from "../identity/types";
 export { exportGraph, exportGraphStream } from "../interchange/export";
-export { importGraph, importGraphStream } from "../interchange/import";
+export {
+  importGraph,
+  importGraphStream,
+  summarizeImportErrors,
+} from "../interchange/import";
 export { computeTransitiveClosure, isReachable } from "../ontology/closures";
 export {
   META_EDGE_EQUIVALENT_TO,

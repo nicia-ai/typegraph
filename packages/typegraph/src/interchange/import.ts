@@ -903,6 +903,15 @@ function serializedStreamRefusalText(
       };
 }
 
+export function summarizeImportErrors(errors: readonly ImportError[]): string {
+  return errors
+    .map(
+      (entry) =>
+        `${entry.entityType} ${entry.kind} ${entry.id}: ${entry.error}`,
+    )
+    .join("; ");
+}
+
 function throwIfStreamChunkFailed(
   result: ImportResult,
   options: ResolvedImportOptions,
@@ -912,6 +921,7 @@ function throwIfStreamChunkFailed(
   }
   throw new Error(
     "Graph interchange stream aborted after a chunk reported import errors. " +
+      `Reported errors: ${summarizeImportErrors(result.errors)}. ` +
       'Earlier chunks remain committed; use onStreamChunkError: "continue" for best-effort ingestion.',
   );
 }

@@ -599,7 +599,11 @@ describe("Interchange Round-Trip", () => {
         ]),
         importOptions({ onConflict: "error" }),
       ),
-    ).rejects.toThrow("stream aborted after a chunk reported import errors");
+    ).rejects.toThrow(
+      new RegExp(
+        `stream aborted after a chunk reported import errors.*Reported errors: node Person ${alice.id}: Node already exists`,
+      ),
+    );
     expect(await targetStore.nodes.Person.getById(alice.id)).toBeDefined();
   });
 
