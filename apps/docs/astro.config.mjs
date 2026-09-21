@@ -197,6 +197,15 @@ const LAZILY_DISCOVERED_DEPS = [
   "starlight-blog/routes/rss-archive",
 ];
 
+// Tailwind's layers must sit below Starlight's. Whichever stylesheet declares a
+// layer first fixes its priority, and in `astro dev` the CSS a route emits
+// follows its component import order: starlight-blog's routes emit Starlight
+// component styles before tailwind.css, which sank `starlight.components` and
+// `starlight.content` beneath Tailwind's Preflight and stripped the blog's
+// layout. Declaring the order up front makes it independent of emission order.
+const CASCADE_LAYER_ORDER =
+  "@layer properties, theme, base, components, utilities, starlight;";
+
 export default defineConfig({
   site: "https://typegraph.dev",
   markdown: {
@@ -332,6 +341,7 @@ export default defineConfig({
       customCss: ["./src/styles/tailwind.css", "./src/styles/custom.css"],
       favicon: "/favicon.svg",
       head: [
+        { tag: "style", content: CASCADE_LAYER_ORDER },
         {
           tag: "link",
           attrs: { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
