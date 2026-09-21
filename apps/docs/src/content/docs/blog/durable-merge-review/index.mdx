@@ -1,0 +1,228 @@
+---
+title: "Durable Merge Review: The Plan Expires, the Approval Doesn't"
+date: 2026-10-27
+excerpt: "planMerge() already let you review a proposed change before committing it — but the plan you review has to stay untouched until you apply it, and a real approval process writes things: an audit record, a decision, a signature. 0.56 adds planCandidateWriteSetReview() and revalidateCandidateWriteSetReview(): persist the review as evidence in the target graph itself, and get a fresh, safe plan back precisely because the one you started with is now stale."
+tags:
+  - announcements
+cover:
+  alt: "A candidate write set branching into a live path — review and approval persisted, then a fresh plan applied — and a dead path where persisting that same review strikes out the original execution plan into a badged StaleMergePlanError"
+  image: "./cover.png"
+social:
+  alt: "Durable Merge Review: The Plan Expires, the Approval Doesn't"
+  image: "./social.png"
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+[Graph Merge](/blog/graph-merge) plans before it applies:
+`planMerge()` returns the exact proposed write set without touching the
+target, so a human or a policy engine can look at it first. That works
+cleanly as long as the reviewer's approval lives somewhere else — a ticket
+system, a separate database, anywhere but the graph the plan targets. The
+moment you want the review itself to be graph data — an audit trail sitting
+next to the record it concerns, queryable the same way everything else is —
+you run into the plan's own contract: it's revision-fenced, and _writing the
+review down_ is a write. By the time anyone approves it, the plan you asked
+them to approve may already be the wrong one to apply.
+
+0.56 adds a durable version of the same idea. `planCandidateWriteSetReview()`
+captures the candidate, the plan, the policy, and the target's baseline as
+one immutable, digest-checked artifact you're meant to persist. When it's
+time to act on an approval, `revalidateCandidateWriteSetReview()` checks that
+artifact against current graph state and hands back a fresh plan — compatible,
+changed, or incompatible — instead of asking you to reuse one that's already
+expired.
+
+## Propose a change, capture the review
+
+[Example 27](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/27-durable-merge-review.ts)
+proposes flipping one `Item` from `"proposed"` to `"accepted"`:
+
+```typescript
+const proposal = await store.nodes.Item.create({
+  label: "Reviewed catalog entry",
+  status: "proposed",
+});
+
+const review = unwrap(
+  await planCandidateWriteSetReview({
+    target: store,
+    makeBackend,
+    policy: {
+      id: "manual-acceptance-v1",
+      context: { requiredApprovals: 1, authorizedReviewers: ["reviewer:maya"] },
+    },
+    writeSet: {
+      formatVersion: 1,
+      sourceId: "catalog-review",
+      target: await captureCandidateWriteSetTarget(store),
+      nodes: [
+        {
+          kind: "Item",
+          id: proposal.id,
+          properties: { label: proposal.label, status: "accepted" },
+        },
+      ],
+      edges: [],
+    },
+  }),
+);
+```
+
+`review` is `MergeReviewArtifact`: the retained candidate write set, the
+reviewed execution plan, normalized merge options, the policy's identity and
+context exactly as supplied, and a captured baseline of the target. Every
+field that matters to "is this still the change we approved" is in one
+content-digested value — `review.digest.value` identifies it exactly, the way
+a git commit hash identifies a tree. V1 works over candidate write sets
+specifically; it isn't a general rebase for arbitrary `planMerge()` artifacts.
+
+## Write the evidence into the graph it's about
+
+Persist the artifact as ordinary graph data, keyed by its own digest so the
+id and the content can never drift apart:
+
+```typescript
+const artifact = await store.nodes.Artifact.create(
+  { content: JSON.stringify(review) },
+  { id: review.digest.value },
+);
+await store.edges.evidence.create(proposal, artifact, { note: "review" });
+```
+
+`Artifact`, `Decision`, and `evidence` here are ordinary application-defined
+node and edge kinds — nothing about durable review requires special schema
+support. What makes this the durable version is only that the review now
+lives where the data it's about lives: one graph, one query surface, one
+backup, one access-control boundary. Content addressing gives you an
+identifier; actually keeping that content immutable is still storage's job.
+
+An authenticated reviewer's approval gets the same treatment — a record, not
+a side channel:
+
+```typescript
+const decision = await store.nodes.Decision.create({
+  approved: true,
+  reviewDigest: review.digest.value,
+  reviewer: "reviewer:maya",
+});
+await store.edges.evidence.create(decision, artifact, { note: "approval" });
+```
+
+## The plan you started with is already stale
+
+Here's the part that makes the durability real instead of aspirational. Try
+to apply the _original_ plan now, after writing the artifact and the
+decision:
+
+```typescript
+const stale = await applyMergePlan(store, review.plan);
+// stale.error is a StaleMergePlanError
+```
+
+It fails — correctly. Persisting the review artifact and the approval
+decision were themselves writes to the target, and `review.plan` is
+revision-fenced against the target state from _before_ those writes. This
+isn't a quirk to work around; it's the proof that the mechanism works.
+Nothing about durable review gets to quietly relax "a plan is single-use and
+checked against current state" — not even the act of recording that the plan
+was approved. If it did, the fence would be theater.
+
+## Revalidate the retained candidate, not the dead plan
+
+The candidate that produced the review is still there, inside the artifact
+you stored. `revalidateCandidateWriteSetReview()` reads the persisted
+content, reruns planning against current target state, and tells you exactly
+what it found:
+
+```typescript
+const persisted = await store.nodes.Artifact.getById(artifact.id);
+const approval = await store.nodes.Decision.getById(decision.id);
+// ... authenticate persisted/approval, check approval.approved and reviewer ...
+
+const checked = unwrap(
+  await revalidateCandidateWriteSetReview({
+    target: store,
+    makeBackend,
+    review: JSON.parse(persisted.content),
+    policy: {
+      id: "manual-acceptance-v1",
+      context: { requiredApprovals: 1, authorizedReviewers: ["reviewer:maya"] },
+    },
+  }),
+);
+```
+
+| `checked.status` | What it means                                                                                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `compatible`     | Nothing that matters moved. Comes with a fresh `plan` and the original `reviewDigest`, so you can relate this exact approval to this exact re-derived plan.                          |
+| `changed`        | Policy, options, the baseline entities, or plan fields differ from what was reviewed. `checked.differences` says which. Get a new review and a new approval — do not reuse this one. |
+| `incompatible`   | Graph id, schema identity, or revision origin don't match. This approval cannot be reused for this target at all.                                                                    |
+
+The example's target hasn't moved in any way that matters — only the review
+and approval records themselves were added, and revalidation already accounts
+for those — so `checked.status` is `"compatible"`.
+
+## Compatible is not authorization
+
+`revalidateCandidateWriteSetReview()` tells you the world didn't move; it
+doesn't tell you the caller is allowed to act on that. The example checks
+both, explicitly, before spending the plan:
+
+```typescript
+if (checked.status !== "compatible") {
+  throw new Error("A new review and approval are required");
+}
+if (checked.reviewDigest.value !== approval.reviewDigest) {
+  throw new Error("Approval does not identify the validated review");
+}
+
+const report = unwrap(await applyMergePlan(store, checked.plan));
+```
+
+Two separate questions, two separate checks: "is this fresh plan still the
+change that was reviewed" (`checked.status`), and "does the stored approval
+actually name this review" (comparing digests). Collapsing them — treating
+`compatible` as if it implied authorized — is exactly the mistake this API is
+built not to make for you. Authentication of the persisted artifact and
+decision, and enforcement of the policy's `authorizedReviewers`, stay the
+caller's job; V1's target-and-content matching gives you a safe plan to
+apply, not a verdict on who's allowed to apply it.
+
+## The receipt is a separate commit, deliberately
+
+Applying `checked.plan` commits the actual change. Recording that it
+happened is a second, independent write:
+
+```typescript
+await store.nodes.Artifact.create({
+  content: JSON.stringify({
+    reviewDigest: checked.reviewDigest,
+    approvalId: approval.id,
+    executionPlanDigest: checked.plan.digest,
+    executionTarget: checked.plan.target,
+    report,
+  }),
+});
+```
+
+If this receipt write fails, the merge itself is still committed — that
+transaction already closed. The two things to do about a missing receipt are
+reconcile it from history and the application's own operation log, or repair
+it by re-deriving the same content; retrying the candidate as though it
+never applied is the one option that isn't safe, because by then it already
+did.
+
+## Try it
+
+- [Durable candidate review](/graph-merge#durable-candidate-review-in-the-target-graph):
+  the full reference, including the revalidation status table and recovery
+  guidance
+- [Constraint-aware ingestion branches](/graph-merge#constraint-aware-ingestion-branches):
+  where the candidate write set this post reviews usually comes from
+- [Example 27](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/27-durable-merge-review.ts):
+  the full runnable source behind this post
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

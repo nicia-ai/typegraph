@@ -1,0 +1,195 @@
+---
+title: "Source-Dependent Targets: One Edge Kind, Two Destinations, Zero Cross-Pairs"
+date: 2026-10-22
+excerpt: "0.55 lets one edge kind carry different allowed targets per source kind. assignedTo can permit Employee → Department and Student → Course as a single declaration, and the two undeclared cross-pairs — Employee → Course, Student → Department — are not just undocumented, they're rejected, at the type checker and at runtime."
+tags:
+  - announcements
+cover:
+  alt: "Two horizontal blue lanes lit against a faint crosshatched field of every possible source-to-target line, with two of the crossing lines picked out in dashed red and marked with an X"
+  image: "./cover.png"
+social:
+  alt: "Source-Dependent Targets: One Edge Kind, Two Destinations, Zero Cross-Pairs"
+  image: "./social.png"
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+An edge kind's `to` has always been able to name several node kinds:
+`assignedTo` connecting `Employee | Student` to `Department | Course`. What
+it couldn't do was say that only _some_ of those combinations are real.
+Declare `from: [Employee, Student]` and `to: [Department, Course]` and you
+get every combination — Employee → Department, Employee → Course,
+Student → Department, Student → Course — because an array-valued `to` is a
+Cartesian product by construction. Two of those four pairs are nonsense in
+any schema where employees don't enroll in courses and students don't get
+departmental assignments, and nothing before 0.55 could say so. 0.55 adds a
+second way to write `to`: a map from source kind to its own allowed
+targets, and the pairs it doesn't list stop being reachable at all.
+
+## The old default was permissive by construction
+
+```typescript
+const assignedTo = defineEdge("assignedTo", {
+  from: [Employee, Student],
+  to: [Department, Course],
+});
+```
+
+This compiles, and it is exactly as wide as it looks: `store.edges.assignedTo
+.create(student, department)` succeeds. So does
+`store.edges.assignedTo.create(employee, course)`. Nothing in the type
+signature or the runtime write path distinguishes them from the two pairs
+you actually meant, because as far as `to: [Department, Course]` is
+concerned, every source kind can reach every target kind. The schema is
+correct about the union of possible targets and silent about which source
+gets which one.
+
+## Say the correlation once, with a map
+
+Replace the array with an object keyed by source kind:
+
+```typescript
+const assignedTo = defineEdge("assignedTo", {
+  from: [Employee, Student],
+  to: {
+    Employee: [Department],
+    Student: [Course],
+  },
+});
+
+const graph = defineGraph({
+  id: "assignments",
+  nodes: {
+    Employee: { type: Employee },
+    Student: { type: Student },
+    Department: { type: Department },
+    Course: { type: Course },
+  },
+  edges: { assignedTo },
+});
+```
+
+`store.edges.assignedTo.create(employee, department)` and
+`.create(student, course)` still succeed. The other two pairs now fail
+before a row is written:
+
+```text
+EndpointPairError: assignedTo: undeclared endpoint pair
+  { edgeKind: "assignedTo", endpoint: "pair",
+    fromKind: "Employee", toKind: "Course",
+    allowedPairs: [
+      { from: "Employee", to: "Department" },
+      { from: "Student", to: "Course" },
+    ] }
+```
+
+TypeScript catches the same mistake earlier: `EdgeRegistration`'s inferred
+`create()` signature narrows per source, so passing an `Employee` where the
+map only lists `Course` for `Student` is a compile error at the call site,
+not a discovery at runtime. Dynamic callers — `store.getEdgeCollection(kind)`,
+imports, bulk writes — don't get that compile-time check, which is exactly
+why the runtime `EndpointPairError` exists: it's the same rule, enforced at
+the boundary that doesn't have a type checker watching it. An invalid
+_source_ kind (something that isn't `Employee` or `Student` at all) still
+produces the existing `EndpointError`; `EndpointPairError` is specifically
+for a source and target that are each individually valid but never declared
+together.
+
+## Declaring the map has its own rules
+
+A map isn't a free-form object; it's checked at `defineEdge()` time, and
+each rule throws `ConfigurationError` immediately rather than deferring to a
+confusing runtime failure later:
+
+- Every kind in `from` needs an entry. Omit `Student` from the map and
+  `defineEdge()` throws before the graph is ever built.
+- No extra keys. A map entry for a kind that isn't in `from` is rejected —
+  there's no such thing as a target list nobody can reach.
+- Every target array must be nonempty; `Employee: []` throws.
+- Keys are the literal `kind` string, and `[Employee.kind]: [Department]`
+  works identically to writing `Employee` — useful when the kind name is a
+  constant rather than a literal.
+- Duplicate targets in one array are normalized away: `Task: [Task, Task]`
+  becomes `Task: [Task]`.
+
+## A registration can narrow, never widen
+
+An edge's own map is its outer bound. A specific graph — or a runtime graph
+extension — can register a narrower version of it, the same way array-valued
+`to` could already be narrowed:
+
+```typescript
+const graph = defineGraph({
+  edges: {
+    assignedTo: {
+      type: assignedTo, // Employee -> Department, Student -> Course
+      from: [Employee],
+      to: { Employee: [Department] }, // drops Student entirely in this graph
+    },
+  },
+});
+```
+
+Trying to add a pair the edge's own definition never declared throws
+`ConfigurationError`, and so does the specific mistake that motivated this
+feature in the first place: registering a Cartesian `to: [Department,
+Course]` against a base edge whose map only allows the correlated pairs.
+That registration would silently re-admit the two cross-pairs the map exists
+to forbid, so it's rejected as widening, not accepted as a shorthand.
+
+## Subtypes resolve against the pair, not just the kind
+
+`subClassOf` still works the way it does everywhere else in TypeGraph:
+matching one `from` entry via inheritance still has to land on that entry's
+own `to` list. Declare `SubTask subClassOf Task` against an edge whose map
+says `Task: [Task]`, and `SubTask → Task`, `Task → SubTask`, and
+`SubTask → SubTask` are all valid — every combination resolves through the
+same `Task: [Task]` pair. What subtyping doesn't do is let a `SubTask` reach
+a target some _other_ source kind's entry allows; `SubTask → Course` on an
+edge whose map only gives `Task` (and its subtypes) access to `Task` still
+throws `EndpointPairError`.
+
+## Bulk writes fail the whole batch, not just the bad row
+
+`bulkCreate()` and `bulkUpsertById()` validate every item's pair before
+committing any of them:
+
+```typescript
+await store.edges.assignedTo.bulkCreate([
+  { from: employeeA, to: departmentA }, // valid
+  { from: employeeB, to: courseA }, // undeclared pair
+]);
+// throws EndpointPairError; store.edges.assignedTo.count() is still 0
+```
+
+One undeclared pair anywhere in the batch rolls back the entire write. A
+partial commit here would be worse than a full rejection: it would leave
+some of a logically-one batch applied and quietly hide which rows were
+dropped.
+
+## The schema remembers which pairs, not just which kinds
+
+The map is part of the edge's serialized schema (`targetKindsBySource`), and
+two graphs that declare the same pairs in a different key order hash
+identically — declaration order was never semantically meaningful, so it
+isn't allowed to affect the schema fingerprint. Migration is treated with
+the weight a real constraint deserves: replacing a Cartesian `to` with a
+correlated map is a **breaking** schema change (you're removing pairs,
+even if you're not removing kinds), and it follows the same
+empty-before-migrating discipline as any other breaking edge change. See
+[schema management](/schema-management#endpoint-pair-changes) for the exact
+migration rules.
+
+## Try it
+
+- [Source-Dependent Targets](/core-concepts#source-dependent-targets): the
+  full reference, including graph extensions and typed-collection inference
+  limits
+- [`EndpointPairError`](/errors#endpointpairerror): the exact error shape
+  and how it differs from `EndpointError`
+- [Endpoint pair changes](/schema-management#endpoint-pair-changes): what
+  counts as breaking and how to migrate one
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />
