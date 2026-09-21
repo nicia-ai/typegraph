@@ -1,5 +1,13 @@
 # @nicia-ai/typegraph
 
+## 0.68.1
+
+### Patch Changes
+
+- [#735](https://github.com/nicia-ai/typegraph/pull/735) [`149db17`](https://github.com/nicia-ai/typegraph/commit/149db17e9042ee461908b9677f7c6c5c7f7bcbd6) Thanks [@pdlug](https://github.com/pdlug)! - `cloneWorkingCopyStrategy` now imports with `onUnknownProperty: "allow"`, so a working copy — and therefore `branch()`, `ingestionBranch()`, and `planCandidateWriteSet()` — can be seeded from live rows that carry undeclared properties `validateStore()` already reports as healthy. Incoming candidate write-set documents remain strict. A streamed interchange abort now names the failing entity and property in the thrown message instead of wrapping only a generic abort.
+
+- [#737](https://github.com/nicia-ai/typegraph/pull/737) [`3428764`](https://github.com/nicia-ai/typegraph/commit/34287643aa708ed53caf56c8216c50042aef6441) Thanks [@pdlug](https://github.com/pdlug)! - `compareAndSet()` and `updateWhere()` no longer throw an untyped Zod error on node kinds whose schema has object-level refinements. Early field checks reconstruct a partial schema from `.shape` so refinements stay on the complete after-image, the same document `update()` already validates.
+
 ## 0.68.0
 
 ### Highlights
