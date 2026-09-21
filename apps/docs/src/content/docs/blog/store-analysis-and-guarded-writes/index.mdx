@@ -324,12 +324,11 @@ const options = {
 ```
 
 Without it the planner doesn't recognize `partner:7` as `acct_7`, and
-applying the plan fails on the `account_email` uniqueness constraint. One
-prerequisite, explained in the last section: I deleted `acct_legacy_3` first,
-so the graph holds 242 accounts, not 243. With the resolver in place:
+applying the plan fails on the `account_email` uniqueness constraint. With
+the resolver in place:
 
 ```text
-upserts: 2  accounts still 242
+upserts: 2  accounts still 243
 acct_7 name: keep "Account 7", feed says "Account 7 Holdings"
 acct_7 plan: keep "team", feed says "enterprise"
 acct_7 seats: keep 12, feed says 40
@@ -338,20 +337,20 @@ acct_7 seats: keep 12, feed says 40
 Two upserts: a new account, and a match on `acct_7` that disagrees with the
 feed in three properties. By default the accepted values win and the
 disagreements go on the review, so the feed's "enterprise, 40 seats" is a
-line item for a reviewer, not a silent overwrite. The target still has 242
+line item for a reviewer, not a silent overwrite. The target still has 243
 accounts.
 
 Then the world moves. Some unrelated write lands (here, a guarded
 `acct_3` plan change), and applying the original plan is refused:
 
 ```text
-StaleMergePlanError: The target revision changed after this merge plan was created; the plan was not applied.  accounts 242
+StaleMergePlanError: The target revision changed after this merge plan was created; the plan was not applied.  accounts 243
 ```
 
-Re-plan against the current graph, apply, and the count goes to 243:
+Re-plan against the current graph, apply, and the count goes to 244:
 
 ```text
-merged nodes=2  accounts 243
+merged nodes=2  accounts 244
 ```
 
 The plan is fenced on the target's revision, not on the rows it touches, so
@@ -396,7 +395,7 @@ const summary = await store.transaction(
 ```
 
 ```text
-{ accounts: 243, scanned: 243, violations: [] }
+{ accounts: 244, scanned: 244, violations: [] }
 ```
 
 The violations are gone because the two repairs above landed by this point
@@ -446,33 +445,26 @@ semantics through `$ref`, unions, intersections, arrays, or conditionals.
 **A guard protects what it can name.** Expected values are JSON scalars
 that must pass the property's current schema. That means you can't fence on
 the invalid value itself: if a person and an agent both repair the same bad
-field, a guard on its neighbors won't tell them apart. A kind whose Zod
-schema uses an object-level `.refine()` can't use `compareAndSet()` at all
-in this build; the call throws Zod's
-`.partial() cannot be used on object schemas containing refinements`
-rather than a typed TypeGraph error. Where the guard can't express the
-precondition, the revision-fenced plan above is the alternative.
+field, a guard on its neighbors won't tell them apart. Where the guard can't
+express the precondition, the revision-fenced plan above is the alternative.
 
-**Planning needs a graph that imports cleanly.** The working copy is seeded
-by cloning the whole target through interchange import, which rejects
-unknown properties. Before I deleted `acct_legacy_3`, the same call failed:
-
-```text
-CandidateWriteSetError: Unable to create the transient candidate staging store.
-BranchError: Failed to create constraint-aware ingestion branch
-BranchError: Failed to create working-copy branch of base store
-Error: Graph interchange stream aborted after a chunk reported import errors. Earlier chunks remain committ…
-```
-
-The message doesn't name the row. I found it by bisecting the seed data:
-with the two invalid rows repaired, planning still failed until the row
-with the undeclared `salesforceId` was gone. So `validateStore()`
-calling that row healthy holds for the store's own reads, and planning
-disagrees. The cost of the clone also scales with the target, which is why
-the guide recommends this for bounded review workflows and not as a
+**Planning clones the whole target.** The working copy is seeded by
+cloning the target graph, so the cost scales with the target. The guide
+recommends `planCandidateWriteSet()` for bounded review workflows, not as a
 hot-path comparison.
 
 ## Upgrading
+
+Two behaviors changed after 0.68.0, both found while writing this post. On
+0.68.0 and earlier, `planCandidateWriteSet()` refuses a target that holds a
+row with undeclared properties, such as `acct_legacy_3` above
+([#733](https://github.com/nicia-ai/typegraph/issues/733), fixed in
+[#735](https://github.com/nicia-ai/typegraph/pull/735)), and
+`compareAndSet()` throws a raw Zod error on a kind whose schema has an
+object-level `.refine()`
+([#734](https://github.com/nicia-ai/typegraph/issues/734), fixed in
+[#737](https://github.com/nicia-ai/typegraph/pull/737)). Both are fixed in
+the next patch release; the examples in this post assume it.
 
 `BulkOperationHookContext["operation"]` now includes `"compareAndSet"`, so
 an exhaustive `switch` over it needs the new case. During a mixed-version
