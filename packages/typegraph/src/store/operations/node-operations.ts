@@ -44,7 +44,7 @@
  *    resurrect" — both the single and bulk paths read that from the node row
  *    they are about to write, because one decision with two owners drifts.
  */
-import { type z } from "zod";
+import { z } from "zod";
 
 import {
   type AtomicNodeBatchEntry,
@@ -3110,6 +3110,20 @@ export async function executeNodeUpdate<G extends GraphDef>(
   );
 }
 
+function validateNodePropertySubset(
+  schema: z.ZodObject<z.ZodRawShape>,
+  properties: Record<string, unknown>,
+  context: Readonly<{ kind: string; operation: "update" }>,
+) {
+  // Reconstruct from `.shape` so object-level refinements stay on the complete
+  // after-image. Zod 4 throws if `schema.partial()` is called on a refined object.
+  return validateNodeProps(
+    z.object(schema.shape).partial(),
+    properties,
+    context,
+  );
+}
+
 function normalizeCompareAndSetExpectations(
   schema: z.ZodObject<z.ZodRawShape>,
   kind: string,
@@ -3170,8 +3184,8 @@ function normalizeCompareAndSetExpectations(
     scalarExpectedInput[property] = value;
   }
 
-  const parsedExpected = validateNodeProps(
-    schema.partial(),
+  const parsedExpected = validateNodePropertySubset(
+    schema,
     scalarExpectedInput,
     { kind, operation: "update" },
   );
@@ -3266,7 +3280,7 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
     );
   }
 
-  const parsedPatch = validateNodeProps(schema.partial(), inputPatch, {
+  const parsedPatch = validateNodePropertySubset(schema, inputPatch, {
     kind,
     operation: "update",
   });
