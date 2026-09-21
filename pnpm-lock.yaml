@@ -4,9 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  satteri: 0.10.5
-
 importers:
 
   .:
@@ -66,8 +63,8 @@ importers:
         specifier: ^7.3.3
         version: 7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
       starlight-blog:
-        specifier: ^0.29.0
-        version: 0.29.0(@astrojs/markdown-satteri@0.4.1)(@astrojs/starlight@0.42.2(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))(typescript@5.9.3))(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))(typescript@5.9.3)
+        specifier: ^0.30.0
+        version: 0.30.0(@astrojs/markdown-satteri@0.4.1)(@astrojs/starlight@0.42.2(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))(typescript@5.9.3))(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))(typescript@5.9.3)
       starlight-llms-txt:
         specifier: ^0.12.0
         version: 0.12.0(@astrojs/markdown-satteri@0.4.1)(@astrojs/starlight@0.42.2(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))(typescript@5.9.3))(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))
@@ -5487,11 +5484,10 @@ packages:
   stackback@0.0.2:
     resolution: {integrity: sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw==}
 
-  starlight-blog@0.29.0:
-    resolution: {integrity: sha512-Pdv5I84ux0109Zt23TbpCfuRZ8ioWvjmwVnmeYD2h0OH2bgVzo7cKsblzMolkaGc1QDnSX8985xaM1QJvcOhqQ==}
-    engines: {node: '>=22.12.0'}
+  starlight-blog@0.30.0:
+    resolution: {integrity: sha512-w53e48fD9tZ+Cv12PM1fzBkSEOW4M09j4FQgHpdve8aH4GxtAdCySdokSAu7yhEqjlvRE4wTRdsQuQGt3vIpog==}
     peerDependencies:
-      '@astrojs/starlight': '>=0.41.0'
+      '@astrojs/starlight': '>=0.42.0'
 
   starlight-llms-txt@0.12.0:
     resolution: {integrity: sha512-ya4c0ZoiPUXuHDzd3AYCKh78Y3II3EToSE9Yp6uVN0c2UUKoNpqTjijhW86W/4toZzSUhWSnxeYs7QBcXNIPGg==}
@@ -6430,10 +6426,10 @@ snapshots:
 
   '@astrojs/internal-helpers@0.10.1':
     dependencies:
-      '@types/hast': 3.0.4
+      '@types/hast': 3.0.5
       '@types/mdast': 4.0.4
       js-yaml: 4.3.0
-      picomatch: 4.0.5
+      picomatch: 4.0.7
       retext-smartypants: 6.2.0
       shiki: 4.3.1
       smol-toml: 1.7.0
@@ -7851,7 +7847,7 @@ snapshots:
     dependencies:
       '@types/estree': 1.0.9
       '@types/estree-jsx': 1.0.5
-      '@types/hast': 3.0.4
+      '@types/hast': 3.0.5
       '@types/mdx': 2.0.14
       acorn: 8.17.0
       collapse-white-space: 2.1.0
@@ -9945,7 +9941,7 @@ snapshots:
 
   hast-util-from-parse5@8.0.3:
     dependencies:
-      '@types/hast': 3.0.4
+      '@types/hast': 3.0.5
       '@types/unist': 3.0.3
       devlop: 1.1.0
       hastscript: 9.0.1
@@ -11618,7 +11614,7 @@ snapshots:
 
   rehype-raw@7.0.0:
     dependencies:
-      '@types/hast': 3.0.4
+      '@types/hast': 3.0.5
       hast-util-raw: 9.1.0
       vfile: 6.0.3
 
@@ -11640,7 +11636,7 @@ snapshots:
 
   rehype-stringify@10.0.1:
     dependencies:
-      '@types/hast': 3.0.4
+      '@types/hast': 3.0.5
       hast-util-to-html: 9.0.5
       unified: 11.0.5
 
@@ -11682,7 +11678,7 @@ snapshots:
 
   remark-rehype@11.1.2:
     dependencies:
-      '@types/hast': 3.0.4
+      '@types/hast': 3.0.5
       '@types/mdast': 4.0.4
       mdast-util-to-hast: 13.2.1
       unified: 11.0.5
@@ -12040,7 +12036,7 @@ snapshots:
 
   stackback@0.0.2: {}
 
-  starlight-blog@0.29.0(@astrojs/markdown-satteri@0.4.1)(@astrojs/starlight@0.42.2(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))(typescript@5.9.3))(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))(typescript@5.9.3):
+  starlight-blog@0.30.0(@astrojs/markdown-satteri@0.4.1)(@astrojs/starlight@0.42.2(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))(typescript@5.9.3))(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))(typescript@5.9.3):
     dependencies:
       '@astrojs/markdown-remark': 7.2.1
       '@astrojs/mdx': 7.0.2(@astrojs/markdown-satteri@0.4.1)(astro@7.3.3(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))
