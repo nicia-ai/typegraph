@@ -1389,7 +1389,10 @@ whether its diff was pruned.
 `branch()` is backend-agnostic. The default `cloneWorkingCopyStrategy` exports
 the base through TypeGraph's interchange and imports it into a fresh store on a
 backend your factory provides — so it works identically across SQLite, Postgres,
-and in-process PGlite, and needs no schema changes.
+and in-process PGlite, and needs no schema changes. The import is
+fidelity-preserving: undeclared properties that `validateStore()` treats as
+healthy semi-structured data are carried through. Stripping them would make a
+later merge invent deletions against the original base.
 
 ```typescript
 // Each branch gets its own in-memory SQLite backend:
@@ -1826,8 +1829,10 @@ The result is the ordinary `MergePlanArtifact`, so review and application use
 the same APIs as every other merge plan.
 
 Planning clones the complete target graph into a disposable working copy before
-staging the candidate set. Use it for bounded review workflows, not as a hot-path
-comparison primitive against a large graph.
+staging the candidate set. Existing undeclared properties on the target survive
+that clone; extra properties on the candidate document itself are still refused.
+Use it for bounded review workflows, not as a hot-path comparison primitive
+against a large graph.
 
 ```typescript
 import {

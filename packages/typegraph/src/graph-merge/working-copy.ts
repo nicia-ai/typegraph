@@ -35,6 +35,14 @@
  * identical reads on the base for any instant between the row's real
  * creation and the clone.
  *
+ * Undeclared properties are the same class of stored live state.
+ * `validateStore()` treats them as healthy semi-structured data. The clone
+ * therefore imports with `onUnknownProperty: "allow"` — interchange's
+ * fidelity-preserving strategy — so those keys survive the round trip.
+ * `"error"` would refuse to branch a graph analysis already reports as clean.
+ * `"strip"` would drop the keys on the fork, and the merge diff against the
+ * original base would invent deletions the caller never made.
+ *
  * Logical-namespace (copy-on-write within one backend, no full data copy) is a
  * future strategy slot — see the `WorkingCopyStrategy` interface — deferred past
  * P0.
@@ -67,6 +75,7 @@ import {
   sharesSerializedTransactionResource,
   snapshotExportContention,
   storeBackend,
+  summarizeImportErrors,
   wrapWithManagedClose,
 } from "./typegraph-internal";
 import type { BaseVersion } from "./types";
@@ -158,14 +167,17 @@ async function assertWorkingCopyMatchesBase<G extends GraphDef>(
  *      base's live state.
  *   2. Create a fresh store over the caller-provided backend with the SAME graph
  *      definition via `createStoreWithSchema`.
- *   3. `importGraphStream(freshStore, data, { onConflict: "error", ... })` — ids are
- *      preserved so the diff engine can key on them. `onConflict: "error"`
- *      requires the backend to be EMPTY: a pre-existing row is a contract
- *      violation that must surface loudly, never be silently skipped (a skipped
- *      row would leave the clone diverging from the base, so the fork's diff would
- *      report phantom modifications/deletions). `importGraphStream` RETURNS
- *      `{ success, errors }` rather than throwing on a per-row rejection, so its
- *      result is checked and any failure fails the branch.
+ *   3. `importGraphStream(freshStore, data, { onConflict: "error",
+ *      onUnknownProperty: "allow", ... })` — ids are preserved so the diff
+ *      engine can key on them. `onConflict: "error"` requires the backend to be
+ *      EMPTY: a pre-existing row is a contract violation that must surface
+ *      loudly, never be silently skipped (a skipped row would leave the clone
+ *      diverging from the base, so the fork's diff would report phantom
+ *      modifications/deletions). `onUnknownProperty: "allow"` carries undeclared
+ *      properties through (see the fidelity note above). A streamed chunk that
+ *      reports per-row errors throws (default `onStreamChunkError: "abort"`); a
+ *      materialized import returns `{ success, errors }`. Either failure fails
+ *      the branch.
  *
  * The backend `makeBackend()` returns is opened here, so any failure AFTER it is
  * created closes it before rethrowing — only the success path hands the backend
@@ -238,7 +250,7 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
         } as const;
         const importOptions = {
           onConflict: "error",
-          onUnknownProperty: "error",
+          onUnknownProperty: "allow",
           validateReferences: true,
           batchSize: CLONE_IMPORT_BATCH_SIZE,
         } as const;
@@ -265,7 +277,7 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
             );
         if (!result.success) {
           throw new BranchError(
-            "Clone import failed: the working copy could not be seeded from the base store. The backend returned by makeBackend() must be empty.",
+            `Clone import failed: the working copy could not be seeded from the base store. ${summarizeImportErrors(result.errors)}`,
             { details: { errors: result.errors } },
           );
         }

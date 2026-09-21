@@ -18,7 +18,7 @@ import {
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import { requireDefined } from "../../src/utils/presence";
-import { createSqliteMergeBackend } from "./test-utils";
+import { createSqliteMergeBackend, getStoreBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), externalKey: z.string() }),
@@ -216,6 +216,75 @@ describe("candidate write-set planning", () => {
       );
       expect(result.error.cause).toBeInstanceOf(BranchError);
     }
+  });
+
+  it("plans against a target row whose undeclared properties validateStore reports as healthy", async () => {
+    const { target, writeSet } = await setup();
+    await getStoreBackend(target).insertNode({
+      graphId: target.graphId,
+      kind: "Person",
+      id: "legacy-extra",
+      props: { name: "Legacy", externalKey: "legacy", legacyFlag: true },
+    });
+    expect(
+      (await target.validateStore({ entity: "node", kind: "Person" }))
+        .violations,
+    ).toEqual([]);
+
+    const backend = candidateBackend();
+    const planned = unwrap(
+      await planCandidateWriteSet({
+        target,
+        makeBackend: backend.makeBackend,
+        writeSet,
+        options,
+      }),
+    );
+    expect(
+      planned.writes.nodeDeletes.some((entry) => entry.id === "legacy-extra"),
+    ).toBe(false);
+    expect(
+      planned.writes.nodeUpserts.some(
+        (entry) =>
+          entry.id === "legacy-extra" &&
+          entry.unsetProps.includes("legacyFlag"),
+      ),
+    ).toBe(false);
+    expect(backend.close).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a candidate write set that carries undeclared properties", async () => {
+    const { target, writeSet } = await setup();
+    const backend = candidateBackend();
+    const result = await planCandidateWriteSet({
+      target,
+      makeBackend: backend.makeBackend,
+      writeSet: {
+        ...writeSet,
+        nodes: [
+          {
+            ...writeSet.nodes[0],
+            properties: {
+              name: "Proposed",
+              externalKey: "shared",
+              legacyFlag: true,
+            },
+          },
+        ],
+      },
+    });
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(CandidateWriteSetError);
+      expect(result.error.details["errors"]).toEqual([
+        expect.objectContaining({ entityType: "node", id: "candidate" }),
+      ]);
+      expect(JSON.stringify(result.error.details["errors"])).toContain(
+        "legacyFlag",
+      );
+    }
+    expect(backend.close).toHaveBeenCalledOnce();
   });
 
   it("closes staging after an attributed import refusal", async () => {

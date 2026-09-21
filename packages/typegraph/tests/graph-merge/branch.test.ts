@@ -326,6 +326,37 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(forkedLegacy?.meta.validFrom).toBeUndefined();
   });
 
+  it("clones undeclared properties that validateStore reports as healthy", async () => {
+    const [baseStore] = await createStoreWithSchema(graph, await makeBackend());
+    await getStoreBackend(baseStore).insertNode({
+      graphId: baseStore.graphId,
+      kind: "Person",
+      id: "legacy-extra",
+      props: { name: "Legacy", legacyFlag: true },
+    });
+    const validation = await baseStore.validateStore({
+      entity: "node",
+      kind: "Person",
+    });
+    expect(validation.violations).toEqual([]);
+
+    const result = await branch<G>(baseStore, () => makeBackend());
+    expect(isOk(result)).toBe(true);
+    const forkStore = unwrap(result).store;
+
+    const cloned = (
+      await enumerateAllNodes(
+        getStoreBackend(forkStore),
+        forkStore.graphId,
+        "Person",
+      )
+    ).find((row) => row.id === "legacy-extra");
+    expect(cloned && rowPropsToObject(cloned.props)).toMatchObject({
+      name: "Legacy",
+      legacyFlag: true,
+    });
+  });
+
   it.each(["direct", "plan", "incremental"] as const)(
     "preserves open-left staged nodes and edges when merging through %s",
     async (mode) => {
