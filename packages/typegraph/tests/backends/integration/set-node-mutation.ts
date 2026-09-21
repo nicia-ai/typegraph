@@ -9,6 +9,7 @@ import {
   defineNode,
   expr,
   subClassOf,
+  ValidationError,
 } from "../../../src";
 import type {
   CompareAndSetNodeParams,
@@ -157,6 +158,129 @@ export function registerSetNodeMutationIntegrationTests(
           'compareAndSet() expected property "metadata" must be a JSON scalar or compareAndSetAbsent',
         );
       }
+    });
+
+    it("validates refined node schemas on the complete after-image", async () => {
+      const Account = defineNode("Account", {
+        schema: z
+          .object({
+            name: z.string(),
+            plan: z.enum(["free", "enterprise"]),
+            ownerId: z.string().optional(),
+          })
+          .refine(
+            (account) =>
+              account.plan !== "enterprise" || account.ownerId !== undefined,
+            {
+              path: ["ownerId"],
+              message: "enterprise accounts need an owner",
+            },
+          ),
+      });
+      const store = await context.createStore(
+        defineGraph({
+          id: "set_update_refined_account",
+          nodes: { Account: { type: Account } },
+          edges: {},
+        }),
+      );
+      const casSuccess = await store.nodes.Account.create({
+        name: "CasSuccess",
+        plan: "free",
+      });
+      const casViolation = await store.nodes.Account.create({
+        name: "CasViolation",
+        plan: "free",
+      });
+      const whereSuccess = await store.nodes.Account.create({
+        name: "WhereSuccess",
+        plan: "free",
+      });
+      const whereViolation = await store.nodes.Account.create({
+        name: "WhereViolation",
+        plan: "free",
+      });
+      const casOwned = await store.nodes.Account.create({
+        name: "CasOwned",
+        plan: "free",
+        ownerId: "rep-1",
+      });
+      const whereOwned = await store.nodes.Account.create({
+        name: "WhereOwned",
+        plan: "free",
+        ownerId: "rep-1",
+      });
+
+      expect(
+        await store.nodes.Account.compareAndSet(casSuccess.id, {
+          expected: { plan: "free" },
+          patch: { plan: "enterprise", ownerId: "rep-3" },
+        }),
+      ).toBe(true);
+      await expect(
+        store.nodes.Account.getById(casSuccess.id),
+      ).resolves.toMatchObject({
+        plan: "enterprise",
+        ownerId: "rep-3",
+      });
+
+      await expect(
+        store.nodes.Account.compareAndSet(casViolation.id, {
+          expected: { plan: "free" },
+          patch: { plan: "enterprise" },
+        }),
+      ).rejects.toBeInstanceOf(ValidationError);
+      await expect(
+        store.nodes.Account.getById(casViolation.id),
+      ).resolves.toMatchObject({ plan: "free" });
+
+      await expect(
+        store.nodes.Account.updateWhere({
+          patch: { plan: "enterprise", ownerId: "rep-9" },
+          where: (account) => account.name.eq("WhereSuccess"),
+        }),
+      ).resolves.toEqual({ affectedCount: 1 });
+      await expect(
+        store.nodes.Account.getById(whereSuccess.id),
+      ).resolves.toMatchObject({
+        plan: "enterprise",
+        ownerId: "rep-9",
+      });
+
+      await expect(
+        store.nodes.Account.updateWhere({
+          patch: { plan: "enterprise" },
+          where: (account) => account.name.eq("WhereViolation"),
+        }),
+      ).rejects.toBeInstanceOf(ValidationError);
+      await expect(
+        store.nodes.Account.getById(whereViolation.id),
+      ).resolves.toMatchObject({ plan: "free" });
+
+      expect(
+        await store.nodes.Account.compareAndSet(casOwned.id, {
+          expected: { plan: "free" },
+          patch: { plan: "enterprise" },
+        }),
+      ).toBe(true);
+      await expect(
+        store.nodes.Account.getById(casOwned.id),
+      ).resolves.toMatchObject({
+        plan: "enterprise",
+        ownerId: "rep-1",
+      });
+      await expect(
+        store.nodes.Account.updateWhere({
+          patch: { plan: "enterprise" },
+          where: (account) => account.name.eq("WhereOwned"),
+        }),
+      ).resolves.toEqual({ affectedCount: 1 });
+      await expect(
+        store.nodes.Account.getById(whereOwned.id),
+      ).resolves.toMatchObject({
+        plan: "enterprise",
+        ownerId: "rep-1",
+      });
     });
 
     it("refuses a compare-and-set without a property patch", async () => {
