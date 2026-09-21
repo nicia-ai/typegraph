@@ -53,3 +53,30 @@ main:is(:not(:has(.sl-blog-posts)), :has(.sl-blog-post-count))
   .content-panel:first-of-type {
   display: block;
 }
+
+/* Blog: the way back to the post list. The sidebar's "All posts" link is set
+   apart from the posts below it and gains an arrow wherever it is not the
+   current page; the same link sits above the title of every other blog page
+   (src/components/starlight/PageTitle.astro). */
+a.blog-index-link {
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+
+a.blog-index-link:not([aria-current="page"])::before {
+  content: "← ";
+}
+
+.blog-back-link {
+  display: inline-block;
+  margin-top: 0.25rem;
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-gray-3);
+  text-decoration: none;
+}
+
+.blog-back-link:hover {
+  color: var(--sl-color-white);
+  text-decoration: underline;
+}

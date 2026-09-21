@@ -260,6 +260,7 @@ export default defineConfig({
     starlight({
       components: {
         Head: "./src/components/starlight/Head.astro",
+        PageTitle: "./src/components/starlight/PageTitle.astro",
         ThemeProvider: "./src/components/starlight/ThemeProvider.astro",
       },
       routeMiddleware: "./src/starlight-route-data.ts",
@@ -276,6 +277,9 @@ export default defineConfig({
           metrics: {
             readingTime: true,
           },
+          // The sidebar lists every post: it defaults to the ten most recent,
+          // which left older posts absent with nothing saying so.
+          recentPostCount: Infinity,
         }),
         starlightLlmsTxt({
           details: [
