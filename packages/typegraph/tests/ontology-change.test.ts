@@ -196,7 +196,7 @@ const MATRIX: readonly MatrixRow[] = [
     from: "A",
     to: "B",
     expectedSeverity: "warning",
-    expectedProbeKinds: ["nodeUniquenessComponent", "nodeDisjointness"],
+    expectedProbeKinds: ["nodeUniqueness", "nodeDisjointness"],
   },
   {
     metaEdge: "subClassOf",
@@ -212,7 +212,7 @@ const MATRIX: readonly MatrixRow[] = [
     from: "A",
     to: "B",
     expectedSeverity: "warning",
-    expectedProbeKinds: ["nodeUniquenessComponent", "nodeDisjointness"],
+    expectedProbeKinds: ["nodeUniqueness", "nodeDisjointness"],
   },
   {
     metaEdge: "equivalentTo",
@@ -228,7 +228,7 @@ const MATRIX: readonly MatrixRow[] = [
     from: "A",
     to: "B",
     expectedSeverity: "warning",
-    expectedProbeKinds: ["nodeUniquenessComponent", "nodeDisjointness"],
+    expectedProbeKinds: ["nodeUniqueness", "nodeDisjointness"],
   },
   {
     metaEdge: "sameAs",
@@ -314,7 +314,7 @@ const MATRIX: readonly MatrixRow[] = [
     via: "edgeA",
     edges: EDGES_FOR_COMPOSITION,
     expectedSeverity: "warning",
-    expectedProbeKinds: ["compositionSingleWhole"],
+    expectedProbeKinds: ["composition"],
   },
   {
     metaEdge: "partOf",
@@ -334,7 +334,7 @@ const MATRIX: readonly MatrixRow[] = [
     via: "edgeA",
     edges: EDGES_FOR_COMPOSITION,
     expectedSeverity: "warning",
-    expectedProbeKinds: ["compositionSingleWhole"],
+    expectedProbeKinds: ["composition"],
   },
   {
     metaEdge: "hasPart",
@@ -525,7 +525,7 @@ describe("classifyOntologyChanges", () => {
 
       const changes = classifyOntologyChanges(before, after);
       const added = relationChangeOf(changes, "added");
-      const probe = probeOfKind(added.probes, "nodeUniquenessComponent");
+      const probe = probeOfKind(added.probes, "nodeUniqueness");
 
       expect(probe.groups).toEqual([
         {
@@ -645,8 +645,8 @@ describe("classifyOntologyChanges", () => {
       expect(change.severity).toBe("warning");
       expect(change.details).toContain('existence: "required"');
       expect((change.probes ?? []).map((probe) => probe.kind)).toEqual([
-        "compositionSingleWhole",
-        "compositionRequiredWhole",
+        "composition",
+        "compositionExistence",
       ]);
     });
     // MUTATION CHECK: restore `relation.existence ?? ""` as a fifth element

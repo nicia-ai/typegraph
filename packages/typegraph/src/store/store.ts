@@ -365,6 +365,7 @@ import {
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
   executeNodeReparent,
+  executeNodeReparentBatch,
   executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
   executeNodeSetUpdate,
@@ -442,6 +443,7 @@ import {
   createSubgraphRead,
   executeSubgraph,
   type InternalSubgraphOptions,
+  type SubgraphCompositionSelection,
   type SubgraphOptions,
   type SubgraphProject,
   type SubgraphProjectFor,
@@ -908,7 +910,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
-    const C extends boolean | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
     options: SubgraphOptions<G, EK, NK, P, C>,
@@ -2875,8 +2877,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // `nodes.<Kind>.reparent(...)` is THE surface that moves a part, so it
       // is the one that states `onIncumbent: "replace"`; every get-or-create
       // path reaches the same write plan with `"refuse"`.
-      executeReparent: (kind, id, attachment, backend) =>
-        executeNodeReparent(ctx, kind, id, attachment, backend, {
+      executeReparent: (kind, id, options, backend) =>
+        executeNodeReparent(ctx, kind, id, options, backend, {
+          onIncumbent: "replace",
+        }),
+      executeReparentBatch: (kind, items, backend) =>
+        executeNodeReparentBatch(ctx, kind, items, backend, {
           onIncumbent: "replace",
         }),
       executeDelete: (kind, id, backend) =>
@@ -3846,7 +3852,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
-    const C extends boolean | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
     options: SubgraphOptions<G, EK, NK, P, C>,
@@ -3906,7 +3912,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
-    const C extends boolean | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
     options: InternalSubgraphOptions<G, EK, NK, P, C>,

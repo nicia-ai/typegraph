@@ -431,12 +431,18 @@ refusal, or an acyclicity refusal aborts the node create too.
 - **`kind` / `id`** name the whole. A pair that is not declared between the
   two kinds raises `ConfigurationError`
   (`details.code: "COMPOSITION_WHOLE_NOT_DECLARED"`).
-- **`via`** names the realizing edge kind. It is required only when the part
-  kind declares **more than one** composition pair toward that whole kind:
+- **`via`** names the realizing edge. Pass the edge's type when you have it
+  (a typo is a compile error, the same check `partOf`/`hasPart` apply) or its
+  kind string when the edge is chosen at runtime. It is required only when the
+  part kind declares **more than one** composition pair toward that whole kind:
   omitting it there raises `ConfigurationError`
   (`COMPOSITION_VIA_AMBIGUOUS`) rather than silently picking one, and naming
   an edge kind that realizes no declared pair between them raises
-  `COMPOSITION_VIA_NOT_DECLARED`.
+  `COMPOSITION_VIA_NOT_DECLARED`. `parts()`, `wholes()`, and
+  `subgraph({ composition: { via } })` take the same value and refuse a via
+  that realizes no pair, rather than silently walking every realizing edge.
+- **`validFrom` / `validTo`** are the realizing edge's window, not the part
+  node's. A `validFrom` on `create` is not copied onto the edge.
 - **`props`** are the realizing edge's own properties, validated against that
   edge kind's schema exactly as `store.edges.<via>.create(...)` would
   validate them. A realizing edge with required schema fields therefore needs
@@ -454,7 +460,9 @@ await store.nodes.Chapter.reparent(chapter.id, {
 
 `reparent` writes a brand-new realizing edge, so it takes the same
 `props` as `create`'s `partOf`: a realizing edge whose schema has required
-fields needs them restated on every move.
+fields needs them restated on every move. It returns `{ edge, moved }`.
+`at` is the single instant both halves share; omit it to read the clock once.
+`bulkReparent` runs the same move for many parts in one transaction.
 
 Moving a part is a first-class operation because neither half is legal on its
 own: the new attachment refuses while the old edge still holds the part's

@@ -125,6 +125,7 @@ export { RecordedStoreView, StoreView } from "./store-view";
 export type {
   AnyEdge,
   AnyNode,
+  SubgraphCompositionSelection,
   SubgraphOptions,
   SubgraphResult,
   SubgraphResultEdgeKinds,

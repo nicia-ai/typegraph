@@ -608,7 +608,9 @@ const identityReconciliationSchema = z
       "committed-id",
       "policy",
     ]),
-    policy: z.string().optional(),
+    policy: z
+      .enum(["refuse", "assertWins", "retractWins", "flag", "callback"])
+      .optional(),
     branches: z.array(nonEmptyStringSchema),
   })
   .strict();

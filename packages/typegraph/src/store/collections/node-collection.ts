@@ -36,6 +36,7 @@ import {
   asCompiledSelectSql,
   type CompiledSelectSql,
 } from "../../query/sql-intent";
+import type { CompositionViaRef } from "../../registry/composition-relation";
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
@@ -45,7 +46,6 @@ import {
 } from "../resolved-mutation-set";
 import { type NodeRow } from "../row-mappers";
 import {
-  type CompositionAttachment,
   type CreateNodeInput,
   type GetOrCreateAction,
   type Node,
@@ -54,6 +54,8 @@ import {
   type NodeCreateOptions,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
+  type NodeReparentOptions,
+  type NodeReparentResult,
   type QueryOptions,
   type UpdateNodeInput,
   type ValidityEndMutation,
@@ -273,9 +275,14 @@ export type NodeCollectionConfig = Readonly<{
   executeReparent: (
     kind: string,
     id: string,
-    attachment: CompositionAttachment,
+    options: NodeReparentOptions,
     backend: GraphBackend | TransactionBackend,
-  ) => Promise<void>;
+  ) => Promise<NodeReparentResult>;
+  executeReparentBatch: (
+    kind: string,
+    items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
@@ -425,6 +432,7 @@ export function createNodeCollection<
     prepareReplacement,
     executeReplacementBatch: executeNodeReplacementBatch,
     executeReparent: executeNodeReparent,
+    executeReparentBatch: executeNodeReparentBatch,
     executeDelete: executeNodeDelete,
     executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
@@ -705,11 +713,28 @@ export function createNodeCollection<
       return result;
     },
 
-    async reparent(
+    async reparent<
+      const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+    >(
       id: NodeId<N>,
-      attachment: CompositionAttachment,
-    ): Promise<void> {
-      await executeNodeReparent(kind, id, attachment, backend);
+      options: NodeReparentOptions<Via>,
+    ): Promise<NodeReparentResult<Via>> {
+      return executeNodeReparent(kind, id, options, backend) as Promise<
+        NodeReparentResult<Via>
+      >;
+    },
+
+    async bulkReparent<
+      const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+    >(
+      items: readonly Readonly<{
+        id: NodeId<N>;
+        options: NodeReparentOptions<Via>;
+      }>[],
+    ): Promise<readonly NodeReparentResult<Via>[]> {
+      return executeNodeReparentBatch(kind, items, backend) as Promise<
+        readonly NodeReparentResult<Via>[]
+      >;
     },
 
     async delete(id: NodeId<N>): Promise<void> {

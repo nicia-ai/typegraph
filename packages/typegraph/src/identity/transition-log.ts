@@ -59,13 +59,37 @@ export type IdentityTransitionCause =
   | "reconcile";
 
 /**
+ * The `onAssertionConflict` arm a reconciliation records. A function policy
+ * is `"callback"` — its source is never part of the artifact.
+ */
+export type IdentityAssertionPolicyLabel =
+  | "refuse"
+  | "assertWins"
+  | "retractWins"
+  | "flag"
+  | "callback";
+
+/**
+ * The policy axes a successful merge actually exercised. `pairing` and
+ * `provenance` are absent: a provenance refusal fails the merge before any
+ * transition is written, and pairing mode is a recall setting, not a
+ * per-transition decision. An edge or uniqueness `"flag"` is recorded when
+ * that axis dropped a pairing.
+ */
+export type IdentityDecisionPolicyRecord = Readonly<{
+  assertion?: readonly IdentityAssertionPolicyLabel[] | undefined;
+  edge?: "flag" | undefined;
+  uniqueness?: "flag" | undefined;
+}>;
+
+/**
  * Decision provenance for a transition written under a governed merge apply.
  * Every field is optional and is evidence already in hand at the apply site;
  * nothing here is invented or recomputed at read time. `undefined` (the
  * default) means an ordinary API write with no governing decision.
  */
 export type IdentityDecisionProvenance = Readonly<{
-  policy?: string | undefined;
+  policy?: IdentityDecisionPolicyRecord | undefined;
   branchId?: string | undefined;
   branchAncestry?: readonly string[] | undefined;
   mergePlanDigest?: string | undefined;

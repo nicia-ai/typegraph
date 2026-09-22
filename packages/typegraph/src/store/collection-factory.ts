@@ -27,7 +27,6 @@ import {
 import type { ResolvedMutationSetAttempt } from "./resolved-mutation-set";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
-  type CompositionAttachment,
   type CreateEdgeInput,
   type CreateNodeInput,
   type Edge,
@@ -38,6 +37,8 @@ import {
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeGetOrCreateByConstraintOptions,
+  type NodeReparentOptions,
+  type NodeReparentResult,
   type QueryOptions,
 } from "./types";
 
@@ -116,9 +117,14 @@ export type NodeOperations = Readonly<{
   executeReparent: (
     kind: string,
     id: string,
-    attachment: CompositionAttachment,
+    options: NodeReparentOptions,
     backend: GraphBackend | TransactionBackend,
-  ) => Promise<void>;
+  ) => Promise<NodeReparentResult>;
+  executeReparentBatch: (
+    kind: string,
+    items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,

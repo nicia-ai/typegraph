@@ -45,6 +45,7 @@ import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import type { Store } from "./store";
 import {
   type InternalSubgraphOptions,
+  type SubgraphCompositionSelection,
   type SubgraphProjectFor,
   type SubgraphResult,
   type SubgraphResultEdgeKinds,
@@ -170,7 +171,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
-    const C extends boolean | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
     options: InternalSubgraphOptions<G, EK, NK, P, C>,

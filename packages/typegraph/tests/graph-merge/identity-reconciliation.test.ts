@@ -272,7 +272,9 @@ describe.each(backendMatrix())(
       );
       expect(decided.length).toBeGreaterThan(0);
       for (const transition of decided) {
-        expect(transition.decision?.policy).toBe("assertion:callback");
+        expect(transition.decision?.policy).toEqual({
+          assertion: ["callback"],
+        });
       }
     });
 

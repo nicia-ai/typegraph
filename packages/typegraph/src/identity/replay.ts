@@ -114,9 +114,27 @@ export type IdentityReplayStep<G extends GraphDef> = Readonly<{
  * recorded axis. Use it only as `fromRecorded` on the next `transitionsOf` /
  * `replay` call.
  */
+declare const TRANSITION_PAGE_CURSOR_BRAND: unique symbol;
+
+/**
+ * A page cursor for `transitionsOf` / `replay`. It is minted from a
+ * recorded instant, including one a restored row's SOURCE graph allocated,
+ * so it must not be passed to `store.asOfRecorded`. Pass it only as
+ * `fromRecorded`.
+ */
+export type TransitionPageCursor = string & {
+  readonly [TRANSITION_PAGE_CURSOR_BRAND]: "TransitionPageCursor";
+};
+
+export function transitionPageCursor(
+  instant: RecordedInstant,
+): TransitionPageCursor {
+  return instant as string as TransitionPageCursor;
+}
+
 type PagedTransitions = Readonly<{
   rows: readonly IdentityTransitionRow[];
-  nextFrom?: RecordedInstant | undefined;
+  nextFrom?: TransitionPageCursor | undefined;
 }>;
 
 export type IdentityReplay<G extends GraphDef> = Readonly<{
@@ -130,7 +148,7 @@ export type IdentityReplay<G extends GraphDef> = Readonly<{
    * restored row's SOURCE graph allocated, not this graph. Never pass it to
    * `store.asOfRecorded`; pass it only as `fromRecorded`.
    */
-  nextFrom?: RecordedInstant | undefined;
+  nextFrom?: TransitionPageCursor | undefined;
 }>;
 
 /** One page of {@link identityTransitionsOf}'s answer. */
@@ -143,7 +161,7 @@ export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
    * restored row's SOURCE graph allocated, not this graph. Never pass it to
    * `store.asOfRecorded`; pass it only as `fromRecorded`.
    */
-  nextFrom?: RecordedInstant | undefined;
+  nextFrom?: TransitionPageCursor | undefined;
 }>;
 
 export type IdentityReplayOptions = Readonly<{
@@ -466,9 +484,8 @@ function pageBoundaries(
   );
   return {
     rows: rows.filter((row) => row.recorded_revision < cutoffRevision),
-    nextFrom: createRecordedInstant(
-      cutoffRow.recorded_revision,
-      cutoffRow.recorded_at,
+    nextFrom: transitionPageCursor(
+      createRecordedInstant(cutoffRow.recorded_revision, cutoffRow.recorded_at),
     ),
   };
 }
@@ -498,7 +515,7 @@ type WalkedTransitions = Readonly<{
   fromRevision: number | undefined;
   toRevision: number | undefined;
   rows: readonly IdentityTransitionRow[];
-  nextFrom?: RecordedInstant | undefined;
+  nextFrom?: TransitionPageCursor | undefined;
 }>;
 
 /**

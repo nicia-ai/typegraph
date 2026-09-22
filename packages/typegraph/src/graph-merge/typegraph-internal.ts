@@ -65,7 +65,11 @@ export {
   loadSpanningDifferentAssertion,
 } from "../identity/service-read";
 export type { PlainNodeRef } from "../identity/sql-target";
-export type { IdentityDecisionProvenance } from "../identity/transition-log";
+export type {
+  IdentityAssertionPolicyLabel,
+  IdentityDecisionPolicyRecord,
+  IdentityDecisionProvenance,
+} from "../identity/transition-log";
 export type {
   IdentityAssertionWriteFacade,
   IdentityFacade,

@@ -12,6 +12,7 @@
  * runtime merge logic.
  */
 
+import type { IdentityAssertionPolicyLabel } from "../identity/transition-log";
 import type { IdentityRelation } from "../identity/types";
 import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 import type {
@@ -756,7 +757,7 @@ export type IdentityReconciliation = Readonly<{
    * `IdentityDecisionProvenance.policy` is built from, so a merge that
    * arbitrated nothing by policy records no policy string.
    */
-  policy?: string | undefined;
+  policy?: IdentityAssertionPolicyLabel | undefined;
   branches: readonly BranchId[];
 }>;
 

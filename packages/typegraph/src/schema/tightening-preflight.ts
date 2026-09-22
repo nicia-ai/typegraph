@@ -302,11 +302,11 @@ export function prepareSchemaTighteningPreflight(
 
   const grouped = {
     disjointness: probeOfKind(probes, "nodeDisjointness"),
-    uniqueness: probeOfKind(probes, "nodeUniquenessComponent"),
+    uniqueness: probeOfKind(probes, "nodeUniqueness"),
     endpoints: probeOfKind(probes, "edgeEndpointAssignability"),
     acyclicity: probeOfKind(probes, "edgeAcyclicity"),
-    composition: probeOfKind(probes, "compositionSingleWhole"),
-    compositionExistence: probeOfKind(probes, "compositionRequiredWhole"),
+    composition: probeOfKind(probes, "composition"),
+    compositionExistence: probeOfKind(probes, "compositionExistence"),
   } as const;
   const uniquenessGroups = (grouped.uniqueness?.groups ?? []).map((group) =>
     uniquenessAxisGroupFor(group.constraintName, group.coveredKinds),

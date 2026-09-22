@@ -1990,12 +1990,17 @@ export type OntologyChange = Readonly<{
     probes?: readonly OntologyDataProbe[];
 }>;
 
+// @public (undocumented)
+export type OntologyDataProbe = OntologyDataProbeBody & Readonly<{
+    families: (typeof PROBE_VIOLATION_FAMILIES)[OntologyDataProbeBody["kind"]];
+}>;
+
 // @public
-export type OntologyDataProbe = Readonly<{
+type OntologyDataProbeBody = Readonly<{
     kind: "nodeDisjointness";
     pairs: readonly (readonly [string, string])[];
 }> | Readonly<{
-    kind: "nodeUniquenessComponent";
+    kind: "nodeUniqueness";
     groups: readonly UniquenessComponentProbeGroup[];
 }> | Readonly<{
     kind: "edgeEndpointAssignability";
@@ -2004,10 +2009,10 @@ export type OntologyDataProbe = Readonly<{
     kind: "edgeAcyclicity";
     edgeKinds: readonly string[];
 }> | Readonly<{
-    kind: "compositionSingleWhole";
+    kind: "composition";
     edgeKinds: readonly string[];
 }> | Readonly<{
-    kind: "compositionRequiredWhole";
+    kind: "compositionExistence";
     edgeKinds: readonly string[];
 }>;
 
@@ -2046,6 +2051,19 @@ type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
 
 // @public
 type PredicateBuilder = Readonly<Record<string, FieldPredicateBuilder>>;
+
+// @public
+export const PROBE_VIOLATION_FAMILIES: {
+    readonly nodeDisjointness: readonly ["nodeDisjointness"];
+    readonly nodeUniqueness: readonly ["nodeUniqueness"];
+    readonly edgeEndpointAssignability: readonly ["edgeEndpointAssignability"];
+    readonly edgeAcyclicity: readonly ["edgeAcyclicity"];
+    readonly composition: readonly ["composition", "edgeAcyclicity"];
+    readonly compositionExistence: readonly ["compositionExistence"];
+};
+
+// @public (undocumented)
+export function probeCoversViolationFamily(probe: Pick<OntologyDataProbe, "families">, family: string): boolean;
 
 // @public
 export function projectTypeVisible(schema: JsonSchema): JsonSchema;

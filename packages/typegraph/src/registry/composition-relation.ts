@@ -16,6 +16,7 @@
  * readers, never `pairs` directly. That is what keeps "is this edge kind a
  * composition edge" and "which side is the part" answered once.
  */
+import { type AnyEdgeType } from "../core/types";
 import { META_EDGE_HAS_PART, META_EDGE_PART_OF } from "../ontology/constants";
 import { type NamedOntologyRelation } from "../ontology/validation";
 import { compareStrings } from "../utils/compare";
@@ -27,6 +28,18 @@ import { type KindRegistry } from "./kind-registry";
 // ============================================================
 // Types
 // ============================================================
+
+/**
+ * A realizing edge named either by its type (a typo is a compile error) or
+ * by its kind string (a dynamic caller). {@link compositionViaKind} is the
+ * one owner of that distinction.
+ */
+export type CompositionViaRef = AnyEdgeType | string;
+
+/** The edge-kind string a {@link CompositionViaRef} names. */
+export function compositionViaKind(via: CompositionViaRef): string {
+  return typeof via === "string" ? via : via.kind;
+}
 
 /** Which endpoint of the realizing edge carries the PART. */
 export type CompositionPartSide = "from" | "to";

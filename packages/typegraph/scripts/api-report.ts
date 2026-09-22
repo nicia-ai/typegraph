@@ -687,9 +687,16 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `ReadConstraintFenceViolationsParams`-adjacent surface it rides in on
   // make the composition-relation types reachable from those backend
   // entrypoints for the first time.
-  // `CompositionWholeRef` and `NodeCreateOptions` are exported directly from
-  // `.` (see `src/index.ts`), so neither registers as forgotten here — the
-  // debt is back to its pre-E.2 baseline for this entrypoint specifically.
+  // `NodeCreateOptions`, `NodeReparentOptions` and `NodeReparentResult` are
+  // exported directly from `.` (see `src/index.ts`). `CompositionWholeRef`
+  // is not: it was an alias of `CompositionNodeRef` and callers import
+  // `CompositionAttachment`.
+  // Typed composition/ontology aliases (`CompositionAttachmentProps`,
+  // `TypedOntologyRelation`, `SubClassOfCheck`, `EquivalentToCheck`,
+  // `PolymorphicNodeType`, `StructuralSubtypeMismatch`) are now exported from
+  // `.`, which drops that entrypoint's forgotten-export count. Other
+  // entrypoints still reach the renamed probe kinds and attachment props only
+  // transitively, so their counts hold and only the fingerprint moves.
   ".": {
     count: 410,
     sha256: "bb66b071623f7b108adbc99c1d640e6d3aa47f29f1645a38480cca0c24f2f06f",

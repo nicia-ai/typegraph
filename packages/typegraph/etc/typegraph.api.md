@@ -821,10 +821,17 @@ export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 ext
 export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 extends AliasMap, A3 extends AliasMap, A4 extends AliasMap, A5 extends AliasMap, E1 extends EdgeAliasMap, E2 extends EdgeAliasMap, E3 extends EdgeAliasMap, E4 extends EdgeAliasMap, E5 extends EdgeAliasMap, R1 extends RecursiveAliasMap, R2 extends RecursiveAliasMap, R3 extends RecursiveAliasMap, R4 extends RecursiveAliasMap, R5 extends RecursiveAliasMap>(f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>, f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>, f3: QueryFragment<G, A3, A4, E3, E4, R3, R4>, f4: QueryFragment<G, A4, A5, E4, E5, R4, R5>): QueryFragment<G, A1, A5, E1, E5, R1, R5>;
 
 // @public
-export type CompositionAttachment = CompositionNodeRef & Readonly<{
-    via?: string;
-    props?: Record<string, unknown>;
+export type CompositionAttachment<Via extends CompositionViaRef | undefined = CompositionViaRef | undefined> = CompositionNodeRef & Readonly<{
+    via?: Via;
+    props?: CompositionAttachmentProps<Via>;
+    validFrom?: string | null;
+    validTo?: string;
 }>;
+
+// @public (undocumented)
+export type CompositionAttachmentProps<Via> = [
+Via
+] extends [AnyEdgeType] ? z.input<Via["schema"]> : Record<string, unknown>;
 
 // @public
 export type CompositionClaimScope = Readonly<{
@@ -905,15 +912,33 @@ export type CompositionExistenceErrorDetails = Readonly<{
 }>;
 
 // @public
+export type CompositionHeldEdge = Readonly<{
+    id: string;
+    kind: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    validFrom?: string;
+    validTo?: string;
+}>;
+
+// @public
+type CompositionNavigationEdge<O> = O extends {
+    via: infer V extends AnyEdgeType;
+} ? V : DynamicEdgeType;
+
+// @public
 export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
     from?: keyof Aliases & string;
     maxHops?: number;
     depth?: string;
     path?: string;
+    via?: CompositionViaRef;
 }>;
 
-// @public
-type CompositionNavigationResult<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState, NA extends string, O> = QueryBuilder<G, Aliases & Record<NA, NodeAlias<DynamicNodeType>>, EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>, RecursiveAliases & BuildRecursiveAliases<O extends {
+// @public (undocumented)
+type CompositionNavigationResult<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState, NA extends string, O> = QueryBuilder<G, Aliases & Record<NA, NodeAlias<DynamicNodeType>>, EdgeAliases & Record<`${NA}_edge`, EdgeAlias<CompositionNavigationEdge<O>>>, RecursiveAliases & BuildRecursiveAliases<O extends {
     depth: infer D extends string;
 } ? D : false, O extends {
     path: infer P extends string;
@@ -953,7 +978,10 @@ type CompositionRelation = Readonly<{
 }>;
 
 // @public
-export type CompositionWholeRef = CompositionNodeRef;
+export function compositionViaKind(via: CompositionViaRef): string;
+
+// @public
+export type CompositionViaRef = AnyEdgeType | string;
 
 // @public
 export function computeTransitiveClosure(relations: readonly (readonly [string, string])[]): ReadonlyMap<string, ReadonlySet<string>>;
@@ -1182,7 +1210,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     shortestPath(from: NodeIdentifier, to: NodeIdentifier, options: StoreViewShortestPathOptions<G>): Promise<ShortestPathResult | undefined>;
     // (undocumented)
     protected readonly store: Store<G>;
-    subgraph<const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends boolean | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: StoreViewSubgraphOptions<G, EK, NK, P, C>): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    subgraph<const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends SubgraphCompositionSelection | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: StoreViewSubgraphOptions<G, EK, NK, P, C>): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
     weaklyConnectedComponents(options: StoreViewWeaklyConnectedComponentsOptions<G>): Promise<readonly WeaklyConnectedComponentMembership[]>;
     weightedShortestPath(from: NodeIdentifier, to: NodeIdentifier, options: StoreViewWeightedShortestPathOptions<G>): Promise<WeightedShortestPathResult | undefined>;
 }
@@ -1543,6 +1571,9 @@ type DecodePointerSegment<S extends string> = S extends `${infer Head}~1${infer 
 
 // @public (undocumented)
 type Decrement<Current extends Depth> = DepthDecrementMap[Current];
+
+// @public
+export const DEFAULT_ALIAS_EXPANSION_AXIS: DefaultAliasExpansionAxis;
 
 // @public (undocumented)
 export const DEFAULT_SEARCHABLE_LANGUAGE: "english";
@@ -2605,7 +2636,7 @@ export function equivalentTo<A extends NodeType | AnyEdgeType>(kindA: A, kindBOr
 export function equivalentTo<A extends AnyEdgeType, B extends NodeType>(kindA: A, kindB: B): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, B>;
 
 // @public
-type EquivalentToCheck<A extends NodeType, B extends NodeType> = [
+export type EquivalentToCheck<A extends NodeType, B extends NodeType> = [
 IncompatibleKeys<NodeProps<A>, NodeProps<B>>
 ] extends [never] ? [
 IncompatibleKeys<NodeProps<B>, NodeProps<A>>
@@ -3858,6 +3889,9 @@ export type IdentityAssertionId = string & Readonly<{
 }>;
 
 // @public
+export type IdentityAssertionPolicyLabel = "refuse" | "assertWins" | "retractWins" | "flag" | "callback";
+
+// @public
 export type IdentityAssertionResult<G extends GraphDef> = Readonly<{
     assertion: IdentityAssertion<G>;
     action: "created" | "existing";
@@ -3899,8 +3933,15 @@ export type IdentityContradictionErrorDetails = Readonly<{
 }>;
 
 // @public
+export type IdentityDecisionPolicyRecord = Readonly<{
+    assertion?: readonly IdentityAssertionPolicyLabel[] | undefined;
+    edge?: "flag" | undefined;
+    uniqueness?: "flag" | undefined;
+}>;
+
+// @public
 export type IdentityDecisionProvenance = Readonly<{
-    policy?: string | undefined;
+    policy?: IdentityDecisionPolicyRecord | undefined;
     branchId?: string | undefined;
     branchAncestry?: readonly string[] | undefined;
     mergePlanDigest?: string | undefined;
@@ -3980,7 +4021,7 @@ export type IdentityRelation = "same" | "different";
 export type IdentityReplay<G extends GraphDef> = Readonly<{
     steps: readonly IdentityReplayStep<G>[];
     truncatedBefore?: RecordedInstant | undefined;
-    nextFrom?: RecordedInstant | undefined;
+    nextFrom?: TransitionPageCursor | undefined;
 }>;
 
 // @public
@@ -4097,7 +4138,7 @@ export type IdentityTransitionCursor = Readonly<{
 // @public
 export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
     transitions: readonly IdentityTransition<G>[];
-    nextFrom?: RecordedInstant | undefined;
+    nextFrom?: TransitionPageCursor | undefined;
 }>;
 
 // @public
@@ -4444,7 +4485,7 @@ type InternalReachableOptions<G extends GraphDef> = InternalBaseTraversalOptions
 type InternalShortestPathOptions<G extends GraphDef> = InternalBaseTraversalOptions<G>;
 
 // @public
-type InternalSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends boolean | undefined = undefined> = Omit<SubgraphOptions<G, EK, NK, P, C>, "recordedAsOf"> & Readonly<{
+type InternalSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends SubgraphCompositionSelection | undefined = undefined> = Omit<SubgraphOptions<G, EK, NK, P, C>, "recordedAsOf"> & Readonly<{
     recordedAsOf?: RecordedInstant;
 }>;
 
@@ -5178,7 +5219,7 @@ const NODE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count"
 const NODE_TYPE_BRAND: "__nodeType";
 
 // @public
-const NODE_WRITE_NAMES: readonly ["create", "createFromRecord", "update", "reparent", "compareAndSet", "updateWhere", "delete", "hardDelete", "upsertById", "upsertByIdFromRecord", "bulkCreate", "bulkReplaceById", "bulkUpsertById", "bulkInsert", "bulkDelete", "getOrCreateByConstraint", "bulkGetOrCreateByConstraint"];
+const NODE_WRITE_NAMES: readonly ["create", "createFromRecord", "update", "reparent", "bulkReparent", "compareAndSet", "updateWhere", "delete", "hardDelete", "upsertById", "upsertByIdFromRecord", "bulkCreate", "bulkReplaceById", "bulkUpsertById", "bulkInsert", "bulkDelete", "getOrCreateByConstraint", "bulkGetOrCreateByConstraint"];
 
 // @public
 export type NodeAccessor<N extends NodeType> = IsDynamicNodeType<N> extends true ? DynamicNodeAccessor : Readonly<{
@@ -5211,7 +5252,7 @@ type NodeChange = Readonly<{
 
 // @public
 export type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
-    create: (props: z.input<N["schema"]>, options?: NodeCreateOptions) => Promise<Node<N>>;
+    create: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(props: z.input<N["schema"]>, options?: NodeCreateOptions<Via>) => Promise<Node<N>>;
     getById: (id: NodeId<N>, options?: QueryOptions) => Promise<Node<N> | undefined>;
     getByIds: (ids: readonly NodeId<N>[], options?: QueryOptions) => Promise<readonly (Node<N> | undefined)[]>;
     update: (id: NodeId<N>, props: Partial<z.input<N["schema"]>>, options?: ValidityEndMutation) => Promise<Node<N>>;
@@ -5233,7 +5274,11 @@ export type NodeCollection<N extends NodeType, CN extends string = string> = Rea
     }>) => Promise<Readonly<{
         affectedCount: number;
     }>>;
-    reparent: (id: NodeId<N>, attachment: CompositionAttachment) => Promise<void>;
+    reparent: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(id: NodeId<N>, options: NodeReparentOptions<Via>) => Promise<NodeReparentResult<Via>>;
+    bulkReparent: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(items: readonly Readonly<{
+        id: NodeId<N>;
+        options: NodeReparentOptions<Via>;
+    }>[]) => Promise<readonly NodeReparentResult<Via>[]>;
     delete: (id: NodeId<N>) => Promise<void>;
     hardDelete: (id: NodeId<N>) => Promise<void>;
     find: (filter?: Readonly<{
@@ -5251,9 +5296,9 @@ export type NodeCollection<N extends NodeType, CN extends string = string> = Rea
         validFrom?: string | null;
         onImmutableLowerBound?: "preserve" | "refuse";
     }> & ValidityEndMutation) => Promise<Node<N>>;
-    bulkCreate: (items: readonly (Readonly<{
+    bulkCreate: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(items: readonly (Readonly<{
         props: z.input<N["schema"]>;
-    }> & NodeCreateOptions)[]) => Promise<Node<N>[]>;
+    }> & NodeCreateOptions<Via>)[]) => Promise<Node<N>[]>;
     bulkUpsertById: (items: readonly (Readonly<{
         id: string;
         props: z.input<N["schema"]>;
@@ -5278,10 +5323,10 @@ export type NodeCollection<N extends NodeType, CN extends string = string> = Rea
     bulkFindByIndex: (indexName: string, items: readonly Readonly<{
         props: Partial<z.input<N["schema"]>>;
     }>[], options?: NodeBulkFindByIndexOptions) => Promise<readonly Node<N>[][]>;
-    getOrCreateByConstraint: (constraintName: CN, props: z.input<N["schema"]>, options?: NodeGetOrCreateByConstraintOptions) => Promise<NodeGetOrCreateByConstraintResult<N>>;
-    bulkGetOrCreateByConstraint: (constraintName: CN, items: readonly Readonly<{
+    getOrCreateByConstraint: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(constraintName: CN, props: z.input<N["schema"]>, options?: NodeGetOrCreateByConstraintOptions<Via>) => Promise<NodeGetOrCreateByConstraintResult<N>>;
+    bulkGetOrCreateByConstraint: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(constraintName: CN, items: readonly Readonly<{
         props: z.input<N["schema"]>;
-    }>[], options?: NodeGetOrCreateByConstraintOptions) => Promise<NodeGetOrCreateByConstraintResult<N>[]>;
+    }>[], options?: NodeGetOrCreateByConstraintOptions<Via>) => Promise<NodeGetOrCreateByConstraintResult<N>[]>;
 }>;
 
 // @public (undocumented)
@@ -5327,11 +5372,11 @@ export type NodeCreateCommandResult = Readonly<{
 }>;
 
 // @public
-export type NodeCreateOptions = Readonly<{
+export type NodeCreateOptions<Via extends CompositionViaRef | undefined = CompositionViaRef | undefined> = Readonly<{
     id?: string;
     validFrom?: string | null;
     validTo?: string;
-    partOf?: CompositionAttachment;
+    partOf?: CompositionAttachment<Via>;
 }>;
 
 // @public
@@ -5351,9 +5396,9 @@ export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | 
 export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
-export type NodeGetOrCreateByConstraintOptions = Readonly<{
+export type NodeGetOrCreateByConstraintOptions<Via extends CompositionViaRef | undefined = CompositionViaRef | undefined> = Readonly<{
     ifExists?: IfExistsMode;
-    partOf?: CompositionAttachment;
+    partOf?: CompositionAttachment<Via>;
 }>;
 
 // @public
@@ -5516,6 +5561,17 @@ export type NodeRegistration<N extends NodeType = NodeType> = Readonly<{
 }>;
 
 // @public
+export type NodeReparentOptions<Via extends CompositionViaRef | undefined = CompositionViaRef | undefined> = CompositionAttachment<Via> & Readonly<{
+    at?: string;
+}>;
+
+// @public
+export type NodeReparentResult<Via extends CompositionViaRef | undefined = CompositionViaRef | undefined> = Readonly<{
+    edge: Via extends AnyEdgeType ? Edge<Via> : Edge;
+    moved: boolean;
+}>;
+
+// @public
 type NodeRow = Readonly<{
     graph_id: string;
     kind: string;
@@ -5647,12 +5703,17 @@ type OntologyChange = Readonly<{
     probes?: readonly OntologyDataProbe[];
 }>;
 
+// @public (undocumented)
+export type OntologyDataProbe = OntologyDataProbeBody & Readonly<{
+    families: (typeof PROBE_VIOLATION_FAMILIES)[OntologyDataProbeBody["kind"]];
+}>;
+
 // @public
-export type OntologyDataProbe = Readonly<{
+type OntologyDataProbeBody = Readonly<{
     kind: "nodeDisjointness";
     pairs: readonly (readonly [string, string])[];
 }> | Readonly<{
-    kind: "nodeUniquenessComponent";
+    kind: "nodeUniqueness";
     groups: readonly UniquenessComponentProbeGroup[];
 }> | Readonly<{
     kind: "edgeEndpointAssignability";
@@ -5661,10 +5722,10 @@ export type OntologyDataProbe = Readonly<{
     kind: "edgeAcyclicity";
     edgeKinds: readonly string[];
 }> | Readonly<{
-    kind: "compositionSingleWhole";
+    kind: "composition";
     edgeKinds: readonly string[];
 }> | Readonly<{
-    kind: "compositionRequiredWhole";
+    kind: "compositionExistence";
     edgeKinds: readonly string[];
 }>;
 
@@ -5836,7 +5897,7 @@ type PointerSegmentsForObject<T, Current extends Depth> = {
 }[ObjectPointerKey<T>];
 
 // @public
-type PolymorphicNodeType<N extends NodeType> = Omit<N, "kind"> & Readonly<{
+export type PolymorphicNodeType<N extends NodeType> = Omit<N, "kind"> & Readonly<{
     kind: string;
 }>;
 
@@ -5876,6 +5937,19 @@ type PreparedQueryConfig<R> = Readonly<{
     selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
     schemaIntrospector: SchemaIntrospector;
 }>;
+
+// @public
+export const PROBE_VIOLATION_FAMILIES: {
+    readonly nodeDisjointness: readonly ["nodeDisjointness"];
+    readonly nodeUniqueness: readonly ["nodeUniqueness"];
+    readonly edgeEndpointAssignability: readonly ["edgeEndpointAssignability"];
+    readonly edgeAcyclicity: readonly ["edgeAcyclicity"];
+    readonly composition: readonly ["composition", "edgeAcyclicity"];
+    readonly compositionExistence: readonly ["compositionExistence"];
+};
+
+// @public (undocumented)
+export function probeCoversViolationFamily(probe: Pick<OntologyDataProbe, "families">, family: string): boolean;
 
 // @public (undocumented)
 type ProjectedEdgeResult<E extends AnyEdgeType, Selection extends readonly string[] | undefined> = Readonly<Pick<Edge<E>, "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId">> & Readonly<SelectedEdgeProps<E, Selection>> & (HasMeta<Selection> extends true ? Readonly<{
@@ -6813,6 +6887,9 @@ type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
 export type ScopedMeasure<Context> = <T>(fn: (scoped: Context) => Promise<T>) => Promise<TransactionOutcome<T>>;
 
 // @public
+export const SEARCH_EXPANSION_DEFAULT: "exact";
+
+// @public
 export function searchable(options?: SearchableOptions): SearchableSchema;
 
 // @public
@@ -7273,7 +7350,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     ]>(...queries: Queries) => Promise<BatchResults<Queries>>;
     bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
-    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends boolean | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends SubgraphCompositionSelection | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
     clear: () => Promise<void>;
     refreshStatistics: () => Promise<void>;
     materializeIndexes: (options?: MaterializeIndexesOptions) => Promise<MaterializeIndexesResult>;
@@ -7400,7 +7477,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     recordedEdgeGetById: <E extends AnyEdgeType>(kind: string, id: EdgeId<E>, coordinate: ReadCoordinate) => Promise<Edge<E> | undefined>;
     recordedEdgeGetByIds: <E extends AnyEdgeType>(kind: string, ids: readonly EdgeId<E>[], coordinate: ReadCoordinate) => Promise<readonly (Edge<E> | undefined)[]>;
     recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
-    subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends boolean | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends SubgraphCompositionSelection | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
     identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     identityContext: () => IdentityServiceContext<G>;
@@ -7784,7 +7861,7 @@ export type StoreViewReachableOptions<G extends GraphDef> = Omit<ReachableOption
 export type StoreViewShortestPathOptions<G extends GraphDef> = Omit<ShortestPathOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public
-export type StoreViewSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends boolean | undefined = undefined> = Omit<SubgraphOptions<G, EK, NK, P, C>, "temporalMode" | "asOf" | "recordedAsOf">;
+export type StoreViewSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends SubgraphCompositionSelection | undefined = undefined> = Omit<SubgraphOptions<G, EK, NK, P, C>, "temporalMode" | "asOf" | "recordedAsOf">;
 
 // @public
 export type StoreViewWeaklyConnectedComponentsOptions<G extends GraphDef> = Omit<WeaklyConnectedComponentsOptions<G>, keyof TemporalAlgorithmOptions>;
@@ -7825,7 +7902,7 @@ type StringPredicate = Readonly<{
 }>;
 
 // @public
-type StructuralSubtypeMismatch<ChildKind extends string, ParentKind extends string, Fields extends string> = Readonly<{
+export type StructuralSubtypeMismatch<ChildKind extends string, ParentKind extends string, Fields extends string> = Readonly<{
     __typegraphSubClassOfError: `subClassOf(${ChildKind}, ${ParentKind}): the child's schema must extend the parent's`;
     missingOrIncompatibleProperties: Fields;
     fix: "Give the child these properties with compatible types, or declare broader(child, parent) instead.";
@@ -7835,9 +7912,14 @@ type StructuralSubtypeMismatch<ChildKind extends string, ParentKind extends stri
 export function subClassOf<C extends NodeType, P extends NodeType>(child: C, parent: P & SubClassOfCheck<C, P>): TypedOntologyRelation<typeof META_EDGE_SUB_CLASS_OF, C, P>;
 
 // @public
-type SubClassOfCheck<C extends NodeType, P extends NodeType> = [
+export type SubClassOfCheck<C extends NodeType, P extends NodeType> = [
 IncompatibleKeys<NodeProps<C>, NodeProps<P>>
 ] extends [never] ? unknown : StructuralSubtypeMismatch<C["kind"], P["kind"], IncompatibleKeys<NodeProps<C>, NodeProps<P>>>;
+
+// @public (undocumented)
+export type SubgraphCompositionSelection = boolean | Readonly<{
+    via?: CompositionViaRef;
+}>;
 
 // @public (undocumented)
 type SubgraphEdgeProjectionField<E extends AnyEdgeType = AnyEdgeType> = EdgeProjectionPropertyKey<E> | "meta";
@@ -7872,7 +7954,7 @@ export type SubgraphNodeResult<G extends GraphDef, NK extends NodeKinds<G> = Nod
 type SubgraphNodeResultForKind<G extends GraphDef, Kind extends NodeKinds<G>, P> = ProjectionSelection<P, "nodes", Kind> extends readonly string[] ? ProjectedNodeResult<G["nodes"][Kind]["type"], ProjectionSelection<P, "nodes", Kind>> : Node<G["nodes"][Kind]["type"]>;
 
 // @public (undocumented)
-export type SubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends boolean | undefined = undefined> = Readonly<{
+export type SubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends SubgraphCompositionSelection | undefined = undefined> = Readonly<{
     edges: readonly EK[];
     maxDepth?: number;
     includeKinds?: readonly NK[];
@@ -7893,7 +7975,7 @@ type SubgraphProject<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>,
 }>;
 
 // @public
-type SubgraphProjectFor<G extends GraphDef, NK extends NodeKinds<G>, EK extends EdgeKinds<G>, C extends boolean | undefined> = SubgraphProject<G, NK, SubgraphResultEdgeKinds<G, EK, C>>;
+type SubgraphProjectFor<G extends GraphDef, NK extends NodeKinds<G>, EK extends EdgeKinds<G>, C extends SubgraphCompositionSelection | undefined> = SubgraphProject<G, NK, SubgraphResultEdgeKinds<G, EK, C>>;
 
 // @public
 export type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, EK extends EdgeKinds<G> = EdgeKinds<G>, P extends SubgraphProject<G, NK, EK> | undefined = undefined> = Readonly<{
@@ -7904,7 +7986,11 @@ export type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKin
 }>;
 
 // @public
-export type SubgraphResultEdgeKinds<G extends GraphDef, EK extends EdgeKinds<G>, C extends boolean | undefined> = true extends C ? EdgeKinds<G> : EK;
+export type SubgraphResultEdgeKinds<G extends GraphDef, EK extends EdgeKinds<G>, C extends SubgraphCompositionSelection | undefined> = EK | (true extends C ? EdgeKinds<G> : C extends {
+    via: infer V;
+} ? [
+V
+] extends [AnyEdgeType] ? V["kind"] extends EdgeKinds<G> ? V["kind"] : EdgeKinds<G> : EdgeKinds<G> : never);
 
 // @public
 export type SubsetEdge<G extends GraphDef, K extends EdgeKinds<G>> = {
@@ -8104,6 +8190,17 @@ type TransactionRuntime = Readonly<{
 }>;
 
 // @public
+const TRANSITION_PAGE_CURSOR_BRAND: unique symbol;
+
+// @public
+export type TransitionPageCursor = string & {
+    readonly [TRANSITION_PAGE_CURSOR_BRAND]: "TransitionPageCursor";
+};
+
+// @public (undocumented)
+export function transitionPageCursor(instant: RecordedInstant): TransitionPageCursor;
+
+// @public
 type Traversal = Readonly<{
     edgeAlias: string;
     edgeKinds: readonly string[];
@@ -8194,7 +8291,7 @@ export const tsvectorStrategy: FulltextStrategy;
 export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<R["type"], EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType, EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType, EdgeAllowedPairs<R>>;
 
 // @public
-type TypedOntologyRelation<M extends string, From extends NodeType | AnyEdgeType | string, To extends NodeType | AnyEdgeType | string> = Readonly<{
+export type TypedOntologyRelation<M extends string, From extends NodeType | AnyEdgeType | string, To extends NodeType | AnyEdgeType | string> = Readonly<{
     metaEdge: MetaEdge<M>;
     from: From;
     to: To;

@@ -41,15 +41,24 @@ export {
 
 // Types
 export {
+  type EquivalentToCheck,
   getTypeName,
   isMetaEdge,
   META_EDGE_BRAND,
   type MetaEdge,
   type MetaEdgeProperties,
   type OntologyRelation,
+  type PolymorphicNodeType,
+  type StructuralSubtypeMismatch,
+  type SubClassOfCheck,
+  type TypedOntologyRelation,
 } from "./types";
 
 // R5's orientation, for `CompositionOptions.partSide`.
 export type { CompositionPartSide } from "../registry/composition-relation";
 // Item E.2, for `CompositionOptions.existence`.
 export type { CompositionExistence } from "../registry/composition-relation";
+export {
+  compositionViaKind,
+  type CompositionViaRef,
+} from "../registry/composition-relation";

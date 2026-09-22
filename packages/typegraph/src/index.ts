@@ -115,11 +115,13 @@ export {
   IDENTITY_REPLAY_MAX_LIMIT,
   type IdentityAssertion,
   type IdentityAssertionId,
-  type IdentityAssertionResult,
-  type IdentityAssertionWriteFacade,
   // The governing decision a merge attaches to the identity transitions it
   // causes — named on `StoreRuntime.applyIdentityMergeAtTarget`, so a backend
   // or store author implementing the port needs it by name.
+  type IdentityAssertionPolicyLabel,
+  type IdentityAssertionResult,
+  type IdentityAssertionWriteFacade,
+  type IdentityDecisionPolicyRecord,
   type IdentityDecisionProvenance,
   type IdentityFacade,
   type IdentityNode,
@@ -143,6 +145,8 @@ export {
   type IdentityWriteSummary,
   pruneIdentityTransitions,
   rebuildIdentityClosure,
+  type TransitionPageCursor,
+  transitionPageCursor,
 } from "./identity";
 
 // ============================================================
@@ -355,13 +359,20 @@ export type {
   CompositionExistence,
   CompositionOptions,
   CompositionPartSide,
+  CompositionViaRef,
+  EquivalentToCheck,
   MetaEdge,
   MetaEdgeProperties,
   OntologyRelation,
+  PolymorphicNodeType,
+  StructuralSubtypeMismatch,
+  SubClassOfCheck,
+  TypedOntologyRelation,
 } from "./ontology";
 export {
   // Individual relation factories (for convenience)
   broader,
+  compositionViaKind,
   // Transitive-closure utilities (reason over subClassOf/equivalentTo hierarchies)
   computeTransitiveClosure,
   // Core ontology module
@@ -681,6 +692,7 @@ export type {
   OntologyDataProbe,
   UniquenessComponentProbeGroup,
 } from "./schema";
+export { PROBE_VIOLATION_FAMILIES, probeCoversViolationFamily } from "./schema";
 // The axes a schema commit's edge-cardinality tightening owes, for a
 // consumer narrowing `MigrationErrorDetails` on
 // `reason: "edge-cardinality-tightening-violated"` — same reasoning as the
@@ -729,6 +741,7 @@ export type {
 export type {
   AnyEdge,
   AnyNode,
+  SubgraphCompositionSelection,
   SubgraphEdgeResult,
   SubgraphNodeResult,
   SubgraphOptions,
@@ -745,8 +758,9 @@ export type {
   CompareAndSetAbsent,
   CompareAndSetExpected,
   CompositionAttachment,
+  CompositionAttachmentProps,
+  CompositionHeldEdge,
   CompositionNodeRef,
-  CompositionWholeRef,
   ConstraintNames,
   CreateEdgeInput,
   CreateNodeInput,
@@ -782,6 +796,8 @@ export type {
   NodeGetOrCreateByConstraintOptions,
   NodeGetOrCreateByConstraintResult,
   NodeRef,
+  NodeReparentOptions,
+  NodeReparentResult,
   NoRecordedCoordinate,
   OperationHookContext,
   QueryHookContext,
@@ -943,6 +959,10 @@ export {
 // The one expansion axis a `from`/`to` alias, a store-wide default, and
 // `search()` state (the default and search forms exclude `"narrower"`).
 export type { AliasExpansionAxis, DefaultAliasExpansionAxis } from "./query";
+export {
+  DEFAULT_ALIAS_EXPANSION_AXIS,
+  SEARCH_EXPANSION_DEFAULT,
+} from "./query";
 
 // Fragment composition types
 export type {

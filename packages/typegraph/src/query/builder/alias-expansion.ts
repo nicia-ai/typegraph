@@ -41,6 +41,13 @@ export type DefaultAliasExpansionAxis = Exclude<AliasExpansionAxis, "narrower">;
 export const DEFAULT_ALIAS_EXPANSION_AXIS: DefaultAliasExpansionAxis =
   "subclasses";
 
+/**
+ * `search()`'s default, distinct from {@link DEFAULT_ALIAS_EXPANSION_AXIS}.
+ * The search facade is not polymorphic. `queryDefaults.expansion` does not
+ * apply to it.
+ */
+export const SEARCH_EXPANSION_DEFAULT = "exact" as const satisfies DefaultAliasExpansionAxis;
+
 export type AliasExpansionOptions = Readonly<{
   /**
    * The alias's expansion axis. Omitted (or `undefined`) takes the store

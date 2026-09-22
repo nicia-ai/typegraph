@@ -5728,6 +5728,7 @@ async function commitResolvedMerge<G extends GraphDef>(
   const decision = mergeIdentityDecision({
     branchAncestry: resolved.branchAncestry,
     reconciliations: plan.identityReconciliations,
+    conflicts: plan.identityConflicts,
   });
   const merged =
     resolved.incrementalGuard === undefined ?
@@ -6871,6 +6872,8 @@ export async function applyMergePlan<G extends GraphDef>(
     branchAncestry: branchAncestryFromAnchors(artifact.anchors),
     reconciliations: (artifact.review.identityReconciliations ??
       []) as unknown as readonly IdentityReconciliation[],
+    conflicts: (artifact.review.identityConflicts ??
+      []) as unknown as readonly IdentityUnresolvedConflict[],
     mergePlanDigest: artifact.digest.value,
     ...(options.reviewDigest === undefined ?
       {}

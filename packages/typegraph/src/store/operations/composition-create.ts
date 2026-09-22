@@ -54,7 +54,10 @@ import {
   EndpointNotFoundError,
 } from "../../errors";
 import { validateEdgeProps } from "../../errors/validation";
-import { type CompositionPair } from "../../registry/composition-relation";
+import {
+  type CompositionPair,
+  compositionViaKind,
+} from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { requireDefined } from "../../utils/presence";
@@ -62,8 +65,8 @@ import { encodeTupleKey } from "../../utils/tuple-key";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   type CompositionAttachment,
+  type CompositionHeldEdge,
   type CompositionNodeRef,
-  type CompositionWholeRef,
   type CreateEdgeInput,
   type CreateNodeInput,
 } from "../types";
@@ -95,7 +98,7 @@ import {
  */
 export type CompositionCreateWork = Readonly<{
   pair: CompositionPair;
-  whole: CompositionWholeRef;
+  whole: CompositionNodeRef;
   /** The concrete part kind this create declared — `input.kind`, verbatim. */
   partKind: string;
   /**
@@ -106,6 +109,12 @@ export type CompositionCreateWork = Readonly<{
    * would be a second spelling of that decision.
    */
   props: Record<string, unknown>;
+  /**
+   * The realizing edge's own window, copied from the attachment and never
+   * from the part node's `validFrom`/`validTo`. Empty means the edge insert's
+   * own default.
+   */
+  edgeWindow: Readonly<{ validFrom?: string | null; validTo?: string }>;
 }>;
 
 /**
@@ -151,16 +160,19 @@ function resolveCompositionAttachment(
 
   const viaEdgeKinds = declared.map((pair) => pair.viaEdgeKind);
   const via = attachment.via;
-  if (via !== undefined) {
-    const pair = declared.find((candidate) => candidate.viaEdgeKind === via);
+  const viaKind = via === undefined ? undefined : compositionViaKind(via);
+  if (viaKind !== undefined) {
+    const pair = declared.find(
+      (candidate) => candidate.viaEdgeKind === viaKind,
+    );
     if (pair === undefined) {
       throw new ConfigurationError(
-        `Edge kind "${via}" realizes no declared composition pair between "${partKind}" and "${attachment.kind}".`,
+        `Edge kind "${viaKind}" realizes no declared composition pair between "${partKind}" and "${attachment.kind}".`,
         {
           code: "COMPOSITION_VIA_NOT_DECLARED",
           partKind,
           wholeKind: attachment.kind,
-          via,
+          via: viaKind,
           declaredVia: viaEdgeKinds,
         },
         {
@@ -228,6 +240,33 @@ export function resolveCompositionCreate(
     whole: { kind: partOf.kind, id: partOf.id },
     partKind,
     props: partOf.props ?? {},
+    edgeWindow: compositionEdgeWindow(partOf),
+  };
+}
+
+export function compositionEdgeWindow(
+  attachment: CompositionAttachment,
+): Readonly<{ validFrom?: string | null; validTo?: string }> {
+  return {
+    ...(attachment.validFrom === undefined ?
+      {}
+    : { validFrom: attachment.validFrom }),
+    ...(attachment.validTo === undefined ?
+      {}
+    : { validTo: attachment.validTo }),
+  };
+}
+
+export function compositionHeldEdgeFromRow(edge: EdgeRow): CompositionHeldEdge {
+  return {
+    id: edge.id,
+    kind: edge.kind,
+    fromKind: edge.from_kind,
+    fromId: edge.from_id,
+    toKind: edge.to_kind,
+    toId: edge.to_id,
+    ...(edge.valid_from === undefined ? {} : { validFrom: edge.valid_from }),
+    ...(edge.valid_to === undefined ? {} : { validTo: edge.valid_to }),
   };
 }
 
@@ -425,9 +464,7 @@ export async function findLiveCompositionAttachment(
   concreteKind: string,
   concreteId: string,
   excludeEdgeIds?: ReadonlySet<string>,
-): Promise<
-  Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }> | undefined
-> {
+): Promise<Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }> | undefined> {
   if (!registry.isCompositionPart(concreteKind)) return undefined;
   const connected = await backend.findEdgesConnectedTo({
     graphId,
@@ -465,7 +502,7 @@ function selectLiveCompositionAttachment(
   concreteId: string,
   candidateEdges: readonly EdgeRow[],
   excludeEdgeIds?: ReadonlySet<string>,
-): Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }> | undefined {
+): Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }> | undefined {
   for (const edge of candidateEdges) {
     if (excludeEdgeIds?.has(edge.id) === true) continue;
     const partSide = registry.compositionPartSide(edge.kind);
@@ -677,7 +714,7 @@ function incumbentHoldsRequestedAttachment(
   request: CompositionAttachmentRequest,
   current: Readonly<{
     edge: Pick<EdgeRow, "kind">;
-    whole: CompositionWholeRef;
+    whole: CompositionNodeRef;
   }>,
 ): boolean {
   const { attachment, work } = request;
@@ -715,7 +752,7 @@ export function incumbentSatisfiesRequestedAttachment(
   request: CompositionAttachmentRequest,
   current: Readonly<{
     edge: Pick<EdgeRow, "kind" | "props">;
-    whole: CompositionWholeRef;
+    whole: CompositionNodeRef;
   }>,
 ): boolean {
   return (
@@ -758,7 +795,7 @@ function decideCompositionIncumbent(
   current:
     | Readonly<{
         edge: Pick<EdgeRow, "id" | "kind" | "props">;
-        whole: CompositionWholeRef;
+        whole: CompositionNodeRef;
       }>
     | undefined,
 ): "satisfied" | "attach" | "replace" {
@@ -808,7 +845,7 @@ export type FencedCompositionAttachment = Readonly<{
   request: CompositionAttachmentRequest;
   disposition: "satisfied" | "attach" | "replace";
   /** The incumbent the disposition was judged against; absent when none. */
-  incumbent?: Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }>;
+  incumbent?: Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }>;
 }>;
 
 /**
@@ -966,7 +1003,7 @@ export async function findLiveCompositionWhole(
   concreteKind: string,
   concreteId: string,
   excludeEdgeIds?: ReadonlySet<string>,
-): Promise<CompositionWholeRef | undefined> {
+): Promise<CompositionNodeRef | undefined> {
   const attachment = await findLiveCompositionAttachment(
     registry,
     backend,
@@ -1115,7 +1152,7 @@ export async function readCompositionAttachmentsForPage(
   graphId: string,
   parts: readonly NodeRow[],
 ): Promise<
-  ReadonlyMap<string, Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }>>
+  ReadonlyMap<string, Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }>>
 > {
   const candidateEdges = await readPageAttachmentCandidateEdges(
     registry,
@@ -1125,7 +1162,7 @@ export async function readCompositionAttachmentsForPage(
   );
   const attachments = new Map<
     string,
-    Readonly<{ edge: EdgeRow; whole: CompositionWholeRef }>
+    Readonly<{ edge: EdgeRow; whole: CompositionNodeRef }>
   >();
   for (const row of parts) {
     const partKey = encodeTupleKey([row.kind, row.id]);
@@ -1177,7 +1214,7 @@ type CompositionWholeRowReader = Readonly<Pick<GraphBackend, "getNode">> &
 export async function readCompositionWholeRows(
   port: CompositionWholeRowReader,
   graphId: string,
-  wholes: readonly CompositionWholeRef[],
+  wholes: readonly CompositionNodeRef[],
   batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<ReadonlyMap<string, NodeRow | undefined>> {
   const idsByKind = new Map<string, Set<string>>();
@@ -1230,16 +1267,16 @@ export async function readCompositionWholeRows(
 export async function readLiveCompositionWholes(
   backend: GraphReadBackend,
   graphId: string,
-  wholes: readonly CompositionWholeRef[],
+  wholes: readonly CompositionNodeRef[],
   batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
-): Promise<readonly CompositionWholeRef[]> {
+): Promise<readonly CompositionNodeRef[]> {
   const rowsByWhole = await readCompositionWholeRows(
     backend,
     graphId,
     wholes,
     batchPointRead,
   );
-  const live: CompositionWholeRef[] = [];
+  const live: CompositionNodeRef[] = [];
   for (const row of rowsByWhole.values()) {
     if (!isEndpointRowLive(row)) continue;
     live.push({ kind: row.kind, id: row.id });
@@ -1260,8 +1297,8 @@ export async function readCompositionUnattachedParts(
   graphId: string,
   partKinds: readonly string[],
   batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ>,
-): Promise<readonly CompositionWholeRef[]> {
-  const unattached: CompositionWholeRef[] = [];
+): Promise<readonly CompositionNodeRef[]> {
+  const unattached: CompositionNodeRef[] = [];
   for (const partKind of partKinds) {
     let after: string | undefined;
     for (;;) {

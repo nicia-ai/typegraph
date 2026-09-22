@@ -13,6 +13,7 @@
  * forbids re-spelling.
  */
 import { identityAssertionSemanticKey } from "../identity/assertion-key";
+import type { IdentityAssertionPolicyLabel } from "../identity/transition-log";
 import type { IdentityRelation } from "../identity/types";
 import { identityValidityWindowsOverlap } from "../identity/validity-window";
 import { requireDefined } from "../utils/presence";
@@ -437,7 +438,9 @@ function buildReconciliation(
  * function policy is recorded as `"callback"` — its source is never part of
  * the plan artifact, exactly as `reviewOptionEvidence` encodes it.
  */
-function identityPolicyLabel(policy: IdentityAssertionConflictPolicy): string {
+function identityPolicyLabel(
+  policy: IdentityAssertionConflictPolicy,
+): IdentityAssertionPolicyLabel {
   return typeof policy === "function" ? "callback" : policy;
 }
 

@@ -133,7 +133,9 @@ export type {
 } from "./builder/prepared-bindings";
 export {
   type AliasExpansionAxis,
+  DEFAULT_ALIAS_EXPANSION_AXIS,
   type DefaultAliasExpansionAxis,
+  SEARCH_EXPANSION_DEFAULT,
 } from "./builder/alias-expansion";
 export { PreparedQuery } from "./builder/prepared-query";
 export {

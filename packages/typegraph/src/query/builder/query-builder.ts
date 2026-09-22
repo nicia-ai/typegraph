@@ -19,6 +19,7 @@ import {
   resolveReadCoordinate,
 } from "../../core/temporal";
 import {
+  type AnyEdgeType,
   type EdgeType,
   type NodeType,
   type TemporalMode,
@@ -29,6 +30,10 @@ import {
   UnsupportedPredicateError,
 } from "../../errors";
 import { type PolymorphicNodeType } from "../../ontology/types";
+import {
+  compositionViaKind,
+  type CompositionViaRef,
+} from "../../registry/composition-relation";
 import { partitionCompositionEdgeKindsByDirection } from "../../registry/composition-relation";
 import { isInteropProbeKey } from "../../utils/object";
 import {
@@ -202,6 +207,13 @@ export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
   depth?: string;
   /** Include the traversal path in output. Pass a string to customize the alias. */
   path?: string;
+  /**
+   * Realize the walk through this edge only. An edge TYPE is checked at
+   * compile time; a kind string is checked at runtime. A kind that realizes
+   * no composition pair for the source alias is refused
+   * (`COMPOSITION_VIA_NOT_DECLARED`), never silently dropped.
+   */
+  via?: CompositionViaRef;
 }>;
 
 type DynamicEdgeTypeFor<T> =
@@ -212,6 +224,9 @@ type DynamicEdgeTypeFor<T> =
  * consumed by both methods' public signatures and their internal casts, so
  * the same generic expansion is never re-spelled four times over.
  */
+type CompositionNavigationEdge<O> =
+  O extends { via: infer V extends AnyEdgeType } ? V : DynamicEdgeType;
+
 type CompositionNavigationResult<
   G extends GraphDef,
   Aliases extends AliasMap,
@@ -223,7 +238,7 @@ type CompositionNavigationResult<
 > = QueryBuilder<
   G,
   Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
-  EdgeAliases & Record<`${NA}_edge`, EdgeAlias<DynamicEdgeType>>,
+  EdgeAliases & Record<`${NA}_edge`, EdgeAlias<CompositionNavigationEdge<O>>>,
   RecursiveAliases &
     BuildRecursiveAliases<
       O extends { depth: infer D extends string } ? D : false,
@@ -976,10 +991,10 @@ export class QueryBuilder<
    *
    * Recurses by default — the difference from `traverse`, which reaches only
    * the direct level — to the full transitive parts closure; pass `maxHops:
-   * 1` for direct parts only. The result alias is untyped (`DynamicNodeType`,
-   * reached through `.field(name)`) because the parts closure is registry
-   * data that may span more than one node kind with different schemas, not a
-   * single kind the graph's static type can name.
+   * 1` for direct parts only. The result alias stays `DynamicNodeType`: a
+   * realizing edge can admit more than one part kind, and a conditional node
+   * type on this alias is not assignable back onto `QueryBuilder`. `via` as
+   * an edge type does type the edge alias.
    *
    * Refuses rather than silently returning zero rows: an alias whose kind
    * declares no composition parts throws `ConfigurationError` with code
@@ -1112,6 +1127,27 @@ export class QueryBuilder<
     const edgeKinds = new Set<string>();
     for (const kind of sourceKinds) {
       for (const edgeKind of edgeKindsUnder(kind)) edgeKinds.add(edgeKind);
+    }
+    const viaKind =
+      options?.via === undefined ? undefined : compositionViaKind(options.via);
+    if (viaKind !== undefined) {
+      if (!edgeKinds.has(viaKind)) {
+        throw new ConfigurationError(
+          `.${relation}("${nodeAlias}") via "${viaKind}" realizes no composition pair for alias "${fromAlias}".`,
+          {
+            code: "COMPOSITION_VIA_NOT_DECLARED",
+            relation,
+            alias: fromAlias,
+            via: viaKind,
+            declaredVia: [...edgeKinds].toSorted(),
+          },
+          {
+            suggestion: `Pass via naming one of the declared realizing edges, or omit it to walk every composition edge of this alias.`,
+          },
+        );
+      }
+      edgeKinds.clear();
+      edgeKinds.add(viaKind);
     }
     if (edgeKinds.size === 0) {
       const kindsLabel =

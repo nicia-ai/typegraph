@@ -653,14 +653,14 @@ describe("identity transition log", () => {
           validFrom: now,
         },
       ],
-      { policy: "test:reconcile", mergePlanDigest: "digest-abc" },
+      { policy: { assertion: ["flag"] }, mergePlanDigest: "digest-abc" },
     );
     const rows = await readTransitions(ctx);
     const reconcileRows = rows.filter((row) => row.cause === "reconcile");
     expect(reconcileRows.length).toBeGreaterThanOrEqual(1);
     expect(reconcileRows[0]?.assertion_ids).toEqual([assertionId]);
     expect(reconcileRows[0]?.decision).toEqual({
-      policy: "test:reconcile",
+      policy: { assertion: ["flag"] },
       mergePlanDigest: "digest-abc",
     });
   });

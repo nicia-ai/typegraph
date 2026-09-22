@@ -7,8 +7,12 @@ export {
   type IdentityReplayStep,
   type IdentityTransition,
   type IdentityTransitionHistory,
+  transitionPageCursor,
+  type TransitionPageCursor,
 } from "./replay";
 export {
+  type IdentityAssertionPolicyLabel,
+  type IdentityDecisionPolicyRecord,
   type IdentityDecisionProvenance,
   type IdentityTransitionCause,
   type IdentityTransitionCursor,

@@ -150,4 +150,67 @@ describe("reparent's move instant", () => {
       vi.useRealTimers();
     }
   });
+
+  it("honors a stated at and refuses a disagreeing validFrom", async () => {
+    const [store] = await createStoreWithSchema(
+      buildGraph("reparent_stated_at"),
+      createTestBackend(),
+    );
+    const showA = await store.nodes.RiShow.create({});
+    const showB = await store.nodes.RiShow.create({});
+    const clip = await store.nodes.RiClip.create(
+      {},
+      {
+        partOf: {
+          kind: "RiShow",
+          id: showA.id,
+          validFrom: "2024-01-01T00:00:00.000Z",
+        },
+      },
+    );
+    const at = "2024-06-01T00:00:00.000Z";
+    await expect(
+      store.nodes.RiClip.reparent(clip.id, {
+        kind: "RiShow",
+        id: showB.id,
+        at,
+        validFrom: "2024-07-01T00:00:00.000Z",
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFIGURATION_ERROR",
+      details: { code: "COMPOSITION_REPARENT_INSTANT_CONFLICT" },
+    });
+    const moved = await store.nodes.RiClip.reparent(clip.id, {
+      kind: "RiShow",
+      id: showB.id,
+      at,
+    });
+    expect(moved.moved).toBe(true);
+    expect(moved.edge.meta.validFrom).toBe(at);
+    expect(moved.edge).toBeInstanceOf(Object);
+    expect(moved.edge.kind).toBe("riClipOf");
+  });
+
+  it("does not copy the part node's validity window onto the realizing edge", async () => {
+    const [store] = await createStoreWithSchema(
+      buildGraph("composition_edge_window"),
+      createTestBackend(),
+    );
+    const show = await store.nodes.RiShow.create({});
+    const nodeFrom = "2020-01-01T00:00:00.000Z";
+    const edgeFrom = "2021-01-01T00:00:00.000Z";
+    await store.nodes.RiClip.create(
+      {},
+      {
+        validFrom: nodeFrom,
+        partOf: { kind: "RiShow", id: show.id, validFrom: edgeFrom },
+      },
+    );
+    const edges = await store.edges.riClipOf.find({});
+    expect(edges).toHaveLength(1);
+    expect(requireDefined(edges[0]).meta.validFrom).toBe(edgeFrom);
+    const clips = await store.nodes.RiClip.find({});
+    const clip = requireDefined(clips[0]);
+    expect(clip.meta.validFrom).toBe(nodeFrom);
+  });
 });

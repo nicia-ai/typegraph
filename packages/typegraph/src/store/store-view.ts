@@ -80,6 +80,7 @@ import { type StoreSearch } from "./search-facade";
 import { type Store, type ViewIdentityAccess } from "./store";
 import {
   type InternalSubgraphOptions,
+  type SubgraphCompositionSelection,
   type SubgraphOptions,
   type SubgraphProjectFor,
   type SubgraphResult,
@@ -130,7 +131,7 @@ export type StoreViewSubgraphOptions<
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
   P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
-  C extends boolean | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 > = Omit<
   SubgraphOptions<G, EK, NK, P, C>,
   "temporalMode" | "asOf" | "recordedAsOf"
@@ -899,7 +900,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
     const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
-    const C extends boolean | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
     options: StoreViewSubgraphOptions<G, EK, NK, P, C>,

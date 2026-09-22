@@ -292,6 +292,13 @@ const partOfMetaEdge = createMetaEdge(META_EDGE_PART_OF, "X is part of Y");
 
 /**
  * The options every composition relation (`partOf`/`hasPart`) requires.
+ *
+ * Composition is a closed relation, not a relation class. The reserved
+ * claim axis, cascade, required existence, and multi-edge acyclicity live
+ * only on `partOf`/`hasPart`. `acyclic: true` on an ordinary edge composes
+ * through `implies`/`inverseOf` by a different mechanism and does not grant
+ * these guarantees. `memberOf` or `dependsOn` cannot opt into them by
+ * declaring another pair — there is no public composition-pair factory.
  */
 export type CompositionOptions = Readonly<{
   /** The edge kind that realizes the composition instance-level. */

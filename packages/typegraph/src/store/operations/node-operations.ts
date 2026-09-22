@@ -205,17 +205,20 @@ import {
   ResolvedMutationSetMoved,
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
-import { type NodeRow, rowToNode } from "../row-mappers";
+import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
 import {
   type BulkOperationHookContext,
   compareAndSetAbsent,
   type CompositionAttachment,
   type CompositionNodeRef,
   type CreateNodeInput,
+  type Edge,
   type GetOrCreateAction,
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeGetOrCreateByConstraintOptions,
+  type NodeReparentOptions,
+  type NodeReparentResult,
   type OperationHookContext,
   type OperationOutcomeFacts,
   type UpdateNodeInput,
@@ -280,7 +283,6 @@ import {
 } from "./node-write-pipeline";
 import {
   atomicResolvedUpdateAttemptBudget,
-  booleanWriteResultChanges,
   type HookedWritePlanContext,
   type OverlaidSessionMint,
   runAtomicProgramWithHooks,
@@ -2674,8 +2676,8 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
   work: CompositionCreateWork | undefined,
   partId: string,
   temporal: Readonly<{ validFrom?: string | null; validTo?: string }> = {},
-): Promise<void> {
-  if (work === undefined) return;
+): Promise<EdgeCreatePrepared | undefined> {
+  if (work === undefined) return undefined;
   const prepared = await prepareCompositionCreateEdge(
     ctx,
     target,
@@ -2686,6 +2688,7 @@ async function attachCompositionCreateEdge<G extends GraphDef>(
     { endpoints: { source: "read" }, validateAcyclicity: true },
   );
   await insertPreparedCompositionEdge(ctx, session, prepared);
+  return prepared;
 }
 
 /**
@@ -2786,26 +2789,6 @@ async function insertPreparedCompositionEdge<G extends GraphDef>(
   prepared: EdgeCreatePrepared,
 ): Promise<void> {
   await session.createEdgeNoReturn(edgeInsertWork(ctx, prepared));
-}
-
-/**
- * The composition edge's temporal window, inherited verbatim from
- * the part's own INSERT params — the one place every create shape (single,
- * both batch shapes) reads `validFrom`/`validTo` off `insertParams` into
- * {@link attachCompositionCreateEdge}'s `temporal` parameter, so the three
- * call sites cannot drift on which fields they forward.
- */
-function compositionTemporalFromInsertParams(
-  insertParams: Pick<InsertNodeParams, "validFrom" | "validTo">,
-): Readonly<{ validFrom?: string | null; validTo?: string }> {
-  return {
-    ...(insertParams.validFrom === undefined ?
-      {}
-    : { validFrom: insertParams.validFrom }),
-    ...(insertParams.validTo === undefined ?
-      {}
-    : { validTo: insertParams.validTo }),
-  };
 }
 
 /**
@@ -2957,7 +2940,7 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
       lock,
       work,
       prepared.id,
-      compositionTemporalFromInsertParams(prepared.insertParams),
+      work.edgeWindow,
       {
         endpoints: {
           source: "primedWhole",
@@ -3024,6 +3007,35 @@ async function attachBatchCompositionCreateEdges<G extends GraphDef>(
  * non-monotonic one — issue #242's failure mode), and neither is fenceable:
  * each write is legal at the instant it samples.
  */
+type AttachmentApplyResult = Readonly<{
+  wrote: boolean;
+  edge: Edge | undefined;
+}>;
+
+async function readHeldEdge(
+  target: WriteTarget,
+  graphId: string,
+  id: string,
+): Promise<Edge> {
+  const row = await target.getEdge(graphId, id);
+  return rowToEdge(
+    requireDefined(row, `composition edge "${id}" was written but not readable`),
+  );
+}
+
+function attachmentWindow(
+  work: CompositionCreateWork,
+  moveAt: string | undefined,
+): Readonly<{ validFrom?: string | null; validTo?: string }> {
+  if (moveAt === undefined) return work.edgeWindow;
+  return {
+    validFrom: moveAt,
+    ...(work.edgeWindow.validTo === undefined ?
+      {}
+    : { validTo: work.edgeWindow.validTo }),
+  };
+}
+
 async function applyCompositionAttachmentDecision<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: WriteSession,
@@ -3031,27 +3043,38 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
   lock: GraphWriteLock,
   partId: string,
   decided: FencedCompositionAttachment,
-): Promise<boolean> {
+  moveAt?: string,
+): Promise<AttachmentApplyResult> {
   const { request, disposition } = decided;
   const { work } = request;
   const partKind = work.partKind;
-  if (disposition === "satisfied") return false;
+  if (disposition === "satisfied") {
+    return {
+      wrote: false,
+      edge:
+        decided.incumbent === undefined ?
+          undefined
+        : rowToEdge(decided.incumbent.edge),
+    };
+  }
 
   if (disposition === "attach") {
-    // A fresh attachment states no window of its own: the realizing edge's
-    // lower bound is the insert's own default, exactly as it is for every
-    // other create path. Only a MOVE needs an explicit instant (below), and
-    // only because the two halves have to abut.
-    await attachCompositionCreateEdge(
+    const prepared = await attachCompositionCreateEdge(
       ctx,
       session,
       target,
       lock,
       work,
       partId,
-      {},
+      attachmentWindow(work, moveAt),
     );
-    return true;
+    return {
+      wrote: true,
+      edge:
+        prepared === undefined ?
+          undefined
+        : await readHeldEdge(target, ctx.graphId, prepared.insertParams.id),
+    };
   }
 
   // `"replace"`: the incumbent is retired and the requested attachment takes
@@ -3061,7 +3084,7 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
     decided.incumbent,
     'decideCompositionIncumbent answered "replace" with no incumbent read',
   );
-  const moveInstant = nowIso();
+  const moveInstant = moveAt ?? nowIso();
   // Prepared BEFORE the incumbent is retired, so a refusal leaves the part
   // attached where it was; `createRetiringEdgeValidationBackend` owns why the
   // count must already exclude the retiring row.
@@ -3071,7 +3094,7 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
     lock,
     work,
     partId,
-    { validFrom: moveInstant },
+    attachmentWindow(work, moveInstant),
     { endpoints: { source: "read" }, validateAcyclicity: true },
   );
   const incumbentPair = requireCompositionPairVia(
@@ -3119,7 +3142,10 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
   }
 
   await insertPreparedCompositionEdge(ctx, session, replacement);
-  return true;
+  return {
+    wrote: true,
+    edge: await readHeldEdge(target, ctx.graphId, replacement.insertParams.id),
+  };
 }
 
 /**
@@ -3203,7 +3229,8 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
   lock: GraphWriteLock,
   partId: string,
   request: CompositionAttachmentRequest,
-): Promise<boolean> {
+  moveAt?: string,
+): Promise<AttachmentApplyResult> {
   return applyCompositionAttachmentDecision(
     ctx,
     session,
@@ -3218,6 +3245,7 @@ async function applyCompositionAttachmentUnderFence<G extends GraphDef>(
       request,
       lock,
     ),
+    moveAt,
   );
 }
 
@@ -3411,10 +3439,31 @@ export async function executeNodeReparent<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   id: string,
-  attachment: CompositionAttachment,
+  options: NodeReparentOptions,
   backend: GraphBackend | TransactionBackend,
-  options: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
-): Promise<void> {
+  disposition: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
+): Promise<NodeReparentResult> {
+  const [result] = await executeNodeReparentBatch(
+    ctx,
+    kind,
+    [{ id, options }],
+    backend,
+    disposition,
+  );
+  return requireDefined(
+    result,
+    "executeNodeReparentBatch returned no result for a single reparent",
+  );
+}
+
+export async function executeNodeReparentBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+  backend: GraphBackend | TransactionBackend,
+  disposition: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
+): Promise<readonly NodeReparentResult[]> {
+  if (items.length === 0) return [];
   if (!ctx.registry.isCompositionPart(kind)) {
     throw new ConfigurationError(
       `Node kind "${kind}" is not a composition part: it declares no partOf/hasPart pair toward any whole.`,
@@ -3424,20 +3473,86 @@ export async function executeNodeReparent<G extends GraphDef>(
       },
     );
   }
-  await runCompositionAttachmentWritePlan(
-    ctx,
-    kind,
-    id,
-    // Synchronous and read-free: an undeclared pair, an unknown `via`, and an
-    // ambiguous omitted `via` all refuse before any row is read or locked.
-    resolveCompositionAttachmentRequest(
+  const resolved = items.map((item) => ({
+    id: item.id,
+    moveAt: resolveReparentInstant(item.options),
+    request: resolveCompositionAttachmentRequest(
       ctx.registry,
-      { kind, id },
-      attachment,
-      options.onIncumbent,
+      { kind, id: item.id },
+      item.options,
+      disposition.onIncumbent,
+    ),
+  }));
+  for (const item of resolved) {
+    const gate = await backend.getNode(ctx.graphId, kind, item.id);
+    if (!gate || !isLiveNodeRow(gate))
+      throw new NodeNotFoundError(kind, item.id);
+  }
+  const first = requireDefined(resolved[0]);
+  return runHookedWritePlan(
+    nodeWritePlanContext(ctx),
+    ctx.createOperationContext("update", "node", kind, first.id),
+    mixedWritePlan(
+      compositionEdgeConstraintFence(ctx, first.request.work),
+      false,
     ),
     backend,
+    async (session, target, _overlaidSession, lock) => {
+      const results: NodeReparentResult[] = [];
+      for (const item of resolved) {
+        const part = await target.getNode(ctx.graphId, kind, item.id);
+        if (!part || !isLiveNodeRow(part)) {
+          throw new NodeNotFoundError(kind, item.id);
+        }
+        const applied = await applyCompositionAttachmentUnderFence(
+          ctx,
+          session,
+          target,
+          lock,
+          item.id,
+          item.request,
+          item.moveAt,
+        );
+        results.push({
+          moved: applied.wrote,
+          edge: requireDefined(
+            applied.edge,
+            "a reparent that did not refuse produced no holding edge",
+          ),
+        });
+      }
+      return results;
+    },
+    { didWrite: (results) => results.some((result) => result.moved) },
   );
+}
+
+function resolveReparentInstant(options: NodeReparentOptions): string {
+  if (options.validFrom === null) {
+    throw new ConfigurationError(
+      "reparent cannot honor validFrom: null. A move has one instant, shared by the retired window's end and the new edge's start.",
+      { code: "COMPOSITION_REPARENT_INSTANT_CONFLICT" },
+      {
+        suggestion:
+          "Pass `at`, or a string `validFrom`, or omit both to read the clock once.",
+      },
+    );
+  }
+  if (
+    options.at !== undefined &&
+    options.validFrom !== undefined &&
+    options.at !== options.validFrom
+  ) {
+    throw new ConfigurationError(
+      `reparent cannot honor both at (${options.at}) and validFrom (${options.validFrom}): a move has one instant.`,
+      {
+        code: "COMPOSITION_REPARENT_INSTANT_CONFLICT",
+        at: options.at,
+        validFrom: options.validFrom,
+      },
+    );
+  }
+  return options.at ?? options.validFrom ?? nowIso();
 }
 
 /**
@@ -3457,12 +3572,13 @@ async function runCompositionAttachmentWritePlan<G extends GraphDef>(
   id: string,
   request: CompositionAttachmentRequest,
   backend: GraphBackend | TransactionBackend,
-): Promise<void> {
+  moveAt?: string,
+): Promise<AttachmentApplyResult> {
   const gate = await backend.getNode(ctx.graphId, kind, id);
   if (!gate || !isLiveNodeRow(gate)) throw new NodeNotFoundError(kind, id);
 
   const opContext = ctx.createOperationContext("update", "node", kind, id);
-  await runHookedWritePlan(
+  return runHookedWritePlan(
     nodeWritePlanContext(ctx),
     opContext,
     // `entity: "mixed"`: this frame writes only edges, but it writes TWO of
@@ -3487,9 +3603,10 @@ async function runCompositionAttachmentWritePlan<G extends GraphDef>(
         lock,
         id,
         request,
+        moveAt,
       );
     },
-    { didWrite: booleanWriteResultChanges },
+    { didWrite: (applied) => applied.wrote },
   );
 }
 
@@ -3648,11 +3765,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       projectionFusionEligible &&
       supportsNodeInsertProjections(target, projections);
 
-    // Reads `prepared.insertParams`, the SAME source the batch
-    // paths read, rather than `input` directly — one owner for "what
-    // validity window does the composition edge inherit from its part",
-    // shared by every create shape.
-    const attachCompositionEdge = (): Promise<void> =>
+    // The realizing edge's window is the attachment's own
+    // (`compositionWork.edgeWindow`), never the part node's insert params.
+    const attachCompositionEdge = (): Promise<EdgeCreatePrepared | undefined> =>
       attachCompositionCreateEdge(
         ctx,
         session,
@@ -3660,7 +3775,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         lock,
         compositionWork,
         id,
-        compositionTemporalFromInsertParams(prepared.insertParams),
+        compositionWork?.edgeWindow ?? {},
       );
 
     const existing = prepared.tombstone;

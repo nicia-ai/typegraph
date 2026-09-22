@@ -13,8 +13,14 @@
  * field the caller cannot evidence stays absent rather than being guessed.
  */
 import type { MergePlanAnchors } from "./plan-schema";
-import type { IdentityDecisionProvenance } from "./typegraph-internal";
-import type { IdentityReconciliation } from "./types";
+import type {
+  IdentityDecisionPolicyRecord,
+  IdentityDecisionProvenance,
+} from "./typegraph-internal";
+import type {
+  IdentityReconciliation,
+  IdentityUnresolvedConflict,
+} from "./types";
 
 /**
  * Root-first branch ancestry: the base (or fork-point) graph, then each branch
@@ -56,21 +62,48 @@ export function branchAncestryFromAnchors(
  */
 function identityDecisionPolicy(
   reconciliations: readonly IdentityReconciliation[],
-): string | undefined {
-  const arms = new Set<string>();
-  for (const reconciliation of reconciliations) {
-    if (reconciliation.policy !== undefined) {
-      arms.add(`assertion:${reconciliation.policy}`);
+  conflicts: readonly IdentityUnresolvedConflict[],
+): IdentityDecisionPolicyRecord | undefined {
+  const assertion = [
+    ...new Set(
+      reconciliations.flatMap((reconciliation) =>
+        reconciliation.policy === undefined ? [] : [reconciliation.policy],
+      ),
+    ),
+  ].toSorted();
+  for (const conflict of conflicts) {
+    if (conflict.kind === "assertion" && !assertion.includes("flag")) {
+      assertion.push("flag");
+      assertion.sort();
     }
   }
-  if (arms.size === 0) return undefined;
-  return [...arms].toSorted().join(",");
+  const edge =
+    conflicts.some((conflict) => conflict.kind === "edge") ?
+      ("flag" as const)
+    : undefined;
+  const uniqueness =
+    conflicts.some((conflict) => conflict.kind === "uniqueness") ?
+      ("flag" as const)
+    : undefined;
+  if (
+    assertion.length === 0 &&
+    edge === undefined &&
+    uniqueness === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(assertion.length === 0 ? {} : { assertion }),
+    ...(edge === undefined ? {} : { edge }),
+    ...(uniqueness === undefined ? {} : { uniqueness }),
+  };
 }
 
 /** The evidence an apply site has for the decision it is about to record. */
 export type MergeIdentityDecisionInput = Readonly<{
   branchAncestry: readonly string[];
   reconciliations: readonly IdentityReconciliation[];
+  conflicts?: readonly IdentityUnresolvedConflict[];
   mergePlanDigest?: string | undefined;
   reviewDigest?: string | undefined;
   sourceId?: string | undefined;
@@ -84,7 +117,10 @@ export type MergeIdentityDecisionInput = Readonly<{
 export function mergeIdentityDecision(
   input: MergeIdentityDecisionInput,
 ): IdentityDecisionProvenance {
-  const policy = identityDecisionPolicy(input.reconciliations);
+  const policy = identityDecisionPolicy(
+    input.reconciliations,
+    input.conflicts ?? [],
+  );
   // [root, branch] — exactly one branch merged, so naming it is unambiguous.
   const soleBranch =
     input.branchAncestry.length === 2 ? input.branchAncestry[1] : undefined;

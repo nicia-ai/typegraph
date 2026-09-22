@@ -59,7 +59,11 @@ import {
 } from "../query/schema-introspector";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
-import { partitionCompositionEdgeKindsByDirection } from "../registry/composition-relation";
+import {
+  compositionViaKind,
+  type CompositionViaRef,
+  partitionCompositionEdgeKindsByDirection,
+} from "../registry/composition-relation";
 import type { KindRegistry } from "../registry/kind-registry";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
@@ -324,12 +328,30 @@ type SubgraphEdgeResultForKind<
 // Options & Result Types
 // ============================================================
 
+export type SubgraphCompositionSelection =
+  boolean | Readonly<{ via?: CompositionViaRef }>;
+
+function compositionRequested(
+  composition: SubgraphCompositionSelection | undefined,
+): boolean {
+  return composition === true || typeof composition === "object";
+}
+
+function compositionViaOf(
+  composition: SubgraphCompositionSelection | undefined,
+): string | undefined {
+  if (typeof composition !== "object") return undefined;
+  return composition.via === undefined ?
+      undefined
+    : compositionViaKind(composition.via);
+}
+
 export type SubgraphOptions<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
   P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
-  C extends boolean | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 > = Readonly<{
   /** Edge kinds to follow during traversal. Edges not listed are not traversed. */
   edges: readonly EK[];
@@ -426,7 +448,7 @@ export type InternalSubgraphOptions<
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
   P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
-  C extends boolean | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 > = Omit<SubgraphOptions<G, EK, NK, P, C>, "recordedAsOf"> &
   Readonly<{
     recordedAsOf?: RecordedInstant;
@@ -472,8 +494,17 @@ export type SubgraphEdgeResult<
 export type SubgraphResultEdgeKinds<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
-  C extends boolean | undefined,
-> = true extends C ? EdgeKinds<G> : EK;
+  C extends SubgraphCompositionSelection | undefined,
+> =
+  | EK
+  | (true extends C ? EdgeKinds<G>
+    : C extends { via: infer V } ?
+      [V] extends [AnyEdgeType] ?
+        V["kind"] extends EdgeKinds<G> ?
+          V["kind"]
+        : EdgeKinds<G>
+      : EdgeKinds<G>
+    : never);
 
 /**
  * The projection a `subgraph(...)` call may state, keyed by the edge kinds its
@@ -489,7 +520,7 @@ export type SubgraphProjectFor<
   G extends GraphDef,
   NK extends NodeKinds<G>,
   EK extends EdgeKinds<G>,
-  C extends boolean | undefined,
+  C extends SubgraphCompositionSelection | undefined,
 > = SubgraphProject<G, NK, SubgraphResultEdgeKinds<G, EK, C>>;
 
 /**
@@ -573,7 +604,8 @@ type SubgraphExecutionParams<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 > = Readonly<{
   graph: G;
   graphId: string;
@@ -817,13 +849,14 @@ async function resolveSubgraphCompositionEdgeKinds<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 >(
-  params: SubgraphExecutionParams<G, EK, NK, P>,
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
   ctx: SubgraphContext,
   baseSchema: SqlSchema,
 ): Promise<readonly string[]> {
-  if (params.options.composition !== true) return [];
+  if (!compositionRequested(params.options.composition)) return [];
   if (params.registry.compositionEdgeKinds().length === 0) {
     throw new ConfigurationError(
       `subgraph({ composition: true }) requires the graph to declare at least one partOf/hasPart relation, but "${params.graphId}" declares none.`,
@@ -834,7 +867,7 @@ async function resolveSubgraphCompositionEdgeKinds<
       },
     );
   }
-  return fetchCompositionEdgeKindsForRoot({
+  const compositionEdgeKinds = await fetchCompositionEdgeKindsForRoot({
     registry: params.registry,
     backend: params.backend,
     schema: baseSchema,
@@ -844,6 +877,25 @@ async function resolveSubgraphCompositionEdgeKinds<
     asOf: ctx.asOf,
     recordedAsOf: ctx.recordedAsOf,
   });
+  const requestedVia = compositionViaOf(params.options.composition);
+  if (
+    requestedVia !== undefined &&
+    !compositionEdgeKinds.includes(requestedVia)
+  ) {
+    throw new ConfigurationError(
+      `subgraph composition via "${requestedVia}" realizes no partOf/hasPart pair under the root of "${params.graphId}".`,
+      {
+        code: "COMPOSITION_VIA_NOT_DECLARED",
+        via: requestedVia,
+        declaredVia: compositionEdgeKinds,
+      },
+      {
+        suggestion:
+          "Pass via naming a realizing edge of this root's composition, or pass composition: true to include every realizing edge.",
+      },
+    );
+  }
+  return requestedVia === undefined ? compositionEdgeKinds : [requestedVia];
 }
 
 function buildSubgraphCompositionReachableCte<

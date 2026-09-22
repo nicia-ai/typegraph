@@ -134,14 +134,14 @@ export type UniquenessComponentProbeGroup = Readonly<{
 }>;
 
 /** One data check a schema commit owes before it may publish an ontology tightening. */
-export type OntologyDataProbe =
+type OntologyDataProbeBody =
   | Readonly<{
       kind: "nodeDisjointness";
       /** Disjoint kind pairs the proposal ADDS, after propagation. Canonical order. */
       pairs: readonly (readonly [string, string])[];
     }>
   | Readonly<{
-      kind: "nodeUniquenessComponent";
+      kind: "nodeUniqueness";
       /**
        * One entry per `(constraint name, merged component)` the proposal
        * creates.
@@ -163,7 +163,7 @@ export type OntologyDataProbe =
       edgeKinds: readonly string[];
     }>
   | Readonly<{
-      kind: "compositionSingleWhole";
+      kind: "composition";
       /**
        * The realizing (`via`) edge kinds of the `partOf`/`hasPart` pairs
        * ADDED this commit — delta-scoped like every other family here, so a
@@ -176,7 +176,7 @@ export type OntologyDataProbe =
       edgeKinds: readonly string[];
     }>
   | Readonly<{
-      kind: "compositionRequiredWhole";
+      kind: "compositionExistence";
       /**
        * The realizing (`via`) edge kinds of the `partOf`/`hasPart` pairs
        * added this commit that ALSO declare `existence: "required"`. Item
@@ -186,6 +186,43 @@ export type OntologyDataProbe =
        */
       edgeKinds: readonly string[];
     }>;
+
+/**
+ * The violation families each probe can produce. `compositionSingleWhole`
+ * fans out into both `composition` and `edgeAcyclicity`; every other probe
+ * names the family a `verifyConstraintFences()` row uses for the same fact.
+ * `edgeCardinality` has no ontology probe — it is a write-time fence, not a
+ * schema-commit check. {@link probeCoversViolationFamily} is the join.
+ */
+export const PROBE_VIOLATION_FAMILIES = {
+  nodeDisjointness: ["nodeDisjointness"],
+  nodeUniqueness: ["nodeUniqueness"],
+  edgeEndpointAssignability: ["edgeEndpointAssignability"],
+  edgeAcyclicity: ["edgeAcyclicity"],
+  composition: ["composition", "edgeAcyclicity"],
+  compositionExistence: ["compositionExistence"],
+} as const satisfies Record<OntologyDataProbeBody["kind"], readonly string[]>;
+
+export type OntologyDataProbe = OntologyDataProbeBody &
+  Readonly<{
+    families: (typeof PROBE_VIOLATION_FAMILIES)[OntologyDataProbeBody["kind"]];
+  }>;
+
+export function stampProbeFamilies<P extends OntologyDataProbeBody>(
+  probe: P,
+): OntologyDataProbe {
+  return {
+    ...probe,
+    families: PROBE_VIOLATION_FAMILIES[probe.kind],
+  };
+}
+
+export function probeCoversViolationFamily(
+  probe: Pick<OntologyDataProbe, "families">,
+  family: string,
+): boolean {
+  return (probe.families as readonly string[]).includes(family);
+}
 
 /**
  * A change to the ontology. Moved here from `migration.ts`, which
@@ -576,7 +613,7 @@ function classifyKnownRelationSeverity(
       return direction === "added" ?
           {
             severity: "warning",
-            probeKinds: ["nodeUniquenessComponent", "nodeDisjointness"],
+            probeKinds: ["nodeUniqueness", "nodeDisjointness"],
           }
         : { severity: "warning", probeKinds: ["edgeEndpointAssignability"] };
     }
@@ -602,8 +639,8 @@ function classifyKnownRelationSeverity(
         severity: "warning",
         probeKinds:
           relation.existence === "required" ?
-            ["compositionSingleWhole", "compositionRequiredWhole"]
-          : ["compositionSingleWhole"],
+            ["composition", "compositionExistence"]
+          : ["composition"],
       };
     }
     case META_EDGE_BROADER:
@@ -650,24 +687,23 @@ function buildProbe(
 ): OntologyDataProbe {
   switch (kind) {
     case "nodeDisjointness": {
-      return { kind, pairs: context.disjointnessPairs };
+      return stampProbeFamilies({ kind, pairs: context.disjointnessPairs });
     }
-    case "nodeUniquenessComponent": {
-      return { kind, groups: context.uniquenessGroups };
+    case "nodeUniqueness": {
+      return stampProbeFamilies({ kind, groups: context.uniquenessGroups });
     }
     case "edgeEndpointAssignability": {
-      return { kind, allowances: context.endpointAllowances };
+      return stampProbeFamilies({
+        kind,
+        allowances: context.endpointAllowances,
+      });
     }
-    case "compositionSingleWhole":
-    case "compositionRequiredWhole": {
-      // `relation.via` is always present here: `classifyKnownRelationSeverity`
-      // only attaches either probe kind to a `partOf`/`hasPart` relation, and
-      // R3 (schema load) already refuses one persisted without `via` before
-      // this classifier ever sees it.
-      return {
+    case "composition":
+    case "compositionExistence": {
+      return stampProbeFamilies({
         kind,
         edgeKinds: relation.via === undefined ? [] : [relation.via],
-      };
+      });
     }
   }
 }
@@ -777,8 +813,8 @@ function classifyExistenceChange(
     severity: "warning",
     details: `Relation ${relationDescription(after)} tightened existence from "${beforeExistence}" to "${afterExistence}"`,
     probes: [
-      buildProbe("compositionSingleWhole", context, after),
-      buildProbe("compositionRequiredWhole", context, after),
+      buildProbe("composition", context, after),
+      buildProbe("compositionExistence", context, after),
     ],
   };
 }
@@ -812,7 +848,9 @@ export function classifyOntologyChanges(
       name: edgeKind,
       severity: "warning",
       details: `Edge "${edgeKind}" declared acyclic: true`,
-      probes: [{ kind: "edgeAcyclicity", edgeKinds: [edgeKind] }],
+      probes: [
+        stampProbeFamilies({ kind: "edgeAcyclicity", edgeKinds: [edgeKind] }),
+      ],
     });
   }
   for (const edgeKind of edgeAcyclicityRemovedDelta(before, after)) {
@@ -918,8 +956,8 @@ export function classifyOntologyChanges(
  */
 const EDGE_KIND_PROBE_KINDS = [
   "edgeAcyclicity",
-  "compositionSingleWhole",
-  "compositionRequiredWhole",
+  "composition",
+  "compositionExistence",
 ] as const;
 
 type EdgeKindProbeKind = (typeof EDGE_KIND_PROBE_KINDS)[number];
@@ -970,7 +1008,7 @@ export function ontologyTighteningProbes(
           for (const pair of probe.pairs) pairs.set(pairKey(pair), pair);
           break;
         }
-        case "nodeUniquenessComponent": {
+        case "nodeUniqueness": {
           for (const group of probe.groups) groups.set(groupKey(group), group);
           break;
         }
@@ -981,8 +1019,8 @@ export function ontologyTighteningProbes(
           break;
         }
         case "edgeAcyclicity":
-        case "compositionSingleWhole":
-        case "compositionRequiredWhole": {
+        case "composition":
+        case "compositionExistence": {
           const collected = edgeKindProbes.get(probe.kind) ?? new Set<string>();
           for (const edgeKind of probe.edgeKinds) collected.add(edgeKind);
           edgeKindProbes.set(probe.kind, collected);
@@ -994,36 +1032,44 @@ export function ontologyTighteningProbes(
 
   const result: OntologyDataProbe[] = [];
   if (pairs.size > 0) {
-    result.push({
-      kind: "nodeDisjointness",
-      pairs: [...pairs.values()].toSorted((left, right) =>
-        compareStringTuples(pairTuple(left), pairTuple(right)),
-      ),
-    });
+    result.push(
+      stampProbeFamilies({
+        kind: "nodeDisjointness",
+        pairs: [...pairs.values()].toSorted((left, right) =>
+          compareStringTuples(pairTuple(left), pairTuple(right)),
+        ),
+      }),
+    );
   }
   if (groups.size > 0) {
-    result.push({
-      kind: "nodeUniquenessComponent",
-      groups: [...groups.values()].toSorted((left, right) =>
-        compareStringTuples(groupTuple(left), groupTuple(right)),
-      ),
-    });
+    result.push(
+      stampProbeFamilies({
+        kind: "nodeUniqueness",
+        groups: [...groups.values()].toSorted((left, right) =>
+          compareStringTuples(groupTuple(left), groupTuple(right)),
+        ),
+      }),
+    );
   }
   if (allowances.size > 0) {
-    result.push({
-      kind: "edgeEndpointAssignability",
-      allowances: [...allowances.values()].toSorted((left, right) =>
-        compareStrings(left.edgeKind, right.edgeKind),
-      ),
-    });
+    result.push(
+      stampProbeFamilies({
+        kind: "edgeEndpointAssignability",
+        allowances: [...allowances.values()].toSorted((left, right) =>
+          compareStrings(left.edgeKind, right.edgeKind),
+        ),
+      }),
+    );
   }
   for (const kind of EDGE_KIND_PROBE_KINDS) {
     const collected = edgeKindProbes.get(kind);
     if (collected === undefined || collected.size === 0) continue;
-    result.push({
-      kind,
-      edgeKinds: [...collected].toSorted(compareStrings),
-    });
+    result.push(
+      stampProbeFamilies({
+        kind,
+        edgeKinds: [...collected].toSorted(compareStrings),
+      }),
+    );
   }
   return result;
 }

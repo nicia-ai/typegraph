@@ -34,6 +34,7 @@ import {
   assertPermittedExpansionAxis,
   type DefaultAliasExpansionAxis,
   expandKindsForAxis,
+  SEARCH_EXPANSION_DEFAULT,
 } from "../query/builder/alias-expansion";
 import { type QueryBuilder } from "../query/builder/query-builder";
 import { type NodeAccessor } from "../query/builder/types";
@@ -327,7 +328,7 @@ function buildKindCandidates(
 function resolveSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
-  axis: DefaultAliasExpansionAxis = "exact",
+  axis: DefaultAliasExpansionAxis = SEARCH_EXPANSION_DEFAULT,
 ): readonly string[] {
   assertPermittedExpansionAxis(axis, SEARCH_EXPANSION_AXES, "search");
   if (axis === "subclasses" && ctx.createQuery === undefined) {
