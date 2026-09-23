@@ -1040,6 +1040,17 @@ export function requiredCompositionPartKinds(
 }
 
 /**
+ * Whether the registry declares any required-existence composition part kind:
+ * a graph whose parts and their attaching composition edges must be written
+ * in ONE import transaction, since a part committed alone is an orphan.
+ */
+export function declaresRequiredCompositionParts(
+  registry: KindRegistry,
+): boolean {
+  return requiredCompositionPartKinds(registry).length > 0;
+}
+
+/**
  * How many parts one attachment page resolves at a time — the `findNodesByKind`
  * limit the audit pages on, and the chunk size every other consumer of
  * {@link readCompositionAttachmentsForPage} (provenance's support computation)

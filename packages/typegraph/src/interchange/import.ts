@@ -137,7 +137,10 @@ import {
   edgeMatchIdentityUpdateRefusal,
   resolveEdgeMatchIdentityStorage,
 } from "../store/edge-match-key";
-import { findLiveCompositionWhole } from "../store/operations/composition-create";
+import {
+  declaresRequiredCompositionParts,
+  findLiveCompositionWhole,
+} from "../store/operations/composition-create";
 import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
 import {
   createNodeBatchValidationSeams,
@@ -684,6 +687,12 @@ async function importGraphData<G extends GraphDef>(
  * Nodes must precede edges. Once a node chunk commits, edge validation reads the
  * target store rather than retaining every imported node id in memory.
  *
+ * Refused with a typed {@link ConfigurationError}
+ * (`IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED`) before any chunk is read
+ * when the target graph declares a required-existence composition part kind:
+ * a part and the edge attaching it arrive in different chunks, so only
+ * {@link importGraph}'s single transaction can check the part's attachment.
+ *
  * Refused with a typed {@link ConfigurationError} when the target writes through
  * a serialized database connection that another long-lived interchange stream
  * already holds — either because this stream came from a snapshot export on that
@@ -714,6 +723,7 @@ export async function importGraphStream<G extends GraphDef>(
 ): Promise<ImportResult> {
   const store = resolveIngestionImportTarget<G>(target);
   const options = ImportOptionsSchema.parse(rawOptions);
+  assertStreamedImportSupportsComposition(store);
   const sourceBackend = exportStreamBackend(chunks);
   const targetBackend = storeBackend(store);
   // Whether this export would hold the connection the import writes through is
@@ -1070,6 +1080,30 @@ function throwIfStreamChunkFailed(
     "Graph interchange stream aborted after a chunk reported import errors. " +
       `Reported errors: ${summarizeImportErrors(result.errors)}. ` +
       'Earlier chunks remain committed; use onStreamChunkError: "continue" for best-effort ingestion.',
+  );
+}
+
+/**
+ * Refuses a streamed import into a graph that declares required-existence
+ * composition parts, before any chunk is read. Every chunk commits on its own,
+ * and a part's attaching edge arrives in a later chunk than the part itself,
+ * so the required-existence check can only be exact inside ONE transaction —
+ * which `importGraph` provides.
+ */
+function assertStreamedImportSupportsComposition<G extends GraphDef>(
+  store: Store<G>,
+): void {
+  if (!declaresRequiredCompositionParts(store.registry)) return;
+  throw new ConfigurationError(
+    "Streamed import cannot validate required-existence composition parts: each chunk commits separately, so a part would commit before the edge that attaches it.",
+    {
+      code: "IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED",
+      graphId: store.graphId,
+    },
+    {
+      suggestion:
+        "Use importGraph(), which writes every node and edge in one transaction and checks each required part's attachment there.",
+    },
   );
 }
 

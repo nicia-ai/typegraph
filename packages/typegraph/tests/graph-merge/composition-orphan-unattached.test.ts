@@ -24,23 +24,14 @@
  *
  * The branch is HAND-BUILT (`GraphBranch`'s own docblock: "the merge
  * primitive's own committed-target stand-in, `tests/`-only fixtures") rather
- * than produced by `branch()`, for two reasons:
- *
- * 1. `branch()`'s default working-copy strategy clones the fork point
- *    through `importGraphStream`, which validates a required-existence
- *    part's `partOf` PER STREAM CHUNK ("nodes" then "edges" are separate
- *    `importGraphData` calls, each with its own fresh `pendingRequiredParts`)
- *    rather than across the whole clone — so it refuses to clone ANY store
- *    holding a live required-existence part, independent of this file's
- *    fix. That gap is orthogonal to this fix and out of scope here.
- * 2. The branch's edit must be recognizable as touching the SAME inherited
- *    edge the fork point (and target) carry — which needs the branch's copy
- *    to share the fork point's exact edge id. Ordinary node-create (via
- *    `partOf`) auto-generates a fresh id for its composition edge, so the
- *    branch and the fork point would otherwise diverge on id for what is
- *    supposed to be the identical inherited row. The branch's row is
- *    instead planted with `backend.insertNode`/`insertEdge` directly,
- *    copying the fork point's OWN ids verbatim.
+ * than produced by `branch()`, because its edit — dropping the part's only
+ * composition edge while both endpoints stay live — is one the branch store's
+ * own write path refuses. The branch's rows are instead planted with
+ * `backend.insertNode`/`insertEdge` directly, copying the fork point's OWN ids
+ * verbatim, so the merge recognizes the edit as touching the SAME inherited
+ * edge. `branch()` itself clones a store holding a live required part through
+ * a single-transaction `importGraph` (a streamed import commits per chunk and
+ * refuses such graphs upfront); the first case below pins that clone.
  *
  * The target is `forkPoint` itself: the "target evolved no differently from
  * the fork point" case `composition-orphan.test.ts` already establishes as
@@ -66,6 +57,7 @@ import { z } from "zod";
 
 import { rowPropsToObject } from "../../src/backend/types";
 import { computeBaseVersion } from "../../src/graph-merge/base-version";
+import { branch } from "../../src/graph-merge/branch";
 import type { CanonicalEntity } from "../../src/graph-merge/canonicalize";
 import type { MergedEdge } from "../../src/graph-merge/edge-repoint";
 import {
@@ -213,6 +205,39 @@ describe.each(backendMatrix())(
         props: rowPropsToObject(edgeRow.props),
       });
     }
+
+    it("branch() clones a store holding a live required part exactly", async () => {
+      cleanups = [];
+      const base = await makeStore();
+      await base.nodes.UWhole.create({}, { id: "w1" });
+      await base.nodes.UPart.create(
+        {},
+        { id: "p1", partOf: { kind: "UWhole", id: "w1" } },
+      );
+
+      const cloned = await branch(base, () => makeBackend(), { id: BRANCH_A });
+
+      if (isErr(cloned)) throw cloned.error;
+      const clone = cloned.data.store;
+      const nodeIds = async (store: Store<G>) => ({
+        wholes: (await store.nodes.UWhole.find()).map((node) => node.id),
+        parts: (await store.nodes.UPart.find()).map((node) => node.id),
+      });
+      const edges = async (store: Store<G>) =>
+        (await store.edges.uHolds.find()).map((edge) => ({
+          id: edge.id,
+          from: edge.fromId,
+          to: edge.toId,
+        }));
+      expect(await nodeIds(clone)).toEqual(await nodeIds(base));
+      expect(await edges(clone)).toEqual(await edges(base));
+      expect(await edges(clone)).toHaveLength(1);
+      await cloned.data.close();
+    });
+    // MUTATION CHECK: dropping `declaresRequiredCompositionParts` from the
+    // clone's materialize condition in `working-copy.ts` sends the clone
+    // through `importGraphStream`, which refuses the graph, and `branch()`
+    // fails.
 
     it("reports at plan time and refuses at apply time when a branch drops the part's only composition edge while both endpoints survive", async () => {
       cleanups = [];

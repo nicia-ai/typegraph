@@ -23,10 +23,13 @@ import {
   partOf,
 } from "../../src";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import { ConfigurationError } from "../../src/errors";
 import {
   FORMAT_VERSION,
   type GraphData,
+  type GraphInterchangeChunk,
   importGraph,
+  importGraphStream,
 } from "../../src/interchange";
 import { storeRuntime } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
@@ -358,4 +361,61 @@ describe("validating import: required composition existence", () => {
   // `runtime.detachDeletedImportedIdentityNode(frame.target, ...)` call from
   // `assertImportedRequiredPartsAttached` (src/interchange/import.ts). The
   // `validateIdentity()` assertion above then rejects instead of resolving.
+});
+
+describe("streamed import: required composition existence", () => {
+  it("refuses a streamed import into a graph with required parts before reading any chunk, writing no row", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(buildGraph(), backend);
+      const data = payload({
+        nodes: [
+          { kind: "CeiEpisode", id: "episode", properties: {} },
+          { kind: "CeiSegment", id: "segment", properties: {} },
+        ],
+        edges: [
+          {
+            kind: "ceiSegmentOf",
+            id: "segment-of",
+            from: { kind: "CeiSegment", id: "segment" },
+            to: { kind: "CeiEpisode", id: "episode" },
+            properties: {},
+          },
+        ],
+      });
+      let chunksRead = 0;
+      async function* chunks(): AsyncGenerator<GraphInterchangeChunk> {
+        await Promise.resolve();
+        chunksRead += 1;
+        yield {
+          type: "header",
+          header: {
+            formatVersion: data.formatVersion,
+            exportedAt: data.exportedAt,
+            source: data.source,
+          },
+        };
+        chunksRead += 1;
+        yield { type: "nodes", nodes: data.nodes };
+        chunksRead += 1;
+        yield { type: "edges", edges: data.edges };
+      }
+
+      const error = await importGraphStream(store, chunks(), {
+        onConflict: "error",
+        batchSize: 100,
+      }).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as ConfigurationError).details).toMatchObject({
+        code: "IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED",
+      });
+      expect((error as ConfigurationError).suggestion).toMatch(/importGraph/u);
+      expect(chunksRead).toBe(0);
+      expect(await store.nodes.CeiEpisode.find()).toEqual([]);
+      expect(await store.nodes.CeiSegment.find()).toEqual([]);
+    } finally {
+      await backend.close();
+    }
+  });
 });

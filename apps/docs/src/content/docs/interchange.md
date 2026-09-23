@@ -530,7 +530,8 @@ The contract is deliberately narrow:
   or a part/whole cycle. This refusal covers `existence: "required"` pairs
   too — trusted import cannot honor that guarantee any more than the
   one-whole claim, so there is no separate reason code for it. Use
-  `importGraphStream` for a graph with a composition pair;
+  `importGraphStream` for a graph with a composition pair (`importGraph`
+  when a pair declares `existence: "required"`);
   `store.verifyConstraintFences()` reports either problem (plus a required
   part with no whole) after the fact if trusted import is used anyway on
   data prepared outside TypeGraph.
@@ -655,6 +656,14 @@ Only nodes THIS import creates are tracked this way: a required-existence node
 already live on the target that this import merely updates or leaves alone is
 never re-checked, even if it happens to have no whole (a pre-existing gap
 `store.verifyConstraintFences()` — not import — reports).
+
+`importGraphStream` cannot make this check: every chunk commits on its own,
+and a part's composition edge arrives in a later chunk than the part itself.
+A streamed import into a graph that declares any required-existence part kind
+is therefore refused before any chunk is read, with a `ConfigurationError`
+whose `details.code` is `IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED`. Use
+`importGraph` for such a graph. `branch()` and the other working-copy clones
+switch to a materialized `importGraph` for these graphs on their own.
 
 #### An edge that would close a cycle
 

@@ -6,7 +6,10 @@
  * ({@link cloneWorkingCopyStrategy}): `exportGraphStream` the base, then
  * `importGraphStream` into a fresh store on a caller-provided backend. IDs are
  * preserved by interchange, so the diff engine (T3) can key on stable ids across
- * base and fork. This leverages public entrypoints only, needs zero schema
+ * base and fork. The clone falls back to a materialized `exportGraph` /
+ * `importGraph` when a stream cannot run: when the fresh backend shares the
+ * base's snapshot connection, or when the graph declares required-existence
+ * composition parts (a streamed import refuses those). This leverages public entrypoints only, needs zero schema
  * changes, and behaves identically across SQLite and Postgres.
  *
  * INTERCHANGE FIDELITY LIMITATION (verified, design §13.x): the interchange
@@ -67,6 +70,7 @@ import {
   createSqlSchema,
   createStore,
   createStoreWithSchema,
+  declaresRequiredCompositionParts,
   exportGraph,
   exportGraphStream,
   importGraph,
@@ -254,16 +258,19 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
           validateReferences: true,
           batchSize: CLONE_IMPORT_BATCH_SIZE,
         } as const;
-        // When the fresh backend writes through the connection the base's
-        // snapshot export would hold, streaming is exactly what the import
-        // guard refuses — so ask that guard's own predicate, and materialize
-        // the export instead of streaming it when it says so.
+        // Materialize the export instead of streaming it whenever the
+        // streamed import would refuse: when the fresh backend writes through
+        // the connection the base's snapshot export would hold (the import
+        // guard's own predicate), or when the graph declares required-
+        // existence parts, which only a single-transaction import can write
+        // together with their attaching edges.
         const result =
           (
             snapshotExportContention(
               storeBackend(baseStore),
               storeBackend(freshStore),
-            ) === undefined
+            ) === undefined &&
+            !declaresRequiredCompositionParts(freshStore.registry)
           ) ?
             await importGraphStream(
               freshStore,
