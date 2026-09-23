@@ -718,7 +718,8 @@ export function buildLockEdgeClaims(
 }
 
 /**
- * The batch counterpart of {@link buildLockEdgeClaimGuarded}'s `has_incumbent`:
+ * The batch counterpart of {@link buildLockEdgeClaimGuarded}'s
+ * `incumbent_edge_id`:
  * every proposed claim whose axis a live edge OTHER than the proposed one
  * already occupies, with that incumbent's id.
  *
@@ -759,12 +760,14 @@ export function buildReadEdgeClaimIncumbents(
 /**
  * Single-row create-or-lock with an entity-relation guard in its RETURNING
  * projection. The upsert first establishes the cardinality-axis row lock; its
- * returned holder resolves concurrent claimants, while `has_incumbent`
- * catches rows imported or written before the claim relation existed.
+ * returned holder resolves concurrent claimants, while `incumbent_edge_id`
+ * names the live edge already occupying the axis — including one imported or
+ * written before the claim relation existed — ordered by id exactly as
+ * {@link buildReadEdgeClaimIncumbents} reports it.
  *
  * A matching row with the proposed id is excluded. That is the legitimate
  * resurrection/reopen case: the same edge is reclaiming the same axis.
- * PostgreSQL's READ COMMITTED snapshot does not refresh this `EXISTS` after an
+ * PostgreSQL's READ COMMITTED snapshot does not refresh this subquery after an
  * `ON CONFLICT` wait. Managed constrained writes consume the probe-folding
  * contract only while holding TypeGraph's graph advisory lock, so committed
  * preexisting rows are visible and peers cannot publish a claimless row during
@@ -779,6 +782,7 @@ export function buildLockEdgeClaimGuarded(
 ): SQL {
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
+  const edgesName = getTableName(edges);
   const target = edgeCardinalityClaimTarget(params);
 
   return sql`
@@ -799,10 +803,12 @@ export function buildLockEdgeClaimGuarded(
       ${quotedColumn(edgeClaims.updatedAt)} = ${qualified(claimsName, edgeClaims.updatedAt)}
     RETURNING
       ${quotedColumn(edgeClaims.edgeId)} AS holder_edge_id,
-      EXISTS (
-        SELECT 1 FROM ${edges}
+      (
+        SELECT ${qualified(edgesName, edges.id)} FROM ${edges}
         WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), params)}
-      ) AS has_incumbent
+        ORDER BY ${qualified(edgesName, edges.id)}
+        LIMIT 1
+      ) AS incumbent_edge_id
   `;
 }
 

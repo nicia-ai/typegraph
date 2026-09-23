@@ -244,6 +244,59 @@ export function registerCompositionTighteningIntegrationTests(
     // The batch lock then inserts a fresh composition claim for the new edge,
     // the bulk create commits, and the chapter holds two wholes.
 
+    it("names the occupying edge when a single create attaches a second whole, claimed or not", async () => {
+      const id = "composition_tightening_incumbent_id";
+      const store = await context.createStore(buildGraph(id, false));
+      const unclaimedChapter = await store.nodes.CtChapter.create({});
+      const book = await store.nodes.CtBook.create({});
+      const unclaimed = await store.edges.ctChapterOf.create(
+        unclaimedChapter,
+        book,
+        {},
+      );
+
+      await migrateSchema(
+        context.getBackend(),
+        buildGraph(id, true),
+        await activeVersion(context, id),
+      );
+      const [upgradedStore] = await createAdapterStoreWithSchema(
+        buildGraph(id, true),
+        context.getBackend(),
+      );
+      const anthology = await upgradedStore.nodes.CtAnthology.create({});
+      const claimedChapter = await upgradedStore.nodes.CtChapter.create({});
+      const claimed = await upgradedStore.edges.ctChapterOf.create(
+        claimedChapter,
+        book,
+        {},
+      );
+
+      // Written before `partOf`: the incumbent holds no composition claim
+      // row, so the guard's incumbent read is the only thing that names it.
+      await expect(
+        upgradedStore.edges.ctIncludedIn.create(
+          unclaimedChapter,
+          anthology,
+          {},
+        ),
+      ).rejects.toMatchObject({
+        code: "COMPOSITION_WHOLE_OCCUPIED",
+        details: { incumbentEdgeId: unclaimed.id },
+      });
+      await expect(
+        upgradedStore.edges.ctIncludedIn.create(claimedChapter, anthology, {}),
+      ).rejects.toMatchObject({
+        code: "COMPOSITION_WHOLE_OCCUPIED",
+        details: { incumbentEdgeId: claimed.id },
+      });
+    });
+    // MUTATION CHECK: in `claimEdgeCardinalityGuarded`
+    // (src/backend/drizzle/operation-backend-core.ts), report the lock's
+    // `holder_edge_id` instead of `incumbent_edge_id`. For the unclaimed
+    // incumbent the lock inserted the writing edge's own claim, so the
+    // refusal names the refused edge rather than `unclaimed.id`.
+
     it('item E.2: flipping an already-declared pair to existence: "required" refuses a DIRTY graph directly through ensureSchema, never reaching "breaking-change"', async () => {
       const id = "composition_tightening_flip_required";
       const store = await context.createStore(buildFlipGraph(id, false));

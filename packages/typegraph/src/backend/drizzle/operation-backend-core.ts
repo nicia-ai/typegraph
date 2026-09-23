@@ -1962,7 +1962,7 @@ export function createCommonOperationBackend(
    * it is claimed; a composition axis is relation-wide and has no read probe,
    * so a live attachment that predates its `partOf` declaration holds no claim
    * row and only this read can see it — the batch counterpart of the
-   * single-row guard's `has_incumbent`.
+   * single-row guard's `incumbent_edge_id`.
    */
   async function readClaimlessIncumbents(
     entries: readonly ClaimEdgeCardinalityParams[],
@@ -1990,7 +1990,8 @@ export function createCommonOperationBackend(
 
   /**
    * Single-claim fast path. The lock statement reports both the committed
-   * claim holder and whether a claimless live edge already occupies the axis.
+   * claim holder and the live edge, claimed or not, already occupying the
+   * axis.
    * A stale foreign holder is taken over only through a second guarded
    * statement whose fresh snapshot rechecks the entire axis.
    */
@@ -1999,7 +2000,7 @@ export function createCommonOperationBackend(
   ): Promise<EdgeClaimOutcome> {
     const rows = await execution.execAll<{
       holder_edge_id: string;
-      has_incumbent: boolean | number;
+      incumbent_edge_id: string | null;
     }>(operationStrategy.buildLockEdgeClaimGuarded(params, nowIso()));
     const locked = rows[0];
     if (locked === undefined) {
@@ -2008,15 +2009,12 @@ export function createCommonOperationBackend(
         { operation: "insert", entity: "edge" },
       );
     }
-    const hasIncumbent =
-      locked.has_incumbent === true || locked.has_incumbent === 1;
-    if (locked.holder_edge_id === params.edgeId) {
-      return hasIncumbent ?
-          { status: "refused", holderEdgeId: params.edgeId }
-        : { status: "claimed" };
+    const incumbent = locked.incumbent_edge_id ?? undefined;
+    if (incumbent !== undefined) {
+      return { status: "refused", holderEdgeId: incumbent };
     }
-    if (hasIncumbent) {
-      return { status: "refused", holderEdgeId: locked.holder_edge_id };
+    if (locked.holder_edge_id === params.edgeId) {
+      return { status: "claimed" };
     }
 
     const takeOver = await execution.execAll<{ holder_edge_id: string }>(
