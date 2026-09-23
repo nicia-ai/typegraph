@@ -5763,11 +5763,35 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       payload.baselineGraph,
       adopted.backend,
     );
-    await assertEvolvedSchemaRequiredKindsEmpty(
-      adopted.backend,
-      this.graphId,
-      requireDefined(payload.classification),
-    );
+    // Ordering — and the "ontology before identity" reasoning — is spelled
+    // once, at `composeSchemaCommitPreflight` in `../schema/manager`.
+    await composeSchemaCommitPreflight({
+      structural: (target) =>
+        assertEvolvedSchemaRequiredKindsEmpty(
+          target,
+          this.graphId,
+          requireDefined(payload.classification),
+        ),
+      edgeMatchIdentity: undefined,
+      tightening: requirements.schemaTightening,
+      identity:
+        requirements.identityAffectedKinds.length === 0 ?
+          undefined
+        : async (target: SchemaCommitPreflightBackend) => {
+            const storage = await inspectAdoptedIdentityStorage(
+              adopted.backend,
+              this.#sqlSchema(),
+              {
+                graphId: this.graphId,
+                identityTableDdl: this.#baseBackend.identityTableDdl,
+              },
+            );
+            await candidate.identitySchemaPreflight(
+              target,
+              storage.provisionInCommit,
+            );
+          },
+    })(adopted.backend);
     if (requirements.vectorSlots.length > 0) {
       const provision = adopted.backend.ensureVectorSlotContributions;
       if (provision === undefined) {
@@ -5780,20 +5804,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       await provision(requireDefined(payload.vectorSlots), {
         onDrift: "throw",
       });
-    }
-    if (requirements.identityAffectedKinds.length > 0) {
-      const storage = await inspectAdoptedIdentityStorage(
-        adopted.backend,
-        this.#sqlSchema(),
-        {
-          graphId: this.graphId,
-          identityTableDdl: this.#baseBackend.identityTableDdl,
-        },
-      );
-      await candidate.identitySchemaPreflight(
-        adopted.backend,
-        storage.provisionInCommit,
-      );
     }
     const committed = await adopted.backend.commitSchemaVersion({
       graphId: this.graphId,
@@ -6151,22 +6161,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // Ordering — and the "ontology before identity" reasoning — is
           // spelled once, at `composeSchemaCommitPreflight` in
           // `../schema/manager`.
-          composeSchemaCommitPreflight([
-            (target) =>
+          composeSchemaCommitPreflight({
+            structural: (target) =>
               assertEvolvedSchemaRequiredKindsEmpty(
                 target,
                 this.graphId,
                 classification,
               ),
-            schemaTighteningPreflight?.run,
-            identityCandidate === undefined ? undefined : (
-              (target: SchemaCommitPreflightBackend) =>
-                identityCandidate.identitySchemaPreflight(
-                  target,
-                  identityProvisioning?.provisionInCommit ?? [],
-                )
-            ),
-          ]),
+            edgeMatchIdentity: undefined,
+            tightening: schemaTighteningPreflight,
+            identity:
+              identityCandidate === undefined ? undefined : (
+                (target: SchemaCommitPreflightBackend) =>
+                  identityCandidate.identitySchemaPreflight(
+                    target,
+                    identityProvisioning?.provisionInCommit ?? [],
+                  )
+              ),
+          }),
           storedSchema,
           schemaCommitCapabilityError(
             identityCandidate !== undefined,

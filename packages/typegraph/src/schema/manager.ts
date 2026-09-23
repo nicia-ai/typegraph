@@ -541,10 +541,12 @@ export async function ensureSchemaInternal<G extends GraphDef>(
         // `diff` above already classified this exact before/after pair.
         changes: diff.ontology,
       });
-      const preflight = composeSchemaCommitPreflight([
-        schemaTighteningPreflight?.run,
-        identityPreflight,
-      ]);
+      const preflight = composeSchemaCommitPreflight({
+        structural: undefined,
+        edgeMatchIdentity: undefined,
+        tightening: schemaTighteningPreflight,
+        identity: identityPreflight,
+      });
       const committedRow =
         preflight === undefined ?
           await commitNewSchemaVersion(
@@ -865,6 +867,24 @@ function requireCommitWithPreflight(
 type SchemaCommitPreflightStep =
   ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined;
 
+type SchemaCommitPreflightFunction = (
+  target: SchemaCommitPreflightBackend,
+) => Promise<void>;
+
+/**
+ * The steps a schema-commit preflight is composed from, by role. Every key is
+ * required — a path with nothing to run for a role passes `undefined` — so a
+ * commit path cannot drop a role by forgetting it, and never spells the order
+ * the roles run in.
+ */
+export type SchemaCommitPreflightSteps = Readonly<{
+  /** Gates deciding whether the commit is legal at all (dropped/required kinds empty). */
+  structural: SchemaCommitPreflightStep;
+  edgeMatchIdentity: SchemaCommitPreflightStep;
+  tightening: SchemaTighteningPreflight | undefined;
+  identity: SchemaCommitPreflightStep;
+}>;
+
 /**
  * THE atomic-preflight capability error a commit owes, given whether identity
  * contributed a preflight step of its own and which tightening preflight (if
@@ -873,10 +893,12 @@ type SchemaCommitPreflightStep =
  * Identity's error wins whenever identity contributed a step, because its
  * preflight is the one that cannot be split from the commit; a
  * tightening-only commit names the axis it is actually about (see
- * {@link SchemaTighteningPreflight.capabilityError}). One owner, because all
- * three commit paths (`ensureSchema`'s auto-migrate branch, `migrateSchema`,
- * `Store.evolve`) owe the same decision and a copy that drifts would blame
- * the wrong subsystem in an operator-facing refusal.
+ * {@link SchemaTighteningPreflight.capabilityError}). One owner, because
+ * every commit path that relies on the backend's atomic preflight primitive
+ * (`ensureSchema`'s auto-migrate branch, `migrateSchema`, `Store.evolve`)
+ * owes the same decision and a copy that drifts would blame the wrong
+ * subsystem in an operator-facing refusal. `withEvolvedTransaction` runs its
+ * preflight inside the caller's adopted transaction and owes no such error.
  */
 export function schemaCommitCapabilityError(
   hasIdentityPreflight: boolean,
@@ -888,48 +910,49 @@ export function schemaCommitCapabilityError(
 
 /**
  * THE order a schema-commit preflight runs its steps in, and the one place
- * that order is spelled — called by every commit path that can owe more
- * than one preflight step (`ensureSchema`'s auto-migrate branch,
- * `migrateSchema`, `Store.evolve`): structural gates that decide whether the
- * commit is legal at all (dropped-kinds / required-kinds-empty), then
- * `edgeMatchIdentityPreflight`, then the ontology-tightening preflight, then
- * the identity preflight (whose last act is the closure rebuild).
+ * that order is spelled — called by every commit path that publishes a
+ * changed schema document (`ensureSchema`'s auto-migrate branch,
+ * `migrateSchema`, `Store.evolve`, `Store.withEvolvedTransaction`): structural
+ * gates that decide whether the commit is legal at all (dropped-kinds /
+ * required-kinds-empty), then `edgeMatchIdentityPreflight`, then the
+ * ontology-tightening preflight, then the identity preflight (whose last act
+ * is the closure rebuild).
  *
  * Ontology precedes identity because the identity closure is DERIVED from
  * the ontology being committed (`identitySchemaCommitPreflight` rebuilds it
  * from the target registry), so rebuilding it under an ontology the data
  * falsifies is work a refusal would only throw away.
  *
- * `undefined` steps drop out; an all-`undefined` list yields `undefined`,
+ * `undefined` steps drop out; an all-`undefined` set yields `undefined`,
  * which is the caller's signal to take the plain commit primitive and pay
  * for no transaction it does not need. The first overload is for a caller
- * that always has at least one unconditional leading step (a structural
- * gate that runs whether or not any of the changes it is checking exist —
- * `assertDroppedKindsEmpty` and `assertEvolvedSchemaRequiredKindsEmpty` are
- * both no-ops on an empty list, so they are safe to run unconditionally):
- * its result is guaranteed defined, which lets `migrateSchema` and
- * `Store.evolve` pass it straight to `commitNewSchemaVersionWithPreflight`'s
- * required `preflight` parameter without an unsound narrowing.
+ * with an unconditional structural gate (`assertDroppedKindsEmpty` and
+ * `assertEvolvedSchemaRequiredKindsEmpty` are both no-ops on an empty list,
+ * so they are safe to run unconditionally): its result is guaranteed
+ * defined, which lets `migrateSchema`, `Store.evolve`, and
+ * `withEvolvedTransaction` run it without an unsound narrowing.
  *
- * @internal Exported for `tests/schema-commit-preflight-order.test.ts` only —
- * not re-exported through `src/schema/index.ts` or the package root, the
- * same convention `commitNewSchemaVersionWithPreflight` already uses.
+ * @internal Not re-exported through `src/schema/index.ts` or the package
+ * root, the same convention `commitNewSchemaVersionWithPreflight` uses.
  */
 export function composeSchemaCommitPreflight(
-  steps: readonly [
-    (target: SchemaCommitPreflightBackend) => Promise<void>,
-    ...(readonly SchemaCommitPreflightStep[]),
-  ],
-): (target: SchemaCommitPreflightBackend) => Promise<void>;
+  steps: SchemaCommitPreflightSteps &
+    Readonly<{ structural: SchemaCommitPreflightFunction }>,
+): SchemaCommitPreflightFunction;
 export function composeSchemaCommitPreflight(
-  steps: readonly SchemaCommitPreflightStep[],
-): ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined;
+  steps: SchemaCommitPreflightSteps,
+): SchemaCommitPreflightFunction | undefined;
 export function composeSchemaCommitPreflight(
-  steps: readonly SchemaCommitPreflightStep[],
-): ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
-  const defined = steps.filter(
-    (step): step is (target: SchemaCommitPreflightBackend) => Promise<void> =>
-      step !== undefined,
+  steps: SchemaCommitPreflightSteps,
+): SchemaCommitPreflightFunction | undefined {
+  const ordered: readonly SchemaCommitPreflightStep[] = [
+    steps.structural,
+    steps.edgeMatchIdentity,
+    steps.tightening?.run,
+    steps.identity,
+  ];
+  const defined = ordered.filter(
+    (step): step is SchemaCommitPreflightFunction => step !== undefined,
   );
   if (defined.length === 0) return undefined;
   return async (target: SchemaCommitPreflightBackend): Promise<void> => {
@@ -1302,18 +1325,18 @@ export async function migrateSchema<G extends GraphDef>(
         // than through `commitSchemaVersionIfKindsEmpty`. Ordering — and the
         // "ontology before identity" reasoning — is spelled once, at
         // `composeSchemaCommitPreflight`.
-        composeSchemaCommitPreflight([
-          (transactionBackend) =>
+        composeSchemaCommitPreflight({
+          structural: (transactionBackend) =>
             assertDroppedKindsEmpty(
               transactionBackend,
               target.id,
               currentVersion,
               guardedDrops,
             ),
-          edgeMatchIdentityPreflight,
-          schemaTighteningPreflight?.run,
-          identityPreflight,
-        ]),
+          edgeMatchIdentity: edgeMatchIdentityPreflight,
+          tightening: schemaTighteningPreflight,
+          identity: identityPreflight,
+        }),
         storedSchema,
         schemaCommitCapabilityError(
           identityPreflight !== undefined,

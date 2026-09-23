@@ -188,18 +188,10 @@ async function readCompositionUnattachedPartsForEdgeKinds(
 
 function buildOntologyTighteningViolatedError(
   params: SchemaTighteningPreflightParams,
-  changes: readonly OntologyChange[],
+  probedChanges: readonly OntologyChange[],
   violations: readonly ConstraintFenceViolation[],
 ): MigrationError {
   const shown = previewViolations(violations);
-  // Only the changes that actually required a data check: a `safe` or
-  // `breaking` change in the same diff (`relatedTo` added alongside the
-  // `disjointWith` this refusal is about, say) carries no `probes` and would
-  // otherwise show up in `details.changes` as if it, too, were implicated —
-  // see `MigrationErrorDetails`'s `"ontology-tightening-violated"` docblock.
-  const probedChanges = changes.filter(
-    (change) => (change.probes ?? []).length > 0,
-  );
   return new MigrationError(
     `Ontology tightening refused: ${String(violations.length)} existing row(s) violate the proposed ontology. ` +
       `${shown}. Run store.verifyConstraintFences() to list them, resolve the rows, then retry.`,
@@ -241,6 +233,15 @@ function buildEdgeCardinalityTighteningViolatedError(
  */
 export type SchemaTighteningPreflight = Readonly<{
   run: (target: SchemaCommitPreflightBackend) => Promise<void>;
+  /**
+   * Only the ontology changes that owe a data check. A `safe` or `breaking`
+   * change in the same diff (`relatedTo` added alongside a `disjointWith`,
+   * say) carries no `probes` and is not implicated by a refusal — see
+   * `MigrationErrorDetails`'s `"ontology-tightening-violated"` docblock.
+   */
+  probedChanges: readonly OntologyChange[];
+  /** The edge-cardinality axes this transition newly constrains. */
+  newlyConstrainedAxes: readonly EdgeCardinalityDeclaration[];
   /**
    * {@link EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR}
    * when this commit newly constrains an edge cardinality — on either axis,
@@ -294,6 +295,9 @@ export function prepareSchemaTighteningPreflight(
   if (probes.length === 0 && newlyConstrainedAxes.length === 0) {
     return undefined;
   }
+  const probedChanges = changes.filter(
+    (change) => (change.probes ?? []).length > 0,
+  );
 
   // Built once, outside the returned closure: every commit path already ran
   // `buildKindRegistry` on the target graph before reaching the preflight, so
@@ -440,11 +444,17 @@ export function prepareSchemaTighteningPreflight(
         cardinalityViolations,
       );
     }
-    throw buildOntologyTighteningViolatedError(params, changes, violations);
+    throw buildOntologyTighteningViolatedError(
+      params,
+      probedChanges,
+      violations,
+    );
   };
 
   return {
     run,
+    probedChanges,
+    newlyConstrainedAxes,
     capabilityError:
       newlyConstrainedAxes.length > 0 ?
         EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR

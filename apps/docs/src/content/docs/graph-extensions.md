@@ -396,7 +396,10 @@ opens its write transaction. It returns an immutable `"noop"` or `"change"`
 plan with `graphId`, `baseline: { version, hash }`, and
 `result: { version, hash }`. Change plans expose an ordered `requirements`
 array whose entries name new-kind additions, empty-kind checks, vector slots,
-and identity work. A `new-kind` entry describes a graph delta; it does not
+ontology tightening, and identity work. An `ontology-tightening` entry lists
+the ontology changes and newly constrained edge cardinalities that existing
+rows must satisfy; apply checks them on the fenced session and refuses with
+the same `MigrationError` `evolve()` raises. A `new-kind` entry describes a graph delta; it does not
 indicate that a removal is queued or direct callers to run
 `materializeRemovals()`. The plan is opaque and bound to the loaded TypeGraph
 module: it cannot be serialized, cloned, or reconstructed. It can be passed between

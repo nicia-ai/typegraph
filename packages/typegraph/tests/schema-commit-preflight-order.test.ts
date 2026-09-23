@@ -1,33 +1,21 @@
 /**
  * Guards that `composeSchemaCommitPreflight` — the one place the
- * schema-commit preflight step order is spelled — iterates its steps in the
+ * schema-commit preflight step order is spelled — runs its roles in the
  * canonical order: structural gates, then `edgeMatchIdentityPreflight`, then
- * the ontology-tightening preflight, then the identity preflight. This test
- * observes the COMPOSER's own FIFO iteration through four recording steps;
- * it says nothing about what order any real call site passes those steps
- * in, because it builds its own step array rather than importing one.
+ * the ontology-tightening preflight, then the identity preflight. Call sites
+ * name each step by role rather than by position, so no commit path can
+ * reorder them; this file therefore certifies the order every path runs.
  *
- * The load-bearing guard for "ontology before the identity closure rebuild"
- * at each real call site lives in `tests/identity.test.ts`, end-to-end, one
- * case per path that can owe both preflights: `ensureSchema`'s auto-migrate
- * branch ("rejects contradictory existing groups before committing
- * enablement", "revalidates identity for ontology-only schema migrations"),
- * `migrateSchema` ("refuses the same tightening driven through
- * migrateSchema directly, before the identity closure rebuild"), and
- * `Store.evolve` ("refuses the same tightening driven through
- * Store.evolve(), before the identity closure rebuild"). Each constructs a
- * commit that is simultaneously an ontology-tightening violation AND an
- * identity contradiction and asserts it surfaces `MigrationError`
- * `"ontology-tightening-violated"`, not `ConfigurationError`
- * `"IDENTITY_SCHEMA_CONTRADICTION"` — reachable only if that call site's OWN
- * composed array orders the ontology preflight first. A call-site reorder
- * on any one of the three paths leaves this file green and fails only its
- * own case in `identity.test.ts`.
+ * The end-to-end guards for "ontology before the identity closure rebuild"
+ * live in `tests/identity.test.ts` (one case per path that can owe both
+ * preflights), and the adopted path's tightening refusal lives in the shared
+ * `tests/backends/integration/adopted-evolution.ts` suite.
  */
 import { describe, expect, it } from "vitest";
 
 import { type SchemaCommitPreflightBackend } from "../src/backend/types";
 import { composeSchemaCommitPreflight } from "../src/schema/manager";
+import { type SchemaTighteningPreflight } from "../src/schema/tightening-preflight";
 
 function recordingStep(
   calls: string[],
@@ -39,59 +27,77 @@ function recordingStep(
   };
 }
 
-describe("composeSchemaCommitPreflight", () => {
-  it("runs its steps in the canonical order: dropped-kinds, edge-match-identity, ontology, identity", async () => {
-    const calls: string[] = [];
-    const preflight = composeSchemaCommitPreflight([
-      recordingStep(calls, "dropped-kinds"),
-      recordingStep(calls, "edge-match-identity"),
-      recordingStep(calls, "ontology"),
-      recordingStep(calls, "identity"),
-    ]);
+function recordingTightening(
+  calls: string[],
+  name: string,
+): SchemaTighteningPreflight {
+  return {
+    run: recordingStep(calls, name),
+    probedChanges: [],
+    newlyConstrainedAxes: [],
+    capabilityError: { code: "TEST", message: "test" },
+  };
+}
 
-    expect(preflight).toBeDefined();
+describe("composeSchemaCommitPreflight", () => {
+  it("runs its roles in the canonical order: structural, edge-match-identity, ontology, identity", async () => {
+    const calls: string[] = [];
+    const preflight = composeSchemaCommitPreflight({
+      identity: recordingStep(calls, "identity"),
+      tightening: recordingTightening(calls, "ontology"),
+      edgeMatchIdentity: recordingStep(calls, "edge-match-identity"),
+      structural: recordingStep(calls, "structural"),
+    });
+
     await preflight({} as SchemaCommitPreflightBackend);
 
     expect(calls).toEqual([
-      "dropped-kinds",
+      "structural",
       "edge-match-identity",
       "ontology",
       "identity",
     ]);
   });
 
-  // MUTATION CHECK (recorded in lane-A-load-bearing.md): reversing the
-  // iteration order inside `composeSchemaCommitPreflight` makes this
-  // assertion fail.
+  // MUTATION CHECK: reordering the role list inside
+  // `composeSchemaCommitPreflight` makes this assertion fail.
 
-  it("drops undefined steps and returns undefined when every step is undefined", async () => {
+  it("drops undefined roles and returns undefined when every role is undefined", async () => {
     expect(
-      composeSchemaCommitPreflight([undefined, undefined]),
+      composeSchemaCommitPreflight({
+        structural: undefined,
+        edgeMatchIdentity: undefined,
+        tightening: undefined,
+        identity: undefined,
+      }),
     ).toBeUndefined();
 
     const calls: string[] = [];
-    const preflight = composeSchemaCommitPreflight([
-      undefined,
-      recordingStep(calls, "only-step"),
-      undefined,
-    ]);
+    const preflight = composeSchemaCommitPreflight({
+      structural: undefined,
+      edgeMatchIdentity: undefined,
+      tightening: recordingTightening(calls, "only-step"),
+      identity: undefined,
+    });
     await preflight?.({} as SchemaCommitPreflightBackend);
     expect(calls).toEqual(["only-step"]);
   });
 
   it("awaits each step before starting the next", async () => {
     const order: string[] = [];
-    const preflight = composeSchemaCommitPreflight([
-      async () => {
+    const preflight = composeSchemaCommitPreflight({
+      structural: async () => {
         order.push("first-start");
         await Promise.resolve();
         order.push("first-end");
       },
-      () => {
+      edgeMatchIdentity: undefined,
+      tightening: undefined,
+      identity: () => {
         order.push("second-start");
         return Promise.resolve();
       },
-    ]);
+    });
     await preflight({} as SchemaCommitPreflightBackend);
     expect(order).toEqual(["first-start", "first-end", "second-start"]);
   });
