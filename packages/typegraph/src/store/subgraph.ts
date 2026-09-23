@@ -912,6 +912,7 @@ async function resolveSubgraphCompositionEdgeKinds<
     graphId: params.graphId,
     rootId: params.rootId,
     temporalMode: ctx.temporalMode,
+    currentTimestamp: ctx.currentTimestamp,
     asOf: ctx.asOf,
     recordedAsOf: ctx.recordedAsOf,
     recordedReadBinding: ctx.recordedReadBinding,
@@ -961,6 +962,7 @@ function buildSubgraphCompositionReachableCte<
     outEdgeKinds,
     inEdgeKinds,
     temporalMode: ctx.temporalMode,
+    currentTimestamp: ctx.currentTimestamp,
     ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
     ...(ctx.recordedAsOf !== undefined && { recordedAsOf: ctx.recordedAsOf }),
     dialect: ctx.dialect,
@@ -1499,6 +1501,7 @@ async function fetchCompositionEdgeKindsForRoot(input: {
   graphId: string;
   rootId: string;
   temporalMode: TemporalMode;
+  currentTimestamp: SqlFragment;
   asOf: string | undefined;
   recordedAsOf: RecordedInstant | undefined;
   recordedReadBinding: RecordedReadBinding | undefined;
@@ -1509,7 +1512,7 @@ async function fetchCompositionEdgeKindsForRoot(input: {
     recordedAsOf: input.recordedAsOf,
     recordedReadBinding: input.recordedReadBinding,
     tableAlias: "n",
-    currentTimestamp: currentReadInstant(),
+    currentTimestamp: input.currentTimestamp,
   });
   const query = sql`SELECT n.kind FROM ${input.schema.nodesTable} n WHERE n.graph_id = ${input.graphId} AND n.id = ${input.rootId} AND ${nodeTemporalFilter}`;
   const rows = await input.backend.execute<{ kind: string }>(

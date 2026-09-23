@@ -22,7 +22,7 @@
  * checks actually performed are recorded in the scratchpad
  * `lane-Ed-load-bearing.md` note.
  */
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -724,6 +724,49 @@ export function registerCompositionNavigationIntegrationTests(
       });
       expect(pilotEdge).not.toHaveProperty("note");
       expect(pilotEdge).not.toHaveProperty("meta");
+    });
+
+    it("subgraph({ composition: true }) reads every statement at one current instant", async () => {
+      const readStart = new Date("2099-01-01T00:00:00.000Z");
+      const afterEpisodeEnds = new Date("2099-01-01T00:02:00.000Z");
+      let advanceClockOnNextStatement = false;
+      const store = await context.createStore(compositionNavigationGraph, {
+        hooks: {
+          onQueryStart: () => {
+            if (!advanceClockOnNextStatement) return;
+            advanceClockOnNextStatement = false;
+            vi.setSystemTime(afterEpisodeEnds);
+          },
+        },
+      });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(readStart);
+        const podcast = await store.nodes.CnPodcast.create({ title: "Pod" });
+        const episode = await store.nodes.CnEpisode.create({ title: "Ep" });
+        await store.edges.cnEpisodeOf.create(
+          episode,
+          podcast,
+          {},
+          { validTo: "2099-01-01T00:01:00.000Z" },
+        );
+
+        // The clock moves past the episode edge's end while the read is in
+        // flight, after its first statement. Every statement of one read must
+        // still evaluate "current" at the instant the read started. The
+        // transaction-bound read runs the same executor through the hooked
+        // backend, which is what lets the hook move the clock mid-read.
+        const result = await store.transaction((tx) => {
+          advanceClockOnNextStatement = true;
+          return tx.subgraph(podcast.id, { edges: [], composition: true });
+        });
+
+        expect(new Set(result.nodes.keys())).toEqual(
+          new Set([podcast.id, episode.id]),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("subgraph({ composition: true }) closes the unit under a recorded-pinned read", async () => {
