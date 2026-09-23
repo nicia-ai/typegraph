@@ -376,6 +376,7 @@ import {
   nodeUpsertDirtyCheck,
   prepareNodeReplacement,
 } from "./operations";
+import { nodeKindOwesCompositionEdge } from "./operations/atomic-mutation-program";
 import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import {
   batchRefusalDetails,
@@ -5004,11 +5005,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       if (
         (registration.unique?.length ?? 0) > 0 ||
         this.#registry.getDisjointKinds(entry.kind).length > 0 ||
+        nodeKindOwesCompositionEdge(this.#registry, entry.kind) ||
         resolveEmbeddingFields(registration.type.schema).length > 0 ||
         getSearchableFields(registration.type.schema).length > 0
       ) {
         throw new ConfigurationError(
-          "writeNodeUpsertBatch only supports plain node kinds without identity claims or projections.",
+          "writeNodeUpsertBatch only supports plain node kinds without identity claims, required composition, or projections.",
           {
             code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_KIND",
             kind: entry.kind,

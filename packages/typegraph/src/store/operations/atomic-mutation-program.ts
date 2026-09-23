@@ -38,11 +38,24 @@ import { compositionEdgeHasRequiredExistencePart } from "./composition-create";
 import { diagnoseFusedSchemaFenceNoRow } from "./write-transaction";
 
 /**
+ * Item E.2: whether every live node of `kind` owes a composition edge — a
+ * required-existence part kind. A node write that has no shape for that
+ * edge (a fused program, a node-only upsert batch) must refuse or fall back
+ * for such a kind, even when no `partOf` is stated: `resolveCompositionCreate`
+ * is what refuses the bare create on the portable path.
+ */
+export function nodeKindOwesCompositionEdge(
+  registry: KindRegistry,
+  kind: string,
+): boolean {
+  return registry.compositionExistence(kind) === "required";
+}
+
+/**
  * Item E.2: whether `item` owes a composition edge a fused node-create
- * program has no shape for — a stated `partOf`, or a required-existence
- * kind (which owes one even with no `partOf` stated; `resolveCompositionCreate`
- * is what refuses that bare create). The one predicate both node-create
- * fused-eligibility checks below share, so neither re-spells it.
+ * program has no shape for — a stated `partOf`, or a kind for which
+ * {@link nodeKindOwesCompositionEdge} holds. The one predicate both
+ * node-create fused-eligibility checks below share, so neither re-spells it.
  */
 function nodeCreateOwesCompositionEdge(
   registry: KindRegistry,
@@ -50,7 +63,7 @@ function nodeCreateOwesCompositionEdge(
 ): boolean {
   return (
     item.partOf !== undefined ||
-    registry.compositionExistence(item.kind) === "required"
+    nodeKindOwesCompositionEdge(registry, item.kind)
   );
 }
 
@@ -197,7 +210,7 @@ export function resolveAtomicNodeReplacementBatchProgram(
   // shape — a required-existence kind must take the portable path so
   // `resolveCompositionCreate` gets to refuse the bare create rather than
   // this program silently writing an orphan.
-  if (input.registry.compositionExistence(input.kind) === "required") return;
+  if (nodeKindOwesCompositionEdge(input.registry, input.kind)) return;
   const executor = resolveAtomicMutationProfile(input)?.replaceNodes;
   if (executor === undefined) return;
   const releasedClaimFamilies = new Set(executor.releasedClaimFamilies);

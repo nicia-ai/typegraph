@@ -34,6 +34,7 @@ export const PGLITE_TEST_FILES = [
   "tests/fused-edge-endpoints.test.ts",
   "tests/graph-templates.test.ts",
   "tests/guarded-edge-cardinality-claim.test.ts",
+  "tests/heterogeneous-node-upsert-batch-composition-pglite.test.ts",
   "tests/import-edge-match-identity-atomicity.test.ts",
   "tests/lineage-fork-clear-epoch.test.ts",
   "tests/lineage-interleaved-writer-pglite.test.ts",
