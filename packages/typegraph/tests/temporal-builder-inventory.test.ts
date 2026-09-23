@@ -264,6 +264,6 @@ describe("the stamping-site inventory (I5)", () => {
     for (const role of Object.values(BACKEND_COLUMN_FILES)) {
       expect(role.length).toBeGreaterThan(0);
     }
-    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(15);
+    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(16);
   });
 });
