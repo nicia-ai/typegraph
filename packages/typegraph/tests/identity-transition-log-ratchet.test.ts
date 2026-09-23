@@ -221,7 +221,7 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
   {
     file: "interchange/import.ts",
     reason:
-      "Imports identityReplayRequiresHistoryError to raise the exact typed refusal an archival transitions/retention restore into a history-off target gets, upfront (assertIdentityTransitionsRestoreSupported), matching store.ts's backstop of the same error — never a relation read.",
+      "Imports identityTransitionLogUnavailableError to raise the exact typed refusal an archival transitions/retention restore into a target without a TypeGraph transition log gets, upfront (assertIdentityTransitionsRestoreSupported), matching store.ts's backstop of the same error — never a relation read.",
   },
   {
     file: "interchange/export.ts",

@@ -329,6 +329,12 @@ cannot answer a request. Its code names the reason:
   section targets a history-off store: without `history: true` those rows
   could never be read back through `transitionsOf` / `replay` either, so the
   import refuses rather than writing them write-only.
+- `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` — the backend owns recorded
+  time itself (it declares `recordedTime`), so TypeGraph performs no recorded
+  capture and keeps no transition log for it, with or without
+  `history: true`. Raised by the same operations as
+  `IDENTITY_REPLAY_REQUIRES_HISTORY`, including an archival-transitions
+  import.
 - `IDENTITY_REPLAY_HISTORY_TRUNCATED` — the requested range lies entirely
   below the graph's retention watermark (see
   [`pruneIdentityTransitions`](/identity/#retention)); `details.prunedBefore`
@@ -1871,6 +1877,7 @@ try {
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store opened without `history: true` |
+| `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store whose backend owns recorded time (engine-native) |
 | `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
 | `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | A single lineage's transition rows exceeded the walk's internal total safety ceiling |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |

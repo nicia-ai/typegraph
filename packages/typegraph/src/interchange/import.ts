@@ -106,7 +106,7 @@ import {
   IDENTITY_IMPORT_PROGRESS,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
-import { identityReplayRequiresHistoryError } from "../identity/transition-log";
+import { identityTransitionLogUnavailableError } from "../identity/transition-log";
 import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { type DialectAdapter } from "../query/dialect/types";
@@ -1095,13 +1095,16 @@ function assertIdentityImportSupported<G extends GraphDef>(
 }
 
 /**
- * Rejects an archival transitions/retention payload aimed at a history-off
- * store BEFORE any entity write. A non-zero retention watermark counts as an
+ * Rejects an archival transitions/retention payload aimed at a store that
+ * keeps no TypeGraph transition log (history off, or engine-native recorded
+ * time) BEFORE any entity write. A non-zero retention watermark counts as an
  * archival restore on its own, exactly as a non-empty `transitions` array does,
  * so both call sites refuse the same documents.
  *
  * `importIdentityTransitionsAtTarget` (`store.ts`) raises the same
- * `IdentityReplayError` / `IDENTITY_REPLAY_REQUIRES_HISTORY` as a backstop,
+ * `IdentityReplayError` (both gate on TypeGraph capture, never the public
+ * `historyEnabled` getter, which is also true for engine-native history) as
+ * a backstop,
  * but only from the LAST import section — after nodes, edges and identity
  * assertions have already committed durably on a non-transactional target,
  * or after they have queued inside a transaction that a later error would
@@ -1120,9 +1123,12 @@ function assertIdentityTransitionsRestoreSupported<G extends GraphDef>(
 ): void {
   if (
     (hasTransitions || (retention?.prunedBeforeRevision ?? 0) > 0) &&
-    !store.historyEnabled
+    !storeCaptureEnabled(store)
   ) {
-    throw identityReplayRequiresHistoryError(store.graphId);
+    throw identityTransitionLogUnavailableError(
+      store.graphId,
+      store.recordedTimeOwnership,
+    );
   }
 }
 

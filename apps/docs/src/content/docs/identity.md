@@ -386,7 +386,9 @@ needs (the loop above takes the default).
 
 Both `replay` and `transitionsOf` throw `IDENTITY_REPLAY_REQUIRES_HISTORY` on
 a store opened without `history: true` — there is nothing for them to
-annotate.
+annotate. On a backend that owns recorded time itself (engine-native), they
+throw `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` even with `history: true`:
+TypeGraph captures no recorded history there, so it keeps no transition log.
 
 `replay` and `transitionsOf` live on `store.identity` and `tx.identity`
 only, never on a coordinate-pinned read lens (`store.asOf(t).identity`,

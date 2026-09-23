@@ -14,7 +14,10 @@
  * coordinate c". This module is an explanation layer over that truth, never
  * a second copy of it.
  */
-import { requireTypeGraphRecordedRevision } from "../backend/capabilities/recorded-time-ownership";
+import {
+  type RecordedTimeOwnership,
+  requireTypeGraphRecordedRevision,
+} from "../backend/capabilities/recorded-time-ownership";
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError, IdentityReplayError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
@@ -63,11 +66,7 @@ export type IdentityTransitionCause =
  * is `"callback"` — its source is never part of the artifact.
  */
 export type IdentityAssertionPolicyLabel =
-  | "refuse"
-  | "assertWins"
-  | "retractWins"
-  | "flag"
-  | "callback";
+  "refuse" | "assertWins" | "retractWins" | "flag" | "callback";
 
 /**
  * The policy axes a successful merge actually exercised. `pairing` and
@@ -807,10 +806,28 @@ export async function readTransitionRetentionDetails(
   };
 }
 
-/** The `IdentityReplayError` a store without `history: true` raises for every replay-family operation. */
-export function identityReplayRequiresHistoryError(
+/**
+ * The `IdentityReplayError` every replay-family operation raises when the
+ * store keeps no TypeGraph transition log. Two states reach it: a store opened
+ * without `history: true`, and a backend that owns recorded time itself
+ * (engine-native), where TypeGraph performs no recorded capture — and so
+ * writes no transitions — whatever `history` says. The latter names its own
+ * code, since `history: true` is not the remedy there.
+ */
+export function identityTransitionLogUnavailableError(
   graphId: string,
+  recordedTimeOwnership: RecordedTimeOwnership,
 ): IdentityReplayError {
+  if (recordedTimeOwnership === "engine-native") {
+    return new IdentityReplayError(
+      "Identity replay is not supported under engine-native recorded time.",
+      { code: "IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED", graphId },
+      {
+        suggestion:
+          "This backend declares recordedTime, so it owns recorded history itself and TypeGraph keeps no identity transition log for it, with or without history: true. Replay needs a backend whose recorded time TypeGraph captures in its own relations.",
+      },
+    );
+  }
   return new IdentityReplayError(
     "Identity replay requires the store to be opened with history: true.",
     { code: "IDENTITY_REPLAY_REQUIRES_HISTORY", graphId },
@@ -819,6 +836,21 @@ export function identityReplayRequiresHistoryError(
         "Open the store with createStore(graph, backend, { history: true }); the transition log annotates the recorded axis and has nothing to annotate without it.",
     },
   );
+}
+
+/** Refuses a replay-family operation on a context whose store keeps no TypeGraph transition log — see {@link identityTransitionLogUnavailableError}. */
+export function requireIdentityTransitionLog(
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "historyEnabled" | "recordedTimeOwnership"
+  >,
+): void {
+  if (!ctx.historyEnabled) {
+    throw identityTransitionLogUnavailableError(
+      ctx.graphId,
+      ctx.recordedTimeOwnership,
+    );
+  }
 }
 
 /**
@@ -870,9 +902,7 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   options: Readonly<{ beforeRecorded: string }>,
 ): Promise<Readonly<{ pruned: number; prunedBeforeRevision: number }>> {
-  if (!ctx.historyEnabled) {
-    throw identityReplayRequiresHistoryError(ctx.graphId);
-  }
+  requireIdentityTransitionLog(ctx);
   const targetRevision = requireTypeGraphRecordedRevision(
     options.beforeRecorded,
     "beforeRecorded",

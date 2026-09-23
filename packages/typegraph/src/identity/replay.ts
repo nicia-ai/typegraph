@@ -31,13 +31,13 @@ import { type IdentityServiceContext } from "./service-types";
 import { type PlainNodeRef } from "./sql-target";
 import {
   type IdentityDecisionProvenance,
-  identityReplayRequiresHistoryError,
   type IdentityTransitionCause,
   type IdentityTransitionCursor,
   type IdentityTransitionRow,
   isRestoredTransitionRow,
   readIdentityTransitions,
   readTransitionRetentionDetails,
+  requireIdentityTransitionLog,
   transitionClassRef,
   transitionPriorClassRef,
 } from "./transition-log";
@@ -431,13 +431,6 @@ function resolveLimit(limit: number | undefined): number {
   return resolved;
 }
 
-function requireHistoryEnabled<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
-): void {
-  if (!ctx.historyEnabled)
-    throw identityReplayRequiresHistoryError(ctx.graphId);
-}
-
 function distinctBoundaries(
   rows: readonly IdentityTransitionRow[],
 ): readonly number[] {
@@ -537,7 +530,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
   ref: IdentityNodeRefInput<G>,
   options: IdentityReplayOptions | undefined,
 ): Promise<WalkedTransitions> {
-  requireHistoryEnabled(ctx);
+  requireIdentityTransitionLog(ctx);
   const limit = resolveLimit(options?.limit);
   const seed = registeredPlainRef(ctx, ref);
   const walkSeed = await currentClassCanonicalSeed(ctx, seed);

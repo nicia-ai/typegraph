@@ -1044,6 +1044,10 @@ export class IdentitySeparationViolationError extends TypeGraphError {
 export type IdentityReplayErrorDetails =
   | Readonly<{ code: "IDENTITY_REPLAY_REQUIRES_HISTORY"; graphId: string }>
   | Readonly<{
+      code: "IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED";
+      graphId: string;
+    }>
+  | Readonly<{
       code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
       /**
        * The caller's OWN `fromRecorded`, present only when the caller

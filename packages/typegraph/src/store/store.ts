@@ -189,7 +189,7 @@ import {
 import { type IdentityTarget } from "../identity/sql-target";
 import {
   type IdentityDecisionProvenance,
-  identityReplayRequiresHistoryError,
+  identityTransitionLogUnavailableError,
 } from "../identity/transition-log";
 import type {
   IdentityFacade,
@@ -2185,7 +2185,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // still passes through, catching any caller that reaches this method
     // directly.
     if (!this.#captureEnabled) {
-      throw identityReplayRequiresHistoryError(this.graphId);
+      throw identityTransitionLogUnavailableError(
+        this.graphId,
+        this.#recordedTimeOwnership,
+      );
     }
     return importIdentityTransitionsIntoTarget(
       { graphId: this.graphId, schema: this.#sqlSchema() },
@@ -5321,6 +5324,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend,
       schema: this.#sqlSchema(),
       historyEnabled: this.#captureEnabled,
+      recordedTimeOwnership: this.#recordedTimeOwnership,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
       sameIdAcrossKinds: this.#graph.identity?.sameIdAcrossKinds ?? "ignore",
       loadNodes: async (references, coordinate) => {
