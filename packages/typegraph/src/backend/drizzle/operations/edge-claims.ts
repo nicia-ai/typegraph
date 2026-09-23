@@ -200,6 +200,15 @@ function proposedRelationCte(
 }
 
 /**
+ * The axis a claim statement's holder predicate is rendered from: the declared
+ * population, plus the composition scope when the axis is the reserved
+ * relation-wide one. Predicate SHAPE — never a per-row value — which is why it
+ * is a group key below rather than a column of the `proposed` relation.
+ */
+type ClaimHolderAxis = EdgeCardinalityAxisRef &
+  Readonly<{ scope?: CompositionClaimScope }>;
+
+/**
  * What distinguishes two claims whose predicates cannot share one statement.
  *
  * The claim predicates are shaped by {@link EdgeCardinalitySpec} — which
@@ -256,7 +265,7 @@ function groupEntriesByPredicateShape(
  */
 function axisOf(
   entries: readonly ClaimEdgeCardinalityParams[],
-): ClaimEdgeCardinalityParams {
+): ClaimHolderAxis {
   const [first] = entries;
   if (first === undefined) {
     throw new TypeError("A claim group is never empty.");
@@ -301,69 +310,37 @@ export function endpointTerms(
 }
 
 /**
- * Splits a chunk into the groups that can share one statement.
- *
- * The claim predicates are shaped by {@link EdgeCardinalitySpec}: which
- * endpoints the axis key covers, and what a holder must still be. Those are
- * predicate SHAPE, not values, so they cannot ride in the `proposed` relation
- * without becoming OR-guarded terms the planner can no longer seek on — which
- * is the cost this rewrite exists to remove. One statement per distinct axis
- * spec keeps every term index-seekable; a chunk of one edge kind and one
- * direction, the ordinary case, still renders exactly one statement.
- *
- * First-appearance order, so a rendered program is deterministic.
+ * Where a composition arm reads the PART's identity, for the one caller that
+ * cannot supply a {@link ClaimValueSource}: the read-only audit
+ * ({@link file://./constraint-fence-audit.ts
+ * buildContendedCompositionEdgeRowAudit}) correlates its peer test to the
+ * OUTER row's own qualified part columns rather than to a write's bound
+ * literal. Distinct from `ClaimValueSource` so the compiler, not a comment, is
+ * what proves that branch reads no other field — the audit has no `edgeKind`,
+ * no endpoint tuple and no edge id to offer.
  */
-function groupEntriesBySpec(
-  entries: readonly ClaimEdgeCardinalityParams[],
-): readonly (readonly ClaimEdgeCardinalityParams[])[] {
-  const groups = new Map<string, ClaimEdgeCardinalityParams[]>();
-  for (const entry of entries) {
-    const name = edgeCardinalityAxisName(entry);
-    const group = groups.get(name);
-    if (group === undefined) groups.set(name, [entry]);
-    else group.push(entry);
-  }
-  return [...groups.values()];
-}
-
-/**
- * The endpoint identity {@link claimHolderTerms} needs from `params` when it
- * has no `partIdentity` to fall back on: an ordinary claim's own
- * `edgeKind` (read on that branch) plus the full endpoint tuple a real
- * `ClaimEdgeCardinalityParams` always carries. This is the shape the write
- * path passes through unchanged; a caller that instead supplies
- * `partIdentity` (today, only the audit —
- * {@link file://../../drizzle/operations/constraint-fence-audit.ts
- * buildContendedCompositionEdgeRowAudit}) needs none of these fields, which
- * is exactly what the second overload below states.
- */
-type BoundClaimHolderIdentity = EdgeCardinalityAxisRef &
-  Readonly<{
-    edgeKind: string;
-    fromKind: string;
-    fromId: string;
-    toKind: string;
-    toId: string;
-    scope?: CompositionClaimScope;
-  }>;
+type ClaimPartIdentity = Readonly<{ part: Readonly<{ kind: SQL; id: SQL }> }>;
 
 /**
  * THE rows that can hold this claim: which edge kinds, and — for a
  * composition claim — on which endpoint. The one owner of that decision, so
  * {@link competingLiveEdgePredicate}, {@link recordedClaimHolderIsLivePredicate}
  * and the read-only audit's correlated peer test
- * ({@link file://../../drizzle/operations/constraint-fence-audit.ts
+ * ({@link file://./constraint-fence-audit.ts
  * buildContendedCompositionEdgeRowAudit}) cannot render two different
  * answers to "does this row hold the axis this claim contends for".
  *
- * `scope === undefined` (the ordinary case, unchanged from before item E):
- * `kind = params.edgeKind`, plus the endpoint terms {@link endpointTerms}
- * renders off `keyShape`.
+ * The values come from {@link ClaimValueSource}, so the single-row statements
+ * (which bind them) and the batch statements (which read them off the
+ * `proposed` relation) get the same predicate from the same renderer.
  *
- * `scope !== undefined` (a composition claim, R4): the claim's key is the
- * PART's identity regardless of which orientation wrote it, so a holder is
- * any row of ANY holder edge kind whose PART-side endpoint matches that
- * identity — an OR over the two oriented arms `scope.holders` carries:
+ * `scope === undefined` (the ordinary case): `kind = values.edgeKind`, plus
+ * the endpoint terms {@link endpointTerms} renders off `keyShape`.
+ *
+ * `scope !== undefined` (a composition claim): the claim's key is the PART's
+ * identity regardless of which orientation wrote it, so a holder is any row
+ * of ANY holder edge kind whose PART-side endpoint matches that identity — an
+ * OR over the two oriented arms `scope.holders` carries:
  * `kind IN (fromSideKinds) AND from_kind/from_id = the part` for a
  * `partSide: "from"` holder, `kind IN (toSideKinds) AND to_kind/to_id = the
  * part` for a `partSide: "to"` one. This is what lets `chapterOf`
@@ -371,129 +348,81 @@ type BoundClaimHolderIdentity = EdgeCardinalityAxisRef &
  * part `to`) contend for the SAME Chapter's one whole even though they are
  * different edge kinds in different orientations.
  *
- * `partIdentity` overrides where the part's own kind/id come from: omitted
- * (every write-path caller), they are `params`' bound `fromKind`/`fromId` or
- * `toKind`/`toId` literal; the correlated audit instead passes the OUTER
- * row's own qualified columns, so the peer test reads "matches the part THIS
- * row names" rather than a literal captured ahead of time. The two overloads
- * below are what let the audit pass a `scope`-only params object with no
- * `edgeKind`/`fromKind`/`fromId`/`toKind`/`toId` at all, rather than
- * fabricating placeholder values for fields this branch never reads (R8):
- * the compiler, not a comment, is what proves they are unread.
+ * A {@link ClaimPartIdentity} in place of the value source overrides where the
+ * part's own kind and id come from: every write-path caller passes values, and
+ * the part is then the `fromKind`/`fromId` or `toKind`/`toId` the axis keys on;
+ * the correlated audit instead passes the OUTER row's own qualified columns, so
+ * the peer test reads "matches the part THIS row names" rather than a literal
+ * captured ahead of time. The two overloads are what let that caller pass a
+ * scope-only axis with no values at all, rather than fabricating placeholders
+ * for fields the branch never reads.
+ *
+ * Because the holder kinds and the key shape are predicate SHAPE rather than
+ * values, a batch statement renders this fragment ONCE for its whole group —
+ * see {@link claimPredicateShapeKey}.
  */
 export function claimHolderTerms(
   edgesName: string,
   edges: Tables["edges"],
-  params: BoundClaimHolderIdentity,
+  axis: ClaimHolderAxis,
+  values: ClaimValueSource,
 ): SQL;
 export function claimHolderTerms(
   edgesName: string,
   edges: Tables["edges"],
-  params: EdgeCardinalityAxisRef & Readonly<{ scope: CompositionClaimScope }>,
-  partIdentity: Readonly<{ kind: SQL; id: SQL }>,
+  axis: EdgeCardinalityAxisRef & Readonly<{ scope: CompositionClaimScope }>,
+  values: ClaimPartIdentity,
 ): SQL;
 export function claimHolderTerms(
   edgesName: string,
   edges: Tables["edges"],
-  params: EdgeCardinalityAxisRef &
-    Readonly<{
-      scope?: CompositionClaimScope;
-    }> &
-    Partial<
-      Pick<
-        BoundClaimHolderIdentity,
-        "edgeKind" | "fromKind" | "fromId" | "toKind" | "toId"
-      >
-    >,
-  partIdentity?: Readonly<{ kind: SQL; id: SQL }>,
+  axis: ClaimHolderAxis,
+  values: ClaimValueSource | ClaimPartIdentity,
 ): SQL {
-  const spec = edgeCardinalitySpec(params);
-  if (params.scope === undefined) {
-    // The first overload guarantees a bound identity whenever `scope` is
-    // absent — the ordinary claim shape.
-    const bound = params as BoundClaimHolderIdentity;
-    return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(
-      edgesName,
-      edges,
-      spec.keyShape,
-      {
-        fromKind: sql`${bound.fromKind}`,
-        fromId: sql`${bound.fromId}`,
-        toKind: sql`${bound.toKind}`,
-        toId: sql`${bound.toId}`,
-      },
-    )}`;
+  const spec = edgeCardinalitySpec(axis);
+  if (axis.scope === undefined) {
+    // The first overload guarantees a full value source whenever `scope` is
+    // absent — the ordinary claim shape, whose predicate reads the edge kind
+    // and the endpoints its key covers.
+    const bound = values as ClaimValueSource;
+    return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, bound)}`;
   }
-  // No `partIdentity` means the first overload matched: a real write-path
-  // composition claim, whose `fromKind`/`fromId`/`toKind`/`toId` are genuine
-  // bound values. Cast once here rather than at each field read below.
-  const bound = params as BoundClaimHolderIdentity;
-  const partKind =
-    partIdentity?.kind ??
-    sql`${spec.keyShape === "from" ? bound.fromKind : bound.toKind}`;
-  const partId =
-    partIdentity?.id ??
-    sql`${spec.keyShape === "from" ? bound.fromId : bound.toId}`;
-  const fromSideKinds = params.scope.holders
-    .filter((holder) => holder.partSide === "from")
-    .map((holder) => holder.edgeKind);
-  const toSideKinds = params.scope.holders
-    .filter((holder) => holder.partSide === "to")
-    .map((holder) => holder.edgeKind);
+  const part =
+    "part" in values ?
+      values.part
+    : {
+        kind: spec.keyShape === "from" ? values.fromKind : values.toKind,
+        id: spec.keyShape === "from" ? values.fromId : values.toId,
+      };
+  // One arm per ORIENTED side, always `from` before `to`, so two axes whose
+  // holders agree render the identical statement text regardless of the order
+  // `scope.holders` lists them in.
+  const sides = [
+    { partSide: "from", kindColumn: edges.fromKind, idColumn: edges.fromId },
+    { partSide: "to", kindColumn: edges.toKind, idColumn: edges.toId },
+  ] as const;
   const arms: SQL[] = [];
-  if (fromSideKinds.length > 0) {
+  for (const side of sides) {
+    const sideKinds = axis.scope.holders
+      .filter((holder) => holder.partSide === side.partSide)
+      .map((holder) => holder.edgeKind);
+    if (sideKinds.length === 0) continue;
     arms.push(sql`
       (
             ${qualified(edgesName, edges.kind)} IN (${sql.join(
-              fromSideKinds.map((kind) => sql`${kind}`),
+              sideKinds.map((kind) => sql`${kind}`),
               sql`, `,
             )})
-            AND ${qualified(edgesName, edges.fromKind)} = ${partKind}
-            AND ${qualified(edgesName, edges.fromId)} = ${partId}
-          )
-    `);
-  }
-  if (toSideKinds.length > 0) {
-    arms.push(sql`
-      (
-            ${qualified(edgesName, edges.kind)} IN (${sql.join(
-              toSideKinds.map((kind) => sql`${kind}`),
-              sql`, `,
-            )})
-            AND ${qualified(edgesName, edges.toKind)} = ${partKind}
-            AND ${qualified(edgesName, edges.toId)} = ${partId}
+            AND ${qualified(edgesName, side.kindColumn)} = ${part.kind}
+            AND ${qualified(edgesName, side.idColumn)} = ${part.id}
           )
     `);
   }
   // A composition claim always names its own edge kind on the matching side
   // (`compositionClaim`, `src/store/claims/composition-claims.ts`), so
   // `arms` is never empty in practice; the fallback keeps this total rather
-  // than emitting invalid SQL for a hand-built params object with no
-  // holders.
+  // than emitting invalid SQL for a hand-built axis with no holders.
   return arms.length === 0 ? sql`FALSE` : sql`(${sql.join(arms, sql` OR `)})`;
-}
-
-function claimHolderMatch(
-  edgesName: string,
-  edges: Tables["edges"],
-  values: ClaimValueSource,
-  spec: EdgeCardinalitySpec,
-  witness?: ClaimEdgeCardinalityParams,
-): SQL {
-  const scope = witness?.scope;
-  if (scope !== undefined && witness !== undefined) {
-    const partOnTarget = spec.keyShape === "to";
-    return claimHolderTerms(
-      edgesName,
-      edges,
-      { ...witness, scope },
-      {
-        kind: partOnTarget ? values.toKind : values.fromKind,
-        id: partOnTarget ? values.toId : values.fromId,
-      },
-    );
-  }
-  return sql`${qualified(edgesName, edges.kind)} = ${values.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, values)}`;
 }
 
 /**
@@ -504,13 +433,12 @@ function claimHolderMatch(
 function competingLiveEdgePredicate(
   tables: Tables,
   values: ClaimValueSource,
-  spec: EdgeCardinalitySpec,
-  witness?: ClaimEdgeCardinalityParams,
+  axis: ClaimHolderAxis,
 ): SQL {
   const { edges } = tables;
   const edgesName = getTableName(edges);
   const activeTerm =
-    spec.holderLiveness === "liveAndActive" ?
+    edgeCardinalitySpec(axis).holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
     : sql``;
 
@@ -518,7 +446,7 @@ function competingLiveEdgePredicate(
     ${qualified(edgesName, edges.graphId)} = ${values.graphId}
       AND ${qualified(edgesName, edges.id)} <> ${values.edgeId}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${claimHolderMatch(edgesName, edges, values, spec, witness)}${activeTerm}
+      AND ${claimHolderTerms(edgesName, edges, axis, values)}${activeTerm}
   `;
 }
 
@@ -573,21 +501,20 @@ function schemaFenceCte(
 function recordedClaimHolderIsLivePredicate(
   tables: Tables,
   values: ClaimValueSource,
-  spec: EdgeCardinalitySpec,
-  witness?: ClaimEdgeCardinalityParams,
+  axis: ClaimHolderAxis,
 ): SQL {
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
   const edgesName = getTableName(edges);
   const activeTerm =
-    spec.holderLiveness === "liveAndActive" ?
+    edgeCardinalitySpec(axis).holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
     : sql``;
   return sql`
     ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
       AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${claimHolderMatch(edgesName, edges, values, spec, witness)}${activeTerm}
+      AND ${claimHolderTerms(edgesName, edges, axis, values)}${activeTerm}
   `;
 }
 
@@ -596,7 +523,8 @@ function recordedClaimHolderIsLivePredicate(
  * The schema and endpoint gates ensure a stale fence remains a side-effect-free
  * no-op; a later edge refusal rolls this mutation back with the whole program.
  *
- * One statement per axis-spec group; see {@link groupEntriesBySpec}.
+ * One statement per predicate-shape group; see
+ * {@link groupEntriesByPredicateShape}.
  *
  * The `stale` CTE names its projection distinctly (`stale_graph_id`, …): the
  * row-value comparison the DELETE ends with is against the target relation's
@@ -613,8 +541,7 @@ export function buildDeleteStaleAtomicEdgeClaims(
   const claimsName = getTableName(edgeClaims);
   const values = PROPOSED_CLAIM_VALUES;
   return groupEntriesByPredicateShape(entries).map((group) => {
-    const witness = axisOf(group);
-    const spec = edgeCardinalitySpec(witness);
+    const axis = axisOf(group);
     return sql`
       WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)},
       ${proposedRelationCte(tables, group)},
@@ -633,7 +560,7 @@ export function buildDeleteStaleAtomicEdgeClaims(
           AND ${proposedEndpointsLivePredicate(tables, values)}
           AND NOT EXISTS (
             SELECT 1 FROM ${edges}
-            WHERE ${recordedClaimHolderIsLivePredicate(tables, values, spec, witness)}
+            WHERE ${recordedClaimHolderIsLivePredicate(tables, values, axis)}
           )
       )
       DELETE FROM ${edgeClaims}
@@ -649,7 +576,8 @@ export function buildDeleteStaleAtomicEdgeClaims(
 /**
  * Acquires every still-unowned axis before inserting the guarded edge rows.
  *
- * One statement per axis-spec group; see {@link groupEntriesBySpec}.
+ * One statement per predicate-shape group; see
+ * {@link groupEntriesByPredicateShape}.
  */
 export function buildAcquireAtomicEdgeClaims(
   tables: Tables,
@@ -667,8 +595,7 @@ export function buildAcquireAtomicEdgeClaims(
   );
   const values = PROPOSED_CLAIM_VALUES;
   return groupEntriesByPredicateShape(entries).map((group) => {
-    const witness = axisOf(group);
-    const spec = edgeCardinalitySpec(witness);
+    const axis = axisOf(group);
     return sql`
       WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)},
       ${proposedRelationCte(tables, group)}
@@ -683,7 +610,7 @@ export function buildAcquireAtomicEdgeClaims(
       WHERE ${proposedEndpointsLivePredicate(tables, values)}
         AND NOT EXISTS (
           SELECT 1 FROM ${edges}
-          WHERE ${competingLiveEdgePredicate(tables, values, spec, witness)}
+          WHERE ${competingLiveEdgePredicate(tables, values, axis)}
         )
       ON CONFLICT (${conflictColumns}) DO NOTHING
     `;
@@ -700,7 +627,8 @@ export function buildAcquireAtomicEdgeClaims(
  * refusal leg in a rendered program — the backend tests discriminate the three
  * claim phases by them.
  *
- * One statement per axis-spec group; see {@link groupEntriesBySpec}.
+ * One statement per predicate-shape group; see
+ * {@link groupEntriesByPredicateShape}.
  */
 export function buildAssertAtomicEdgeClaimsOwned(
   tables: Tables,
@@ -715,7 +643,7 @@ export function buildAssertAtomicEdgeClaimsOwned(
     `"${edgeClaims.graphId.name}", "${edgeClaims.axis.name}", "${edgeClaims.key.name}", "${edgeClaims.edgeId.name}", "${edgeClaims.updatedAt.name}"`,
   );
   const values = PROPOSED_CLAIM_VALUES;
-  return groupEntriesBySpec(entries).map(
+  return groupEntriesByPredicateShape(entries).map(
     (group) => sql`
       WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)},
       ${proposedRelationCte(tables, group)}
@@ -834,7 +762,7 @@ export function buildLockEdgeClaimGuarded(
       ${quotedColumn(edgeClaims.edgeId)} AS holder_edge_id,
       EXISTS (
         SELECT 1 FROM ${edges}
-        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), edgeCardinalitySpec(params))}
+        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), params)}
       ) AS has_incumbent
   `;
 }
@@ -884,7 +812,7 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
       FROM live_endpoints
       WHERE NOT EXISTS (
         SELECT 1 FROM ${edges}
-        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(claim), edgeCardinalitySpec(claim))}
+        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(claim), claim)}
       )
     ),
     claim AS (
@@ -939,7 +867,7 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
  * caller-suppliable and graph-unique, so a hard-deleted id can be reused by a
  * DIFFERENT edge; a claim naming that id would otherwise read as a live holder
  * and block its axis forever. The extra terms are exactly the components the
- * axis and key were built from — and exactly the columns `countEdgesFrom` /
+ * axis and key were built from — and exactly the columns `countEdgesAtEndpoint` /
  * `edgeExistsBetween` filter on — so the fence's liveness predicate and the
  * probe's read the same shape.
  *
@@ -947,7 +875,8 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
  * `holderLiveness` and `keyShape` are read from {@link edgeCardinalitySpec},
  * the same table the TypeScript probe reads, and {@link claimHolderTerms}
  * renders the holder predicate itself — the one seam a new `keyShape` or a
- * new claim scope has to extend.
+ * new claim scope has to extend, since it owns both the ordinary endpoint
+ * terms ({@link endpointTerms}) and the composition scope's oriented arms.
  */
 export function buildTakeOverEdgeClaim(
   tables: Tables,
@@ -956,14 +885,7 @@ export function buildTakeOverEdgeClaim(
 ): SQL {
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
-  const spec = edgeCardinalitySpec(params);
   const target = edgeCardinalityClaimTarget(params);
-
-  const edgesName = getTableName(edges);
-  const activeTerm =
-    spec.holderLiveness === "liveAndActive" ?
-      sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
-    : sql``;
 
   return sql`
     UPDATE ${edgeClaims}
@@ -975,10 +897,7 @@ export function buildTakeOverEdgeClaim(
       AND ${qualified(claimsName, edgeClaims.edgeId)} <> ${params.edgeId}
       AND NOT EXISTS (
         SELECT 1 FROM ${edges}
-        WHERE ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
-          AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
-          AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-          AND ${claimHolderTerms(edgesName, edges, params)}${activeTerm}
+        WHERE ${recordedClaimHolderIsLivePredicate(tables, boundClaimValues(params), params)}
       )
     RETURNING ${quotedColumn(edgeClaims.edgeId)} as holder_edge_id
   `;
@@ -1008,7 +927,7 @@ export function buildTakeOverEdgeClaimGuarded(
       AND ${qualified(claimsName, edgeClaims.edgeId)} <> ${params.edgeId}
       AND NOT EXISTS (
         SELECT 1 FROM ${edges}
-        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), edgeCardinalitySpec(params))}
+        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), params)}
       )
     RETURNING ${quotedColumn(edgeClaims.edgeId)} as holder_edge_id
   `;
