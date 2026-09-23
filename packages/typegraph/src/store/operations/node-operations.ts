@@ -395,10 +395,16 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
       ref: Readonly<{ kind: string; id: string }>,
       mode: "soft" | "hard",
     ) => Promise<void>;
+    /**
+     * Moves `ref`'s identity view along with its own window end: refuses a
+     * `validTo` that would strand identity assertion history and notes the
+     * membership boundary the move creates. `undefined` is a CLEARED end
+     * (`clearValidTo`), which strands nothing but still moves the boundary.
+     */
     requireValidityEndCompatible: (
       target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
-      validTo: string,
+      validTo: string | undefined,
     ) => Promise<void>;
   }>;
 }>;
@@ -4341,6 +4347,39 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 // Node Update Operations
 // ============================================================
 
+/** Whether a node write states a new valid-time window end — set or cleared. */
+function nodeWriteMovesWindowEnd(
+  input: Readonly<{ validTo?: string; clearValidTo?: true }>,
+): boolean {
+  return input.validTo !== undefined || input.clearValidTo === true;
+}
+
+/**
+ * The identity half of a node write that moves its own window end, inside the
+ * write frame and before the row write: every update path that can carry
+ * `validTo` or `clearValidTo` runs this one owner, so a narrowed, widened or
+ * cleared end is refused or noted the same way whichever path writes it.
+ */
+async function applyIdentityWindowEnd<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: IdentityTarget,
+  input: Readonly<{
+    kind: string;
+    id: string;
+    validTo?: string;
+    clearValidTo?: true;
+  }>,
+): Promise<void> {
+  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+  const identity = ctx.identity;
+  if (identity === undefined || !nodeWriteMovesWindowEnd(input)) return;
+  await identity.requireValidityEndCompatible(
+    target,
+    { kind: input.kind, id: input.id },
+    validTo,
+  );
+}
+
 function resolveAtomicNodeUpdateExecutor<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   entries: readonly NodeUpsertUpdateBatchEntry[],
@@ -4424,26 +4463,16 @@ export async function executeNodeUpdate<G extends GraphDef>(
     nodeWritePlan(
       nodeFencesConstraintProbe(ctx, input.kind, "update"),
       // Identity participates in an update when it RESURRECTS, and when it
-      // states a validity end: a live-row update cannot change a node's kind, so
-      // nothing folds, but an end reads the identity assertions that touch it.
-      options?.clearDeleted === true || input.validTo !== undefined ?
+      // moves its validity end: a live-row update cannot change a node's kind,
+      // so nothing folds, but an end reads the identity that touches it.
+      options?.clearDeleted === true || nodeWriteMovesWindowEnd(input) ?
         nodeRequiresIdentityLock(ctx)
       : false,
     ),
     backend,
     async (session, target) => {
-      const validTo = validateOptionalCanonicalIsoDate(
-        input.validTo,
-        "validTo",
-      );
+      await applyIdentityWindowEnd(ctx, target, input);
       const identity = ctx.identity;
-      if (identity !== undefined && validTo !== undefined) {
-        await identity.requireValidityEndCompatible(
-          target,
-          { kind: input.kind, id: input.id },
-          validTo,
-        );
-      }
       const node = await performNodeUpdateWithResurrectionRecovery(
         ctx,
         input,
@@ -4805,26 +4834,16 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
           compositionEdgeConstraintFence(ctx, compositionAttachment.work)
         )),
       // Conditional for the same reason as {@link executeNodeUpdate}: a
-      // resurrecting upsert folds, and stating a validity end reads the
+      // resurrecting upsert folds, and moving a validity end reads the
       // identity's other members, so both take the lock.
-      options?.clearDeleted === true || input.validTo !== undefined ?
+      options?.clearDeleted === true || nodeWriteMovesWindowEnd(input) ?
         nodeRequiresIdentityLock(ctx)
       : false,
     ),
     backend,
     async (session, target, _overlaidSession, lock) => {
-      const validTo = validateOptionalCanonicalIsoDate(
-        input.validTo,
-        "validTo",
-      );
+      await applyIdentityWindowEnd(ctx, target, input);
       const identity = ctx.identity;
-      if (identity !== undefined && validTo !== undefined) {
-        await identity.requireValidityEndCompatible(
-          target,
-          { kind: input.kind, id: input.id },
-          validTo,
-        );
-      }
       // Reads first, then writes — `prepareCompositionAttachmentDecision`
       // owns the reason.
       const decided =
@@ -5025,7 +5044,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
     nodeWritePlan(
       nodeFencesConstraintProbe(ctx, first.input.kind, "update"),
       entries.some(
-        (entry) => entry.clearDeleted || entry.input.validTo !== undefined,
+        (entry) => entry.clearDeleted || nodeWriteMovesWindowEnd(entry.input),
       ) && nodeRequiresIdentityLock(ctx),
     ),
     backend,
@@ -5120,6 +5139,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
       const fallbackRows = batchMissed ? undefined : resolvedRows;
       const nodes: Node[] = [];
       for (const entry of entries) {
+        await applyIdentityWindowEnd(ctx, target, entry.input);
         nodes.push(
           await performNodeUpdateWithResurrectionRecovery(
             ctx,

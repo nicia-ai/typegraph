@@ -608,6 +608,69 @@ describe("identity transition log", () => {
     expect(windowEndRows.length).toBeGreaterThanOrEqual(1);
   });
 
+  // Load-bearing: reopening a window moves the membership boundary back just
+  // as narrowing it did, so every update path that can carry `clearValidTo` or
+  // `validTo` notes it through the one identity window-end owner. Revert
+  // check: skip the owner for a cleared end (the old `validTo !== undefined`
+  // gate) and the reopen notes nothing; drop its call from the batch upsert
+  // path and the bulk narrowing notes nothing.
+  it("notes a window-end transition for every move of a class member's window end, including a cleared one", async () => {
+    const Org = defineNode("Org", { schema: z.object({ name: z.string() }) });
+    const foldGraph = defineGraph({
+      id: "identity_transition_log_window_reopen",
+      nodes: { Person: { type: Person }, Org: { type: Org } },
+      edges: {},
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    const [store] = await createAdapterStoreWithSchema(
+      foldGraph,
+      createTestBackend(),
+      { history: true },
+    );
+    await store.nodes.Person.create({ name: "A" }, { id: "shared" });
+    await store.nodes.Org.create({ name: "A Org" }, { id: "shared" });
+    const orgRef = { kind: "Org", id: "shared" } as const;
+    async function windowEndCount(): Promise<number> {
+      const history = await store.identity.transitionsOf(orgRef);
+      return history.transitions.filter(
+        (transition) => transition.cause === "window-end",
+      ).length;
+    }
+    const farFuture = new Date(Date.now() + 1_000_000_000).toISOString();
+
+    await store.nodes.Person.update(
+      asNodeId("shared"),
+      {},
+      { validTo: farFuture },
+    );
+    expect(await windowEndCount()).toBe(1);
+
+    await store.nodes.Person.update(
+      asNodeId("shared"),
+      {},
+      { clearValidTo: true },
+    );
+    expect(await windowEndCount()).toBe(2);
+
+    // Already open: nothing moved, so no boundary is manufactured.
+    await store.nodes.Person.upsertById(
+      "shared",
+      { name: "A" },
+      { clearValidTo: true },
+    );
+    expect(await windowEndCount()).toBe(2);
+
+    await store.nodes.Person.bulkUpsertById([
+      { id: "shared", props: { name: "A" }, validTo: farFuture },
+    ]);
+    expect(await windowEndCount()).toBe(3);
+
+    await store.nodes.Person.bulkUpsertById([
+      { id: "shared", props: { name: "A" }, clearValidTo: true },
+    ]);
+    expect(await windowEndCount()).toBe(4);
+  });
+
   it("notes a kind-drop transition when Store.removeKinds() cascades a folded class", async () => {
     const extensionGraph = defineGraph({
       id: "identity_transition_log_kind_drop",

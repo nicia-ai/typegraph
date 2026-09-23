@@ -7376,7 +7376,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             requireValidityEndCompatible: (
               target: IdentityTarget,
               ref: Readonly<{ kind: string; id: string }>,
-              validTo: string,
+              validTo: string | undefined,
             ) =>
               requireNodeValidityEndCompatible(
                 {

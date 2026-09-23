@@ -974,15 +974,58 @@ async function readNodeValidTo(
     );
 }
 
+/** Refuses a finite node window end that an open or later-ending identity assertion touching `ref` would outlive. */
+async function refuseStrandedAssertionHistory(
+  ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
+  rawTarget: Backend,
+  ref: PlainNodeRef,
+  validTo: string,
+): Promise<void> {
+  const rows = await rawTarget.execute<RawIdentityAssertionRow>(
+    asCompiledRowsSql(sql`
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
+      FROM ${ctx.schema.identityAssertionsTable}
+      WHERE graph_id = ${ctx.graphId}
+        AND deleted_at IS NULL
+        AND (valid_to IS NULL OR valid_to > ${validTo})
+        AND (
+          (a_kind = ${ref.kind} AND a_id = ${ref.id})
+          OR (b_kind = ${ref.kind} AND b_id = ${ref.id})
+        )
+      ORDER BY id
+      LIMIT 1
+    `),
+  );
+  const row = rows.at(0);
+  if (row !== undefined) {
+    const assertion = normalizeIdentityAssertionRow(row);
+    throw new IdentityEndpointValidityError({
+      endpoint: ref,
+      assertionWindow: {
+        validFrom: assertion.valid_from,
+        ...(assertion.valid_to === undefined ?
+          {}
+        : { validTo: assertion.valid_to }),
+      },
+      endpointWindow: { validTo },
+    });
+  }
+}
+
 /**
  * Refuses a finite node window that would strand identity assertion history,
- * then — once the narrowing is confirmed safe AND confirmed to actually MOVE
- * the window — notes the `window-end` transition when `ref` currently belongs
- * to a real (>=2 member) identity class: narrowing its own valid-time window
- * changes what a valid-time `membersOf` read returns after `validTo` even
- * though nothing in the ledger or the closure table is written.
+ * then — once the move is confirmed safe AND confirmed to actually MOVE the
+ * window — notes the `window-end` transition when `ref` currently belongs to
+ * a real (>=2 member) identity class: moving its own valid-time window end
+ * changes what a valid-time `membersOf` read returns after the old or new end
+ * even though nothing in the ledger or the closure table is written.
  * Self-referential (`classRef === priorClassRef`) because the class's LABEL
  * does not change, only its coordinate-visible membership.
+ *
+ * `validTo: undefined` is a CLEARED end (`clearValidTo`): the window reopens,
+ * which strands no assertion — there is nothing to refuse — but it moves the
+ * boundary back exactly as a narrowing moved it, so it is noted under the same
+ * cause whenever the stored end was finite.
  *
  * A repeat update that restates the SAME `validTo` moves nothing — §2.3
  * forbids manufacturing a boundary at which membership did not change, so
@@ -995,39 +1038,13 @@ export async function requireNodeValidityEndCompatible(
   ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
   target: Backend,
   ref: PlainNodeRef,
-  validTo: string,
+  validTo: string | undefined,
 ): Promise<void> {
   await withRecordedIdentityMutationTarget(
     target,
     async (rawTarget, _touch, noteTransition) => {
-      const rows = await rawTarget.execute<RawIdentityAssertionRow>(
-        asCompiledRowsSql(sql`
-          SELECT ${IDENTITY_ASSERTION_COLUMNS}
-          FROM ${ctx.schema.identityAssertionsTable}
-          WHERE graph_id = ${ctx.graphId}
-            AND deleted_at IS NULL
-            AND (valid_to IS NULL OR valid_to > ${validTo})
-            AND (
-              (a_kind = ${ref.kind} AND a_id = ${ref.id})
-              OR (b_kind = ${ref.kind} AND b_id = ${ref.id})
-            )
-          ORDER BY id
-          LIMIT 1
-        `),
-      );
-      const row = rows.at(0);
-      if (row !== undefined) {
-        const assertion = normalizeIdentityAssertionRow(row);
-        throw new IdentityEndpointValidityError({
-          endpoint: ref,
-          assertionWindow: {
-            validFrom: assertion.valid_from,
-            ...(assertion.valid_to === undefined ?
-              {}
-            : { validTo: assertion.valid_to }),
-          },
-          endpointWindow: { validTo },
-        });
+      if (validTo !== undefined) {
+        await refuseStrandedAssertionHistory(ctx, rawTarget, ref, validTo);
       }
       // A node in no real (>= 2 member) class can produce no `window-end`
       // transition at all: no closure row means a singleton under every source

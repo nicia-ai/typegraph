@@ -519,6 +519,47 @@ export function registerIdentityIntegrationTests(
       ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
     });
 
+    // Load-bearing for the batch path: a bulk upsert's window end goes through
+    // the same identity window-end owner as update and upsertById. Revert
+    // check: drop that owner's call from the upsert-update batch and the bulk
+    // narrowing below commits, stranding the open assertion.
+    it("refuses a node window end that would strand identity history on every update path", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Stranded person" },
+        { id: "stranded-person" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Stranded company" },
+        { id: "stranded-company" },
+      );
+      await store.identity.assertSame(person, company);
+      const endpointEnd = new Date(Date.now() + 86_400_000).toISOString();
+
+      await expect(
+        store.nodes.Person.update(person.id, {}, { validTo: endpointEnd }),
+      ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+      await expect(
+        store.nodes.Person.upsertById(
+          person.id,
+          { name: "Stranded person" },
+          { validTo: endpointEnd },
+        ),
+      ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+      await expect(
+        store.nodes.Person.bulkUpsertById([
+          {
+            id: person.id,
+            props: { name: "Stranded person" },
+            validTo: endpointEnd,
+          },
+        ]),
+      ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+      await expect(
+        store.nodes.Person.getById(person.id),
+      ).resolves.toMatchObject({ meta: { validTo: undefined } });
+    });
+
     it("keeps retrospective assertions behind their recorded-time commit", async () => {
       const store = await provisionIdentityTraversalStore(context, true);
       const endpointStart = "2019-01-01T00:00:00.000Z";
