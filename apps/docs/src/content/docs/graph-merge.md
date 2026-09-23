@@ -1917,7 +1917,10 @@ Merge planning also assumes the working copy is quiescent while it is diffed.
 A strategy may implement `merge()` to apply an approved plan through a database
 branch primitive. `applyDurableMergePlan()` validates the plan and descriptor,
 then calls that method only when no apply callbacks or persisted provenance were
-requested. The result has two outcomes:
+requested and the plan carries no identity or composition work: identity
+assertion or retraction writes, identity reconciliations or conflicts, a
+reported composition orphan, or a write to a composition whole, part, or edge
+kind. Those plans always take the portable path. The result has two outcomes:
 
 - `applied`: the strategy proved the branch origin and target fence on the
   resources being merged, proved the complete physical diff is exactly the

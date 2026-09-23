@@ -316,7 +316,8 @@ export type DurableWorkingCopyStrategy<
    * 3. prove the host-native diff contains exactly `plan.writes`, including all
    *    TypeGraph sidecars and no rows belonging to another graph or application;
    * 4. prove the plan needs no canonicalization, repointing, identity, callback,
-   *    provenance, or other semantic work the native merge would bypass; and
+   *    provenance, composition, or other semantic work the native merge would
+   *    bypass; and
    * 5. report the actual applied counts.
    *
    * A whole-database merge primitive therefore qualifies only for an allocation
@@ -324,6 +325,13 @@ export type DurableWorkingCopyStrategy<
    * equivalent to the approved TypeGraph plan. If any dimension cannot be
    * proven, return `unsupported` BEFORE executing host SQL; TypeGraph will apply
    * the plan through its portable transaction path.
+   *
+   * TypeGraph never offers this command a plan that requests callbacks or
+   * persisted provenance, writes or reconciles identity assertions (identity
+   * assertion or retraction writes, identity reconciliations or conflicts), or
+   * touches composition (a reported composition orphan, or a write to a
+   * composition whole, part, or edge kind, which owes cascade, single-whole, and
+   * required-existence enforcement): those plans always take the portable path.
    */
   merge?:
     | ((
