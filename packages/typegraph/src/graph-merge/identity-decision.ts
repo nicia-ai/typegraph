@@ -38,7 +38,7 @@ export function branchAncestryOf(
 }
 
 /** The same ancestry, read off a plan artifact's anchors. */
-export function branchAncestryFromAnchors(
+function branchAncestryFromAnchors(
   anchors: MergePlanAnchors,
 ): readonly string[] {
   const root =
