@@ -13,7 +13,6 @@
  * forbids re-spelling.
  */
 import { identityAssertionSemanticKey } from "../identity/assertion-key";
-import type { IdentityAssertionPolicyLabel } from "../identity/transition-log";
 import type { IdentityRelation } from "../identity/types";
 import { identityValidityWindowsOverlap } from "../identity/validity-window";
 import { requireDefined } from "../utils/presence";
@@ -28,6 +27,7 @@ import type {
 } from "./staging";
 import {
   compareCodePoints,
+  type IdentityAssertionPolicyLabel,
   type IdentityTransferAssertion,
 } from "./typegraph-internal";
 import type {

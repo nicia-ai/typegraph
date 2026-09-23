@@ -12,7 +12,6 @@
  * runtime merge logic.
  */
 
-import type { IdentityAssertionPolicyLabel } from "../identity/transition-log";
 import type { IdentityRelation } from "../identity/types";
 import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 import type {
@@ -27,6 +26,7 @@ import type {
   EngineRevision,
   GetNodeType,
   GraphDef,
+  IdentityAssertionPolicyLabel,
   IdentityAssertionWriteFacade,
   JsonValue,
   Node,
