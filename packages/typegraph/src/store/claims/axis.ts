@@ -23,8 +23,12 @@ import { subClassComponent } from "../../constraints";
 import { type UniquenessScope } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { compareStrings } from "../../utils/compare";
+import { compareCodePoints, compareStrings } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
+// Type-only: `edge-claims.ts` value-imports `edgeCardinalityAxis` from this
+// file, but a type-only import is erased at runtime, so this back-edge
+// creates no value cycle.
+import { type EdgeCardinalityAxisRef } from "./edge-claims";
 
 /**
  * The one code point an axis component may not contain, written as an escape
@@ -51,6 +55,48 @@ const DISJOINT_AXIS_PREFIX = `${AXIS_SEPARATOR}disjoint${AXIS_SEPARATOR}`;
  * constraint can carry the same name.
  */
 export const DISJOINT_CONSTRAINT_NAME = `${AXIS_SEPARATOR}disjointWith`;
+
+/**
+ * THE axis every composition claim is written at, and THE name of the
+ * composition acyclic relation ({@link file://../acyclicity.ts
+ * compositionAcyclicRelation}).
+ *
+ * ONE string for the whole graph, not one per edge kind and not one per
+ * population: R4's invariant is relation-wide, so two composition edges out
+ * of one part must collide on one row regardless of which `partOf`/`hasPart`
+ * pair or which realizing edge kind wrote it. Prefixed with the reserved
+ * separator so no kind name can spell it (enforced the same way
+ * {@link DISJOINT_CONSTRAINT_NAME} is, through {@link assertClaimAxisSafe}).
+ */
+export const COMPOSITION_RELATION_NAME = `${AXIS_SEPARATOR}composition`;
+
+/**
+ * THE printable form of an acyclic relation's name, for the one place such a
+ * name crosses into a public field — `EdgeAcyclicityErrorDetails.relation`,
+ * `EdgeAcyclicityIndeterminateErrorDetails.relation`, and
+ * `EdgeAcyclicityViolation.relation` (which `ConstraintFenceViolation`
+ * carries verbatim). A standalone `acyclic: true` relation is named after its
+ * own edge kind (`src/store/acyclicity.ts`'s `standaloneAcyclicRelation`) and
+ * is already printable — `assertClaimAxisSafe` refuses any kind name
+ * containing {@link AXIS_SEPARATOR} — so this only ever has work to do for
+ * {@link COMPOSITION_RELATION_NAME} itself.
+ *
+ * The reserved prefix stays on the relation's INTERNAL name
+ * (`AcyclicEdgeRelation.name`, used for grouping and as this graph's one
+ * composition relation's identity) precisely because no real kind name can
+ * spell it — swapping in a printable internal name would reopen the
+ * collision {@link assertClaimAxisSafe} exists to close, this time against a
+ * user's own `acyclic: true` edge kind. Stripping it here, at display time
+ * only, is what keeps the raw U+001E out of a thrown message or a
+ * `details`/`ConstraintFenceViolation` field a caller might log, serialize,
+ * or compare — the same treatment {@link DISJOINT_CONSTRAINT_NAME} gets by
+ * never being surfaced at all (`DisjointError` names the two kinds instead).
+ */
+export function displayAcyclicRelationName(name: string): string {
+  return name.startsWith(AXIS_SEPARATOR) ?
+      name.slice(AXIS_SEPARATOR.length)
+    : name;
+}
 
 /**
  * THE axis a disjointness claim is written at: the registry's own canonical
@@ -126,6 +172,23 @@ function uniquenessClaimKinds(
   return scope === "kind" ? [kind] : subClassComponent(kind, registry);
 }
 
+/**
+ * THE code-point minimum of a set of kinds — what a uniqueness axis folds
+ * a covered set onto. One spelling, so the live-graph claim target
+ * ({@link uniquenessClaimTarget}) and the ontology-tightening probe (which
+ * folds a proposed schema's merged subclass component onto the same axis)
+ * cannot compute two different minima for the same covered set.
+ *
+ * `undefined` only for an empty input, which no real caller produces: both
+ * `uniquenessClaimKinds` and a merged subclass component always carry at
+ * least the kind that anchors them.
+ */
+export function uniquenessAxisOfKinds(
+  kinds: readonly string[],
+): string | undefined {
+  return kinds.toSorted((left, right) => compareStrings(left, right))[0];
+}
+
 /** THE decision above — the one owner of both readings. */
 export function uniquenessClaimTarget(
   kind: string,
@@ -133,7 +196,10 @@ export function uniquenessClaimTarget(
   registry: KindRegistry,
 ): UniquenessClaimTarget {
   const kinds = uniquenessClaimKinds(kind, scope, registry);
-  return { axis: kinds[0] ?? kind, crossKind: kinds.length > 1 };
+  return {
+    axis: uniquenessAxisOfKinds(kinds) ?? kind,
+    crossKind: kinds.length > 1,
+  };
 }
 
 /**
@@ -179,25 +245,42 @@ export function uniquenessProbeKinds(
   const coveredKinds = uniquenessClaimKinds(kind, scope, registry);
   const rest = coveredKinds
     .filter((candidate) => candidate !== axis)
-    .toSorted((left, right) => compareStrings(left, right));
+    .toSorted((left, right) => compareCodePoints(left, right));
   return [axis, ...rest];
 }
 
 /**
- * THE axis an edge cardinality claim is written at: the declared cardinality
- * and the edge kind, which together name the population the constraint counts.
+ * The prefix marking an axis as a TARGET-side population.
  *
- * `one` and `oneActive` on one kind are DIFFERENT axes on purpose — they count
- * different populations (every live edge from a source vs every active one) —
- * so a kind whose declaration changed cannot inherit rows the old declaration
- * wrote. The cardinality tokens contain no `:`, so the pair is injective over
- * arbitrary edge kind names.
+ * The reserved U+001E device the disjointness axis already uses (`:41-42`):
+ * a source axis is `"<cardinality>:<edgeKind>"` and can never begin with the
+ * separator, so the two namespaces cannot collide however an edge kind is
+ * named. Source axis strings are unchanged byte for byte — existing
+ * `typegraph_edge_claims` rows keep fencing what they fence today, with no
+ * migration.
+ */
+const TARGET_AXIS_PREFIX = `${AXIS_SEPARATOR}to${AXIS_SEPARATOR}`;
+
+/**
+ * THE axis an edge cardinality claim is written at: the direction, the
+ * declared cardinality and the edge kind, which together name the population
+ * the constraint counts.
+ *
+ * `one` and `oneActive` on one kind (in either direction) are DIFFERENT axes
+ * on purpose — they count different populations (every live edge vs every
+ * active one) — so a kind whose declaration changed cannot inherit rows the
+ * old declaration wrote. The cardinality tokens contain no `:`, so the pair is
+ * injective over arbitrary edge kind names. The signature takes the direction
+ * explicitly (rather than a bare cardinality) so every caller must say which
+ * endpoint's population it means; a caller that cannot say is a caller that
+ * was guessing.
  */
 export function edgeCardinalityAxis(
-  cardinality: string,
+  ref: EdgeCardinalityAxisRef,
   edgeKind: string,
 ): string {
-  return `${cardinality}:${edgeKind}`;
+  const base = `${ref.cardinality}:${edgeKind}`;
+  return ref.direction === "source" ? base : `${TARGET_AXIS_PREFIX}${base}`;
 }
 
 /** The relation a claim row lives in. */
@@ -245,6 +328,25 @@ export function compareClaimTargets(
     compareStrings(left.constraintName ?? "", right.constraintName ?? "") ||
     compareStrings(left.key, right.key)
   );
+}
+
+/**
+ * A claim target keyed as ONE map entry — the identity a grouping or a
+ * duplicate refusal keys on, so every consumer groups the same rows together.
+ * {@link encodeTupleKey} rather than a delimiter join, for the reason that
+ * module states: a delimiter is also a legal value character.
+ *
+ * `graphId` is deliberately absent: every caller groups within one graph, and
+ * including it would make the key say nothing the caller does not already
+ * know.
+ */
+export function targetIdentity(target: ClaimTarget): string {
+  return encodeTupleKey([
+    target.relation,
+    target.axis,
+    target.constraintName ?? "",
+    target.key,
+  ]);
 }
 
 /**

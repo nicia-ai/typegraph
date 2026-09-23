@@ -24,17 +24,20 @@ import type {
 } from "../../../types";
 
 /**
- * Barrel keys (contribution logical names) of the four relations that hold
+ * Barrel keys (contribution logical names) of the six relations that hold
  * Operational Identity state: current assertions, recorded-time assertions,
- * the derived closure, and the derived separation relation.
- * `ensureIdentityTables()` scopes its idempotent CREATE TABLE / CREATE INDEX
- * to exactly these when identity is first enabled on an existing database.
+ * the derived closure, the derived separation relation, and the transition
+ * log plus its retention watermark. `ensureIdentityTables()` scopes its
+ * idempotent CREATE TABLE / CREATE INDEX to exactly these when identity is
+ * first enabled on an existing database.
  */
 const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
   "identityAssertions",
   "recordedIdentityAssertions",
   "identityClosure",
   "identitySeparation",
+  "identityTransitions",
+  "identityTransitionRetention",
 ]);
 
 /**
@@ -178,7 +181,9 @@ export function createIdentityMembers(
       return missing;
     },
 
-    identityTableDdl(identityTableNames: IdentityTableNames): readonly string[] {
+    identityTableDdl(
+      identityTableNames: IdentityTableNames,
+    ): readonly string[] {
       return identityContributionsFor(identityTableNames).flatMap(
         (contribution) => [...contribution.createDdl],
       );

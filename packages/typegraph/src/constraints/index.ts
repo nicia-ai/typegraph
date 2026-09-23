@@ -19,7 +19,6 @@ const UNIQUE_KEY_SEPARATOR = "\u001E";
 const UNIQUE_KEY_NULL_MARKER = "\u001F"; // ASCII Unit Separator
 import { getEdgeEndpointPairs, isEdgeTargetMap } from "../core/edge-endpoints";
 import {
-  type Cardinality,
   type Collation,
   type EdgeRegistration,
   type NullCheckOp,
@@ -27,7 +26,6 @@ import {
   type UniquenessScope,
 } from "../core/types";
 import {
-  CardinalityError,
   ConfigurationError,
   DisjointError,
   EndpointError,
@@ -35,6 +33,7 @@ import {
   UniquenessError,
 } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
+import { compareCodePoints } from "../utils/compare";
 import { hasOwnKey, readOwnProperty } from "../utils/object";
 import { isPresent } from "../utils/presence";
 
@@ -352,7 +351,7 @@ export function getKindsForUniquenessCheck(
   }
 
   // Get the entire connected subclass hierarchy by finding the root ancestor
-  const root = findRootAncestor(baseKind, registry);
+  const root = rootAncestor(baseKind, registry);
 
   // Return the root and all its descendants (which includes baseKind and siblings)
   return registry.expandSubClasses(root);
@@ -384,25 +383,33 @@ export function subClassComponent(
 }
 
 /**
- * Finds the topmost ancestor of a kind, or the kind itself if it has no ancestors.
+ * The kind whose descendants a `kindWithSubClasses` probe walks: the
+ * code-point-minimum MAXIMAL element of `kind` plus its ancestors, where
+ * maximal means "every ancestor of this kind is also one of its descendants",
+ * i.e. nothing sits strictly above it.
+ *
+ * "The ancestor with no ancestors" stopped being a definition once
+ * `equivalentTo` became mutual subsumption (D1): an equivalence class is a
+ * cycle in the ancestor relation, so with `Company ≡ Corporation` and no other
+ * parent, neither is ancestor-free and the old recursion never terminated.
+ * Picking the code-point minimum of the maximal set restores termination AND
+ * removes the old iteration-order dependence — the previous code returned
+ * whichever root `Set` insertion order happened to visit first.
+ *
+ * The probe stays deliberately narrower than the claim axis's component
+ * (`subClassComponent`): see that function's note on multi-root hierarchies.
  */
-function findRootAncestor(kind: string, registry: KindRegistry): string {
-  const ancestors = registry.getAncestors(kind);
-
-  if (ancestors.size === 0) {
-    return kind;
-  }
-
-  // Find an ancestor with no ancestors (the root)
-  for (const ancestor of ancestors) {
-    if (registry.getAncestors(ancestor).size === 0) {
-      return ancestor;
-    }
-  }
-
-  // If all ancestors have ancestors, recurse up
-  const firstAncestor = [...ancestors][0];
-  return firstAncestor ? findRootAncestor(firstAncestor, registry) : kind;
+function rootAncestor(kind: string, registry: KindRegistry): string {
+  const candidates = [kind, ...registry.getAncestors(kind)];
+  const maximal = candidates.filter((candidate) =>
+    [...registry.getAncestors(candidate)].every((ancestor) =>
+      registry.isSubClassOf(ancestor, candidate),
+    ),
+  );
+  const ordered = (maximal.length > 0 ? maximal : candidates).toSorted(
+    (left, right) => compareCodePoints(left, right),
+  );
+  return ordered[0] ?? kind;
 }
 
 /**
@@ -422,90 +429,6 @@ export function createUniquenessError(
     newId,
     fields: [...fields],
   });
-}
-
-// ============================================================
-// Cardinality Validation
-// ============================================================
-
-/**
- * Checks if adding an edge would violate cardinality constraints.
- *
- * @param edgeKind - The edge kind being added
- * @param fromKind - The source node kind
- * @param fromId - The source node ID
- * @param cardinality - The cardinality constraint
- * @param existingEdgeCount - Number of existing edges of this kind from this source
- * @param hasActiveEdge - Whether there's an active (valid_to IS NULL) edge
- * @returns Error if violation, undefined if valid
- */
-export function checkCardinality(
-  edgeKind: string,
-  fromKind: string,
-  fromId: string,
-  cardinality: Cardinality,
-  existingEdgeCount: number,
-  hasActiveEdge: boolean,
-): CardinalityError | undefined {
-  switch (cardinality) {
-    case "many": {
-      // No constraint
-      return undefined;
-    }
-    case "one": {
-      // At most one edge of this kind from any source node
-      if (existingEdgeCount > 0) {
-        return new CardinalityError({
-          edgeKind,
-          fromKind,
-          fromId,
-          cardinality: "one",
-          existingCount: existingEdgeCount,
-        });
-      }
-      return undefined;
-    }
-    case "unique": {
-      // unique is checked separately per (source, target) pair
-      return undefined;
-    }
-    case "oneActive": {
-      // At most one edge with valid_to IS NULL from any source
-      if (hasActiveEdge) {
-        return new CardinalityError({
-          edgeKind,
-          fromKind,
-          fromId,
-          cardinality: "oneActive",
-          existingCount: 1,
-        });
-      }
-      return undefined;
-    }
-  }
-}
-
-/**
- * Checks unique edge constraint (at most one edge between any source-target pair).
- */
-export function checkUniqueEdge(
-  edgeKind: string,
-  fromKind: string,
-  fromId: string,
-  _toKind: string,
-  _toId: string,
-  existingCount: number,
-): CardinalityError | undefined {
-  if (existingCount > 0) {
-    return new CardinalityError({
-      edgeKind,
-      fromKind,
-      fromId,
-      cardinality: "unique",
-      existingCount,
-    });
-  }
-  return undefined;
 }
 
 // ============================================================

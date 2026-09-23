@@ -80,8 +80,15 @@ export {
   operateDurableBranch,
   scanDurableOperations,
 } from "./durable-operation";
-export type { MergeConstraintConflictErrorDetails } from "./errors";
+export type {
+  AcyclicityMergeConflictDetails,
+  AcyclicityMergeConflictEdge,
+  IdentityMergeConflictCode,
+  MergeConstraintConflictErrorDetails,
+  MergeErrorOptions,
+} from "./errors";
 export {
+  AcyclicityMergeConflictError,
   BaseVersionMismatchError,
   BranchError,
   CandidateSourceError,
@@ -97,6 +104,7 @@ export {
   InvalidMergePlanError,
   MatchEvidenceError,
   MERGE_ERROR_CODES,
+  MergeCompositionOrphanError,
   MergeConflictError,
   MergeConstraintConflictError,
   MergeError,
@@ -120,6 +128,11 @@ export type {
   MatchStrategy,
 } from "./evidence";
 export { branchForEvolution } from "./evolution-branch";
+export type {
+  IdentityAssertionConflict,
+  IdentityAssertionConflictPolicy,
+  IdentityAssertionDecision,
+} from "./identity-three-way";
 export { ingestionBranch } from "./ingestion-branch";
 export {
   applyMergePlan,
@@ -135,11 +148,12 @@ export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
   MergePlanAnchors,
   MergePlanArtifact,
-  MergePlanArtifactV1,
-  MergePlanArtifactV1Input,
+  MergePlanArtifactV2,
+  MergePlanArtifactV2Input,
   MergePlanBranchAnchor,
   MergePlanCandidateDiagnostic,
   MergePlanCanonicalMapping,
+  MergePlanCompositionOrphan,
   MergePlanDiagnostics,
   MergePlanDigest,
   MergePlanEdgeDelete,
@@ -192,10 +206,18 @@ export { MERGE_REVIEW_FORMAT_VERSION } from "./review-schema";
 export type {
   BaseNodeLookup,
   CandidateSource,
+  IdentityPairingScope,
   KeylessConfig,
   SourceScope,
 } from "./sources";
-export type { IdentityAssertionWriteFacade } from "./typegraph-internal";
+export type { StagedIdentityAssertion, StagedRetraction } from "./staging";
+export type { RetractionCause } from "./state-diff";
+export type {
+  IdentityAssertionWriteFacade,
+  IdentityDecisionProvenance,
+  IdentityRelation,
+  IdentityTransferAssertion,
+} from "./typegraph-internal";
 export type {
   BaseAmbiguity,
   BaseVersion,
@@ -211,6 +233,10 @@ export type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IdentityAssertionConflictReason,
+  IdentityReconciliation,
+  IdentityReconciliationOptions,
+  IdentityUnresolvedConflict,
   IngestionBranch,
   IngestionNodeCollections,
   MergeBranch,

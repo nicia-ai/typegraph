@@ -886,7 +886,8 @@ export type UnbundledOptionalMember =
  * (`profile.provisioning.recordedTime` in `create-sql-backend.ts` and both
  * dialects' transaction-scoped threading) is off `EngineProvisioning`, a
  * type the receiver test's arm (b) does not recognize by name — still 93,
- * 16 + 84 = 100 members total.
+ * 16 + 84 = 100 members total. `setActiveVersionWithPreflight` then added a
+ * reasoned member with one access (`rollbackSchema`) — 16 + 85 = 101.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   upsertHeterogeneousNodes: {
@@ -939,13 +940,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   tableNames: {
     kind: "reasoned",
     reason:
-      "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.",
-    // 25, including the schema-checked read binding. Previously 24, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
-    // accesses on one physical line, which a line-keyed grep counts once but
-    // the type-aware scanner counts as two access nodes (§Baselines). The
-    // forked working-copy strategy reads the connected backend's names to
-    // fence them against the base store's resolved schema.
-    accesses: 25,
+      "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers, and composition tightening adds one more for the proposed composition relation.",
+    // 29: schema-checked binding (25) plus three acyclicity readers plus the composition tightening probe.
+    accesses: 29,
   },
   fenceSql: {
     kind: "reasoned",
@@ -964,6 +961,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     reason:
       "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.",
     accesses: 3,
+  },
+  setActiveVersionWithPreflight: {
+    kind: "reasoned",
+    reason:
+      "Same schema-version write-fence family as commitSchemaVersionWithPreflight; rollbackSchema refuses with the tightening capability error when it is absent.",
+    accesses: 1,
   },
   lockSchemaVersionForWrite: {
     kind: "reasoned",
@@ -1247,7 +1250,13 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     bundle: "heterogeneousEndpointSetRead",
     // Import prefetches existing endpoint pairs through the same bulk-read
     // capability rather than issuing one probe per incoming edge.
-    ceiling: 5,
+    // `store/operations/composition-cascade.ts`'s `planCompositionCascade`
+    // reads one round's whole-side composition edges the same way
+    // `findConnectedEdgesForNodeBatch` (`node-operations.ts`) already does.
+    // `composition-create.ts`'s `readCompositionUnattachedParts` reads one
+    // page's attachment candidates per orientation instead of one connected-edges
+    // read per row.
+    ceiling: 7,
   },
   fulltextSearch: {
     kind: "deferred",

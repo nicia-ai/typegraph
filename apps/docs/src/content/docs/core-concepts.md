@@ -17,7 +17,7 @@ TypeGraph's power comes from its type system. Define your schema once with Zod, 
   - [Node Operations](#node-operations)
 - [Edges](#edges) — Relationships between nodes
   - [Defining Edge Types](#defining-edge-types) (domain/range constraints)
-  - [Edge Constraints](#edge-constraints) (cardinality)
+  - [Edge Constraints](#edge-constraints) (cardinality, acyclicity)
   - [Edge Operations](#edge-operations)
 - [Graph Definition](#graph-definition) — Combining nodes, edges, and ontology
 - [Delete Behaviors](#delete-behaviors) — Restrict, cascade, disconnect
@@ -413,6 +413,147 @@ await store.edges.currentEmployer.create(alice, other, {}); // Throws Cardinalit
 The check queries existing edges and throws `CardinalityError` if violated.
 For `oneActive`, only edges with `validTo` unset count toward the limit.
 
+#### Target cardinality
+
+`targetCardinality` bounds the edges that point **at** one target node,
+independently of `cardinality`, which bounds the edges leaving one source:
+
+```typescript
+const graph = defineGraph({
+  edges: {
+    // Many-to-one ownership: a source may point at many targets, but each
+    // target may be pointed at by at most one live edge.
+    assignedTo: {
+      type: assignedTo,
+      from: [Person],
+      to: [Ticket],
+      targetCardinality: "one",
+    },
+
+    // At most one ACTIVE edge (valid_to IS NULL) into any target.
+    currentOwner: {
+      type: currentOwner,
+      from: [Person],
+      to: [Asset],
+      targetCardinality: "oneActive",
+    },
+  },
+});
+```
+
+| Target cardinality | Description |
+|---------------------|-------------|
+| `"many"` | No limit (default) |
+| `"one"` | At most one edge of this type into any target node |
+| `"oneActive"` | At most one edge with `valid_to IS NULL` into any target |
+
+There is no `"unique"` target cardinality: pair uniqueness is a property of
+the `(source, target)` pair, and `cardinality: "unique"` already declares it
+from the source side — a second pair declaration on the target side would be
+the same axis stated twice.
+
+`cardinality` and `targetCardinality` compose freely. All twelve
+combinations are accepted; one is *redundant* (`unique` already implies the
+pair bound that `targetCardinality: "one"` would separately declare) and is
+still honored, because refusing an author's explicit, true statement would be
+surprising:
+
+| `cardinality` \ `targetCardinality` | `many` (default) | `one` | `oneActive` |
+| --- | --- | --- | --- |
+| `many` (default) | unconstrained multigraph | many-to-one: a target has at most one incoming edge ever | many-to-one over open-ended edges only |
+| `one` | one outgoing per source (as above) | strict 1:1 over the live population | 1:1 where the target bound counts open-ended edges only |
+| `unique` | at most one edge per `(from, to)` pair (as above) | *redundant*: target `"one"` already implies pair uniqueness | pair uniqueness plus an active-only target bound |
+| `oneActive` | one open-ended outgoing per source (as above) | one open-ended out, at most one incoming ever | strict 1:1 over the open-ended population |
+
+Both axes are limits on **edge count**, not on distinct neighbours: a second
+distinct edge from the same source to an already-`targetCardinality: "one"`
+target is refused exactly like a second edge from a different source would
+be. The reservation is scoped to `(graph, edge kind, target kind, target
+id)` — the source kind is deliberately not part of the key, so two different
+source kinds contend for one target allowance, and two nodes with the same
+id under different target kinds or edge kinds never collide.
+
+The temporal rules mirror the source-side ones, read from the target end:
+`"one"` counts every non-deleted edge at the target (including edges with a
+stated validity end); `"oneActive"` counts only those whose `validTo` is
+unset. Soft-deleting an edge frees the slot it held on both axes; ending an
+edge (setting `validTo`) frees only an active-only (`"oneActive"`) slot,
+never a `"one"` slot; a resurrection or a reopened validity window
+reacquires every applicable reservation, on both axes.
+
+`CardinalityErrorDetails` names which endpoint's population was overrun via
+`direction: "source" | "target"`, alongside `toKind` / `toId` for the target
+endpoint (`fromKind` / `fromId` keep their existing meaning).
+
+#### Acyclicity
+
+Declaring `acyclic: true` makes an edge kind's live relation a DAG (directed
+acyclic graph): no write can create a path from an edge's `to` endpoint back
+to its `from` endpoint, and a self-loop is a cycle of length one.
+
+```typescript
+const graph = defineGraph({
+  edges: {
+    dependsOn: {
+      type: dependsOn,
+      from: [Task],
+      to: [Task],
+      cardinality: "many",
+      acyclic: true,
+    },
+  },
+});
+
+await store.edges.dependsOn.create(a, b, {}); // OK
+await store.edges.dependsOn.create(b, c, {}); // OK
+await store.edges.dependsOn.create(c, a, {}); // Throws EdgeAcyclicityError
+```
+
+`acyclic` is orthogonal to `cardinality`: `cardinality: "many", acyclic: true`
+(a dependency graph, where any number of edges may point at or from a task) is
+the common case. Every write path that can put an edge into the relation
+enforces it: `create`, `bulkCreate`, `getOrCreateByEndpoints`, resurrecting a
+soft-deleted edge, validating import, and merge apply after canonicalization.
+
+**Population.** Every non-deleted edge counts, regardless of its validity
+window. Soft-deleting an edge frees the relation — `a -> b` then `b -> a` is
+accepted once the first edge is deleted. Ending an edge's validity window does
+**not** free it: `a -> b` with its window closed still blocks `b -> a`. This
+is the one place the two temporal axes disagree: acyclicity is a claim about
+the relation's *shape*, not about an instant, so a future-dated edge could
+otherwise close a cycle no write ever probed.
+
+**The check is exhaustive**, not a bounded traversal: it is a set-semantics
+recursive reachability query with no depth bound, so a cycle of any length is
+found — the query builder's `MAX_EXPLICIT_RECURSIVE_DEPTH` does not apply
+here. An engine that cuts the search short (a statement timeout, a resource
+limit) raises `EdgeAcyclicityIndeterminateError` rather than reporting "no
+cycle".
+
+**Concurrency.** The check and the write it guards commit under the same
+per-graph write fence edge cardinality uses, so two concurrent writers of
+`a -> b` and `b -> a` serialize and exactly one commits. A backend with no
+transactions refuses the write (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`) rather
+than enforcing the rule only when nothing races.
+
+Use `store.verifyConstraintFences()` to find edges already on a cycle (the
+`edgeAcyclicity` family), and see [Errors](/errors) for
+`EdgeAcyclicityError` / `EdgeAcyclicityIndeterminateError` and
+[Limitations](/limitations) for what a transactionless backend and a fused
+write program cannot do with an acyclic edge kind.
+
+Cardinality and target cardinality constrain one edge kind's own population;
+they say nothing about what happens to the nodes on either end when the
+relation is a real whole/part relationship. That's a separate declaration,
+[**composition**](/ontology#composition) (`partOf` / `hasPart`): it names
+which edge kind *realizes* containment and requires that edge to declare
+`cardinality`/`targetCardinality: "one"` or `"oneActive"` on the whole side.
+Ownership (one whole per part, enforced cross-relation) and cascade (deleting
+a whole deletes its parts) are the guarantees this declaration is *for*, and
+both are enforced — see the
+[containment tiers](/ontology#choosing-a-containment-tier) table for the
+complete list.
+
 ### Edge Operations
 
 ```typescript
@@ -473,6 +614,15 @@ const graph = defineGraph({
   ontology: [subClassOf(Company, Organization), disjointWith(Person, Company)],
 });
 ```
+
+`subClassOf(Company, Organization)` here requires `Company`'s schema to
+structurally extend `Organization`'s — checked at compile time and at
+registry build (see [Ontology](/ontology#subsumption-type-inheritance)).
+Because of that guarantee, querying `Organization` returns `Company` rows
+by default: `store.query().from("Organization", "o")` is polymorphic, with
+`o`'s `kind` widened to `string` and only `Organization`'s own properties
+statically typed on the alias. Pass `{ expansion: "exact" }` to get
+back the exact-kind reading.
 
 ## Delete Behaviors
 

@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type AdapterStore,
   ConfigurationError,
   createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
   embedding,
+  type GraphDef,
+  MigrationError,
+  type MigrationErrorDetails,
   resolveGraphVectorSlots,
   SchemaContentConflictError,
   TransactionClosedError,
@@ -17,7 +21,10 @@ import type {
   AdapterBackend,
   IdentityTableNames,
 } from "../../../src/backend/types";
-import { defineGraphExtension } from "../../../src/graph-extension";
+import {
+  defineGraphExtension,
+  type GraphExtension,
+} from "../../../src/graph-extension";
 import { mergeGraphExtension } from "../../../src/graph-extension/merge";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../../../src/query/sql-intent";
@@ -122,6 +129,48 @@ const unrelatedFeatureGraph = defineGraph({
   edges: {},
   identity: { sameIdAcrossKinds: "fold" },
 });
+const DisjointLeft = defineNode("AdoptedDisjointLeft", {
+  schema: z.object({}),
+});
+const DisjointRight = defineNode("AdoptedDisjointRight", {
+  schema: z.object({}),
+});
+const disjointTighteningGraph = defineGraph({
+  id: "shared_adopted_disjoint_tightening",
+  nodes: {
+    AdoptedDisjointLeft: { type: DisjointLeft },
+    AdoptedDisjointRight: { type: DisjointRight },
+  },
+  edges: {},
+});
+const disjointTighteningExtension = defineGraphExtension({
+  ontology: [
+    {
+      metaEdge: "disjointWith",
+      from: "AdoptedDisjointLeft",
+      to: "AdoptedDisjointRight",
+    },
+  ],
+});
+const AcyclicTask = defineNode("AdoptedAcyclicTask", {
+  schema: z.object({}),
+});
+const acyclicTighteningGraph = defineGraph({
+  id: "shared_adopted_acyclic_tightening",
+  nodes: { AdoptedAcyclicTask: { type: AcyclicTask } },
+  edges: {},
+});
+function acyclicTighteningExtension(acyclic: boolean) {
+  return defineGraphExtension({
+    edges: {
+      adoptedDependsOn: {
+        from: ["AdoptedAcyclicTask"],
+        to: ["AdoptedAcyclicTask"],
+        ...(acyclic ? { acyclic: true } : {}),
+      },
+    },
+  });
+}
 const standaloneKindExtension = defineGraphExtension({
   nodes: {
     AdoptedStandaloneTag: {
@@ -129,6 +178,77 @@ const standaloneKindExtension = defineGraphExtension({
     },
   },
 });
+
+function ontologyTighteningViolations(
+  error: unknown,
+): MigrationErrorDetails & { reason: "ontology-tightening-violated" } {
+  expect(error).toBeInstanceOf(MigrationError);
+  const details = (error as MigrationError).details;
+  if (details.reason !== "ontology-tightening-violated") {
+    throw new Error(
+      `expected ontology-tightening-violated, got ${details.reason}`,
+    );
+  }
+  return details;
+}
+
+/**
+ * Plans `tightening` against `store`, then asserts the adopted apply refuses
+ * with exactly the refusal `store.evolve(tightening)` raises, before the
+ * callback runs and without publishing a schema version.
+ */
+async function assertAdoptedTighteningRefusedLikeEvolve<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  backend: AdapterBackend<TNativeTransaction>,
+  store: AdapterStore<G, TNativeTransaction>,
+  tightening: GraphExtension,
+): Promise<void> {
+  const graphId = store.graphId;
+  const baseline = await backend.getActiveSchema(graphId);
+  const evolveDetails = ontologyTighteningViolations(
+    await store.evolve(tightening).catch((error: unknown) => error),
+  );
+  const plan = await store.planEvolution(tightening);
+  if (plan.status !== "change") throw new Error("Expected tightening plan.");
+  expect(
+    plan.requirements.filter(
+      (requirement) => requirement.kind === "ontology-tightening",
+    ),
+  ).toEqual([
+    {
+      kind: "ontology-tightening",
+      changes: evolveDetails.changes,
+      edgeCardinalityAxes: [],
+    },
+  ]);
+  if (backend.adoptSchemaWriteTransaction === undefined) {
+    await assertUnsupportedAdoption(() =>
+      backend.transactionWithNative(async (_target, nativeTx) =>
+        store.withEvolvedTransaction(nativeTx, plan, async () => {
+          await Promise.resolve();
+        }),
+      ),
+    );
+    return;
+  }
+  let callbackRan = false;
+  const adoptedError = await backend
+    .transactionWithNative(async (_target, nativeTx) =>
+      store.withEvolvedTransaction(nativeTx, plan, async () => {
+        callbackRan = true;
+        await Promise.resolve();
+      }),
+    )
+    .catch((error: unknown) => error);
+  const adoptedDetails = ontologyTighteningViolations(adoptedError);
+  expect(adoptedDetails.violations).toEqual(evolveDetails.violations);
+  expect(adoptedDetails.changes).toEqual(evolveDetails.changes);
+  expect(callbackRan).toBe(false);
+  const active = await backend.getActiveSchema(graphId);
+  expect(active?.version).toBe(baseline?.version);
+}
 
 async function assertUnsupportedAdoption(
   run: () => Promise<unknown>,
@@ -147,6 +267,10 @@ function identityTablesForBackend(
     ),
     identityClosure: requireDefined(names.identityClosure),
     identitySeparation: requireDefined(names.identitySeparation),
+    identityTransitions: requireDefined(names.identityTransitions),
+    identityTransitionRetention: requireDefined(
+      names.identityTransitionRetention,
+    ),
   };
 }
 
@@ -764,6 +888,43 @@ export function registerAdoptedEvolutionIntegrationTests(
       ).rejects.toThrow();
       const active = await backend.getActiveSchema(graph.id);
       expect(active?.version).toBe(plan.baseline.version);
+    });
+
+    it("refuses a disjointWith tightening existing rows violate, exactly as evolve() does", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(
+        disjointTighteningGraph,
+        backend,
+      );
+      await store.nodes.AdoptedDisjointLeft.create({}, { id: "shared" });
+      await store.nodes.AdoptedDisjointRight.create({}, { id: "shared" });
+
+      await assertAdoptedTighteningRefusedLikeEvolve(
+        backend,
+        store,
+        disjointTighteningExtension,
+      );
+    });
+
+    it("refuses an acyclic: true tightening over an existing cycle, exactly as evolve() does", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(
+        acyclicTighteningGraph,
+        backend,
+      );
+      const evolved = await store.evolve(acyclicTighteningExtension(false));
+      const tasks = evolved.getNodeCollectionOrThrow("AdoptedAcyclicTask");
+      const first = await tasks.create({});
+      const second = await tasks.create({});
+      const dependsOn = evolved.getEdgeCollectionOrThrow("adoptedDependsOn");
+      await dependsOn.create(first, second, {});
+      await dependsOn.create(second, first, {});
+
+      await assertAdoptedTighteningRefusedLikeEvolve(
+        backend,
+        evolved,
+        acyclicTighteningExtension(true),
+      );
     });
 
     it("accepts required-empty tightening when the kind has no rows", async () => {

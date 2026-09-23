@@ -1,3 +1,9 @@
+import { type BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import { resolveRecordedTimeOwnership } from "../backend/capabilities/recorded-time-ownership";
+import {
+  batchPointReadVerdict,
+  type BundleVerdictOf,
+} from "../backend/capabilities/resolve";
 import {
   requireWriteFence,
   resolveWriteFencePlan,
@@ -15,24 +21,34 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
+  createRecordedTransactionScope,
+  graphCapturesRecordedHistory,
   lockRecordedGraphWrite,
+  type RecordedTransactionScope,
+  transactionOwnsSqliteWriteLock,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
+import { nowIso } from "../utils/date";
 import {
   errorChain,
   isPostgresConcurrentDdlRaceError,
 } from "../utils/sql-errors";
 import { separationRebuildRequired } from "./separation";
 import {
+  combineSnapshotMembers,
   deleteAssertionsTouchingKinds,
+  fillLiveSingletons,
   hasAssertionsTouchingKinds,
   type IdentityRebuildContext,
   lockIdentityEnablementNodes,
   lockIdentityGraph,
   purgeAssertionsWithUnregisteredKinds,
   rebuildIdentityClosureForContext,
+  snapshotIdentityClosureClasses,
 } from "./service";
+import { noteClassTransitions } from "./service-mutation";
 import { type IdentityTarget } from "./sql-target";
+import { diffClosureTransitions } from "./transition-log";
 
 /** The identity relations a schema transition reads, writes, and locks. */
 function identityTableNames(schema: SqlSchema): IdentityTableNames {
@@ -41,6 +57,8 @@ function identityTableNames(schema: SqlSchema): IdentityTableNames {
     recordedIdentityAssertions: schema.tables.recordedIdentityAssertions,
     identityClosure: schema.tables.identityClosure,
     identitySeparation: schema.tables.identitySeparation,
+    identityTransitions: schema.tables.identityTransitions,
+    identityTransitionRetention: schema.tables.identityTransitionRetention,
   };
 }
 
@@ -567,6 +585,76 @@ function assertIdentityStoragePresent(
 }
 
 /**
+ * Whether a schema-commit preflight binds its ledger writes and transition
+ * notes to a recorded-capture session. The preflight's target is the raw
+ * schema-commit transaction, which no capture session is bound to, so without
+ * a binding every touch and note it takes is dropped.
+ *
+ * `"store"`: a Store that captures history drives the commit, so it always
+ * binds — the Store's own writes are captured by construction.
+ * `"database"`: no Store drives the commit (a standalone `initializeSchema` /
+ * `migrateSchema` / `ensureSchema`), so the graph's own recorded relations,
+ * read on the commit's session, decide ({@link graphCapturesRecordedHistory}).
+ *
+ * `batchPointRead` is resolved against the ROOT backend by whoever builds
+ * this; the preflight sees only the transaction target, which cannot.
+ */
+export type SchemaCommitCapture = Readonly<{
+  source: "store" | "database";
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+}>;
+
+/**
+ * The one decision of which {@link SchemaCommitCapture} a schema commit over
+ * `backend` takes. `storeCapturesHistory` is the driving Store's capture flag,
+ * or `undefined` when no Store drives the commit. Engine-native recorded
+ * ownership never takes TypeGraph capture, for either source.
+ */
+export function resolveSchemaCommitCapture(
+  backend: GraphBackend,
+  storeCapturesHistory: boolean | undefined,
+): SchemaCommitCapture | undefined {
+  if (storeCapturesHistory === false) return undefined;
+  if (resolveRecordedTimeOwnership(backend) === "engine-native") return;
+  return {
+    source: storeCapturesHistory === true ? "store" : "database",
+    batchPointRead: batchPointReadVerdict(backend),
+  };
+}
+
+/**
+ * Binds a capture session to the schema-commit `target` itself when
+ * `capture` calls for one. Registered against `target` ITSELF, not a wrapped
+ * overlay: `createRecordedTransactionScope` registers both the overlay it
+ * returns and the raw target against the same session, and every write a
+ * preflight issues reaches `target` through `withRecordedIdentityMutationTarget`'s
+ * own touch/noteTransition callbacks. Routing through the overlay would break
+ * `lockIdentityEnablementNodes`, which needs `executeStatement` — a raw-SQL
+ * surface the overlay refuses because it cannot observe what a raw statement
+ * touched. The caller flushes the returned scope once its writes are done.
+ */
+async function bindSchemaCommitCapture(
+  target: TransactionBackend,
+  schema: SqlSchema,
+  graphId: string,
+  capture: SchemaCommitCapture | undefined,
+): Promise<RecordedTransactionScope | undefined> {
+  if (capture === undefined) return;
+  if (
+    capture.source === "database" &&
+    !(await graphCapturesRecordedHistory(target, schema, graphId))
+  ) {
+    return;
+  }
+  return createRecordedTransactionScope(
+    target,
+    capture.batchPointRead,
+    schema,
+    transactionOwnsSqliteWriteLock(target),
+  );
+}
+
+/**
  * Builds the data preflight a schema commit runs inside its own transaction:
  * provision any derived relation the transition owes, take the recorded-write
  * and identity locks, then re-derive the closure so it matches the schema
@@ -594,6 +682,8 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     enablement: boolean;
     droppedNodeKinds?: readonly string[];
     provisionDerivedRelations?: readonly string[];
+    /** See {@link SchemaCommitCapture}; absent means the commit captures nothing. */
+    capture?: SchemaCommitCapture | undefined;
   }>,
 ): (target: SchemaCommitPreflightBackend) => Promise<void> {
   return async (target: SchemaCommitPreflightBackend) => {
@@ -604,6 +694,23 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     );
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
+    const captureScope = await bindSchemaCommitCapture(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      options.capture,
+    );
+    // Snapshotted before either cascade runs, and diffed against the
+    // rebuild's own result below: `rebuildIdentityClosureForContext` recomputes
+    // every class at once rather than handing back which ones it touched, so
+    // this is the only way to attribute a `kind-drop` / `schema-transition`
+    // note to what actually changed rather than fabricating a boundary on a
+    // commit that changed nothing.
+    const before = await snapshotIdentityClosureClasses(
+      target,
+      ctx.schema,
+      ctx.graphId,
+    );
     if (options.enablement) {
       await lockIdentityEnablementNodes(target, ctx.schema);
       // Enablement must not ADOPT rows the rebuild below cannot see. A database
@@ -628,18 +735,56 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     // live-endpoint interchange reads, yet still visible to raw ledger reads
     // and merge staging, where a later "no-op" merge would end them.
     const droppedNodeKinds = options.droppedNodeKinds ?? [];
-    if (droppedNodeKinds.length > 0) {
-      await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
-        deleteAssertionsTouchingKinds(
-          rawTarget,
-          ctx.schema,
-          ctx.graphId,
-          droppedNodeKinds,
-          touch,
-        ),
+    const removedAssertionIds: readonly string[] =
+      droppedNodeKinds.length > 0 ?
+        await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
+          deleteAssertionsTouchingKinds(
+            rawTarget,
+            ctx.schema,
+            ctx.graphId,
+            droppedNodeKinds,
+            touch,
+          ),
+        )
+      : [];
+    await rebuildIdentityClosureForContext({ ...ctx, backend: target });
+    const afterRows = await snapshotIdentityClosureClasses(
+      target,
+      ctx.schema,
+      ctx.graphId,
+    );
+    const affected = combineSnapshotMembers(before, afterRows);
+    // `before` needs the SAME singleton fill `after` gets: a member that was
+    // a live singleton (no closure ROW — `fillLiveSingletons`' own doc
+    // explains why that is not "gone") before this commit would otherwise
+    // read as `oldClassOf.get(key) === undefined` to `diffClosureTransitions`,
+    // which is its OWN signal for "no longer exists" — silently skipping the
+    // one shape `schema-transition` exists to cover: first enablement folding
+    // two previously-untouched singletons that never had a materialized row.
+    const beforeFilled = fillLiveSingletons(before, affected, (kind) =>
+      ctx.registry.nodeKinds.has(kind),
+    );
+    const after = fillLiveSingletons(afterRows, affected, (kind) =>
+      ctx.registry.nodeKinds.has(kind),
+    );
+    const transitions = diffClosureTransitions(affected, beforeFilled, after);
+    if (transitions.length > 0) {
+      await withRecordedIdentityMutationTarget(
+        target,
+        (_rawTarget, _touch, noteTransition) => {
+          noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+            cause:
+              droppedNodeKinds.length > 0 ? "kind-drop" : "schema-transition",
+            assertionIds: removedAssertionIds,
+            validAt: nowIso(),
+          });
+          return Promise.resolve();
+        },
       );
     }
-    await rebuildIdentityClosureForContext({ ...ctx, backend: target });
+    if (captureScope !== undefined) {
+      await captureScope.flush();
+    }
   };
 }
 
@@ -687,14 +832,27 @@ async function provisionDerivedRelationsInCommit(
  *
  * No closure rebuild: without a profile there is no closure contract to
  * restore, and the enablement preflight rebuilds it from scratch anyway.
+ *
+ * No transition note either, deliberately: §2.3 names this function a
+ * `schema-transition` emitter alongside `identitySchemaCommitPreflight`, but a
+ * profile-less graph has no materialized class for a dropped kind's members to
+ * leave — deleting their assertions changes no class membership, so there is
+ * nothing here for a note to describe.
  */
 export function identityKindCascadePreflight(
   ctx: Readonly<{ graphId: string; schema: SqlSchema }>,
   droppedNodeKinds: readonly string[],
+  capture: SchemaCommitCapture | undefined,
 ): (target: TransactionBackend) => Promise<void> {
   return async (target: TransactionBackend) => {
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
+    const captureScope = await bindSchemaCommitCapture(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      capture,
+    );
     await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
       deleteAssertionsTouchingKinds(
         rawTarget,
@@ -704,5 +862,6 @@ export function identityKindCascadePreflight(
         touch,
       ),
     );
+    await captureScope?.flush();
   };
 }

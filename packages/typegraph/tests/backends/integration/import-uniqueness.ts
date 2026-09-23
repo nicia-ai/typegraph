@@ -661,7 +661,7 @@ export function registerImportUniquenessIntegrationTests(
       // declares at most one. The refusal has to be per ROW — first edge
       // committed, second reported, import resolving — and it is per row only
       // because the probe runs against the shared in-batch cardinality state.
-      // Without that state both edges read `countEdgesFrom` = 0 (neither row is
+      // Without that state both edges read `countEdgesAtEndpoint` = 0 (neither row is
       // written yet), both pass, and the refusal arrives from the ONE batch
       // claim, which runs outside every per-row recovery and rejects the import.
       graphIdCounter += 1;

@@ -156,7 +156,9 @@ type InventoryEntry = Readonly<{
 /**
  * The seven `WITH RECURSIVE` emission sites, measured on this branch (§2 of
  * the batch spec, reproduced from `grep -rn "WITH RECURSIVE" src
- * --include=*.ts`).
+ * --include=*.ts`) — site G (item D.2's acyclicity probe) added after that
+ * batch, and site H (the composition closure's exhaustive, set-semantics
+ * walk) in place of the hop-bounded directed builder it replaced.
  */
 const EMISSION_SITES: readonly InventoryEntry[] = [
   {
@@ -168,10 +170,17 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/recursive-cte.ts",
-    line: "sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`",
+    line: "return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;",
     site: "B",
     reason:
       "buildReachableCte compiles a fixed/variable-length traversal into a bounded reachable set.",
+  },
+  {
+    file: "store/recursive-cte.ts",
+    line: "return sql`WITH RECURSIVE reachable(id, kind) AS (${prepared.baseCase} UNION ${recursiveCase})`;",
+    site: "H",
+    reason:
+      "buildExhaustiveDirectedReachableCte compiles the composition closure subgraph({ composition: true }) reads (Ed-01's directed groups) as a SET-SEMANTICS walk: `UNION` over an (id, kind) frontier, bounded by its visited set with no hop ceiling, because a truncated prefix of a part tree is not an owned unit. Shares every row filter with the hop-bounded builders via prepareReachableFilters.",
   },
   {
     file: "identity/service-read.ts",
@@ -203,10 +212,17 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/recursive-cte.ts",
-    line: ": sql`WITH RECURSIVE typegraph_windowed_edges AS (${windowedEdges}), reachable AS (${baseCase} UNION ALL ${recursiveCase})`;",
+    line: "return sql`WITH RECURSIVE ${sql.raw(WINDOWED_EDGES_CTE)} AS (${windowedEdges}), reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;",
     site: "G",
     reason:
       "buildReachableCte ranks each requested edge kind before expanding the bounded reachable set.",
+  },
+  {
+    file: "store/recursive-cte.ts",
+    line: "return sql`WITH RECURSIVE ${body}`;",
+    site: "H",
+    reason:
+      "buildEdgeAcyclicityProbe runs the exhaustive, set-semantics reachability walk an acyclic edge kind's write path, audit, and merge plan-time preview all probe.",
   },
 ];
 
@@ -545,7 +561,7 @@ describe("recursion inventory ratchet", () => {
   it("finds a case-, whitespace-, and escape-sequence-variant phrase a same-case single-space match would miss", () => {
     // A same-case, exact-single-space `String.indexOf` (the defect this
     // test guards against) matches none of these four lines, so a new
-    // seventh emission site written in any of these shapes would be
+    // eighth emission site written in any of these shapes would be
     // invisible in BOTH ratchet directions: no `undeclared` row (the
     // phrase never matches) and no `stale` row (the seven declared sites are
     // unaffected). The fourth shape — `\n` typed literally as two source
@@ -582,8 +598,9 @@ describe("recursion inventory ratchet", () => {
     // M-9, reproduced in miniature: the round-1 formulation counted FILES
     // holding the phrase with a comment-blind scan and compared that count
     // to 6. On this tree `grep -rl "WITH RECURSIVE" src --include=*.ts | wc
-    // -l` is 8 for exactly 6 real emission sites (EMISSION_SITES.length),
-    // because two files hold the phrase only in a doc comment. This
+    // -l` is 8 for exactly 7 real emission sites (EMISSION_SITES.length),
+    // because two files hold the phrase only in a doc comment (site G lives
+    // in `store/recursive-cte.ts`, already one of the eight). This
     // fixture reproduces the shape in miniature: at least four comment
     // lines a raw, line-oriented scan cannot distinguish from code, and
     // zero real sites once the parser strips comments out.

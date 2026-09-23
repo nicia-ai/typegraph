@@ -32,6 +32,7 @@ import {
   requireRecordedTime,
 } from "../backend/capabilities/recorded-time";
 import {
+  capturesTypeGraphRecordedHistory,
   isEngineNativeRecordedReadBinding,
   type RecordedTimeOwnership,
   resolveRecordedTimeOwnership,
@@ -166,21 +167,31 @@ import {
   type IdentityRebuildContext,
   type IdentityServiceContext,
   type IdentityTransferAssertion,
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
   importIdentityAssertionsIntoTarget,
+  importIdentityTransitionsIntoTarget,
   liveNodeKindsSharingIds,
   loadAssertionsByIds,
   loadCurrentStructuralClasses,
   lockIdentityGraph,
   readIdentityAssertionPageAtTarget,
   readIdentityAssertionsForInterchange,
+  readIdentityTransitionPageForInterchange,
+  readTransitionRetentionDetails,
   rebuildIdentityClosureForContext,
   refKey,
   removeIdentityKindsForContext,
   requireNodeValidityEndCompatible,
   toTransferAssertion,
+  toTransitionTransfer,
   validateIdentityForContext,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
+import {
+  type IdentityDecisionProvenance,
+  identityTransitionLogUnavailableError,
+} from "../identity/transition-log";
 import type {
   IdentityFacade,
   IdentityNode,
@@ -205,6 +216,10 @@ import {
   type OneStatementBatchResults,
   type QueryCoordinateState,
 } from "../query/builder";
+import {
+  DEFAULT_ALIAS_EXPANSION_AXIS,
+  type DefaultAliasExpansionAxis,
+} from "../query/builder/alias-expansion";
 import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
 import {
   createEngineRecordedReadBinding,
@@ -231,22 +246,29 @@ import {
   prepareEvolutionPlan,
 } from "../schema/evolution-plan";
 import {
+  adoptBaseSchemaStorage,
   applyDeprecatedKinds,
   commitNewSchemaVersion,
   commitNewSchemaVersionIfKindsEmpty,
   commitNewSchemaVersionWithPreflight,
-  ensureSchema as ensureSchemaImpl,
+  composeSchemaCommitPreflight,
+  ensureSchemaInternal as ensureSchemaImpl,
   getSchemaChanges,
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
   loadAndVerifyGraph,
   parseSerializedSchema,
   requiresMigration as requiresMigrationImpl,
+  schemaCommitCapabilityError,
   type SchemaManagerOptions,
   type SchemaValidationResult,
 } from "../schema/manager";
 import { type SchemaDiff } from "../schema/migration";
-import { serializeSchema } from "../schema/serializer";
+import {
+  serializeSchema,
+  serializeSchemaPreservingUnknownFields,
+} from "../schema/serializer";
+import { prepareSchemaTighteningPreflight } from "../schema/tightening-preflight";
 import { type SerializedSchema } from "../schema/types";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -257,7 +279,12 @@ import {
   type GraphAlgorithms,
   type InternalGraphAlgorithms,
 } from "./algorithms";
-import { applyResolvedNodeClaims } from "./claims/resolved-node-claims";
+import {
+  applyResolvedNodeClaims,
+  findResolvedNodeClaimConflicts,
+  type ResolvedNodeRelease,
+  type ResolvedNodeUpsert,
+} from "./claims/resolved-node-claims";
 import {
   type ConstraintFenceViolation,
   verifyConstraintFences as verifyConstraintFencesImpl,
@@ -337,8 +364,11 @@ import {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeReparent,
+  executeNodeReparentBatch,
   executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
+  executeNodeRevive,
   executeNodeSetUpdate,
   executeNodeUpdate,
   executeNodeUpsertUpdateBatch,
@@ -347,6 +377,8 @@ import {
   nodeUpsertDirtyCheck,
   prepareNodeReplacement,
 } from "./operations";
+import { nodeKindOwesCompositionEdge } from "./operations/atomic-mutation-program";
+import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import {
   batchRefusalDetails,
   batchRefusalSuffix,
@@ -378,6 +410,7 @@ import {
   resetRevisionOrigin,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
+  transactionOwnsSqliteWriteLock,
   withRecordedFlushObserver,
   withRecordedNodeMutationTarget,
   withRecordedRelationsPrecondition,
@@ -410,12 +443,16 @@ import {
 } from "./store-view";
 import {
   createSubgraphRead,
+  executeSessionSubgraph,
   executeSubgraph,
   type InternalSubgraphOptions,
+  type SubgraphCompositionSelection,
   type SubgraphOptions,
   type SubgraphProject,
+  type SubgraphProjectFor,
   type SubgraphRead,
   type SubgraphResult,
+  type SubgraphResultEdgeKinds,
 } from "./subgraph";
 import {
   createTransactionReceiptRecorder,
@@ -433,6 +470,7 @@ import {
   type BulkFindRuntimeEdgesFromParams,
   type BulkFindRuntimeEdgesFromResult,
   type BulkOperationHookContext,
+  type CompositionNodeRef,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
   type Edge,
@@ -452,6 +490,7 @@ import {
   type MeasurableTransactionContext,
   type Node,
   type OperationHookContext,
+  type OperationOutcomeFacts,
   type QueryHookContext,
   type QueryOptions,
   type RecordedHeterogeneousNodeWriteBatch,
@@ -628,7 +667,25 @@ type OperationHookRunner = <T>(
   ctx: OperationHookContext,
   fn: () => Promise<T>,
   didWrite?: (result: T) => boolean,
+  operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
 ) => Promise<T>;
+
+/**
+ * THE one place a start context becomes an end context: the facts the
+ * operation learned while it ran, folded on. `onOperationStart` always sees
+ * the bare context — the facts do not exist yet — so the immediate and
+ * buffered runners share this fold rather than each re-spelling the spread
+ * and drifting on which hook gets the enriched object.
+ */
+function operationEndContext<T>(
+  ctx: OperationHookContext,
+  result: T,
+  operationFacts:
+    ((result: T) => OperationOutcomeFacts | undefined) | undefined,
+): OperationHookContext {
+  const facts = operationFacts?.(result);
+  return facts === undefined ? ctx : { ...ctx, ...facts };
+}
 
 type BulkOperationHookRunner = <T extends Readonly<{ affectedCount: number }>>(
   ctx: BulkOperationHookContext,
@@ -681,11 +738,14 @@ function transactionOutcome<T>(
   recordedByGraph: RecordedFlushInstants | undefined,
   graphId: string,
 ): TransactionOutcome<T> {
-  const recorded = recordedByGraph?.get(graphId);
+  const flushed = recordedByGraph?.get(graphId);
+  if (flushed !== undefined) {
+    recorder.recordIdentityTransitions(flushed.identityTransitions);
+  }
   return {
     result,
     receipt: recorder.snapshot(
-      recorded === undefined ? undefined : asRecordedInstant(recorded),
+      flushed === undefined ? undefined : asRecordedInstant(flushed.recordedAt),
     ),
   };
 }
@@ -852,11 +912,12 @@ type StoreCore<G extends GraphDef> = Readonly<{
   subgraph: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ) => Promise<SubgraphResult<G, NK, EK, P>>;
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
   clear: () => Promise<void>;
   refreshStatistics: () => Promise<void>;
   materializeIndexes: (
@@ -966,11 +1027,12 @@ type TransactionReadMethods<G extends GraphDef> = Readonly<{
   subgraph: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ) => Promise<SubgraphResult<G, NK, EK, P>>;
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
 }>;
 
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
@@ -1334,6 +1396,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #schemaMetadata: StoreSchemaMetadata;
   readonly #runtimeKindOwner = Object.freeze({});
   readonly #defaultTraversalExpansion: TraversalExpansion;
+  readonly #defaultExpansion: DefaultAliasExpansionAxis;
   // Stored verbatim so `evolve()` can construct the next Store with
   // identical options. Reconstructing from the individual private
   // fields would silently drop any future StoreOptions field a
@@ -1445,8 +1508,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // capture (construction below, recordedNow/revisionNow, and the two
     // transaction-commit sites).
     this.#requestedHistory = requestedHistory;
-    this.#captureEnabled =
-      requestedHistory && this.#recordedTimeOwnership === "typegraph-relations";
+    this.#captureEnabled = capturesTypeGraphRecordedHistory(
+      requestedHistory,
+      backend,
+    );
     this.#engineNativeHistory =
       requestedHistory && this.#recordedTimeOwnership === "engine-native";
     this.#revisionTrackingEnabled =
@@ -1522,6 +1587,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#hooks = options?.hooks ?? {};
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
+    this.#defaultExpansion =
+      options?.queryDefaults?.expansion ?? DEFAULT_ALIAS_EXPANSION_AXIS;
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
@@ -1529,6 +1596,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       evolutionPlanningTarget: (plan) => this.#evolutionPlanningTarget(plan),
       captureEnabled: this.#captureEnabled,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
+      batchPointRead: this.#batchPointRead,
       // The query path's own construction, not a second spelling of it: a
       // caller that could only rebuild this object could not observe the one
       // the queries actually run on.
@@ -1553,44 +1621,38 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.algorithmsAtCoordinate(coordinate),
       identityAtCoordinate: (coordinate) =>
         this.identityAtCoordinate(coordinate),
+      identityContext: () => {
+        this.#requireIdentityEnabled();
+        return this.#identityContext(this.#backend);
+      },
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
-      applyResolvedNodeUniqueness: async (target, writes, apply) => {
-        const upserts = writes.upserts.map((upsert) => {
-          if (!hasOwnKey(this.#graph.nodes, upsert.kind)) {
-            throw new KindNotFoundError(upsert.kind, "node", {
-              graphId: this.graphId,
-            });
-          }
-          const registration = this.#graph.nodes[upsert.kind];
-          if (registration === undefined) {
-            throw new KindNotFoundError(upsert.kind, "node", {
-              graphId: this.graphId,
-            });
-          }
-          return {
-            ...upsert,
-            constraints: registration.unique ?? [],
-          };
-        });
-        // Which kinds a release is worth CLEARING for: the clear exists so the
-        // set's upserts can take keys the set is giving back, and only a
-        // uniqueness declaration produces a key another node could take.
-        const constrainedKinds = new Set(
-          Object.entries(this.#graph.nodes)
-            .filter(
-              ([, registration]) => (registration.unique ?? []).length > 0,
-            )
-            .map(([kind]) => kind),
+      deleteNodeWithPolicy: (target, work, policy) =>
+        executeNodeDelete(
+          this.#createNodeOperationContext(),
+          work.kind,
+          work.id,
+          target,
+          policy,
+        ),
+      probeResolvedNodeUniqueness: (target, writes) => {
+        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
+        if (upserts.every((upsert) => upsert.constraints.length === 0)) {
+          return Promise.resolve([]);
+        }
+        return findResolvedNodeClaimConflicts(
+          {
+            graphId: this.graphId,
+            registry: this.#registry,
+            backend: target,
+            uniqueSidecarBatch: this.#uniqueSidecarBatch,
+          },
+          upserts,
+          releases,
         );
-        const releases = writes.releases.filter((release) => {
-          if (!Object.hasOwn(this.#graph.nodes, release.kind)) {
-            throw new KindNotFoundError(release.kind, "node", {
-              graphId: this.graphId,
-            });
-          }
-          return constrainedKinds.has(release.kind);
-        });
+      },
+      applyResolvedNodeUniqueness: async (target, writes, apply) => {
+        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
         if (
           upserts.every((upsert) => upsert.constraints.length === 0) &&
           releases.length === 0
@@ -1671,10 +1733,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.lockIdentityImportTarget(target),
       foldImportedIdentityNodes: (target, references) =>
         this.foldImportedIdentityNodes(target, references),
+      detachDeletedImportedIdentityNode: (target, reference) =>
+        this.detachDeletedImportedIdentityNode(target, reference),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
-      applyIdentityMergeAtTarget: (target, retractions, assertions) =>
-        this.applyIdentityMergeAtTarget(target, retractions, assertions),
+      readIdentityTransitionPageAtTarget: (target, options) =>
+        this.readIdentityTransitionPageAtTarget(target, options),
+      identityTransitionRetentionAtTarget: (target) =>
+        this.identityTransitionRetentionAtTarget(target),
+      importIdentityTransitionsAtTarget: (target, transitions, watermark) =>
+        this.importIdentityTransitionsAtTarget(target, transitions, watermark),
+      applyIdentityMergeAtTarget: (target, retractions, assertions, decision) =>
+        this.applyIdentityMergeAtTarget(
+          target,
+          retractions,
+          assertions,
+          decision,
+        ),
       assertIdentityClassesConsistentAtTarget: (target, seeds) =>
         this.assertIdentityClassesConsistentAtTarget(target, seeds),
     };
@@ -1737,6 +1812,63 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       { code: "IDENTITY_NOT_ENABLED", graphId: this.graphId },
       suggestion === undefined ? undefined : { suggestion },
     );
+  }
+
+  /**
+   * The resolved write set as the claim layer reads it: every upsert carrying
+   * its kind's registered unique constraints, and the releases narrowed to the
+   * kinds whose declarations produce a key another node could take. One owner
+   * for the probe (`probeResolvedNodeUniqueness`) and the apply
+   * (`applyResolvedNodeUniqueness`), so the merge planner's plan-time finding
+   * and the commit's refusal read the same constraints over the same rows.
+   */
+  #resolvedNodeClaimWrites(
+    writes: Readonly<{
+      upserts: readonly Readonly<{
+        kind: string;
+        id: string;
+        props: Readonly<Record<string, unknown>>;
+      }>[];
+      releases: readonly Readonly<{ kind: string; id: string }>[];
+    }>,
+  ): Readonly<{
+    upserts: readonly ResolvedNodeUpsert[];
+    releases: readonly ResolvedNodeRelease[];
+  }> {
+    const upserts = writes.upserts.map((upsert) => {
+      if (!hasOwnKey(this.#graph.nodes, upsert.kind)) {
+        throw new KindNotFoundError(upsert.kind, "node", {
+          graphId: this.graphId,
+        });
+      }
+      const registration = this.#graph.nodes[upsert.kind];
+      if (registration === undefined) {
+        throw new KindNotFoundError(upsert.kind, "node", {
+          graphId: this.graphId,
+        });
+      }
+      return {
+        ...upsert,
+        constraints: registration.unique ?? [],
+      };
+    });
+    // Which kinds a release is worth CLEARING for: the clear exists so the
+    // set's upserts can take keys the set is giving back, and only a
+    // uniqueness declaration produces a key another node could take.
+    const constrainedKinds = new Set(
+      Object.entries(this.#graph.nodes)
+        .filter(([, registration]) => (registration.unique ?? []).length > 0)
+        .map(([kind]) => kind),
+    );
+    const releases = writes.releases.filter((release) => {
+      if (!Object.hasOwn(this.#graph.nodes, release.kind)) {
+        throw new KindNotFoundError(release.kind, "node", {
+          graphId: this.graphId,
+        });
+      }
+      return constrainedKinds.has(release.kind);
+    });
+    return { upserts, releases };
   }
 
   /** @internal Builds the identity read facade for a pinned StoreView. */
@@ -1805,6 +1937,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await identitySchemaCommitPreflight(this.#identityContext(this.#backend), {
       enablement: false,
       provisionDerivedRelations,
+      // The schema-commit target is a raw transaction no capture session is
+      // bound to yet, so a history store binds one for the preflight's own
+      // ledger touches and transition notes.
+      ...(this.#captureEnabled ?
+        { capture: { source: "store", batchPointRead: this.#batchPointRead } }
+      : {}),
     })(target);
   }
 
@@ -1836,7 +1974,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       target,
       this.#batchPointRead,
       this.#sqlSchema(),
-      target.dialect === "sqlite",
+      transactionOwnsSqliteWriteLock(target),
     );
     await removeIdentityKindsForContext(
       this.#identityContext(scope.backend),
@@ -1907,7 +2045,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       : lockIdentityGraph(target, this.graphId);
   }
 
-  /** @internal Restores same-id folding after the ops-layer import bypass. */
+  /**
+   * @internal Restores same-id folding after the ops-layer import bypass.
+   *
+   * Always `"fold"`: import never resurrects a tombstone (a soft-deleted node
+   * is not updatable through it — see `src/interchange/import.ts`), so every
+   * reference this reaches is a genuine first materialization, never a
+   * restore.
+   */
   foldImportedIdentityNodes(
     target: IdentityTarget,
     references: readonly Readonly<{ kind: string; id: string }>[],
@@ -1924,6 +2069,33 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       },
       target,
       references,
+      "fold",
+    );
+  }
+
+  /**
+   * @internal Item E.2. Detaches a node import purges after folding it into
+   * identity — a required composition part `assertImportedRequiredPartsAttached`
+   * (`src/interchange/import.ts`) refuses AFTER `foldImportedIdentityNodes`
+   * already ran for this attempt's batch. Always `"hard"`: the row this
+   * reaches was created and purged within the SAME import, exactly the
+   * `executeNodeHardDelete` shape (`src/store/operations/node-operations.ts`)
+   * `identity.detachDeleted` already serves for the ordinary write path.
+   */
+  detachDeletedImportedIdentityNode(
+    target: IdentityTarget,
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<void> {
+    if (this.#graph.identity === undefined) return Promise.resolve();
+    return detachIdentityForNode(
+      {
+        graphId: this.graphId,
+        sameIdAcrossKinds: this.#graph.identity.sameIdAcrossKinds,
+        schema: this.#sqlSchema(),
+      },
+      target,
+      reference,
+      "hard",
     );
   }
 
@@ -1954,6 +2126,89 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
   }
 
+  /** @internal Reads one bounded page of a graph's ARCHIVAL identity transitions, oldest first. */
+  async readIdentityTransitionPageAtTarget(
+    target: GraphBackend | TransactionBackend,
+    options: Readonly<{ after?: IdentityTransitionCursor; limit: number }>,
+  ): Promise<
+    Readonly<{
+      transitions: readonly IdentityTransitionTransfer[];
+      nextAfter?: IdentityTransitionCursor;
+      done: boolean;
+    }>
+  > {
+    if (this.#graph.identity === undefined) {
+      return { transitions: [], done: true };
+    }
+    const page = await readIdentityTransitionPageForInterchange(
+      target,
+      this.#sqlSchema(),
+      this.graphId,
+      options,
+    );
+    return {
+      transitions: page.transitions.map((row) => toTransitionTransfer(row)),
+      ...(page.nextAfter === undefined ? {} : { nextAfter: page.nextAfter }),
+      done: page.done,
+    };
+  }
+
+  /** @internal Reads a graph's identity transition-retention watermark for archival export. */
+  identityTransitionRetentionAtTarget(
+    target: GraphBackend | TransactionBackend,
+  ): ReturnType<typeof readTransitionRetentionDetails> {
+    if (this.#graph.identity === undefined) {
+      return Promise.resolve({ prunedBeforeRevision: 0, prunedAt: nowIso() });
+    }
+    return readTransitionRetentionDetails(
+      target,
+      this.#sqlSchema(),
+      this.graphId,
+    );
+  }
+
+  /** @internal Restores archival identity transitions inside an import transaction. */
+  importIdentityTransitionsAtTarget(
+    target: IdentityTarget,
+    transitions: readonly IdentityTransitionTransfer[],
+    carriedWatermark: number | undefined,
+  ): ReturnType<typeof importIdentityTransitionsIntoTarget> {
+    if (transitions.length === 0 && carriedWatermark === undefined) {
+      return Promise.resolve({ created: 0, watermark: undefined });
+    }
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError(
+        "Cannot import identity transitions into an identity-disabled graph.",
+        {
+          code: "IDENTITY_IMPORT_REQUIRES_PROFILE",
+          graphId: this.graphId,
+        },
+      );
+    }
+    // A history-off graph has nowhere for `transitionsOf` / `replay` to ever
+    // read these rows back from (both refuse with the same error below
+    // `history: true`), so restoring them here would write data the store's
+    // own API can never surface again — and, worse, silently. `importGraph`
+    // / `importGraphStream` (`interchange/import.ts`) already refuse this
+    // UPFRONT, before any node or edge write, whenever the document or
+    // stream header names a transitions section or a non-zero retention
+    // watermark — this is the BACKSTOP every archival-transitions restore
+    // still passes through, catching any caller that reaches this method
+    // directly.
+    if (!this.#captureEnabled) {
+      throw identityTransitionLogUnavailableError(
+        this.graphId,
+        this.#recordedTimeOwnership,
+      );
+    }
+    return importIdentityTransitionsIntoTarget(
+      { graphId: this.graphId, schema: this.#sqlSchema() },
+      target,
+      transitions,
+      carriedWatermark,
+    );
+  }
+
   /**
    * @internal Post-write identity validation for a graph-merge commit: proves
    * the identity classes the merge touched carry no contradiction in the state
@@ -1978,6 +2233,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     target: GraphBackend | TransactionBackend,
     retractions: readonly IdentityTransferAssertion[],
     assertions: readonly IdentityTransferAssertion[],
+    decision?: IdentityDecisionProvenance,
   ): Promise<Readonly<{ created: number; retracted: number }>> {
     if (retractions.length === 0 && assertions.length === 0) {
       return Promise.resolve({ created: 0, retracted: 0 });
@@ -1992,6 +2248,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#identityContext(target),
       retractions,
       assertions,
+      decision,
     );
   }
 
@@ -2632,6 +2889,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           nodeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
+      // `nodes.<Kind>.reparent(...)` is THE surface that moves a part, so it
+      // is the one that states `onIncumbent: "replace"`; every get-or-create
+      // path reaches the same write plan with `"refuse"`.
+      executeReparent: (kind, id, options, backend) =>
+        executeNodeReparent(ctx, kind, id, options, backend, {
+          onIncumbent: "replace",
+        }),
+      executeReparentBatch: (kind, items, backend) =>
+        executeNodeReparentBatch(ctx, kind, items, backend, {
+          onIncumbent: "replace",
+        }),
       executeDelete: (kind, id, backend) =>
         executeNodeDelete(ctx, kind, id, backend),
       executeDeleteBatch: (kind, ids, backend) =>
@@ -3035,6 +3303,30 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
     const revision = await recordedTime.revisionNow(session);
     return createEngineRecordedInstant(revision.revision, revision.recordedAt);
+  }
+
+  /**
+   * The engine-native counterpart to a capture flush's
+   * {@link RecordedFlushInstants}: one entry, for this store's one graph.
+   * The ONE owner of that shape on this path, called by both transaction
+   * sites that stamp `TransactionReceipt.recorded` under engine-native
+   * ownership, so neither can spell the map differently from the other.
+   * `identityTransitions` is a measured `0`: the identity transition log is
+   * written only by a TypeGraph capture session's flush, and engine-native
+   * ownership runs none.
+   */
+  async #engineRecordedFlushInstants(
+    session: RecordedTimeSession,
+  ): Promise<RecordedFlushInstants> {
+    return new Map([
+      [
+        this.graphId,
+        {
+          recordedAt: await this.#engineRecordedInstant(session),
+          identityTransitions: 0,
+        },
+      ],
+    ]);
   }
 
   /**
@@ -3574,11 +3866,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async subgraph<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     // The public surface is valid-time only (`recordedAsOf` is typed `never`).
     // Guard JS callers who bypass the type so a leaked recorded pin can't
     // silently switch this read onto the recorded relation; recorded subgraph
@@ -3596,11 +3889,44 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   >(
     rootId: NodeId<AllNodeTypes<G>>,
     options: SubgraphOptions<G, EK, NK, P>,
-    backend: GraphBackend | TransactionBackend = this.#baseBackend,
-    attempt = 1,
+    backend: GraphBackend | TransactionBackend,
+    attempt: number,
   ): SubgraphRead<G, NK, EK, P> {
     this.#assertPublicSubgraphOptions(options);
-    return createSubgraphRead({
+    return createSubgraphRead(
+      this.#sessionSubgraphParams(rootId, options, backend, attempt),
+    );
+  }
+
+  #executeSessionSubgraph<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: SubgraphOptions<G, EK, NK, P, C>,
+    txBackend: TransactionBackend,
+    attempt: number,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
+    this.#assertPublicSubgraphOptions(options);
+    return executeSessionSubgraph(
+      this.#sessionSubgraphParams(rootId, options, txBackend, attempt),
+    );
+  }
+
+  #sessionSubgraphParams<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G>,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined,
+    const C extends SubgraphCompositionSelection | undefined,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: SubgraphOptions<G, EK, NK, P, C>,
+    backend: GraphBackend | TransactionBackend,
+    attempt: number,
+  ) {
+    return {
       graph: this.#graph,
       graphId: this.graphId,
       rootId,
@@ -3608,8 +3934,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       dialect: getDialect(backend.dialect),
       schema: this.#schema,
       recordedReadBinding: this.#recordedReadBinding,
+      registry: this.#registry,
       options,
-    });
+    };
   }
 
   #assertPublicSubgraphOptions(options: unknown): void {
@@ -3633,11 +3960,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   subgraphAtCoordinate<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: InternalSubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    options: InternalSubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     const coordinate = resolveReadCoordinate(
       options.temporalMode ?? this.#graph.defaults.temporalMode,
       options.asOf,
@@ -3650,13 +3978,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       graph: this.#graph,
       graphId: this.graphId,
       rootId,
-      backend: this.#recordedReads.backendForCoordinate(
-        readCoordinate,
-        "recorded-subgraph",
+      backend: this.#createHookedQueryBackend(
+        this.#recordedReads.backendForCoordinate(
+          readCoordinate,
+          "recorded-subgraph",
+        ),
       ),
       dialect: getDialect(this.#backend.dialect),
       schema: this.#schema,
       recordedReadBinding: this.#recordedReadBinding,
+      registry: this.#registry,
       options,
     });
   }
@@ -4063,9 +4394,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // or an empty-body `transactionWithReceipt()` neither takes the
           // extra round trip nor stamps an instant nothing earned.
           if (mutationWitness?.mutated === true) {
-            recordedByGraph = new Map([
-              [this.graphId, await this.#engineRecordedInstant(txBackend)],
-            ]);
+            recordedByGraph =
+              await this.#engineRecordedFlushInstants(txBackend);
           }
           return output;
         };
@@ -4428,9 +4758,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // (undefined when nothing was captured or requested) into `receipt.recorded`.
       const recordedByGraph =
         mutationWitness?.mutated === true ?
-          new Map([
-            [this.graphId, await this.#engineRecordedInstant(txBackend)],
-          ])
+          await this.#engineRecordedFlushInstants(txBackend)
         : await scope.flush();
       // Seal the context so a write through a retained `tx` after this returns
       // fails loud instead of persisting a row the snapshotted receipt can't
@@ -4470,51 +4798,114 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /**
    * Decorates a receipt-enabled transaction `context` with `measure`.
-   * Attribution is structural: `measure` wraps the context's *own* (already
-   * outer-recording) collections a second time with a fresh scope recorder, so a
-   * write through the scoped context counts in the scope and — via the inner
-   * wrapper it delegates to — the outer receipt, while a write through the outer
-   * `context` never reaches the scope recorder. This makes overlapping/concurrent
-   * measures safe by construction (each holds its own scope recorder) and lets
-   * scopes nest: the scoped context is itself decorated, so `scoped.measure(...)`
-   * chains one more wrapper. The scoped context's dynamic collection lookups resolve
-   * against the scope-wrapped map too, so dynamic-kind writes are attributed like
-   * `scoped.nodes.<Kind>`. The scope receipt's `recorded` is always undefined —
-   * the recorded instant is a whole-transaction flush concern.
+   *
+   * Attribution is structural: a scope is one more RECORDER, and the scoped
+   * context's write surface is rebuilt against the whole recorder CHAIN (every
+   * recorder already covering `context`, plus the scope's), then wrapped once
+   * per recorder in it. A write through the scoped context therefore counts in
+   * the scope and in every receipt enclosing it, while a write through the
+   * outer `context` never reaches the scope recorder. Overlapping and
+   * concurrent measures are safe by construction — each holds its own
+   * recorder, and no dynamic "currently measuring" state exists to leak
+   * between them — and scopes nest: the scoped context is itself decorated, so
+   * `scoped.measure(...)` extends the chain by one. The scoped context's
+   * dynamic collection lookups resolve against the scope's own map too, so
+   * dynamic-kind writes are attributed like `scoped.nodes.<Kind>`. The scope
+   * receipt's `recorded` is always undefined — the recorded instant is a
+   * whole-transaction flush concern.
+   *
+   * Rebuilding the surface rather than wrapping the outer collections a second
+   * time is what carries the chain to facts a collection wrapper cannot see
+   * from outside: a node delete's composition `cascadedParts` exist only
+   * inside the operation, and reach their receipts through the OPERATION
+   * CONTEXT the collection's operations were bound to
+   * (`NodeOperationContext.recordCascadedParts`). Wrapping alone would count a
+   * measured delete in the scope's write counters while leaving the parts it
+   * cascaded out of that scope's receipt. `TRANSACTION_RUNTIME`'s internal
+   * delete port is rebound to the scope's context for the same reason — it
+   * reaches `executeNodeDelete` directly, so inheriting the outer port would
+   * reopen exactly that hole for the one caller that uses it.
    */
   #attachMeasure(
     context: AdapterTransactionContext<G, TNativeTransaction>,
+    buildSurface: (
+      recorders: readonly TransactionReceiptRecorder[],
+    ) => TransactionWriteSurface<G>,
+    recorders: readonly TransactionReceiptRecorder[],
   ): MeasurableAdapterTransactionContext<G, TNativeTransaction> {
     const measure: ScopedMeasure<
       MeasurableAdapterTransactionContext<G, TNativeTransaction>
     > = async (fn) => {
       const scopeRecorder = createTransactionReceiptRecorder();
-      const { nodes, edges } = wrapTransactionCollections(
-        context.nodes,
-        context.edges,
-        scopeRecorder,
-      );
-      const identity =
-        this.#graph.identity === undefined ?
-          undefined
-        : wrapTransactionIdentity(
-            (
-              context as unknown as TransactionContext<G> & {
-                identity: IdentityFacade<G>;
-              }
-            ).identity,
-            scopeRecorder,
+      const chain = [...recorders, scopeRecorder];
+      const surface = buildSurface(chain);
+      let nodes = surface.nodes;
+      let edges = surface.edges;
+      let identity = surface.identity;
+      for (const recorder of chain) {
+        ({ nodes, edges } = wrapTransactionCollections(nodes, edges, recorder));
+        identity =
+          identity === undefined ? undefined : (
+            wrapTransactionIdentity(identity, recorder)
           );
-      const scoped = this.#attachMeasure(
-        overlayPropertyDescriptors(context, {
-          nodes,
-          edges,
-          ...(identity === undefined ? {} : { identity }),
-          ...this.#edgeCollectionAccess(edges),
-          getNodeCollection: <const K extends string>(kind: K) =>
-            this.#resolveDynamicNodeCollection(nodes, kind),
-        }),
-      );
+      }
+      const scopedNodes = nodes;
+      const scopedEdges = edges;
+      // The internal delete port travels with the surface too. It runs
+      // `executeNodeDelete` against a node operation context directly and
+      // never touches `surface.nodes` — the collection wrappers just above
+      // are the only thing that increments a receipt's `writes` counters, so
+      // this delete counts toward NEITHER this scope's nor any enclosing
+      // scope's `writes`, rebound or not. What rebinding decides is
+      // `cascadedParts` alone: a scope that inherited the OUTER context's
+      // port would run the delete against the OUTER surface's node operation
+      // context, attributing its `cascadedParts` to the outer chain's
+      // recorders and leaving THIS scope's own (freshly created) receipt
+      // without them. Rebuilt here from the scope's own surface, so
+      // `cascadedParts` reaches this scope's receipt too — the same
+      // attribution-follows-the-context reasoning as the collections above,
+      // for a write those collections cannot see at all. The receipt this
+      // yields is therefore a receipt shape callers must expect: a delete
+      // reported here carries `cascadedParts` while its own `writes` stay at
+      // zero, since no collection ever counted it.
+      const outerRuntime = context[TRANSACTION_RUNTIME];
+      const scopedContext = overlayPropertyDescriptors(context, {
+        nodes: scopedNodes,
+        edges: scopedEdges,
+        ...(identity === undefined ? {} : { identity }),
+        ...this.#edgeCollectionAccess(scopedEdges),
+        getNodeCollection: <const K extends string>(kind: K) =>
+          this.#resolveDynamicNodeCollection(scopedNodes, kind),
+        [TRANSACTION_RUNTIME]: {
+          ...outerRuntime,
+          deleteNodeWithPolicy: (
+            work: Readonly<{ kind: string; id: string }>,
+            policy?: NodeDeletePolicy,
+          ) =>
+            executeNodeDelete(
+              surface.nodeOperationContext,
+              work.kind,
+              work.id,
+              outerRuntime.backend,
+              policy,
+            ),
+          reviveNode: (work: Readonly<{ kind: string; id: string }>) =>
+            executeNodeRevive(
+              surface.nodeOperationContext,
+              work.kind,
+              work.id,
+              outerRuntime.backend,
+            ),
+        },
+      });
+      // Non-enumerable, matching the outer context's own definition, so the
+      // symbol port never leaks into a caller's spread of `tx`.
+      Object.defineProperty(scopedContext, TRANSACTION_RUNTIME, {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+      });
+      const scoped = this.#attachMeasure(scopedContext, buildSurface, chain);
       const result = await fn(scoped);
       return { result, receipt: scopeRecorder.snapshot() };
     };
@@ -4550,7 +4941,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         );
       },
       subgraph: (rootId, options) =>
-        this.#createSubgraphRead(rootId, options, txBackend, attempt).execute(),
+        this.#executeSessionSubgraph(rootId, options, txBackend, attempt),
     };
   }
 
@@ -4617,11 +5008,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       if (
         (registration.unique?.length ?? 0) > 0 ||
         this.#registry.getDisjointKinds(entry.kind).length > 0 ||
+        nodeKindOwesCompositionEdge(this.#registry, entry.kind) ||
         resolveEmbeddingFields(registration.type.schema).length > 0 ||
         getSearchableFields(registration.type.schema).length > 0
       ) {
         throw new ConfigurationError(
-          "writeNodeUpsertBatch only supports plain node kinds without identity claims or projections.",
+          "writeNodeUpsertBatch only supports plain node kinds without identity claims, required composition, or projections.",
           {
             code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_KIND",
             kind: entry.kind,
@@ -4741,52 +5133,68 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
-    const txNodeOperations: NodeOperations = {
-      ...this.#buildNodeOperations(
-        this.#createNodeOperationContext(runHooks, runBulkHooks, attempt),
-      ),
-      createQuery: () =>
-        this.#createQueryForBackend(txBackend, undefined, attempt),
-      maybeRefreshStatisticsAfterBulk: undefined,
-    };
-    const txEdgeOperations: EdgeOperations = {
-      ...this.#buildEdgeOperations(
-        this.#createEdgeOperationContext(runHooks, attempt),
-      ),
-      createQuery: () =>
-        this.#createQueryForBackend(txBackend, undefined, attempt),
-      maybeRefreshStatisticsAfterBulk: undefined,
-    };
-
-    const runNodeOperationHooks = <T>(
-      operation: "create" | "update" | "delete",
-      kind: string,
-      id: string,
-      fn: () => Promise<T>,
-    ): Promise<T> =>
-      runHooks(
-        this.#createOperationContext(operation, "node", kind, id, attempt),
-        fn,
+    // THE one builder of this transaction's write surface, parameterized by
+    // the receipt chain the surface's writes belong to: the transaction itself
+    // builds one with its own recorder (or none, untracked), and every
+    // `tx.measure(...)` scope builds another with the scope's recorder added
+    // (`#attachMeasure`). One builder is why a scoped write reaches the same
+    // operations — and therefore the same composition cascade reporting — as
+    // an unscoped one.
+    const buildSurface = (
+      receiptRecorders: readonly TransactionReceiptRecorder[],
+    ): TransactionWriteSurface<G> => {
+      const nodeOperationContext = this.#createNodeOperationContext(
+        runHooks,
+        runBulkHooks,
+        attempt,
+        receiptRecorders,
       );
+      const nodeOperations: NodeOperations = {
+        ...this.#buildNodeOperations(nodeOperationContext),
+        createQuery: () =>
+          this.#createQueryForBackend(txBackend, undefined, attempt),
+        maybeRefreshStatisticsAfterBulk: undefined,
+      };
+      const edgeOperations: EdgeOperations = {
+        ...this.#buildEdgeOperations(
+          this.#createEdgeOperationContext(runHooks, attempt),
+        ),
+        createQuery: () =>
+          this.#createQueryForBackend(txBackend, undefined, attempt),
+        maybeRefreshStatisticsAfterBulk: undefined,
+      };
+      return {
+        nodeOperationContext,
+        nodes: createNodeCollectionsProxy(
+          this.#graph,
+          this.graphId,
+          this.#registry,
+          txBackend,
+          this.#batchPointRead,
+          nodeOperations,
+        ),
+        edges: createEdgeCollectionsProxy(
+          this.#graph,
+          this.graphId,
+          this.#registry,
+          txBackend,
+          this.#batchPointRead,
+          this.#endpointSetRead,
+          edgeOperations,
+        ),
+        ...(this.#graph.identity === undefined ?
+          {}
+        : { identity: createIdentityFacade(this.#identityContext(txBackend)) }),
+      };
+    };
 
-    let nodes = createNodeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      txBackend,
-      this.#batchPointRead,
-      txNodeOperations,
+    const outerSurface = buildSurface(
+      receiptRecorder === undefined ? [] : [receiptRecorder],
     );
+    const txNodeOperationContext = outerSurface.nodeOperationContext;
 
-    let edges = createEdgeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      txBackend,
-      this.#batchPointRead,
-      this.#endpointSetRead,
-      txEdgeOperations,
-    );
+    let nodes = outerSurface.nodes;
+    let edges = outerSurface.edges;
 
     if (receiptRecorder !== undefined) {
       ({ nodes, edges } = wrapTransactionCollections(
@@ -4796,10 +5204,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ));
     }
 
-    const identity =
-      this.#graph.identity === undefined ?
-        undefined
-      : createIdentityFacade(this.#identityContext(txBackend));
+    const identity = outerSurface.identity;
     const receiptIdentity =
       identity === undefined || receiptRecorder === undefined ?
         identity
@@ -4826,7 +5231,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ...this.#createTransactionReadSurface(txBackend, attempt),
       ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
       backend: createTransactionReadBackend(txBackend),
-      [TRANSACTION_RUNTIME]: { backend: txBackend, runNodeOperationHooks },
+      [TRANSACTION_RUNTIME]: {
+        backend: txBackend,
+        deleteNodeWithPolicy: (
+          work: Readonly<{ kind: string; id: string }>,
+          policy?: NodeDeletePolicy,
+        ) =>
+          executeNodeDelete(
+            txNodeOperationContext,
+            work.kind,
+            work.id,
+            txBackend,
+            policy,
+          ),
+        reviveNode: (work: Readonly<{ kind: string; id: string }>) =>
+          executeNodeRevive(
+            txNodeOperationContext,
+            work.kind,
+            work.id,
+            txBackend,
+          ),
+      },
       getNodeCollection,
       ...this.#edgeCollectionAccess(edges),
       ...(this.#captureEnabled || this.#engineNativeHistory ?
@@ -4891,7 +5316,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // to scope; the plain `transaction()` path stays free of a `measure` the
     // caller has no receiver for.
     return receiptRecorder === undefined ? withSql : (
-        this.#attachMeasure(withSql)
+        this.#attachMeasure(withSql, buildSurface, [receiptRecorder])
       );
   }
 
@@ -4915,6 +5340,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend,
       schema: this.#sqlSchema(),
       historyEnabled: this.#captureEnabled,
+      recordedTimeOwnership: this.#recordedTimeOwnership,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
       sameIdAcrossKinds: this.#graph.identity?.sameIdAcrossKinds ?? "ignore",
       loadNodes: async (references, coordinate) => {
@@ -5340,11 +5766,35 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       payload.baselineGraph,
       adopted.backend,
     );
-    await assertEvolvedSchemaRequiredKindsEmpty(
-      adopted.backend,
-      this.graphId,
-      requireDefined(payload.classification),
-    );
+    // Ordering — and the "ontology before identity" reasoning — is spelled
+    // once, at `composeSchemaCommitPreflight` in `../schema/manager`.
+    await composeSchemaCommitPreflight({
+      structural: (target) =>
+        assertEvolvedSchemaRequiredKindsEmpty(
+          target,
+          this.graphId,
+          requireDefined(payload.classification),
+        ),
+      edgeMatchIdentity: undefined,
+      tightening: requirements.schemaTightening,
+      identity:
+        requirements.identityAffectedKinds.length === 0 ?
+          undefined
+        : async (target: SchemaCommitPreflightBackend) => {
+            const storage = await inspectAdoptedIdentityStorage(
+              adopted.backend,
+              this.#sqlSchema(),
+              {
+                graphId: this.graphId,
+                identityTableDdl: this.#baseBackend.identityTableDdl,
+              },
+            );
+            await candidate.identitySchemaPreflight(
+              target,
+              storage.provisionInCommit,
+            );
+          },
+    })(adopted.backend);
     if (requirements.vectorSlots.length > 0) {
       const provision = adopted.backend.ensureVectorSlotContributions;
       if (provision === undefined) {
@@ -5357,20 +5807,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       await provision(requireDefined(payload.vectorSlots), {
         onDrift: "throw",
       });
-    }
-    if (requirements.identityAffectedKinds.length > 0) {
-      const storage = await inspectAdoptedIdentityStorage(
-        adopted.backend,
-        this.#sqlSchema(),
-        {
-          graphId: this.graphId,
-          identityTableDdl: this.#baseBackend.identityTableDdl,
-        },
-      );
-      await candidate.identitySchemaPreflight(
-        adopted.backend,
-        storage.provisionInCommit,
-      );
     }
     const committed = await adopted.backend.commitSchemaVersion({
       graphId: this.graphId,
@@ -5656,6 +6092,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.graphId,
       );
     }
+    // Extension `evolve()` used to pass ontology through `classifyModifications`
+    // unclassified — that function's own docblock explains why (ontology is out
+    // of its scope by design). The ontology half is classified here instead,
+    // against the exact after-document the commit is about to publish.
+    const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
+      graphId: this.graphId,
+      fromVersion: activeRow.version,
+      toVersion: activeRow.version + 1,
+      before: storedSchema,
+      after: serializeSchemaPreservingUnknownFields(
+        merged,
+        activeRow.version + 1,
+        storedSchema,
+      ),
+    });
     const identityCandidate =
       merged.identity === undefined ?
         undefined
@@ -5688,7 +6139,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         )
       );
     const committed =
-      identityCandidate === undefined ?
+      (
+        schemaTighteningPreflight === undefined &&
+        identityCandidate === undefined
+      ) ?
         classification.requireEmpty.length > 0 ?
           await commitEvolvedSchemaWhenRequiredKindsAreEmpty(
             this.#backend,
@@ -5707,18 +6161,32 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#backend,
           merged,
           activeRow.version,
-          async (target) => {
-            await assertEvolvedSchemaRequiredKindsEmpty(
-              target,
-              this.graphId,
-              classification,
-            );
-            await identityCandidate.identitySchemaPreflight(
-              target,
-              identityProvisioning?.provisionInCommit ?? [],
-            );
-          },
+          // Ordering — and the "ontology before identity" reasoning — is
+          // spelled once, at `composeSchemaCommitPreflight` in
+          // `../schema/manager`.
+          composeSchemaCommitPreflight({
+            structural: (target) =>
+              assertEvolvedSchemaRequiredKindsEmpty(
+                target,
+                this.graphId,
+                classification,
+              ),
+            edgeMatchIdentity: undefined,
+            tightening: schemaTighteningPreflight,
+            identity:
+              identityCandidate === undefined ? undefined : (
+                (target: SchemaCommitPreflightBackend) =>
+                  identityCandidate.identitySchemaPreflight(
+                    target,
+                    identityProvisioning?.provisionInCommit ?? [],
+                  )
+              ),
+          }),
           storedSchema,
+          schemaCommitCapabilityError(
+            identityCandidate !== undefined,
+            schemaTighteningPreflight,
+          ),
         );
     // Provision per-field vector tables + durable markers for any embedding
     // fields this evolution introduced (idempotent for fields that already
@@ -6179,6 +6647,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       registry,
       graphId: this.graphId,
       backend: this.#baseBackend,
+      batchPointRead: this.#batchPointRead,
     });
   }
 
@@ -6514,8 +6983,31 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       finalGraph,
       plan.removedNodeKinds,
     );
+    // A removal only drops declarations, so the tightening step is expected
+    // to owe nothing — but that is the preflight's decision, made from the
+    // same before/after documents every commit path hands it.
+    const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
+      graphId: this.graphId,
+      fromVersion: activeRow.version,
+      toVersion: activeRow.version + 1,
+      before: storedSchema,
+      after: serializeSchemaPreservingUnknownFields(
+        finalGraph,
+        activeRow.version + 1,
+        storedSchema,
+      ),
+    });
+    // No structural gate: dropping kinds that still hold rows is this verb's
+    // purpose (materializeRemovals reclaims them). No edge match identity
+    // step: a removal declares no new durable key.
+    const preflight = composeSchemaCommitPreflight({
+      structural: undefined,
+      edgeMatchIdentity: undefined,
+      tightening: schemaTighteningPreflight,
+      identity: identityCascade,
+    });
     const committedRow =
-      identityCascade === undefined ?
+      preflight === undefined ?
         await commitNewSchemaVersion(
           this.#backend,
           finalGraph,
@@ -6526,8 +7018,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#backend,
           finalGraph,
           activeRow.version,
-          identityCascade,
+          preflight,
           storedSchema,
+          schemaCommitCapabilityError(
+            identityCascade !== undefined,
+            schemaTighteningPreflight,
+          ),
         );
 
     // Queue per-deployment data-cleanup status — one row per removed
@@ -6689,6 +7185,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const result = await ensureSchemaImpl(this.#backend, merged, {
       preloaded: { activeRow, storedSchema },
       autoMigrate: true,
+      historyEnabled: this.#captureEnabled,
     });
     // Use the committed row from the migration result when available,
     // skipping the post-commit `getActiveSchema` round-trip. The
@@ -6853,7 +7350,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ctx: OperationHookContext,
       fn: () => Promise<T>,
       didWrite?: (result: T) => boolean,
-    ) => this.#withOperationHooks(ctx, fn, didWrite);
+      operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
+    ) => this.#withOperationHooks(ctx, fn, didWrite, operationFacts);
   }
 
   #immediateBulkHookRunner(): BulkOperationHookRunner {
@@ -6863,10 +7361,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     ) => this.#withBulkOperationHooks(ctx, fn);
   }
 
+  /**
+   * `receiptRecorders` is the CHAIN of receipts a write through the
+   * collections built from this context belongs to: the enclosing
+   * transaction's recorder, plus one per `tx.measure(...)` scope the
+   * collections were built for (see {@link #attachMeasure}). Empty outside a
+   * receipt-tracked transaction, which is what leaves `recordCascadedParts`
+   * absent there.
+   */
   #createNodeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
     runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
     attempt = 1,
+    receiptRecorders: readonly TransactionReceiptRecorder[] = [],
   ): NodeOperationContext<G> {
     const identityConfig = this.#graph.identity;
     return {
@@ -6891,6 +7398,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             foldCreated: (
               target: IdentityTarget,
               references: readonly Readonly<{ kind: string; id: string }>[],
+              cause: "fold" | "restore",
             ) =>
               foldIdentityForCreatedNodes(
                 {
@@ -6901,6 +7409,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 },
                 target,
                 references,
+                cause,
               ),
             detachDeleted: (
               target: IdentityTarget,
@@ -6920,7 +7429,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             requireValidityEndCompatible: (
               target: IdentityTarget,
               ref: Readonly<{ kind: string; id: string }>,
-              validTo: string,
+              validTo: string | undefined,
             ) =>
               requireNodeValidityEndCompatible(
                 {
@@ -6936,6 +7445,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id, attempt),
       withOperationHooks: runHooks,
+      // Present only inside a receipt-tracked transaction; its absence is
+      // why a top-level delete records nothing (there is no receipt to
+      // record into). Fans out to the whole chain: a delete issued through a
+      // `tx.measure(...)` scope's collections populates that scope's receipt
+      // AND every receipt enclosing it, while one issued through the outer
+      // context reaches only the recorders that context was built with.
+      ...(receiptRecorders.length === 0 ?
+        {}
+      : {
+          recordCascadedParts: (parts: readonly CompositionNodeRef[]) => {
+            for (const recorder of receiptRecorders) {
+              recorder.recordCascadedParts(parts);
+            }
+          },
+        }),
       createBulkOperationContext: (operation, kind) => ({
         ...this.#createHookContext(attempt),
         operation,
@@ -7094,18 +7618,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     ctx: OperationHookContext,
     fn: () => Promise<T>,
     didWrite?: (result: T) => boolean,
+    operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
   ): Promise<T> {
     this.#hooks.onOperationStart?.(ctx);
     const startTime = Date.now();
     try {
       const result = await fn();
-      this.#hooks.onOperationEnd?.(ctx, {
-        durationMs: Date.now() - startTime,
-        outcome:
-          didWrite === undefined ? "unknown"
-          : didWrite(result) ? "written"
-          : "unchanged",
-      });
+      this.#hooks.onOperationEnd?.(
+        operationEndContext(ctx, result, operationFacts),
+        {
+          durationMs: Date.now() - startTime,
+          outcome:
+            didWrite === undefined ? "unknown"
+            : didWrite(result) ? "written"
+            : "unchanged",
+        },
+      );
       return result;
     } catch (error) {
       this.#reportError(ctx, asError(error));
@@ -7164,6 +7692,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ctx: OperationHookContext,
       fn: () => Promise<T>,
       didWrite?: (result: T) => boolean,
+      operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
     ): Promise<T> => {
       this.#hooks.onOperationStart?.(ctx);
       const startTime = Date.now();
@@ -7171,7 +7700,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         const result = await fn();
         pending.push({
           type: "operation",
-          ctx,
+          ctx: operationEndContext(ctx, result, operationFacts),
           durationMs: Date.now() - startTime,
           outcome:
             didWrite === undefined ? "unknown"
@@ -7269,6 +7798,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         backend: queryBackend,
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
+        defaultExpansion: this.#defaultExpansion,
         runtimeKindTokenResolver: (token, entity) =>
           this.#resolveRuntimeKindToken(token, entity),
         ...(this.#schema !== undefined && { schema: this.#schema }),
@@ -7509,6 +8039,24 @@ export type MeasurableAdapterHistoryTransactionContext<
       MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>
     >;
   }>;
+
+/**
+ * One transaction write surface, built for one receipt chain: the node/edge
+ * collection maps and the identity facade a caller writes through, UNWRAPPED
+ * (the receipt counters' wrapping is applied per recorder by the builder's
+ * caller), plus the node operation context those collections are bound to.
+ *
+ * The context travels with the surface because it is what carries facts no
+ * collection wrapper can observe — a node delete's composition
+ * `cascadedParts` — to the receipts the surface belongs to, and because
+ * `TRANSACTION_RUNTIME`'s delete port must run against the same one.
+ */
+type TransactionWriteSurface<G extends GraphDef> = Readonly<{
+  nodeOperationContext: NodeOperationContext<G>;
+  nodes: GraphNodeCollections<G>;
+  edges: GraphEdgeCollections<G>;
+  identity?: IdentityFacade<G>;
+}>;
 
 export type AdapterRecordedReadStore<
   G extends GraphDef,
@@ -8131,6 +8679,14 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   // exist.
   const identityProfile = merged.identity;
   if (identityProfile !== undefined) {
+    // Deployment-wide physical storage (e.g. the identity transition log,
+    // base-schema release 3) must be current BEFORE the identity-storage
+    // check below runs: that check treats a missing identity relation on an
+    // already-enabled graph as ledger data loss, and a relation this library
+    // version added since the database's last open is an upgrade, not data
+    // loss. `ensureSchema` also calls this, later — idempotent by the same
+    // durable version marker, so the repeat costs one read, not new DDL.
+    await adoptBaseSchemaStorage(backend);
     // Brand-validate BEFORE the DDL: a counterfeit schema-shaped object must
     // reject with INVALID_SQL_SCHEMA and leave no tables behind — and must
     // not surface as IDENTITY_STORAGE_MISSING on an already enabled graph.
@@ -8212,6 +8768,17 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     // eslint-disable-next-line unicorn/no-useless-fallback-in-spread
     ...(options ?? {}),
     preloaded: { activeRow, storedSchema },
+    // This IS the first point a capture session could exist for this graph —
+    // `StoreImplementation`'s constructor, which normally wraps the backend
+    // with `createRecordedBackend`, has not run yet. Threaded so the identity
+    // preflight can bind its OWN transaction target to a capture session
+    // instead of silently dropping every ledger touch and transition note.
+    // Engine-native `history: true` captures nothing TypeGraph-owned, exactly
+    // as the Store it opens will not.
+    historyEnabled: capturesTypeGraphRecordedHistory(
+      options?.history === true,
+      backend,
+    ),
   };
 
   // An identity semantic change reaches the store only after the preflight

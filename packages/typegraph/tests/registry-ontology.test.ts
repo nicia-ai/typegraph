@@ -8,7 +8,9 @@
  * Key ontology relations:
  *   - subClassOf(Child, Parent) - Type inheritance
  *   - broader(Specific, General) - Concept hierarchy
- *   - equivalentTo(A, B) / sameAs(A, B) - Type equivalence
+ *   - equivalentTo(A, B) - Type equivalence (`sameAs` was a deprecated
+ *     alias, removed; a persisted document that still names it loads and
+ *     folds identically — see the "sameAs" describe block below)
  *   - disjointWith(A, B) - Types that cannot overlap
  *   - partOf(Part, Whole) / hasPart(Whole, Part) - Composition
  */
@@ -17,17 +19,38 @@ import { z } from "zod";
 
 import {
   broader,
+  defineEdge,
   defineGraph,
   defineNode,
   disjointWith,
   equivalentTo,
   hasPart,
   narrower,
+  type NodeType,
+  type OntologyRelation,
   partOf,
-  sameAs,
   subClassOf,
 } from "../src";
+import { ALL_META_EDGE_NAMES } from "../src/ontology/constants";
+import { metaEdgesByName } from "../src/ontology/core-meta-edges";
 import { buildKindRegistry } from "../src/registry";
+
+/**
+ * `sameAs` has no public factory any more (roadmap F removed it), and its
+ * meta-edge object is absent from the public `core` export too — a document
+ * persisted before the removal that still names a `sameAs` relation must
+ * keep loading and folding exactly like `equivalentTo`.
+ * `metaEdgesByName.sameAs` is the internal-only object
+ * `compileOntologyRelation` (`src/graph-extension/compiler.ts`) resolves
+ * that name to, so building the relation directly from it here exercises
+ * the same registry fold a persisted `sameAs` document would (whose
+ * relation carries the name as a plain string, not this object —
+ * `collectOntologyRelations`, `src/registry/kind-registry.ts`, switches on
+ * the name either way).
+ */
+function sameAsRelation(kindA: NodeType, kindB: NodeType): OntologyRelation {
+  return { metaEdge: metaEdgesByName.sameAs, from: kindA, to: kindB };
+}
 
 const emptySchema = z.object({});
 
@@ -187,8 +210,7 @@ describe("sameAs - Alias for equivalentTo", () => {
       Account: { type: Account },
     },
     edges: {},
-    // eslint-disable-next-line @typescript-eslint/no-deprecated -- pins the migration-period alias behavior
-    ontology: [sameAs(User, Account)],
+    ontology: [sameAsRelation(User, Account)],
   });
 
   const registry = buildKindRegistry(graph);
@@ -196,6 +218,23 @@ describe("sameAs - Alias for equivalentTo", () => {
   it("works the same as equivalentTo", () => {
     expect(registry.areEquivalent("User", "Account")).toBe(true);
   });
+});
+
+describe("metaEdgesByName - internal by-name lookup correspondence", () => {
+  // `metaEdgesByName` is a hand-written literal keyed by every
+  // `MetaEdgeName`; nothing else pins that key N maps to the meta-edge
+  // object actually NAMED N. `compileOntologyRelation`
+  // (`src/graph-extension/compiler.ts`) trusts this correspondence
+  // unconditionally when resolving a declarative graph extension's
+  // `metaEdge` string — a mis-mapped entry (e.g. `sameAs` pointing at
+  // `equivalentToMetaEdge`) would compile and persist under the wrong
+  // name with no other test catching it.
+  it.each(ALL_META_EDGE_NAMES)(
+    "metaEdgesByName[%s] carries that name",
+    (name) => {
+      expect(metaEdgesByName[name].name).toBe(name);
+    },
+  );
 });
 
 describe("disjointWith - Mutually Exclusive Types", () => {
@@ -229,6 +268,8 @@ describe("partOf/hasPart - Composition", () => {
   const Engine = defineNode("Engine", { schema: emptySchema });
   const Car = defineNode("Car", { schema: emptySchema });
   const Vehicle = defineNode("Vehicle", { schema: emptySchema });
+  const installedIn = defineEdge("installedIn", { schema: emptySchema });
+  const partOfVehicle = defineEdge("partOfVehicle", { schema: emptySchema });
 
   const graph = defineGraph({
     id: "composition_test",
@@ -237,8 +278,24 @@ describe("partOf/hasPart - Composition", () => {
       Car: { type: Car },
       Vehicle: { type: Vehicle },
     },
-    edges: {},
-    ontology: [partOf(Engine, Car), partOf(Car, Vehicle)],
+    edges: {
+      installedIn: {
+        type: installedIn,
+        from: [Engine],
+        to: [Car],
+        cardinality: "one",
+      },
+      partOfVehicle: {
+        type: partOfVehicle,
+        from: [Car],
+        to: [Vehicle],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      partOf(Engine, Car, { via: installedIn }),
+      partOf(Car, Vehicle, { via: partOfVehicle }),
+    ],
   });
 
   const registry = buildKindRegistry(graph);
@@ -267,6 +324,7 @@ describe("partOf/hasPart - Composition", () => {
 describe("hasPart - Inverse of partOf", () => {
   const Wheel = defineNode("Wheel", { schema: emptySchema });
   const Bicycle = defineNode("Bicycle", { schema: emptySchema });
+  const hasWheel = defineEdge("hasWheel", { schema: emptySchema });
 
   const graph = defineGraph({
     id: "haspart_test",
@@ -274,8 +332,15 @@ describe("hasPart - Inverse of partOf", () => {
       Wheel: { type: Wheel },
       Bicycle: { type: Bicycle },
     },
-    edges: {},
-    ontology: [hasPart(Bicycle, Wheel)],
+    edges: {
+      hasWheel: {
+        type: hasWheel,
+        from: [Bicycle],
+        to: [Wheel],
+        targetCardinality: "one",
+      },
+    },
+    ontology: [hasPart(Bicycle, Wheel, { via: hasWheel })],
   });
 
   const registry = buildKindRegistry(graph);
@@ -283,6 +348,42 @@ describe("hasPart - Inverse of partOf", () => {
   it("hasPart(Whole, Part) means Part is part of Whole", () => {
     expect(registry.isPartOf("Wheel", "Bicycle")).toBe(true);
     expect(registry.getParts("Bicycle")).toContain("Wheel");
+  });
+});
+
+describe("equivalentTo is mutual subsumption", () => {
+  const Person = defineNode("Person", { schema: emptySchema });
+  const Company = defineNode("Company", { schema: emptySchema });
+  const Corporation = defineNode("Corporation", { schema: emptySchema });
+
+  const graph = defineGraph({
+    id: "equivalence_subsumption_test",
+    nodes: {
+      Person: { type: Person },
+      Company: { type: Company },
+      Corporation: { type: Corporation },
+    },
+    edges: {},
+    ontology: [
+      equivalentTo(Company, Corporation),
+      disjointWith(Person, Company),
+    ],
+  });
+
+  const registry = buildKindRegistry(graph);
+
+  it("makes disjointness, assignability, expansion and the component all agree", () => {
+    expect(registry.areDisjoint("Person", "Corporation")).toBe(true);
+    expect(registry.isAssignableTo("Corporation", "Company")).toBe(true);
+    expect(registry.isAssignableTo("Company", "Corporation")).toBe(true);
+    expect(registry.expandSubClasses("Company")).toContain("Corporation");
+    expect(registry.getSubClassComponent("Company")).toEqual([
+      "Company",
+      "Corporation",
+    ]);
+    expect(registry.getSubClassComponent("Corporation")).toBe(
+      registry.getSubClassComponent("Company"),
+    );
   });
 });
 

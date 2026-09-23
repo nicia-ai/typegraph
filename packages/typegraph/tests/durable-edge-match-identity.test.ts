@@ -38,6 +38,7 @@ import {
   getActiveSchema,
   initializeSchema,
   migrateSchema,
+  rollbackSchema,
 } from "../src/schema/manager";
 
 const Person = defineNode("Person", {
@@ -1269,6 +1270,36 @@ describe("durable edge match identity", () => {
       await backend.close();
     }
   });
+
+  it("refuses a rollback that re-keys a populated edge kind, leaving the active version", async () => {
+    const graphId = "durable_identity_rollback_rekey";
+    const { backend } = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(durableGraph(graphId), backend);
+      await migrateSchema(backend, legacyGraph(graphId), 1);
+      const store = createStore(legacyGraph(graphId), backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      await store.edges.knows.create(alice, bob, { label: "friend" });
+
+      await expect(rollbackSchema(backend, graphId, 1)).rejects.toMatchObject({
+        details: {
+          reason: "edge-match-identity-rekey",
+          edgeKinds: ["knows"],
+          fromVersion: 2,
+          toVersion: 1,
+        },
+      });
+      const active = await backend.getActiveSchema(graphId);
+      expect(active?.version).toBe(2);
+    } finally {
+      await backend.close();
+    }
+  });
+  // MUTATION CHECK: passing `edgeMatchIdentity: undefined` to the composed
+  // rollback preflight (`prepareRollbackPreflight`, src/schema/manager.ts)
+  // reactivates the durable key declaration over edges that carry no key;
+  // reporting `active + 1` instead of the rollback target fails `toVersion`.
 
   it("refuses first-schema identity adoption over populated unmanaged kinds", async () => {
     const { backend } = createLocalSqliteBackend({

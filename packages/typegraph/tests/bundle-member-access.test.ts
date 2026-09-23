@@ -33,21 +33,19 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-// Adopted identity evolution adds a Store DDL-factory handoff and a same-session
-// catalog-driven provisioning decision, both guarded before schema commit.
-// Exact-session heterogeneous node upserts add six guarded accesses across
-// Store dispatch and recorded wrappers: 96 -> 102.
-const REASONED_FLOOR = 102;
+// `rollbackSchema` reads the optional preflight flip once.
+const REASONED_FLOOR = 107;
+const DEFERRED_LIVE_TOTAL = 227;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
 // invokes the adopted same-session facet only when the plan owes a slot.
 // The resolved-node batch update reads its optional port at five guarded call
 // sites and reserves one additional access in its declared ceiling.
-const DEFERRED_LIVE_TOTAL = 225;
-const DEFERRED_DECLARED_TOTAL = 229;
+// The composition cascade adds one heterogeneous endpoint-set read.
+const DEFERRED_DECLARED_TOTAL = 231;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 341;
+const TOTAL_ROW_COUNT = 348;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -194,7 +192,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 335)", () => {
+  it("the class partition covers every scanned row (total 343)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

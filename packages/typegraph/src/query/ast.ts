@@ -10,6 +10,7 @@ import {
   type NullCheckOp,
   type TemporalMode,
 } from "../core/types";
+import { type AliasExpansionAxis } from "./builder/alias-expansion";
 import { type DatabaseExpression } from "./expressions";
 import { type JsonPointer } from "./json-pointer";
 
@@ -398,8 +399,15 @@ export type PredicateExpression =
  */
 type QueryStart = Readonly<{
   alias: string;
-  kinds: readonly string[]; // Expanded via ontology if includeSubClasses
-  includeSubClasses: boolean;
+  kinds: readonly string[]; // Expanded per `expansion` (subclasses/narrower)
+  /**
+   * Which expansion axis produced `kinds` — see
+   * `src/query/builder/alias-expansion.ts`. Diagnostic only: error details and
+   * suggestions report it, but no compilation or execution decision may read
+   * it. `kinds` is the resolved decision; a later recursive stage re-roots on a
+   * traversal alias and labels it `"exact"` whatever axis resolved that alias.
+   */
+  expansion: AliasExpansionAxis;
 }>;
 
 // ============================================================

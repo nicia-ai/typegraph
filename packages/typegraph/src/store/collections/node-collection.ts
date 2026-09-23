@@ -36,6 +36,7 @@ import {
   asCompiledSelectSql,
   type CompiledSelectSql,
 } from "../../query/sql-intent";
+import type { CompositionViaRef } from "../../registry/composition-relation";
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
@@ -50,8 +51,11 @@ import {
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeCollection,
+  type NodeCreateOptions,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
+  type NodeReparentOptions,
+  type NodeReparentResult,
   type QueryOptions,
   type UpdateNodeInput,
   type ValidityEndMutation,
@@ -268,6 +272,17 @@ export type NodeCollectionConfig = Readonly<{
   ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
+  executeReparent: (
+    kind: string,
+    id: string,
+    options: NodeReparentOptions,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeReparentResult>;
+  executeReparentBatch: (
+    kind: string,
+    items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
@@ -323,22 +338,15 @@ export type NodeCollectionConfig = Readonly<{
 function buildCreateInput(
   kind: string,
   props: Record<string, unknown>,
-  options?: Readonly<{
-    id?: string;
-    validFrom?: string | null;
-    validTo?: string;
-  }>,
+  options?: NodeCreateOptions,
 ): CreateNodeInput {
-  const input: {
-    kind: string;
-    id?: string;
-    props: Record<string, unknown>;
-    validFrom?: string | null;
-    validTo?: string;
+  const input: { kind: string; props: Record<string, unknown> } & {
+    -readonly [K in keyof NodeCreateOptions]: NodeCreateOptions[K];
   } = { kind, props };
   if (options?.id !== undefined) input.id = options.id;
   if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.partOf !== undefined) input.partOf = options.partOf;
   return input;
 }
 
@@ -392,12 +400,8 @@ function buildUpsertUpdateInput(
 
 function mapBulkNodeInputs(
   kind: string,
-  items: readonly Readonly<{
-    props: Record<string, unknown>;
-    id?: string;
-    validFrom?: string | null;
-    validTo?: string;
-  }>[],
+  items: readonly (Readonly<{ props: Record<string, unknown> }> &
+    NodeCreateOptions)[],
 ): CreateNodeInput[] {
   return items.map((item) => buildCreateInput(kind, item.props, item));
 }
@@ -427,6 +431,8 @@ export function createNodeCollection<
     executeResolvedMutationSet: executeNodeResolvedMutationSet,
     prepareReplacement,
     executeReplacementBatch: executeNodeReplacementBatch,
+    executeReparent: executeNodeReparent,
+    executeReparentBatch: executeNodeReparentBatch,
     executeDelete: executeNodeDelete,
     executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
@@ -442,22 +448,14 @@ export function createNodeCollection<
   return {
     async create(
       props: z.input<N["schema"]>,
-      options?: Readonly<{
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-      }>,
+      options?: NodeCreateOptions,
     ): Promise<Node<N>> {
       return this.createFromRecord(props, options);
     },
 
     async createFromRecord(
       data: Record<string, unknown>,
-      options?: Readonly<{
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-      }>,
+      options?: NodeCreateOptions,
     ): Promise<Node<N>> {
       const result = await executeNodeCreate(
         buildCreateInput(kind, data, options),
@@ -520,8 +518,12 @@ export function createNodeCollection<
       }
       const rootAlias = "compare_and_set_candidate";
       const candidateIdColumn = `${rootAlias}_id`;
+      // Pinned exact-kind, defense in depth: `executeNodeSetUpdate` below
+      // re-filters `WHERE nodes.kind = <kind>` regardless of what this
+      // candidate subquery widens to, so a subclass id this pin would let
+      // through is filtered there anyway (tests/polymorphic-default.test.ts).
       const candidateIds = createQuery()
-        .fromDynamic(kind, rootAlias)
+        .fromDynamic(kind, rootAlias, { expansion: "exact" })
         .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
         .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
         .compile();
@@ -613,8 +615,11 @@ export function createNodeCollection<
         );
       }
 
+      // Pinned exact-kind, defense in depth — same reason as
+      // compareAndSet's root pin above: the outer `WHERE nodes.kind = <kind>`
+      // in `executeNodeSetUpdate` re-filters this candidate set regardless.
       let base = createQuery()
-        .fromDynamic(kind, rootAlias)
+        .fromDynamic(kind, rootAlias, { expansion: "exact" })
         .temporal("asOf", readInstant);
       const where = params.where;
       if (where !== undefined) {
@@ -625,8 +630,11 @@ export function createNodeCollection<
       for (const [index, relation] of exists.entries()) {
         const edgeAlias = `update_edge_${index}`;
         const relatedAlias = `update_related_${index}`;
+        // Pinned exact-kind, defense in depth — same as `base` above: this
+        // projects `rootAlias`'s id, still re-filtered by the outer
+        // `WHERE nodes.kind = <kind>` in `executeNodeSetUpdate`.
         const relationRoot = createQuery()
-          .fromDynamic(kind, rootAlias)
+          .fromDynamic(kind, rootAlias, { expansion: "exact" })
           .temporal("asOf", readInstant);
         let traversal = relationRoot.traverseDynamic(
           relation.edgeKind,
@@ -639,7 +647,16 @@ export function createNodeCollection<
         if (relation.whereEdge !== undefined) {
           traversal = traversal.whereEdge(edgeAlias, relation.whereEdge);
         }
-        let related = traversal.toDynamic(relation.relatedKind, relatedAlias);
+        // Pinned exact-kind, GENUINELY LOAD-BEARING (unlike the root pins
+        // above): this alias's kind gates whether the `exists` predicate is
+        // satisfied at all, and only `rootAlias`'s id is projected — the
+        // outer `WHERE nodes.kind = <kind>` fence never sees `relatedAlias`,
+        // so widening it here would let a subclass-only related row
+        // satisfy an `exists` check the caller declared against the exact
+        // parent kind (tests/polymorphic-default.test.ts, mutation-checked).
+        let related = traversal.toDynamic(relation.relatedKind, relatedAlias, {
+          expansion: "exact",
+        });
         if (relation.whereRelated !== undefined) {
           related = related.whereNode(relatedAlias, relation.whereRelated);
         }
@@ -696,6 +713,32 @@ export function createNodeCollection<
       return result;
     },
 
+    async reparent<
+      const Via extends CompositionViaRef | undefined =
+        CompositionViaRef | undefined,
+    >(
+      id: NodeId<N>,
+      options: NodeReparentOptions<Via>,
+    ): Promise<NodeReparentResult<Via>> {
+      return executeNodeReparent(kind, id, options, backend) as Promise<
+        NodeReparentResult<Via>
+      >;
+    },
+
+    async bulkReparent<
+      const Via extends CompositionViaRef | undefined =
+        CompositionViaRef | undefined,
+    >(
+      items: readonly Readonly<{
+        id: NodeId<N>;
+        options: NodeReparentOptions<Via>;
+      }>[],
+    ): Promise<readonly NodeReparentResult<Via>[]> {
+      return executeNodeReparentBatch(kind, items, backend) as Promise<
+        readonly NodeReparentResult<Via>[]
+      >;
+    },
+
     async delete(id: NodeId<N>): Promise<void> {
       await executeNodeDelete(kind, id, backend);
     },
@@ -731,8 +774,12 @@ export function createNodeCollection<
           temporal,
           defaultTemporalMode,
         );
+        // Pinned exact-kind: the no-`where` branch just below goes straight
+        // to the backend find path, which is exact-kind by construction —
+        // this branch must return the identical row set (see the comment
+        // there), not a polymorphic-by-default one.
         let query = createQuery()
-          .from(kind, "_n")
+          .from(kind, "_n", { expansion: "exact" })
           .temporal(asOf === undefined ? temporalMode : "asOf", asOf)
           .whereNode("_n", filter.where as never)
           .select((ctx: Record<string, unknown>) => ctx["_n"]);
@@ -879,12 +926,8 @@ export function createNodeCollection<
     },
 
     async bulkCreate(
-      items: readonly Readonly<{
-        props: z.input<N["schema"]>;
-        id?: string;
-        validFrom?: string | null;
-        validTo?: string;
-      }>[],
+      items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
+        NodeCreateOptions)[],
     ): Promise<Node<N>[]> {
       const batchInputs = mapBulkNodeInputs(kind, items);
       const results = await executeNodeCreateBatch(batchInputs, backend);

@@ -1,4 +1,3 @@
-import { requireDefined } from "../utils/presence";
 /**
  * Opt-in ontology type reconciliation (design §6 / §7, T10).
  *
@@ -6,18 +5,26 @@ import { requireDefined } from "../utils/presence";
  * may carry DIFFERING `node.kind` values across branches — e.g. one branch staged
  * a `Doctor` while another staged the more-specific `SpecialistDoctor` for what is
  * really the same person. With `reconcileTypes: "ontology"` enabled, this module
- * uses the PUBLIC-closure glue (T2a, `closures.ts`) to decide whether those kinds
- * are subClassOf-compatible and, if so, collapses the cluster to the
- * MOST-SPECIFIC common type, recording a {@link TypeReconciliation}. Genuinely
- * incompatible kinds (siblings, disjoint trees) are FLAGGED — never silently
- * collapsed — and surfaced as a {@link DroppedItem}.
+ * uses the store's own validated `KindRegistry` to decide whether those kinds are
+ * subClassOf-compatible and, if so, collapses the cluster to the MOST-SPECIFIC
+ * common type, recording a {@link TypeReconciliation}. Genuinely incompatible
+ * kinds (siblings, disjoint trees) are FLAGGED — never silently collapsed — and
+ * surfaced as a {@link DroppedItem}.
  *
- * MOST-SPECIFIC = the unique minimum of the subclass partial order restricted to
+ * `equivalentTo` is mutual subsumption (D1): the registry folds an equivalence
+ * class into `subClassAncestors`/`subClassDescendants` before its transitive
+ * closure, so `registry.isAssignableTo` is already true both ways for two
+ * equivalent kinds. That is what makes "most specific" a single predicate
+ * (`isAssignableTo`) rather than a subsumption check plus a separate equivalence
+ * check: reconciling against a private closure and reconciling against the
+ * registry a query runs on can no longer disagree about which kinds are the same
+ * class.
+ *
+ * MOST-SPECIFIC = the unique minimum of `registry.isAssignableTo` restricted to
  * the cluster's distinct kinds: the kind `T` such that every OTHER kind in the
- * cluster is a (transitive) ancestor of `T` (`isReachable(closure, T, other)`),
- * or is EQUIVALENT to `T` (mutual reachability, from folded `equivalentTo`
- * relations). If several mutually-equivalent kinds tie for the minimum, the
- * lexicographically-smallest representative is chosen so the outcome is
+ * cluster is assignable to `T` — equal, a (transitive) subclass, or in `T`'s
+ * folded equivalence class. If several mutually-equivalent kinds tie for the
+ * minimum, the code-point-smallest representative is chosen so the outcome is
  * deterministic. If no single minimum exists, the kinds are incompatible.
  *
  * This module is a PURE decision function — no I/O, no store access. The
@@ -27,9 +34,8 @@ import { requireDefined } from "../utils/presence";
  * repointed edges' `fromKind` / `toKind` annotations while keeping endpoint ids
  * stable (the cascade described in step 2). `mode: "off"` is a guaranteed no-op.
  */
-import type { SubClassClosure } from "./closures";
-import { isReachable } from "./closures";
 import { compareStrings, idOf, type MergeKey } from "./node-key";
+import { compareCodePoints, type KindRegistry } from "./typegraph-internal";
 import type {
   DroppedItem,
   ReconcileTypesMode,
@@ -81,76 +87,40 @@ export type TypeReconcileResult = Readonly<{
   dropped: readonly DroppedItem[];
 }>;
 
-/** Distinct, lexicographically-sorted kinds — the canonical kind set. */
+/** Distinct kinds in code-point order — the canonical kind set. */
 function distinctKinds(kinds: readonly string[]): readonly string[] {
-  return [...new Set(kinds)].sort((left, right) => compareStrings(left, right));
-}
-
-/**
- * Reports whether two kinds are EQUIVALENT under the closure — distinct names
- * that fold to the same `equivalentTo` class, hence mutually reachable. (A kind is
- * not equivalent to itself here; identical names are handled by the caller.)
- */
-function areEquivalent(
-  closure: SubClassClosure,
-  left: string,
-  right: string,
-): boolean {
-  return (
-    left !== right &&
-    isReachable(closure, left, right) &&
-    isReachable(closure, right, left)
-  );
-}
-
-/**
- * Reports whether `candidate` is "at or below" `other` in the subclass order:
- * either it is a (transitive) subclass of `other`, or the two are equivalent. This
- * is the predicate the most-specific kind must satisfy against every OTHER kind in
- * the cluster.
- */
-function isAtOrBelow(
-  closure: SubClassClosure,
-  candidate: string,
-  other: string,
-): boolean {
-  if (candidate === other) {
-    return true;
-  }
-  return (
-    isReachable(closure, candidate, other) ||
-    areEquivalent(closure, candidate, other)
+  return [...new Set(kinds)].toSorted((left, right) =>
+    compareCodePoints(left, right),
   );
 }
 
 /**
  * Finds the MOST-SPECIFIC common kind among `kinds`, or `undefined` if the kinds
- * are incompatible (no single minimum of the subclass order).
+ * are incompatible (no single minimum under `registry.isAssignableTo`).
  *
- * A kind qualifies as the minimum when every OTHER kind is at-or-above it
- * ({@link isAtOrBelow}). Several mutually-equivalent kinds can all qualify; the
- * lexicographically-smallest qualifier is returned so the choice is deterministic.
- * Siblings (e.g. two leaves under a shared parent) and disjoint trees yield no
- * qualifier → `undefined` (incompatible).
+ * A kind qualifies as the minimum when it is assignable to every OTHER kind
+ * (`registry.isAssignableTo(candidate, other)` — equal, a transitive subclass
+ * of `other`, or in `other`'s folded `equivalentTo` class). Several
+ * mutually-equivalent kinds can all qualify; the code-point-smallest
+ * qualifier is returned so the choice is deterministic. Siblings (e.g. two
+ * leaves under a shared parent) and disjoint trees yield no qualifier →
+ * `undefined` (incompatible).
  */
 export function mostSpecificCommonKind(
-  closure: SubClassClosure,
+  registry: KindRegistry,
   kinds: readonly string[],
 ): string | undefined {
   const qualifiers = kinds.filter((candidate) =>
-    kinds.every((other) => isAtOrBelow(closure, candidate, other)),
+    kinds.every((other) => registry.isAssignableTo(candidate, other)),
   );
-  if (qualifiers.length === 0) {
-    return undefined;
-  }
-  return requireDefined(
-    [...qualifiers].sort((left, right) => compareStrings(left, right))[0],
-  );
+  return qualifiers.toSorted((left, right) =>
+    compareCodePoints(left, right),
+  )[0];
 }
 
 /**
- * Reconciles the differing kinds of each resolved cluster against the subClassOf
- * closure.
+ * Reconciles the differing kinds of each resolved cluster against the store's
+ * validated `KindRegistry`.
  *
  * For `mode: "off"` (the default) this is a guaranteed no-op: it returns zero
  * reconciliations, an empty retype map, and zero dropped items, regardless of the
@@ -176,12 +146,12 @@ export function mostSpecificCommonKind(
  * unordered cluster set.
  *
  * @param clusters The resolved clusters with their distinct member kinds.
- * @param closure The subClassOf closure from {@link buildSubClassClosure} (T2a).
+ * @param registry The store's validated `KindRegistry`.
  * @param mode `"off"` (no-op) or `"ontology"` (reconcile).
  */
 export function reconcileTypes(
   clusters: readonly ReconcileClusterInput[],
-  closure: SubClassClosure,
+  registry: KindRegistry,
   mode: ReconcileTypesMode,
 ): TypeReconcileResult {
   if (mode === "off") {
@@ -205,7 +175,7 @@ export function reconcileTypes(
     // The PUBLIC report fields (`entityId`, dropped `id`) carry the bare node id;
     // the internal retype keys on the full `(kind, id)` identity.
     const entityId = idOf(cluster.canonicalId);
-    const toType = mostSpecificCommonKind(closure, kinds);
+    const toType = mostSpecificCommonKind(registry, kinds);
     if (toType === undefined) {
       dropped.push({
         kind: "node",

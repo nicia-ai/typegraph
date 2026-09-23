@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("16 pilot + 84 unbundled = 100, with no member counted twice", () => {
+  it("16 pilot + 85 unbundled = 101, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(16);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(84);
+    expect(unbundledNames.length).toBe(85);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(100);
+    expect(bundledSet.size + unbundledNames.length).toBe(101);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("34 reasoned entries sum to 102 accesses; 50 deferred entries sum to 229", () => {
+  it("35 reasoned entries sum to 107 accesses; 50 deferred entries sum to 231", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(34);
+    expect(reasoned.length).toBe(35);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -157,12 +157,17 @@ describe("capability bundle totality (T9)", () => {
     // and inspects its required storage on that session: 94 -> 96.
     // The exact-session heterogeneous node upsert adds six guarded backend
     // member accesses across Store dispatch and recorded wrappers: 96 -> 102.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(102);
+    // `rollbackSchema` reads the optional preflight flip once to refuse a
+    // tightening on a backend without it: 106 -> 107.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(107);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.
     // The resolved-node batch update adds one optional member with a ceiling
     // of six live access sites: 223 -> 229.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(229);
+    // The composition cascade adds one heterogeneous endpoint-set consumer:
+    // 229 -> 230.
+    // Edge acyclicity adds three tableNames reads: 102 -> 105.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(231);
   });
 });

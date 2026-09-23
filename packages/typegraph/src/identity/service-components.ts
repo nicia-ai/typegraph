@@ -96,12 +96,7 @@ export class UnionFind {
   }
 
   components(): ReadonlyMap<string, readonly PlainNodeRef[]> {
-    const distinct = this.distinctComponents();
-    const byMember = new Map<string, readonly PlainNodeRef[]>();
-    for (const group of distinct.values()) {
-      for (const member of group) byMember.set(refKey(member), group);
-    }
-    return byMember;
+    return indexComponentsByMember(this.distinctComponents());
   }
 
   /**
@@ -138,11 +133,22 @@ export function buildComponents(
   >[],
   sameIdAcrossKinds: "fold" | "ignore",
 ): ReadonlyMap<string, readonly PlainNodeRef[]> {
-  const distinct = buildDistinctComponents(
-    structuralNodes,
-    assertions,
-    sameIdAcrossKinds,
+  return indexComponentsByMember(
+    buildDistinctComponents(structuralNodes, assertions, sameIdAcrossKinds),
   );
+}
+
+/**
+ * Re-keys distinct components by every member, sharing each component's one
+ * array across its members — linear in the member count, never a per-member
+ * copy. Any consumer that looks a class up BY MEMBER (a before/after closure
+ * diff) must go through this index: a distinct map is keyed by an arbitrary
+ * union-find root, so a member lookup against it silently misses every
+ * non-root member.
+ */
+export function indexComponentsByMember(
+  distinct: ReadonlyMap<string, readonly PlainNodeRef[]>,
+): ReadonlyMap<string, readonly PlainNodeRef[]> {
   const byMember = new Map<string, readonly PlainNodeRef[]>();
   for (const group of distinct.values()) {
     for (const member of group) byMember.set(refKey(member), group);
@@ -411,8 +417,30 @@ export function validateSnapshotIntegrity(
   }
 }
 
-type RawClosureRow = RawClosureClassRow &
+/** One materialized closure row: a member and the class it is labeled with. */
+type RawClosureMemberClassRow = RawClosureClassRow &
   Readonly<{ class_kind: string; class_id: string }>;
+
+/**
+ * The graph-wide read of the materialized closure. ONE owner for the
+ * verification path ({@link assertClosureMatchesComponents}) and the
+ * transition-diff snapshot (`snapshotIdentityClosureClasses`), so a column
+ * rename or an added closure column cannot leave one of them reading a stale
+ * projection while the other is updated.
+ */
+export async function readClosureRowsForGraph(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<readonly RawClosureMemberClassRow[]> {
+  return target.execute<RawClosureMemberClassRow>(
+    asCompiledRowsSql(sql`
+      SELECT member_kind, member_id, class_kind, class_id
+      FROM ${schema.identityClosureTable}
+      WHERE graph_id = ${graphId}
+    `),
+  );
+}
 
 export function closureMismatchError(
   graphId: string,
@@ -458,13 +486,7 @@ export async function assertClosureMatchesComponents(
     }
   }
 
-  const rows = await target.execute<RawClosureRow>(
-    asCompiledRowsSql(sql`
-      SELECT member_kind, member_id, class_kind, class_id
-      FROM ${schema.identityClosureTable}
-      WHERE graph_id = ${graphId}
-    `),
-  );
+  const rows = await readClosureRowsForGraph(target, schema, graphId);
   const seen = new Set<string>();
   for (const row of rows) {
     const member = { kind: row.member_kind, id: row.member_id };

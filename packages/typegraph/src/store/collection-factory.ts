@@ -37,6 +37,8 @@ import {
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeGetOrCreateByConstraintOptions,
+  type NodeReparentOptions,
+  type NodeReparentResult,
   type QueryOptions,
 } from "./types";
 
@@ -112,6 +114,17 @@ export type NodeOperations = Readonly<{
    * the other preconditions.
    */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
+  executeReparent: (
+    kind: string,
+    id: string,
+    options: NodeReparentOptions,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeReparentResult>;
+  executeReparentBatch: (
+    kind: string,
+    items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,

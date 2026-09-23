@@ -23,6 +23,11 @@ import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
 import {
+  type CompositionExistence,
+  type CompositionPartSide,
+  compositionRelationFields,
+} from "../registry/composition-relation";
+import {
   isUnstorablePropertyName,
   RESERVED_EDGE_KEYS,
   RESERVED_NODE_KEYS,
@@ -190,12 +195,22 @@ const EDGE_BODY_KEYS: ReadonlySet<string> = new Set([
   "from",
   "to",
   "properties",
+  "cardinality",
+  "targetCardinality",
+  "acyclic",
 ]);
+const CARDINALITY_VALUES = ["many", "one", "unique", "oneActive"] as const;
+const TARGET_CARDINALITY_VALUES = ["many", "one", "oneActive"] as const;
 const ONTOLOGY_ENTRY_KEYS: ReadonlySet<string> = new Set([
   "metaEdge",
   "from",
   "to",
+  "via",
+  "partSide",
+  "existence",
 ]);
+const COMPOSITION_PART_SIDE_VALUES = ["from", "to"] as const;
+const COMPOSITION_EXISTENCE_VALUES = ["optional", "required"] as const;
 const UNIQUE_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "name",
   "fields",
@@ -629,12 +644,43 @@ function validateEdgeDocument(
       );
   if (properties === undefined) return undefined;
 
+  const cardinalityResult = validateOptionalLiteral(
+    raw["cardinality"],
+    CARDINALITY_VALUES,
+    `${path}/cardinality`,
+    "Edge `cardinality`",
+    "INVALID_DOCUMENT_SHAPE",
+    issues,
+  );
+  if (!cardinalityResult.ok) return undefined;
+
+  const targetCardinalityResult = validateOptionalLiteral(
+    raw["targetCardinality"],
+    TARGET_CARDINALITY_VALUES,
+    `${path}/targetCardinality`,
+    "Edge `targetCardinality`",
+    "INVALID_DOCUMENT_SHAPE",
+    issues,
+  );
+  if (!targetCardinalityResult.ok) return undefined;
+
+  const acyclic = validateOptionalBoolean(
+    raw["acyclic"],
+    `${path}/acyclic`,
+    "`acyclic`",
+    "INVALID_DOCUMENT_SHAPE",
+    issues,
+  );
+
   return compactUndefined<ExtensionEdgeDef>({
     description,
     annotations,
     from,
     to,
     properties,
+    cardinality: cardinalityResult.value,
+    targetCardinality: targetCardinalityResult.value,
+    acyclic,
   });
 }
 
@@ -799,7 +845,53 @@ function validateOntologySection(
       continue;
     }
 
-    result.push({ metaEdge: metaEdge as MetaEdgeName, from, to });
+    const via = entry["via"];
+    if (via !== undefined && (typeof via !== "string" || via.length === 0)) {
+      issues.push({
+        path: `${path}/via`,
+        message:
+          "Ontology relation `via` must be a non-empty string when present.",
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      continue;
+    }
+
+    const partSide = entry["partSide"];
+    if (
+      partSide !== undefined &&
+      !(COMPOSITION_PART_SIDE_VALUES as readonly unknown[]).includes(partSide)
+    ) {
+      issues.push({
+        path: `${path}/partSide`,
+        message: `Ontology relation \`partSide\` must be one of ${COMPOSITION_PART_SIDE_VALUES.join(", ")} when present.`,
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      continue;
+    }
+
+    const existence = entry["existence"];
+    if (
+      existence !== undefined &&
+      !(COMPOSITION_EXISTENCE_VALUES as readonly unknown[]).includes(existence)
+    ) {
+      issues.push({
+        path: `${path}/existence`,
+        message: `Ontology relation \`existence\` must be one of ${COMPOSITION_EXISTENCE_VALUES.join(", ")} when present.`,
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      continue;
+    }
+
+    result.push({
+      metaEdge: metaEdge as MetaEdgeName,
+      from,
+      to,
+      ...compositionRelationFields({
+        via,
+        partSide: partSide as CompositionPartSide | undefined,
+        existence: existence as CompositionExistence | undefined,
+      }),
+    });
   }
   return result;
 }

@@ -53,6 +53,7 @@ export type {
   BatchResults,
   CommonPropertyKeys,
   CompiledOneStatementRead,
+  CompositionNavigationOptions,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,
@@ -126,6 +127,12 @@ export { createQueryBuilder } from "./builder";
 export { type AggregateResult, ExecutableAggregateQuery } from "./builder";
 export { ExecutableQuery } from "./builder";
 export { QueryBuilder } from "./builder";
+export {
+  type AliasExpansionAxis,
+  DEFAULT_ALIAS_EXPANSION_AXIS,
+  type DefaultAliasExpansionAxis,
+  SEARCH_EXPANSION_DEFAULT,
+} from "./builder/alias-expansion";
 export type {
   PreparedBindings,
   PreparedParameterDeclaration,

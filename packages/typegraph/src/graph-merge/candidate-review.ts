@@ -14,7 +14,7 @@ import {
   sameMergePlanTargetFence,
 } from "./merge";
 import type { MergePlanArtifact, MergePlanTargetFence } from "./plan-schema";
-import { validateMergePlanArtifact } from "./plan-wire";
+import { readFormatVersion, validateMergePlanArtifact } from "./plan-wire";
 import { err, isErr, ok, type Result } from "./result";
 import {
   captureReviewBaseline,
@@ -186,6 +186,21 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
 }
 
 async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
+  const formatVersion = readFormatVersion(input);
+  if (formatVersion !== MERGE_REVIEW_FORMAT_VERSION) {
+    throw new MergeReviewError(
+      "The stored merge review uses a format this library version cannot validate.",
+      {
+        details: {
+          reason: "unsupported-version",
+          received: formatVersion,
+          supported: MERGE_REVIEW_FORMAT_VERSION,
+        },
+        suggestion:
+          "Plan and review the candidate write set again with this library version.",
+      },
+    );
+  }
   const review = mergeReviewArtifactSchema.parse(input);
   // Candidate staging schemas normalize defaults and strip unknown transport
   // fields. Stored review evidence must already be normalized: otherwise an

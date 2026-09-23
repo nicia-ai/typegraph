@@ -133,7 +133,7 @@ function makeAstFromPredicates(
   having?: PredicateExpression,
 ): QueryAst {
   return {
-    start: { alias: "p", kinds: ["Person"], includeSubClasses: false },
+    start: { alias: "p", kinds: ["Person"], expansion: "exact" as const },
     traversals: [],
     predicates,
     projection: { fields: [] },

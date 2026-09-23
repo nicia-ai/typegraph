@@ -12,7 +12,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, KindNotFoundError } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  KindNotFoundError,
+  partOf,
+} from "../src";
 import { defineGraphExtension } from "../src/graph-extension";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
@@ -97,6 +103,29 @@ describe("Store.introspect", () => {
     expect(edge?.origin).toBe("runtime");
     expect(edge?.from).toEqual(["Tag"]);
     expect(edge?.to).toEqual(["Person"]);
+    expect(edge?.acyclic).toBe(false);
+  });
+
+  it("includes a graph-extension edge's acyclic: true declaration", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Task: { properties: { name: { type: "string" } } } },
+        edges: {
+          dependsOn: {
+            from: ["Task"],
+            to: ["Task"],
+            properties: {},
+            acyclic: true,
+          },
+        },
+      }),
+    );
+
+    const result = evolved.introspect();
+    const edge = result.edges.find((entry) => entry.name === "dependsOn");
+    expect(edge?.acyclic).toBe(true);
   });
 
   it("includes runtime ontology with origin: runtime", async () => {
@@ -117,6 +146,44 @@ describe("Store.introspect", () => {
     );
     expect(relation?.origin).toBe("runtime");
     expect(relation?.metaEdge).toBe("subClassOf");
+  });
+
+  it("reports `via` and `partSide` on a composition relation (E-a-r2-5)", async () => {
+    // The only test of this copy site: OntologyIntrospection is the sole
+    // one of the five via/partSide representations with no coverage, so a
+    // dropped spread here is silent public-API data loss even though every
+    // other copy site (serializer, deserializer, compiler, builders,
+    // extension-validation) is caught by its own test.
+    const Section = defineNode("Section", {
+      schema: z.object({ title: z.string() }),
+    });
+    const parentSection = defineEdge("parentSection", {
+      schema: z.object({}),
+    });
+    const graph = defineGraph({
+      id: "introspect_composition_test",
+      nodes: { Section: { type: Section } },
+      edges: {
+        parentSection: {
+          type: parentSection,
+          from: [Section],
+          to: [Section],
+          cardinality: "one",
+        },
+      },
+      ontology: [
+        partOf(Section, Section, { via: parentSection, partSide: "from" }),
+      ],
+    });
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const relation = store
+      .introspect()
+      .ontology.find((entry) => entry.metaEdge === "partOf");
+
+    expect(relation?.via).toBe("parentSection");
+    expect(relation?.partSide).toBe("from");
   });
 
   it("extension round-trips through defineGraphExtension", async () => {

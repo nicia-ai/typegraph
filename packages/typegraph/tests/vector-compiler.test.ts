@@ -45,7 +45,7 @@ function buildVectorAst(
     start: {
       alias: "d",
       kinds: ["Document"],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [],
     predicates: [
@@ -93,7 +93,7 @@ describe("vector compilation semantics", () => {
     expect(sql).not.toContain("typegraph_node_embeddings");
     // The single declaring kind needs no UNION, but the kind is carried as a
     // `'Document' AS node_kind` literal so the output contract is identical
-    // to the multi-kind (includeSubClasses) UNION-ALL case.
+    // to the multi-kind (expansion: "subclasses") UNION-ALL case.
     expect(sql).toContain("AS node_kind");
     // The empty-body fallback (WHERE 1 = 0) only fires when no kind in the
     // alias declares the field — the slot map prevents that here.
@@ -139,7 +139,7 @@ describe("vector compilation semantics", () => {
     });
   });
 
-  it("unions per-(kind, field) tables across kinds the alias resolves to (includeSubClasses)", () => {
+  it('unions per-(kind, field) tables across kinds the alias resolves to (expansion: "subclasses")', () => {
     const childSlots: VectorSlotMap = new Map([
       [
         vectorSlotKey("Document", "embedding"),
@@ -155,7 +155,7 @@ describe("vector compilation semantics", () => {
       start: {
         alias: "d",
         kinds: ["Document", "Memo"],
-        includeSubClasses: true,
+        expansion: "subclasses" as const,
       },
     };
 
@@ -168,7 +168,7 @@ describe("vector compilation semantics", () => {
     );
 
     // One per-field table per declaring kind, fused by UNION ALL — only the
-    // includeSubClasses path yields more than one branch.
+    // the subclasses-expansion path yields more than one branch.
     expect(sql).toContain("tg_vec_graph_1_document_embedding");
     expect(sql).toContain("tg_vec_graph_1_memo_embedding");
     expect(sql).toMatch(/UNION ALL/);

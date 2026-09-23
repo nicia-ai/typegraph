@@ -33,6 +33,23 @@ export function resolveRecordedTimeOwnership(
 }
 
 /**
+ * Whether TypeGraph itself captures recorded history for a store over
+ * `backend` that requested `history`: only under TypeGraph-owned recorded
+ * time. Engine-native `history: true` is honored by the engine and gets none
+ * of TypeGraph's capture. Shared by Store construction and the schema commits
+ * a store open drives before the Store exists, so both decide it one way.
+ */
+export function capturesTypeGraphRecordedHistory(
+  historyRequested: boolean,
+  backend: Pick<GraphBackend, "recordedTime">,
+): boolean {
+  return (
+    historyRequested &&
+    resolveRecordedTimeOwnership(backend) === "typegraph-relations"
+  );
+}
+
+/**
  * THE one check for "is this recorded read reached under engine-native
  * ownership," for the callers that hold a read binding rather than a
  * backend: the query compiler's historical identity traversal
@@ -80,13 +97,52 @@ export function assertRecordedInstantOwnershipMatch(
   const parts = parseRecordedInstant(instant, surface);
   const expectedKind = ownership === "engine-native" ? "engine" : "typegraph";
   if (parts.kind === expectedKind) return;
-  throw new ConfigurationError(
-    `${surface} requires a recorded instant minted under this store's own recorded-time ownership ("${ownership}"), but got a "${parts.kind}"-form instant.`,
+  throw recordedInstantOwnershipMismatch(ownership, parts.kind, surface);
+}
+
+/**
+ * The TypeGraph-owned numeric revision behind `instant`, for the surfaces
+ * whose storage IS a TypeGraph relation keyed by that number — today the
+ * identity transition log's replay window and its retention watermark. Those
+ * surfaces are reachable only from a capture-enabled (`historyEnabled`)
+ * context, which exists only under `"typegraph-relations"` ownership, so an
+ * `e1:` anchor there is a caller error rather than an unreachable state, and
+ * it is refused through {@link recordedInstantOwnershipMismatch} — the same
+ * typed refusal {@link assertRecordedInstantOwnershipMatch} raises, so the
+ * two entry points cannot drift into two different mismatch errors. They
+ * differ only in what they hand back: the assertion returns nothing, this
+ * returns the narrowed revision its callers came for.
+ */
+export function requireTypeGraphRecordedRevision(
+  instant: string,
+  surface: string,
+): number {
+  const parts = parseRecordedInstant(instant, surface);
+  if (parts.kind === "typegraph") return parts.revision;
+  throw recordedInstantOwnershipMismatch(
+    "typegraph-relations",
+    parts.kind,
+    surface,
+  );
+}
+
+/**
+ * The one refusal for "this recorded instant was minted under the other
+ * ownership form", shared by {@link assertRecordedInstantOwnershipMatch} and
+ * {@link requireTypeGraphRecordedRevision}.
+ */
+function recordedInstantOwnershipMismatch(
+  ownership: RecordedTimeOwnership,
+  instantKind: "typegraph" | "engine",
+  surface: string,
+): ConfigurationError {
+  return new ConfigurationError(
+    `${surface} requires a recorded instant minted under this store's own recorded-time ownership ("${ownership}"), but got a "${instantKind}"-form instant.`,
     {
       code: "RECORDED_INSTANT_OWNERSHIP_MISMATCH",
       surface,
       ownership,
-      instantKind: parts.kind,
+      instantKind,
     },
     {
       suggestion:

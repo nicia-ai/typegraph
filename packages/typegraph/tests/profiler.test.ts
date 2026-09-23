@@ -814,14 +814,20 @@ describe("QueryProfiler", () => {
       expect(emailRec).toBeUndefined();
     });
 
-    it("attributes includeSubClasses filters to matching kinds", async () => {
+    it("attributes subclass-expansion filters to matching kinds", async () => {
       const industryPointer = jsonPointer(["industry"]);
       const profiler = new QueryProfiler({ minFrequencyForRecommendation: 1 });
       const profiledStore = profiler.attachToStore(store);
 
+      // "industry" is a Company-only field, not on the polymorphic
+      // Organization alias's own (parent) schema — C.1/C.2 guarantee only
+      // the PARENT's properties on a polymorphic alias, so this predicate
+      // (deliberately probing a subclass-only field) needs the same
+      // documented cast pattern graph-extension tests use for a property
+      // outside the alias's statically-known shape.
       await profiledStore
         .query()
-        .from("Organization", "o", { includeSubClasses: true })
+        .from("Organization", "o", { expansion: "subclasses" })
         // Deliberate low-level subclass-only predicate: the typed shared-field
         // accessor refuses industry because Organization does not declare it.
         .whereNode("o", () =>
@@ -1425,13 +1431,13 @@ describe("AST Extractor", () => {
     expect(ageAccess).toBeDefined();
   });
 
-  it("includes expanded kinds for includeSubClasses aliases", () => {
+  it("includes expanded kinds for subclass-expanded aliases", () => {
     const namePointer = jsonPointer(["name"]);
     const builder = store.query().from("Organization", "o", {
-      includeSubClasses: true,
+      expansion: "subclasses",
     });
     const query = builder
-      .whereNode("o", (o) => requireDefined(o["name"]).eq("Acme"))
+      .whereNode("o", (o) => requireDefined(o.name).eq("Acme"))
       .select((ctx) => ctx.o);
 
     const accesses = extractPropertyAccesses(query.toAst());

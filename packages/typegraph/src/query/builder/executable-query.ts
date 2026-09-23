@@ -870,13 +870,20 @@ export class ExecutableQuery<
         },
       );
     }
-    if (ast.start.kinds.length !== 1 || ast.start.includeSubClasses) {
+    if (ast.start.kinds.length !== 1) {
       throw new ConfigurationError(
         "A set-update candidate query must select one concrete node kind.",
         {
+          code: "SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED",
           operation: "updateWhere",
           candidateKinds: ast.start.kinds,
-          includeSubClasses: ast.start.includeSubClasses,
+          expansion: ast.start.expansion,
+        },
+        {
+          suggestion:
+            ast.start.expansion === "exact" ?
+              "Run one updateWhere() per node kind, each with a single-kind candidate query."
+            : 'The candidate kind has subclasses or equivalent kinds; pass { expansion: "exact" } to from() to select only the named kind.',
         },
       );
     }

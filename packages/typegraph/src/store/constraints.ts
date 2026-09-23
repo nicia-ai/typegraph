@@ -35,16 +35,19 @@
  * one of these probes is in play, and only then.
  */
 import { type GraphEntityReadBackend, isLiveNodeRow } from "../backend/types";
-import {
-  checkCardinality,
-  checkDisjointness,
-  checkUniqueEdge,
-} from "../constraints";
+import { checkDisjointness } from "../constraints";
 import { type GraphDef } from "../core/define-graph";
-import { type Cardinality, type UniqueConstraint } from "../core/types";
+import { type UniqueConstraint } from "../core/types";
 import { type KindRegistry } from "../registry/kind-registry";
+import { acyclicEdgeRelations } from "./acyclicity";
 import { type ConstraintFenceReason } from "./claims/backing";
-import { EDGE_CARDINALITY_SPECS } from "./claims/edge-claims";
+import {
+  type EdgeCardinalityAxisRef,
+  edgeCardinalityAxisReferences,
+  type EdgeCardinalityDeclarations,
+  edgeCardinalitySpec,
+  edgeCardinalityViolation,
+} from "./claims/edge-claims";
 import { nodeClaimSites } from "./claims/sites";
 
 export { type ConstraintFenceReason } from "./claims/backing";
@@ -65,22 +68,51 @@ export type ConstraintContext = Readonly<{
 }>;
 
 /**
- * The constraint that makes an edge write of this cardinality constrained, or
+ * The constraint that makes an edge write of this declaration constrained, or
  * `undefined` when it is not.
  *
- * `many` declares no constraint, so its create runs no cardinality probe and
- * must NOT pay for the lock — the fence is for writes that check something, not
- * for writes in general. Every other cardinality counts or existence-tests
- * sibling edges before inserting, and nothing in the schema repeats that test.
+ * A declaration with no constrained cardinality axis (both `cardinality` and
+ * `targetCardinality` absent or `many`) and no `acyclic: true` runs no probe
+ * and must NOT pay for the lock — the fence is for writes that check
+ * something, not for writes in general. Every constrained axis counts or
+ * existence-tests sibling edges before inserting, and an `acyclic: true` edge
+ * kind (`cardinality: "many", acyclic: true` is the common case) runs the
+ * reachability probe before inserting; nothing in the schema repeats either
+ * test.
  *
- * The one owner of this classification: `checkCardinalityConstraint`'s `many`
- * arm and this predicate are the same decision seen from two sides, and a
- * second inline `!== "many"` at a write path would be the copy that drifts.
+ * Composition is reported first of all: a composition edge kind ALWAYS
+ * declares a constrained whole-side cardinality, so
+ * it always also qualifies as `"edgeCardinality"` — reporting the narrower
+ * reason first is what lets a backend that cannot hold the fence give advice
+ * that names the `partOf`/`hasPart` declaration rather than a generic
+ * cardinality one. Cardinality is reported next when both it and acyclicity
+ * apply, so every refusal payload that existed before `acyclic` shipped stays
+ * byte-identical — the fence itself is the same per-graph lock regardless of
+ * which reason names it, so the choice affects only what a refusal on an
+ * unfenceable backend calls the constraint.
+ *
+ * The one owner of this classification: it folds through
+ * {@link edgeCardinalityAxisReferences}, the same fold `checkEdgeCardinalityConstraints`
+ * iterates, so a second inline `!== "many"` at a write path — blind to a
+ * target-only declaration — can never drift from it. {@link graphOwesClaims}
+ * routes through this function too, and accepts only its
+ * `"edgeComposition"` / `"edgeCardinality"` answers: acyclicity has no claim
+ * row to substitute for the per-graph lock import skips (see
+ * {@link graphOwesLockOnlyFence}), so an `"edgeAcyclicity"` answer from here
+ * is filtered out at that call site rather than re-derived by a second,
+ * narrower fold.
  */
 export function edgeWriteNeedsConstraintFence(
-  cardinality: Cardinality,
+  declarations: EdgeCardinalityDeclarations &
+    Readonly<{ acyclic?: boolean; composition?: boolean }>,
 ): ConstraintFenceReason | undefined {
-  return cardinality === "many" ? undefined : "edgeCardinality";
+  if (declarations.composition === true) {
+    return "edgeComposition";
+  }
+  if (edgeCardinalityAxisReferences(declarations).length > 0) {
+    return "edgeCardinality";
+  }
+  return declarations.acyclic === true ? "edgeAcyclicity" : undefined;
 }
 
 /**
@@ -131,6 +163,30 @@ export function nodeWriteNeedsConstraintFence(
 }
 
 /**
+ * WHICH constraint makes a node DELETE a constrained write: a composition
+ * WHOLE's delete cascades leaf-first through its parts closure under the
+ * per-graph write lock (`planCompositionCascade`), so a concurrent attach
+ * cannot slip a part past it. The classification is STATIC — a declared-
+ * schema property (`registry.isCompositionWhole`), decided before any row
+ * read — which is what lets a part-less kind's delete stay unfenced on
+ * every backend, interactive transactions or not.
+ *
+ * Sibling of {@link nodeWriteNeedsConstraintFence}: that one folds
+ * `nodeClaimSites` (a create/update write owes a claim); this one is a
+ * one-line registry lookup because a composition delete owes no claim row —
+ * it owes exclusive access to the closure it is about to walk. Kept as its
+ * own function rather than a third value in that one's `operation` union so
+ * a delete's very different reason ("this kind cascades") is never confused
+ * with a create/update's ("this kind claims a scope").
+ */
+export function nodeDeleteNeedsConstraintFence(
+  registry: KindRegistry,
+  kind: string,
+): ConstraintFenceReason | undefined {
+  return registry.isCompositionWhole(kind) ? "edgeComposition" : undefined;
+}
+
+/**
  * THE graph-level answer to "does writing into this graph owe a claim that must
  * precede the row it gates?", folded over the SAME per-kind functions the write
  * paths consult — a node kind any of whose claim sites is `pre-insert` under
@@ -153,6 +209,15 @@ export function nodeWriteNeedsConstraintFence(
  * It lives here rather than beside {@link nodeClaimSites} because it also folds
  * {@link edgeWriteNeedsConstraintFence}, and this module is the one that already
  * sees both per-kind predicates.
+ *
+ * Deliberately asks about CARDINALITY alone, never acyclicity: a claim row is
+ * a pre-insert reservation import's per-row recovery substitutes for the
+ * per-graph lock it does not take, and acyclicity has no claim row to
+ * reserve (`lockOnly`) — so this predicate would have nothing to report for
+ * it anyway. The lock-only question for an acyclic graph is
+ * {@link graphOwesLockOnlyFence}, a separate decision with a separate
+ * consumer: import takes the per-graph lock per chunk when it applies,
+ * rather than trying to substitute a claim that does not exist.
  */
 export function graphOwesClaims(
   graph: GraphDef,
@@ -169,13 +234,45 @@ export function graphOwesClaims(
       if (gating !== undefined) return gating.refusalReason;
     }
   }
-  for (const registration of Object.values(graph.edges)) {
-    const reason = edgeWriteNeedsConstraintFence(
-      registration.cardinality ?? "many",
-    );
-    if (reason !== undefined) return reason;
+  for (const [kind, registration] of Object.entries(graph.edges)) {
+    // Routed through `edgeWriteNeedsConstraintFence` — the one owner of
+    // "which reason does this edge kind's declaration qualify under, and in
+    // what preference order" — rather than re-spelling the cardinality-only
+    // half of that fold here. An acyclicity-only answer is filtered out
+    // below.
+    const reason = edgeWriteNeedsConstraintFence({
+      ...registration,
+      composition: registry.isCompositionEdge(kind),
+    });
+    if (reason === "edgeComposition" || reason === "edgeCardinality") {
+      return reason;
+    }
   }
   return undefined;
+}
+
+/**
+ * Whether `importGraph` must take the per-graph write lock per chunk: the
+ * graph declares at least one `acyclic: true` edge kind, or any
+ * `partOf`/`hasPart` pair — the composition relation is an oriented union
+ * over the SAME acyclicity check, with the same `lockOnly` backing.
+ *
+ * Import takes no per-graph lock by design (`graphOwesClaims`'s docblock) and
+ * is fenced instead by the claim rows its constrained writes issue —
+ * acyclicity has no claim row, so that substitute does not exist here. This
+ * is therefore a real change to import's concurrency posture for such a
+ * graph: for the duration of each chunk transaction, every other writer of
+ * the graph blocks. `importGraphData` reads this before the first chunk and,
+ * on a backend with no transactions, refuses the whole import up front
+ * rather than probing unfenced.
+ */
+export function graphOwesLockOnlyFence(
+  graph: GraphDef,
+  registry: KindRegistry,
+): ConstraintFenceReason | undefined {
+  return acyclicEdgeRelations(graph, registry).length === 0 ?
+      undefined
+    : "edgeAcyclicity";
 }
 
 /**
@@ -203,71 +300,92 @@ export async function checkDisjointnessConstraint(
   }
 }
 
+/** The endpoint identity a cardinality probe reads and refuses against. */
+export type EdgeEndpointTuple = Readonly<{
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
 /**
- * Checks cardinality constraints for an edge.
+ * Checks every cardinality axis an edge's declaration constrains, source and
+ * target alike.
  *
- * Reads {@link EDGE_CARDINALITY_SPECS} rather than re-spelling each
- * cardinality's rules: which endpoints the axis covers (`keyShape`), whether an
- * edge born already ended joins the population at all (`claimsWhenBornEnded`)
- * and whether the population is the live one or the active one
- * (`holderLiveness`) are the same three facts the claim's SQL reads. A probe
- * that spelled its own copy would be the drift that accepts a write the fence
- * then refuses (or the reverse).
+ * Takes the AXIS LIST rather than the raw {@link EdgeCardinalityDeclarations},
+ * so the caller decides which axes this write actually owes a probe for.
+ * Every ordinary write (create, or an update re-entering the FULL live
+ * population on a resurrection) owes the complete
+ * {@link edgeCardinalityAxisReferences} fold, and every such caller passes
+ * exactly that. The one caller that does not is a window reopen with no
+ * delete transition: this row held its non-active-only axes continuously
+ * (see {@link file://./operations/edge-operations.ts}'s reentry branch for
+ * why probing them here would count the row against itself), so it passes a
+ * narrower list. Per axis, reads {@link edgeCardinalitySpec} rather than
+ * re-spelling each cardinality's rules: which endpoint the axis covers
+ * (`keyShape`), whether an edge born already ended joins the population at
+ * all (`claimsWhenBornEnded`) and whether the population is the live one or
+ * the active one (`holderLiveness`) are the same three facts the claim's SQL
+ * reads. A probe that spelled its own copy would be the drift that accepts a
+ * write the fence then refuses (or the reverse).
  *
- * @throws CardinalityError if cardinality constraint is violated
+ * **These are limits on edge count, not on distinct neighbours**: nothing in
+ * the count mentions the opposite endpoint on a `from`/`to` axis, so a second
+ * distinct edge from the same source to a target-`one` target is refused
+ * exactly as a second edge from a different source would be.
+ *
+ * @throws CardinalityError if any constrained axis is violated
  */
-export async function checkCardinalityConstraint(
+export async function checkEdgeCardinalityConstraints(
   ctx: ConstraintContext,
   edgeKind: string,
-  cardinality: Cardinality,
-  fromKind: string,
-  fromId: string,
-  toKind: string,
-  toId: string,
+  axisReferences: readonly EdgeCardinalityAxisRef[],
+  endpoints: EdgeEndpointTuple,
   validTo: string | undefined,
 ): Promise<void> {
-  if (cardinality === "many") return;
-  const spec = EDGE_CARDINALITY_SPECS[cardinality];
+  for (const ref of axisReferences) {
+    const spec = edgeCardinalitySpec(ref);
 
-  // An edge born ended never joins an active-only population, so it has
-  // nothing to check and nothing to claim.
-  if (!spec.claimsWhenBornEnded && validTo !== undefined) return;
+    // An edge born ended never joins an active-only population, so it has
+    // nothing to check and nothing to claim.
+    if (!spec.claimsWhenBornEnded && validTo !== undefined) continue;
 
-  if (spec.keyShape === "fromAndTo") {
-    const exists = await ctx.backend.edgeExistsBetween({
+    if (spec.keyShape === "fromAndTo") {
+      const exists = await ctx.backend.edgeExistsBetween({
+        graphId: ctx.graphId,
+        edgeKind,
+        fromKind: endpoints.fromKind,
+        fromId: endpoints.fromId,
+        toKind: endpoints.toKind,
+        toId: endpoints.toId,
+      });
+      const error = edgeCardinalityViolation(
+        ref,
+        { edgeKind, ...endpoints },
+        exists ? 1 : 0,
+      );
+      if (error) throw error;
+      continue;
+    }
+
+    const endpoint = spec.keyShape;
+    const { endpointKind, endpointId } =
+      endpoint === "from" ?
+        { endpointKind: endpoints.fromKind, endpointId: endpoints.fromId }
+      : { endpointKind: endpoints.toKind, endpointId: endpoints.toId };
+    const count = await ctx.backend.countEdgesAtEndpoint({
       graphId: ctx.graphId,
       edgeKind,
-      fromKind,
-      fromId,
-      toKind,
-      toId,
+      endpoint,
+      endpointKind,
+      endpointId,
+      activeOnly: spec.holderLiveness === "liveAndActive",
     });
-    const error = checkUniqueEdge(
-      edgeKind,
-      fromKind,
-      fromId,
-      toKind,
-      toId,
-      exists ? 1 : 0,
+    const error = edgeCardinalityViolation(
+      ref,
+      { edgeKind, ...endpoints },
+      count,
     );
     if (error) throw error;
-    return;
   }
-
-  const count = await ctx.backend.countEdgesFrom({
-    graphId: ctx.graphId,
-    edgeKind,
-    fromKind,
-    fromId,
-    activeOnly: spec.holderLiveness === "liveAndActive",
-  });
-  const error = checkCardinality(
-    edgeKind,
-    fromKind,
-    fromId,
-    cardinality,
-    count,
-    count > 0,
-  );
-  if (error) throw error;
 }

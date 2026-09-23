@@ -11,6 +11,11 @@ import {
   type Node,
   type NodeRef,
 } from "../store/types";
+import {
+  type IdentityReplay,
+  type IdentityReplayOptions,
+  type IdentityTransitionHistory,
+} from "./replay";
 
 /**
  * The accepted *input* form for every identity facade method: a whole node or
@@ -189,6 +194,51 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
     bulkRetractAssertions: (
       ids: readonly IdentityAssertionId[],
     ) => Promise<readonly IdentityAssertion<G>[]>;
+    /**
+     * Every transition (assertion, retraction, fold, deletion, restore,
+     * window end, kind drop, or reconciliation decision) that changed
+     * `ref`'s identity class, ascending by recorded revision, in pages of at
+     * most `options.limit` boundaries (default 200, maximum 2000). A capped
+     * page carries `nextFrom`, the recorded instant of the first boundary it
+     * stopped short of: pass it back as `options.fromRecorded` for the next
+     * page. Requires the store to be opened with `history: true`.
+     *
+     * On `tx.identity` specifically: reads the transition log itself, which
+     * — unlike every other read on this facade — is NOT read-your-writes
+     * inside an open transaction. A transition a write earlier in the SAME
+     * transaction notes is buffered in the capture session and only reaches
+     * this table when the transaction commits, so `tx.identity.transitionsOf`
+     * can undercount relative to `tx.identity.assertionsOf` on the identical
+     * pending write until the transaction flushes; call it again on
+     * `store.identity` after commit for the complete answer.
+     *
+     * Deliberately absent from {@link IdentityReadFacade}: it answers across
+     * every recorded coordinate, not the one a read-only lens is pinned to.
+     */
+    transitionsOf: (
+      ref: IdentityNodeRefInput<G>,
+      options?: IdentityReplayOptions,
+    ) => Promise<IdentityTransitionHistory<G>>;
+    /**
+     * Pairs every transition touching `ref`'s identity class lineage with the
+     * class membership immediately before and after it, reconstructed through
+     * the same historical reader `asOf` / `asOfRecorded` reads use. Pages by
+     * boundary exactly as {@link IdentityFacade.transitionsOf} does, through
+     * the same `nextFrom` cursor. Requires the store to be opened with
+     * `history: true`.
+     *
+     * On `tx.identity`: carries the same pending-notes caveat as
+     * {@link IdentityFacade.transitionsOf} — a transition noted earlier in
+     * the SAME open transaction is not yet in the log this reads, so it is
+     * absent from `steps` until the transaction commits.
+     *
+     * Deliberately absent from {@link IdentityReadFacade}: it answers across
+     * every recorded coordinate, not the one a read-only lens is pinned to.
+     */
+    replay: (
+      ref: IdentityNodeRefInput<G>,
+      options?: IdentityReplayOptions,
+    ) => Promise<IdentityReplay<G>>;
   }>;
 
 /**
@@ -211,5 +261,20 @@ export type IdentityWriteSummary = Readonly<{
   sameAssertions: number;
   differentAssertions: number;
   retractions: number;
+  /**
+   * Identity transition-log notes flushed for this graph during the
+   * transaction. An ANNOTATION of the writes above, not a fourth kind of
+   * write — deliberately excluded from `total`, which stays the count of
+   * ledger truth rows the transaction produced. Always `0` when identity is
+   * disabled or opened without `history: true`.
+   *
+   * Counted at commit-flush time, not at the collection surface `nodes`/
+   * `edges`/the assertion counters above are: a `tx.measure(fn)` scoped
+   * receipt (see `TransactionReceipt`) therefore always reports `0` here even
+   * when `fn` made identity writes that go on to note real transitions —
+   * those notes are attributed to the transaction's own flush, which happens
+   * once, after every scope has already returned.
+   */
+  transitions: number;
   total: number;
 }>;

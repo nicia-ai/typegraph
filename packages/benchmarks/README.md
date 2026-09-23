@@ -53,7 +53,7 @@ code: `replyOf`'s target is polymorphic (a Comment replies to either a
 root Post or another Comment), which TypeGraph resolves with a
 never-instantiated ontological `Message` supertype
 (`subClassOf(Post, Message)` / `subClassOf(Comment, Message)`) so the
-reply-chain walk can use `includeSubClasses` — Neo4j and LadybugDB don't
+reply-chain walk can use `expansion: "subclasses"` — Neo4j and LadybugDB don't
 need this, since multi-label nodes / multi-pair relationship tables handle
 polymorphic endpoints natively.
 

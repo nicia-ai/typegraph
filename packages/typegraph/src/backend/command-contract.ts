@@ -133,6 +133,25 @@ export function graphCommandCoordinationIsolation(
 }
 
 /**
+ * Whether a session at this isolation observes writes committed while it
+ * waited for the per-graph write fence. `read_committed` takes a fresh
+ * snapshot per statement; `serializable` may read stale but aborts at commit
+ * on the rw-conflict; everything else — including `unknown` — fails closed.
+ *
+ * THE one predicate every "must observe the fence winner" check consults:
+ * match-key convergence ({@link assertGraphCommandConvergenceIsolation}) and
+ * the edge-acyclicity probe (`src/store/acyclicity.ts`) both need "did this
+ * session's snapshot start after the fence it waited for released", and a
+ * second inline spelling of the isolation set is exactly the copy that
+ * drifts.
+ */
+export function observesPostFenceCommits(
+  isolation: GraphCommandIsolation,
+): boolean {
+  return isolation === "read_committed" || isolation === "serializable";
+}
+
+/**
  * A match-key convergence must observe the winner after waiting for its graph
  * lock. Repeatable-read snapshots cannot do that; serializable can instead
  * force a database serialization retry. Adopted/custom transaction ports
@@ -144,7 +163,7 @@ export function assertGraphCommandConvergenceIsolation(
 ): void {
   const isolation =
     boundGraphCommandCoordination(port, coordination)?.isolation ?? "unknown";
-  if (isolation === "read_committed" || isolation === "serializable") return;
+  if (observesPostFenceCommits(isolation)) return;
   throw new ConfigurationError(
     "Match-key convergence requires read-committed or serializable transaction isolation.",
     {
