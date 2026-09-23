@@ -679,7 +679,7 @@ describe("identity transition log", () => {
   // history store must bind one itself or every note the preflight takes is
   // dropped. A lagging closure is the reachable shape that makes the
   // preflight's rebuild change membership. Revert check: drop the
-  // `captureBinding` from `Store#identitySchemaPreflight` and the evolve
+  // `capture` from `Store#identitySchemaPreflight` and the evolve
   // records no transition.
   it("records the schema-transition notes an evolve's identity preflight takes on a history store", async () => {
     const backend = createTestBackend();

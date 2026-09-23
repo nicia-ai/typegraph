@@ -8,11 +8,44 @@ import { RECORDED_MAX_REVISION } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
 import { IDENTITY_TRANSITION_COLUMN_NAMES } from "../../identity/transition-log";
+import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
+import { asCompiledRowsSql } from "../../query/sql-intent";
 import { generateId } from "../../utils/id";
 import { executeStatement } from "./guards";
 
 export type RecordedOperation = "create" | "update" | "delete";
+
+/**
+ * Whether TypeGraph captures recorded history for `graphId`, read as a fact
+ * of the database on `session` — the one owner of that question for a write
+ * no Store drives (a standalone schema commit), which has no `history`
+ * option to consult.
+ *
+ * The evidence is a recorded node row for the graph: every TypeGraph-captured
+ * write lands one, and nothing else does. The recorded clock is not
+ * evidence — revision tracking without history advances the same clock row.
+ * A graph that captures history but has not captured a node yet owns no
+ * identity membership or assertion a schema commit could change, so reading
+ * it as not capturing loses nothing. Engine-native recorded time never
+ * populates these relations, so its graphs read as not capturing, matching
+ * the transition log's own refusal under that ownership.
+ */
+export async function graphCapturesRecordedHistory(
+  session: Pick<TransactionBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<boolean> {
+  const rows = await session.execute<Readonly<{ captured: unknown }>>(
+    asCompiledRowsSql(sql`
+      SELECT 1 AS captured
+      FROM ${schema.recordedNodesTable}
+      WHERE graph_id = ${graphId}
+      LIMIT 1
+    `),
+  );
+  return rows.length > 0;
+}
 
 export type RecordedInsert<Row> = Readonly<{
   row: Row;

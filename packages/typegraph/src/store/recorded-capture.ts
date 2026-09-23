@@ -112,6 +112,7 @@ export {
   resolveLineage,
 } from "./recorded-capture/lineage";
 export {
+  graphCapturesRecordedHistory,
   RECORDED_EDGE_COLUMNS,
   RECORDED_NODE_COLUMNS,
 } from "./recorded-capture/relations";
@@ -236,7 +237,7 @@ export function withRecordedFlushObserver(
   } as RecordedFlushObserverOptions;
 }
 
-type RecordedTransactionScope = Readonly<{
+export type RecordedTransactionScope = Readonly<{
   backend: TransactionBackend;
   flush: () => Promise<RecordedFlushInstants>;
 }>;

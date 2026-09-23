@@ -32,6 +32,7 @@ import {
   requireRecordedTime,
 } from "../backend/capabilities/recorded-time";
 import {
+  capturesTypeGraphRecordedHistory,
   isEngineNativeRecordedReadBinding,
   type RecordedTimeOwnership,
   resolveRecordedTimeOwnership,
@@ -1507,8 +1508,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // capture (construction below, recordedNow/revisionNow, and the two
     // transaction-commit sites).
     this.#requestedHistory = requestedHistory;
-    this.#captureEnabled =
-      requestedHistory && this.#recordedTimeOwnership === "typegraph-relations";
+    this.#captureEnabled = capturesTypeGraphRecordedHistory(
+      requestedHistory,
+      backend,
+    );
     this.#engineNativeHistory =
       requestedHistory && this.#recordedTimeOwnership === "engine-native";
     this.#revisionTrackingEnabled =
@@ -1938,7 +1941,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // bound to yet, so a history store binds one for the preflight's own
       // ledger touches and transition notes.
       ...(this.#captureEnabled ?
-        { captureBinding: { batchPointRead: this.#batchPointRead } }
+        { capture: { source: "store", batchPointRead: this.#batchPointRead } }
       : {}),
     })(target);
   }
@@ -7155,6 +7158,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const result = await ensureSchemaImpl(this.#backend, merged, {
       preloaded: { activeRow, storedSchema },
       autoMigrate: true,
+      historyEnabled: this.#captureEnabled,
     });
     // Use the committed row from the migration result when available,
     // skipping the post-commit `getActiveSchema` round-trip. The
@@ -8742,7 +8746,12 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     // with `createRecordedBackend`, has not run yet. Threaded so the identity
     // preflight can bind its OWN transaction target to a capture session
     // instead of silently dropping every ledger touch and transition note.
-    historyEnabled: options?.history === true,
+    // Engine-native `history: true` captures nothing TypeGraph-owned, exactly
+    // as the Store it opens will not.
+    historyEnabled: capturesTypeGraphRecordedHistory(
+      options?.history === true,
+      backend,
+    ),
   };
 
   // An identity semantic change reaches the store only after the preflight

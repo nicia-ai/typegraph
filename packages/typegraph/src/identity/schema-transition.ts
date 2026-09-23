@@ -1,5 +1,9 @@
 import { type BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
-import { type BundleVerdictOf } from "../backend/capabilities/resolve";
+import { resolveRecordedTimeOwnership } from "../backend/capabilities/recorded-time-ownership";
+import {
+  batchPointReadVerdict,
+  type BundleVerdictOf,
+} from "../backend/capabilities/resolve";
 import {
   requireWriteFence,
   resolveWriteFencePlan,
@@ -18,7 +22,9 @@ import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   createRecordedTransactionScope,
+  graphCapturesRecordedHistory,
   lockRecordedGraphWrite,
+  type RecordedTransactionScope,
   transactionOwnsSqliteWriteLock,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
@@ -579,6 +585,76 @@ function assertIdentityStoragePresent(
 }
 
 /**
+ * Whether a schema-commit preflight binds its ledger writes and transition
+ * notes to a recorded-capture session. The preflight's target is the raw
+ * schema-commit transaction, which no capture session is bound to, so without
+ * a binding every touch and note it takes is dropped.
+ *
+ * `"store"`: a Store that captures history drives the commit, so it always
+ * binds — the Store's own writes are captured by construction.
+ * `"database"`: no Store drives the commit (a standalone `initializeSchema` /
+ * `migrateSchema` / `ensureSchema`), so the graph's own recorded relations,
+ * read on the commit's session, decide ({@link graphCapturesRecordedHistory}).
+ *
+ * `batchPointRead` is resolved against the ROOT backend by whoever builds
+ * this; the preflight sees only the transaction target, which cannot.
+ */
+export type SchemaCommitCapture = Readonly<{
+  source: "store" | "database";
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+}>;
+
+/**
+ * The one decision of which {@link SchemaCommitCapture} a schema commit over
+ * `backend` takes. `storeCapturesHistory` is the driving Store's capture flag,
+ * or `undefined` when no Store drives the commit. Engine-native recorded
+ * ownership never takes TypeGraph capture, for either source.
+ */
+export function resolveSchemaCommitCapture(
+  backend: GraphBackend,
+  storeCapturesHistory: boolean | undefined,
+): SchemaCommitCapture | undefined {
+  if (storeCapturesHistory === false) return undefined;
+  if (resolveRecordedTimeOwnership(backend) === "engine-native") return;
+  return {
+    source: storeCapturesHistory === true ? "store" : "database",
+    batchPointRead: batchPointReadVerdict(backend),
+  };
+}
+
+/**
+ * Binds a capture session to the schema-commit `target` itself when
+ * `capture` calls for one. Registered against `target` ITSELF, not a wrapped
+ * overlay: `createRecordedTransactionScope` registers both the overlay it
+ * returns and the raw target against the same session, and every write a
+ * preflight issues reaches `target` through `withRecordedIdentityMutationTarget`'s
+ * own touch/noteTransition callbacks. Routing through the overlay would break
+ * `lockIdentityEnablementNodes`, which needs `executeStatement` — a raw-SQL
+ * surface the overlay refuses because it cannot observe what a raw statement
+ * touched. The caller flushes the returned scope once its writes are done.
+ */
+async function bindSchemaCommitCapture(
+  target: TransactionBackend,
+  schema: SqlSchema,
+  graphId: string,
+  capture: SchemaCommitCapture | undefined,
+): Promise<RecordedTransactionScope | undefined> {
+  if (capture === undefined) return;
+  if (
+    capture.source === "database" &&
+    !(await graphCapturesRecordedHistory(target, schema, graphId))
+  ) {
+    return;
+  }
+  return createRecordedTransactionScope(
+    target,
+    capture.batchPointRead,
+    schema,
+    transactionOwnsSqliteWriteLock(target),
+  );
+}
+
+/**
  * Builds the data preflight a schema commit runs inside its own transaction:
  * provision any derived relation the transition owes, take the recorded-write
  * and identity locks, then re-derive the closure so it matches the schema
@@ -606,33 +682,8 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     enablement: boolean;
     droppedNodeKinds?: readonly string[];
     provisionDerivedRelations?: readonly string[];
-    /**
-     * Present exactly when the calling Store enables `history: true`.
-     * `batchPointRead` is resolved against the ROOT `GraphBackend` by the
-     * caller (`prepareIdentitySchemaCommit`) — this function sees only the
-     * schema-commit TRANSACTION target, which cannot resolve it itself.
-     *
-     * This preflight's `target` is a schema-commit transaction opened
-     * before any Store exists to wrap it with `createRecordedBackend`
-     * (every caller of this function runs before that wrap, first
-     * enablement included), so `withRecordedIdentityMutationTarget` would
-     * otherwise ALWAYS find it unbound and silently drop every ledger touch
-     * and transition note below, regardless of `history`. When present,
-     * this binds a capture session directly to `target` — but the binding
-     * is registered against `target` ITSELF, not a wrapped overlay (unlike
-     * `Store#removeIdentityKindsInSchemaPreflight`'s pattern):
-     * `createRecordedTransactionScope` registers BOTH the overlay it
-     * returns AND the raw target it was given against the same session, and
-     * every write below reaches `target` through `withRecordedIdentityMutationTarget`'s
-     * own touch/noteTransition callbacks, never through the overlay's
-     * touch-tracked node/edge methods. Routing through the overlay instead
-     * would break `lockIdentityEnablementNodes`, which needs
-     * `executeStatement` — a raw-SQL surface the overlay refuses outright
-     * because it cannot observe what a raw statement touched.
-     */
-    captureBinding?: Readonly<{
-      batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
-    }>;
+    /** See {@link SchemaCommitCapture}; absent means the commit captures nothing. */
+    capture?: SchemaCommitCapture | undefined;
   }>,
 ): (target: SchemaCommitPreflightBackend) => Promise<void> {
   return async (target: SchemaCommitPreflightBackend) => {
@@ -643,19 +694,12 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     );
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
-    // Registers `target` itself (not just the discarded overlay) against a
-    // capture session — see the `captureBinding` doc comment above for why
-    // every call below keeps using `target` directly rather than the
-    // overlay `createRecordedTransactionScope` also returns.
-    const captureScope =
-      options.captureBinding === undefined ?
-        undefined
-      : createRecordedTransactionScope(
-          target,
-          options.captureBinding.batchPointRead,
-          ctx.schema,
-          transactionOwnsSqliteWriteLock(target),
-        );
+    const captureScope = await bindSchemaCommitCapture(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      options.capture,
+    );
     // Snapshotted before either cascade runs, and diffed against the
     // rebuild's own result below: `rebuildIdentityClosureForContext` recomputes
     // every class at once rather than handing back which ones it touched, so
@@ -798,10 +842,17 @@ async function provisionDerivedRelationsInCommit(
 export function identityKindCascadePreflight(
   ctx: Readonly<{ graphId: string; schema: SqlSchema }>,
   droppedNodeKinds: readonly string[],
+  capture: SchemaCommitCapture | undefined,
 ): (target: TransactionBackend) => Promise<void> {
   return async (target: TransactionBackend) => {
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
+    const captureScope = await bindSchemaCommitCapture(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      capture,
+    );
     await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
       deleteAssertionsTouchingKinds(
         rawTarget,
@@ -811,5 +862,6 @@ export function identityKindCascadePreflight(
         touch,
       ),
     );
+    await captureScope?.flush();
   };
 }

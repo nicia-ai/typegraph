@@ -33,6 +33,23 @@ export function resolveRecordedTimeOwnership(
 }
 
 /**
+ * Whether TypeGraph itself captures recorded history for a store over
+ * `backend` that requested `history`: only under TypeGraph-owned recorded
+ * time. Engine-native `history: true` is honored by the engine and gets none
+ * of TypeGraph's capture. Shared by Store construction and the schema commits
+ * a store open drives before the Store exists, so both decide it one way.
+ */
+export function capturesTypeGraphRecordedHistory(
+  historyRequested: boolean,
+  backend: Pick<GraphBackend, "recordedTime">,
+): boolean {
+  return (
+    historyRequested &&
+    resolveRecordedTimeOwnership(backend) === "typegraph-relations"
+  );
+}
+
+/**
  * THE one check for "is this recorded read reached under engine-native
  * ownership," for the callers that hold a read binding rather than a
  * backend: the query compiler's historical identity traversal

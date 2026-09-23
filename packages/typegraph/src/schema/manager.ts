@@ -7,7 +7,6 @@
  * - Auto-migration for safe changes
  * - Error reporting for breaking changes
  */
-import { batchPointReadVerdict } from "../backend/capabilities/resolve";
 import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
 import { countSchemaKindRows } from "../backend/schema-kind-emptiness";
 import {
@@ -41,6 +40,7 @@ import {
   identityKindCascadeNeeded,
   identityKindCascadePreflight,
   identitySchemaCommitPreflight,
+  resolveSchemaCommitCapture,
   withIdentityDdlRaceRetry,
 } from "../identity/schema-transition";
 import {
@@ -386,18 +386,21 @@ type EnsureSchemaPreloadedOptions = Readonly<{
 type EnsureSchemaInternalOptions = EnsureSchemaPreloadedOptions &
   Readonly<{
     /**
-     * Mirrors the Store's own `history: true` option. Threaded through so a
-     * schema commit that runs BEFORE any Store exists to wrap the backend —
-     * every commit `prepareStoreWithSchema` drives, first enablement included —
-     * can still bind its identity preflight's ledger touches and transition-log
-     * notes to a capture session, exactly as `store.evolve()`'s own
-     * already-wrapped `this.#backend` does. Never set for the standalone
-     * `initializeSchema` / `migrateSchema` / public `ensureSchema` entry points
-     * called outside a Store — there, the identity preflight's writes are
-     * correctly current-only. Kept off `SchemaManagerOptions` (rather than
-     * merely documented "never set") so a caller of the public entry point
-     * cannot set it at all: TypeScript's excess-property check rejects it on an
-     * object literal, and `ensureSchema` below does not forward it.
+     * The driving Store's capture flag: whether TypeGraph captures recorded
+     * history for its writes (`history: true` under TypeGraph-owned recorded
+     * time). Threaded so a schema commit that runs BEFORE any Store exists to
+     * wrap the backend — every commit `prepareStoreWithSchema` drives, first
+     * enablement included — binds its identity preflight's ledger touches and
+     * transition-log notes to a capture session exactly as the Store's own
+     * writes are. Absent for the standalone `initializeSchema` /
+     * `migrateSchema` / public `ensureSchema` entry points called outside a
+     * Store: there, the graph's own recorded relations decide
+     * ({@link resolveSchemaCommitCapture}'s `"database"` source), so a
+     * standalone migration of a history database still records its ledger
+     * pre-images and transition notes. Kept off `SchemaManagerOptions` so a
+     * caller of the public entry point cannot override that evidence:
+     * TypeScript's excess-property check rejects it on an object literal, and
+     * `ensureSchema` below does not forward it.
      */
     historyEnabled?: boolean;
   }>;
@@ -470,7 +473,9 @@ export async function ensureSchemaInternal<G extends GraphDef>(
     const result = await initializeSchemaImpl(backend, graph, {
       ...(options?.schema === undefined ? {} : { schema: options.schema }),
       baseSchemaPrepared: true,
-      historyEnabled: options?.historyEnabled ?? false,
+      ...(options?.historyEnabled === undefined ?
+        {}
+      : { historyEnabled: options.historyEnabled }),
     });
     return {
       status: "initialized",
@@ -526,7 +531,9 @@ export async function ensureSchemaInternal<G extends GraphDef>(
           undefined
         : await prepareIdentitySchemaCommit(backend, graph, {
             enablement: storedSchema.identity === undefined,
-            historyEnabled: options?.historyEnabled ?? false,
+            ...(options?.historyEnabled === undefined ?
+              {}
+            : { historyEnabled: options.historyEnabled }),
             ...(options?.schema === undefined ?
               {}
             : { schema: options.schema }),
@@ -1029,7 +1036,7 @@ type InitializeSchemaImplOptions = InitializeSchemaOptions &
   Readonly<{
     /** The caller already completed the deployment-wide adoption gate. */
     baseSchemaPrepared: boolean;
-    /** See {@link EnsureSchemaInternalOptions.historyEnabled}. Default `false`. */
+    /** See {@link EnsureSchemaInternalOptions.historyEnabled}. */
     historyEnabled?: boolean;
   }>;
 
@@ -1122,7 +1129,9 @@ async function initializeSchemaImpl<G extends GraphDef>(
   // accepts while identity reads answer from a never-built closure.
   const preflight = await prepareIdentitySchemaCommit(backend, graph, {
     enablement: true,
-    historyEnabled: options.historyEnabled ?? false,
+    ...(options.historyEnabled === undefined ?
+      {}
+    : { historyEnabled: options.historyEnabled }),
     ...(options.schema === undefined ? {} : { schema: options.schema }),
   });
   // The preflight issues idempotent identity DDL INSIDE this transaction (see
@@ -1496,6 +1505,7 @@ async function prepareIdentityKindCascade<G extends GraphDef>(
   return identityKindCascadePreflight(
     { graphId: target.id, schema },
     options.droppedNodeKinds,
+    resolveSchemaCommitCapture(backend, undefined),
   );
 }
 
@@ -1516,7 +1526,7 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
     enablement: boolean;
     schema?: SqlSchema;
     droppedNodeKinds?: readonly string[];
-    /** See {@link EnsureSchemaInternalOptions.historyEnabled}. Default `false`. */
+    /** See {@link EnsureSchemaInternalOptions.historyEnabled}. */
     historyEnabled?: boolean;
   }>,
 ): Promise<
@@ -1559,12 +1569,10 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
       enablement: options.enablement,
       droppedNodeKinds: options.droppedNodeKinds ?? [],
       provisionDerivedRelations: provisioning.provisionInCommit,
-      // `batchPointReadVerdict` needs the ROOT `GraphBackend` — available
-      // here, not inside `identitySchemaCommitPreflight`, which sees only
-      // the schema-commit TRANSACTION target.
-      ...(options.historyEnabled === true ?
-        { captureBinding: { batchPointRead: batchPointReadVerdict(backend) } }
-      : {}),
+      // Resolved against the ROOT `GraphBackend` — available here, not inside
+      // `identitySchemaCommitPreflight`, which sees only the schema-commit
+      // TRANSACTION target.
+      capture: resolveSchemaCommitCapture(backend, options.historyEnabled),
     },
   );
 }
