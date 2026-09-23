@@ -50,8 +50,8 @@ import {
 } from "../query/compiler/schema";
 import { buildKindRegistry } from "../registry";
 import { freezeDeep } from "../utils/object";
-import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
+import { canonicalEqual } from "./canonical";
 import {
   computeSchemaDiff,
   getMigrationActions,
@@ -71,7 +71,11 @@ import {
   prepareSchemaTighteningPreflight,
   type SchemaTighteningPreflight,
 } from "./tightening-preflight";
-import { type SerializedSchema, serializedSchemaZod } from "./types";
+import {
+  type SerializedEdgeDef,
+  type SerializedSchema,
+  serializedSchemaZod,
+} from "./types";
 
 /**
  * Bounded LRU cache for `parseSerializedSchema` results, keyed on the
@@ -1411,17 +1415,40 @@ function edgeKindsRequiringMatchIdentityMaterialization(
   target: GraphDef,
   storedSchema?: SerializedSchema,
 ): readonly string[] {
-  return getEdgeKinds(target).filter((kind) => {
-    const after = target.edges[kind]?.matchIdentity;
-    if (after === undefined) return false;
-    const before = storedSchema?.edges[kind]?.matchIdentity;
-    return !matchIdentitiesEqual(before, after);
-  });
+  return matchIdentityRekeyedEdgeKinds(
+    getEdgeKinds(target).map(
+      (kind) => [kind, target.edges[kind]?.matchIdentity] as const,
+    ),
+    storedSchema,
+  );
+}
+
+/**
+ * The edge kinds whose `after` match identity is declared and differs from
+ * `before`'s — the kinds whose durable keys a transition must materialize.
+ */
+function matchIdentityRekeyedEdgeKinds(
+  after: readonly (readonly [
+    kind: string,
+    matchIdentity: SerializedEdgeDef["matchIdentity"],
+  ])[],
+  before: SerializedSchema | undefined,
+): readonly string[] {
+  return after
+    .filter(
+      ([kind, matchIdentity]) =>
+        matchIdentity !== undefined &&
+        !matchIdentitiesEqual(
+          before?.edges[kind]?.matchIdentity,
+          matchIdentity,
+        ),
+    )
+    .map(([kind]) => kind);
 }
 
 /** Refuses identity activation/re-keying while rows still lack target keys. */
 function prepareEdgeMatchIdentityCommitPreflight(
-  target: GraphDef,
+  target: Readonly<{ id: string }>,
   edgeKinds: readonly string[],
   currentVersion: number,
 ): ((backend: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
@@ -1829,20 +1856,24 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
  * version. Concurrent rollbacks or commits surface as
  * `StaleVersionError`.
  *
- * Reactivating a version is a schema transition like any commit: when the
- * target declares an ontology axiom or edge cardinality the active schema
- * does not, existing rows are checked against it under the same schema write
- * fence as the flip (`setActiveVersionWithPreflight`), and the rollback is
- * refused with the same `MigrationError` a forward commit of that tightening
- * raises.
+ * Reactivating a version is a schema transition like any commit, and owes
+ * the same preflight steps (see `prepareRollbackPreflight`): a tightening the
+ * target declares is checked against existing rows, and an edge kind the
+ * target re-keys must be empty. A rollback that changes identity-relevant
+ * schema on an identity-enabled target is refused, because rebuilding the
+ * identity closure needs the graph definition a stored document cannot
+ * reconstruct. Owed steps run under the same schema write fence as the flip
+ * (`setActiveVersionWithPreflight`) and refuse with the same errors a forward
+ * commit raises.
  *
  * @param backend - The database backend
  * @param graphId - The graph ID
  * @param targetVersion - The version to roll back to
  * @throws MigrationError if the target version does not exist, or if
  *   existing rows violate a tightening the target version declares
- * @throws ConfigurationError if a tightening is owed and the backend cannot
- *   run its preflight atomically with the flip
+ * @throws ConfigurationError if a preflight is owed and the backend cannot
+ *   run it atomically with the flip, or (`IDENTITY_ROLLBACK_REQUIRES_MIGRATION`)
+ *   if the rollback changes identity-relevant schema
  * @throws StaleVersionError if another writer changed the active version concurrently
  */
 export async function rollbackSchema(
@@ -1869,30 +1900,138 @@ export async function rollbackSchema(
   };
   // An absent target row owes no preflight: `setActiveVersion` refuses it.
   const targetRow = await backend.getSchemaVersion(graphId, targetVersion);
-  const schemaTighteningPreflight =
+  const preflight =
     targetRow === undefined ? undefined : (
-      prepareSchemaTighteningPreflight({
+      prepareRollbackPreflight(
         graphId,
-        fromVersion: activeRow.version,
-        toVersion: targetVersion,
-        before: parseSerializedSchema(activeRow.schema_doc),
-        after: parseSerializedSchema(targetRow.schema_doc),
-      })
+        { version: activeRow.version, schemaDoc: activeRow.schema_doc },
+        { version: targetVersion, schemaDoc: targetRow.schema_doc },
+      )
     );
-  if (schemaTighteningPreflight === undefined) {
+  if (preflight === undefined) {
     await backend.setActiveVersion(params);
     return;
   }
   const setActiveWithPreflight = backend.setActiveVersionWithPreflight;
   if (setActiveWithPreflight === undefined) {
-    throw atomicPreflightUnsupportedError(
-      graphId,
-      requireDefined(
-        schemaCommitCapabilityError(false, schemaTighteningPreflight),
-      ),
-    );
+    throw atomicPreflightUnsupportedError(graphId, preflight.capabilityError);
   }
-  await setActiveWithPreflight(params, schemaTighteningPreflight.run);
+  await setActiveWithPreflight(params, preflight.run);
+}
+
+/**
+ * The preflight reactivating `target` owes, composed through
+ * {@link composeSchemaCommitPreflight} like every other schema commit, or
+ * `undefined` when it owes none.
+ *
+ * - `structural`: none. A rollback deletes no rows: rows of a kind the
+ *   target lacks stay stored and reappear when a later version declares the
+ *   kind again, so there is no emptiness gate to run.
+ * - `edgeMatchIdentity`: an edge kind whose match identity the target
+ *   declares differently must hold no rows, exactly as on a forward commit.
+ * - `tightening`: the target's ontology and edge cardinalities against the
+ *   active document.
+ * - `identity`: refuses when {@link rollbackChangesIdentityDerivation}.
+ *   Every other commit path rebuilds the closure from the target graph's
+ *   registry; a stored document carries no node kind definitions to rebuild
+ *   one from (`buildRegistryFromSerializedSchema` registers no node kinds), so
+ *   a rebuild here would derive an empty closure. Refusing inside the fence,
+ *   after the tightening step, keeps the refusal order every path shares.
+ */
+function prepareRollbackPreflight(
+  graphId: string,
+  active: Readonly<{ version: number; schemaDoc: string }>,
+  target: Readonly<{ version: number; schemaDoc: string }>,
+):
+  | Readonly<{
+      run: (target: SchemaCommitPreflightBackend) => Promise<void>;
+      capabilityError: AtomicPreflightCapabilityError;
+    }>
+  | undefined {
+  const before = parseSerializedSchema(active.schemaDoc);
+  const after = parseSerializedSchema(target.schemaDoc);
+  const tightening = prepareSchemaTighteningPreflight({
+    graphId,
+    fromVersion: active.version,
+    toVersion: target.version,
+    before,
+    after,
+  });
+  const identity =
+    rollbackChangesIdentityDerivation(before, after) ?
+      () =>
+        Promise.reject(
+          identityRollbackRequiresMigrationError(
+            graphId,
+            active.version,
+            target.version,
+          ),
+        )
+    : undefined;
+  const run = composeSchemaCommitPreflight({
+    structural: undefined,
+    edgeMatchIdentity: prepareEdgeMatchIdentityCommitPreflight(
+      { id: graphId },
+      matchIdentityRekeyedEdgeKinds(
+        Object.entries(after.edges).map(
+          ([kind, edge]) => [kind, edge.matchIdentity] as const,
+        ),
+        before,
+      ),
+      active.version,
+    ),
+    tightening,
+    identity,
+  });
+  if (run === undefined) return undefined;
+  return {
+    run,
+    capabilityError:
+      schemaCommitCapabilityError(identity !== undefined, tightening) ??
+      IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+  };
+}
+
+/**
+ * Whether reactivating `after` would change what an identity-enabled target
+ * derives its closure from: enabling identity, changing its profile, or
+ * changing the ontology or the node kinds the closure folds over. A target
+ * with identity disabled derives nothing (its retained ledger is rebuilt by
+ * whichever later commit re-enables it).
+ */
+function rollbackChangesIdentityDerivation(
+  before: SerializedSchema,
+  after: SerializedSchema,
+): boolean {
+  if (after.identity === undefined) return false;
+  return (
+    !canonicalEqual(before.identity, after.identity) ||
+    !canonicalEqual(before.ontology.relations, after.ontology.relations) ||
+    !canonicalEqual(
+      Object.keys(before.nodes).toSorted(),
+      Object.keys(after.nodes).toSorted(),
+    )
+  );
+}
+
+function identityRollbackRequiresMigrationError(
+  graphId: string,
+  fromVersion: number,
+  toVersion: number,
+): ConfigurationError {
+  return new ConfigurationError(
+    "rollbackSchema cannot rebuild the identity closure for a version whose identity-relevant schema differs from the active one.",
+    {
+      code: "IDENTITY_ROLLBACK_REQUIRES_MIGRATION",
+      graphId,
+      fromVersion,
+      toVersion,
+    },
+    {
+      suggestion:
+        "Commit the target version's graph definition forward with migrateSchema(), which rebuilds the closure from that definition.",
+    },
+  );
 }
 
 /**

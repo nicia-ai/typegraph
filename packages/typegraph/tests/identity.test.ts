@@ -32,7 +32,7 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../src/query/sql-intent";
-import { migrateSchema } from "../src/schema";
+import { migrateSchema, rollbackSchema } from "../src/schema";
 import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,
@@ -533,6 +533,77 @@ describe("Operational Identity", () => {
     });
     const activeSchema = await backend.getActiveSchema(graph.id);
     expect(activeSchema?.version).toBe(1);
+  });
+
+  it("refuses a rollback that re-enables identity, leaving the active version and closure untouched", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(graph, backend);
+    // v2 disables identity, and a same-id pair is written while nothing
+    // folds it — reactivating v1 would owe the closure a rebuild that only
+    // the graph definition, not a stored document, can drive.
+    await migrateSchema(backend, disabledMigrationGraph, 1);
+    const disabledStore = createStore(disabledMigrationGraph, backend);
+    await disabledStore.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+    await disabledStore.nodes.Author.create({ penName: "B." }, { id: "bob" });
+
+    await expect(rollbackSchema(backend, graph.id, 1)).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: matchingObject({
+        code: "IDENTITY_ROLLBACK_REQUIRES_MIGRATION",
+        fromVersion: 2,
+        toVersion: 1,
+      }),
+    });
+    const active = await backend.getActiveSchema(graph.id);
+    expect(active?.version).toBe(2);
+
+    // The documented alternative commits v1's definition forward and folds
+    // the pair.
+    await migrateSchema(backend, graph, 2);
+    const [reenabled] = await createStoreWithSchema(graph, backend);
+    expect(
+      await reenabled.identity.areSame(
+        { kind: "Person", id: "bob" },
+        { kind: "Author", id: "bob" },
+      ),
+    ).toBe(true);
+  });
+  // MUTATION CHECK: passing `identity: undefined` to the composed rollback
+  // preflight (`prepareRollbackPreflight`, src/schema/manager.ts) flips the
+  // pointer onto an identity-enabled version whose closure was never
+  // rebuilt, and this test fails.
+
+  it("rolls back an identity-enabled graph when identity-relevant schema is unchanged", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+    await store.nodes.Author.create({ penName: "A." }, { id: "alice" });
+    // v2 only adds an edge kind: the ontology, the node kinds, and the
+    // identity profile the closure derives from are unchanged.
+    const worksAt = defineEdge("worksAt", { schema: z.object({}) });
+    const withEdge = defineGraph({
+      id: graph.id,
+      nodes: graph.nodes,
+      edges: {
+        ...graph.edges,
+        worksAt: { type: worksAt, from: [Person], to: [Company] },
+      },
+      ontology: [disjointWith(Person, Company)],
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    await migrateSchema(backend, withEdge, 1);
+
+    await rollbackSchema(backend, graph.id, 1);
+
+    const active = await backend.getActiveSchema(graph.id);
+    expect(active?.version).toBe(1);
+    const [rolledBack] = await createStoreWithSchema(graph, backend);
+    expect(
+      await rolledBack.identity.areSame(
+        { kind: "Person", id: "alice" },
+        { kind: "Author", id: "alice" },
+      ),
+    ).toBe(true);
   });
 
   it("refuses the same tightening driven through migrateSchema directly, before the identity closure rebuild", async () => {
