@@ -215,11 +215,11 @@ import {
   type OneStatementBatchResults,
   type QueryCoordinateState,
 } from "../query/builder";
-import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
 import {
   DEFAULT_ALIAS_EXPANSION_AXIS,
   type DefaultAliasExpansionAxis,
 } from "../query/builder/alias-expansion";
+import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
 import {
   createEngineRecordedReadBinding,
   createRecordedReadBinding,
@@ -4707,9 +4707,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // (undefined when nothing was captured or requested) into `receipt.recorded`.
       const recordedByGraph =
         mutationWitness?.mutated === true ?
-          new Map([
-            [this.graphId, await this.#engineRecordedInstant(txBackend)],
-          ])
+          await this.#engineRecordedFlushInstants(txBackend)
         : await scope.flush();
       // Seal the context so a write through a retained `tx` after this returns
       // fails loud instead of persisting a row the snapshotted receipt can't

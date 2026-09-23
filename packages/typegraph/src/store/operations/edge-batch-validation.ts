@@ -109,7 +109,7 @@ export function createEdgeBatchValidationBackend(
    * issue singleton probes for those negative cases.
    */
   seedCardinalityRows: (
-    countRequests: readonly Parameters<GraphBackend["countEdgesFrom"]>[0][],
+    countRequests: readonly CountEdgesAtEndpointParams[],
     uniqueRequests: readonly Parameters<GraphBackend["edgeExistsBetween"]>[0][],
     rows: readonly EdgeRow[],
   ) => void;
@@ -242,7 +242,7 @@ export function createEdgeBatchValidationBackend(
   }
 
   function seedCardinalityRows(
-    countRequests: readonly Parameters<GraphBackend["countEdgesFrom"]>[0][],
+    countRequests: readonly CountEdgesAtEndpointParams[],
     uniqueRequests: readonly Parameters<GraphBackend["edgeExistsBetween"]>[0][],
     rows: readonly EdgeRow[],
   ): void {
@@ -250,17 +250,23 @@ export function createEdgeBatchValidationBackend(
     const pairs = new Set<string>();
     for (const row of rows) {
       if (row.deleted_at !== undefined) continue;
-      const sourceKey = encodeTupleKey([
-        row.graph_id,
-        row.kind,
-        row.from_kind,
-        row.from_id,
-      ]);
-      const previous = counts.get(sourceKey) ?? { all: 0, active: 0 };
-      counts.set(sourceKey, {
-        all: previous.all + 1,
-        active: previous.active + (row.valid_to === undefined ? 1 : 0),
-      });
+      const active = row.valid_to === undefined ? 1 : 0;
+      for (const endpoint of ["from", "to"] as const) {
+        const endpointKind = endpoint === "from" ? row.from_kind : row.to_kind;
+        const endpointId = endpoint === "from" ? row.from_id : row.to_id;
+        const endpointKey = encodeTupleKey([
+          row.graph_id,
+          row.kind,
+          endpoint,
+          endpointKind,
+          endpointId,
+        ]);
+        const previous = counts.get(endpointKey) ?? { all: 0, active: 0 };
+        counts.set(endpointKey, {
+          all: previous.all + 1,
+          active: previous.active + active,
+        });
+      }
       pairs.add(
         buildEdgeBetweenCacheKey(
           row.graph_id,
@@ -273,18 +279,22 @@ export function createEdgeBatchValidationBackend(
       );
     }
     for (const params of countRequests) {
-      const sourceKey = encodeTupleKey([
+      const endpointKey = encodeTupleKey([
         params.graphId,
         params.edgeKind,
-        params.fromKind,
-        params.fromId,
+        params.endpoint,
+        params.endpointKind,
+        params.endpointId,
       ]);
-      const sourceCounts = counts.get(sourceKey);
+      const endpointCounts = counts.get(endpointKey);
       const count =
         params.activeOnly === true ?
-          (sourceCounts?.active ?? 0)
-        : (sourceCounts?.all ?? 0);
-      countEdgesFromCache.set(buildCountEdgesFromCacheKey(params), count);
+          (endpointCounts?.active ?? 0)
+        : (endpointCounts?.all ?? 0);
+      countEdgesAtEndpointCache.set(
+        buildCountEdgesAtEndpointCacheKey(params),
+        count,
+      );
     }
     for (const params of uniqueRequests) {
       const exists = pairs.has(

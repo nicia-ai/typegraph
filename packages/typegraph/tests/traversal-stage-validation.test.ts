@@ -28,7 +28,7 @@ function queryWith(expression: PredicateExpression): QueryAst {
   return {
     projection: { fields: [] },
     predicates: [{ expression, targetAlias: "target" }],
-    start: { alias: "root", includeSubClasses: false, kinds: ["Root"] },
+    start: { alias: "root", expansion: "exact", kinds: ["Root"] },
     temporalMode: { mode: "current" },
     traversals: [traversal],
   } satisfies QueryAst;
@@ -117,7 +117,7 @@ describe("isolated traversal-stage validation", () => {
           targetAlias: "root",
         },
       ],
-      start: { alias: "root", includeSubClasses: false, kinds: ["Root"] },
+      start: { alias: "root", expansion: "exact", kinds: ["Root"] },
       temporalMode: { mode: "current" },
       traversals: [traversal],
     } satisfies QueryAst;

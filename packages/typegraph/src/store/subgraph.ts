@@ -614,7 +614,7 @@ type SubgraphExecutionParams<
   schema: SqlSchema | undefined;
   recordedReadBinding: RecordedReadBinding | undefined;
   registry: KindRegistry;
-  options: InternalSubgraphOptions<G, EK, NK, P>;
+  options: InternalSubgraphOptions<G, EK, NK, P, C>;
 }>;
 
 type SubgraphPlan = Readonly<{
@@ -632,9 +632,10 @@ function buildSubgraphPlan<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 >(
-  params: SubgraphExecutionParams<G, EK, NK, P>,
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
   surface: SubgraphSurface,
 ): SubgraphPlan {
   const { options } = params;
@@ -740,10 +741,11 @@ export async function executeSubgraph<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 >(
-  params: SubgraphExecutionParams<G, EK, NK, P>,
-): Promise<SubgraphResult<G, NK, EK, P>> {
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
   const {
     ctx,
     reachableCte,
@@ -757,13 +759,13 @@ export async function executeSubgraph<
     ctx,
     baseSchema,
   );
-  const readCtx =
-    compositionEdgeKinds.length === 0 ? ctx : (
-      {
+  const readContext =
+    compositionEdgeKinds.length === 0 ?
+      ctx
+    : {
         ...ctx,
         edgeKinds: dedupeStrings([...ctx.edgeKinds, ...compositionEdgeKinds]),
-      }
-    );
+      };
 
   // The node and edge fetches both need the traversal closure. Embedding
   // the recursive CTE in each statement runs the BFS twice; on Postgres
@@ -783,10 +785,10 @@ export async function executeSubgraph<
   if (compositionEdgeKinds.length > 0) {
     const baseIds = await fetchIncludedIds(ctx, reachableCte, includedIdsCte);
     const compositionIds = await fetchCompositionClosureIds(
-      readCtx,
+      readContext,
       buildSubgraphCompositionReachableCte(
         params,
-        readCtx,
+        readContext,
         baseSchema,
         compositionEdgeKinds,
       ),
@@ -833,11 +835,11 @@ export async function executeSubgraph<
   }
 
   const [nodeRows, edgeRows] = await Promise.all([
-    fetchSubgraphNodes(readCtx, membership, nodeProjectionPlan),
-    fetchSubgraphEdges(readCtx, membership, edgeProjectionPlan),
+    fetchSubgraphNodes(readContext, membership, nodeProjectionPlan),
+    fetchSubgraphEdges(readContext, membership, edgeProjectionPlan),
   ]);
 
-  return assembleSubgraphResult<G, NK, EK, P>(
+  return assembleSubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>(
     ctx.rootId,
     nodeRows.map((row) => mapSubgraphNodeRow(row, nodeProjectionPlan)),
     edgeRows.map((row) => mapSubgraphEdgeRow(row, edgeProjectionPlan)),
@@ -901,9 +903,10 @@ function buildSubgraphCompositionReachableCte<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 >(
-  params: SubgraphExecutionParams<G, EK, NK, P>,
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
   ctx: SubgraphContext,
   baseSchema: SqlSchema,
   edgeKindsForTraversal: readonly string[],
@@ -919,8 +922,6 @@ function buildSubgraphCompositionReachableCte<
     sourceId: ctx.rootId,
     outEdgeKinds,
     inEdgeKinds,
-    cyclePolicy: "prevent",
-    includePath: false,
     temporalMode: ctx.temporalMode,
     ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
     ...(ctx.recordedAsOf !== undefined && { recordedAsOf: ctx.recordedAsOf }),
@@ -946,8 +947,11 @@ export function createSubgraphRead<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
->(params: SubgraphExecutionParams<G, EK, NK, P>): SubgraphRead<G, NK, EK, P> {
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+>(
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+): SubgraphRead<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P> {
   const plan = buildSubgraphPlan(params, "batchOnce.subgraph");
   const {
     ctx,
@@ -965,8 +969,13 @@ export function createSubgraphRead<
   );
   function mapRows(
     rows: readonly Record<string, unknown>[],
-  ): SubgraphResult<G, NK, EK, P> {
-    return mapOneStatementSubgraphRows(
+  ): SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P> {
+    return mapOneStatementSubgraphRows<
+      G,
+      NK,
+      SubgraphResultEdgeKinds<G, EK, C>,
+      P
+    >(
       ctx.rootId,
       rows as readonly OneStatementSubgraphRow[],
       nodePlan,
@@ -981,7 +990,9 @@ export function createSubgraphRead<
         ),
       ),
     compileOneStatementBatchItem: () => {
-      const item: OneStatementBatchItem<SubgraphResult<G, NK, EK, P>> = {
+      const item: OneStatementBatchItem<
+        SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>
+      > = {
         query: asCompiledRowsSql(query),
         provenance: {
           graphId: params.graphId,

@@ -147,6 +147,10 @@ function identityTablesForBackend(
     ),
     identityClosure: requireDefined(names.identityClosure),
     identitySeparation: requireDefined(names.identitySeparation),
+    identityTransitions: requireDefined(names.identityTransitions),
+    identityTransitionRetention: requireDefined(
+      names.identityTransitionRetention,
+    ),
   };
 }
 

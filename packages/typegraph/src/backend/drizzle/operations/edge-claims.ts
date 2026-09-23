@@ -1,8 +1,8 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
-  type EdgeCardinalityAxisRef,
   edgeCardinalityAxisName,
+  type EdgeCardinalityAxisRef,
   edgeCardinalityClaimTarget,
   type EdgeCardinalitySpec,
   edgeCardinalitySpec,
@@ -200,15 +200,6 @@ function proposedRelationCte(
 }
 
 /**
- * The axis a claim statement's holder predicate is rendered from: the declared
- * population, plus the composition scope when the axis is the reserved
- * relation-wide one. Predicate SHAPE — never a per-row value — which is why it
- * is a group key below rather than a column of the `proposed` relation.
- */
-type ClaimHolderAxis = EdgeCardinalityAxisRef &
-  Readonly<{ scope?: CompositionClaimScope }>;
-
-/**
  * What distinguishes two claims whose predicates cannot share one statement.
  *
  * The claim predicates are shaped by {@link EdgeCardinalitySpec} — which
@@ -265,7 +256,7 @@ function groupEntriesByPredicateShape(
  */
 function axisOf(
   entries: readonly ClaimEdgeCardinalityParams[],
-): ClaimHolderAxis {
+): ClaimEdgeCardinalityParams {
   const [first] = entries;
   if (first === undefined) {
     throw new TypeError("A claim group is never empty.");
@@ -333,16 +324,6 @@ function groupEntriesBySpec(
     else group.push(entry);
   }
   return [...groups.values()];
-}
-
-function specOf(
-  entries: readonly ClaimEdgeCardinalityParams[],
-): EdgeCardinalitySpec {
-  const [first] = entries;
-  if (first === undefined) {
-    throw new TypeError("A cardinality group is never empty.");
-  }
-  return edgeCardinalitySpec(first);
 }
 
 /**
@@ -431,12 +412,17 @@ export function claimHolderTerms(
     // The first overload guarantees a bound identity whenever `scope` is
     // absent — the ordinary claim shape.
     const bound = params as BoundClaimHolderIdentity;
-    return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, {
-      fromKind: sql`${bound.fromKind}`,
-      fromId: sql`${bound.fromId}`,
-      toKind: sql`${bound.toKind}`,
-      toId: sql`${bound.toId}`,
-    })}`;
+    return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(
+      edgesName,
+      edges,
+      spec.keyShape,
+      {
+        fromKind: sql`${bound.fromKind}`,
+        fromId: sql`${bound.fromId}`,
+        toKind: sql`${bound.toKind}`,
+        toId: sql`${bound.toId}`,
+      },
+    )}`;
   }
   // No `partIdentity` means the first overload matched: a real write-path
   // composition claim, whose `fromKind`/`fromId`/`toKind`/`toId` are genuine
@@ -455,6 +441,18 @@ export function claimHolderTerms(
     .filter((holder) => holder.partSide === "to")
     .map((holder) => holder.edgeKind);
   const arms: SQL[] = [];
+  if (fromSideKinds.length > 0) {
+    arms.push(sql`
+      (
+            ${qualified(edgesName, edges.kind)} IN (${sql.join(
+              fromSideKinds.map((kind) => sql`${kind}`),
+              sql`, `,
+            )})
+            AND ${qualified(edgesName, edges.fromKind)} = ${partKind}
+            AND ${qualified(edgesName, edges.fromId)} = ${partId}
+          )
+    `);
+  }
   if (toSideKinds.length > 0) {
     arms.push(sql`
       (
@@ -475,6 +473,29 @@ export function claimHolderTerms(
   return arms.length === 0 ? sql`FALSE` : sql`(${sql.join(arms, sql` OR `)})`;
 }
 
+function claimHolderMatch(
+  edgesName: string,
+  edges: Tables["edges"],
+  values: ClaimValueSource,
+  spec: EdgeCardinalitySpec,
+  witness?: ClaimEdgeCardinalityParams,
+): SQL {
+  const scope = witness?.scope;
+  if (scope !== undefined && witness !== undefined) {
+    const partOnTarget = spec.keyShape === "to";
+    return claimHolderTerms(
+      edgesName,
+      edges,
+      { ...witness, scope },
+      {
+        kind: partOnTarget ? values.toKind : values.fromKind,
+        id: partOnTarget ? values.toId : values.fromId,
+      },
+    );
+  }
+  return sql`${qualified(edgesName, edges.kind)} = ${values.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, values)}`;
+}
+
 /**
  * The live entity predicate a claim guards, excluding the proposed holder.
  * Both the guarded lock and guarded takeover use this exact fragment so the
@@ -484,6 +505,7 @@ function competingLiveEdgePredicate(
   tables: Tables,
   values: ClaimValueSource,
   spec: EdgeCardinalitySpec,
+  witness?: ClaimEdgeCardinalityParams,
 ): SQL {
   const { edges } = tables;
   const edgesName = getTableName(edges);
@@ -496,7 +518,7 @@ function competingLiveEdgePredicate(
     ${qualified(edgesName, edges.graphId)} = ${values.graphId}
       AND ${qualified(edgesName, edges.id)} <> ${values.edgeId}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${qualified(edgesName, edges.kind)} = ${values.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, values)}${activeTerm}
+      AND ${claimHolderMatch(edgesName, edges, values, spec, witness)}${activeTerm}
   `;
 }
 
@@ -552,6 +574,7 @@ function recordedClaimHolderIsLivePredicate(
   tables: Tables,
   values: ClaimValueSource,
   spec: EdgeCardinalitySpec,
+  witness?: ClaimEdgeCardinalityParams,
 ): SQL {
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
@@ -564,7 +587,7 @@ function recordedClaimHolderIsLivePredicate(
     ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
       AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${qualified(edgesName, edges.kind)} = ${values.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, values)}${activeTerm}
+      AND ${claimHolderMatch(edgesName, edges, values, spec, witness)}${activeTerm}
   `;
 }
 
@@ -589,8 +612,9 @@ export function buildDeleteStaleAtomicEdgeClaims(
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
   const values = PROPOSED_CLAIM_VALUES;
-  return groupEntriesBySpec(entries).map((group) => {
-    const spec = specOf(group);
+  return groupEntriesByPredicateShape(entries).map((group) => {
+    const witness = axisOf(group);
+    const spec = edgeCardinalitySpec(witness);
     return sql`
       WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)},
       ${proposedRelationCte(tables, group)},
@@ -609,7 +633,7 @@ export function buildDeleteStaleAtomicEdgeClaims(
           AND ${proposedEndpointsLivePredicate(tables, values)}
           AND NOT EXISTS (
             SELECT 1 FROM ${edges}
-            WHERE ${recordedClaimHolderIsLivePredicate(tables, values, spec)}
+            WHERE ${recordedClaimHolderIsLivePredicate(tables, values, spec, witness)}
           )
       )
       DELETE FROM ${edgeClaims}
@@ -642,8 +666,9 @@ export function buildAcquireAtomicEdgeClaims(
     `"${edgeClaims.graphId.name}", "${edgeClaims.axis.name}", "${edgeClaims.key.name}"`,
   );
   const values = PROPOSED_CLAIM_VALUES;
-  return groupEntriesBySpec(entries).map((group) => {
-    const spec = specOf(group);
+  return groupEntriesByPredicateShape(entries).map((group) => {
+    const witness = axisOf(group);
+    const spec = edgeCardinalitySpec(witness);
     return sql`
       WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)},
       ${proposedRelationCte(tables, group)}
@@ -658,7 +683,7 @@ export function buildAcquireAtomicEdgeClaims(
       WHERE ${proposedEndpointsLivePredicate(tables, values)}
         AND NOT EXISTS (
           SELECT 1 FROM ${edges}
-          WHERE ${competingLiveEdgePredicate(tables, values, spec)}
+          WHERE ${competingLiveEdgePredicate(tables, values, spec, witness)}
         )
       ON CONFLICT (${conflictColumns}) DO NOTHING
     `;

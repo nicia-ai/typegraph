@@ -25,11 +25,21 @@ import {
 import type { Tables } from "../src/backend/drizzle/operations/shared";
 import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
-import type { ClaimEdgeCardinalityParams } from "../src/backend/types";
+import type {
+  ClaimEdgeCardinalityParams,
+  CompositionClaimScope,
+} from "../src/backend/types";
 
 const SCHEMA_FENCE = { graphId: "graph-1", expectedVersion: 1 } as const;
 const LOCK_CLAUSE = drizzleSql`FOR SHARE`;
 const TIMESTAMP = "2026-09-09T00:00:00.000Z";
+const COMPOSITION_SCOPE = {
+  kind: "composition",
+  holders: [
+    { edgeKind: "chapterOf", partSide: "from" },
+    { edgeKind: "includedIn", partSide: "to" },
+  ],
+} as const satisfies CompositionClaimScope;
 
 /** The fence's two parameters plus the claim timestamp. */
 const FIXED_PARAM_COUNT = 3;
@@ -40,8 +50,10 @@ const DELETE_FIXED_PARAM_COUNT = 2;
 function claim(
   index: number,
   cardinality: ClaimEdgeCardinalityParams["cardinality"],
+  scope?: CompositionClaimScope,
 ): ClaimEdgeCardinalityParams {
   return {
+    direction: "source",
     graphId: "graph-1",
     cardinality,
     edgeKind: "worksAt",
@@ -50,6 +62,7 @@ function claim(
     fromId: `person-${index}`,
     toKind: "Company",
     toId: `company-${index}`,
+    ...(scope === undefined ? {} : { scope }),
   };
 }
 

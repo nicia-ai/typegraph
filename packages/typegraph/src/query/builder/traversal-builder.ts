@@ -583,7 +583,7 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<AliasNodeType<G, K & string>, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   >;
 
@@ -611,7 +611,7 @@ export class TraversalBuilder<
         NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>, Optional>
       >,
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   >;
 
@@ -640,13 +640,39 @@ export class TraversalBuilder<
     kind: K,
     alias: UniqueAlias<A, Aliases>,
     options?: AliasExpansionOptions,
-  ): QueryBuilder<
-    G,
-    Aliases & Record<A, NodeAlias<NodeType, Optional>>,
-    EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
-    CoordinateState
-  > {
+  ):
+    | QueryBuilder<
+        G,
+        Aliases & Record<A, NodeAlias<NodeType, Optional>>,
+        EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
+        RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
+        CoordinateState
+      >
+    | QueryBuilder<
+        G,
+        Aliases & Record<A, NodeAlias<AliasNodeType<G, K & string>, Optional>>,
+        EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
+        RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
+        CoordinateState
+      >
+    | QueryBuilder<
+        G,
+        Aliases & Record<A, NodeAlias<G["nodes"][K]["type"], Optional>>,
+        EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
+        RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
+        CoordinateState
+      >
+    | QueryBuilder<
+        G,
+        Aliases &
+          Record<
+            A,
+            NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>, Optional>
+          >,
+        EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
+        RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
+        CoordinateState
+      > {
     validateSqlIdentifier(alias);
 
     const expansion = resolveAliasExpansion(
@@ -704,7 +730,7 @@ export class TraversalBuilder<
         NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>, Optional>
       >,
     EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   >;
 
@@ -725,19 +751,19 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   >;
 
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: AliasExpansionOptions,
+    options?: AliasExpansionOptions | { expansion?: undefined },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   > {
     validateSqlIdentifier(alias);
@@ -858,7 +884,7 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
   > {
     validateSqlIdentifier(alias);
@@ -888,7 +914,7 @@ export class TraversalBuilder<
       G,
       Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
       EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
-      RecAliases & BuildRecursiveAliases<DC, PC, A>,
+      RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
       CoordinateState
     >;
   }

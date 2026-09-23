@@ -65,12 +65,12 @@ import {
   type FieldTypeInfo,
   type SchemaIntrospector,
 } from "../schema-introspector";
-import { buildQueryAst } from "./ast-builder";
 import {
   type AliasExpansionOptions,
   expandKindsForAxis,
   resolveAliasExpansion,
 } from "./alias-expansion";
+import { buildQueryAst } from "./ast-builder";
 import {
   createDynamicFieldBuilder,
   type DynamicEdgeType,
@@ -552,13 +552,36 @@ export class QueryBuilder<
     kind: K | readonly K[],
     alias: UniqueAlias<A, Aliases>,
     options?: AliasExpansionOptions,
-  ): QueryBuilder<
-    G,
-    Aliases & Record<A, NodeAlias>,
-    EdgeAliases,
-    RecursiveAliases,
-    CoordinateState
-  > {
+  ):
+    | QueryBuilder<
+        G,
+        Aliases & Record<A, NodeAlias>,
+        EdgeAliases,
+        RecursiveAliases,
+        CoordinateState
+      >
+    | QueryBuilder<
+        G,
+        Aliases & Record<A, NodeAlias<AliasNodeType<G, K>>>,
+        EdgeAliases,
+        RecursiveAliases,
+        CoordinateState
+      >
+    | QueryBuilder<
+        G,
+        Aliases & Record<A, NodeAlias<G["nodes"][K]["type"]>>,
+        EdgeAliases,
+        RecursiveAliases,
+        CoordinateState
+      >
+    | QueryBuilder<
+        G,
+        Aliases &
+          Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>>>,
+        EdgeAliases,
+        RecursiveAliases,
+        CoordinateState
+      > {
     validateQuerySource(this.#state, true);
     // Validate alias to prevent SQL injection
     validateSqlIdentifier(alias);

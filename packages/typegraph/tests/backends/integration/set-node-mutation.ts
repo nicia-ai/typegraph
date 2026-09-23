@@ -599,7 +599,7 @@ export function registerSetNodeMutationIntegrationTests(
       });
       const candidates = store
         .query()
-        .from("CandidateContent", "content", { includeSubClasses: true })
+        .from("CandidateContent", "content", { expansion: "subclasses" })
         .select((query) => query.content.id);
 
       await expect(

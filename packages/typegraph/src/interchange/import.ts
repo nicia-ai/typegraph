@@ -119,6 +119,7 @@ import { edgeInsertClaims } from "../store/claims/composition-claims";
 import {
   edgeCardinalityAxisReferences,
   type EdgeCardinalityDeclarations,
+  edgeCardinalitySpec,
 } from "../store/claims/edge-claims";
 import {
   checkUniquenessConstraints,
@@ -3405,7 +3406,7 @@ async function processEdgeSlice(
   // read keeps the existing cached singleton fallback in the validation seam.
   const cardinalityCounts = new Map<
     string,
-    Parameters<GraphBackend["countEdgesFrom"]>[0]
+    Parameters<GraphBackend["countEdgesAtEndpoint"]>[0]
   >();
   const uniquePairs = new Map<
     string,
@@ -3416,52 +3417,59 @@ async function processEdgeSlice(
     Readonly<{ kind: string; id: string }>
   >();
   const edgeKinds = new Set<string>();
-  for (const { candidate, cardinality } of preparedCreates) {
+  for (const { candidate, declarations } of preparedCreates) {
     const { edge } = candidate;
-    if (cardinality === "many") continue;
-    edgeKinds.add(edge.kind);
-    const sourceKey = encodeTupleKey([edge.from.kind, edge.from.id]);
-    sourceEndpoints.set(sourceKey, {
-      kind: edge.from.kind,
-      id: edge.from.id,
-    });
-    if (cardinality === "unique") {
+    for (const ref of edgeCardinalityAxisReferences(declarations)) {
+      const spec = edgeCardinalitySpec(ref);
+      // The priming read is from-side. A target count cannot be seeded from
+      // it; that axis keeps the per-row probe.
+      if (spec.keyShape === "to") continue;
+      edgeKinds.add(edge.kind);
+      const sourceKey = encodeTupleKey([edge.from.kind, edge.from.id]);
+      sourceEndpoints.set(sourceKey, {
+        kind: edge.from.kind,
+        id: edge.from.id,
+      });
+      if (spec.keyShape === "fromAndTo") {
+        const params = {
+          graphId,
+          edgeKind: edge.kind,
+          fromKind: edge.from.kind,
+          fromId: edge.from.id,
+          toKind: edge.to.kind,
+          toId: edge.to.id,
+        } satisfies Parameters<GraphBackend["edgeExistsBetween"]>[0];
+        uniquePairs.set(
+          encodeTupleKey([
+            params.edgeKind,
+            params.fromKind,
+            params.fromId,
+            params.toKind,
+            params.toId,
+          ]),
+          params,
+        );
+        continue;
+      }
       const params = {
         graphId,
         edgeKind: edge.kind,
-        fromKind: edge.from.kind,
-        fromId: edge.from.id,
-        toKind: edge.to.kind,
-        toId: edge.to.id,
-      } satisfies Parameters<GraphBackend["edgeExistsBetween"]>[0];
-      uniquePairs.set(
+        endpoint: spec.keyShape,
+        endpointKind: edge.from.kind,
+        endpointId: edge.from.id,
+        activeOnly: spec.holderLiveness === "liveAndActive",
+      } satisfies Parameters<GraphBackend["countEdgesAtEndpoint"]>[0];
+      cardinalityCounts.set(
         encodeTupleKey([
           params.edgeKind,
-          params.fromKind,
-          params.fromId,
-          params.toKind,
-          params.toId,
+          params.endpoint,
+          params.endpointKind,
+          params.endpointId,
+          params.activeOnly ? "1" : "0",
         ]),
         params,
       );
-      continue;
     }
-    const params = {
-      graphId,
-      edgeKind: edge.kind,
-      fromKind: edge.from.kind,
-      fromId: edge.from.id,
-      activeOnly: cardinality === "oneActive",
-    } satisfies Parameters<GraphBackend["countEdgesFrom"]>[0];
-    cardinalityCounts.set(
-      encodeTupleKey([
-        params.edgeKind,
-        params.fromKind,
-        params.fromId,
-        params.activeOnly ? "1" : "0",
-      ]),
-      params,
-    );
   }
   const setRead = frame.target.findEdgesByHeterogeneousEndpointSet;
   if (setRead !== undefined && sourceEndpoints.size > 0 && edgeKinds.size > 0) {
