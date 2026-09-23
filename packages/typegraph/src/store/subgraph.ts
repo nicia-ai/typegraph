@@ -67,7 +67,7 @@ import {
 import type { KindRegistry } from "../registry/kind-registry";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
-import { hasOwnKey } from "../utils/object";
+import { hasOwnKey, isPlainObject } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { isStatementCutShortError } from "../utils/sql-errors";
 import { type EdgeReadWindow, validateEdgeReadBounds } from "./neighbors";
@@ -640,6 +640,23 @@ function buildSubgraphPlan<
 ): SubgraphPlan {
   const { options } = params;
   validateSubgraphTraversalOptions(options);
+  if (
+    surface === "batchOnce.subgraph" &&
+    compositionRequested(options.composition)
+  ) {
+    throw new ConfigurationError(
+      "A one-statement subgraph read cannot close over composition parts.",
+      {
+        code: "SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED",
+        surface,
+        via: compositionViaOf(options.composition),
+      },
+      {
+        suggestion:
+          "Read the composition unit with store.subgraph() or tx.subgraph() outside batchOnce(); the closure resolves the root's kind before it walks the parts, which one statement cannot do.",
+      },
+    );
+  }
   const { valid: coordinate } = resolveReadCoordinate(
     options.temporalMode ?? params.graph.defaults.temporalMode,
     options.asOf,
@@ -685,11 +702,10 @@ function buildSubgraphPlan<
     (kind, field) => introspector.getFieldTypeInfo(kind, field),
     "node",
   );
-  const edgeProjectionPlan = buildProjectionPlan(
-    dedupeStrings(options.edges),
+  const edgeProjectionPlan = buildEdgeProjectionPlan(
+    params.graph,
+    options.edges,
     options.project?.edges,
-    (kind, field) => introspector.getEdgeFieldTypeInfo(kind, field),
-    "edge",
   );
   const reachableCte = buildSubgraphReachableCte(ctx, baseSchema, surface);
 
@@ -701,6 +717,26 @@ function buildSubgraphPlan<
     nodeProjectionPlan,
     edgeProjectionPlan,
   };
+}
+
+/**
+ * The edge projection plan over the edge kinds a read actually hydrates. A
+ * composition read hydrates its resolved composition edge kinds too, so its
+ * plan is built from that resolved list, never from `options.edges` alone.
+ */
+function buildEdgeProjectionPlan<G extends GraphDef>(
+  graph: G,
+  edgeKinds: readonly string[],
+  projection:
+    Readonly<Record<string, readonly string[] | undefined>> | undefined,
+): ProjectionPlan {
+  const introspector = getSubgraphSchemaIntrospector(graph);
+  return buildProjectionPlan(
+    dedupeStrings(edgeKinds),
+    projection,
+    (kind, field) => introspector.getEdgeFieldTypeInfo(kind, field),
+    "edge",
+  );
 }
 
 function buildSubgraphReachableCte(
@@ -746,18 +782,12 @@ export async function executeSubgraph<
 >(
   params: SubgraphExecutionParams<G, EK, NK, P, C>,
 ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
-  const {
-    ctx,
-    reachableCte,
-    includedIdsCte,
-    nodeProjectionPlan,
-    edgeProjectionPlan,
-    baseSchema,
-  } = buildSubgraphPlan(params, "subgraph");
+  const plan = buildSubgraphPlan(params, "subgraph");
+  const { ctx, reachableCte, includedIdsCte, nodeProjectionPlan, baseSchema } =
+    plan;
   const compositionEdgeKinds = await resolveSubgraphCompositionEdgeKinds(
     params,
     ctx,
-    baseSchema,
   );
   const readContext =
     compositionEdgeKinds.length === 0 ?
@@ -766,6 +796,14 @@ export async function executeSubgraph<
         ...ctx,
         edgeKinds: dedupeStrings([...ctx.edgeKinds, ...compositionEdgeKinds]),
       };
+  const edgeProjectionPlan =
+    compositionEdgeKinds.length === 0 ?
+      plan.edgeProjectionPlan
+    : buildEdgeProjectionPlan(
+        params.graph,
+        readContext.edgeKinds,
+        params.options.project?.edges,
+      );
 
   // The node and edge fetches both need the traversal closure. Embedding
   // the recursive CTE in each statement runs the BFS twice; on Postgres
@@ -855,7 +893,6 @@ async function resolveSubgraphCompositionEdgeKinds<
 >(
   params: SubgraphExecutionParams<G, EK, NK, P, C>,
   ctx: SubgraphContext,
-  baseSchema: SqlSchema,
 ): Promise<readonly string[]> {
   if (!compositionRequested(params.options.composition)) return [];
   if (params.registry.compositionEdgeKinds().length === 0) {
@@ -871,12 +908,13 @@ async function resolveSubgraphCompositionEdgeKinds<
   const compositionEdgeKinds = await fetchCompositionEdgeKindsForRoot({
     registry: params.registry,
     backend: params.backend,
-    schema: baseSchema,
+    schema: ctx.schema,
     graphId: params.graphId,
     rootId: params.rootId,
     temporalMode: ctx.temporalMode,
     asOf: ctx.asOf,
     recordedAsOf: ctx.recordedAsOf,
+    recordedReadBinding: ctx.recordedReadBinding,
   });
   const requestedVia = compositionViaOf(params.options.composition);
   if (
@@ -933,6 +971,26 @@ function buildSubgraphCompositionReachableCte<
     recursiveTraversal: resolveRecursiveTraversal(params.backend.capabilities),
     operation: "subgraph",
   });
+}
+
+/**
+ * Runs a subgraph on a pinned session (a transaction). The read is one
+ * statement unless it closes over composition parts: the closure first
+ * resolves the root's kind, so it runs the multi-statement executor on the
+ * same session instead.
+ */
+export async function executeSessionSubgraph<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  NK extends NodeKinds<G>,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+>(
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
+  return compositionRequested(params.options.composition) ?
+      executeSubgraph(params)
+    : createSubgraphRead(params).execute();
 }
 
 export type SubgraphRead<
@@ -1443,11 +1501,13 @@ async function fetchCompositionEdgeKindsForRoot(input: {
   temporalMode: TemporalMode;
   asOf: string | undefined;
   recordedAsOf: RecordedInstant | undefined;
+  recordedReadBinding: RecordedReadBinding | undefined;
 }): Promise<readonly string[]> {
   const nodeTemporalFilter = compileTemporalFilter({
     mode: input.temporalMode,
     asOf: input.asOf,
     recordedAsOf: input.recordedAsOf,
+    recordedReadBinding: input.recordedReadBinding,
     tableAlias: "n",
     currentTimestamp: currentReadInstant(),
   });
@@ -1786,11 +1846,30 @@ function validateEdgeWindows(
   }
 }
 
+function isCompositionSelection(
+  composition: unknown,
+): composition is SubgraphCompositionSelection | undefined {
+  if (composition === undefined || typeof composition === "boolean") {
+    return true;
+  }
+  if (!isPlainObject(composition)) return false;
+  const { via } = composition;
+  return (
+    via === undefined ||
+    typeof via === "string" ||
+    (typeof via === "object" &&
+      via !== null &&
+      "kind" in via &&
+      typeof via.kind === "string")
+  );
+}
+
 function validateSubgraphTraversalOptions(
   options: Readonly<{
     maxDepth?: number;
     direction?: unknown;
     cyclePolicy?: unknown;
+    composition?: unknown;
   }>,
 ): void {
   const maxDepth = options.maxDepth;
@@ -1841,6 +1920,20 @@ function validateSubgraphTraversalOptions(
           {
             path: "cyclePolicy",
             message: "Received an unsupported cycle policy",
+            code: "invalid_value",
+          },
+        ],
+      },
+    );
+  }
+  if (!isCompositionSelection(options.composition)) {
+    throw new ValidationError(
+      "Subgraph composition must be a boolean or { via?: edge kind or edge type }",
+      {
+        issues: [
+          {
+            path: "composition",
+            message: "Received an unsupported composition selection",
             code: "invalid_value",
           },
         ],

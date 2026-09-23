@@ -440,6 +440,7 @@ import {
 } from "./store-view";
 import {
   createSubgraphRead,
+  executeSessionSubgraph,
   executeSubgraph,
   type InternalSubgraphOptions,
   type SubgraphCompositionSelection,
@@ -1023,11 +1024,12 @@ type TransactionReadMethods<G extends GraphDef> = Readonly<{
   subgraph: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ) => Promise<SubgraphResult<G, NK, EK, P>>;
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
 }>;
 
 type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
@@ -3873,11 +3875,44 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   >(
     rootId: NodeId<AllNodeTypes<G>>,
     options: SubgraphOptions<G, EK, NK, P>,
-    backend: GraphBackend | TransactionBackend = this.#baseBackend,
-    attempt = 1,
+    backend: GraphBackend | TransactionBackend,
+    attempt: number,
   ): SubgraphRead<G, NK, EK, P> {
     this.#assertPublicSubgraphOptions(options);
-    return createSubgraphRead({
+    return createSubgraphRead(
+      this.#sessionSubgraphParams(rootId, options, backend, attempt),
+    );
+  }
+
+  #executeSessionSubgraph<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: SubgraphOptions<G, EK, NK, P, C>,
+    txBackend: TransactionBackend,
+    attempt: number,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
+    this.#assertPublicSubgraphOptions(options);
+    return executeSessionSubgraph(
+      this.#sessionSubgraphParams(rootId, options, txBackend, attempt),
+    );
+  }
+
+  #sessionSubgraphParams<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G>,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined,
+    const C extends SubgraphCompositionSelection | undefined,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: SubgraphOptions<G, EK, NK, P, C>,
+    backend: GraphBackend | TransactionBackend,
+    attempt: number,
+  ) {
+    return {
       graph: this.#graph,
       graphId: this.graphId,
       rootId,
@@ -3887,7 +3922,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       recordedReadBinding: this.#recordedReadBinding,
       registry: this.#registry,
       options,
-    });
+    };
   }
 
   #assertPublicSubgraphOptions(options: unknown): void {
@@ -4883,7 +4918,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         );
       },
       subgraph: (rootId, options) =>
-        this.#createSubgraphRead(rootId, options, txBackend, attempt).execute(),
+        this.#executeSessionSubgraph(rootId, options, txBackend, attempt),
     };
   }
 

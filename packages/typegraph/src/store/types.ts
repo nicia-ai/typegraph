@@ -83,9 +83,11 @@ import type {
   ValidateStoreOptions,
 } from "./store-analysis";
 import type {
+  SubgraphCompositionSelection,
   SubgraphOptions,
-  SubgraphProject,
+  SubgraphProjectFor,
   SubgraphResult,
+  SubgraphResultEdgeKinds,
 } from "./subgraph";
 
 /**
@@ -2633,11 +2635,12 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
     subgraph: <
       const EK extends EdgeKinds<G>,
       const NK extends NodeKinds<G> = NodeKinds<G>,
-      const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+      const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+      const C extends SubgraphCompositionSelection | undefined = undefined,
     >(
       rootId: NodeId<AllNodeTypes<G>>,
-      options: SubgraphOptions<G, EK, NK, P>,
-    ) => Promise<SubgraphResult<G, NK, EK, P>>;
+      options: SubgraphOptions<G, EK, NK, P, C>,
+    ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
   }>;
 
 /**

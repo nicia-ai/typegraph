@@ -67,7 +67,12 @@ const CnBonusEpisode = defineNode("CnBonusEpisode", {
   schema: z.object({ title: z.string() }),
 });
 
-const cnEpisodeOf = defineEdge("cnEpisodeOf", { schema: z.object({}) });
+const cnEpisodeOf = defineEdge("cnEpisodeOf", {
+  schema: z.object({
+    position: z.number().optional(),
+    note: z.string().optional(),
+  }),
+});
 const cnSegmentOf = defineEdge("cnSegmentOf", { schema: z.object({}) });
 const cnBookHasChapter = defineEdge("cnBookHasChapter", {
   schema: z.object({}),
@@ -140,11 +145,27 @@ const noCompositionGraph = defineGraph({
 
 type CompositionStore = InspectableStore<typeof compositionNavigationGraph>;
 
+function adjacencyEdgeIds(
+  adjacency: ReadonlyMap<
+    string,
+    ReadonlyMap<string, readonly Readonly<{ id: string }>[]>
+  >,
+): ReadonlySet<string> {
+  return new Set(
+    [...adjacency.values()].flatMap((byKind) =>
+      [...byKind.values()].flatMap((edges) => edges.map((edge) => edge.id)),
+    ),
+  );
+}
+
 async function seedCompositionFixtures(store: CompositionStore) {
   const podcast = await store.nodes.CnPodcast.create({ title: "The Pod" });
   const episode1 = await store.nodes.CnEpisode.create({ title: "Episode 1" });
   const episode2 = await store.nodes.CnEpisode.create({ title: "Episode 2" });
-  await store.edges.cnEpisodeOf.create(episode1, podcast, {});
+  await store.edges.cnEpisodeOf.create(episode1, podcast, {
+    position: 1,
+    note: "pilot",
+  });
   await store.edges.cnEpisodeOf.create(episode2, podcast, {});
   const segment1 = await store.nodes.CnSegment.create({ title: "Segment 1" });
   await store.edges.cnSegmentOf.create(segment1, episode1, {});
@@ -592,6 +613,154 @@ export function registerCompositionNavigationIntegrationTests(
       expect(new Set(result.nodes.keys())).toEqual(
         new Set(chain.map((section) => section.id)),
       );
+    });
+
+    it("subgraph({ composition: true }) projects composition edges it adds to the traversal", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const { podcast, episode1 } = await seedCompositionFixtures(store);
+
+      const result = await store.subgraph(podcast.id, {
+        edges: [],
+        composition: true,
+        project: { edges: { cnEpisodeOf: ["position"] } },
+      });
+
+      const pilotEdges =
+        result.adjacency.get(episode1.id)?.get("cnEpisodeOf") ?? [];
+      expect(pilotEdges).toHaveLength(1);
+      const pilotEdge = requireDefined(pilotEdges[0]);
+      expect(pilotEdge).toMatchObject({
+        kind: "cnEpisodeOf",
+        fromId: episode1.id,
+        toId: podcast.id,
+        position: 1,
+      });
+      expect(pilotEdge).not.toHaveProperty("note");
+      expect(pilotEdge).not.toHaveProperty("meta");
+    });
+
+    it("subgraph({ composition: true }) closes the unit under a recorded-pinned read", async () => {
+      const history = await context.createHistoryStore(
+        compositionNavigationGraph,
+      );
+      const book = await history.nodes.CnBook.create({ title: "The Book" });
+      const chapter = await history.nodes.CnChapter.create({
+        title: "Chapter 1",
+      });
+      await history.edges.cnBookHasChapter.create(book, chapter, {});
+      const paragraph = await history.nodes.CnParagraph.create({
+        title: "Paragraph 1",
+      });
+      await history.edges.cnParagraphOf.create(paragraph, chapter, {});
+      const pin = await history.recordedNow();
+      if (pin === undefined) throw new Error("recorded clock was not written");
+      const lateChapter = await history.nodes.CnChapter.create({
+        title: "Chapter 2",
+      });
+      await history.edges.cnBookHasChapter.create(book, lateChapter, {});
+
+      const pinned = await history.asOfRecorded(pin).subgraph(book.id, {
+        edges: [],
+        composition: true,
+      });
+
+      expect(new Set(pinned.nodes.keys())).toEqual(
+        new Set([book.id, chapter.id, paragraph.id]),
+      );
+    });
+
+    it("tx.subgraph({ composition }) returns the same unit as store.subgraph", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const { podcast, book } = await seedCompositionFixtures(store);
+
+      const [storePodcast, storeBookViaChapters] = await Promise.all([
+        store.subgraph(podcast.id, { edges: [], composition: true }),
+        store.subgraph(book.id, {
+          edges: [],
+          composition: { via: "cnBookHasChapter" },
+        }),
+      ]);
+      const [txPodcast, txBookViaChapters] = await store.transaction(
+        async (tx) => [
+          await tx.subgraph(podcast.id, { edges: [], composition: true }),
+          await tx.subgraph(book.id, {
+            edges: [],
+            composition: { via: "cnBookHasChapter" },
+          }),
+        ],
+      );
+
+      expect(txPodcast.nodes.size).toBe(4);
+      expect(new Set(txPodcast.nodes.keys())).toEqual(
+        new Set(storePodcast.nodes.keys()),
+      );
+      expect(adjacencyEdgeIds(txPodcast.adjacency)).toEqual(
+        adjacencyEdgeIds(storePodcast.adjacency),
+      );
+      expect(txBookViaChapters.nodes.size).toBe(2);
+      expect(new Set(txBookViaChapters.nodes.keys())).toEqual(
+        new Set(storeBookViaChapters.nodes.keys()),
+      );
+      await expect(
+        store.transaction((tx) =>
+          tx.subgraph(book.id, {
+            edges: [],
+            composition: { via: "cnEpisodeOf" },
+          }),
+        ),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          details: matchingObject({ code: "COMPOSITION_VIA_NOT_DECLARED" }),
+        }),
+      );
+    });
+
+    it("batchOnce refuses subgraph({ composition }) before running any statement", async () => {
+      const statements: string[] = [];
+      const store = await context.createStore(compositionNavigationGraph, {
+        hooks: { onQueryStart: (ctx) => statements.push(ctx.sql) },
+      });
+      const { podcast } = await seedCompositionFixtures(store);
+      // The batch builder's options type admits no `composition`; only a
+      // JavaScript caller can reach this refusal, so the options are
+      // untyped here.
+      const compositionSelections: readonly unknown[] = [
+        true,
+        { via: "cnEpisodeOf" },
+        { via: "notAnEdgeKind" },
+      ];
+
+      for (const composition of compositionSelections) {
+        statements.length = 0;
+        const options = { edges: [], composition } as never;
+        await expect(
+          store.batchOnce((read) => [
+            read.neighbors(podcast, { edges: ["cnEpisodeOf"] }),
+            read.subgraph(podcast.id, options),
+          ]),
+        ).rejects.toThrow(
+          expect.objectContaining({
+            code: "CONFIGURATION_ERROR",
+            details: matchingObject({
+              code: "SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED",
+            }),
+          }),
+        );
+        expect(statements).toEqual([]);
+      }
+    });
+
+    it("subgraph refuses a composition selection that is neither a boolean nor { via }", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const { podcast } = await seedCompositionFixtures(store);
+      const invalidSelections: readonly unknown[] = ["true", { via: 42 }, []];
+
+      for (const composition of invalidSelections) {
+        const options = { edges: [], composition } as never;
+        await expect(store.subgraph(podcast.id, options)).rejects.toThrow(
+          expect.objectContaining({ code: "VALIDATION_ERROR" }),
+        );
+      }
     });
 
     it("subgraph({ composition: true }) refuses on a graph declaring no composition relation", async () => {
