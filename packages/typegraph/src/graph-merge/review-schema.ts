@@ -12,7 +12,11 @@ import type {
 import { mergePlanArtifactV2Schema } from "./plan-schema";
 import type { JsonValue } from "./typegraph-internal";
 
-export const MERGE_REVIEW_FORMAT_VERSION = 1 as const;
+// Bumped 1 -> 2 alongside the embedded plan's own 1 -> 2 bump
+// (`MERGE_PLAN_FORMAT_VERSION`): a review embeds its plan under the strict
+// plan schema, so a review stored before that bump can never validate, and it
+// must be refused as an unsupported version rather than as malformed.
+export const MERGE_REVIEW_FORMAT_VERSION = 2 as const;
 
 /** Application-owned identity of policy code and all opaque/external dependencies. */
 export type MergeReviewPolicy = Readonly<{
@@ -37,7 +41,8 @@ export type MergeReviewBaseline = Readonly<{
 
 /**
  * Immutable review evidence, distinct from its single-use execution plan.
- * V2 supports candidate write sets only. Authenticate stored artifacts separately.
+ * Only candidate write sets are reviewable. Authenticate stored artifacts
+ * separately.
  */
 export type MergeReviewArtifact = Readonly<{
   formatVersion: typeof MERGE_REVIEW_FORMAT_VERSION;

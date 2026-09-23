@@ -100,7 +100,8 @@ export async function constructMergePlanArtifact(
   );
 }
 
-function readFormatVersion(input: unknown): unknown {
+/** Reads a wire artifact's `formatVersion` before any schema validation. */
+export function readFormatVersion(input: unknown): unknown {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     return undefined;
   }

@@ -7,6 +7,7 @@ import {
   asBranchId,
   captureCandidateWriteSetTarget,
   isErr,
+  MERGE_REVIEW_FORMAT_VERSION,
   MergePlanningStaleError,
   MergeReviewError,
   planCandidateWriteSetReview,
@@ -123,6 +124,30 @@ describe("candidate review wire and coherent capture", () => {
       expect(await args.target.nodes.Item.count()).toBe(0);
     },
   );
+
+  it("refuses a review stored under an earlier format as an unsupported version, not as malformed", async () => {
+    const { args } = await setup();
+    const review = unwrap(await planCandidateWriteSetReview(args));
+    expect(review.formatVersion).toBe(MERGE_REVIEW_FORMAT_VERSION);
+    const stored: unknown = { ...review, formatVersion: 1 };
+    const makeBackend = vi.fn(args.makeBackend);
+
+    const result = await revalidateCandidateWriteSetReview({
+      ...args,
+      makeBackend,
+      review: stored,
+    });
+
+    if (!isErr(result))
+      throw new Error("Expected an unsupported-version refusal.");
+    expect(result.error).toBeInstanceOf(MergeReviewError);
+    expect(result.error.details).toEqual({
+      reason: "unsupported-version",
+      received: 1,
+      supported: MERGE_REVIEW_FORMAT_VERSION,
+    });
+    expect(makeBackend).not.toHaveBeenCalled();
+  });
 
   it("refuses a mixed-revision baseline even when the inner planner sees a stable newer target", async () => {
     const { args, backend } = await setup();
