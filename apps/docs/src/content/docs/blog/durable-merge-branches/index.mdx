@@ -1,0 +1,342 @@
+---
+title: "Merges That Wait"
+date: 2026-09-21
+excerpt: "0.56, 0.67 and 0.68 let a reviewed graph merge wait a day for approval, survive a deploy, reopen in another process, and take input from an at-least-once queue without applying anything twice."
+tags:
+  - announcements
+cover:
+  alt: "A route lit in blue passing through three process capsules, each ending in an ×, joined by small { } descriptor tokens and finishing at an explicit destroy, inside a field of grey process lifetimes that end without carrying anything"
+  image: "./cover.png"
+social:
+  alt: "Merges That Wait"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+[Graph Merge](/blog/graph-merge) plans before it applies: you fork a working
+copy with `branch()`, stage changes on it, and `planMerge()` shows you the exact
+write set before anything touches the target. That works well as long as
+staging, planning and applying all happen in one run of one process.
+
+The workflows that most want a review step don't look like that. Say a nightly
+job proposes loyalty-point adjustments that a person approves the next
+morning, a deploy lands in between, and the thing feeding the branch is a queue
+that occasionally delivers the same message twice. An in-memory branch handle
+and a plan that goes stale as soon as anything is written can't cope with any
+of that.
+
+It took three releases to fix, and I think the result is one of the more
+unusual things TypeGraph can do. 0.56 made the review itself durable by storing
+it as graph data, 0.67 made the working copy durable so a branch can be closed
+in one process and reopened in another, and 0.68 made it safe to feed that
+branch from an at-least-once queue.
+
+## The review lives in the graph
+
+A merge plan is tied to the target's revision, so if the target changes after
+planning, applying the plan fails. That rule is what keeps a stale plan from
+clobbering newer data, but it gets in the way if you want the review (the
+proposal, the decision, who approved it) stored as graph data next to the
+record it concerns, because _writing the review down_ is itself a write to the
+target, and by the time anyone approves the plan it's stale.
+
+0.56 resolves this by separating what was reviewed from the plan you
+eventually apply. `planCandidateWriteSetReview()` captures the candidate
+changes, the plan, the policy, and a baseline of the target as one immutable,
+content-digested artifact:
+
+```typescript
+const review = unwrap(
+  await planCandidateWriteSetReview({
+    target: store,
+    makeBackend,
+    policy: {
+      id: "manual-acceptance-v1",
+      context: { requiredApprovals: 1, authorizedReviewers: ["reviewer:maya"] },
+    },
+    writeSet: {
+      formatVersion: 1,
+      sourceId: "catalog-review",
+      target: await captureCandidateWriteSetTarget(store),
+      nodes: [
+        {
+          kind: "Item",
+          id: proposal.id,
+          properties: { label: proposal.label, status: "accepted" },
+        },
+      ],
+      edges: [],
+    },
+  }),
+);
+```
+
+You store it as ordinary graph data, keyed by its own digest, along with the
+reviewer's decision. `Artifact`, `Decision` and `evidence` here are ordinary
+kinds the example defines itself, so this needs no special schema support:
+
+```typescript
+const artifact = await store.nodes.Artifact.create(
+  { content: JSON.stringify(review) },
+  { id: review.digest.value },
+);
+await store.edges.evidence.create(proposal, artifact, { note: "review" });
+
+const decision = await store.nodes.Decision.create({
+  approved: true,
+  reviewDigest: review.digest.value,
+  reviewer: "reviewer:maya",
+});
+await store.edges.evidence.create(decision, artifact, { note: "approval" });
+```
+
+Applying the original plan at this point fails:
+
+```typescript
+const stale = await applyMergePlan(store, review.plan);
+// stale.error is a StaleMergePlanError
+```
+
+Recording the review and the approval moved the target, so the plan is stale.
+This is the part I like: durable review doesn't get an exemption from the
+staleness check, because if recording an approval could quietly un-stale a
+plan, the check would mean nothing.
+
+Instead of reusing the plan, you call `revalidateCandidateWriteSetReview()`,
+which reads the stored artifact, re-plans the retained candidate against the
+current target, and tells you what it found:
+
+| `checked.status` | What it means                                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `compatible`     | Nothing that matters moved. You get a fresh `plan` and the original `reviewDigest`.                                |
+| `changed`        | Policy, options, baseline entities, or plan fields differ from what was reviewed. Get a new review and approval.   |
+| `incompatible`   | Graph id, schema identity, or revision origin don't match. This approval can't be used against this target at all. |
+
+In the example only the review and approval records were added, so the result
+is `compatible`. I was careful to keep `compatible` meaning only that nothing
+relevant moved; it says nothing about whether the caller is allowed to act, so
+the example checks both before spending the plan:
+
+```typescript
+if (checked.status !== "compatible") {
+  throw new Error("A new review and approval are required");
+}
+if (checked.reviewDigest.value !== approval.reviewDigest) {
+  throw new Error("Approval does not identify the validated review");
+}
+
+const report = unwrap(await applyMergePlan(store, checked.plan));
+```
+
+Authenticating the stored decision and enforcing `authorizedReviewers` are
+still your job. TypeGraph tells you whether the plan is safe to apply and
+leaves the question of who may apply it to you.
+
+## A working copy that outlives its process
+
+The branch itself was still tied to one process, because a `branch()` result
+holds its store and close handle in memory and disposing it deletes the fork.
+0.67 adds `branchDurable()`, which forks a working copy that persists and hands
+back a small JSON descriptor you can put on a queue. Here's the loyalty
+ledger's nightly job:
+
+```typescript
+const created = unwrap(await branchDurable(base, host));
+const staged = created.branch.store;
+
+await staged.nodes.Account.update(ada.id, { points: 160 });
+await staged.nodes.Account.create({ name: "Grace", points: 40 });
+
+// Releases this process's connection and writer lease. The working copy stays.
+await created.branch.close();
+await queue.put(JSON.stringify(created.descriptor));
+```
+
+The descriptor is the only thing that leaves the process:
+
+```json
+{
+  "kind": "sqlite-file-host",
+  "version": 1,
+  "graphId": "loyalty",
+  "definitionHash": "ec9dd68d2fbf14e3",
+  "branchId": "gluQHM58QmB1LFjZIJEdA",
+  "base": "ec9dd68d2fbf14e3#s1\u0000revision:kHeqC6EE55ENVL3a_np2R:r1:0000000000000001:2026-09-20T19:16:21.492Z",
+  "store": { "id": "35da40a3-1820-4b9f-b9b4-2117e653ded8" },
+  "schemaAnchor": { "version": 1, "hash": "ec9dd68d2fbf14e3" }
+}
+```
+
+TypeGraph doesn't ship a durable host. It defines the contract (a
+`DurableWorkingCopyStrategy` with `create`, `seal`, `reopen`, `abort` and
+`destroy`), and your host decides where a working copy lives, whether that's a
+directory, a database, or a provider's branch API. The descriptor's `store`
+field is the host's opaque locator, and everything else in it belongs to
+TypeGraph. The examples here ran against a small file-backed SQLite host,
+across separate `node` processes.
+
+The next day a different process reads the descriptor and reopens the branch,
+and what comes back is an ordinary `GraphBranch`, so everything after that is
+the merge API you already know:
+
+```typescript
+const descriptor = JSON.parse(await queue.get());
+
+const branch = unwrap(await reopenDurableBranch(graph, descriptor, host));
+const plan = unwrap(await planMerge(base, [branch]));
+
+const report = unwrap(
+  await applyDurableMergePlan({
+    target: base,
+    branch,
+    descriptor,
+    strategy: host,
+    plan,
+  }),
+);
+await branch.close();
+unwrap(await destroyDurableBranch(descriptor, host));
+```
+
+```text
+plan: 2 node upserts, 0 conflicts
+  host.merge(): declining native merge (no SQL executed)
+merged: {"nodes":2,"edges":0,"identity":{"asserted":0,"retracted":0}}
+base now: Grace=40, Ada=160
+reopen after destroy refused: true
+```
+
+That `host.merge()` line is an optional hook: a host with a real
+database-branching primitive can apply the approved plan natively, as long as
+it proves its physical diff matches the approved write set. If it answers
+`unsupported`, no SQL has run and TypeGraph applies the portable plan instead.
+If it _throws_, TypeGraph doesn't fall back, because the host may have applied
+part of the change and replaying it could apply it twice.
+
+A descriptor is a document your application stored and handed back later, so
+TypeGraph treats it as untrusted input. At fork time the host seals the true
+origin, and every reopen and destroy is checked against it, so relabeling the
+branch id makes the reopen fail:
+
+```text
+Durable branch descriptor does not match the working copy the host attested for
+its store locator: the descriptor's TypeGraph fences disagree with the origin
+recorded at fork. This is a tampered, relabeled, or wrong-branch descriptor.
+```
+
+The same check stops you from destroying branch B with branch A's descriptor,
+or reopening with a graph that reuses the id `"loyalty"` but defines
+`Account` differently.
+
+## The message that arrives twice
+
+Suppose the branch is fed from a queue where "award Ada 25 points" can arrive
+twice. The award has to apply exactly once, and whoever is downstream (a
+notification, an audit log) has to hear about every applied award eventually,
+even if the worker dies right after committing.
+
+What that calls for is a transactional outbox scoped to the working copy, and
+0.68 builds one into the durable-branch contract. You hand
+`operateDurableBranch()` an idempotency key, a `mutation` describing the
+change, and `metadata` to keep as evidence:
+
+```typescript
+const outcome = unwrap(
+  await operateDurableBranch(descriptor, host, {
+    idempotencyKey: "award-7731",
+    metadata: { source: "orders-queue", messageId: 7731 },
+    mutation: { op: "award", account: adaId, points: 25 },
+  }),
+);
+```
+
+TypeGraph never interprets `mutation`; it digests it together with `metadata`,
+hands the host the request, and validates what comes back. The host applies
+the change and writes an evidence row in one database transaction, which in
+this host is a single SQLite transaction on one connection. To check the
+rollback, I made it throw after the graph write and before the evidence insert:
+
+```text
+DurableOperationError | GRAPH_MERGE_OPERATION | Durable operation failed: injected failure after the graph write
+evidence: undefined
+accounts: Grace=40, Ada=160
+```
+
+There's no evidence row, and Ada is still at the staged 160.
+
+In the real run, the worker commits the award (Ada goes from 160 to 185) and
+then dies before telling anyone. A fresh process picks up the descriptor, and
+the queue redelivers the same message:
+
+```text
+recover pid 76873 | Ada on branch: 185
+redelivered: replayed | Ada on branch: 185
+```
+
+`replayed` returns the evidence from the first run and applies nothing, so Ada
+stays at 185 instead of 210. If you reuse the key with a different payload,
+even just different metadata, the host rejects it without writing:
+
+```text
+changed payload: DurableOperationConflictError | GRAPH_MERGE_OPERATION_CONFLICT
+Ada on branch: 185
+```
+
+The evidence rows act as the outbox. Each one starts with `delivered: false`,
+and you can't destroy the branch while any are undelivered:
+
+```text
+destroy: DurableEvidenceUndeliveredError | GRAPH_MERGE_OPERATION_UNDELIVERED |
+  refusing to destroy "60367e1c-…": undelivered operation evidence remains
+```
+
+To deliver them, you scan for undelivered rows and mark each one after
+publishing it:
+
+```typescript
+const page = unwrap(
+  await scanDurableOperations(descriptor, host, { limit: 100 }),
+);
+for (const evidence of page.operations) {
+  if (evidence.delivered) continue;
+  await publishDownstream(evidence); // your outbox consumer
+  unwrap(
+    await markDurableOperationDelivered(
+      descriptor,
+      host,
+      evidence.idempotencyKey,
+    ),
+  );
+}
+unwrap(await destroyDurableBranch(descriptor, host));
+```
+
+A crash at any point in that sequence means, at worst, that a downstream
+consumer hears about an award twice; the award itself is never applied twice
+or silently dropped.
+
+## Limits
+
+- **There's no first-party host and no queue.** Whether your host's
+  transaction is atomic is up to your database. TypeGraph validates what the
+  host reports back but can't check your storage.
+- **Exclusion is the host's job.** The example host's writer lease is a lock
+  file. When I left one behind, as a killed process would, reopening failed
+  until it was cleared. A real host wants a lease that expires.
+- **Plan against a quiet branch.** Feeding operations into a branch while a
+  reviewer plans against it means planning against a moving target.
+- **Delivery is at-least-once.** Make downstream writes idempotent on the key.
+- **You probably don't need this for a one-shot job.** If you stage, plan and
+  apply in one run, `branch()` is unchanged and simpler.
+
+## Try it
+
+- [Durable candidate review](/graph-merge#durable-candidate-review-in-the-target-graph)
+- [Durable host-native branches](/graph-merge#durable-host-native-branches)
+  and [atomic operations and evidence](/graph-merge#atomic-operations-and-immutable-evidence)
+- [Example 27](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/27-durable-merge-review.ts):
+  the durable review, end to end
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

@@ -1,0 +1,62 @@
+---
+# Copy this whole _template/ folder to start a new post, rename the folder
+# to something URL-friendly (the folder name becomes the slug, e.g.
+# blog/my-new-post/), AND rename this file from _index.mdx to index.mdx —
+# the leading underscore is deliberate: Starlight's docsLoader excludes
+# content by leading-underscore FILENAME (not parent directory), which is
+# what keeps this template out of the collection entirely — no route, not
+# in the dev-mode listing, not in RSS, and its image() fields are never
+# schema-validated (so there's no cover.png/social.png here yet; generate
+# real ones after renaming, per the instructions below). Dropping the
+# underscore when you rename to index.mdx is what makes a real post
+# routable. Delete this comment block once you've customized the rest.
+#
+# Directory-based posts (<slug>/index.mdx) route identically to a flat
+# <slug>.mdx — Starlight's docsLoader supports both — but keep everything
+# about one post together: this file, generate-images.mjs, cover.png, and
+# social.png.
+title: Post title
+# A valid YAML date. Posts are listed newest-first by this field.
+date: 2026-07-06
+# Shown in the blog index and tag/author pages. Supports basic Markdown.
+excerpt: One or two sentences summarizing the post.
+tags:
+  - announcements
+# Set featured: true to pin the post to a "Featured posts" sidebar group.
+# featured: true
+# Two images, generated together by the co-located generate-images.mjs in
+# this same folder — see that file, and src/content.config.ts for why
+# cover/social are separate fields. Customize generate-images.mjs first
+# (either edit the generic-fallback call it starts with, or replace it with
+# a bespoke diagram — see the "Step 0" decision in the blog-cover skill),
+# then:
+#   node generate-images.mjs --out-dir /tmp/blog-images
+# rasterize both SVGs to 1200x630 PNGs (e.g. via the `browse` skill: `goto
+# file://<svg.html>` + `screenshot`), and copy the results to ./cover.png
+# and ./social.png next to this file.
+#
+# `cover` is a title-free illustration — shown on the blog index and at the
+# top of the post itself.
+cover:
+  alt: "Abstract illustration of a TypeGraph node graph"
+  image: "./cover.png"
+# `social` bakes the title into the same illustration and is used ONLY for
+# the OG/Twitter share card (see src/components/starlight/Head.astro) — it
+# is never rendered on the page, so the title isn't shown twice.
+social:
+  alt: "Post title, for assistive tech and the share-card alt text"
+  image: "./social.png"
+# draft: true keeps a published (underscore-dropped) post visible in
+# `pnpm dev` but out of production builds — useful while you're still
+# writing. Remove it when the post is ready to publish.
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+Write the post body here as Markdown. Because this is an `.mdx` file you can
+also import and use Astro components.
+
+End every post with the newsletter call-to-action so readers can subscribe:
+
+<NewsletterSignup />

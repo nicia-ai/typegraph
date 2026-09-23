@@ -1,0 +1,121 @@
+---
+title: Introducing TypeGraph
+date: 2026-02-21
+excerpt: A typed knowledge graph that lives inside your TypeScript app, is defined by one Zod schema, and stores everything in the SQLite or Postgres you already run.
+tags:
+  - announcements
+cover:
+  alt: "Abstract illustration of a TypeGraph node graph"
+  image: "./cover.png"
+social:
+  alt: "Introducing TypeGraph"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+Every project I've worked on that needed real structure (a knowledge base, an
+org chart, memory for an agent) ended up with the same stack: an ORM for the
+actual data, a vector store added when someone wanted semantic search, and
+eventually, once the relationships got interesting, a graph database off to
+the side with a sync job keeping it roughly in line with the other two.
+
+Each of those systems has its own idea of what a `Person` is and its own
+consistency model, so the schema drifts between them. Meanwhile TypeScript
+already has Zod, a schema language good enough to describe all of it, and none
+of those systems treats it as the source of truth.
+
+TypeGraph is the other option: keep the graph inside the application, as a
+library, and store it in the database you already run.
+
+## It runs in your process
+
+TypeGraph writes through your existing SQLite or Postgres connection and
+commits in the same transaction as the rest of your data. You don't deploy a
+graph server or keep one running, and your app doesn't make a network hop to
+reach its own graph.
+
+## One schema
+
+You describe your data once, in Zod:
+
+```typescript
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string(), role: z.string() }),
+});
+
+const worksOn = defineEdge("worksOn", {
+  schema: z.object({ since: z.string() }),
+});
+
+const graph = defineGraph({
+  id: "org",
+  nodes: { Person: { type: Person } },
+  edges: { worksOn: { type: worksOn, from: [Person], to: [Person] } },
+});
+```
+
+From that one definition TypeGraph derives runtime validation, the TypeScript
+types, the storage layout, and what the query builder will let you write. If
+you've ever kept an ORM schema, a folder of hand-written interfaces, and a
+Cypher cheat sheet in sync by hand, you know why I wanted this.
+
+## Relationships that mean something
+
+A foreign key tells you two rows are related, but it can't tell you that a
+`Podcast` is a kind of `Media`, that `marriedTo` implies `knows`, or that a
+`Person` and an `Organization` can never be the same thing. In most codebases
+those rules live in a comment, or in the head of whoever wrote the migration.
+
+In TypeGraph, edges are first-class and typed, and they carry their own
+properties. The ontology layer (`subClassOf`, `implies`, `disjointWith`,
+`equivalentTo`) does real work: a query for `Media` can include podcasts, a
+`knows` traversal can pick up spouses, and a write that would make a person
+and an organization share an identity fails. Traversals compile to SQL, so a
+three-hop walk is one query rather than a loop of lookups.
+
+## Vectors are just another field
+
+Embeddings are a field type. When you declare one, TypeGraph stores and
+indexes it on whichever backend you're running:
+
+```typescript
+const Document = defineNode("Document", {
+  schema: z.object({ title: z.string(), embedding: embedding(1536) }),
+});
+
+const similar = await store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) => d.embedding.similarTo(queryVector, 10))
+  .select((ctx) => ctx.d)
+  .execute();
+```
+
+`.similarTo()` is a predicate like any other, so it composes with filters and
+traversals in the same query. You don't ask a vector database for a list of
+IDs and then run a second query to find out what those IDs are.
+
+## What it isn't
+
+TypeGraph isn't trying to be Neo4j. There's no PageRank, no community
+detection, no distributed storage, and at this stage no traversal algorithms
+beyond the queries you write yourself. It's built for thousands to millions
+of nodes living next to the rest of your data. If your graph _is_ the product
+and it has billions of edges, you want a dedicated graph database.
+
+## Where it stands
+
+It's early, a handful of releases in. The DSL, the ontology layer, vector
+search, and both backends are solid. What comes next depends on what people
+build with it, so if you try it and hit a wall, open an issue.
+
+## Try it
+
+- [What is TypeGraph?](/overview) and the [Quick Start](/getting-started)
+- [Ontology & Reasoning](/ontology): `subClassOf`, `implies`,
+  `disjointWith`, `equivalentTo`
+- [Semantic Search](/semantic-search)
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

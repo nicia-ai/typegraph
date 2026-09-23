@@ -1,0 +1,339 @@
+---
+title: "Replacing the N+1 Loop With One Statement"
+date: 2026-09-18
+excerpt: "How a page listing documents with their newest version, version count, and latest comments went from 33 SQL statements to one, and why batchOnce() throws instead of quietly splitting the work back up."
+tags:
+  - announcements
+cover:
+  alt: "Ten long horizontal lanes of tick marks, each a separate read, sweeping through S-curves into a single solid batchOnce node that emits one bold line to the right"
+  image: "./cover.png"
+social:
+  alt: "Replacing the N+1 Loop With One Statement"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+Most apps have a page like this one: a workspace lists its published
+documents, and each row shows the title, how many versions the document has,
+the note on the newest version, and the three most recent comments. Every
+piece of that is a one-hop read from the document, so the first version anyone
+writes is a loop:
+
+```typescript
+const documents = await store
+  .query()
+  .from("Document", "document")
+  .whereNode("document", (document) => document.status.eq("published"))
+  .orderBy("document", "title")
+  .select((ctx) => ctx.document)
+  .execute();
+
+const rows = await Promise.all(
+  documents.map(async (document) => {
+    const versionEdges = await store.edges.hasVersion.findFrom(document);
+    const versions = await store.nodes.Version.getByIds(
+      versionEdges.map((edge) => edge.toId),
+    );
+    const commentEdges = await store.edges.hasComment.findFrom(document);
+    const comments = await store.nodes.Comment.getByIds(
+      commentEdges.map((edge) => edge.toId),
+    );
+    // Sort in JavaScript: newest version, version count, three latest comments.
+    return summarize(document, versions, comments);
+  }),
+);
+```
+
+Counted at the driver, that loop issues 33 statements for eight documents,
+one for the list and four per document. On in-memory SQLite you'd never
+notice, but with the database across a network every one of those is a round
+trip, the count grows with the length of the list, and you're loading every
+comment to keep three and every version to keep one.
+
+This is the N+1, the oldest performance bug in the book, and over releases
+0.58 to 0.65 I went after it properly. The same page now costs **one SQL
+statement**, and when TypeGraph can't do a batch in one statement it throws
+before running anything instead of quietly issuing more.
+
+(Every number here is a statement count, measured by wrapping
+better-sqlite3's `Statement` and `exec` in the script that ran the code. None
+of them are wall-clock times. What a round trip costs on your network is
+yours to multiply in.)
+
+## Step one: reads that say what they want
+
+`store.neighbors()` joins each edge to the node on its far end in a single
+statement, and applies ordering and the limit before hydrating anything, so
+"the newest version" fetches one row. `store.countNeighbors()` is the matching
+count and hydrates nothing at all.
+
+```typescript
+const [latest] = await store.neighbors(document, {
+  edges: ["hasVersion"],
+  orderBy: { by: "node", field: "sequence", direction: "desc" },
+  limit: 1,
+});
+const versions = await store.countNeighbors(document, {
+  edges: ["hasVersion"],
+});
+```
+
+Two calls per document is 16 statements for the page, which is better than
+33 but still grows with the length of the list.
+
+## Step two: `batchOnce()`
+
+`store.batchOnce()` is the part I'm happiest with. It takes any number of
+independent reads and runs them as exactly one SQL statement: each read
+becomes a CTE, and a single JSON envelope carries every result set back, in
+input order. The callback can return a runtime-sized array, which means the
+loop above translates almost literally:
+
+```typescript
+const results = await store.batchOnce((read) =>
+  documents.flatMap((document) => [
+    read.neighbors(document, {
+      edges: ["hasVersion"],
+      orderBy: { by: "node", field: "sequence", direction: "desc" },
+      limit: 1,
+    }),
+    read.countNeighbors(document, { edges: ["hasVersion"] }),
+  ]),
+);
+// results[2 * i] is document i's newest version, results[2 * i + 1] its count.
+```
+
+That takes the page from sixteen statements to one. Inside a transaction,
+`tx.batchOnce()` binds to the open connection, so the batch sees writes made
+earlier in the same callback and is still one statement.
+
+### It won't quietly fall back
+
+A lot of "batch" APIs are really a `for` loop, and you only find out they
+issued N queries when a latency graph shows it a month later. `batchOnce()`
+has no fallback path, so if it can't do the job in one statement it throws
+before executing anything:
+
+```typescript
+await store.batchOnce((read) =>
+  Array.from({ length: 501 }, () =>
+    read.countNeighbors(document, { edges: ["hasVersion"] }),
+  ),
+);
+// ConfigurationError: store.batchOnce() accepts at most 500 reads in one statement.
+```
+
+Five hundred reads run as one statement, and 501 throws without issuing any.
+It won't chunk to fit the backend's bind-parameter limit either, and reads that
+can't be embedded (edge-collection `batchFind*` calls, for example) are
+rejected instead of being run on the side. Since the name promises one
+statement, I'd rather it fail loudly than break that promise.
+
+The older `store.batch()`, by contrast, runs its queries one after another. It
+always did, and the docs now say so plainly because people were putting it in
+hot paths expecting a single round trip.
+
+## Step three: shape it in SQL
+
+A batch of `neighbors()` calls still has one read per parent, so eight
+documents means sixteen reads inside the statement, and the 500-read ceiling
+works out to 250 documents. When the question is "for every document in this
+result", a relation answers it with a fixed number of reads however long the
+list is.
+0.61 added `project()`, derived relations, and aggregates; 0.63 added
+`topPerPartition()`:
+
+```typescript
+const published = () =>
+  store
+    .query()
+    .from("Document", "document")
+    .whereNode("document", (document) => document.status.eq("published"));
+
+const versions = published()
+  .traverse("hasVersion", "link")
+  .to("Version", "version")
+  .project((fields) => ({
+    documentId: fields.document.id,
+    versionId: fields.version.id,
+    sequence: fields.version.sequence,
+    note: fields.version.note,
+  }))
+  .asRelation();
+
+const versionCounts = versions
+  .groupBy((columns) => [columns.documentId])
+  .aggregate((columns) => ({
+    documentId: columns.documentId,
+    versions: expr.count(columns.versionId),
+  }));
+
+const latestVersions = versions.topPerPartition({
+  partitionBy: (columns) => [columns.documentId],
+  orderBy: (columns) => [
+    { expression: columns.sequence, direction: "desc" },
+    { expression: columns.versionId },
+  ],
+  limit: 1,
+});
+```
+
+`topPerPartition()` uses `ROW_NUMBER()`, so ties don't widen the limit. Both
+orderings end in an id because the API can't know your ordering is unique,
+and a repeatable winner needs a tiebreaker. The comments are the same shape
+with a limit of three, plus an ordered collection that folds the winners into
+one array per document:
+
+```typescript
+const recentComments = published()
+  .traverse("hasComment", "link")
+  .to("Comment", "comment")
+  .project((fields) => ({
+    documentId: fields.document.id,
+    commentId: fields.comment.id,
+    body: fields.comment.body,
+    postedAt: fields.comment.postedAt,
+  }))
+  .asRelation()
+  .topPerPartition({
+    partitionBy: (columns) => [columns.documentId],
+    orderBy: (columns) => [
+      { expression: columns.postedAt, direction: "desc", nulls: "last" },
+      { expression: columns.commentId },
+    ],
+    limit: 3,
+  })
+  .groupBy((columns) => [columns.documentId])
+  .aggregate((columns) => ({
+    documentId: columns.documentId,
+    recent: expr.collect(columns.body, {
+      orderBy: [
+        { expression: columns.postedAt, direction: "desc", nulls: "last" },
+        { expression: columns.commentId },
+      ],
+    }),
+  }));
+```
+
+Relations are batch members like any other read, so the whole page, titles
+included, is one statement:
+
+```typescript
+const titles = published()
+  .orderBy("document", "title")
+  .select((ctx) => ({ id: ctx.document.id, title: ctx.document.title }));
+
+const [documents, counts, latest, comments] = await store.batchOnce(
+  () => [titles, versionCounts, latestVersions, recentComments] as const,
+);
+```
+
+Joined on `documentId`, a row comes out as:
+
+```text
+{ id: "1BMs3-6PEJYXtjB9BcrsU", versionCount: 3, latest: "v3 of doc 2",
+  recent: ["comment 5 on doc 2", "comment 4 on doc 2", "comment 3 on doc 2"] }
+```
+
+The script asserts that these eight rows are identical to what the loop
+produced. Here's how the versions of the page compare:
+
+| Page for eight documents                     | Statements |
+| -------------------------------------------- | ---------: |
+| Loop of `findFrom()` and `getByIds()`        |         33 |
+| Loop of `neighbors()` and `countNeighbors()` |         16 |
+| `batchOnce()` of the `neighbors()` reads     |          1 |
+| `batchOnce()` of four relations              |          1 |
+
+`neighbors()` fits when you already hold a handful of sources, and relations
+fit when you want "every parent in this result". `topPerPartition()` needs
+window functions
+and ordered `expr.collect()` needs ordered aggregates; a backend without them
+throws a typed error before executing.
+
+## The rest of the set-shaped toolkit
+
+A few smaller pieces from the same stretch, all aimed at the same habit of
+doing one thing per row:
+
+- **`bulkFindFrom()` / `bulkFindTo()`** are `findFrom()` / `findTo()` for a
+  whole page of endpoints. Index `i` of the result holds the edges of input
+  `i`, an endpoint with no edges gets an empty array, and `limitPerInput`
+  caps each endpoint's fan-out. Fifty people's jobs cost one statement per
+  endpoint kind (split only when the bind-parameter budget requires it)
+  instead of fifty.
+
+  ```typescript
+  const people = await store.nodes.Person.find({ limit: 50 });
+  const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
+  ```
+
+- **`store.bulkFindEdgesTo()`** does the inbound direction across several
+  node and edge kinds at once. Twelve documents and two edge kinds was one
+  statement; calling `findTo()` per kind per document was 24.
+
+- **`updateWhere()`** is a set-based, transactional update that returns how
+  many rows changed. The selector is mandatory (`where`, `exists`, a
+  candidate query, or an explicit `all: true`), so you can't wipe out a whole
+  kind by forgetting a filter:
+
+  ```typescript
+  const result = await store.nodes.Person.updateWhere({
+    patch: { active: false },
+    where: (person) => person.lastSeen.lt(cutoff),
+    exists: [
+      {
+        edgeKind: "worksAt",
+        direction: "out",
+        relatedKind: "Company",
+        whereRelated: (company) =>
+          company.field("status").string().eq("closed"),
+      },
+    ],
+  });
+  // { affectedCount: number }
+  ```
+
+- **`in()` / `notIn()` take list parameters**, so `field.in(param("ids"))`
+  binds a runtime-sized list in a prepared query instead of forcing you to
+  rebuild the query per call.
+
+- **Subgraphs got per-edge-kind windows** (keep only the newest N edges of a
+  noisy kind), and `subgraph()` works inside `batchOnce()`. Five roots
+  awaited in a loop cost 10 statements on SQLite; batched, one.
+
+- **Mixed-kind cursor pages**: a query can start from several kinds
+  (`.from(["Person", "Team"], "entity")`), and a `.page()` can sit in a batch
+  next to unrelated reads, so a directory of people and teams can be read as
+  one ordered stream at one statement per page.
+
+- **`executeChecked(version)`** folds the "has another isolate changed the
+  schema?" probe into the read itself, for serverless deployments that cache
+  the schema per isolate. Probing and then reading took 2 statements, and the
+  checked read takes 1.
+  A moved schema throws `SchemaChangedError`, even when the query would have
+  matched no rows.
+
+## What one statement doesn't buy you
+
+- **It saves round trips, but the database does the same work.** Every member
+  of a batch still runs its own plan. For one large closure on Postgres, the
+  direct `subgraph()` can beat the batched form, and `topPerPartition()`
+  bounds the rows returned, not necessarily the rows scanned.
+- **Results are materialized.** `batchOnce()` returns JSON envelopes, doesn't
+  stream, and has no byte cap. Bound your reads with limits and projections.
+- **The counts are SQLite driver counts.** They show the shape of the
+  improvement, and your actual latency depends on your network.
+
+## Try it
+
+- [`store.batchOnce()`](/schemas-stores#storebatchoncebuildreads-options):
+  the full contract, including what can and can't be embedded
+- [Top-N per parent](/queries/relations#top-n-per-parent) and
+  [Ordered collections](/queries/relations#ordered-collections)
+- [`updateWhere()`](/schemas-stores#updatewhereparams) and
+  [`bulkFindEdgesTo()`](/schemas-stores#storebulkfindedgestoparams-options)
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />
