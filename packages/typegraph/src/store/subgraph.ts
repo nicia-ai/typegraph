@@ -76,7 +76,6 @@ import {
   buildReachableCte,
   buildWindowedEdgesCte,
 } from "./recursive-cte";
-} from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
 import {
   type EdgeRow,
@@ -920,7 +919,6 @@ function buildSubgraphCompositionReachableCte<
     sourceId: ctx.rootId,
     outEdgeKinds,
     inEdgeKinds,
-    maxHops: MAX_EXPLICIT_RECURSIVE_DEPTH,
     cyclePolicy: "prevent",
     includePath: false,
     temporalMode: ctx.temporalMode,

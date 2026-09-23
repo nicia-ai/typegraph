@@ -870,13 +870,13 @@ export class ExecutableQuery<
         },
       );
     }
-    if (ast.start.kinds.length !== 1 || ast.start.includeSubClasses) {
+    if (ast.start.kinds.length !== 1 || ast.start.expansion !== "exact") {
       throw new ConfigurationError(
         "A set-update candidate query must select one concrete node kind.",
         {
           operation: "updateWhere",
           candidateKinds: ast.start.kinds,
-          includeSubClasses: ast.start.includeSubClasses,
+          expansion: ast.start.expansion,
         },
       );
     }

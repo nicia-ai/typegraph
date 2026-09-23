@@ -23,7 +23,6 @@ export type {
   EngineRevision,
   EntityKey,
   GraphBackend,
-  GraphBackend,
   GraphReadBackend,
   LineageDelta,
   LineageMembers,

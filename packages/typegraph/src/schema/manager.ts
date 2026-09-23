@@ -58,7 +58,6 @@ import {
   type SchemaDiff,
 } from "./migration";
 import { prepareNewSchemaVersion } from "./new-schema-version";
-import { prepareOntologyTighteningPreflight } from "./ontology-tightening-preflight";
 import {
   computeSchemaHash,
   getSchemaHash,

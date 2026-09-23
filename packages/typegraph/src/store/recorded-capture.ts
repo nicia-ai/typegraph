@@ -718,7 +718,6 @@ export async function withRecordedIdentityDecision<T>(
   if (session === undefined) return fn();
   return session.withIdentityDecision(decision, fn);
 }
-}
 
 /**
  * Registers an engine-native mutation witness's sink against `overlay` (the

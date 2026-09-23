@@ -39,7 +39,6 @@ import type { EvolutionPlan } from "../schema/evolution-plan";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
-import { type InternalGraphAlgorithms } from "./algorithms";
 import { type ResolvedNodeClaimConflict } from "./claims/resolved-node-claims";
 import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import type { Store } from "./store";

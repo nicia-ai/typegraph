@@ -424,7 +424,6 @@ function compileRecursiveCte(
   ctx: PredicateCompilerContext,
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
   temporalFilterPass: TemporalFilterPass,
-  temporalFilterPass: TemporalFilterPass,
   seedQuery?: SqlFragment,
 ): RecursiveCteResult {
   const { dialect } = ctx;

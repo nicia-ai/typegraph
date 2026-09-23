@@ -225,14 +225,12 @@ import type {
   Edge,
   EdgeAcyclicityViolation,
   EdgeId,
-  EdgeId,
   EngineRevision,
   EntityKey,
   GraphBackend,
   GraphDef,
   GraphReadBackend,
   IdentityTransferAssertion,
-  JsonValue,
   JsonValue,
   KindRegistry,
   LineageDelta,
@@ -5947,6 +5945,7 @@ export async function planMergeForEvolution<G extends GraphDef>(
     async (resolved) => {
       await assertPlanningFenceUnchanged(store, baselineFence);
       return resolvedMergeArtifact(
+        store,
         resolved,
         "snapshot",
         resultingFence,
@@ -6066,6 +6065,7 @@ export async function planMergeIncrementalForEvolution<G extends GraphDef>(
     async (resolved) => {
       await assertPlanningFenceUnchanged(store, baselineFence);
       return resolvedMergeArtifact(
+        store,
         resolved,
         "incremental",
         resultingFence,

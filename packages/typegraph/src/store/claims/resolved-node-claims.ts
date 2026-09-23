@@ -509,13 +509,6 @@ export async function validateResolvedNodeClaims(
  * node's claims are batch-cleared so the later per-node upserts can take the
  * validated final keys in any order (including swaps and handoffs).
  */
-function resolvedNodeUniquenessOperationsRefusal(): ConfigurationError {
-  return new ConfigurationError(
-    "Resolved node writes require batched uniqueness operations",
-    { code: RESOLVED_NODE_UNIQUENESS_UNSUPPORTED_CODE },
-  );
-}
-
 async function prepareResolvedNodeClaims(
   ctx: UniquenessContext,
   upserts: readonly ResolvedNodeUpsert[],

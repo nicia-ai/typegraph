@@ -431,7 +431,12 @@ export function claimHolderTerms(
     // The first overload guarantees a bound identity whenever `scope` is
     // absent — the ordinary claim shape.
     const bound = params as BoundClaimHolderIdentity;
-    return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, bound)}`;
+    return sql`${qualified(edgesName, edges.kind)} = ${bound.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, {
+      fromKind: sql`${bound.fromKind}`,
+      fromId: sql`${bound.fromId}`,
+      toKind: sql`${bound.toKind}`,
+      toId: sql`${bound.toId}`,
+    })}`;
   }
   // No `partIdentity` means the first overload matched: a real write-path
   // composition claim, whose `fromKind`/`fromId`/`toKind`/`toId` are genuine
@@ -450,22 +455,6 @@ export function claimHolderTerms(
     .filter((holder) => holder.partSide === "to")
     .map((holder) => holder.edgeKind);
   const arms: SQL[] = [];
-  for (const side of sides) {
-    const sideKinds = axis.scope.holders
-      .filter((holder) => holder.partSide === side.partSide)
-      .map((holder) => holder.edgeKind);
-    if (sideKinds.length === 0) continue;
-    arms.push(sql`
-      (
-            ${qualified(edgesName, edges.kind)} IN (${sql.join(
-              sideKinds.map((kind) => sql`${kind}`),
-              sql`, `,
-            )})
-            AND ${qualified(edgesName, edges.fromKind)} = ${partKind}
-            AND ${qualified(edgesName, edges.fromId)} = ${partId}
-          )
-    `);
-  }
   if (toSideKinds.length > 0) {
     arms.push(sql`
       (

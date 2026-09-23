@@ -239,7 +239,6 @@ import { type CompiledRowsSql } from "../query/sql-intent";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import { canonicalEqual } from "../schema/canonical";
 import {
-import {
   type EvolutionPlan,
   type EvolutionPlanRequirements,
   getEvolutionPlanPayload,
@@ -3886,6 +3885,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       dialect: getDialect(backend.dialect),
       schema: this.#schema,
       recordedReadBinding: this.#recordedReadBinding,
+      registry: this.#registry,
       options,
     });
   }
@@ -5122,6 +5122,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#registry,
           txBackend,
           this.#batchPointRead,
+          this.#endpointSetRead,
           edgeOperations,
         ),
         ...(this.#graph.identity === undefined ?

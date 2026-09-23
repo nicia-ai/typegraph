@@ -52,6 +52,7 @@ import {
   compareReferences,
   loadAssertionsTouching,
   loadCurrentStructuralClassComponents,
+  loadCurrentStructuralClasses,
   lockIdentityGraph,
   refKey,
 } from "./service-read";
