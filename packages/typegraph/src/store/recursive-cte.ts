@@ -24,11 +24,13 @@ import {
 import { type TraversalDirection } from "./algorithms/types";
 import { edgeOrderColumnName, type EdgeReadWindow } from "./neighbors";
 
-type ReachableCteCore = Readonly<{
+/**
+ * The row-visibility inputs every reachable CTE shares, however it is bounded:
+ * the graph, the temporal coordinate, the recorded relation, and the engine
+ * verdict. Neither the walk's bounds nor its source set live here.
+ */
+type ReachableCteFiltersCore = Readonly<{
   graphId: string;
-  maxHops: number;
-  cyclePolicy: RecursiveCyclePolicy;
-  includePath: boolean;
   /**
    * Temporal mode applied to both nodes and edges along the traversal.
    * Callers that want the pre-temporal behavior (soft-delete only) should
@@ -52,8 +54,22 @@ type ReachableCteCore = Readonly<{
   recursiveTraversal: RecursiveTraversalVerdict;
   /** Operation label echoed in the refusal's `details.operation`. */
   operation: string;
-  edgeWindows?: Readonly<Record<string, EdgeReadWindow | undefined>>;
-}> &
+}>;
+
+/**
+ * {@link ReachableCteFiltersCore} plus the three members only a HOP-BOUNDED
+ * walk can state, and its one-or-many source set. An exhaustive walk has no
+ * depth ceiling to cap, no path to emit, and no cycle policy to apply (its
+ * visited set subsumes all three), so it does not take this type: stating the
+ * absence structurally keeps an exhaustive caller from being asked for a
+ * `maxHops` that would be silently ignored.
+ */
+type ReachableCteCore = ReachableCteFiltersCore &
+  Readonly<{
+    maxHops: number;
+    cyclePolicy: RecursiveCyclePolicy;
+    includePath: boolean;
+  }> &
   (
     | Readonly<{ sourceId: string; sourceIds?: never }>
     | Readonly<{ sourceId?: never; sourceIds: readonly string[] }>
@@ -63,32 +79,26 @@ type BuildReachableCteOptions = ReachableCteCore &
   Readonly<{
     edgeKinds: readonly string[];
     direction: TraversalDirection;
+    edgeWindows?: Readonly<Record<string, EdgeReadWindow | undefined>>;
   }>;
 
 type PreparedReachableCte = Readonly<{
   baseCase: SqlFragment;
   recursiveColumns: readonly SqlFragment[];
   recursiveWhere: readonly SqlFragment[];
+  /**
+   * The edge-row visibility predicates (graph, kind, temporal) the recursive
+   * WHERE opens with — also the filter a pre-ranked edge relation applies
+   * before its window, so both read the same rows.
+   */
+  edgeWhere: readonly SqlFragment[];
   forceWorktableOuterJoinOrder: boolean;
   schema: SqlSchema;
 }>;
 
-/**
- * {@link ReachableCteCore} minus the three members that only a HOP-BOUNDED
- * walk can state: an exhaustive walk has no depth ceiling to cap, no path to
- * emit, and no cycle policy to apply (its visited set subsumes all three).
- * Stating the absence structurally keeps an exhaustive caller from being
- * asked for a `maxHops` that would be silently ignored.
- */
-type ReachableCteFiltersCore = Omit<
-  ReachableCteCore,
-  "maxHops" | "cyclePolicy" | "includePath"
->;
-
 type ReachableCteFilters = Readonly<{
-  edgeKindFilter: SqlFragment;
+  edgeWhere: readonly SqlFragment[];
   nodeTemporalFilter: SqlFragment;
-  edgeTemporalFilter: SqlFragment;
   schema: SqlSchema;
   forceWorktableOuterJoinOrder: boolean;
 }>;
@@ -143,14 +153,14 @@ function prepareReachableFilters(
     options.recordedReadBinding,
     "recorded-recursive-cte",
   );
-  const edgeWindows = Object.entries(options.edgeWindows ?? {}).filter(
-    (entry): entry is [string, EdgeReadWindow] => entry[1] !== undefined,
-  );
 
   return {
-    edgeKindFilter,
+    edgeWhere: [
+      sql`e.graph_id = ${options.graphId}`,
+      edgeKindFilter,
+      edgeTemporalFilter,
+    ],
     nodeTemporalFilter,
-    edgeTemporalFilter,
     schema,
     forceWorktableOuterJoinOrder:
       options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
@@ -168,9 +178,12 @@ function prepareReachableCte(
   options: ReachableCteCore,
   edgeKindsForFilter: readonly string[],
 ): PreparedReachableCte {
-  const filters = prepareReachableFilters(options, edgeKindsForFilter);
-  const { edgeKindFilter, nodeTemporalFilter, edgeTemporalFilter, schema } =
-    filters;
+  const {
+    edgeWhere,
+    nodeTemporalFilter,
+    schema,
+    forceWorktableOuterJoinOrder,
+  } = prepareReachableFilters(options, edgeKindsForFilter);
   const trackPath = options.cyclePolicy === "prevent" || options.includePath;
   const initialPath =
     trackPath ? options.dialect.initializePath(sql.raw("n.id")) : undefined;
@@ -210,9 +223,7 @@ function prepareReachableCte(
   if (options.sourceIds !== undefined) recursiveColumns.push(sql`r.origin_id`);
 
   const recursiveWhere: SqlFragment[] = [
-    sql`e.graph_id = ${options.graphId}`,
-    edgeKindFilter,
-    edgeTemporalFilter,
+    ...edgeWhere,
     nodeTemporalFilter,
     sql`r.depth < ${options.maxHops}`,
   ];
@@ -222,7 +233,8 @@ function prepareReachableCte(
     baseCase,
     recursiveColumns,
     recursiveWhere,
-    forceWorktableOuterJoinOrder: filters.forceWorktableOuterJoinOrder,
+    edgeWhere,
+    forceWorktableOuterJoinOrder,
     schema,
   };
 }
@@ -238,157 +250,74 @@ function prepareReachableCte(
  * node distinct once per path length and turn the fixpoint into an open walk.
  */
 function prepareExhaustiveReachableCte(
-  options: ReachableCteFiltersCore,
+  options: BuildExhaustiveDirectedReachableCteOptions,
   edgeKindsForFilter: readonly string[],
 ): PreparedReachableCte {
-  const filters = prepareReachableFilters(options, edgeKindsForFilter);
-  const { edgeKindFilter, nodeTemporalFilter, edgeTemporalFilter, schema } =
-    filters;
+  const {
+    edgeWhere,
+    nodeTemporalFilter,
+    schema,
+    forceWorktableOuterJoinOrder,
+  } = prepareReachableFilters(options, edgeKindsForFilter);
 
   return {
     baseCase: sql`SELECT n.id, n.kind FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND ${nodeTemporalFilter}`,
     recursiveColumns: [sql`n.id`, sql`n.kind`],
-    recursiveWhere: [
-      sql`e.graph_id = ${options.graphId}`,
-      edgeKindFilter,
-      edgeTemporalFilter,
-      nodeTemporalFilter,
-    ],
-    forceWorktableOuterJoinOrder: filters.forceWorktableOuterJoinOrder,
+    recursiveWhere: [...edgeWhere, nodeTemporalFilter],
+    edgeWhere,
+    forceWorktableOuterJoinOrder,
     schema,
   };
 }
 
+/**
+ * The pre-ranked edge relation a windowed walk expands through. Each window
+ * keeps only the newest N edges per source endpoint, oriented uniformly as
+ * `typegraph_source_*` / `typegraph_target_*`, so the recursive term walks it
+ * "out" whatever direction each kind was requested in.
+ */
+const WINDOWED_EDGES_CTE = "typegraph_windowed_edges";
+
 export function buildReachableCte(
   options: BuildReachableCteOptions,
 ): SqlFragment {
-  assertRecursiveTraversal(options.recursiveTraversal, options.operation);
-  const trackPath = options.cyclePolicy === "prevent" || options.includePath;
-  const edgeKindFilter = compileKindFilter(
-    sql.raw("e.kind"),
-    options.edgeKinds,
-  );
-  const currentTimestamp = options.currentTimestamp ?? currentReadInstant();
-  const nodeTemporalFilter = compileTemporalFilter({
-    mode: options.temporalMode,
-    asOf: options.asOf,
-    recordedAsOf: options.recordedAsOf,
-    tableAlias: "n",
-    currentTimestamp,
-    recordedReadBinding: options.recordedReadBinding,
-  });
-  const edgeTemporalFilter = compileTemporalFilter({
-    mode: options.temporalMode,
-    asOf: options.asOf,
-    recordedAsOf: options.recordedAsOf,
-    tableAlias: "e",
-    currentTimestamp,
-    recordedReadBinding: options.recordedReadBinding,
-  });
-  // Derive the read schema from the same `recordedAsOf` that drives the temporal
-  // filters above: when a recorded pin is set the node/edge sources become the
-  // recorded relations, matching the `recorded_from/to` interval predicate. One
-  // derivation means the table source and the predicate cannot disagree.
-  const schema = recordedReadSchemaFor(
-    options.schema,
-    options.recordedAsOf,
-    options.recordedReadBinding,
-    "recorded-recursive-cte",
-  );
-  const edgeWindows = Object.entries(options.edgeWindows ?? {}).filter(
-    (entry): entry is [string, EdgeReadWindow] => entry[1] !== undefined,
+  const prepared = prepareReachableCte(options, options.edgeKinds);
+  const windowed = Object.values(options.edgeWindows ?? {}).some(
+    (window) => window !== undefined,
   );
 
-  const initialPath =
-    trackPath ? options.dialect.initializePath(sql.raw("n.id")) : undefined;
-  const pathExtension =
-    trackPath ?
-      options.dialect.extendPath(sql.raw("r.path"), sql.raw("n.id"))
-    : undefined;
-  const cycleCheck =
-    options.cyclePolicy === "prevent" ?
-      options.dialect.cycleCheck(sql.raw("n.id"), sql.raw("r.path"))
-    : undefined;
-
-  const baseColumns: SqlFragment[] = [sql`n.id`, sql`n.kind`, sql`0 AS depth`];
-  if (initialPath !== undefined) {
-    baseColumns.push(sql`${initialPath} AS path`);
-  }
-
-  if (options.sourceIds !== undefined) baseColumns.push(sql`n.id AS origin_id`);
-  const sourceFilter =
-    options.sourceIds === undefined ? sql`n.id = ${options.sourceId}`
-    : options.sourceIds.length === 0 ? sql`1 = 0`
-    : sql`n.id IN (${sql.join(
-        options.sourceIds.map((id) => sql`${id}`),
-        sql`, `,
-      )})`;
-  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND ${sourceFilter} AND ${nodeTemporalFilter}`;
-
-  const recursiveColumns: SqlFragment[] = [
-    sql`n.id`,
-    sql`n.kind`,
-    sql`r.depth + 1 AS depth`,
-  ];
-  if (pathExtension !== undefined) {
-    recursiveColumns.push(sql`${pathExtension} AS path`);
-  }
-
-  if (options.sourceIds !== undefined) recursiveColumns.push(sql`r.origin_id`);
-
-  const recursiveWhere: SqlFragment[] = [
-    sql`e.graph_id = ${options.graphId}`,
-    edgeKindFilter,
-    edgeTemporalFilter,
-    nodeTemporalFilter,
-    sql`r.depth < ${options.maxHops}`,
-  ];
-  if (cycleCheck !== undefined) recursiveWhere.push(cycleCheck);
-
-  const forceWorktableOuterJoinOrder =
-    options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
-
-  const usesOrientedEdges = edgeWindows.length > 0;
   const recursiveCase = compileRecursiveBranch({
-    recursiveColumns,
-    whereClauses: recursiveWhere,
-    direction: usesOrientedEdges ? "out" : options.direction,
-    forceWorktableOuterJoinOrder,
-    schema,
+    recursiveColumns: prepared.recursiveColumns,
+    whereClauses: prepared.recursiveWhere,
+    direction: windowed ? "out" : options.direction,
+    forceWorktableOuterJoinOrder: prepared.forceWorktableOuterJoinOrder,
+    schema: prepared.schema,
     edgesTable:
-      usesOrientedEdges ?
-        sql.identifier("typegraph_windowed_edges")
-      : schema.edgesTable,
-    ...(usesOrientedEdges && {
+      windowed ?
+        sql.identifier(WINDOWED_EDGES_CTE)
+      : prepared.schema.edgesTable,
+    ...(windowed && {
       joinField: "typegraph_source_id",
       targetField: "typegraph_target_id",
       targetKindField: "typegraph_target_kind",
     }),
   });
 
-  const windowedEdges =
-    usesOrientedEdges ?
-      buildWindowedEdgesCte(
-        schema.edgesTable,
-        options.direction,
-        options.edgeKinds.map((kind) => [kind, options.edgeWindows?.[kind]]),
-        sql.join(
-          [
-            sql`e.graph_id = ${options.graphId}`,
-            edgeKindFilter,
-            edgeTemporalFilter,
-          ],
-          sql` AND `,
-        ),
-      )
-    : undefined;
-  return windowedEdges === undefined ?
-      sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`
-    : sql`WITH RECURSIVE typegraph_windowed_edges AS (${windowedEdges}), reachable AS (${baseCase} UNION ALL ${recursiveCase})`;
+  if (!windowed) {
+    return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;
+  }
+  const windowedEdges = buildWindowedEdgesCte(
+    prepared.schema.edgesTable,
+    options.direction,
+    options.edgeKinds.map((kind) => [kind, options.edgeWindows?.[kind]]),
+    sql.join([...prepared.edgeWhere], sql` AND `),
+  );
+  return sql`WITH RECURSIVE ${sql.raw(WINDOWED_EDGES_CTE)} AS (${windowedEdges}), reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;
 }
 
 type BuildExhaustiveDirectedReachableCteOptions = ReachableCteFiltersCore &
   Readonly<{
+    sourceId: string;
     /** Edge kinds walked in the "out" direction (`e.from_id = r.id`). */
     outEdgeKinds: readonly string[];
     /** Edge kinds walked in the "in" direction (`e.to_id = r.id`). */
@@ -512,7 +441,8 @@ type RecursiveFrontierBranchOptions = Readonly<{
   nodeJoin: SqlFragment;
   whereClauses: readonly SqlFragment[];
   forceWorktableOuterJoinOrder: boolean;
-  schema: SqlSchema;
+  /** The edge relation `e` reads: the edges table or a pre-ranked window of it. */
+  edgesTable: SqlFragment;
 }>;
 
 /**
@@ -530,9 +460,9 @@ function recursiveFrontierBranch(
 ): SqlFragment {
   if (options.forceWorktableOuterJoinOrder) {
     const allWhere = [...options.whereClauses, options.joinCondition];
-    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.schema.edgesTable} e ${options.nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
+    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.edgesTable} e ${options.nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
   }
-  return sql`${options.selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON ${options.joinCondition} ${options.nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  return sql`${options.selectClause} FROM reachable r JOIN ${options.edgesTable} e ON ${options.joinCondition} ${options.nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
 }
 
 type DirectionalBranchOptions = Readonly<{
@@ -551,15 +481,14 @@ function buildDirectionalBranch(
 ): SqlFragment {
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(options.targetField)} AND n.kind = e.${sql.raw(options.targetKindField)}`;
 
-  if (options.forceWorktableOuterJoinOrder) {
-    const allWhere = [
-      ...options.whereClauses,
-      sql`e.${sql.raw(options.joinField)} = r.id`,
-    ];
-    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
-  }
-
-  return sql`${options.selectClause} FROM reachable r JOIN ${options.edgesTable} e ON e.${sql.raw(options.joinField)} = r.id ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  return recursiveFrontierBranch({
+    selectClause: options.selectClause,
+    joinCondition: sql`e.${sql.raw(options.joinField)} = r.id`,
+    nodeJoin,
+    whereClauses: options.whereClauses,
+    forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
+    edgesTable: options.edgesTable,
+  });
 }
 
 type BidirectionalBranchOptions = Readonly<{
@@ -577,15 +506,14 @@ function buildBidirectionalBranch(
   // folded into a single UNION ALL branch via an OR on the join condition.
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.to_id = r.id AND n.id = e.from_id AND n.kind = e.from_kind) OR (e.from_id = r.id AND n.id = e.to_id AND n.kind = e.to_kind))`;
 
-  if (options.forceWorktableOuterJoinOrder) {
-    const allWhere = [
-      ...options.whereClauses,
-      sql`(e.from_id = r.id OR e.to_id = r.id)`,
-    ];
-    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
-  }
-
-  return sql`${options.selectClause} FROM reachable r JOIN ${options.edgesTable} e ON (e.from_id = r.id OR e.to_id = r.id) ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  return recursiveFrontierBranch({
+    selectClause: options.selectClause,
+    joinCondition: sql`(e.from_id = r.id OR e.to_id = r.id)`,
+    nodeJoin,
+    whereClauses: options.whereClauses,
+    forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
+    edgesTable: options.edgesTable,
+  });
 }
 
 export function buildWindowedEdgesCte(
@@ -661,7 +589,7 @@ function buildDirectedGroupsBranch(
     nodeJoin,
     whereClauses: options.whereClauses,
     forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
-    schema: options.schema,
+    edgesTable: options.schema.edgesTable,
   });
 }
 

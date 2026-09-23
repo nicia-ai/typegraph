@@ -170,7 +170,7 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/recursive-cte.ts",
-    line: "sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`",
+    line: "return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;",
     site: "B",
     reason:
       "buildReachableCte compiles a fixed/variable-length traversal into a bounded reachable set.",
@@ -212,7 +212,7 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/recursive-cte.ts",
-    line: ": sql`WITH RECURSIVE typegraph_windowed_edges AS (${windowedEdges}), reachable AS (${baseCase} UNION ALL ${recursiveCase})`;",
+    line: "return sql`WITH RECURSIVE ${sql.raw(WINDOWED_EDGES_CTE)} AS (${windowedEdges}), reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;",
     site: "G",
     reason:
       "buildReachableCte ranks each requested edge kind before expanding the bounded reachable set.",
