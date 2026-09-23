@@ -570,17 +570,10 @@ export function storeQueryBackend<G extends GraphDef>(
 type TransactionRuntimePort = Readonly<{
   [TRANSACTION_RUNTIME]?: Readonly<{
     backend: TransactionBackend;
-    runNodeOperationHooks: TransactionNodeOperationHookRunner;
     deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy;
+    reviveNode: TransactionReviveNode;
   }>;
 }>;
-
-type TransactionNodeOperationHookRunner = <T>(
-  operation: "create" | "update" | "delete",
-  kind: string,
-  id: string,
-  fn: () => Promise<T>,
-) => Promise<T>;
 
 /**
  * A node delete bound to the transaction it is invoked from — see
@@ -592,6 +585,11 @@ type TransactionNodeOperationHookRunner = <T>(
 export type TransactionDeleteNodeWithPolicy = (
   work: Readonly<{ kind: string; id: string }>,
   policy?: NodeDeletePolicy,
+) => Promise<void>;
+
+/** A node revival bound to the transaction it is invoked from — see {@link transactionReviveNode}. */
+type TransactionReviveNode = (
+  work: Readonly<{ kind: string; id: string }>,
 ) => Promise<void>;
 
 const transactionStoreOwners = new WeakMap<object, object>();
@@ -673,19 +671,6 @@ export function transactionBackend(
   return runtime.backend;
 }
 
-/** Returns the hook runner paired with a transaction's internal backend. */
-export function transactionNodeOperationHookRunner(
-  transaction: TransactionRuntimePort,
-): TransactionNodeOperationHookRunner {
-  const runtime = transaction[TRANSACTION_RUNTIME];
-  if (runtime === undefined) {
-    throw new TypeError(
-      "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
-    );
-  }
-  return runtime.runNodeOperationHooks;
-}
-
 /**
  * Soft-deletes one node under an explicit {@link NodeDeletePolicy} through
  * THIS transaction's own node-operation context — the buffered hook runner
@@ -712,4 +697,26 @@ export function transactionDeleteNodeWithPolicy(
     );
   }
   return runtime.deleteNodeWithPolicy(work, policy);
+}
+
+/**
+ * Revives one soft-deleted node with its stored props through THIS
+ * transaction's own node-operation context — the in-frame revive owner
+ * (`executeNodeRevive`), so the revival re-takes its uniqueness claims,
+ * re-syncs its projections and re-enters identity as a restore exactly as the
+ * write path owes, under the transaction's buffered hook runner. The inverse
+ * of a soft delete through {@link transactionDeleteNodeWithPolicy}; today's
+ * caller is provenance's currency reopen.
+ */
+export function transactionReviveNode(
+  transaction: TransactionRuntimePort,
+  work: Readonly<{ kind: string; id: string }>,
+): Promise<void> {
+  const runtime = transaction[TRANSACTION_RUNTIME];
+  if (runtime === undefined) {
+    throw new TypeError(
+      "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
+    );
+  }
+  return runtime.reviveNode(work);
 }

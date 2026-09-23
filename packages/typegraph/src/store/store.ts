@@ -367,6 +367,7 @@ import {
   executeNodeReparentBatch,
   executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
+  executeNodeRevive,
   executeNodeSetUpdate,
   executeNodeUpdate,
   executeNodeUpsertUpdateBatch,
@@ -4876,6 +4877,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               outerRuntime.backend,
               policy,
             ),
+          reviveNode: (work: Readonly<{ kind: string; id: string }>) =>
+            executeNodeRevive(
+              surface.nodeOperationContext,
+              work.kind,
+              work.id,
+              outerRuntime.backend,
+            ),
         },
       });
       // Non-enumerable, matching the outer context's own definition, so the
@@ -5172,17 +5180,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
     const txNodeOperationContext = outerSurface.nodeOperationContext;
 
-    const runNodeOperationHooks = <T>(
-      operation: "create" | "update" | "delete",
-      kind: string,
-      id: string,
-      fn: () => Promise<T>,
-    ): Promise<T> =>
-      runHooks(
-        this.#createOperationContext(operation, "node", kind, id, attempt),
-        fn,
-      );
-
     let nodes = outerSurface.nodes;
     let edges = outerSurface.edges;
 
@@ -5223,7 +5220,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend: createTransactionReadBackend(txBackend),
       [TRANSACTION_RUNTIME]: {
         backend: txBackend,
-        runNodeOperationHooks,
         deleteNodeWithPolicy: (
           work: Readonly<{ kind: string; id: string }>,
           policy?: NodeDeletePolicy,
@@ -5234,6 +5230,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             work.id,
             txBackend,
             policy,
+          ),
+        reviveNode: (work: Readonly<{ kind: string; id: string }>) =>
+          executeNodeRevive(
+            txNodeOperationContext,
+            work.kind,
+            work.id,
+            txBackend,
           ),
       },
       getNodeCollection,

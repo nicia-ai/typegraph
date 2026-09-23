@@ -82,11 +82,13 @@ import {
   type GraphBackend,
   type InsertNodeParams,
   isLiveNodeRow,
+  isTombstonedNodeRow,
   type LiveNodeRow,
   type NodeInsertProjection,
   type NodePropertyExpectation,
   type NodeRow as BackendNodeRow,
   rowPropsToObject,
+  type TombstonedNodeRow,
   type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
@@ -587,6 +589,31 @@ async function deleteNodeRowInFrame<G extends GraphDef>(
   }
   await ctx.identity?.detachDeleted(target, { kind, id }, mode);
   return true;
+}
+
+/**
+ * ONE tombstoned node row's revival inside an already-open write frame — the
+ * inverse of {@link deleteNodeRowInFrame}'s soft path: the stored props come
+ * back as they were (uniqueness claims re-taken, embeddings and fulltext
+ * re-synced) and the node re-enters identity as a restore.
+ */
+async function reviveNodeRowInFrame<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: NodeWriteSession,
+  target: WriteTarget,
+  existing: TombstonedNodeRow,
+): Promise<void> {
+  const registration = getNodeRegistration(ctx.graph, existing.kind);
+  await session.reviveNode({
+    existing,
+    schema: registration.type.schema,
+    uniqueConstraints: registration.unique ?? [],
+  });
+  await ctx.identity?.foldCreated(
+    target,
+    [{ kind: existing.kind, id: existing.id }],
+    "restore",
+  );
 }
 
 /**
@@ -3019,7 +3046,10 @@ async function readHeldEdge(
 ): Promise<Edge> {
   const row = await target.getEdge(graphId, id);
   return rowToEdge(
-    requireDefined(row, `composition edge "${id}" was written but not readable`),
+    requireDefined(
+      row,
+      `composition edge "${id}" was written but not readable`,
+    ),
   );
 }
 
@@ -3071,9 +3101,9 @@ async function applyCompositionAttachmentDecision<G extends GraphDef>(
     return {
       wrote: true,
       edge:
-        prepared === undefined ?
-          undefined
-        : await readHeldEdge(target, ctx.graphId, prepared.insertParams.id),
+        prepared === undefined ? undefined : (
+          await readHeldEdge(target, ctx.graphId, prepared.insertParams.id)
+        ),
     };
   }
 
@@ -5392,6 +5422,44 @@ export async function executeNodeDelete<G extends GraphDef>(
     },
   );
   ctx.recordCascadedParts?.(outcome.cascadedParts);
+}
+
+/**
+ * Revives one soft-deleted node with its stored props, under the node's
+ * "update" operation hooks — a currency reopen (provenance), not a create: no
+ * input is validated and the validity window is left as it was. A no-op when
+ * the node is absent or live.
+ *
+ * @throws {UniquenessError} when a unique key the node held was taken by
+ *   another node while it was tombstoned.
+ */
+export async function executeNodeRevive<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  id: string,
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  const gate = await backend.getNode(ctx.graphId, kind, id);
+  if (gate === undefined || !isTombstonedNodeRow(gate)) return;
+
+  await runHookedWritePlan(
+    nodeWritePlanContext(ctx),
+    ctx.createOperationContext("update", "node", kind, id),
+    nodeWritePlan(
+      nodeFencesConstraintProbe(ctx, kind, "update"),
+      nodeRequiresIdentityLock(ctx),
+    ),
+    backend,
+    async (session, target): Promise<boolean> => {
+      const existing = await target.getNode(ctx.graphId, kind, id);
+      if (existing === undefined || !isTombstonedNodeRow(existing)) {
+        return false;
+      }
+      await reviveNodeRowInFrame(ctx, session, target, existing);
+      return true;
+    },
+    { didWrite: (revived) => revived },
+  );
 }
 
 async function findConnectedEdgesForNodeBatch<G extends GraphDef>(

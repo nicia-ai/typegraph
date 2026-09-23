@@ -1193,7 +1193,8 @@ export type NodeCollection<
    * `undefined`. A future `validTo` is unaffected.
    */
   create: <
-    const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
   >(
     props: z.input<N["schema"]>,
     options?: NodeCreateOptions<Via>,
@@ -1306,7 +1307,8 @@ export type NodeCollection<
    * missing or already deleted.
    */
   reparent: <
-    const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
   >(
     id: NodeId<N>,
     options: NodeReparentOptions<Via>,
@@ -1318,7 +1320,8 @@ export type NodeCollection<
    * back. Each item is {@link NodeReparentOptions} plus the part id.
    */
   bulkReparent: <
-    const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
   >(
     items: readonly Readonly<{
       id: NodeId<N>;
@@ -1456,7 +1459,8 @@ export type NodeCollection<
    * `undefined`. A future `validTo` is unaffected.
    */
   bulkCreate: <
-    const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
   >(
     items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
       NodeCreateOptions<Via>)[],
@@ -1625,7 +1629,8 @@ export type NodeCollection<
    * @param options - Existing record behavior (default: "return")
    */
   getOrCreateByConstraint: <
-    const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
   >(
     constraintName: CN,
     props: z.input<N["schema"]>,
@@ -1639,7 +1644,8 @@ export type NodeCollection<
    * Atomic when the backend supports transactions.
    */
   bulkGetOrCreateByConstraint: <
-    const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
   >(
     constraintName: CN,
     items: readonly Readonly<{
@@ -2539,12 +2545,6 @@ export const TRANSACTION_RUNTIME: unique symbol = typeGraphGlobalSymbol(
 
 type TransactionRuntime = Readonly<{
   backend: TransactionBackend;
-  runNodeOperationHooks: <T>(
-    operation: "create" | "update" | "delete",
-    kind: string,
-    id: string,
-    fn: () => Promise<T>,
-  ) => Promise<T>;
   /**
    * Soft-deletes one node under an explicit {@link NodeDeletePolicy} through
    * this SAME transaction's node-operation context — the buffered hook
@@ -2563,6 +2563,12 @@ type TransactionRuntime = Readonly<{
     work: Readonly<{ kind: string; id: string }>,
     policy?: NodeDeletePolicy,
   ) => Promise<void>;
+  /**
+   * Revives one soft-deleted node with its stored props through this SAME
+   * transaction's node-operation context — the inverse of a soft delete via
+   * {@link file://./runtime-port.ts transactionReviveNode}.
+   */
+  reviveNode: (work: Readonly<{ kind: string; id: string }>) => Promise<void>;
 }>;
 
 /**

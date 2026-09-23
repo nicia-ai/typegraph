@@ -1,8 +1,5 @@
 import type { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
-import {
-  type BundleVerdictOf,
-  createClaimsVerdictThunk,
-} from "../backend/capabilities/resolve";
+import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   type EdgeRow,
   type GraphReadBackend,
@@ -11,12 +8,9 @@ import {
   type LiveNodeRow,
   type NodeRow,
   rowPropsToObject,
-  type TombstonedNodeRow,
-  type TransactionBackend,
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { projectTargetKinds } from "../core/edge-endpoints";
-import type { NodeRegistration } from "../core/types";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
 import type { KindRegistry } from "../registry";
 import {
@@ -24,18 +18,13 @@ import {
   readCompositionAttachmentsForPage,
   readLiveCompositionWholes,
 } from "../store/operations/composition-create";
-import {
-  applyNodeResurrect,
-  applyNodeSoftDelete,
-  createNodeWriteContext,
-} from "../store/operations/node-write-pipeline";
+import { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 import { lockRecordedGraphWrite } from "../store/recorded-capture";
-import { type GraphWriteLock } from "../store/recorded-capture/clock";
 import {
-  storeBackend,
   storeRuntime,
   transactionBackend,
-  transactionNodeOperationHookRunner,
+  transactionDeleteNodeWithPolicy,
+  transactionReviveNode,
 } from "../store/runtime-port";
 import type { HistoryStore } from "../store/store";
 import {
@@ -1003,46 +992,6 @@ function buildReport<
   return { died, survivedVia, unaffected };
 }
 
-/**
- * Brings fact currency in line with the post-transition support snapshot —
- * but only for the facts the transition could have affected (those reachable
- * from the flipped sources through justification edges). Facts outside that
- * set are never touched: an unsupported live fact elsewhere in the graph
- * (e.g. one whose justification edges have not been linked yet) is not this
- * transition's business, and silently tombstoning it would be invisible data
- * loss the report cannot even mention.
- *
- * Closes run before reopens: a reopen re-checks uniqueness, and the unique
- * key it needs may still be held by a fact this same transition is about to
- * close — closing first makes a legal transition order-independent.
- *
- * Which rows the close pass writes is NOT decided here: the caller resolves
- * them once through {@link closingFactRows} and hands the same map to the
- * report, so every tombstone this pass writes is named in `died`.
- */
-/**
- * Runs `action` over every fact row in `snapshot` that is both affected by the
- * transition and matches `isTargetKey`/`isTargetRow`, concurrently — the
- * matched rows are independent facts, so there is no ordering dependency
- * within a single pass (only between the close pass and the reopen pass,
- * which the caller sequences).
- */
-async function forEachAffectedFact<T extends NodeRow>(
-  snapshot: SupportSnapshot,
-  affected: ReadonlySet<string>,
-  isTargetKey: (key: string) => boolean,
-  isTargetRow: (row: NodeRow) => row is T,
-  action: (row: T) => Promise<void>,
-): Promise<void> {
-  const rows = selectAffectedFactRows(
-    snapshot,
-    affected,
-    isTargetKey,
-    isTargetRow,
-  );
-  await Promise.all([...rows.values()].map((row) => action(row)));
-}
-
 /** The affected fact rows matching both predicates, keyed by fact. */
 function selectAffectedFactRows<T extends NodeRow>(
   snapshot: SupportSnapshot,
@@ -1084,126 +1033,69 @@ function closingFactRows(
 }
 
 /**
- * The transaction-scoped hook lifecycle fact close/reopen runs through —
- * transaction runtime's operation-hook runner. Using the
- * transaction's runner (not the store's) defers each fact's success hook
- * until the transition's COMMIT, so hooks never report a closed or reopened
- * fact that a failed commit then rolls back.
+ * A belief-status close: the canonical soft delete WITHOUT delete-behavior
+ * enforcement or composition cascade. Closing a fact's currency is not a
+ * domain delete, so its connected edges neither block the close (`restrict`)
+ * nor get removed (`cascade` / `disconnect`) — every edge survives untouched,
+ * so a later reopen restores the same neighbourhood. No part is cascaded
+ * either: the REQUIRED parts of a closed whole are closed by this same
+ * transition instead, because the support computation makes a required part
+ * support-dependent on its whole, so they arrive here as facts of their own,
+ * and an optional part is left alone.
  */
-type RunNodeOperationHooks = <T>(
-  operation: "create" | "update" | "delete",
-  kind: string,
-  id: string,
-  fn: () => Promise<T>,
-) => Promise<T>;
+const FACT_CURRENCY_CLOSE_POLICY: NodeDeletePolicy = {
+  enforceDeleteBehavior: false,
+  cascadeComposition: false,
+};
 
+/**
+ * Brings fact currency in line with the post-transition support snapshot —
+ * but only for the facts the transition could have affected (those reachable
+ * from the flipped sources through justification edges). Facts outside that
+ * set are never touched: an unsupported live fact elsewhere in the graph
+ * (e.g. one whose justification edges have not been linked yet) is not this
+ * transition's business, and silently tombstoning it would be invisible data
+ * loss the report cannot even mention.
+ *
+ * Closes run before reopens: a reopen re-checks uniqueness, and the unique
+ * key it needs may still be held by a fact this same transition is about to
+ * close — closing first makes a legal transition order-independent.
+ *
+ * Which rows the close pass writes is NOT decided here: the caller resolves
+ * them once through {@link closingFactRows} and hands the same map to the
+ * report, so every tombstone this pass writes is named in `died`.
+ *
+ * Both passes go through the transaction's own node operations — the one
+ * in-frame delete and revive owners — so each fact takes exactly the steps
+ * any node delete or revival owes (uniqueness, embeddings, fulltext, identity
+ * detach on close and restore on reopen) under the transaction's buffered
+ * hook runner, which defers every success hook until the transition's COMMIT.
+ * One fact at a time: the writes share the transaction's one connection.
+ */
 async function synchronizeFactCurrency<G extends GraphDef>(
-  backend: TransactionBackend,
-  store: HistoryStore<G>,
-  runHooks: RunNodeOperationHooks,
+  tx: TransactionContext<G>,
   snapshot: SupportSnapshot,
   affected: ReadonlySet<string>,
   closing: ReadonlyMap<string, LiveNodeRow>,
-  lock: GraphWriteLock,
 ): Promise<void> {
   // The rows the caller already resolved through `closingFactRows`, so the
   // pass that writes and the report that names them cannot disagree.
-  await Promise.all(
-    [...closing.values()].map((row) =>
-      closeFactCurrency(backend, store, runHooks, row, lock),
-    ),
-  );
-  await forEachAffectedFact(
+  for (const row of closing.values()) {
+    await transactionDeleteNodeWithPolicy(
+      tx,
+      { kind: row.kind, id: row.id },
+      FACT_CURRENCY_CLOSE_POLICY,
+    );
+  }
+  const reopening = selectAffectedFactRows(
     snapshot,
     affected,
     (key) => snapshot.supportedFactKeys.has(key),
     isTombstonedNodeRow,
-    (row) => reopenFactCurrency(backend, store, runHooks, row, lock),
   );
-}
-
-function getFactRegistration<G extends GraphDef>(
-  store: HistoryStore<G>,
-  row: NodeRow,
-): NodeRegistration {
-  const registration = store.graph.nodes[row.kind];
-  if (registration !== undefined) return registration;
-  throw new ConfigurationError(
-    `Provenance fact kind "${row.kind}" is not a node kind in this graph.`,
-    { kind: row.kind, graphId: store.graphId },
-  );
-}
-
-async function closeFactCurrency<G extends GraphDef>(
-  backend: TransactionBackend,
-  store: HistoryStore<G>,
-  runHooks: RunNodeOperationHooks,
-  row: LiveNodeRow,
-  lock: GraphWriteLock,
-): Promise<void> {
-  await runHooks("delete", row.kind, row.id, async () => {
-    const registration = getFactRegistration(store, row);
-    // The canonical soft-delete steps (tombstone, uniqueness/embedding/
-    // fulltext cleanup) WITHOUT delete-behavior enforcement: closing a
-    // fact's currency is a belief-status change, not a domain delete, so
-    // its connected edges neither block the close (`restrict`) nor get
-    // removed (`cascade` / `disconnect`). Every edge survives untouched,
-    // making a later reopen an exact inverse of this close.
-    //
-    // A belief-status close likewise runs no composition cascade — every
-    // part keeps its attachment — because the REQUIRED parts of a closed
-    // whole are closed by this same transition instead: the support
-    // computation makes a required part support-dependent on its whole, so
-    // they arrive here as facts of their own and an optional part is left
-    // alone.
-    await applyNodeSoftDelete(
-      createNodeWriteContext(
-        store.graphId,
-        store.registry,
-        lock,
-        createClaimsVerdictThunk(storeBackend(store)),
-        requireDefined(storeRuntime(store).uniqueSidecarBatch),
-      ),
-      {
-        existing: row,
-        schema: registration.type.schema,
-        uniqueConstraints: registration.unique ?? [],
-        onDelete: registration.onDelete,
-      },
-      backend,
-      { enforceDeleteBehavior: false },
-    );
-  });
-}
-
-async function reopenFactCurrency<G extends GraphDef>(
-  backend: TransactionBackend,
-  store: HistoryStore<G>,
-  runHooks: RunNodeOperationHooks,
-  row: TombstonedNodeRow,
-  lock: GraphWriteLock,
-): Promise<void> {
-  await runHooks("update", row.kind, row.id, async () => {
-    const registration = getFactRegistration(store, row);
-    // The delete removed this fact's uniqueness entries, so reopen re-checks and
-    // re-inserts them (rather than the diff-based update path) before clearing
-    // the tombstone and re-syncing embeddings/fulltext.
-    await applyNodeResurrect(
-      createNodeWriteContext(
-        store.graphId,
-        store.registry,
-        lock,
-        createClaimsVerdictThunk(storeBackend(store)),
-        requireDefined(storeRuntime(store).uniqueSidecarBatch),
-      ),
-      {
-        existing: row,
-        schema: registration.type.schema,
-        uniqueConstraints: registration.unique ?? [],
-      },
-      backend,
-    );
-  });
+  for (const row of reopening.values()) {
+    await transactionReviveNode(tx, { kind: row.kind, id: row.id });
+  }
 }
 
 function getTransactionNodeCollection<G extends GraphDef>(
@@ -1255,9 +1147,8 @@ async function runTransition<
     // first read. `store.transaction` itself takes no lock (write operations
     // acquire it at their own boundaries), but a transition's support
     // snapshot must not race a concurrent transition or history write, so
-    // the per-graph write lock is acquired explicitly up front. The token is
-    // the evidence the currency-sync pipeline steps require.
-    const lock = await lockRecordedGraphWrite(backend, store.graphId);
+    // the per-graph write lock is acquired explicitly up front.
+    await lockRecordedGraphWrite(backend, store.graphId);
     const rows = await Promise.all(
       uniqueSources.map((source) =>
         backend.getNode(store.graphId, source.kind, source.id),
@@ -1306,15 +1197,7 @@ async function runTransition<
     const after = computeSupportSnapshot(supportGraph, availableAfter);
     const affected = after.affectedFactKeys(uniqueSources);
     const closing = closingFactRows(after, affected);
-    await synchronizeFactCurrency(
-      backend,
-      store,
-      transactionNodeOperationHookRunner(tx),
-      after,
-      affected,
-      closing,
-      lock,
-    );
+    await synchronizeFactCurrency(tx, after, affected, closing);
     return buildReport<G, FactKind, JustificationKind>(
       before,
       after,

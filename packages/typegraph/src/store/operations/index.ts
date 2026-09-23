@@ -53,6 +53,7 @@ export {
   executeNodeReparentBatch,
   executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
+  executeNodeRevive,
   executeNodeSetUpdate,
   executeNodeUpdate,
   executeNodeUpsertUpdate,
