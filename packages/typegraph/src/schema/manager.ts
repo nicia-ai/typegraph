@@ -18,6 +18,7 @@ import {
   type SchemaCommitPreflightBackend,
   type SchemaKindEmptinessProbe,
   type SchemaVersionRow,
+  type SetActiveVersionParams,
   type TransactionBackend,
 } from "../backend/types";
 import {
@@ -852,15 +853,23 @@ function requireCommitWithPreflight(
 ): NonNullable<GraphBackend["commitSchemaVersionWithPreflight"]> {
   const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
   if (commitWithPreflight === undefined) {
-    throw new ConfigurationError(
-      capabilityError.message,
-      { code: capabilityError.code, graphId: graph.id },
-      capabilityError.suggestion === undefined ?
-        undefined
-      : { suggestion: capabilityError.suggestion },
-    );
+    throw atomicPreflightUnsupportedError(graph.id, capabilityError);
   }
   return commitWithPreflight;
+}
+
+/** The refusal for a backend that cannot run a schema preflight atomically. */
+function atomicPreflightUnsupportedError(
+  graphId: string,
+  capabilityError: AtomicPreflightCapabilityError,
+): ConfigurationError {
+  return new ConfigurationError(
+    capabilityError.message,
+    { code: capabilityError.code, graphId },
+    capabilityError.suggestion === undefined ?
+      undefined
+    : { suggestion: capabilityError.suggestion },
+  );
 }
 
 /** One step of a composed schema-commit preflight; `undefined` drops out. */
@@ -1811,10 +1820,20 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
  * version. Concurrent rollbacks or commits surface as
  * `StaleVersionError`.
  *
+ * Reactivating a version is a schema transition like any commit: when the
+ * target declares an ontology axiom or edge cardinality the active schema
+ * does not, existing rows are checked against it under the same schema write
+ * fence as the flip (`setActiveVersionWithPreflight`), and the rollback is
+ * refused with the same `MigrationError` a forward commit of that tightening
+ * raises.
+ *
  * @param backend - The database backend
  * @param graphId - The graph ID
  * @param targetVersion - The version to roll back to
- * @throws MigrationError if the target version does not exist
+ * @throws MigrationError if the target version does not exist, or if
+ *   existing rows violate a tightening the target version declares
+ * @throws ConfigurationError if a tightening is owed and the backend cannot
+ *   run its preflight atomically with the flip
  * @throws StaleVersionError if another writer changed the active version concurrently
  */
 export async function rollbackSchema(
@@ -1834,11 +1853,35 @@ export async function rollbackSchema(
       },
     );
   }
-  await backend.setActiveVersion({
+  const params: SetActiveVersionParams = {
     graphId,
     expected: { kind: "active", version: activeRow.version },
     version: targetVersion,
-  });
+  };
+  // An absent target row owes no preflight: `setActiveVersion` refuses it.
+  const targetRow = await backend.getSchemaVersion(graphId, targetVersion);
+  const schemaTighteningPreflight =
+    targetRow === undefined ? undefined : (
+      prepareSchemaTighteningPreflight({
+        graphId,
+        fromVersion: activeRow.version,
+        toVersion: targetVersion,
+        before: parseSerializedSchema(activeRow.schema_doc),
+        after: parseSerializedSchema(targetRow.schema_doc),
+      })
+    );
+  if (schemaTighteningPreflight === undefined) {
+    await backend.setActiveVersion(params);
+    return;
+  }
+  const setActiveWithPreflight = backend.setActiveVersionWithPreflight;
+  if (setActiveWithPreflight === undefined) {
+    throw atomicPreflightUnsupportedError(
+      graphId,
+      schemaTighteningPreflight.capabilityError,
+    );
+  }
+  await setActiveWithPreflight(params, schemaTighteningPreflight.run);
 }
 
 /**

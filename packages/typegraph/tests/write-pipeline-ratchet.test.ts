@@ -125,8 +125,10 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * resolved batches and is routed through recorded capture like updateNode.
  * `upsertHeterogeneousNodes` (131→132) is the exact-session, closed node
  * program and follows the same recorded-capture classification.
+ * `setActiveVersionWithPreflight` (132→133) joined the schema-version
+ * lifecycle beside `setActiveVersion`, owned by the schema manager.
  */
-const MEMBER_COUNT = 132;
+const MEMBER_COUNT = 133;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

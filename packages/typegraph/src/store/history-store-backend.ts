@@ -177,6 +177,7 @@ type UnsafeHistoryStoreBackendMember =
   | "repairContributions"
   | "registerGraphTemplate"
   | "schemaWriteTransaction"
+  | "setActiveVersionWithPreflight"
   | "transaction"
   | "trustedImport";
 

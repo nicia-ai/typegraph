@@ -33,7 +33,8 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-const REASONED_FLOOR = 106;
+// `rollbackSchema` reads the optional preflight flip once.
+const REASONED_FLOOR = 107;
 const DEFERRED_LIVE_TOTAL = 227;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
@@ -44,7 +45,7 @@ const DEFERRED_LIVE_TOTAL = 227;
 // The composition cascade adds one heterogeneous endpoint-set read.
 const DEFERRED_DECLARED_TOTAL = 231;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 347;
+const TOTAL_ROW_COUNT = 348;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -191,7 +192,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 342)", () => {
+  it("the class partition covers every scanned row (total 343)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

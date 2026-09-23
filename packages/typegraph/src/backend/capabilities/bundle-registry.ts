@@ -886,7 +886,8 @@ export type UnbundledOptionalMember =
  * (`profile.provisioning.recordedTime` in `create-sql-backend.ts` and both
  * dialects' transaction-scoped threading) is off `EngineProvisioning`, a
  * type the receiver test's arm (b) does not recognize by name — still 93,
- * 16 + 84 = 100 members total.
+ * 16 + 84 = 100 members total. `setActiveVersionWithPreflight` then added a
+ * reasoned member with one access (`rollbackSchema`) — 16 + 85 = 101.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   upsertHeterogeneousNodes: {
@@ -960,6 +961,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     reason:
       "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.",
     accesses: 3,
+  },
+  setActiveVersionWithPreflight: {
+    kind: "reasoned",
+    reason:
+      "Same schema-version write-fence family as commitSchemaVersionWithPreflight; rollbackSchema refuses with the tightening capability error when it is absent.",
+    accesses: 1,
   },
   lockSchemaVersionForWrite: {
     kind: "reasoned",

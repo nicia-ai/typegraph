@@ -2715,6 +2715,20 @@ export type GraphBackend = Readonly<{
     this: void,
     params: SetActiveVersionParams,
   ) => Promise<void>;
+  /**
+   * {@link GraphBackend.setActiveVersion} with a data preflight, for a flip
+   * that reactivates a stricter schema than the active one. The callback runs
+   * in the same write transaction after the schema write fence is acquired
+   * and before the pointer flip, exactly as
+   * {@link GraphBackend.commitSchemaVersionWithPreflight} runs its own.
+   *
+   * @internal
+   */
+  setActiveVersionWithPreflight?: (
+    this: void,
+    params: SetActiveVersionParams,
+    preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
+  ) => Promise<void>;
 
   /** Register an immutable materialized schema template. */
   registerGraphTemplate?: (

@@ -32,7 +32,11 @@ import {
 import { type AdapterBackend } from "../../../src/backend/types";
 import { computeUniqueKey } from "../../../src/constraints";
 import { buildKindRegistry } from "../../../src/registry";
-import { getActiveSchema, migrateSchema } from "../../../src/schema";
+import {
+  getActiveSchema,
+  migrateSchema,
+  rollbackSchema,
+} from "../../../src/schema";
 import {
   DISJOINT_CONSTRAINT_NAME,
   disjointnessClaimAxis,
@@ -167,6 +171,28 @@ function acyclicTighteningGraph(id: string, withAcyclic: boolean) {
   });
 }
 
+/**
+ * v1 declares `acyclic: true`, v2 drops it, and (when `withCycle`) a cycle is
+ * written under v2: reactivating v1 is the same tightening as committing it
+ * forward.
+ */
+async function cycleWrittenAfterDroppingAcyclic(
+  context: IntegrationTestContext,
+  id: string,
+  withCycle: boolean,
+): Promise<void> {
+  await context.createStore(acyclicTighteningGraph(id, true));
+  const [relaxed] = await createAdapterStoreWithSchema(
+    acyclicTighteningGraph(id, false),
+    context.getBackend(),
+  );
+  expect(await activeVersion(context, id)).toBe(2);
+  const a = await relaxed.nodes.Task.create({});
+  const b = await relaxed.nodes.Task.create({});
+  await relaxed.edges.dependsOn.create(a, b);
+  if (withCycle) await relaxed.edges.dependsOn.create(b, a);
+}
+
 function probeGraph(id: string, withDisjoint: boolean) {
   return defineGraph({
     id,
@@ -269,6 +295,53 @@ export function registerOntologyTighteningIntegrationTests(
     // `edgeAcyclicityAddedDelta`'s caller) makes the commit migrate instead
     // of refusing — the §2.1 defect this workstream exists to close,
     // reproduced for the acyclicity axis.
+
+    it("refuses rolling back to a stricter version whose acyclic declaration live rows violate", async () => {
+      const id = "ontology_tightening_rollback_acyclic";
+      await cycleWrittenAfterDroppingAcyclic(context, id, true);
+
+      const error = await rollbackSchema(context.getBackend(), id, 1).catch(
+        (error_: unknown) => error_,
+      );
+
+      expect(error).toBeInstanceOf(MigrationError);
+      expect((error as MigrationError).details).toMatchObject({
+        reason: "ontology-tightening-violated",
+        fromVersion: 2,
+        toVersion: 1,
+      });
+      expect(await activeVersion(context, id)).toBe(2);
+    });
+    // MUTATION CHECK: flipping through `backend.setActiveVersion` without the
+    // tightening preflight in `rollbackSchema` makes the rollback succeed and
+    // this case fail.
+
+    it("rolls back to a stricter version when live rows satisfy it", async () => {
+      const id = "ontology_tightening_rollback_clean";
+      await cycleWrittenAfterDroppingAcyclic(context, id, false);
+
+      await rollbackSchema(context.getBackend(), id, 1);
+
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+
+    it("refuses a tightening rollback on a backend without setActiveVersionWithPreflight, leaving the active version", async () => {
+      const id = "ontology_tightening_rollback_capability";
+      await cycleWrittenAfterDroppingAcyclic(context, id, false);
+      const restrictedBackend = projectBackendWithout(context.getBackend(), [
+        "setActiveVersionWithPreflight",
+      ]);
+
+      const error = await rollbackSchema(restrictedBackend, id, 1).catch(
+        (error_: unknown) => error_,
+      );
+
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as ConfigurationError).details).toMatchObject({
+        code: "ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
+      });
+      expect(await activeVersion(context, id)).toBe(2);
+    });
 
     it("still migrates cleanly when the newly-acyclic edge kind's data has no cycle", async () => {
       const id = "ontology_tightening_acyclic_clean";

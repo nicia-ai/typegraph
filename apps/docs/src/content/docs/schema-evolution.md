@@ -802,6 +802,13 @@ await rollbackSchema(backend, "my_app", 2);
 
 This does not delete newer versions. You can migrate forward again later.
 
+Reactivating an older version is checked like a forward commit. When the
+target version declares an ontology axiom or edge cardinality the active
+version does not (a `disjointWith`, `acyclic: true`, or a tighter
+`cardinality`, for example), existing rows are validated under the same schema
+fence as the switch, and a violation refuses the rollback with the same
+`MigrationError` a forward migration would raise.
+
 ## Migration Hooks
 
 Use `onBeforeMigrate` and `onAfterMigrate` for observability — logging,

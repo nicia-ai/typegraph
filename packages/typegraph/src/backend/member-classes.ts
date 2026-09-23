@@ -193,6 +193,7 @@ const SCHEMA_MEMBERS = [
   "instantiateGraphTemplate",
   "registerGraphTemplate",
   "setActiveVersion",
+  "setActiveVersionWithPreflight",
   "lockSchemaVersionForWrite",
   "lockSchemaVersionAndGraphWrite",
   "schemaWriteTransaction",
