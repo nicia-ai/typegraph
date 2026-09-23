@@ -22,7 +22,7 @@
  * checks actually performed are recorded in the scratchpad
  * `lane-Ed-load-bearing.md` note.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -32,6 +32,7 @@ import {
   hasPart,
   type NodeRef,
   partOf,
+  type QualifiedRecursivePath,
   subClassOf,
 } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
@@ -431,6 +432,68 @@ export function registerCompositionNavigationIntegrationTests(
         sectionChild.id,
         sectionGrandchild.id,
       ]);
+    });
+
+    it("parts() takes the recursive path and depth option forms, including a qualified path", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const { book, chapter1, paragraph1 } =
+        await seedCompositionFixtures(store);
+      const [chapterEdges, paragraphEdges] = await Promise.all([
+        store.edges.cnBookHasChapter.findFrom(book),
+        store.edges.cnParagraphOf.findFrom(paragraph1),
+      ]);
+      const chapterEdge = requireDefined(chapterEdges[0]);
+      const paragraphEdge = requireDefined(paragraphEdges[0]);
+
+      const rows = await store
+        .query()
+        .from("CnBook", "b")
+        .whereNode("b", (candidate) => candidate.id.eq(book.id))
+        .parts("x", { depth: true, path: { format: "qualified" } })
+        .select((ctx) => ({ depth: ctx.x_depth, route: ctx.x_path }))
+        .execute();
+
+      expectTypeOf(rows).toEqualTypeOf<
+        { depth: number; route: QualifiedRecursivePath }[]
+      >();
+      const chapterRoute = [
+        { type: "node", kind: "CnBook", id: book.id },
+        {
+          type: "edge",
+          kind: "cnBookHasChapter",
+          id: chapterEdge.id,
+          direction: "out",
+        },
+        { type: "node", kind: "CnChapter", id: chapter1.id },
+      ];
+      expect(rows.toSorted((left, right) => left.depth - right.depth)).toEqual([
+        { depth: 1, route: chapterRoute },
+        {
+          depth: 2,
+          route: [
+            ...chapterRoute,
+            {
+              type: "edge",
+              kind: "cnParagraphOf",
+              id: paragraphEdge.id,
+              direction: "in",
+            },
+            { type: "node", kind: "CnParagraph", id: paragraph1.id },
+          ],
+        },
+      ]);
+
+      const aliasedRows = await store
+        .query()
+        .from("CnParagraph", "p")
+        .whereNode("p", (candidate) => candidate.id.eq(paragraph1.id))
+        .wholes("w", { maxHops: 1, path: false, depth: "level" })
+        .select((ctx) => ({ whole: ctx.w.id, level: ctx.level }))
+        .execute();
+      expectTypeOf(aliasedRows).toEqualTypeOf<
+        { whole: string; level: number }[]
+      >();
+      expect(aliasedRows).toEqual([{ whole: chapter1.id, level: 1 }]);
     });
 
     it("a recursing mixed-orientation parts() compiles as a later traversal stage", async () => {

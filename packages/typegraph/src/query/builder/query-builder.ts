@@ -112,10 +112,12 @@ import {
   type EmptyRecursiveAliasMap,
   type NodeAccessor,
   type NodeAlias,
+  type QualifiedRecursivePathOption,
   type QueryBuilderConfig,
   type QueryBuilderState,
   type QueryCoordinateState,
   type RecursiveAliasMap,
+  type RecursiveTraversalOptions,
   type SelectContext,
   type UniqueAlias,
 } from "./types";
@@ -199,10 +201,17 @@ export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
   from?: keyof Aliases & string;
   /** Maximum recursion depth. `1` reaches only the direct level. */
   maxHops?: number;
-  /** Include recursion depth in output. Pass a string to customize the alias. */
-  depth?: string;
-  /** Include the traversal path in output. Pass a string to customize the alias. */
-  path?: string;
+  /**
+   * Include recursion depth in output, as `.recursive({ depth })` takes it:
+   * `true` for the default alias or a string to customize it.
+   */
+  depth?: RecursiveTraversalOptions["depth"];
+  /**
+   * Include the traversal path in output, as `.recursive({ path })` takes it:
+   * `true` or an alias string for node ids, or `{ format: "qualified" }` for
+   * node and edge references with each hop's direction.
+   */
+  path?: RecursiveTraversalOptions["path"];
   /**
    * Realize the walk through this edge only. An edge TYPE is checked at
    * compile time; a kind string is checked at runtime. A kind that realizes
@@ -237,8 +246,14 @@ type CompositionNavigationResult<
   EdgeAliases & Record<`${NA}_edge`, EdgeAlias<CompositionNavigationEdge<O>>>,
   RecursiveAliases &
     BuildRecursiveAliases<
-      O extends { depth: infer D extends string } ? D : false,
-      O extends { path: infer P extends string } ? P : false,
+      O extends { depth: infer D extends boolean | string } ? D : false,
+      O extends (
+        {
+          path: infer P extends boolean | string | QualifiedRecursivePathOption;
+        }
+      ) ?
+        P
+      : false,
       NA
     >,
   CoordinateState
@@ -1294,7 +1309,7 @@ export class QueryBuilder<
     // depth nor a path column, so no accepted option is ever silently
     // dropped by the optimization.
     const wantsRecursiveOutput =
-      options?.depth !== undefined || options?.path !== undefined;
+      (options?.depth ?? false) !== false || (options?.path ?? false) !== false;
     const willRecurse = !(options?.maxHops === 1 && !wantsRecursiveOutput);
 
     return (willRecurse ?
