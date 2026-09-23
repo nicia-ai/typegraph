@@ -325,6 +325,23 @@ export function registerOntologyTighteningIntegrationTests(
       expect(await activeVersion(context, id)).toBe(1);
     });
 
+    it("rolls back a version that tightens nothing on a backend without setActiveVersionWithPreflight", async () => {
+      const id = "ontology_tightening_rollback_loosening";
+      await context.createStore(acyclicTighteningGraph(id, false));
+      await createAdapterStoreWithSchema(
+        acyclicTighteningGraph(id, true),
+        context.getBackend(),
+      );
+      expect(await activeVersion(context, id)).toBe(2);
+      const restrictedBackend = projectBackendWithout(context.getBackend(), [
+        "setActiveVersionWithPreflight",
+      ]);
+
+      await rollbackSchema(restrictedBackend, id, 1);
+
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+
     it("refuses a tightening rollback on a backend without setActiveVersionWithPreflight, leaving the active version", async () => {
       const id = "ontology_tightening_rollback_capability";
       await cycleWrittenAfterDroppingAcyclic(context, id, false);

@@ -50,6 +50,7 @@ import {
 } from "../query/compiler/schema";
 import { buildKindRegistry } from "../registry";
 import { freezeDeep } from "../utils/object";
+import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
 import {
   computeSchemaDiff,
@@ -1878,7 +1879,9 @@ export async function rollbackSchema(
   if (setActiveWithPreflight === undefined) {
     throw atomicPreflightUnsupportedError(
       graphId,
-      schemaTighteningPreflight.capabilityError,
+      requireDefined(
+        schemaCommitCapabilityError(false, schemaTighteningPreflight),
+      ),
     );
   }
   await setActiveWithPreflight(params, schemaTighteningPreflight.run);
