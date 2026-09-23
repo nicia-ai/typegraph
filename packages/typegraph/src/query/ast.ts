@@ -10,8 +10,8 @@ import {
   type NullCheckOp,
   type TemporalMode,
 } from "../core/types";
-import { type DatabaseExpression } from "./expressions";
 import { type AliasExpansionAxis } from "./builder/alias-expansion";
+import { type DatabaseExpression } from "./expressions";
 import { type JsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -402,9 +402,10 @@ type QueryStart = Readonly<{
   kinds: readonly string[]; // Expanded per `expansion` (subclasses/narrower)
   /**
    * Which expansion axis produced `kinds` — see
-   * `src/query/builder/alias-expansion.ts`. A `boolean` cannot describe a
-   * `"narrower"`-expanded alias, so this records the DECISION itself rather
-   * than a flag a compiled-AST consumer would have to re-derive.
+   * `src/query/builder/alias-expansion.ts`. Diagnostic only: error details and
+   * suggestions report it, but no compilation or execution decision may read
+   * it. `kinds` is the resolved decision; a later recursive stage re-roots on a
+   * traversal alias and labels it `"exact"` whatever axis resolved that alias.
    */
   expansion: AliasExpansionAxis;
 }>;
