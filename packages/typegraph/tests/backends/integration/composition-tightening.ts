@@ -207,6 +207,43 @@ export function registerCompositionTighteningIntegrationTests(
       ).rejects.toMatchObject({ code: "COMPOSITION_WHOLE_OCCUPIED" });
     });
 
+    it("refuses a bulk attach to a second whole when the incumbent predates the declaration", async () => {
+      const id = "composition_tightening_clean_bulk";
+      const store = await context.createStore(buildGraph(id, false));
+      const chapter = await store.nodes.CtChapter.create({});
+      const book = await store.nodes.CtBook.create({});
+      const incumbent = await store.edges.ctChapterOf.create(chapter, book, {});
+
+      await migrateSchema(
+        context.getBackend(),
+        buildGraph(id, true),
+        await activeVersion(context, id),
+      );
+      const [upgradedStore] = await createAdapterStoreWithSchema(
+        buildGraph(id, true),
+        context.getBackend(),
+      );
+      const anthology = await upgradedStore.nodes.CtAnthology.create({});
+
+      // The incumbent was written before `partOf` existed, so it holds no
+      // composition claim row; only the batch claim's incumbent read sees it.
+      await expect(
+        upgradedStore.edges.ctIncludedIn.bulkCreate([
+          { from: chapter, to: anthology },
+        ]),
+      ).rejects.toMatchObject({
+        code: "COMPOSITION_WHOLE_OCCUPIED",
+        details: { incumbentEdgeId: incumbent.id },
+      });
+      expect(await upgradedStore.edges.ctIncludedIn.findFrom(chapter)).toEqual(
+        [],
+      );
+    });
+    // MUTATION CHECK: make `readClaimlessIncumbents`
+    // (src/backend/drizzle/operation-backend-core.ts) return an empty map.
+    // The batch lock then inserts a fresh composition claim for the new edge,
+    // the bulk create commits, and the chapter holds two wholes.
+
     it('item E.2: flipping an already-declared pair to existence: "required" refuses a DIRTY graph directly through ensureSchema, never reaching "breaking-change"', async () => {
       const id = "composition_tightening_flip_required";
       const store = await context.createStore(buildFlipGraph(id, false));

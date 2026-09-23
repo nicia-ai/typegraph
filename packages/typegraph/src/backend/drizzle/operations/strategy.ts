@@ -100,6 +100,7 @@ import {
   buildLockEdgeClaimGuarded,
   buildLockEdgeClaims,
   buildPurgeEdgeClaims,
+  buildReadEdgeClaimIncumbents,
   buildTakeOverEdgeClaim,
   buildTakeOverEdgeClaimGuarded,
 } from "./edge-claims";
@@ -551,15 +552,19 @@ export type CommonOperationStrategy = Readonly<{
   buildCheckUnique: (params: CheckUniqueParams) => SQL;
   buildCheckUniqueBatch: (params: CheckUniqueBatchParams) => SQL;
   /**
-   * The two edge-claim statements, in the order the driver issues them: the
-   * decision-free lock that reports the committed holder, then — only for a
-   * foreign holder — the conditional takeover. Members of this interface rather
-   * than dialect helpers, so the type checker forces both dialects to have them.
+   * The edge-claim statements, in the order the driver issues them: the
+   * decision-free lock that reports the committed holder, the incumbent read
+   * for claims no read probe covers, then — only for a foreign holder — the
+   * conditional takeover. Members of this interface rather than dialect
+   * helpers, so the type checker forces both dialects to have them.
    */
   buildLockEdgeClaims: (
     entries: readonly ClaimEdgeCardinalityParams[],
     timestamp: string,
   ) => SQL;
+  buildReadEdgeClaimIncumbents: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ) => readonly SQL[];
   buildLockEdgeClaimGuarded: (
     params: ClaimEdgeCardinalityParams,
     timestamp: string,
@@ -1252,6 +1257,11 @@ function createCommonOperationStrategy(
       timestamp: string,
     ): SQL {
       return buildLockEdgeClaims(tables, entries, timestamp);
+    },
+    buildReadEdgeClaimIncumbents(
+      entries: readonly ClaimEdgeCardinalityParams[],
+    ): readonly SQL[] {
+      return buildReadEdgeClaimIncumbents(tables, entries);
     },
     buildLockEdgeClaimGuarded(
       params: ClaimEdgeCardinalityParams,

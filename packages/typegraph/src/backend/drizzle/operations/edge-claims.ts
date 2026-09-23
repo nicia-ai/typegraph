@@ -718,6 +718,45 @@ export function buildLockEdgeClaims(
 }
 
 /**
+ * The batch counterpart of {@link buildLockEdgeClaimGuarded}'s `has_incumbent`:
+ * every proposed claim whose axis a live edge OTHER than the proposed one
+ * already occupies, with that incumbent's id.
+ *
+ * {@link buildLockEdgeClaims} reports only the claim relation's holder, so a
+ * live edge that never wrote a claim row — one that predates the declaration
+ * fencing its axis — is invisible to it. Rendered from
+ * {@link competingLiveEdgePredicate}, the fragment the single-row guard reads,
+ * so the two paths cannot disagree about what an incumbent is. Issued after
+ * the lock, it reads a snapshot that includes every claimant the lock waited
+ * on.
+ *
+ * Ordered by incumbent id, so a caller keeping the first row per axis reports
+ * a deterministic one. One statement per predicate-shape group; see
+ * {@link groupEntriesByPredicateShape}.
+ */
+export function buildReadEdgeClaimIncumbents(
+  tables: Tables,
+  entries: readonly ClaimEdgeCardinalityParams[],
+): readonly SQL[] {
+  const { edges } = tables;
+  const edgesName = getTableName(edges);
+  const values = PROPOSED_CLAIM_VALUES;
+  return groupEntriesByPredicateShape(entries).map((group) => {
+    const axis = axisOf(group);
+    return sql`
+      WITH ${proposedRelationCte(tables, group)}
+      SELECT
+        ${proposedValue("axis")} AS axis,
+        ${proposedValue("key")} AS key,
+        ${qualified(edgesName, edges.id)} AS incumbent_edge_id
+      FROM ${PROPOSED_RELATION_REF}
+      JOIN ${edges} ON ${competingLiveEdgePredicate(tables, values, axis)}
+      ORDER BY ${qualified(edgesName, edges.id)}
+    `;
+  });
+}
+
+/**
  * Single-row create-or-lock with an entity-relation guard in its RETURNING
  * projection. The upsert first establishes the cardinality-axis row lock; its
  * returned holder resolves concurrent claimants, while `has_incumbent`

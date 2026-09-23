@@ -1879,7 +1879,9 @@ export function createCommonOperationBackend(
    * COMMITTED, so two concurrent writers would both see "the incumbent is not
    * live yet" and both commit. Statement 1 is therefore decision-free — it only
    * makes the row exist, takes its lock and reports the COMMITTED holder — and
-   * statement 2 re-evaluates liveness after that lock is held.
+   * statement 2 re-evaluates liveness after that lock is held. Between them,
+   * {@link readClaimlessIncumbents} refuses a composition claim whose axis a
+   * claimless live edge already occupies.
    *
    * Duplicate conflict targets are refused rather than collapsed: a multi-row
    * upsert cannot affect one row twice, so two entries claiming one axis would
@@ -1925,8 +1927,14 @@ export function createCommonOperationBackend(
       const holderByTarget = new Map(
         rows.map((row) => [`${row.axis}\u0000${row.key}`, row.holder_edge_id]),
       );
+      const incumbentByTarget = await readClaimlessIncumbents(chunk);
       for (const entry of chunk) {
         const key = targetKey(entry);
+        const incumbent = incumbentByTarget.get(key);
+        if (incumbent !== undefined) {
+          outcomes.set(key, { status: "refused", holderEdgeId: incumbent });
+          continue;
+        }
         const holder = holderByTarget.get(key);
         if (holder === undefined || holder === entry.edgeId) {
           outcomes.set(key, { status: "claimed" });
@@ -1946,6 +1954,38 @@ export function createCommonOperationBackend(
     return entries.map(
       (entry) => outcomes.get(targetKey(entry)) ?? { status: "claimed" },
     );
+  }
+
+  /**
+   * The live edges already occupying a composition claim's axis, keyed like
+   * the lock's holders. An ordinary axis is read-probed by the store before
+   * it is claimed; a composition axis is relation-wide and has no read probe,
+   * so a live attachment that predates its `partOf` declaration holds no claim
+   * row and only this read can see it — the batch counterpart of the
+   * single-row guard's `has_incumbent`.
+   */
+  async function readClaimlessIncumbents(
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ): Promise<ReadonlyMap<string, string>> {
+    const compositionEntries = entries.filter(
+      (entry) => entry.scope !== undefined,
+    );
+    const incumbents = new Map<string, string>();
+    if (compositionEntries.length === 0) return incumbents;
+    for (const query of operationStrategy.buildReadEdgeClaimIncumbents(
+      compositionEntries,
+    )) {
+      const rows = await execution.execAll<{
+        axis: string;
+        key: string;
+        incumbent_edge_id: string;
+      }>(query);
+      for (const row of rows) {
+        const key = `${row.axis}\u0000${row.key}`;
+        if (!incumbents.has(key)) incumbents.set(key, row.incumbent_edge_id);
+      }
+    }
+    return incumbents;
   }
 
   /**

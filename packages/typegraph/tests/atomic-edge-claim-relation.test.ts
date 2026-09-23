@@ -23,6 +23,7 @@ import {
   buildDeleteStaleAtomicEdgeClaims,
   buildInsertEdgeIfEndpointsLiveWithCardinalityClaim,
   buildLockEdgeClaimGuarded,
+  buildReadEdgeClaimIncumbents,
   buildTakeOverEdgeClaim,
   buildTakeOverEdgeClaimGuarded,
 } from "../src/backend/drizzle/operations/edge-claims";
@@ -323,6 +324,11 @@ describe.each(DIALECTS)(
             SCHEMA_FENCE,
             LOCK_CLAUSE,
           ),
+      ],
+      [
+        "buildReadEdgeClaimIncumbents",
+        (entries: readonly ClaimEdgeCardinalityParams[]) =>
+          buildReadEdgeClaimIncumbents(tables, entries),
       ],
     ] as const)("%s spells each group's own spec", (_name, build) => {
       it.each([
