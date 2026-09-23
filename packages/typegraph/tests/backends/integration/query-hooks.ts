@@ -55,6 +55,19 @@ function directSubgraphStatementCount(context: IntegrationTestContext): number {
  */
 const COMPOSITION_SUBGRAPH_STATEMENT_COUNT = 5;
 
+/**
+ * A subgraph's node and edge fetches run concurrently on some backends, so
+ * statements finish in no fixed order; pairing ends with starts compares the
+ * two as multisets keyed by the statement's own operation id.
+ */
+function inOperationIdOrder(
+  contexts: readonly QueryHookContext[],
+): readonly QueryHookContext[] {
+  return contexts.toSorted((left, right) =>
+    left.operationId.localeCompare(right.operationId),
+  );
+}
+
 export function registerQueryHookIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -88,7 +101,7 @@ export function registerQueryHookIntegrationTests(
       });
       expect(current.nodes.has(peer.id)).toBe(true);
       expect(starts).toHaveLength(expected);
-      expect(ends).toEqual(starts);
+      expect(inOperationIdOrder(ends)).toEqual(inOperationIdOrder(starts));
 
       starts.length = 0;
       ends.length = 0;
@@ -98,7 +111,7 @@ export function registerQueryHookIntegrationTests(
       });
       expect(recorded.nodes.has(peer.id)).toBe(true);
       expect(starts).toHaveLength(expected);
-      expect(ends).toEqual(starts);
+      expect(inOperationIdOrder(ends)).toEqual(inOperationIdOrder(starts));
 
       starts.length = 0;
       ends.length = 0;
@@ -110,7 +123,7 @@ export function registerQueryHookIntegrationTests(
         .execute();
       expect(recordedPeople).toHaveLength(2);
       expect(starts).toHaveLength(1);
-      expect(ends).toEqual(starts);
+      expect(inOperationIdOrder(ends)).toEqual(inOperationIdOrder(starts));
     });
 
     it("fires once per statement a composition subgraph submits", async () => {
