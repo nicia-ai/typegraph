@@ -242,6 +242,10 @@ Each route alternates node and edge references, starting and ending with a node:
 do not hydrate node or edge properties. Legacy `path: true` and `path: "alias"` continue to return
 node ID arrays.
 
+To keep only the paths that end at particular nodes, filter the endpoint with `.where(...)`. A
+`whereNode()` on the target alias constrains every hop, so a path through a node that fails it is
+never extended (see [Expansion and completed-result filters](#expansion-and-completed-result-filters)).
+
 ## Chaining Fixed and Recursive Traversals
 
 Fixed-hop and recursive traversals compose from left to right. Each later stage expands from the
