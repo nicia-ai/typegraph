@@ -39,6 +39,7 @@ import {
   buildDistinctComponents,
   classHasDisjointKinds,
   componentFor,
+  indexComponentsByMember,
   loadLiveReferences,
   loadSnapshot,
   requireLiveEndpoint,
@@ -1158,7 +1159,11 @@ export async function replaceAffectedClosure(
   // singleton class is gone, so its rows must be rewritten too.
   const separationMembers = [...affected, ...[...components.values()].flat()];
   await replaceSeparationForMembers(target, schema, graphId, separationMembers);
-  return diffClosureTransitions(affected, oldClassOf, components);
+  return diffClosureTransitions(
+    affected,
+    oldClassOf,
+    indexComponentsByMember(components),
+  );
 }
 
 /**

@@ -87,6 +87,23 @@ function readTransitions<G extends GraphDef>(
   });
 }
 
+/** Each `cause` row as `class <- prior` (`<- -` for "no prior class"), sorted, so a test pins the EXACT record set. */
+function transitionHops(
+  rows: readonly IdentityTransitionRow[],
+  cause: IdentityTransitionRow["cause"],
+): readonly string[] {
+  return rows
+    .filter((row) => row.cause === cause)
+    .map((row) => {
+      const prior =
+        row.prior_class_kind === undefined ?
+          "-"
+        : `${row.prior_class_kind}:${row.prior_class_id}`;
+      return `${row.class_kind}:${row.class_id} <- ${prior}`;
+    })
+    .toSorted();
+}
+
 describe("identity transition log", () => {
   it("notes an assert transition when assertSame fuses two singletons", async () => {
     const [store] = await createAdapterStoreWithSchema(
@@ -227,14 +244,90 @@ describe("identity transition log", () => {
       { kind: "Org", id: "shared" },
     ];
     const rows = await readTransitions(ctx, sharedReferences);
-    const foldRows = rows.filter((row) => row.cause === "fold");
-    expect(foldRows.length).toBeGreaterThanOrEqual(1);
+    // Two singletons fold into one class labelled by its code-point-least
+    // member: one record, neither side having had a prior (>=2 member) class.
+    expect(transitionHops(rows, "fold")).toEqual(["Org:shared <- -"]);
 
     await store.nodes.Org.delete(asNodeId("shared"));
     await store.nodes.Org.create({ name: "A Org 2" }, { id: "shared" });
     const afterRestore = await readTransitions(ctx, sharedReferences);
     const restoreRows = afterRestore.filter((row) => row.cause === "restore");
     expect(restoreRows.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // Load-bearing: `replaceAffectedClosure` diffs its recomputed classes BY
+  // MEMBER. Handing that diff the root-keyed distinct components instead
+  // (`buildDistinctComponents` without `indexComponentsByMember`) finds a new
+  // class for the union-find root only, so every other member's record is
+  // silently skipped — here the `Person:c` class's absorption into `Person:a`.
+  it("records every absorbed class when bulkAssertSame fuses two existing classes", async () => {
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    for (const id of ["a", "b", "c", "d"]) {
+      await store.nodes.Person.create({ name: id }, { id });
+    }
+    await store.identity.bulkAssertSame([
+      { a: { kind: "Person", id: "a" }, b: { kind: "Person", id: "b" } },
+      { a: { kind: "Person", id: "c" }, b: { kind: "Person", id: "d" } },
+    ]);
+    const ctx = storeRuntime(store).identityContext();
+    const references = ["a", "b", "c", "d"].map((id) => ({
+      kind: "Person",
+      id,
+    }));
+    const beforeFuse = await readTransitions(ctx, references);
+    expect(transitionHops(beforeFuse, "assert")).toEqual([
+      "Person:a <- -",
+      "Person:c <- -",
+    ]);
+
+    await store.identity.bulkAssertSame([
+      { a: { kind: "Person", id: "b" }, b: { kind: "Person", id: "c" } },
+    ]);
+    const afterFuse = await readTransitions(ctx, references);
+    // `Person:a` survives as the label but its member set grew (a
+    // self-referential record), and the `Person:c` class became `Person:a`.
+    expect(transitionHops(afterFuse, "assert")).toEqual([
+      "Person:a <- -",
+      "Person:a <- Person:a",
+      "Person:a <- Person:c",
+      "Person:c <- -",
+    ]);
+  });
+
+  it("records the absorbed class when a same-id create folds into an existing multi-member class", async () => {
+    const Org = defineNode("Org", { schema: z.object({ name: z.string() }) });
+    const foldGraph = defineGraph({
+      id: "identity_transition_log_fold_class",
+      nodes: { Person: { type: Person }, Org: { type: Org } },
+      edges: {},
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    const [store] = await createAdapterStoreWithSchema(
+      foldGraph,
+      createTestBackend(),
+      { history: true },
+    );
+    await store.nodes.Person.create({ name: "A" }, { id: "shared" });
+    await store.nodes.Person.create({ name: "Z" }, { id: "z" });
+    await store.identity.assertSame(
+      { kind: "Person", id: "shared" },
+      { kind: "Person", id: "z" },
+    );
+    await store.nodes.Org.create({ name: "A Org" }, { id: "shared" });
+    const ctx = storeRuntime(store).identityContext();
+    const rows = await readTransitions(ctx, [
+      { kind: "Org", id: "shared" },
+      { kind: "Person", id: "shared" },
+      { kind: "Person", id: "z" },
+    ]);
+    expect(transitionHops(rows, "fold")).toEqual([
+      "Org:shared <- -",
+      "Org:shared <- Person:shared",
+    ]);
   });
 
   it("notes a detach transition when a member of a class is soft-deleted", async () => {

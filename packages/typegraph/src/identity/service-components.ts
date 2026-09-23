@@ -96,12 +96,7 @@ export class UnionFind {
   }
 
   components(): ReadonlyMap<string, readonly PlainNodeRef[]> {
-    const distinct = this.distinctComponents();
-    const byMember = new Map<string, readonly PlainNodeRef[]>();
-    for (const group of distinct.values()) {
-      for (const member of group) byMember.set(refKey(member), group);
-    }
-    return byMember;
+    return indexComponentsByMember(this.distinctComponents());
   }
 
   /**
@@ -138,11 +133,22 @@ export function buildComponents(
   >[],
   sameIdAcrossKinds: "fold" | "ignore",
 ): ReadonlyMap<string, readonly PlainNodeRef[]> {
-  const distinct = buildDistinctComponents(
-    structuralNodes,
-    assertions,
-    sameIdAcrossKinds,
+  return indexComponentsByMember(
+    buildDistinctComponents(structuralNodes, assertions, sameIdAcrossKinds),
   );
+}
+
+/**
+ * Re-keys distinct components by every member, sharing each component's one
+ * array across its members — linear in the member count, never a per-member
+ * copy. Any consumer that looks a class up BY MEMBER (a before/after closure
+ * diff) must go through this index: a distinct map is keyed by an arbitrary
+ * union-find root, so a member lookup against it silently misses every
+ * non-root member.
+ */
+export function indexComponentsByMember(
+  distinct: ReadonlyMap<string, readonly PlainNodeRef[]>,
+): ReadonlyMap<string, readonly PlainNodeRef[]> {
   const byMember = new Map<string, readonly PlainNodeRef[]>();
   for (const group of distinct.values()) {
     for (const member of group) byMember.set(refKey(member), group);
