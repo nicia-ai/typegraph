@@ -714,7 +714,8 @@ export function createNodeCollection<
     },
 
     async reparent<
-      const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+      const Via extends CompositionViaRef | undefined =
+        CompositionViaRef | undefined,
     >(
       id: NodeId<N>,
       options: NodeReparentOptions<Via>,
@@ -725,7 +726,8 @@ export function createNodeCollection<
     },
 
     async bulkReparent<
-      const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+      const Via extends CompositionViaRef | undefined =
+        CompositionViaRef | undefined,
     >(
       items: readonly Readonly<{
         id: NodeId<N>;

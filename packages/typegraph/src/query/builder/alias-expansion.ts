@@ -46,7 +46,8 @@ export const DEFAULT_ALIAS_EXPANSION_AXIS: DefaultAliasExpansionAxis =
  * The search facade is not polymorphic. `queryDefaults.expansion` does not
  * apply to it.
  */
-export const SEARCH_EXPANSION_DEFAULT = "exact" as const satisfies DefaultAliasExpansionAxis;
+export const SEARCH_EXPANSION_DEFAULT =
+  "exact" as const satisfies DefaultAliasExpansionAxis;
 
 export type AliasExpansionOptions = Readonly<{
   /**
