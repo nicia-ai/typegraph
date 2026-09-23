@@ -129,9 +129,9 @@ import type {
 import { compareMatchEvidence, entityRef } from "./evidence";
 import { evolutionPlanningTarget } from "./evolution-target";
 import {
-  branchAncestryFromAnchors,
   branchAncestryOf,
   mergeIdentityDecision,
+  mergeIdentityDecisionFromArtifact,
 } from "./identity-decision";
 import type { IdentitySeparationFacts } from "./identity-pairing";
 import {
@@ -6875,18 +6875,7 @@ export async function applyMergePlan<G extends GraphDef>(
   // anchors it names, the review digest the caller reviewed it under, and the
   // policy arm the classifier actually exercised. Nothing here is read back or
   // recomputed, and a field the apply cannot evidence stays absent.
-  const decision = mergeIdentityDecision({
-    branchAncestry: branchAncestryFromAnchors(artifact.anchors),
-    reconciliations: (artifact.review.identityReconciliations ??
-      []) as unknown as readonly IdentityReconciliation[],
-    conflicts: (artifact.review.identityConflicts ??
-      []) as unknown as readonly IdentityUnresolvedConflict[],
-    mergePlanDigest: artifact.digest.value,
-    ...(options.reviewDigest === undefined ?
-      {}
-    : { reviewDigest: options.reviewDigest }),
-    ...(options.sourceId === undefined ? {} : { sourceId: options.sourceId }),
-  });
+  const decision = mergeIdentityDecisionFromArtifact(artifact, options);
   try {
     const { beforeApply, afterApply } = options;
     const composed = beforeApply !== undefined || afterApply !== undefined;
@@ -7004,12 +6993,7 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     }
     const txBackend = transactionBackend(tx);
     await assertMergeTransactionPristine(effectiveTarget, txBackend);
-    const decision = mergeIdentityDecision({
-      branchAncestry: branchAncestryFromAnchors(artifact.anchors),
-      reconciliations: (artifact.review.identityReconciliations ??
-        []) as unknown as readonly IdentityReconciliation[],
-      mergePlanDigest: artifact.digest.value,
-    });
+    const decision = mergeIdentityDecisionFromArtifact(artifact);
     const merged = await applyValidatedMergePlanInTransaction(
       effectiveTarget,
       tx,

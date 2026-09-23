@@ -12,7 +12,7 @@
  * classifier actually exercised. Nothing is read, recomputed, or invented; a
  * field the caller cannot evidence stays absent rather than being guessed.
  */
-import type { MergePlanAnchors } from "./plan-schema";
+import type { MergePlanAnchors, MergePlanArtifactV2 } from "./plan-schema";
 import type {
   IdentityDecisionPolicyRecord,
   IdentityDecisionProvenance,
@@ -138,4 +138,27 @@ export function mergeIdentityDecision(
     : { reviewDigest: input.reviewDigest }),
     ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
   };
+}
+
+/**
+ * The decision an approved plan artifact evidences — its digest, anchors, and
+ * the reconciliations and conflicts its review recorded — plus the review
+ * context only the caller holds. The one builder every artifact apply site
+ * calls, so the transition log records the same policy whichever entry point
+ * applied the plan.
+ */
+export function mergeIdentityDecisionFromArtifact(
+  artifact: MergePlanArtifactV2,
+  context: Readonly<{ reviewDigest?: string; sourceId?: string }> = {},
+): IdentityDecisionProvenance {
+  return mergeIdentityDecision({
+    branchAncestry: branchAncestryFromAnchors(artifact.anchors),
+    reconciliations: (artifact.review.identityReconciliations ??
+      []) as unknown as readonly IdentityReconciliation[],
+    conflicts: (artifact.review.identityConflicts ??
+      []) as unknown as readonly IdentityUnresolvedConflict[],
+    mergePlanDigest: artifact.digest.value,
+    reviewDigest: context.reviewDigest,
+    sourceId: context.sourceId,
+  });
 }
