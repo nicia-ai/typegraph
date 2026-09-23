@@ -121,7 +121,11 @@ import {
   translateMergeCommitError,
   UnsupportedMergePlanVersionError,
 } from "./errors";
-import type { CandidateDiagnostic, CandidateDiagnostics, EntityRef } from "./evidence";
+import type {
+  CandidateDiagnostic,
+  CandidateDiagnostics,
+  EntityRef,
+} from "./evidence";
 import { compareMatchEvidence, entityRef } from "./evidence";
 import { evolutionPlanningTarget } from "./evolution-target";
 import {
@@ -5930,9 +5934,10 @@ export async function planMergeForEvolution<G extends GraphDef>(
   const anchors: MergePlanAnchors = {
     kind: "snapshot",
     base: { graphId: store.graphId, baseVersion: precondition.data },
-    branches: [...branches]
-      .sort((left, right) => compareStrings(left.id, right.id))
-      .map((branch) => ({ branchId: branch.id, baseVersion: branch.base })),
+    branches: branchesInAnchorOrder(branches).map((branch) => ({
+      branchId: branch.id,
+      baseVersion: branch.base,
+    })),
   };
   return resolveMerge(
     target,
@@ -5944,8 +5949,10 @@ export async function planMergeForEvolution<G extends GraphDef>(
     precondition.data,
     async (resolved) => {
       await assertPlanningFenceUnchanged(store, baselineFence);
+      // The evolved candidate, not the baseline: composition orphans are
+      // judged under the registry the evolution commits, as apply will.
       return resolvedMergeArtifact(
-        store,
+        target,
         resolved,
         "snapshot",
         resultingFence,
@@ -6044,12 +6051,10 @@ export async function planMergeIncrementalForEvolution<G extends GraphDef>(
       baseVersion: forkVersion,
       schema: resultingFence.schema,
     },
-    branches: [...branches]
-      .sort((left, right) => compareStrings(left.id, right.id))
-      .map((branch) => ({
-        branchId: branch.id,
-        baseVersion: forkVersion,
-      })),
+    branches: branchesInAnchorOrder(branches).map((branch) => ({
+      branchId: branch.id,
+      baseVersion: forkVersion,
+    })),
   };
   return resolveMerge(
     target,
@@ -6064,8 +6069,10 @@ export async function planMergeIncrementalForEvolution<G extends GraphDef>(
     undefined,
     async (resolved) => {
       await assertPlanningFenceUnchanged(store, baselineFence);
+      // The evolved candidate, not the baseline: composition orphans are
+      // judged under the registry the evolution commits, as apply will.
       return resolvedMergeArtifact(
-        store,
+        target,
         resolved,
         "incremental",
         resultingFence,
