@@ -1286,6 +1286,8 @@ describe("durable edge match identity", () => {
         details: {
           reason: "edge-match-identity-rekey",
           edgeKinds: ["knows"],
+          fromVersion: 2,
+          toVersion: 1,
         },
       });
       const active = await backend.getActiveSchema(graphId);
@@ -1296,7 +1298,8 @@ describe("durable edge match identity", () => {
   });
   // MUTATION CHECK: passing `edgeMatchIdentity: undefined` to the composed
   // rollback preflight (`prepareRollbackPreflight`, src/schema/manager.ts)
-  // reactivates the durable key declaration over edges that carry no key.
+  // reactivates the durable key declaration over edges that carry no key;
+  // reporting `active + 1` instead of the rollback target fails `toVersion`.
 
   it("refuses first-schema identity adoption over populated unmanaged kinds", async () => {
     const { backend } = createLocalSqliteBackend({

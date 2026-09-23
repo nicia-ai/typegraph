@@ -1010,7 +1010,7 @@ async function commitInitialEdgeIdentityOnEmptyKinds(
 
   throw edgeMatchIdentityRekeyPopulatedError(
     graph.id,
-    0,
+    { fromVersion: 0, toVersion: 1 },
     result.kinds.map((entry) => entry.kind),
   );
 }
@@ -1088,7 +1088,7 @@ async function initializeSchemaImpl<G extends GraphDef>(
   const edgeMatchIdentityPreflight = prepareEdgeMatchIdentityCommitPreflight(
     graph,
     edgeIdentityKinds,
-    0,
+    { fromVersion: 0, toVersion: 1 },
   );
 
   const schema = serializeSchema(graph, 1);
@@ -1298,7 +1298,7 @@ export async function migrateSchema<G extends GraphDef>(
   const edgeMatchIdentityPreflight = prepareEdgeMatchIdentityCommitPreflight(
     target,
     rekeyedEdgeKinds,
-    currentVersion,
+    { fromVersion: currentVersion, toVersion: currentVersion + 1 },
   );
 
   // No BEFORE document, no ontology to tighten against: a v1 initial commit
@@ -1447,10 +1447,16 @@ function matchIdentityRekeyedEdgeKinds(
 }
 
 /** Refuses identity activation/re-keying while rows still lack target keys. */
+/** The versions a schema transition moves the active pointer between. */
+type SchemaVersionTransition = Readonly<{
+  fromVersion: number;
+  toVersion: number;
+}>;
+
 function prepareEdgeMatchIdentityCommitPreflight(
   target: Readonly<{ id: string }>,
   edgeKinds: readonly string[],
-  currentVersion: number,
+  transition: SchemaVersionTransition,
 ): ((backend: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
   if (edgeKinds.length === 0) return undefined;
   return async (backend): Promise<void> => {
@@ -1466,7 +1472,7 @@ function prepareEdgeMatchIdentityCommitPreflight(
     if (populated.length === 0) return;
     throw edgeMatchIdentityRekeyPopulatedError(
       target.id,
-      currentVersion,
+      transition,
       populated,
     );
   };
@@ -1474,15 +1480,15 @@ function prepareEdgeMatchIdentityCommitPreflight(
 
 function edgeMatchIdentityRekeyPopulatedError(
   graphId: string,
-  currentVersion: number,
+  transition: SchemaVersionTransition,
   edgeKinds: readonly string[],
 ): MigrationError {
   return new MigrationError(
     `Refusing to activate or change match identity for populated edge kinds: ${edgeKinds.join(", ")}. Export and hard-delete those edges, migrate the schema, then import them so TypeGraph can materialize the new durable keys.`,
     {
       graphId,
-      fromVersion: currentVersion,
-      toVersion: currentVersion + 1,
+      fromVersion: transition.fromVersion,
+      toVersion: transition.toVersion,
       reason: "edge-match-identity-rekey",
       edgeKinds,
     },
@@ -1978,7 +1984,7 @@ function prepareRollbackPreflight(
         ),
         before,
       ),
-      active.version,
+      { fromVersion: active.version, toVersion: target.version },
     ),
     tightening,
     identity,
