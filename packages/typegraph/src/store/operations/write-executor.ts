@@ -101,11 +101,6 @@ export function writeResultAlwaysChanges(): boolean {
   return true;
 }
 
-/** Classifies a command that returns its authoritative mutation verdict. */
-export function booleanWriteResultChanges(result: boolean): boolean {
-  return result;
-}
-
 /**
  * Selects the optimistic update budget without duplicating singleton routing.
  *

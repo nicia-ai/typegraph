@@ -65,7 +65,6 @@ import { encodeTupleKey } from "../../utils/tuple-key";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   type CompositionAttachment,
-  type CompositionHeldEdge,
   type CompositionNodeRef,
   type CreateEdgeInput,
   type CreateNodeInput,
@@ -244,7 +243,7 @@ export function resolveCompositionCreate(
   };
 }
 
-export function compositionEdgeWindow(
+function compositionEdgeWindow(
   attachment: CompositionAttachment,
 ): Readonly<{ validFrom?: string | null; validTo?: string }> {
   return {
@@ -254,19 +253,6 @@ export function compositionEdgeWindow(
     ...(attachment.validTo === undefined ?
       {}
     : { validTo: attachment.validTo }),
-  };
-}
-
-export function compositionHeldEdgeFromRow(edge: EdgeRow): CompositionHeldEdge {
-  return {
-    id: edge.id,
-    kind: edge.kind,
-    fromKind: edge.from_kind,
-    fromId: edge.from_id,
-    toKind: edge.to_kind,
-    toId: edge.to_id,
-    ...(edge.valid_from === undefined ? {} : { validFrom: edge.valid_from }),
-    ...(edge.valid_to === undefined ? {} : { validTo: edge.valid_to }),
   };
 }
 

@@ -208,7 +208,7 @@ export type OntologyDataProbe = OntologyDataProbeBody &
     families: (typeof PROBE_VIOLATION_FAMILIES)[OntologyDataProbeBody["kind"]];
   }>;
 
-export function stampProbeFamilies<P extends OntologyDataProbeBody>(
+function stampProbeFamilies<P extends OntologyDataProbeBody>(
   probe: P,
 ): OntologyDataProbe {
   return {
