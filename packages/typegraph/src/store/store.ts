@@ -6983,8 +6983,31 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       finalGraph,
       plan.removedNodeKinds,
     );
+    // A removal only drops declarations, so the tightening step is expected
+    // to owe nothing — but that is the preflight's decision, made from the
+    // same before/after documents every commit path hands it.
+    const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
+      graphId: this.graphId,
+      fromVersion: activeRow.version,
+      toVersion: activeRow.version + 1,
+      before: storedSchema,
+      after: serializeSchemaPreservingUnknownFields(
+        finalGraph,
+        activeRow.version + 1,
+        storedSchema,
+      ),
+    });
+    // No structural gate: dropping kinds that still hold rows is this verb's
+    // purpose (materializeRemovals reclaims them). No edge match identity
+    // step: a removal declares no new durable key.
+    const preflight = composeSchemaCommitPreflight({
+      structural: undefined,
+      edgeMatchIdentity: undefined,
+      tightening: schemaTighteningPreflight,
+      identity: identityCascade,
+    });
     const committedRow =
-      identityCascade === undefined ?
+      preflight === undefined ?
         await commitNewSchemaVersion(
           this.#backend,
           finalGraph,
@@ -6995,8 +7018,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#backend,
           finalGraph,
           activeRow.version,
-          identityCascade,
+          preflight,
           storedSchema,
+          schemaCommitCapabilityError(
+            identityCascade !== undefined,
+            schemaTighteningPreflight,
+          ),
         );
 
     // Queue per-deployment data-cleanup status — one row per removed
