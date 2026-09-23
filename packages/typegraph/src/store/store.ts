@@ -3974,9 +3974,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       graph: this.#graph,
       graphId: this.graphId,
       rootId,
-      backend: this.#recordedReads.backendForCoordinate(
-        readCoordinate,
-        "recorded-subgraph",
+      backend: this.#createHookedQueryBackend(
+        this.#recordedReads.backendForCoordinate(
+          readCoordinate,
+          "recorded-subgraph",
+        ),
       ),
       dialect: getDialect(this.#backend.dialect),
       schema: this.#schema,

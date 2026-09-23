@@ -3514,9 +3514,11 @@ Query hooks describe SQL statements submitted by Store read APIs, not logical AP
 backend-internal setup statements. Fluent queries, `batchOnce()`, `neighbors()`,
 `countNeighbors()`, and `subgraph()` all use this observed execution path. A logical read that
 submits more than one statement fires one start/end pair per statement: direct `subgraph()` emits
-two pairs on SQLite and three on PostgreSQL, while `tx.subgraph()` and the same subgraph embedded in
-`batchOnce()` emit one (a `tx.subgraph()` with `composition` runs the direct statement
-sequence). A fluent query that retries with a different projection likewise fires a
+two pairs on SQLite and three on PostgreSQL, including at a recorded coordinate
+(`store.asOfRecorded(...).subgraph()`), while `tx.subgraph()` and the same subgraph embedded in
+`batchOnce()` emit one. A `subgraph()` with `composition` emits five on both backends (the root's
+kind, the `edges` closure, the composition closure, then nodes and edges), inside a transaction
+too. A fluent query that retries with a different projection likewise fires a
 pair for each statement it submits.
 
 ### `StoreHooks`
