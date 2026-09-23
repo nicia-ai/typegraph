@@ -36,8 +36,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "runtime-schema-evolution";
-const TITLE =
-  "Runtime Schema Evolution: An Agent, a Clinical Trial, and a Retraction";
+const TITLE = "An Agent That Grows Its Own Schema";
 
 const COLOR_INSTANCE = "#cbd5e1";
 const COLOR_INSTANCE_MID = "#a9bdd6";

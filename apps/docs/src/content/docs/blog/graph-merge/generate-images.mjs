@@ -32,7 +32,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "graph-merge";
-const TITLE = "Graph Merge: Same Patient, Two Feeds, One Canonical Record";
+const TITLE = "Merging Two Feeds That Disagree About the Same Patient";
 
 const COLOR_STREAM_A = "#7dabe8";
 const COLOR_STREAM_B = "#5b7fb5";

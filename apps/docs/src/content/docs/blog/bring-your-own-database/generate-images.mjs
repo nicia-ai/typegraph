@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Bespoke cover/social images for the "Portable Stores" post — NOT a
+// Bespoke cover/social images for the "Bring Your Own Database" post (originally drawn for "Portable Stores") — NOT a
 // generic template. Two concentric-circle diagrams showing which layer is
 // the PUBLIC TYPE SURFACE, not which layer runs first — Drizzle has always
 // done the actual SQL work underneath in both versions; what changed in
@@ -43,8 +43,8 @@ import {
   writeBlogImages,
 } from "#blog-art";
 
-const SLUG = "portable-stores";
-const TITLE = "Portable Stores: Drizzle Becomes an Adapter, Not a Requirement";
+const SLUG = "bring-your-own-database";
+const TITLE = "Bring Your Own Database";
 
 const COLOR_BLUE = "#2563eb";
 const COLOR_BLUE_DARK = "#1d4ed8";

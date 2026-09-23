@@ -40,7 +40,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "truth-maintenance-for-agent-memory";
-const TITLE = "Bitemporal Recorded Time and Provenance Retraction";
+const TITLE = "Agent Memory That Knows Why It Believes Things";
 
 const COLOR_LIVE_STROKE = "#2563eb";
 const COLOR_LIVE_FILL = "#ffffff";

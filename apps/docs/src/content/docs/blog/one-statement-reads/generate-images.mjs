@@ -39,7 +39,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "one-statement-reads";
-const TITLE = "One Statement Per Page: Reads That Refuse to Become an N+1";
+const TITLE = "Replacing the N+1 Loop With One Statement";
 
 const COLOR_ACCENT = "#2563eb";
 const COLOR_ACCENT_DEEP = "#1d4ed8";

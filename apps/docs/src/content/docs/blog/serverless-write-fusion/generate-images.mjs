@@ -42,8 +42,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "serverless-write-fusion";
-const TITLE =
-  "One Exchange Instead of Six: Fusing Writes for Serverless Drivers";
+const TITLE = "One Round Trip Per Write";
 
 const COLOR_RAIL = "#cbd5e1";
 const COLOR_MUTED = "#94a3b8";

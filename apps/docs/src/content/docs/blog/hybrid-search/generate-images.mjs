@@ -37,7 +37,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "hybrid-search";
-const TITLE = "Hybrid Search: The SKU Query Embeddings Always Get Wrong";
+const TITLE = "Embeddings Can't Find a SKU";
 
 const COLOR_VECTOR = "#93c5fd";
 const COLOR_FULLTEXT = "#2563eb";

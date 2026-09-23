@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // PATTERN: field with a lit path (see .claude/skills/blog-cover/SKILL.md).
 //
-// Cover/social images for "Rows That Exist at No Point in Time". The post's
+// Cover/social images for "Quietly Wrong" (the inverted-validity-window section). The post's
 // subject is a coordinate that does not exist: `asOf(t)` needs
 // `valid_from <= t < valid_to`, so a row whose bounds run backwards is
 // readable at no `t` at all.
@@ -29,8 +29,8 @@ import {
   writeBlogImages,
 } from "#blog-art";
 
-const SLUG = "validity-window-repair";
-const TITLE = "Rows That Exist at No Point in Time";
+const SLUG = "quietly-wrong";
+const TITLE = "Five Bugs That Didn't Crash";
 
 const COLOR_WINDOW = "#9db8dd";
 const COLOR_WINDOW_LIVE = "#1d4ed8";

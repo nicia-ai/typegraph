@@ -36,7 +36,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "durable-merge-branches";
-const TITLE = "Durable Branches: The Working Copy Outlives the Process";
+const TITLE = "Merges That Wait";
 
 const COLOR_CAPSULE_FILL = "#cbd5e1";
 const COLOR_CAPSULE_STROKE = "#94a3b8";

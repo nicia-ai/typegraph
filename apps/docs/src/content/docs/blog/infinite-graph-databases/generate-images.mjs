@@ -30,8 +30,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "infinite-graph-databases";
-const TITLE =
-  "An Infinite Supply of Graph Databases: Provisioning Is Just a Name";
+const TITLE = "An Infinite Supply of Graph Databases";
 
 const COLOR_BLUE = "#2563eb";
 const COLOR_BLUE_DARK = "#1d4ed8";

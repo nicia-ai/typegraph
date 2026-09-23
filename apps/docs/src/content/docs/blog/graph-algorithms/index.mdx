@@ -1,46 +1,51 @@
 ---
-title: "Graph Algorithms: The Cheapest Citation Lineage Isn't the Shortest One"
+title: "The Cheapest Citation Lineage Isn't the Shortest One"
 date: 2026-07-21
-excerpt: "0.37 adds weaklyConnectedComponents and weightedShortestPath; 0.38 adds global and personalized PageRank plus deterministic label propagation: whole-graph analytics that run as SQL against the store, no separate engine. Run against an 18-paper citation DAG: the cheapest lineage between two papers takes more hops than the shortest one, and PageRank promotes a 1998 paper past six more-cited rivals."
+excerpt: "Connected components, weighted shortest path, PageRank, personalized PageRank, and label propagation now run as SQL against your store. On an 18-paper citation graph they turn up things a citation count never would."
 tags:
   - announcements
 cover:
   alt: "The full 18-paper citation network from the post's example, drawn as a faint gray graph, with the real 4-hop weightedShortestPath route from transformer through dropout, alexnet, and lenet to backprop lit up as a bold blue glowing path"
   image: "./cover.png"
 social:
-  alt: "Graph Algorithms: The Cheapest Citation Lineage Isn't the Shortest One"
+  alt: "The Cheapest Citation Lineage Isn't the Shortest One"
   image: "./social.png"
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
 
-`store.algorithms.shortestPath` and `.reachable` answer questions about two
-nodes at a time: how do I get from A to B, what's within N hops of A. A
-different class of question needs the whole graph at once. Is this
-dataset one connected body, or several islands? Which nodes matter most,
-structurally, not just by raw count? Do communities fall out of the
-topology on their own? Those need an algorithm that runs several rounds
-over the entire visible graph in one repeatable snapshot, which is a much
-bigger engineering lift than a single traversal: a pinned transactional
-connection, a temporary working table, and a typed convergence contract
-instead of "just keep expanding the frontier."
+When I introduced TypeGraph I said there was no PageRank and no community
+detection, and that if you needed those you wanted a real graph database.
+That's still partly true (more on that at the end), but as of 0.38 the list
+is a lot shorter.
 
-0.37 adds the first two, `weaklyConnectedComponents` and
-`weightedShortestPath`, on the same set-based BFS engine that replaced
-recursive-CTE path enumeration for the point-query traversals. 0.38 adds
-global and personalized `pageRank` plus deterministic `labelPropagation`
-(the LDBC Graphalytics CDLP benchmark's algorithm). All five run as SQL:
-no export step, no separate analytics engine, no second copy of the graph
-to keep in sync.
+Until now, `store.algorithms` answered questions about two nodes at a time,
+like how to get from A to B or what's within three hops of A. Some questions
+need the whole graph at once: whether a dataset is one connected body or
+several islands, which nodes matter most structurally rather than by raw
+count, or whether communities emerge from the topology on their own.
+
+Answering those means running an algorithm round after round over the entire
+graph, from one consistent snapshot, until it converges. That needs more
+machinery than a single traversal, including a pinned transaction, a temporary
+working table, and a clear rule for what happens when the rounds don't
+settle. 0.37 added
+`weaklyConnectedComponents` and `weightedShortestPath`. 0.38 added global and
+personalized `pageRank` and deterministic `labelPropagation`, the same
+algorithm the LDBC Graphalytics benchmark uses for community detection. All
+five run as SQL against the store, so you don't export the graph to a separate
+analytics engine and keep a second copy in sync.
+
+They're also a lot of fun to play with, so the rest of this post runs them on
+a small citation graph.
 
 ## The corpus
 
-Same citation graph as [the research-copilot
-example](/examples/research-copilot): 18 landmark ML papers, 55 authors,
-14 topics, and 37 real citation edges, from Rumelhart, Hinton & Williams'
-1986 backpropagation paper through LLaMA in 2023. That example runs point
-queries: semantic search, `shortestPath`, `degree`. This post runs the
-whole-graph algorithms over the same data instead.
+This is the same citation graph as the
+[research-copilot example](/examples/research-copilot): 18 landmark ML
+papers, 55 authors, 14 topics, and 37 real citation edges, from Rumelhart,
+Hinton & Williams' 1986 backprop paper through LLaMA in 2023. That example
+runs point queries; here I run the whole-graph algorithms over the same data.
 
 ```typescript
 const backend = createExampleBackend();
@@ -48,10 +53,9 @@ const [store] = await createStoreWithSchema(graph, backend);
 // Ingested 18 papers, 55 authors, 14 topics, 37 citation edges.
 ```
 
-## Is this literature one body of work, or islands?
+## One body of work, or islands?
 
-Treat `cites` as undirected and partition by connectivity. One call, one
-answer:
+Treat `cites` as undirected and partition by connectivity:
 
 ```typescript
 const components = await store.algorithms.weaklyConnectedComponents({
@@ -65,29 +69,28 @@ const components = await store.algorithms.weaklyConnectedComponents({
   • component of 18 paper(s), rooted at "Adam: A Method for Stochastic Optimization"
 ```
 
-Every paper in the corpus traces back to every other paper through some
-citation chain; there's no isolated cluster citing only itself. On a
-real, heterogeneous dataset this is the sanity check worth running first:
-`nodeKinds: ["Paper"]` keeps authors and topics out of the partition, so a
-result of more than one component would mean a genuinely disconnected
-sub-literature, not an artifact of a lightly-cited author node.
+Every paper reaches every other through some chain of citations. On a real,
+messy dataset this is the sanity check to run first. `nodeKinds: ["Paper"]`
+keeps authors and topics out of it, so more than one component would mean a
+separate sub-literature rather than a lightly cited author hanging
+off the edge.
 
 ## The cheapest lineage isn't the shortest one
 
-Citations always point from a newer paper to an older one it cites, which
-makes "cost" trickier to define than it looks. The obvious first weight,
-`yearGap` (the number of years a citation reaches back), **telescopes**:
-because every hop along a `cites` path steps strictly newer→older, the
-sum of gaps along _any_ route from paper A to paper B collapses to exactly
-`A.year - B.year`, independent of which route you took. Every path ties,
-so weighting by `yearGap` degenerates into `shortestPath` with extra
-arithmetic.
+This is my favorite result in the post, and getting to it took one false
+start.
 
-`yearGapCost = yearGap²` breaks the tie on purpose. Squaring is convex: one
-27-year leap costs `27² = 729`, but the same span crossed by several
-smaller citations sums to much less. That's a genuinely different
-optimization, "prefer the smoothest incremental lineage," and it's where
-`weightedShortestPath` stops agreeing with `shortestPath`:
+Citations always point from a newer paper to an older one, so the obvious edge
+weight is `yearGap`, the number of years a citation reaches back. The trouble
+is that every hop steps strictly backward in time, so the gaps along _any_
+route from A to B telescope to exactly `A.year - B.year`. Every path ties, and
+weighting by `yearGap` is just `shortestPath` with extra arithmetic.
+
+Squaring the gap breaks the tie. `yearGapCost = yearGap²` is convex, so one
+27-year leap costs `27² = 729` while the same span covered in several small
+steps costs much less. The question becomes "what's the smoothest chain of
+ideas between these two papers," and that's where `weightedShortestPath`
+starts disagreeing with `shortestPath`:
 
 ```typescript
 const hopPath = await store.algorithms.shortestPath(from.id, to.id, {
@@ -111,22 +114,22 @@ clip → backprop:
   weighted by yearGapCost:     7 hops   totalWeight=359   clip(2021) → gpt2(2019) → bert(2018) → transformer(2017) → dropout(2014) → alexnet(2012) → lenet(1998) → backprop(1986)   ◀── more hops, lower convex cost
 ```
 
-The direct route from Transformer to backprop is a single 31-year leap
-through Adam; the convex-cost route takes four smaller steps instead and
-comes out at less than half the cost. Same two papers, same graph, two
-legitimately different answers to "what's the best path" (the fewest-hop
-one and the smoothest-lineage one), and `weightedShortestPath` finds the
-second without enumerating every route by hand. Weights are audited before
-any traversal round runs, so a negative or non-numeric `yearGapCost`
-anywhere in the selected edges throws `InvalidEdgeWeightError` up front
-rather than silently mis-answering.
+The fewest-hops route from the Transformer paper to backprop makes a 28-year
+jump through Adam. The convex-cost route takes four smaller steps (Dropout,
+AlexNet, LeNet) and comes in at less than half the cost. From CLIP it walks
+seven hops, almost straight down the history of deep learning. Both are
+legitimate answers to "what's the best path" between the same two papers, and
+I like that the convex-cost one reads like a syllabus.
 
-## Propagated authority vs. raw citation count
+Weights are checked before any traversal round runs, so a negative or
+non-numeric `yearGapCost` anywhere in the selected edges throws
+`InvalidEdgeWeightError` up front instead of producing a wrong answer.
 
-Citation count answers "how many papers cite this one." PageRank answers
-"how much does this paper matter, given what cites it": a citation from a
-heavily-cited paper counts for more than one from an obscure one, and that
-propagates transitively.
+## PageRank vs. counting citations
+
+A citation count tells you how many papers cite this one. PageRank tells you
+how much a paper matters given _who_ cites it: a citation from an important
+paper is worth more, and that carries through the graph.
 
 ```typescript
 const pageRankScores = await store.algorithms.pageRank({
@@ -149,19 +152,18 @@ const pageRankScores = await store.algorithms.pageRank({
      8    0.05592      3       4   -4  Deep Residual Learning for Image Recognition
 ```
 
-Backprop wins both ways; it's the corpus's true root, so that's not a
-surprise. The interesting row is LeNet: one direct citation puts it at raw
-rank 13, but PageRank moves it to rank 6, seven places higher, because the
-one paper that cites it is AlexNet, itself heavily cited. A citation
-count treats every citation as equal; PageRank doesn't, and that's the
-whole point of propagated authority over a raw tally.
+Backprop wins both rankings, which is no surprise since it's the root of the
+whole corpus. The row I find interesting is 6th place. LeNet has exactly
+**one** citation in this corpus, which puts it 13th by count, but PageRank
+moves it up seven places because that one citation comes from AlexNet, which
+is heavily cited itself. A plain count would treat it like any other
+citation.
 
-## What's important to CLIP, specifically
+## What matters to CLIP, specifically
 
-Personalized PageRank runs the identical power iteration but teleports
-back to a chosen seed instead of spreading uniformly across the graph,
-answering "important relative to this paper" instead of "important
-globally":
+Personalized PageRank runs the same iteration, but instead of jumping to a
+random node it keeps jumping back to a seed you choose. The question changes
+from "important globally" to "important from where CLIP is standing":
 
 ```typescript
 const personalized = await store.algorithms.personalizedPageRank({
@@ -185,17 +187,17 @@ const personalized = await store.algorithms.personalizedPageRank({
       8    0.05500           16   +8  An Image is Worth 16x16 Words: Transformers for I...
 ```
 
-CLIP itself jumps from global rank 17 to personalized rank 1: teleport
-mass returning to CLIP inflates everything in its own citation lineage.
-SimCLR and ViT, both direct CLIP citations sitting well outside the global
-top 10, jump 8 places each. Same graph, same algorithm, a different
-teleport target, and a ranking that answers a different question.
+CLIP itself jumps from 17th to 1st, since every jump lands back on it, and
+SimCLR and ViT, both cited directly by CLIP and both well outside the global
+top 10, climb eight places each. Changing only the seed gives you a ranking
+for a different question, and it's the one I'd reach for in a "related work"
+or recommendation feature.
 
-## Do research communities emerge?
+## Do research communities fall out?
 
-Deterministic label propagation (CDLP) finds communities by having each
-node adopt its most common neighbor label, round after round, over the
-_undirected_ projection of `cites`. Run it the strict way first:
+Label propagation finds communities by having every node adopt the most
+common label among its neighbors, round after round, over the undirected
+version of `cites`. Run it strictly first:
 
 ```typescript
 const converged = await store.algorithms.labelPropagation({
@@ -211,12 +213,13 @@ the undirected citation graph oscillates (tree / even-cycle structure
 that mirrors labels back and forth).
 ```
 
-The throw is documented, provable behavior. Synchronous label voting has
-no self-vote, so a tree-shaped neighborhood (common once a directed
-citation DAG is projected to undirected) can mirror two labelings back
-and forth forever, and no amount of extra `maxIterations` fixes it.
-`onMaxIterations: "return"` accepts the fixed-round labeling instead, the
-same contract the LDBC Graphalytics CDLP benchmark uses:
+That error is expected. In synchronous label propagation a node doesn't vote
+for itself, so a tree-shaped neighborhood (common once you flatten a citation
+DAG into an undirected graph) can flip two labelings back and forth forever,
+and more iterations won't fix it. The default throws rather than handing you
+whatever labels the last round happened to land on. If you want that
+fixed-round answer, which is what the LDBC Graphalytics benchmark specifies,
+ask for it:
 
 ```typescript
 const fixedRound = await store.algorithms.labelPropagation({
@@ -252,37 +255,37 @@ const fixedRound = await store.algorithms.labelPropagation({
    A Simple Framework for Contrastive Learning of Vi...   [Contrastive, SelfSupervised, ComputerVision]
 ```
 
-None of these three groupings were told about `topics`; label propagation
-only ever saw the undirected `cites` edges. It still separated the
-optimization/classic-vision foundations, the transformer/language-model
-era, and the contrastive self-supervised vision cluster into three
-distinct communities, purely from citation topology. The topic tags above
-are printed for the reader, not fed to the algorithm.
+The algorithm only saw undirected `cites` edges (the topic tags are printed
+for you and were never fed to it), yet it separated the optimization and
+classic-vision foundations, the transformer and language-model era, and the
+contrastive self-supervised vision cluster purely from who cites whom.
 
 ## What's still missing
 
 Shortest path (weighted and unweighted), reachability, neighborhoods,
-degree, weakly connected components, deterministic label propagation, and
-global/personalized PageRank cover a lot of ground, but not everything:
-strongly connected components, topological sort, betweenness/closeness/
-eigenvector centrality, and modularity-optimizing community detection
-(Louvain, Leiden) aren't in `store.algorithms`. For those, export the edge
-list via `.query().traverse()` or `store.subgraph()` and hand it to a
-specialized in-memory library like
-[graphology](https://graphology.github.io/). TypeGraph's job here is
-being the source of truth and the fast path for the algorithms that come
-up often enough to earn a place on the store itself, not to replace a
-dedicated analytics library for everything else.
+degree, connected components, label propagation, and global and personalized
+PageRank cover a lot of ground, but strongly connected
+components, topological sort, betweenness/closeness/eigenvector centrality,
+and Louvain/Leiden community detection aren't in `store.algorithms`. For
+those, pull the edge list out with `.query().traverse()` or
+`store.subgraph()` and hand it to an in-memory library like
+[graphology](https://graphology.github.io/).
+
+Scale matters too. These run as rounds of SQL, which keeps everything in one
+database and is fine for graphs the size most applications have, but on
+millions of edges the engines that hold the graph in a specialized in-memory
+index are orders of magnitude faster at whole-graph work. The
+[benchmark post](/blog/benchmarking-typegraph-neo4j-ladybugdb) has the
+numbers, including the unflattering ones.
 
 ## Try it
 
-- [Graph Algorithms](/graph-algorithms): the full reference, with every
-  algorithm, shared options, temporal behavior, and numerical-tolerance
-  notes for PageRank across backends
-- [Research Copilot](/examples/research-copilot): the same citation
-  corpus, run through the point-query algorithms instead
-- [Example 27](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/27-graph-analytics.ts):
-  the full runnable source behind this post
+- [Graph Algorithms](/graph-algorithms): every algorithm, shared options,
+  temporal behavior, and PageRank tolerance notes across backends
+- [Research Copilot](/examples/research-copilot): the same corpus, run
+  through the point-query algorithms
+- [Example 32](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/32-graph-analytics.ts):
+  the runnable source behind this post
 - [GitHub](https://github.com/nicia-ai/typegraph)
 
 <NewsletterSignup />

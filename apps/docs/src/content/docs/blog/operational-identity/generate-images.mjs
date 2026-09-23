@@ -32,8 +32,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "operational-identity";
-const TITLE =
-  "Operational Identity: Two Systems, One Customer, Zero Silent Contradictions";
+const TITLE = "Tracking Which Records Are the Same Person";
 
 const COLOR_PAIR = "#9db8dd";
 const COLOR_PAIR_LINK = "#6698d8";
@@ -120,15 +119,12 @@ function renderDiagram() {
 
   const refusedLabel = `<text x="${(BARRIER_ONE_X + BARRIER_TWO_X) / 2}" y="${BARRIER_TOP - 18}" text-anchor="middle" font-family="${SANS}" font-size="19" font-weight="700" fill="${COLOR_REFUSE}">refused twice</text>`;
 
-  const foldLabel = `<text x="${MARGIN_X}" y="${CANVAS_HEIGHT - 42}" font-family="${SANS}" font-size="17" font-weight="600" fill="${COLOR_MUTED_TEXT}">shared id · folds on sight</text>`;
-
   return `${renderFoldedField()}
     ${attempt}
     ${renderNode({ x: LEFT_NODE_X, label: "Person", id: "person-119" })}
     ${renderNode({ x: RIGHT_NODE_X, label: "CaseSubject", id: "case-77" })}
     ${barriers}
-    ${refusedLabel}
-    ${foldLabel}`;
+    ${refusedLabel}`;
 }
 
 /**

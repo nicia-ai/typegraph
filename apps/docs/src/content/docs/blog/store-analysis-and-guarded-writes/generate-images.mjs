@@ -39,7 +39,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "store-analysis-and-guarded-writes";
-const TITLE = "Look Before You Write: Store Analysis and Guarded Writes";
+const TITLE = "Look Before You Write";
 
 const COLOR_DOT = "#cbd5e1";
 const COLOR_DOT_STROKE = "#94a3b8";

@@ -1,43 +1,44 @@
 ---
-title: "Look Before You Write: Store Analysis and Guarded Writes"
-date: 2026-10-20
-excerpt: "An agent asked to clean up an account directory needs three things before it edits rows it doesn't own: what is in the graph, what no longer fits the schema, and a write that applies only if nothing moved. 0.54 adds store.describe(), store.validateStore(), compareAndSet(), and planCandidateWriteSet(); 0.64 lets the first two run inside a transaction. Run against 243 accounts with two rows the tightened schema rejects: the guarded repair wins once, the same repair from a stale read returns false and writes nothing, and a stale batch plan is refused."
+title: "Look Before You Write"
+date: 2026-09-22
+excerpt: "How an agent can find the rows that no longer fit a tightened schema and repair them without overwriting a person's edit, using store.describe(), validateStore(), and compareAndSet()."
 tags:
   - announcements
 cover:
   alt: "A dense field of record dots in a grid, most of them muted gray; two are ringed in red where they violate the schema, and a blue guard bracket closes around one of them as a blue check lands, while a second bracket over a neighboring dot has bounced off"
   image: "./cover.png"
 social:
-  alt: "Look Before You Write: Store Analysis and Guarded Writes"
+  alt: "Look Before You Write"
   image: "./social.png"
-draft: true
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
 
-An account directory has been running for a while. Last month someone
-tightened its rules: `email` must be a real address, `plan` is one of three
-values, `seats` must be positive. New writes obey. Rows stored under the old
-rules were never revisited, and nobody knows how many of them still don't
-fit. A background agent (or an on-call operator with a REPL) is asked to
-clean it up while sales reps keep editing the same accounts.
+Suppose you tighten the schema on an account directory so that `email` has to
+be a real address, `plan` has to be one of three values, and `seats` has to be
+positive. TypeGraph validates on write, so everything written from then on is
+checked, but rows stored before the change are never looked at again, and you
+have no idea how many of them fail the new rules. You'd like a background
+agent (or yourself, in a REPL) to find and fix them while sales reps carry on
+editing the same accounts.
 
-That is three questions, each with its own way to go wrong. What is in this
-graph? Reading it all back doesn't scale as the schema and the data grow.
-What no longer fits? The store validates on write, so nothing looks at old
-rows. And how do I change a row without overwriting whatever a person did
-after I looked? 0.54 answers each with `store.describe()`,
-`store.validateStore()`, and `compareAndSet()` / `planCandidateWriteSet()`;
-0.64 lets the first two run inside a transaction. It is the same loop as
-[runtime schema evolution](/blog/runtime-schema-evolution), where an agent
-proposes changes to the schema itself: look, propose, and apply only if the
-world is where you left it.
+To do that safely the agent needs a cheap overview of what's in the graph, a
+way to find the rows that don't validate without reading everything back into
+memory, and a write that won't clobber a change a person made after the agent
+read the row.
 
-The graph is 240 accounts and 90 people created through the store, 60
-`memberOf` edges, and three legacy `Account` rows inserted through the
-backend directly, the way a writer running the old rules would have stored
-them. The outputs below come from running this code, lightly abridged,
-against it on SQLite.
+0.54 added `store.describe()`, `store.validateStore()`, and `compareAndSet()`
+for those three jobs, plus `planCandidateWriteSet()` for reviewing a whole
+batch before it lands, and 0.64 lets the first two run inside a transaction.
+It's the same loop [runtime schema evolution](/blog/runtime-schema-evolution)
+uses when an agent proposes changes to the schema itself: the agent looks at
+the current state, proposes a change, and the change only applies if nothing
+has moved since it looked.
+
+The graph here is 240 accounts and 90 people created through the store, 60
+`memberOf` edges, and three legacy `Account` rows inserted through the backend
+directly, the way a writer running the old rules would have stored them. The
+outputs below come from running this code against it on SQLite.
 
 ```typescript
 const Account = defineNode("Account", {
@@ -49,28 +50,9 @@ const Account = defineNode("Account", {
     ownerId: z.string().optional(),
   }),
 });
-
-const graph = defineGraph({
-  id: "accounts",
-  nodes: {
-    Account: {
-      type: Account,
-      unique: [
-        {
-          name: "account_email",
-          fields: ["email"],
-          scope: "kind",
-          collation: "binary",
-        },
-      ],
-    },
-    Person: { type: Person },
-  },
-  edges: { memberOf: { type: memberOf, from: [Person], to: [Account] } },
-});
 ```
 
-## What is in the graph
+## What's in the graph
 
 ```typescript
 const { statistics } = await store.describe();
@@ -98,33 +80,16 @@ edge memberOf: 60
   /role  present=30  coverage=0.50
 ```
 
-Every declared kind gets a row count, and every directly addressable
-declared property gets a presence count, an explicit-`null` count, and a
-coverage figure (non-null rows over total rows). `/ownerId` at 0.25 says 60
-of 243 accounts have an owner. That is the kind of number an agent uses to
-decide where to spend its attention before it reads a single row.
+Every declared kind gets a row count, and every declared property gets a
+presence count and a coverage figure. `/ownerId` at 0.25 says 60 of 243
+accounts have an owner, which is enough for an agent to decide where to spend
+its attention before it reads a single row.
 
-The counts are computed by the database, not by pulling rows into
-JavaScript. Counting statements through a wrapped `backend.execute`, the way
-`tests/store-analysis.test.ts` does, `describe()` on this graph is two data
-statements: one for every node kind, one for every edge kind. A schema with
-1,001 declared properties is split into four, because each statement's
-result columns are capped at 512, comfortably under PostgreSQL's limit of
-1,664. Each `validateStore()` page, below, is one statement.
-
-The result also carries the schema it was computed under:
-
-```text
-{
-  schemaVersion: 1,
-  schemaHash: '362110ec868c79a2',
-  schemaFence: '8a099b414bf5f3a6214b156f18613531'
-}
-```
-
-TypeGraph reads that coordinate before and after the aggregate statements
-and refuses the result if it changed, so you never get statistics that
-straddle a schema commit.
+The counting happens in the database, and on this graph `describe()` runs two
+statements, one for all node kinds and one for all edge kinds. The result also
+records the schema version and hash it was computed under, and TypeGraph
+checks that they didn't change mid-way, so you never get statistics that
+straddle a schema change.
 
 ## What no longer fits
 
@@ -156,52 +121,39 @@ acct_legacy_2 /plan Invalid option: expected one of "free"|"team"|"enterprise"
 acct_legacy_2 /seats Too small: expected number to be >0
 ```
 
-Two records, three violations. `pageSize` counts records scanned, not
-violations returned, which is why the last page scanned 43 records and
-reported 3 failures: `acct_legacy_2` breaks two rules at once. Each failure
-carries the record id, an RFC 6901 pointer to the offending property, the
-Zod issue code, and the reason. The scan is a keyset walk, one bounded
-statement per page. The cursor is bound to the entity, kind, schema fence,
-and last scanned id, so a schema change mid-sweep raises
-`StoreAnalysisCursorStaleError` instead of quietly resuming against rules
-the first pages weren't checked under.
+There are three violations across two records, because `acct_legacy_2` breaks
+two rules. Each failure carries the record id, a JSON pointer to the property,
+the Zod issue code, and the reason. Each page is one bounded statement, and the cursor is tied to the
+schema it started under. If the schema changes mid-sweep, the next page throws
+`StoreAnalysisCursorStaleError` instead of quietly checking the rest against
+different rules.
 
-The third legacy row, `acct_legacy_3`, isn't in the report. It carries a
-`salesforceId` that the schema doesn't declare. Undeclared properties are
-treated as healthy semi-structured data and never reported, even when the
-authored Zod object is strict. That is what lets you sweep a graph whose
-shape is evolving at runtime without every extra field showing up as a
-defect.
+The third legacy row, `acct_legacy_3`, isn't reported. It carries a
+`salesforceId` the schema doesn't declare, and undeclared properties count as
+healthy extra data, so you can sweep a graph whose shape is changing at runtime
+without every extra field showing up as a defect.
 
 ## Fix a row without racing anyone
 
-The obvious repair is `getById()`, decide, `update()`. The gap between the
-read and the write is where a rep's edit gets overwritten.
-`compareAndSet()` closes it: the id, the expected values, and the update
-run as one set-based statement.
+The obvious repair is to call `getById()`, decide what to change, and call
+`update()`, but a sales rep's edit that lands between the read and the write
+gets overwritten. `compareAndSet()` closes that gap by checking the expected
+values and applying the update in one statement.
 
 ```typescript
-const before = await store.nodes.Account.getById(id);
 const applied = await store.nodes.Account.compareAndSet(id, {
   expected: { name: "Northwind", plan: "team", seats: 12 },
   patch: { email: "ops@northwind.example" },
 });
-const after = await store.nodes.Account.getById(id);
-console.log(
-  `applied=${applied}  email=${after?.email}  version ${before?.meta.version} -> ${after?.meta.version}`,
-);
 ```
 
 ```text
 applied=true  email=ops@northwind.example  version 1 -> 2
 ```
 
-For `acct_legacy_1` the agent guards on the three properties it read that
-are valid. The complete after-image still goes through ordinary validation,
-and the row's version advances. Now the case the guard exists for. An agent read
-`acct_legacy_2` and planned a repair; before it applied, a person fixed the
-row by hand, changing the email along the way. The agent's guard names the
-email it read:
+The interesting case is when someone else gets there first. Say the agent read
+`acct_legacy_2` and planned a repair, but before it applied, a person fixed
+the row by hand and changed the email along the way. The agent's guard names the email it read:
 
 ```typescript
 const applied = await store.nodes.Account.compareAndSet(id, {
@@ -214,22 +166,14 @@ const applied = await store.nodes.Account.compareAndSet(id, {
 applied=false  seats=20  version 2 -> 2  updatedAt changed=false
 ```
 
-`false` means the row was missing or no longer matched, and in both cases
-nothing was written: the person's `seats=20` stands, the version didn't
-move, `updatedAt` didn't change. It is an ordinary outcome, not an
-exception. The agent's correct response is to re-read and re-plan. If you
-register `onBulkOperationEnd`, guards show up in the ordinary hook stream
-with the affected count, so hits and misses are observable without wrapping
-the call:
+`false` means nothing was written, so the person's `seats=20` stands and the
+version didn't move. It's an ordinary return value rather than an exception,
+and the agent should re-read the row and plan again.
 
-```text
-compareAndSet Account affected=1
-compareAndSet Account affected=0
-```
-
-Absence is a value you have to state. `undefined` is refused because it can
-vanish while an object is assembled or serialized, so the guard uses an
-exported marker to require that a property isn't stored:
+To require that a property is _missing_, use the exported
+`compareAndSetAbsent` marker (`undefined` is too easy to lose while an object
+is being built or serialized). Here are two agents trying to claim the same
+unowned account:
 
 ```typescript
 const claim = (ownerId: string) =>
@@ -245,87 +189,39 @@ console.log(await claim("rep-9"), await claim("rep-4"));
 true false
 ```
 
-Two agents claiming the same unowned account: one owns it, the other learns
-that immediately and moves on. No lock, no retry loop.
+The first agent gets the account and the second finds out immediately,
+without a lock or a retry loop.
 
-Two behaviors are worth knowing before you build on this, both verified in
-the same run. The expected values are parsed through the property's current
-schema, so a guard can't name a value the schema already rejects. Guarding
-`acct_legacy_1` on its bad email is a `ValidationError` on `email`, which is
-why the repairs above guard on `name`, `plan`, and `seats` instead. And the
-after-image must be valid as a whole: patching only `plan` on
-`acct_legacy_2` fails on `seats`, before anything is written. A row with two
-violations gets one patch that fixes both.
+Expected values are checked against the property's current schema, so you
+can't guard on a value that's already invalid, which is why the repair above
+guards on `name`, `plan` and `seats` rather than the bad email. The row also
+has to be valid as a whole after the patch, so patching only `plan` on
+`acct_legacy_2` fails on `seats` before anything is written.
 
-## Propose a batch without a branch
+## Review a batch before it lands
 
-A guard is the right size for one row. A partner feed offering a batch of
-accounts is a review problem: you want to see what would change before
-anything does. `planCandidateWriteSet()` takes a serializable write set,
-stages it in a disposable working copy, runs it through the ordinary merge
-planner, and hands back the ordinary plan artifact. It creates no durable
-branch and never writes to the target.
+A guard works for one row, but a partner feed offering a batch of accounts
+is more of a review problem, where you want to see what would change before
+anything does. `planCandidateWriteSet()` takes a serializable batch of nodes
+and edges, stages it on a throwaway copy, and hands back an ordinary merge plan
+without ever writing to the target.
 
 ```typescript
 const plan = unwrap(
   await planCandidateWriteSet({
     target: store,
     makeBackend,
-    options,
+    options, // two Accounts with the same email are the same account
     writeSet: {
       formatVersion: 1,
       sourceId: "partner-feed",
       target: await captureCandidateWriteSetTarget(store),
-      nodes: [
-        {
-          kind: "Account",
-          id: "partner:7",
-          properties: {
-            name: "Account 7 Holdings",
-            email: "ops+7@example.com",
-            plan: "enterprise",
-            seats: 40,
-          },
-          validFrom: "2026-09-01T00:00:00.000Z",
-        },
-        {
-          kind: "Account",
-          id: "partner:globex",
-          properties: {
-            name: "Globex",
-            email: "it@globex.example",
-            plan: "team",
-            seats: 25,
-          },
-          validFrom: "2026-09-01T00:00:00.000Z",
-        },
-      ],
+      nodes: [partnerAccount7, partnerGlobex],
       edges: [],
     },
   }),
 );
 ```
-
-`options` tells the planner that two `Account` nodes with the same email are
-the same account:
-
-```typescript
-const options = {
-  resolve: {
-    Account: {
-      similarity: {
-        kind: "custom",
-        score: (a, b) => (a.email === b.email ? 1 : 0),
-      },
-      threshold: 1,
-    },
-  },
-};
-```
-
-Without it the planner doesn't recognize `partner:7` as `acct_7`, and
-applying the plan fails on the `account_email` uniqueness constraint. With
-the resolver in place:
 
 ```text
 upserts: 2  accounts still 243
@@ -334,61 +230,36 @@ acct_7 plan: keep "team", feed says "enterprise"
 acct_7 seats: keep 12, feed says 40
 ```
 
-Two upserts: a new account, and a match on `acct_7` that disagrees with the
-feed in three properties. By default the accepted values win and the
-disagreements go on the review, so the feed's "enterprise, 40 seats" is a
-line item for a reviewer, not a silent overwrite. The target still has 243
-accounts.
+The plan has one new account and one match on `acct_7`, where the feed
+disagrees on three properties. The existing values win by default and the
+disagreements go on the review, so "enterprise, 40 seats" becomes a line item
+for a person to look at instead of a silent overwrite.
 
-Then the world moves. Some unrelated write lands (here, a guarded
-`acct_3` plan change), and applying the original plan is refused:
+If something unrelated writes to the graph before you apply, applying the
+original plan fails:
 
 ```text
 StaleMergePlanError: The target revision changed after this merge plan was created; the plan was not applied.  accounts 243
 ```
 
-Re-plan against the current graph, apply, and the count goes to 244:
+Re-planning and applying takes the count to 244. The plan is tied to the
+target's revision rather than only the rows it touches, so any write makes it
+stale, which is cheap to recover from for a bounded batch. When a person's
+approval has to sit between planning and applying, [durable review](/blog/durable-merge-branches)
+handles it.
 
-```text
-merged nodes=2  accounts 244
-```
+## One consistent snapshot
 
-The plan is fenced on the target's revision, not on the rows it touches, so
-an unrelated write, like this one, invalidates it. For a bounded batch that
-is cheap to redo. When a
-human approval has to sit between planning and applying, that's the case
-[durable merge review](/blog/durable-merge-review) handles: the approval is
-persisted as evidence and a fresh plan is derived from it.
-
-## Inside a transaction
-
-Root-store analysis is a sequence of statements. When a sweep needs to see
-one consistent dataset, 0.64 exposes the same two methods on the transaction
-context:
+At the root store, each `describe()` statement and each `validateStore()` page
+is its own read. TypeGraph catches schema changes between those reads but not
+data changes, so when a sweep needs one consistent view, 0.64 puts both methods
+on the transaction context:
 
 ```typescript
 const summary = await store.transaction(
   async (tx) => {
     const { statistics } = await tx.describe();
-    let scanned = 0;
-    const violations: string[] = [];
-    let cursor: string | undefined;
-    do {
-      const page = await tx.validateStore({
-        entity: "node",
-        kind: "Account",
-        pageSize: 100,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-      scanned += page.scannedCount;
-      violations.push(...page.violations.map((v) => `${v.id}${v.path}`));
-      cursor = page.nextCursor;
-    } while (cursor !== undefined);
-    return {
-      accounts: statistics.nodes.find((k) => k.kind === "Account")?.count,
-      scanned,
-      violations,
-    };
+    // ...page through tx.validateStore() exactly as above
   },
   { isolationLevel: "repeatable_read", accessMode: "read_only" },
 );
@@ -398,89 +269,50 @@ const summary = await store.transaction(
 { accounts: 244, scanned: 244, violations: [] }
 ```
 
-The violations are gone because the two repairs above landed by this point
-in the run. Use `repeatable_read` or `serializable` and consume every page
-inside the callback; that is what makes the pages one snapshot. Calling the
-root `store.describe()` from inside a transaction callback does not join the
-transaction.
+The violations are gone because both repairs landed earlier in the run. Use
+`repeatable_read` or `serializable` and consume every page inside the
+callback.
 
-## Also in 0.54
+## Limits
 
-Graph-scoped annotations now flow through `defineGraph`,
-`defineGraphExtension`, the serialized schema, and introspection, so an
-extension can carry metadata about the graph and an agent reading
-`describe()` sees it:
-
-```typescript
-const evolved = await store.evolve(
-  defineGraphExtension({ annotations: { displayName: "Account directory" } }),
-);
-console.log((await evolved.describe()).schema.annotations);
-```
-
-```text
-{ displayName: 'Account directory' }
-```
-
-The release also adds schema-bound runtime-kind tokens, which keep extension
-node and edge types through collections, bulk edge reads, and one-hop
-traversals. That one I haven't exercised here; the
-[graph extensions guide](/graph-extensions) covers it.
-
-## What this doesn't do
-
-**Analysis is live data, not a snapshot.** At the root store, each
-`describe()` path batch and each `validateStore()` page is its own
-statement. The schema fence catches schema changes between them; it does not
-catch data changes, so a concurrent write can be visible to one page and not
-another. The transaction form above is the way to get a single snapshot.
-Both methods are current-state only and absent from `StoreView`; there is no
-as-of population analysis.
-
-**`describe()` covers directly addressable declared properties.** Coverage
-follows nested JSON Schema `properties` and deliberately doesn't invent
-semantics through `$ref`, unions, intersections, arrays, or conditionals.
-`validateStore()` remains the authority for those.
-
-**A guard protects what it can name.** Expected values are JSON scalars
-that must pass the property's current schema. That means you can't fence on
-the invalid value itself: if a person and an agent both repair the same bad
-field, a guard on its neighbors won't tell them apart. Where the guard can't
-express the precondition, the revision-fenced plan above is the alternative.
-
-**Planning clones the whole target.** The working copy is seeded by
-cloning the target graph, so the cost scales with the target. The guide
-recommends `planCandidateWriteSet()` for bounded review workflows, not as a
-hot-path comparison.
+- **`describe()` covers directly addressable declared properties.** It
+  doesn't guess through `$ref`, unions, arrays, or conditionals.
+  `validateStore()` is the authority for those.
+- **Both are current-state only.** There's no "what did the data look like
+  last month" analysis.
+- **A guard can only protect what it can name.** You can't guard on an
+  invalid value, so if a person and an agent both repair the same bad field,
+  a guard on its neighbors won't tell them apart. The revision-fenced plan is
+  the alternative there.
+- **Planning copies the whole target,** so its cost scales with the graph.
+  It's for bounded review workflows, not a hot path.
 
 ## Upgrading
 
-Two behaviors changed after 0.68.0, both found while writing this post. On
-0.68.0 and earlier, `planCandidateWriteSet()` refuses a target that holds a
-row with undeclared properties, such as `acct_legacy_3` above
-([#733](https://github.com/nicia-ai/typegraph/issues/733), fixed in
-[#735](https://github.com/nicia-ai/typegraph/pull/735)), and
+Writing this post turned up two bugs in 0.68.0 and earlier.
+`planCandidateWriteSet()` fails on a target that holds a row with undeclared
+properties, like `acct_legacy_3` above
+([#733](https://github.com/nicia-ai/typegraph/issues/733)), and
 `compareAndSet()` throws a raw Zod error on a kind whose schema has an
 object-level `.refine()`
-([#734](https://github.com/nicia-ai/typegraph/issues/734), fixed in
-[#737](https://github.com/nicia-ai/typegraph/pull/737)). Both are fixed in
-the next patch release; the examples in this post assume it.
+([#734](https://github.com/nicia-ai/typegraph/issues/734)). Both are fixed in
+0.68.1 ([#735](https://github.com/nicia-ai/typegraph/pull/735),
+[#737](https://github.com/nicia-ai/typegraph/pull/737)), which the examples
+here assume.
 
-`BulkOperationHookContext["operation"]` now includes `"compareAndSet"`, so
-an exhaustive `switch` over it needs the new case. During a mixed-version
-rollout, upgrade every process that can write schema versions to 0.54
-before enabling graph-scoped annotations; 0.54 preserves unknown top-level
-serialized-schema fields during reconciliation, and older writers don't.
+`BulkOperationHookContext["operation"]` now includes `"compareAndSet"`, so an
+exhaustive `switch` over it needs the new case. If you run mixed versions
+during a rollout, upgrade every process that writes schema versions to 0.54
+before using graph-scoped annotations (also new in 0.54: metadata on the graph
+itself, carried through extensions and returned by `describe()`). Older
+writers drop fields they don't recognize.
 
 ## Try it
 
-- [`describe()` and `validateStore()`](/graph-extensions#population-statistics-and-stored-data-validation),
-  including the transaction form
-- [`compareAndSet()`](/schemas-stores#compareandsetid-params) and the
-  `compareAndSetAbsent` marker
+- [`describe()` and `validateStore()`](/graph-extensions#population-statistics-and-stored-data-validation)
+- [`compareAndSet()`](/schemas-stores#compareandsetid-params) and
+  `compareAndSetAbsent`
 - [`planCandidateWriteSet()`](/graph-merge#constraint-aware-ingestion-branches)
-  and the plan and apply lifecycle
-- [Example 27](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/27-durable-merge-review.ts),
-  which carries a candidate write set through review and apply
+- [GitHub](https://github.com/nicia-ai/typegraph)
 
 <NewsletterSignup />

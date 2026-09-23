@@ -110,7 +110,7 @@ the only diff from example 10 is the import line and connection setup.
 
 | Example | Description |
 |---------|-------------|
-| [27-graph-analytics.ts](./27-graph-analytics.ts) | The next chapter of 14-research-copilot: whole-graph analytics over the same citation DAG — `weaklyConnectedComponents`, `weightedShortestPath` (fewest hops vs. cheapest lineage under a convex cost), `pageRank` vs. raw citation count, `personalizedPageRank` seeded on one paper, and `labelPropagation` community detection (including the oscillate-then-fixed-round contract) |
+| [32-graph-analytics.ts](./32-graph-analytics.ts) | The next chapter of 14-research-copilot: whole-graph analytics over the same citation DAG — `weaklyConnectedComponents`, `weightedShortestPath` (fewest hops vs. cheapest lineage under a convex cost), `pageRank` vs. raw citation count, `personalizedPageRank` seeded on one paper, and `labelPropagation` community detection (including the oscillate-then-fixed-round contract) |
 
 ### Runtime Schema & Application Showcases
 
@@ -189,7 +189,7 @@ Each example follows a consistent pattern:
 11. For production, see **10-postgresql** for backend configuration
 12. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
 13. For end-to-end application demos, see **14-research-copilot**, then see
-    **27-graph-analytics** for the whole-graph algorithms (PageRank,
+    **32-graph-analytics** for the whole-graph algorithms (PageRank,
     communities, weighted paths) over the same corpus
 14. For read lenses over one graph — view modes, pinned reads, consistent
     snapshots — see **26-store-views**

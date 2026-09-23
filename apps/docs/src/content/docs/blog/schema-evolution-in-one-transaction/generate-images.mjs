@@ -38,8 +38,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "schema-evolution-in-one-transaction";
-const TITLE =
-  "Schema Evolution in One Transaction: The Kind, the Rows, and the Ledger Entry Commit Together";
+const TITLE = "Schema Changes That Roll Back With Everything Else";
 
 const COLOR_LIVE_STROKE = "#2563eb";
 const COLOR_LIVE_ROW = "#3b82f6";

@@ -1,22 +1,21 @@
 ---
-title: "One Exchange Instead of Six: Fusing Writes for Serverless Drivers"
-date: 2026-10-15
-excerpt: "A single managed write cost five to six sequential round trips — begin, schema-fence probe, duplicate check, insert, commit. On a 45ms edge-to-database link that is a quarter-second before the row exists. 0.52.0 fused eligible node and edge writes into one atomic exchange on Neon HTTP, Cloudflare D1, and libSQL; 0.53.0 finishes the job, extending the same programs to singleton updates and deletes, upserts, read-free document replacement, claims and search projections, and pinned PostgreSQL sessions. All figures are transport-submission counts, not wall-clock benchmarks."
+title: "One Round Trip Per Write"
+date: 2026-09-01
+excerpt: "A single TypeGraph write used to cost five or six sequential round trips, which adds up to about a quarter of a second from an edge worker to managed Postgres. 0.52 and 0.53 fold most writes into one request."
 tags:
   - announcements
 cover:
   alt: "A sequence diagram between a worker and its database: five muted request-and-response rungs for begin, schema-fence probe, duplicate check, insert and commit, against one bold line above them for the single fused statement"
   image: "./cover.png"
 social:
-  alt: "One Exchange Instead of Six: Fusing Writes for Serverless Drivers"
+  alt: "One Round Trip Per Write"
   image: "./social.png"
-draft: true
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
 
-With statement logging turned on and prepared statements off, a single
-managed node or edge write looked like this on the wire:
+I turned on statement logging, turned off prepared statements, and created one
+node. This is what went over the wire:
 
 ```
 begin
@@ -26,170 +25,108 @@ INSERT ... (the write)
 commit
 ```
 
-Five statements, five round trips. On a pooled connection with sub-millisecond
-latency to the database, that's invisible. On an edge-compute-to-managed-
-PostgreSQL link — the shape serverless deployments actually run — round-trip
-time is closer to 45ms, and every one of those statements pays it in full:
-roughly 250–300ms for one write. Every latency figure in this post is that
-arithmetic — a submission count multiplied by an assumed round trip — not a
-measured wall-clock benchmark. What is measured here is the number of
-submissions crossing the transport boundary. A captured first-provisioning flow for one
-graph ran 97 statements total; roughly 40 of them, across just seven writes,
-were fence probes, duplicate checks, and transaction framing — not the
-writes themselves.
+That's five round trips to write one row. On a pooled connection sitting next
+to the database you'd never notice, but a lot of people run TypeGraph from
+edge functions against managed Postgres, where a round trip is more like 45ms
+and each of those statements pays it in full, so the row takes roughly a
+quarter of a second to exist.
 
-That gap is the subject of [issue #533](https://github.com/nicia-ai/typegraph/issues/533),
-and closing it is most of what 0.52.0 was — and all of what 0.53.0
-finishes. The fix isn't a cache or a timeout tweak. It's a different execution contract: an eligible write's
-decision (does the schema fence pass, does the duplicate check pass, do the
-endpoints exist, does the cardinality claim hold) and its mutation now share
-one command boundary, compiled into one statement, instead of being a
-sequence of application-level reads that individually decide whether to let
-the write proceed.
+When I captured a first-run provisioning flow for one graph, it issued 97
+statements, and about 40 of them, spread across just seven writes, were
+schema-version probes, duplicate checks, and `begin`/`commit` rather than
+actual writes.
 
-## The command port
+That was [issue #533](https://github.com/nicia-ai/typegraph/issues/533), and
+closing it took two releases. The short version: an eligible write and every
+check it depends on now go to the database together, as one request.
 
-`GraphBackend.commands` replaces the old optional managed-create hook as a
-required semantic execution port. A command carries an explicit root or
-transaction session and, after the graph's advisory lock is actually
-acquired, a coordination token bound to that graph and session — a wrapper
-for a different connection can't reuse it. On PostgreSQL, the same
-lock statement observes the effective transaction isolation and folds it
-into the token, so match-key convergence knows whether it's running under
-read-committed or serializable without a separate probe round trip. It's
-correctness evidence that used to require asking, now carried by a
-statement that already had to run.
+A note on the numbers: everything below is a count of requests crossing the
+transport, which is what I measured. Latency figures are that count times an
+assumed 45ms round trip, not wall-clock benchmarks.
 
-A backend either executes every dimension a command requests or refuses
-before issuing SQL — [`node.create`, `edge.create`, and
-`edge.converge-create`](/backend-setup#authoritative-command-sessions) are
-required cases, and an unsupported dimension gets a typed `unsupported`
-result rather than being silently dropped. That's what lets the Store fall
-back to the complete portable path cleanly instead of mixing partial
-backend work with a second decision path.
+## Checks and write, in one statement
 
-For eligible first-party PostgreSQL writes — schema-managed, generated ID,
-no claims outside what the command can carry, no history/revision/Operational
-Identity sidecars — this folds the schema fence, endpoint predicate,
-uniqueness verdict, and the insert itself into one statement. **Five to six
-sequential requests become one: an 80–83% reduction**, which at that assumed
-45ms round trip works out to roughly 180–225ms of removed network wait. On Neon's WebSocket driver, a
-typical get-or-create miss against a schema-declared match identity drops
-from the dispatcher read plus `begin`/lock/`commit` framing — five requests —
-to one.
+The old path was a sequence of reads, each deciding whether the write could
+proceed: whether the schema version still matched, whether the row was a
+duplicate, whether the edge's endpoints existed, and whether the cardinality
+constraint held. Each of those was another round trip, and the whole sequence
+was wrapped in a transaction so nothing could change between the checks and
+the insert.
 
-Writes that need more than a command can carry — dynamic call-level
-`matchOn`, constrained single-edge cardinality claims, history or revision
-capture, caller-owned transactions, custom backends — keep the interactive
-transaction those guarantees actually require. This is fusion for the common
-shape, not a rewrite of the transactional path underneath it. See
-[Remote edge convergence](/performance/overview#remote-edge-convergence) for
-the exact eligibility rules.
+In 0.52, for the common shape on Postgres (schema-managed, generated ID, no
+history or identity tracking), all of those checks and the insert compile into
+a single statement, and the database evaluates the conditions and performs
+the write atomically.
 
-## Bulk writes on transactionless roots
+That takes **five or six sequential requests down to one**, which at 45ms
+removes roughly 180–225ms of waiting from every such write. On Neon's WebSocket
+driver, a typical get-or-create that misses drops from five requests to one.
 
-The sharper version of this problem is on Neon HTTP, Cloudflare D1, and
-libSQL — roots that don't offer an interactive multi-statement transaction
-at all, only one-shot atomic dispatch (`transaction([...])`, `batch()`).
-Before 0.52.0, a bulk call on one of these had to fall back to sequential,
-non-atomic execution: no framing overhead to fuse away, just no atomicity
-guarantee either.
+When a write needs something a single statement can't carry (history capture,
+a caller-owned transaction, call-level `matchOn`), it takes the ordinary
+transactional path, which is still there underneath for everything the fast
+path doesn't cover.
 
-0.52.0 adds a closed, precompiled write-program layer that these three
-transports execute as one native atomic exchange:
+## Batches on drivers without transactions
 
-- **`nodes.bulkInsert()`** for generated-ID, schema-managed batches with no
-  claims, Operational Identity, history, revision, or projections compiles
-  to one schema-fenced exchange. It also drops the existence-priming read
-  that used to run first to confirm the batch was guaranteed-empty — that
-  guarantee now comes from the generated-ID shape itself, not a read.
-- **`edges.bulkInsert()` / `edges.bulkCreate()`**, unconstrained, fold
-  endpoint validation into the write boundary instead of reading candidate
-  endpoints first. A one-chunk batch goes from 2 exchanges to 1 when both
-  endpoints share a kind, 3 to 1 across two kinds.
-- **The same two methods with a declared durable `matchIdentity` or a
-  cardinality claim (`one`, `unique`, `oneActive`)** carry that arbitration
-  inside the same native transaction: claims are prepared without a database
-  read, sorted by the existing canonical comparator, and acquired before the
-  edge rows in the same lock order the interactive fallback already used.
+The bigger win is on Neon HTTP, Cloudflare D1, and libSQL, which don't give
+you an interactive transaction at all, only one-shot atomic batches. Before
+0.52, a bulk write on one of them ran statement by statement, so it was slow
+and a partial failure left partial data behind.
 
-Measured at the libSQL transport boundary — counting actual `execute()` /
-`batch()` submissions, not SQL statements inside the resulting transaction:
+Now TypeGraph compiles eligible bulk writes into a precompiled program that
+those drivers execute as a single atomic batch. `nodes.bulkInsert()` becomes
+one request, edge batches validate their endpoints inside the write instead of
+reading candidate endpoints first, and batches with a cardinality constraint
+(`one`, `unique`, `oneActive`) carry the constraint checks in the same batch.
+Counting actual `execute()` / `batch()` calls on libSQL:
 
-| Managed bulk shape                 | Before | After | Reduction |
-| ---------------------------------- | -----: | ----: | --------: |
-| Unconstrained edge batch           |      1 |     1 | unchanged |
-| Durable-match edge batch           |      6 |     1 |       83% |
-| Cardinality-constrained edge batch |      8 |     1 |     87.5% |
+| Bulk edge write               | Before | After |
+| ----------------------------- | -----: | ----: |
+| Unconstrained                 |      1 |     1 |
+| With a durable match identity |      6 |     1 |
+| With a cardinality constraint |      8 |     1 |
 
-Every chunk in a native program carries the same schema fence, so a stale
-fence is a side-effect-free no-op rather than a partial write, and a later
-endpoint, duplicate, or identity conflict rolls every earlier claim mutation
-back in the same exchange. A dropped conflict arbiter fails closed with
-`EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE` instead of silently accepting
-duplicates — the regression test for that path was written by deleting the
-conflict-target clause and watching duplicates land, then restoring it and
-watching the same input refuse.
+Since it's all one batch, a conflict anywhere rolls the whole thing back. I
+wanted proof that the conflict check actually did something, so I wrote its
+regression test by deleting the conflict clause, watching duplicates land,
+and then putting the clause back and watching the same input get rejected.
 
-When 0.52 shipped, caller-supplied-ID node insertion was still the slowest
-common bulk shape on these transports at 5 transport submissions, named here
-as the next candidate rather than something that release claimed. 0.53 closes
-it: eligible plain node `bulkInsert()` and `bulkCreate()` calls now submit one
-exchange for generated, caller-supplied, and mixed ID batches alike.
+## 0.53: the writes that have to look first
 
-History/revision-enabled stores, caller-owned transactions, and derived or
-custom backends all keep their existing transaction or typed-refusal path on
-purpose; none of this is a public Store batch API, it's an internal execution
-optimization underneath the same `bulkInsert`/`bulkCreate` calls you already
-write.
+0.52 fused the writes that create things, which left the ones that need to
+know what's already there: updates, upserts, and deletes that have to release
+the uniqueness claims their row held. 0.53 moved those onto the same programs.
 
-## What 0.53 finished
+- **Single-row `update()` and `delete()`** are one read plus one guarded
+  write, rather than a transaction around both: 60–67% fewer requests.
+- **`bulkUpsertById()`** is two requests: one batched read, one atomic write.
+- **`bulkReplaceById()`** is new. Each item is a complete document, so there's
+  nothing to read first. Creates, replacements, resurrections of deleted
+  rows, uniqueness claims, and fulltext and vector index updates all go in one
+  request.
+- **Large D1 upserts stay atomic.** D1 allows 100 bind parameters per
+  statement, so the program splits into many statements inside one atomic
+  batch. That raised the ceiling from 17 nodes and 6 edges to 512 nodes and
+  187 edges per call. Anything bigger falls back to the regular path instead
+  of building an unbounded request.
+- **Postgres transaction sessions run the same programs** through a
+  savepoint, so a rejected program doesn't poison the transaction around it.
 
-0.52 fused the write that creates something. The shapes left over were the
-ones that have to know what is already there — an update, an upsert, a
-delete that must release the claims its row owned. 0.53 puts those on the
-same programs.
+There's one trade-off to know about: the fused `update()` is optimistic. It
+doesn't hold a lock between its read and its write, so if the row moved
+underneath it, it re-reads and tries again, up to four times, and then throws
+`DatabaseOperationError`. Under sustained contention on the same row, that can
+fail a write that a transaction-capable backend used to serialize for you. I
+think that's the right trade for most workloads, but not for something like a
+hot counter.
 
-- **Singleton `update()` and `delete()`** now run as one authoritative read
-  or live-row gate plus one guarded atomic mutation, instead of an explicit
-  managed transaction spanning both. That is roughly 60–67% fewer exchanges
-  for the eligible shapes, and the per-operation hook contract is unchanged.
-- **`bulkUpsertById()`** costs 2 exchanges — one batched preimage read, then
-  one atomic mutation submission. A mixed create-and-update set used to need
-  separate create and update submissions after that read, so it falls from 3
-  to 2.
-- **`nodes.<Kind>.bulkReplaceById()`** is new: every item supplies a complete
-  document, so there is nothing to read first. Missing-row creation, live
-  replacement, tombstone resurrection, claim release and acquisition, and
-  fulltext/vector transitions all submit as one read-free atomic exchange.
-- **Claims and search projections moved inside the program.** Uniqueness and
-  disjointness claims, fulltext and per-vector-slot transitions, endpoint and
-  schema fences, and postimage assertions now travel in the same submission
-  as the rows they belong to, rather than as sidecar work after it.
-- **Large D1 batches stay atomic.** The program chunks statements by the
-  100-parameter bind budget inside one atomic batch, raising the previous
-  17-node and 6-edge ceilings to 512 nodes and 187 edges per call. A terminal
-  postimage assertion per chunk rolls the whole submission back if any guarded
-  member moved; anything larger fails closed to the portable path rather than
-  building an unbounded request.
-- **PostgreSQL sessions run the same programs** on their pinned transaction,
-  through a savepoint — so a deliberate refusal can be diagnosed and rolled
-  back without poisoning the caller's surrounding transaction.
+## Letting the database decide: match identities
 
-One behavioural change is worth reading twice. The guarded update converges
-**optimistically** rather than holding a transaction lock across its read and
-write: a one-row update gets four attempts against a moved preimage before
-throwing `DatabaseOperationError`. Under sustained same-row contention that
-can refuse a write which a transaction-capable backend previously serialized
-for you. It is a real trade, not a free win.
-
-## What made the arbitrated case fusible
-
-Folding a cardinality claim or a match-on-endpoints convergence into one
-statement needs something the database can arbitrate without an
-application-level lock or cache: a real unique constraint. That's the other
-piece of this release — **durable edge match identities**. An edge
-registration can now declare one named, canonical property-field set:
+Fusing an edge get-or-create needed something the database could arbitrate on
+its own, without a lock or an in-process cache: a real unique constraint. So
+0.52 also added **durable edge match identities**. An edge can declare a named
+set of fields that identify it:
 
 ```typescript
 const worksAt = defineEdge("worksAt", {
@@ -207,95 +144,42 @@ edges: {
 },
 ```
 
-TypeGraph persists the directed endpoint/property key on every row and
-enforces it with a database unique arbiter — SQLite and PostgreSQL both
-provision and idempotently upgrade the edge relation for it. Once that
-arbiter exists, `getOrCreateByEndpoints` isn't "read, decide, then write and
-hope nothing raced" — it's a single conditional-insert statement the
-database resolves atomically, which is what makes the one-request path in
-the previous section safe on a stateless edge worker with no in-process
-cache to lean on. Dynamic, call-level `matchOn` remains available for
-convergence you don't want to declare in the schema, through the same
-transaction-fenced path it always used.
+TypeGraph stores that key on every edge row and backs it with a unique
+index, on both SQLite and Postgres. Once that exists,
+`getOrCreateByEndpoints` no longer has to read, decide, write, and hope
+nothing raced, because it's a single conditional insert the database resolves
+atomically, which is what makes the one-request path safe on a stateless edge
+worker with nothing in memory to lean on.
 
-This is a breaking schema change: adding, removing, or changing a match
-identity is refused while the affected edge kind holds rows. Export, hard
-delete, migrate the schema, then reimport — see
-[Upgrading deployment-wide base storage](/backend-setup#upgrading-deployment-wide-base-storage)
-if your DDL is managed outside `createStoreWithSchema()`.
-
-## If you maintain a custom backend
-
-Two contract changes apply regardless of which optimizations your backend
-can actually implement:
-
-- **`GraphBackend.commands` is now required.** Move managed-create and
-  specialized edge-insert logic into `{ session, execute }` handling
-  `node.create`, `edge.create`, and `edge.converge-create`; return the typed
-  `unsupported` result for any dimension you don't lower to SQL. See the
-  migration shape in [Authoritative command sessions](/backend-setup#authoritative-command-sessions).
-- **`OptionalTransactionExecution` is now a discriminated union**,
-  `{ mode: "interactive-transaction" | "sequential" }`, replacing the
-  ambiguous `execution.atomic` boolean.
-- **The top-level `capabilities.transactions` override is gone.** 0.52
-  narrowed it to mean interactive callback/session support specifically,
-  rather than generic atomicity; 0.53 removes it and **refuses it at
-  construction** instead of silently retaining it as inert data. Declare
-  `capabilities.execution.interactiveTransactions`. The distinction it was
-  narrowed to still holds: a transactionless root is not non-atomic, it is
-  atomic only for the shapes it natively batches.
-- **`store.transaction()` and `store.transactionWithReceipt()` now refuse a
-  backend without interactive transaction support** rather than degrading.
-  Call ordinary Store write methods directly when your application means to
-  own partial-failure recovery itself.
-
-Both bundled backends already implement the full surface, so if you're only
-using `createLocalSqliteBackend`, `createPostgresBackend`, or one of the
-serverless root factories, none of this requires a code change on your
-side.
-
-## Also in these releases
-
-- **Durable schema-only graph templates**, with idempotent v1 instantiation
-  — provision the same starting schema shape repeatedly without hand-rolling
-  the idempotency yourself. 0.53 makes registration and instantiation safe
-  across serverless isolates, so a template registered in one isolate can be
-  reopened through a verified store from a later one.
-- **Conformance runners for custom atomic backends**, covering both transport
-  mechanics (ordered result slots, exact statement and parameter forwarding,
-  rollback without sidecar leakage) and semantic eligibility. Passing the
-  transport runner certifies mechanics only; it does not by itself authorize
-  the bundled mutation programs, which stay a separate fail-closed contract.
-- **Fix:** reciprocal-rank-fusion scores in hybrid search now compute with
-  floating-point division. Integer division was silently truncating fused
-  scores toward zero.
+Changing a match identity is a breaking schema change and is rejected while
+the edge kind has rows. Call-level `matchOn` still works for matching you
+don't want in the schema, through the regular transactional path.
 
 ## Upgrading
 
-0.53 stamps deployment-wide base storage independently of your per-graph
-schemas. An existing or externally provisioned database must be opened once
-through privileged `createStoreWithSchema()` / `createAdapterStoreWithSchema()`,
-or receive TypeGraph's generated base-schema migration, before the zero-DDL
-verified-store and graph-template paths are used; until then those paths fail
-early with `BaseSchemaMigrationError`. This also repairs externally
-provisioned pre-0.52 databases whose graph schema never changed.
+If you use a bundled backend (`createLocalSqliteBackend`,
+`createPostgresBackend`, or one of the serverless factories), you don't need to
+change any code.
 
-One more refusal to know about: a PostgreSQL-dialect backend declaring neither
-usable pessimistic locks nor serialized writers can no longer open a
-schema-managed store, and reports `WRITE_FENCE_UNAVAILABLE` rather than
-accepting a declaration it cannot honor. Every first-party configuration —
-PostgreSQL, Neon, PGlite, SQLite, D1, libSQL — keeps its existing posture.
+There are two things to know. An existing or externally provisioned database has
+to be opened once through `createStoreWithSchema()` (or get TypeGraph's
+generated base-schema migration) before the zero-DDL verified-store paths will
+run; until then they fail early with `BaseSchemaMigrationError`. And
+`store.transaction()` now throws on a backend without interactive transactions
+instead of quietly running your callback without one.
+
+If you maintain a custom backend, `GraphBackend.commands` is now required and
+a few capability flags changed shape. The
+[authoritative command sessions](/backend-setup#authoritative-command-sessions)
+section has the migration.
 
 ## Try it
 
-- [Performance → Batch Write Patterns](/performance/overview#batch-write-patterns)
-  and [Remote edge convergence](/performance/overview#remote-edge-convergence):
-  eligibility rules and measured numbers for the fused paths
-- [Backend Setup → Authoritative command sessions](/backend-setup#authoritative-command-sessions)
-  and [Upgrading deployment-wide base storage](/backend-setup#upgrading-deployment-wide-base-storage):
-  the custom-backend contract and the schema migration path
-- [Changelog](/changelog#0530): the full 0.53.0 entry, and
-  [0.52.0](/changelog#0520) for the release that started this work
+- [Batch write patterns](/performance/overview#batch-write-patterns) and
+  [remote edge convergence](/performance/overview#remote-edge-convergence):
+  which writes are eligible, and the measured counts
+- [Upgrading deployment-wide base storage](/backend-setup#upgrading-deployment-wide-base-storage)
+- [Changelog](/changelog#0530) for 0.53.0, and [0.52.0](/changelog#0520)
 - [GitHub](https://github.com/nicia-ai/typegraph)
 
 <NewsletterSignup />

@@ -37,8 +37,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "materializing-event-streams";
-const TITLE =
-  "Materializing Event Streams: Two Bots, One Jane Doe, Zero Duplicates";
+const TITLE = "Turning Two Agents' Event Streams Into One Canonical Graph";
 
 const COLOR_SALES = "#3b82f6";
 const COLOR_SUPPORT = "#1e40af";

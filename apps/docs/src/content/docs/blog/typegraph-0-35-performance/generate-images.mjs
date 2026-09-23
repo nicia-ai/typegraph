@@ -30,7 +30,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "typegraph-0-35-performance";
-const TITLE = "TypeGraph 0.35: A Performance Release";
+const TITLE = "TypeGraph 0.35: Faster Almost Everywhere";
 
 const BEFORE_LABEL = "0.34";
 const AFTER_LABEL = "0.35";

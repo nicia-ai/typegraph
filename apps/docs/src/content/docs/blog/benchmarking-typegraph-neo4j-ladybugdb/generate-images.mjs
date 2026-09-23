@@ -38,8 +38,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "benchmarking-typegraph-neo4j-ladybugdb";
-const TITLE =
-  "TypeGraph vs. Neo4j vs. LadybugDB vs. pgGraph: Where Each Engine Actually Wins";
+const TITLE = "TypeGraph vs. Neo4j, LadybugDB and pgGraph: Who Wins What";
 
 const COLOR_TRACK = "#cbd5e1";
 const COLOR_RIVAL = "#94a3b8";

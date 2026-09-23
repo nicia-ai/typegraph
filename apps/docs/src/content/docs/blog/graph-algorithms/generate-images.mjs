@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bespoke cover/social images for the "Graph Algorithms" post — NOT a
 // generic template. The full real citation DAG from
-// examples/27-graph-analytics.ts (the same 18 papers, 37 real citation
+// examples/32-graph-analytics.ts (the same 18 papers, 37 real citation
 // edges used throughout the post) laid out by citation depth — backprop
 // (1986) at depth 0, each paper one layer past the deepest paper it
 // cites, LLaMA (2023) at depth 8 — rendered as a faint background network.
@@ -39,8 +39,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "graph-algorithms";
-const TITLE =
-  "Graph Algorithms: The Cheapest Citation Lineage Isn't the Shortest One";
+const TITLE = "The Cheapest Citation Lineage Isn't the Shortest One";
 
 const COLOR_EDGE = "#94a3b8";
 const COLOR_NODE_FILL = "#cbd5e1";
@@ -54,7 +53,7 @@ const COLOR_TEXT_DARK = "#0f172a";
  * @typedef {{ x: number; y: number }} Point
  */
 
-// Real (x, y) layout for all 18 papers in examples/27-graph-analytics.ts,
+// Real (x, y) layout for all 18 papers in examples/32-graph-analytics.ts,
 // positioned by citation depth (0 = backprop, cited by nothing; each other
 // paper is one layer past the deepest paper it cites). x follows depth
 // left-to-right; y is hand-spread within each depth to keep the

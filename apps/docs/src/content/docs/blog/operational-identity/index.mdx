@@ -1,41 +1,44 @@
 ---
-title: "Operational Identity: Two Systems, One Customer, Zero Silent Contradictions"
-date: 2026-09-24
-excerpt: "`store.identity` is a queryable, retractable, bitemporal ledger for asserting that two nodes — same kind or different kinds — are the same real-world thing, or provably not. Nodes sharing an id can fold automatically; everything else is an explicit assertion, optionally bounded to a validity window, propagated through traversal, interchange, and graph merge. A contradiction is refused twice: once by application validation, and again by a constraint the database itself enforces."
+title: "Tracking Which Records Are the Same Person"
+date: 2026-09-12
+excerpt: "`store.identity` records claims that two nodes are the same real-world thing, or provably aren't, keeps them queryable at any point in time after they're retracted, and has the database reject a set of claims that contradicts itself."
 tags:
   - announcements
 cover:
   alt: "Diagram of two records, Person and CaseSubject, folding into one identity class over a shared id, then splitting into two separated classes after a retraction, with a small database lock icon marking the constraint that refuses to let them refold"
   image: "./cover.png"
 social:
-  alt: "Operational Identity: Two Systems, One Customer, Zero Silent Contradictions"
+  alt: "Tracking Which Records Are the Same Person"
   image: "./social.png"
-draft: true
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
 
-A bank's KYC onboarding flow writes a `Person` row keyed by its own
-customer id. A separate fraud-detection pipeline writes a `CaseSubject`
-row for every actor named in an investigation, keyed by whatever id the
-case system uses — which, for a walk-in customer, happens to be the id
-the bank already assigned. Two systems, two schemas, one person.
+Say a bank's KYC onboarding writes a `Person` node for each customer, keyed by
+the bank's customer id, and its fraud pipeline writes a `CaseSubject` for
+everyone named in an investigation. When the person under investigation is a
+walk-in customer, the case system reuses the bank's id, so one human being
+ends up as two nodes of different kinds, and nothing in the graph says they're
+the same person.
 
-Graph libraries usually answer this at the type level. TypeGraph's own
-`sameAs` and `differentFrom` ontology factories did exactly that: they
-related _kinds_, not rows, and `differentFrom` never enforced anything
-about instance data at all. They are deprecated now.
+Most graph libraries handle "these are the same thing" at the type level, and
+TypeGraph used to as well. The `sameAs` and `differentFrom` ontology factories
+related _kinds_ rather than rows, and `differentFrom` never checked anything
+about actual data, which is of no use when a compliance team needs to say that
+this particular customer is that particular case subject. Both factories are
+deprecated now.
 
-`store.identity` is the replacement, and it is a different kind of
-object: a ledger of assertions about individual nodes, queryable at any
-temporal coordinate, retractable without deletion, propagated through
-traversal, interchange and graph merge — and backstopped in the database
-against ever committing a claim that contradicts itself.
+Their replacement, `store.identity`, is one of my favorite things in the
+library. It's a ledger of claims about individual nodes, either that two of
+them are the same entity or that they're provably not. You can query it at any
+point in time and retract a claim without deleting it, the claims carry
+through traversals and merges, and the database itself won't commit a set of
+claims that contradicts itself.
 
-## Two ways two nodes become one entity
+## Folding on a shared id
 
-Identity is opt-in per graph. Enabling it also decides whether nodes of
-different kinds that happen to share an id fold together on sight:
+Identity is opt-in per graph. Turning it on also decides what happens when
+nodes of different kinds share an id:
 
 ```typescript
 const graph = defineGraph({
@@ -51,11 +54,10 @@ const graph = defineGraph({
 });
 ```
 
-`"fold"` joins live nodes of different kinds sharing an id
-automatically. `"ignore"` enables the same ledger without that implicit
-join, for graphs where a shared id across kinds is a coincidence rather
-than evidence. With `"fold"`, the two systems above never need to
-coordinate:
+With `"fold"`, live nodes of different kinds that share an id are the same
+entity automatically. (`"ignore"` gives you the ledger without that implicit
+join, for graphs where a shared id is a coincidence.) The two systems above
+never have to coordinate:
 
 ```typescript
 const person = await store.nodes.Person.create(
@@ -72,19 +74,15 @@ await store.identity.membersOf(person);
 //  { kind: "Person", id: "cust-8842" }]
 ```
 
-Folds conduct on a node's **lifecycle**, not its validity window. A node
-created today with a backdated `validFrom` is visible in the past to an
-ordinary read, but it does not conduct a fold there — the fold begins
-when the node actually exists. Symmetrically, a node with a future
-`validFrom` folds today, because it already exists and is live. That
-keeps the materialized closure behind current reads identical to the one
-`asOf(now)` reads, with no valid-time skew to special-case.
+A fold starts when the node actually exists, not at its `validFrom`. A node
+created today with a backdated validity window shows up in historical reads,
+but it doesn't retroactively fold anything in the past.
 
-## When the ids don't already match
+## Saying it explicitly
 
-Most matches aren't that convenient. An investigator manually links a
-walk-in customer to an actor named in an unrelated case, under two ids
-that share nothing:
+Most matches don't come with a shared id. Here an investigator links a
+walk-in customer to an actor in an unrelated case, under two ids that have
+nothing in common:
 
 ```typescript
 const walkIn = await store.nodes.Person.create(
@@ -103,25 +101,14 @@ await store.identity.assertSame(walkIn, caseActor);
 // { action: "existing", assertion: <same assertion> } — idempotent
 ```
 
-`assertSame` and `assertDifferent` return a durable receipt either way,
-so a caller that re-runs after a crash cannot tell whether it created the
-assertion or confirmed one already there — the same idempotent shape as
-[`transactionWithReceipt()`](/blog/materializing-event-streams). Assertion
-IDs carry a private-symbol brand, so an unrelated string can't be passed
-by accident; a plain string that came back from persistence re-enters the
-branded type through `asIdentityAssertionId(value)` rather than a cast.
+Asserting the same thing twice gives you the existing assertion back, so a
+job that re-runs after a crash doesn't need to know whether it got that far
+last time. There are bulk forms (`bulkAssertSame`, `bulkAssertDifferent`) that
+return one result per input pair, in order.
 
-The bulk forms — `bulkAssertSame`, `bulkAssertDifferent` — preserve input
-order and return exactly one result per pair. On PostgreSQL they run
-under a single graph identity lock; SQLite serializes through its own
-single-writer lock instead. `bulkRetractAssertions` is the one method
-that deliberately breaks the one-result-per-input shape: it dedupes ids
-and returns only the assertions that were actually open, so its result
-does not align index-by-index with its input.
-
-The ontology gets a say before anything touches storage. Folding
-`walkIn` onto an `Organization` — a kind `disjointWith` `Person` — is
-rejected on the spot:
+Claims are also checked against the ontology before anything is stored.
+Since `Person` is `disjointWith` `Organization`, folding the walk-in onto a
+company fails:
 
 ```typescript
 await store.identity.assertSame(walkIn, acmeFreight);
@@ -129,49 +116,27 @@ await store.identity.assertSame(walkIn, acmeFreight);
 // details: { operation: "assertSame", reason: "disjoint-kinds", a, b }
 ```
 
-## Claims that were true for a while
-
-Not every identity claim is permanent. A person and a legacy record can
-be the same entity for a period and then diverge — a merged account that
-was later split, a case subject correct only for the window an
-investigation covered. Assertions take an explicit half-open validity
-window:
+Claims can also be bounded in time. A merged account that was later split, or
+a case subject that was only correct for the window an investigation covered,
+gets a half-open validity window:
 
 ```typescript
 await store.identity.assertSame(alice, legacyAlice, {
   validFrom: "2020-01-01T00:00:00.000Z",
   validTo: "2022-01-01T00:00:00.000Z",
 });
-
-await store.identity.bulkAssertDifferent([
-  { a: alice, b: bob, validFrom: "2023-01-01T00:00:00.000Z" },
-  { a: alice, b: carol }, // ordinary current-assertion semantics
-]);
 ```
 
-A past-ended window affects historical reads only. An open window
-beginning in the past affects both historical and current reads. The
-rules around the edges are the interesting part: a windowed assertion
-requires both endpoint rows to cover its whole interval, so an ended or
-late-starting endpoint raises `IdentityEndpointValidityError` rather
-than recording a claim about a node that wasn't there. Future bounds and
-inverted windows raise `IdentityValidityWindowError`. Zero-width windows
-are accepted as empty history. Repeating the exact relation, pair and
-window is idempotent — but a _second_ open window for a pair that is
-already current is refused rather than silently collapsed onto a
-different `validFrom`.
+Both endpoints have to exist for the whole window, and contradictions are
+checked across every overlapping stretch of time, including through chains of
+`same` claims.
 
-Contradictions are checked throughout every overlapping segment,
-including along transitive `same` paths, and adjacent half-open windows
-correctly do not overlap.
+## Changing your mind
 
-## The ledger won't hold both claims at once
-
-Three weeks later, forensic review proves `person-119` and `case-77` are
-two different people who happened to share a wire-authorization
-signature. That's new evidence, and exactly the shape a system should be
-able to record — but the ledger currently says they're the same entity,
-and it means it:
+Suppose forensic review later shows that `person-119` and `case-77` are two
+different people who happened to share a wire-authorization signature. You
+want to record that, but the ledger currently says they're the same entity,
+and it won't hold both claims at once:
 
 ```typescript
 await store.identity.assertDifferent(walkIn, caseActor);
@@ -179,10 +144,7 @@ await store.identity.assertDifferent(walkIn, caseActor);
 // details: { operation: "assertDifferent", reason: "same-class", a, b }
 ```
 
-`assertDifferent` refuses endpoints already in one identity class, the
-same way `assertSame` refuses endpoints an ontology already separated.
-Recording new evidence means retracting the old claim first —
-explicitly, not by overwriting it:
+You retract the old claim first, explicitly:
 
 ```typescript
 const ended = await store.identity.retractAssertion(linked.assertion.id);
@@ -195,32 +157,26 @@ await store.identity.areSame(walkIn, caseActor); // false
 await store.identity.areDifferent(walkIn, caseActor); // true
 ```
 
-`retractAssertion` deletes nothing. The ended assertion and its `validTo`
-stay readable through `identity.assertionsOf(...)` and at any historical
-coordinate. The class split is a fact with a timestamp, not a silent
-correction.
+Nothing was deleted: the retracted assertion and its `validTo` are still
+readable, and a query at a time before the retraction still sees one entity,
+so if an auditor asks why these two records were treated as one customer in
+August, you can answer them.
 
-Deletion participates in the same discipline. Soft-deleting a node ends
-its current assertions; when a deletion is what ended an assertion, the
-row records that node as `endedBy`, so a later reader can tell _why_ an
-assertion ended and not merely that it did.
+Soft-deleting a node ends its current assertions too, and records the node as
+the reason (`endedBy`), so a later reader can tell _why_ a claim ended.
 
-## A backstop beneath the application
+## A backstop in the database
 
-Everything above is code deciding whether a write is legal, and code can
-be wrong. `assertSame` validates against state it just read — the right
-layer for a clear error message, but still "read, then decide." A bug
-elsewhere that writes identity rows directly could in principle commit
-the exact contradiction the API refuses.
+Everything so far is application code deciding whether a write is allowed,
+and application code can be wrong. `assertSame` checks against state it just
+read, so a bug somewhere else that writes identity rows directly could still
+commit the contradiction the API rejects.
 
-So identity maintains a second derived relation: the **separation
-relation**, one row per pair of identity classes that a current
-`different` assertion holds apart, keyed under a
-`CHECK (class_key_low < class_key_high)` constraint. Every transaction
-that fuses two classes relabels the affected separation rows in the same
-statement batch. Fusing two classes that were separated relabels both
-sides of their shared row onto one key, and the database aborts the
-transaction:
+So identity also keeps a table of which identity classes are held apart by a
+`different` claim, with a database `CHECK` constraint on it. When a
+transaction merges two classes, it rewrites those rows in the same batch. If
+two classes that are supposed to be separate get merged anyway, the rewrite
+violates the constraint and the database aborts the transaction:
 
 ```typescript
 // IdentitySeparationViolationError
@@ -228,16 +184,13 @@ transaction:
 //            assertionId, a, b }
 ```
 
-`enforcedBy: "writer"` on the same error means the opposite happened: the
-write was accepted and only the writer's own re-check caught it, which
-means the relation was provisioned without its constraint. Either way the
-graph cannot end up holding a contradiction. The interesting question
-becomes which layer let it get that far.
+The API catches contradictions first and gives you a useful error, and the
+constraint is there for the case where the API has a bug.
 
-## Identity you can traverse
+## Traversals that understand it
 
-An identity class is only useful if queries respect it. Traversal
-expansion is per hop and defaults off:
+Queries can expand through identity classes, per hop, and it's off by
+default:
 
 ```typescript
 const results = await store
@@ -249,20 +202,15 @@ const results = await store
   .execute();
 ```
 
-The hop considers coordinate-visible members of the source class,
-returns the physical edge and target rows, preserves provenance, and
-deduplicates a physical edge within the step. There is no automatic
-graph-wide expansion, and collection reads like `getById` have no
-identity option — expansion is something you ask for.
+That hop follows `authored` edges from the person _and_ from every other node
+in their identity class, and returns the real edge and target rows with
+duplicates removed.
 
-Both coordinates reach the candidate edge through an ordinary indexed
-equality on the class member, never a membership test evaluated per
-candidate edge. What differs is what a class costs to compute. At the
-**current** coordinate the maintained closure already _is_ the class
-relation, so each step seeks into it from its own frontier. Cost is
-proportional to the frontier and the size of its classes — never to how
-many identity classes the graph holds. Measured on SQLite, with each
-`Person` folded to a `Company` and an `Alias` peer sharing its id:
+At the current time, each hop looks classes up through an index on the
+maintained closure, so the cost tracks the rows you start from and the size of
+their classes, not how many classes the graph holds. Measured on SQLite, with
+each `Person` folded to a `Company` and an `Alias` sharing its id, before and
+after the closure became index-seekable:
 
 | source rows | fan-out | matching edges | before    | after |
 | ----------- | ------- | -------------- | --------- | ----- |
@@ -272,129 +220,98 @@ many identity classes the graph holds. Measured on SQLite, with each
 | 1000        | 8       | 8000           | 8611 ms   | 13 ms |
 | 500         | 200     | 100,000        | 51,602 ms | 77 ms |
 
-A **historical** hop cannot use that closure, because the closure
-represents only the present. Its classes are reconstructed from the
-assertion ledger, and under `"fold"` that reconstruction also has to
-consider the structural same-id relation across every live node. No
-frontier narrows that fixed point, so it is built once per statement into
-a materialized relation each step joins.
+That closure only describes the present, which is worth planning around. A
+hop at a _historical_ time has to rebuild classes from the assertion ledger
+for the whole graph, once per statement, even if you only asked about one
+node, so queries about the present are much cheaper than queries about the
+past.
 
-That asymmetry is the thing to plan around: a past-coordinate hop
-rebuilds the whole graph's classes even when you asked about one node. A
-current hop has no such floor — a single-start-row hop over 50,000 folded
-triples measures 1 ms on SQLite against 387 ms before the closure was
-seekable, and nine unrelated 501-member classes cost it nothing at all.
-Reading the present is the cheaper question by a wide margin.
+Identity claims also carry through interchange and graph merge. Exports carry
+assertions (current ones by default, ended ones too if you ask for an archival
+export), and graph merge treats identity as part of what it diffs. Two branches
+that make opposing claims about the same pair, or that contradict each other
+through a chain of `same` claims neither wrote alone, fail at plan time with
+`IdentityMergeConflictError`, and the merge checks again inside its own
+transaction before committing.
 
-## Identity that travels
+## Staging the duplicate you came to resolve
 
-Identity truth is not confined to one database.
+Ingestion is where identity gets messiest. Say a provider feed arrives with a
+patient carrying MRN `MRN-4471` and the graph already has a `Patient` with
+that MRN. That's expected, since deciding whether the two are the same person
+is why the ingestion pass exists, but `Patient` declares `unique("mrn")`, so
+the second row can't be written. If you stage it on an ordinary `branch()`,
+staging fails at the duplicate before entity resolution has seen anything.
 
-**Interchange** format `2.0` carries an optional identity section. State
-export includes current assertions; `identityMode: "archival"` also
-includes ended ones, restored after shape validation without affecting
-the current closure. Identity-enabled exports default `includeTemporal`
-to `true`, because importing identity truth has to prove both endpoints
-existed throughout each assertion window — setting it to `false` on an
-identity-enabled graph is refused outright.
+`ingestionBranch()` makes a working copy that defers node uniqueness and
+nothing else, so schema validation, endpoint checks, disjointness and edge
+cardinality all still apply while staging. The usual answer to this problem is
+a "skip validation" flag on the import, which I didn't want, because it lets
+every other kind of bad row in alongside the duplicates you meant to allow.
 
 ```typescript
-const archive = await exportGraph(store, {
-  identityMode: "archival",
-  includeDeleted: true,
+const incoming = unwrap(
+  await ingestionBranch(base, makeBackend, { id: asBranchId("provider-a") }),
+);
+
+const imported = await importGraph(incoming, providerDocument, {
+  onConflict: "error",
+  onUnknownProperty: "error",
 });
+if (!imported.success) throw new Error("Provider import was rejected");
+
+const alias = await incoming.nodes.Patient.getById(
+  asNodeId("incoming-patient"),
+);
+if (alias === undefined) throw new Error("Imported patient was not found");
+
+// `canonicalPatient` was read from the base before forking.
+await incoming.identity.assertSame(canonicalPatient, alias);
 ```
 
-There is a genuine trade-off in that second option worth stating plainly:
-without `includeDeleted`, an assertion whose endpoint is soft-deleted is
-dropped from the export entirely rather than carried as a dangling
-reference. With it, those assertions survive — but interchange documents
-carry no `deletedAt` field, so nodes exported only because of that flag
-re-import as **live**. An `includeDeleted` archive resurrects its
-soft-deleted nodes. Choose deliberately for a backup.
+The duplicate MRN and the claim that explains it now sit on the same branch
+and reach merge planning together. The handle only exposes the assertion
+methods, without identity reads, retractions, transactions, or access to the
+underlying store, so it can't be used to get around the deferred constraint.
 
-**Graph merge** includes identity truth in staleness fingerprints and
-diffs, and detects identity conflicts at plan time as a typed
-`IdentityMergeConflictError`: direct opposing relations on one endpoint
-pair, transitive contradictions reached through a chain of `same`
-assertions no single branch wrote, retract/reassert races, and assertions
-over a node another branch deleted. A branch that retracts a pair and
-reasserts it itself — convergent, not racing — merges cleanly.
-
-Plan time is the early surface, not the only one. After its identity
-writes, and still inside the same transaction, a merge re-derives the
-classes it touched from the written state and refuses a contradiction
-there too, so a plan validated against state that has since moved cannot
-leave a contradictory ledger behind. If the derived classes disagree with
-the materialized closure, the closure is rebuilt inside that same
-transaction and the check re-runs — repairing a lagging closure
-atomically with a merge that is otherwise sound.
-
-This is mechanical truth propagation, not semantic entity
-reconciliation. It moves the claims you made; it does not invent new
-ones.
-
-**Ingestion branches** are where identity meets messy data. An untrusted
-batch often contains an alias that deliberately repeats a canonical
-node's unique key — and the identity evidence needed to collapse it. An
-`ingestionBranch()` handle exposes an assertion-only identity facade
-alongside its collections, so the duplicate and the assertion explaining
-it can be staged together and resolved at merge time. That story is its
-own post.
+At merge time the original uniqueness rule applies again. `applyMergePlan()`
+checks uniqueness against the entire resolved write set inside the target
+transaction, so a valid key handoff or swap goes through as one set (a
+row-by-row check would see two owners in the middle and reject it). If
+resolution still leaves two live owners of one MRN, the merge fails with
+`MergeConstraintConflictError` and writes nothing, so the deferral only gives
+you room to review the duplicate before merging.
 
 ## What it costs
 
-Identity is free when you don't use it: an identity-disabled graph runs
-no identity SQL, locks, or closure work at all — construction and
-property updates measure 0.002 ms and 0.039 ms on SQLite.
+A graph without identity enabled pays nothing: no identity SQL, locks, or
+closure work. With it on:
 
-When you do enable it, there are three costs worth knowing before you
-turn it on:
+- **One writer per graph for identity-affecting writes on Postgres.** They
+  serialize on a per-graph advisory lock. Other graphs and all reads are
+  unaffected.
+- **First-time enablement is heavy.** It briefly takes a `SHARE` lock on the
+  shared nodes table, which blocks writes for every graph in that database,
+  and loads the whole graph to build the initial closure. Do it in a quiet
+  window.
+- **Switching `fold` and `ignore` is a breaking schema change,** because it
+  changes every `areSame` answer on existing data. It needs an explicit
+  migration.
+- **It needs real transactions.** The bundled SQLite and Postgres drivers
+  have them. Cloudflare D1 and `drizzle-orm/neon-http` don't, and reject an
+  identity-enabled graph at construction.
 
-- **A per-graph write fence.** On PostgreSQL every identity-affecting
-  node write serializes on a per-graph advisory transaction lock: at most
-  one writer per graph at a time. That is a correctness guarantee for the
-  ledger and closure, and also a throughput ceiling. Other graphs and all
-  reads are unaffected.
-- **First-time enablement is heavier than steady state.** It takes a
-  `SHARE` lock on the shared nodes table — briefly blocking writes for
-  _every_ graph in that database — and loads the whole graph to build the
-  initial closure. Plan it for a quiet window on large databases.
-  `evolve()` re-runs the same rebuild.
-- **Changing `sameIdAcrossKinds` is breaking.** A `fold`↔`ignore` flip
-  rewrites the closure and changes every `areSame`/`membersOf` answer
-  against existing data, so it requires the same explicit
-  `migrateSchema()` opt-in as any other breaking change. It never
-  auto-migrates silently.
-
-Identity also requires interactive atomic transactions. The bundled
-SQLite and PostgreSQL drivers have them; Cloudflare D1 and
-`drizzle-orm/neon-http` refuse an identity-enabled graph with
-`ConfigurationError` code `IDENTITY_REQUIRES_ATOMIC_BACKEND`. A custom
-backend must additionally declare how it fences concurrent writers, or
-construction is refused with `IDENTITY_REQUIRES_WRITE_FENCE` — the error
-names the exact declaration line to add.
-
-## What this deliberately isn't
-
-Durable entity handles, identity-group IDs, semantic reconciliation,
-automatic OWL property substitution, and graph-wide identity expansion
-are not part of this. `store.identity` records and propagates the
-identity claims _you_ make, with a ledger you can audit and a database
-that refuses to hold a contradiction. Deciding that two records are the
-same person is still your call — or your entity-resolution pass's.
+`store.identity` records and propagates the identity claims _you_ make, so
+deciding that two records are the same person is still up to you or your
+entity-resolution pass. What it adds is a durable record of those decisions,
+including when each was made and when it stopped being true.
 
 ## Try it
 
-- [Operational Identity](/identity): the full guide — bulk assertions,
-  identity-expanded traversal, interchange and graph-merge propagation,
-  error codes, and migrating off `sameAs`/`differentFrom`
-- [Ontology](/ontology): `disjointWith` and the other relations identity
-  is validated against
-- [Graph Merge](/graph-merge): branch, resolve, and fold identity truth
-  back together
-- [`identity.test.ts`](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/tests/identity.test.ts):
-  the behavioral test suite this post's examples are drawn from
+- [Operational Identity](/identity): the full guide, including migrating off
+  `sameAs`/`differentFrom`
+- [Constraint-aware ingestion branches](/graph-merge#constraint-aware-ingestion-branches)
+- [Graph Merge](/graph-merge): branch, resolve, and merge identity back
 - [GitHub](https://github.com/nicia-ai/typegraph)
 
 <NewsletterSignup />

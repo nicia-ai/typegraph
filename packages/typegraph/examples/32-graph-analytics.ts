@@ -21,7 +21,7 @@
  * time — nothing is hard-coded.
  *
  * Run with:
- *   npx tsx examples/27-graph-analytics.ts
+ *   npx tsx examples/32-graph-analytics.ts
  */
 import {
   createStoreWithSchema,

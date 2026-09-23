@@ -38,8 +38,7 @@ import {
 } from "#blog-art";
 
 const SLUG = "source-dependent-edges";
-const TITLE =
-  "Source-Dependent Targets: One Edge Kind, Two Destinations, Zero Cross-Pairs";
+const TITLE = "Letting an Edge's Targets Depend on Its Source";
 
 const COLOR_FIELD = "#94a3b8";
 const COLOR_NODE_FILL = "#cbd5e1";

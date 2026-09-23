@@ -1,66 +1,145 @@
 ---
-title: "Durable Branches: The Working Copy Outlives the Process"
-date: 2026-11-10
-excerpt: "branch() gives you a working copy that lives and dies with the process that made it, which is the wrong shape for a review that waits a day and survives a deploy. 0.67 adds branchDurable(): a persistent working copy plus a JSON descriptor that can cross a queue and be reopened elsewhere. 0.68 adds operateDurableBranch(): apply a mutation and its evidence in one host transaction, keyed by an idempotency key, with the branch undestroyable until that evidence has been delivered."
+title: "Merges That Wait"
+date: 2026-09-21
+excerpt: "0.56, 0.67 and 0.68 let a reviewed graph merge wait a day for approval, survive a deploy, reopen in another process, and take input from an at-least-once queue without applying anything twice."
 tags:
   - announcements
 cover:
   alt: "A route lit in blue passing through three process capsules, each ending in an ×, joined by small { } descriptor tokens and finishing at an explicit destroy, inside a field of grey process lifetimes that end without carrying anything"
   image: "./cover.png"
 social:
-  alt: "Durable Branches: The Working Copy Outlives the Process"
+  alt: "Merges That Wait"
   image: "./social.png"
-draft: true
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
 
-[Graph Merge](/blog/graph-merge) plans before it applies: fork a working copy
-with `branch()`, stage changes on it, and `planMerge()` shows you the exact
-write set before anything touches the target. That works as long as staging,
-planning and applying happen in one run. The workflows that most want a branch
-don't. A nightly job proposes loyalty-point adjustments, a person approves them
-tomorrow, and a deploy lands in between. A `branch()` result's store and close
-handle live in the process that made it, and the ephemeral fork's `dispose()`
-deletes the fork. Nothing about it survives the process.
+[Graph Merge](/blog/graph-merge) plans before it applies: you fork a working
+copy with `branch()`, stage changes on it, and `planMerge()` shows you the exact
+write set before anything touches the target. That works well as long as
+staging, planning and applying all happen in one run of one process.
 
-0.67 adds `branchDurable()`, which forks a working copy that persists, and
-hands back a small JSON descriptor you can put on a queue. 0.68 adds
-`operateDurableBranch()` for the case where the branch is fed by a stream of
-messages: it applies a mutation and writes its evidence in one host
-transaction, so a crash between "applied" and "told downstream" can be
-recovered instead of guessed at.
+The workflows that most want a review step don't look like that. Say a nightly
+job proposes loyalty-point adjustments that a person approves the next
+morning, a deploy lands in between, and the thing feeding the branch is a queue
+that occasionally delivers the same message twice. An in-memory branch handle
+and a plan that goes stale as soon as anything is written can't cope with any
+of that.
 
-This is not [Durable Merge Review](/blog/durable-merge-review). That post is
-about persisting the _approval_ of a plan as evidence in the target graph. This
-one is about persisting the _working copy_ the plan is computed from. They
-compose, but neither needs the other.
+It took three releases to fix, and I think the result is one of the more
+unusual things TypeGraph can do. 0.56 made the review itself durable by storing
+it as graph data, 0.67 made the working copy durable so a branch can be closed
+in one process and reopened in another, and 0.68 made it safe to feed that
+branch from an at-least-once queue.
 
-One scoping note up front, because it shapes everything below: TypeGraph does
-not ship a durable host. It defines the contract, validates every answer a host
-gives, and refuses to fake anything the host can't do. The host, a
-`DurableWorkingCopyStrategy`, is what actually allocates and reconnects a
-working copy. The examples here run against a small file-backed SQLite host,
-where a working copy is a directory, and every output block is from a real run
-of it across separate `node` processes.
+## The review lives in the graph
 
-## A working copy that is somewhere
+A merge plan is tied to the target's revision, so if the target changes after
+planning, applying the plan fails. That rule is what keeps a stale plan from
+clobbering newer data, but it gets in the way if you want the review (the
+proposal, the decision, who approved it) stored as graph data next to the
+record it concerns, because _writing the review down_ is itself a write to the
+target, and by the time anyone approves the plan it's stale.
 
-The graph is a loyalty ledger. The base has one account, Ada, at 100 points:
+0.56 resolves this by separating what was reviewed from the plan you
+eventually apply. `planCandidateWriteSetReview()` captures the candidate
+changes, the plan, the policy, and a baseline of the target as one immutable,
+content-digested artifact:
 
 ```typescript
-const Account = defineNode("Account", {
-  schema: z.object({ name: z.string(), points: z.number() }),
-});
-
-const graph = defineGraph({
-  id: "loyalty",
-  nodes: { Account: { type: Account } },
-  edges: {},
-});
+const review = unwrap(
+  await planCandidateWriteSetReview({
+    target: store,
+    makeBackend,
+    policy: {
+      id: "manual-acceptance-v1",
+      context: { requiredApprovals: 1, authorizedReviewers: ["reviewer:maya"] },
+    },
+    writeSet: {
+      formatVersion: 1,
+      sourceId: "catalog-review",
+      target: await captureCandidateWriteSetTarget(store),
+      nodes: [
+        {
+          kind: "Item",
+          id: proposal.id,
+          properties: { label: proposal.label, status: "accepted" },
+        },
+      ],
+      edges: [],
+    },
+  }),
+);
 ```
 
-The nightly job forks a durable branch, stages two changes on it, and lets go:
+You store it as ordinary graph data, keyed by its own digest, along with the
+reviewer's decision. `Artifact`, `Decision` and `evidence` here are ordinary
+kinds the example defines itself, so this needs no special schema support:
+
+```typescript
+const artifact = await store.nodes.Artifact.create(
+  { content: JSON.stringify(review) },
+  { id: review.digest.value },
+);
+await store.edges.evidence.create(proposal, artifact, { note: "review" });
+
+const decision = await store.nodes.Decision.create({
+  approved: true,
+  reviewDigest: review.digest.value,
+  reviewer: "reviewer:maya",
+});
+await store.edges.evidence.create(decision, artifact, { note: "approval" });
+```
+
+Applying the original plan at this point fails:
+
+```typescript
+const stale = await applyMergePlan(store, review.plan);
+// stale.error is a StaleMergePlanError
+```
+
+Recording the review and the approval moved the target, so the plan is stale.
+This is the part I like: durable review doesn't get an exemption from the
+staleness check, because if recording an approval could quietly un-stale a
+plan, the check would mean nothing.
+
+Instead of reusing the plan, you call `revalidateCandidateWriteSetReview()`,
+which reads the stored artifact, re-plans the retained candidate against the
+current target, and tells you what it found:
+
+| `checked.status` | What it means                                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `compatible`     | Nothing that matters moved. You get a fresh `plan` and the original `reviewDigest`.                                |
+| `changed`        | Policy, options, baseline entities, or plan fields differ from what was reviewed. Get a new review and approval.   |
+| `incompatible`   | Graph id, schema identity, or revision origin don't match. This approval can't be used against this target at all. |
+
+In the example only the review and approval records were added, so the result
+is `compatible`. I was careful to keep `compatible` meaning only that nothing
+relevant moved; it says nothing about whether the caller is allowed to act, so
+the example checks both before spending the plan:
+
+```typescript
+if (checked.status !== "compatible") {
+  throw new Error("A new review and approval are required");
+}
+if (checked.reviewDigest.value !== approval.reviewDigest) {
+  throw new Error("Approval does not identify the validated review");
+}
+
+const report = unwrap(await applyMergePlan(store, checked.plan));
+```
+
+Authenticating the stored decision and enforcing `authorizedReviewers` are
+still your job. TypeGraph tells you whether the plan is safe to apply and
+leaves the question of who may apply it to you.
+
+## A working copy that outlives its process
+
+The branch itself was still tied to one process, because a `branch()` result
+holds its store and close handle in memory and disposing it deletes the fork.
+0.67 adds `branchDurable()`, which forks a working copy that persists and hands
+back a small JSON descriptor you can put on a queue. Here's the loyalty
+ledger's nightly job:
 
 ```typescript
 const created = unwrap(await branchDurable(base, host));
@@ -89,60 +168,21 @@ The descriptor is the only thing that leaves the process:
 }
 ```
 
-It has two halves. Everything except `store` is TypeGraph's: the graph id, a
-hash of the graph definition, the branch id, the `base@V` token the branch
-forked from, and the schema anchor. `store` is the host's opaque locator, here
-a directory name, which TypeGraph never interprets. Because the locator is
-handed back to your code, it must not hold secrets. Put a lookup key in it and
-resolve credentials inside the host.
+TypeGraph doesn't ship a durable host. It defines the contract (a
+`DurableWorkingCopyStrategy` with `create`, `seal`, `reopen`, `abort` and
+`destroy`), and your host decides where a working copy lives, whether that's a
+directory, a database, or a provider's branch API. The descriptor's `store`
+field is the host's opaque locator, and everything else in it belongs to
+TypeGraph. The examples here ran against a small file-backed SQLite host,
+across separate `node` processes.
 
-## What the host owns
-
-The strategy is five required members and two optional ones. The part worth
-seeing is how `seal` and `reopen` divide the trust:
-
-```typescript
-const host: DurableWorkingCopyStrategy<typeof graph, Locator> = {
-  type: "sqlite-file-host",
-  version: 1,
-  create: async (baseStore, base) => {
-    /* clone the base into <root>/<id>/working-copy.sqlite, take the lease */
-  },
-  // Called once, right after the fork: persist the complete origin.
-  seal: async (locator, origin) =>
-    writeFile(originFile(locator), JSON.stringify(origin)),
-  reopen: async (graph, locator) => ({
-    store: createStore(graph, openBackend(locator), { revisionTracking: true }),
-    origin: await readOrigin(locator), // the host's record, not the descriptor's
-    access: await acquireLease(locator), // one holder at a time
-  }),
-  abort: async (locator) => {
-    /* delete a half-created allocation */
-  },
-  destroy: async (locator, expectedOrigin) => {
-    /* verify the stored origin equals expectedOrigin, then delete */
-  },
-};
-```
-
-`access` is the concurrency promise. A host says either `engine-fenced` (the
-database gives sound cross-client isolation) or `exclusive` (it holds an
-allocation-wide writer lease and excludes every other process). This host takes
-the second option with an exclusive-create lock file. A backend that only
-serializes calls within its own process must use `exclusive`, because two
-reopened handles each get their own in-memory queue.
-
-## Reopen it somewhere else
-
-Some time later, in a different process (a different pid, in the run below),
-the reviewer's job reads the descriptor and reopens the branch. The result is
-the ordinary `GraphBranch`, so everything downstream is the merge API you
-already know:
+The next day a different process reads the descriptor and reopens the branch,
+and what comes back is an ordinary `GraphBranch`, so everything after that is
+the merge API you already know:
 
 ```typescript
 const descriptor = JSON.parse(await queue.get());
 
-// `base` was opened with { revisionTracking: true }, as public merge plans require.
 const branch = unwrap(await reopenDurableBranch(graph, descriptor, host));
 const plan = unwrap(await planMerge(base, [branch]));
 
@@ -167,38 +207,17 @@ base now: Grace=40, Ada=160
 reopen after destroy refused: true
 ```
 
-The `host.merge()` line is the optional native-merge hook. A host with a real
-database-branch primitive can apply an approved plan natively, but only after
-proving its whole physical diff equals the approved TypeGraph write set.
-`applyDurableMergePlan()` tries `strategy.merge()` first (skipping it when apply
-callbacks or persisted provenance are requested), and the hook answers one of
-two ways. `applied` comes with that proof. `unsupported` means no SQL ran, so
-TypeGraph applies the complete portable plan instead:
+That `host.merge()` line is an optional hook: a host with a real
+database-branching primitive can apply the approved plan natively, as long as
+it proves its physical diff matches the approved write set. If it answers
+`unsupported`, no SQL has run and TypeGraph applies the portable plan instead.
+If it _throws_, TypeGraph doesn't fall back, because the host may have applied
+part of the change and replaying it could apply it twice.
 
-```typescript
-merge: async () => ({ outcome: "unsupported", dimensions: ["planSemantics"] }),
-```
-
-A _thrown_ native failure never falls back: the host may have applied part of
-the change, and replaying the portable plan could apply it twice. A host with no
-native primitive can just omit `merge`; this one declines explicitly so the
-fallback shows up in the output.
-
-Closing and destroying are separate events on purpose. `branch.close()` releases
-the connection and the lease and leaves the working copy reopenable, which is
-what let the second process find it. Only `destroyDurableBranch()` deletes.
-
-## The descriptor is untrusted input
-
-A descriptor is a document your application stored and later handed back, so
-every TypeGraph-owned fence in it is treated as a claim, not a fact. The
-authority is the origin the host sealed at fork time. Reopening with a
-relabeled branch id:
-
-```typescript
-const relabeled = { ...descriptor, branchId: "someone-elses-branch" };
-const refused = await reopenDurableBranch(graph, relabeled, host);
-```
+A descriptor is a document your application stored and handed back later, so
+TypeGraph treats it as untrusted input. At fork time the host seals the true
+origin, and every reopen and destroy is checked against it, so relabeling the
+branch id makes the reopen fail:
 
 ```text
 Durable branch descriptor does not match the working copy the host attested for
@@ -206,32 +225,21 @@ its store locator: the descriptor's TypeGraph fences disagree with the origin
 recorded at fork. This is a tampered, relabeled, or wrong-branch descriptor.
 ```
 
-`destroyDurableBranch()` is checked the same way. Given branch A's fences and
-branch B's locator, the host refuses and B stays intact:
+The same check stops you from destroying branch B with branch A's descriptor,
+or reopening with a graph that reuses the id `"loyalty"` but defines
+`Account` differently.
 
-```text
-Failed to destroy durable working copy for branch "BT7AIrxNLl5A0X9bkB_fx":
-refusing to destroy "ad7e3082-…": stored origin does not match the descriptor
-B still reopenable: true
-```
+## The message that arrives twice
 
-The check compares more than the branch id. The graph definition hash is part of
-the origin, so reopening with a graph that reuses the id `"loyalty"` but defines
-`Account` differently is refused too ("it hashes differently, so it is a
-different graph definition even though it reuses graph id").
-
-## 0.68: the message that arrives twice
-
-Now feed the branch from a queue. The messages are at-least-once: "award Ada 25
-points" can arrive twice. Two things have to hold. The award must apply once no
-matter how often the message shows up, and whoever is downstream (a
-notification, an audit log) must eventually be told about each applied award
+Suppose the branch is fed from a queue where "award Ada 25 points" can arrive
+twice. The award has to apply exactly once, and whoever is downstream (a
+notification, an audit log) has to hear about every applied award eventually,
 even if the worker dies right after committing.
 
-That is a transactional outbox scoped to a working copy, and 0.68 makes it part
-of the durable-branch contract. You hand `operateDurableBranch()` an idempotency
-key, an opaque `mutation` describing the change, and `metadata` to retain as
-evidence:
+What that calls for is a transactional outbox scoped to the working copy, and
+0.68 builds one into the durable-branch contract. You hand
+`operateDurableBranch()` an idempotency key, a `mutation` describing the
+change, and `metadata` to keep as evidence:
 
 ```typescript
 const outcome = unwrap(
@@ -241,53 +249,13 @@ const outcome = unwrap(
     mutation: { op: "award", account: adaId, points: 25 },
   }),
 );
-if (outcome.outcome === "unsupported") throw new Error("host lacks operations");
 ```
 
-```text
-worker pid 76846 -> applied delivered: false
-evidence: {
-  "idempotencyKey": "award-7731",
-  "operationDigest": "e61c17df5f4feb5cfa3ae78655b7f3a7",
-  "metadata": { "source": "orders-queue", "messageId": 7731 },
-  "mutation": { "op": "award", "account": "Oo80_F-NuXUZ635g4WJO6", "points": 25 },
-  "before": { "base": "ec9dd68d2fbf14e3#s1…r1:0000000000000003:…" },
-  "after":  { "base": "ec9dd68d2fbf14e3#s1…r1:0000000000000004:…" },
-  "delivered": false
-}
-```
-
-(The base coordinates are shortened, and this branch already carries the staged
-160, so Ada goes from 160 to 185.) TypeGraph never reads `mutation` or
-`metadata`. It requires both to be JSON-safe, canonicalizes them into
-`operationDigest`, and hands the host a request. What the mutation _means_ is
-the host's business, and here it is one that increments a points balance. The
-part that has to be atomic is the host's, too. In this host it is a single
-SQLite transaction on one connection, using the same
-[caller-owned transaction pattern](/recipes#cross-store-transactions-drizzle--typegraph)
-as any application mixing its own SQL with a TypeGraph write:
-
-```typescript
-db.run(sql`BEGIN IMMEDIATE`);
-try {
-  const tx = store.withTransaction(db);
-  await tx.nodes.Account.update(account.id, {
-    points: account.points + mutation.points,
-  });
-  db.$client
-    .prepare(
-      "INSERT INTO durable_operations (idempotency_key, digest /* … */) VALUES (?, ? /* … */)",
-    )
-    .run(request.idempotencyKey, request.operationDigest /* … */);
-  db.run(sql`COMMIT`);
-} catch (error) {
-  db.run(sql`ROLLBACK`);
-  throw error;
-}
-```
-
-To confirm that the rollback path does what it claims, I made the host throw
-after the graph write and before the evidence insert:
+TypeGraph never interprets `mutation`; it digests it together with `metadata`,
+hands the host the request, and validates what comes back. The host applies
+the change and writes an evidence row in one database transaction, which in
+this host is a single SQLite transaction on one connection. To check the
+rollback, I made it throw after the graph write and before the evidence insert:
 
 ```text
 DurableOperationError | GRAPH_MERGE_OPERATION | Durable operation failed: injected failure after the graph write
@@ -295,54 +263,36 @@ evidence: undefined
 accounts: Grace=40, Ada=160
 ```
 
-No evidence row, and Ada is still at the staged 160: the graph write rolled
-back with everything else. Retrying the same key without the injected failure
-then applies it exactly once, to 165. (This check used a fresh branch and a
-5-point award.) The guarantee comes from the host's transaction; TypeGraph's
-part is refusing to accept evidence that doesn't match the request.
+There's no evidence row, and Ada is still at the staged 160.
 
-### The worker dies; the message comes back
-
-Back to the earlier award, where the worker committed and then exited with
-`process.exit(1)` before it could tell anyone. A fresh process picks up the
-descriptor. The queue redelivers the identical message first:
-
-```typescript
-const replay = unwrap(
-  await operateDurableBranch(descriptor, host, redelivered),
-);
-```
+In the real run, the worker commits the award (Ada goes from 160 to 185) and
+then dies before telling anyone. A fresh process picks up the descriptor, and
+the queue redelivers the same message:
 
 ```text
 recover pid 76873 | Ada on branch: 185
 redelivered: replayed | Ada on branch: 185
 ```
 
-`replayed` returns the previously committed evidence and applies nothing: Ada
-is still 185, not 210. The identity of an operation is its key together with a
-digest of its content. Reuse the key with a different payload, even metadata
-alone, and the host refuses without writing:
+`replayed` returns the evidence from the first run and applies nothing, so Ada
+stays at 185 instead of 210. If you reuse the key with a different payload,
+even just different metadata, the host rejects it without writing:
 
 ```text
 changed payload: DurableOperationConflictError | GRAPH_MERGE_OPERATION_CONFLICT
 Ada on branch: 185
 ```
 
-### Evidence you have to deliver before you can destroy
-
-The evidence row is the outbox. `delivered` starts `false`, and TypeGraph
-rejects a host that reports a newly applied operation as already delivered, so a
-host can't bypass delivery or the destroy fence. The fence follows from it:
+The evidence rows act as the outbox. Each one starts with `delivered: false`,
+and you can't destroy the branch while any are undelivered:
 
 ```text
-undelivered? true
 destroy: DurableEvidenceUndeliveredError | GRAPH_MERGE_OPERATION_UNDELIVERED |
   refusing to destroy "60367e1c-…": undelivered operation evidence remains
 ```
 
-The typed refusal is preserved rather than flattened into a generic branch
-failure, so the caller can still recover the evidence. Delivering is a scan and
-a mark:
+To deliver them, you scan for undelivered rows and mark each one after
+publishing it:
 
 ```typescript
 const page = unwrap(
@@ -362,59 +312,31 @@ for (const evidence of page.operations) {
 unwrap(await destroyDurableBranch(descriptor, host));
 ```
 
-```text
-delivered award-7731 -> true
-undelivered? false
-destroyed
-```
+A crash at any point in that sequence means, at worst, that a downstream
+consumer hears about an award twice; the award itself is never applied twice
+or silently dropped.
 
-`scanDurableOperations()` pages in the host's stable order (default 100, at most 1000) and returns an opaque `cursor` to pass back as `after`; no cursor means you
-reached the end. `markDurableOperationDelivered()` is idempotent, and
-`durableBranchHasUndeliveredEvidence()` is the queryable half of the fence.
-`operateDurableBranch()` is the one orchestrator that tolerates a host without
-the `operations` capability. It returns an explicit `unsupported` outcome having
-executed nothing, rather than simulating atomicity (the read and delivery calls
-refuse with `DurableOperationUnsupportedError` instead):
+## Limits
 
-```text
-no capability: {"outcome":"unsupported","dimensions":["atomicMutation"]}
-```
-
-## What this doesn't do
-
-- **There is no first-party durable host and no queue.** TypeGraph's own tests
-  cover the branch contract with a file-backed SQLite host and the operations
-  contract with an in-memory recording host. Whether your host's transaction is
-  actually atomic is your database's guarantee to keep. TypeGraph validates the
-  outcome envelope it gets back (the echoed request, the recomputed digest, the
-  delivered flag), not your storage.
-- **Exclusion is the host's job.** The `exclusive` lease in this example is a
-  lock file. When I left one behind, as a killed process would, reopening failed
-  with `EEXIST` until the file was cleared. A real host wants a lease that
-  expires.
-- **The branch must be quiet while you plan.** Merge planning assumes a
-  quiescent working copy. Feeding operations into a branch while a reviewer
-  plans against it will plan a moving target.
-- **Delivery is at-least-once.** You mark evidence delivered only after the
-  downstream transaction commits, so a crash between the two re-delivers.
-  Make the downstream write idempotent on the idempotency key.
-- **`mutation` is not portable.** It is a host-defined description, and its
-  meaning changes with the host. A descriptor is bound to the strategy that made
-  it: reopening with a different strategy `type` is refused ("belongs to
-  strategy \"sqlite-file-host\", not \"some-other-host\"").
-- **Use it only when the branch has to outlive its process.** For a job that
-  stages, plans and applies in one run, `branch()` is unchanged and still the
-  simpler tool. Existing strategies need no changes, and `operations` is opt-in.
+- **There's no first-party host and no queue.** Whether your host's
+  transaction is atomic is up to your database. TypeGraph validates what the
+  host reports back but can't check your storage.
+- **Exclusion is the host's job.** The example host's writer lease is a lock
+  file. When I left one behind, as a killed process would, reopening failed
+  until it was cleared. A real host wants a lease that expires.
+- **Plan against a quiet branch.** Feeding operations into a branch while a
+  reviewer plans against it means planning against a moving target.
+- **Delivery is at-least-once.** Make downstream writes idempotent on the key.
+- **You probably don't need this for a one-shot job.** If you stage, plan and
+  apply in one run, `branch()` is unchanged and simpler.
 
 ## Try it
 
-- [Graph Merge → Durable host-native branches](/graph-merge#durable-host-native-branches):
-  the full contract, including access leases and exact-fork verification
-- [Graph Merge → Atomic operations and immutable evidence](/graph-merge#atomic-operations-and-immutable-evidence):
-  idempotency, evidence validation and the destroy fence in detail
-- [The durable-branch tests](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/tests/graph-merge/durable-branch.test.ts):
-  a stateless file-backed host, plus tamper and locator-swap cases
-- [Changelog](/changelog#0670): 0.67.0, then [0.68.0](/changelog#0680)
+- [Durable candidate review](/graph-merge#durable-candidate-review-in-the-target-graph)
+- [Durable host-native branches](/graph-merge#durable-host-native-branches)
+  and [atomic operations and evidence](/graph-merge#atomic-operations-and-immutable-evidence)
+- [Example 27](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/27-durable-merge-review.ts):
+  the durable review, end to end
 - [GitHub](https://github.com/nicia-ai/typegraph)
 
 <NewsletterSignup />

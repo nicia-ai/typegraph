@@ -1,40 +1,41 @@
 ---
-title: "Runtime Schema Evolution: An Agent, a Clinical Trial, and a Retraction"
+title: "An Agent That Grows Its Own Schema"
 date: 2026-05-12
-excerpt: "0.25 adds graph extensions: schema changes proposed at runtime, validated, and committed without a redeploy. A demo puts it on real data, where an agent grows a clinical-research graph in three stages, and the third stage is a kind nobody designed for."
+excerpt: "Graph extensions let a schema change be proposed at runtime, validated, and committed without a redeploy. I let a small model grow a clinical-research graph from real data, and it found retractions nobody designed for."
 tags:
   - announcements
 cover:
   alt: "Diagram of three runtime-proposed kinds (ClinicalTrial, Publication, PublicationEvent) connected by referencesTrial and correctsPublication edges, none of which existed when the demo started"
   image: "./cover.png"
 social:
-  alt: "Runtime Schema Evolution: An Agent, a Clinical Trial, and a Retraction"
+  alt: "An Agent That Grows Its Own Schema"
   image: "./social.png"
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
 
-A clinical trial starts as a registration record. Months later it becomes a
-peer-reviewed paper. Years later, sometimes, it becomes a retraction
-notice: a kind of object that wasn't part of the schema when the trial was
-registered, and probably wasn't part of the schema when the paper was
-indexed either.
+If you follow a clinical trial through the literature, you see it registered
+first, then published as a paper, and occasionally, years later, retracted. A
+retraction notice is a kind of record that wasn't in anyone's schema when the
+trial was registered, and usually wasn't there when the paper was indexed
+either.
 
-TypeGraph's schema is normally fixed at compile time. You declare
-`defineNode`/`defineEdge` in TypeScript, get full type inference, and any
-new kind of thing needs a code change and a deploy. That's the right
-default. But it doesn't fit every source: an ingestion pipeline pulling
-from an API you don't control, a multi-tenant app where each tenant brings
-its own shape, an agent watching a corpus and discovering a kind of record
-partway through. 0.25 adds **graph extensions** for exactly that case:
-schema changes proposed at runtime, validated as strictly as
-the compile-time path, committed atomically, with no redeploy.
+TypeGraph's schema normally lives in code: you declare `defineNode` and
+`defineEdge` in TypeScript, you get full type inference, and adding a new kind
+of thing means a code change and a deploy. I think that's the right default and
+I'm keeping it, but it doesn't fit an ingestion pipeline pulling from an API you
+don't control, a multi-tenant app where each tenant brings its own shape, or an
+agent that discovers a new kind of record halfway through a corpus.
 
-## The mechanic
+0.25 adds **graph extensions** for those cases. A schema change can be proposed
+at runtime, validated as strictly as the compile-time path, and committed
+atomically without a redeploy.
 
-An extension is a plain JSON-serializable document (new node/edge kinds,
-their property types, unique constraints, indexes) built with
-`defineGraphExtension` and committed with `store.evolve()`:
+## Proposing a change
+
+An extension is a plain JSON document (new node and edge kinds, their property
+types, unique constraints, indexes) built with `defineGraphExtension` and
+committed with `store.evolve()`:
 
 ```typescript
 const proposal = defineGraphExtension({
@@ -53,20 +54,17 @@ const proposal = defineGraphExtension({
 const evolved = await store.evolve(proposal);
 ```
 
-The property-type vocabulary is deliberately small (strings, numbers,
-booleans, enums, one level of array/object nesting) so an LLM-induced
-schema stays auditable and can't smuggle in a Zod refinement or a function.
-Validation runs at the boundary: malformed proposals throw
-`GraphExtensionValidationError` with per-field issues before anything
-touches the database. The commit is CAS'd against the active schema
-version, so two writers racing to extend the same graph get a clean
-`StaleVersionError` to retry on, not a silent overwrite.
+The type vocabulary is small on purpose: strings, numbers, booleans, enums,
+and one level of array/object nesting. An LLM-written schema stays readable,
+and it can't smuggle in a Zod refinement or a function. A malformed proposal
+throws `GraphExtensionValidationError` with per-field issues before anything
+touches the database. The commit is checked against the active schema version,
+so two writers racing to extend the same graph get a `StaleVersionError` to
+retry on, not a silent overwrite.
 
-The read side gets the same safety a compile-time kind has. TypeScript
-can't see a kind that didn't exist when the code was compiled, so runtime
-kinds go through string-keyed siblings of the normal query builder
-(`fromDynamic` / `traverseDynamic` / `toDynamic`), which validate kind
-names against the live registry at query-build time:
+Reads get the same care. TypeScript can't see a kind that didn't exist at
+compile time, so runtime kinds go through string-keyed versions of the query
+builder, which check kind names against the live schema:
 
 ```typescript
 const rows = await store
@@ -78,53 +76,47 @@ const rows = await store
   .execute();
 ```
 
-A typo throws `KindNotFoundError` instead of quietly returning zero rows,
-the exact failure mode a schemaless store gives you for free and this one
-refuses to.
+A typo in a kind name throws `KindNotFoundError`, where a schemaless store
+would quietly return zero rows and leave you to find out later.
 
-## Putting it on real data
+## Letting an agent drive
 
-A minimal example is worth a skim, but it doesn't tell you whether the
-loop survives contact with messy, real, multi-stage data. So we built
+A toy example is fine for the API, but I wanted to know whether the loop holds
+up against messy, real, multi-stage data. So I built
 [`typegraph-clinical-demo`](https://github.com/pdlug/typegraph-clinical-demo):
-the same machinery, end to end, over a real corpus of clinical trial
-registrations from ClinicalTrials.gov, their publications from PubMed, and
-retractions/corrections from CrossRef. All of it is public-record
-bibliographic metadata: no patient data, nothing private.
+the same machinery end to end, over real trial registrations from
+ClinicalTrials.gov, their publications from PubMed, and retractions and
+corrections from CrossRef. It's all public bibliographic metadata, with no
+patient data.
 
-An LLM agent (a 26B-parameter open-weight MoE model via OpenRouter, picked
-by a small eval harness; see below) watches the corpus arrive in three
-stages and proposes a graph extension after each one. The proposals are
-**blind**: the agent sees the sample records and the names of kinds already
-in the graph, nothing else. No type hints, no "mark titles searchable," no
-"use the NCT number as a unique constraint." Property types, optionality,
-searchability, and unique constraints are all induced from the sample.
+An LLM agent watches the corpus arrive in three stages and proposes an
+extension after each one. The proposals are **blind**: the agent sees sample
+records and the names of kinds already in the graph, and I didn't give it any
+hints about types, searchable fields, or which identifier should be unique.
+Property types, optionality, searchability, and constraints are all inferred
+from the samples.
 
-- **Stage 1: registration.** The agent sees ~1,100 ClinicalTrials.gov
+- **Stage 1, registration.** The agent sees about 1,100 ClinicalTrials.gov
   records and proposes `ClinicalTrial`.
-- **Stage 2: publication.** PubMed records referencing those trials arrive.
-  The agent proposes `Publication` plus a `referencesTrial` edge back to
-  the kind from stage 1.
-- **Stage 3: retraction.** Retraction notices and corrections arrive, a
-  kind of record nobody designed a schema for upfront, because most trials
-  never get one. The agent proposes `PublicationEvent` plus a
-  `correctsPublication` edge back to stage 2.
+- **Stage 2, publication.** PubMed records referencing those trials arrive, and
+  the agent proposes `Publication` with a `referencesTrial` edge back to stage 1.
+- **Stage 3, retraction.** Retraction notices and corrections arrive. Nobody
+  designs for these up front, because most trials never get one. The agent
+  proposes `PublicationEvent` with a `correctsPublication` edge back to stage 2.
 
-Each stage is a real `store.evolve()` call against a real store, followed
-by a bulk ingest under the new schema, captured from a live run.
+Each stage is a real `store.evolve()` against a real store, followed by a bulk
+ingest under the new schema.
 
-## The repair loop, and why stage 3 needs it
+## When the proposal is valid but wrong
 
-Static validation catches malformed proposals, but it can't catch a
-proposal that's internally consistent and still wrong for the data: a
-field the agent marked required because the three sample records it saw
-all happened to have it, when the wider corpus doesn't. So the demo runs a
-**smoke test** after each accepted proposal: ingest the full sample against
-an ephemeral scratch store seeded with every prior accepted extension. Zod
-failures come back to the agent as the same structured `{path, code,
-message}` issues static validation produces.
+Validation catches malformed proposals, but it can't catch one that's
+internally consistent and still wrong for the data, like a field the agent marked
+required because the three samples it saw all happened to have it. So after
+each accepted proposal the demo runs a **smoke test**: ingest the full sample
+into a scratch store seeded with every earlier extension. Failures go back to
+the agent in the same structured `{path, code, message}` form validation uses.
 
-Stage 3 is where this actually fires, on a real run:
+Stage 3 is where it fires, on a real run:
 
 ```text
 STAGE 3: post-publication discourse
@@ -139,22 +131,22 @@ STAGE 3: post-publication discourse
   PublicationEvent nodes: 922/922 ingested  (0 skipped)
 ```
 
-The agent's first proposal only saw three sample records, all `correction`
-events with `artifactDoi` and `date` populated, and induced both fields as
-required strings. The smoke test's full-sample ingest hit `comment` events
-that lack `artifactDoi` and failed. On attempt 2 the agent marks both
-fields optional; smoke passes; the graph commits. End to end, including the
-repair, this stage takes about 16 seconds and one extra model call.
+The first proposal saw three samples, all `correction` events with
+`artifactDoi` and `date` filled in, and made both required. The full-sample
+ingest hit `comment` events without them and failed. On attempt 2 the agent
+made both optional, the smoke test passed, and the graph committed. The whole
+stage, repair included, takes about 16 seconds and one extra model call.
 
-The smoke test runs against a scratch store, not the live one, so a failed
-attempt that partially ingests before throwing doesn't leave stray rows or
-unique-key conflicts for the next attempt to trip over. Only a proposal
-that survives smoke gets committed to the real store.
+I love watching this loop work. Nobody explained the mistake to the model in
+prose; it got the same machine-readable errors a developer would have seen and
+fixed its own schema. Because the smoke test runs against a scratch store, a failed attempt
+leaves no stray rows or half-claimed unique keys for the next attempt to trip
+over. Only a proposal that survives gets committed to the real store.
 
-## The payoff query
+## The payoff
 
-By the end of stage 3, the graph has three kinds and two edges that didn't
-exist when the demo started, and the payoff query walks all of them:
+After stage 3 the graph has three kinds and two edges that didn't exist when
+the demo started, and one query walks all of them:
 
 ```typescript
 const rows = await store
@@ -172,36 +164,36 @@ const rows = await store
   .execute();
 ```
 
-On the real corpus this surfaces four documented retraction chains,
-including SCIPIO (cardiac stem cells, Lancet 2011, retracted 2019) and a
-2018 nilotinib trial outcome, plus three more retractions the corpus
-turns up organically, including the Anil Potti genomic-predictor case and
-the Mehra et al. hydroxychloroquine retraction that halted multiple
-registered trials in 2020. None of that required a migration. It required
-three `store.evolve()` calls and a query written against kind names that
-were strings until an agent decided otherwise.
+On the real corpus it surfaces four documented retraction chains, including
+SCIPIO (cardiac stem cells, Lancet 2011, retracted 2019) and a 2018 nilotinib
+trial outcome, plus three more the corpus turned up on its own: the Anil Potti
+genomic-predictor case and the Mehra et al. hydroxychloroquine retraction that
+halted multiple registered trials in 2020 among them. Getting there took no
+migrations, just three `store.evolve()` calls and a query written against kind
+names that were plain strings until the agent defined them.
 
-## What it costs
+## You don't need a frontier model for this
 
-The eval harness (`pnpm eval`) runs the same blind three-stage pipeline
-against a lineup of models and scores whether each one's first proposal
-survives both static validation and the smoke test. The cheapest model
-that cleared all three stages on the first try, a 26B-parameter
-open-weight MoE with 4B active parameters, undercut both closed-model
-challengers on cost: 4x cheaper than Gemini 3.1 Flash Lite (which also
-cleared every stage on the first try) and 5x cheaper than GPT 5.4 nano
-(which needed one repair). End to end: under 30 seconds and about $0.003
-in API cost for the full three-stage run, including the stage-3 repair.
-The loop needs a structured error channel and a model that can read a
-JSON Schema error and try again, not a frontier model.
+The demo includes an eval harness (`pnpm eval`) that runs the same blind
+three-stage pipeline across a lineup of models and scores whether each first
+proposal survives validation and the smoke test. The cheapest model that
+cleared all three stages on the first try was a 26B-parameter open-weight MoE
+with 4B active parameters. It came in 4x cheaper than Gemini 3.1 Flash Lite
+(which also went three for three) and 5x cheaper than GPT 5.4 nano (which
+needed one repair).
+
+The full three-stage run, repair included, takes under 30 seconds and costs
+about **$0.003** in API calls. The loop needs a structured error channel and a
+model that can read a JSON Schema error and try again, and when the schema
+layer does its job, a small model handles that fine.
 
 ## Try it
 
 - [Graph Extensions](/graph-extensions): the full reference
-- [Agent-Driven Schema](/examples/agent-driven-schema): a minimal,
-  in-repo version of the same loop
+- [Agent-Driven Schema](/examples/agent-driven-schema): a minimal, in-repo
+  version of the same loop
 - [`pdlug/typegraph-clinical-demo`](https://github.com/pdlug/typegraph-clinical-demo):
-  clone it, `pnpm demo`, watch the schema grow
+  clone it, `pnpm demo`, and watch the schema grow
 - [GitHub](https://github.com/nicia-ai/typegraph)
 
 <NewsletterSignup />
