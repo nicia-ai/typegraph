@@ -39,6 +39,8 @@ import {
   readIdentityTransitions,
 } from "../src/identity/transition-log";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { sql } from "../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../src/query/sql-intent";
 import {
   createRecordedTransactionScope,
   runRecordedTransactionSavepoint,
@@ -46,6 +48,7 @@ import {
 } from "../src/store/recorded-capture";
 import { storeRuntime } from "../src/store/runtime-port";
 import { generateId } from "../src/utils/id";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -669,6 +672,44 @@ describe("identity transition log", () => {
       { id: "shared", props: { name: "A" }, clearValidTo: true },
     ]);
     expect(await windowEndCount()).toBe(4);
+  });
+
+  // Load-bearing: `store.evolve()` runs the identity schema-commit preflight
+  // on the raw commit transaction, which no capture session is bound to, so a
+  // history store must bind one itself or every note the preflight takes is
+  // dropped. A lagging closure is the reachable shape that makes the
+  // preflight's rebuild change membership. Revert check: drop the
+  // `captureBinding` from `Store#identitySchemaPreflight` and the evolve
+  // records no transition.
+  it("records the schema-transition notes an evolve's identity preflight takes on a history store", async () => {
+    const backend = createTestBackend();
+    const [store] = await createAdapterStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    await store.nodes.Person.create({ name: "A" }, { id: "a" });
+    await store.nodes.Person.create({ name: "B" }, { id: "b" });
+    await store.identity.assertSame(
+      { kind: "Person", id: "a" },
+      { kind: "Person", id: "b" },
+    );
+    const schema = createSqlSchema(backend.tableNames);
+    const executeStatement = requireDefined(backend.executeStatement);
+    await executeStatement(
+      asCompiledStatementSql(sql`
+        DELETE FROM ${schema.identityClosureTable}
+        WHERE graph_id = ${store.graphId}
+      `),
+    );
+
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    const rows = await readTransitions(storeRuntime(evolved).identityContext());
+    expect(transitionHops(rows, "schema-transition")).toEqual([
+      "Person:a <- -",
+    ]);
   });
 
   it("notes a kind-drop transition when Store.removeKinds() cascades a folded class", async () => {

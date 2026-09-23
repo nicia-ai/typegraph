@@ -1933,6 +1933,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await identitySchemaCommitPreflight(this.#identityContext(this.#backend), {
       enablement: false,
       provisionDerivedRelations,
+      // The schema-commit target is a raw transaction no capture session is
+      // bound to yet, so a history store binds one for the preflight's own
+      // ledger touches and transition notes.
+      ...(this.#captureEnabled ?
+        { captureBinding: { batchPointRead: this.#batchPointRead } }
+      : {}),
     })(target);
   }
 
