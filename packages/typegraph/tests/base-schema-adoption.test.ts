@@ -28,11 +28,8 @@ import {
   edgeMatchIdentityUniqueIndexName,
   generatePostgresDDL,
   generatePostgresMigrationSQL,
-  generateSqliteCreateIndexSQL,
-  generateSqliteCreateTableSQL,
   generateSqliteMigrationSQL,
 } from "../src/backend/drizzle/ddl";
-import { tables as sqliteSchemaTables } from "../src/backend/drizzle/schema/sqlite";
 import {
   createPostgresBackend,
   createPostgresTables,
@@ -1056,51 +1053,42 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  it("catches an installed version-3 PostgreSQL/PGlite database up to version 4, adding the identity-transitions restored_at column", async () => {
-    const tableNames = {
-      baseSchemaVersions: "tg_base_schema_versions",
-      identityTransitions: "tg_identity_transitions",
-    } as const;
-    const tables = createPostgresTables(tableNames);
-    const client = await PGlite.create();
-    await client.exec(generatePostgresDDL(tables).join("\n\n"));
-    const backend = createPostgresBackend(drizzlePglite(client), {
-      tables,
+  it("catches an installed version-3 PGlite database up to version 4 through adoptBaseSchema() directly, gaining the identity transition log", async () => {
+    // `adoptBaseSchema()` is the offline path, which never calls
+    // `generateDdl()`, so only the version-4 step body itself can recreate
+    // the relations a real version-3 deployment lacks — including the
+    // transition log's `restored_at` column, which ships with the table.
+    const { backend, client } = await createLocalPgliteBackend({
       vector: false,
     });
     try {
       await createStoreWithSchema(graph, backend);
-      const marker = await client.query<{ version: number }>(
-        `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
-      );
-      expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
-
-      // Roll the identity-transitions table back to its version-3 shape —
-      // Postgres, unlike SQLite, supports DROP COLUMN unconditionally, so no
-      // hand-reconstructed legacy DDL is needed here — and the marker back
-      // to 3, what a real version-3 deployment left behind.
       await client.exec(
         [
-          `ALTER TABLE "${tableNames.identityTransitions}" DROP COLUMN "restored_at"`,
-          `UPDATE "${tableNames.baseSchemaVersions}" SET version = 3 WHERE installation = 1`,
+          'DROP TABLE "typegraph_identity_transitions"',
+          'DROP TABLE "typegraph_identity_transition_retention"',
+          'UPDATE "typegraph_base_schema_versions" SET version = 3 WHERE installation = 1',
         ].join(";\n"),
       );
 
-      await createStoreWithSchema(graph, backend);
+      await requireDefined(backend.adoptBaseSchema)();
 
       const advancedMarker = await client.query<{ version: number }>(
-        `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
       );
       expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
       const columns = await client.query<{ column_name: string }>(
-        `SELECT column_name FROM information_schema.columns WHERE table_name = '${tableNames.identityTransitions}'`,
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'typegraph_identity_transitions'",
       );
       expect(columns.rows.map((row) => row.column_name)).toContain(
         "restored_at",
       );
+      const retention = await client.query<{ table_name: string }>(
+        "SELECT table_name FROM information_schema.tables WHERE table_name = 'typegraph_identity_transition_retention'",
+      );
+      expect(retention.rows).toHaveLength(1);
     } finally {
       await backend.close();
-      await client.close();
     }
   });
 
@@ -1166,27 +1154,17 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  it("catches an installed version-4 SQLite database up to the current version, adding the identity-transitions restored_at column", async () => {
+  it("catches an installed version-3 SQLite database up to version 4, gaining the identity transition log", async () => {
     const { backend, db } = createLocalSqliteBackend();
     const client = sqliteClient(db);
     try {
       await createStoreWithSchema(graph, backend);
-      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
-        CURRENT_BASE_SCHEMA_VERSION,
-      );
-      client.exec("DROP TABLE typegraph_identity_transitions");
-      const legacyCreateTable = generateSqliteCreateTableSQL(
-        sqliteSchemaTables.identityTransitions,
-      ).replace('"restored_at" TEXT,\n  ', "");
-      expect(legacyCreateTable).not.toContain("restored_at");
-      client.exec(legacyCreateTable);
-      for (const statement of generateSqliteCreateIndexSQL(
-        sqliteSchemaTables.identityTransitions,
-      )) {
-        client.exec(statement);
-      }
       client.exec(
-        "UPDATE typegraph_base_schema_versions SET version = 4 WHERE installation = 1",
+        [
+          "DROP TABLE typegraph_identity_transitions",
+          "DROP TABLE typegraph_identity_transition_retention",
+          "UPDATE typegraph_base_schema_versions SET version = 3 WHERE installation = 1",
+        ].join(";\n"),
       );
 
       await createStoreWithSchema(graph, backend);
@@ -1198,6 +1176,13 @@ describe("deployment-wide base-schema adoption", () => {
         .prepare(`PRAGMA table_info("typegraph_identity_transitions")`)
         .all() as readonly Readonly<{ name: string }>[];
       expect(columns.map((column) => column.name)).toContain("restored_at");
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+          )
+          .get("typegraph_identity_transition_retention"),
+      ).toEqual({ name: "typegraph_identity_transition_retention" });
     } finally {
       await backend.close();
     }

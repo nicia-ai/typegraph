@@ -189,9 +189,7 @@ import {
   generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
-  IDENTITY_TRANSITIONS_ADOPTION_COLUMNS,
   planSqliteEdgeMatchIdentityAdoption,
-  planSqliteIdentityTransitionsRestoredAtAdoption,
   sqliteContributions,
 } from "./ddl";
 import {
@@ -1547,42 +1545,6 @@ export function buildSqliteEngineProfile(
     );
   }
 
-  async function ensureIdentityTransitionsRestoredAtColumn(): Promise<void> {
-    const identityTransitionsTableName = getTableName(
-      tables.identityTransitions,
-    );
-    // Same "no ADD COLUMN IF NOT EXISTS" shape as `ensureEdgeMatchIdentityStorage`
-    // above, narrowed to one column. One pass, no retry: a concurrent adopter
-    // that wins the race leaves exactly the post-state this call wanted, so a
-    // precisely classified duplicate-column failure IS success.
-    const columnRows = await executionAdapter.execute<{
-      name?: unknown;
-    }>(sql`PRAGMA table_info(${sql.identifier(identityTransitionsTableName)})`);
-    const columns = new Set(
-      columnRows.flatMap((row) =>
-        typeof row.name === "string" ? [row.name] : [],
-      ),
-    );
-    const statements = planSqliteIdentityTransitionsRestoredAtAdoption(
-      identityTransitionsTableName,
-      columns,
-    );
-    try {
-      for (const statement of statements) {
-        await db.run(sql.raw(statement));
-      }
-    } catch (error) {
-      if (
-        !isSqliteDuplicateColumnError(
-          error,
-          IDENTITY_TRANSITIONS_ADOPTION_COLUMNS,
-        )
-      ) {
-        throw error;
-      }
-    }
-  }
-
   async function readBaseSchemaVersion(): Promise<number | undefined> {
     try {
       const rows = await db
@@ -1722,7 +1684,6 @@ export function buildSqliteEngineProfile(
     identityTransitionRetentionTableDdl: generateSqliteCreateTableSQL(
       tables.identityTransitionRetention,
     ),
-    ensureIdentityTransitionsRestoredAtColumn,
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`

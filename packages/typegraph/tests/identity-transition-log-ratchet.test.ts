@@ -144,11 +144,6 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
       "Resolves the configured/default table name into the PostgreSQL backend's `SqlTableNames`, mirroring every other relation.",
   },
   {
-    file: "backend/sqlite/local.ts",
-    reason:
-      "ensureLocalSqliteIdentityTransitionsRestoredAtColumn resolves the relation's configured table name to run the base-schema version-4 adoption step (an ALTER-shaped column migration, mirroring drizzle/sqlite.ts's async ensureIdentityTransitionsRestoredAtColumn for this synchronous local-installation path) — DDL adoption wiring, never a membership read.",
-  },
-  {
     file: "backend/types.ts",
     reason:
       "IdentityTableNames names the relation as one of the six Operational Identity table-name fields a backend port speaks about — structural, not a read.",
