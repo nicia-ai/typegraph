@@ -579,7 +579,9 @@ no extra call.
 **Recursion is the default**, matching the value proposition over `traverse()`:
 `parts()`/`wholes()` reach the full transitive closure unless you pass
 `maxHops: 1` for the direct level only. `depth` and `path` behave exactly as
-they do for `.recursive({ depth, path })`.
+they do for `.recursive({ depth, path })`. Like any recursive step, they chain
+after earlier fixed or recursive traversals as a later stage (see
+[Chaining Fixed and Recursive Traversals](#chaining-fixed-and-recursive-traversals)).
 
 ```typescript
 const directChildren = await store
@@ -624,14 +626,6 @@ For the whole-plus-parts *export* shape (rather than a query result), see
 - **Recursive queries cannot be aggregated in place yet.** `groupBy()`, aggregate projections,
   aggregate ordering, and `having()` are refused. Project node columns with `project()`, then use
   `asRelation()` to aggregate that completed relation.
-- **One recursive traversal per query.** A query with multiple `.recursive()` calls throws
-  `UnsupportedPredicateError`. If you need multiple recursive paths, run separate queries or
-  use [set operations](/queries/combine) to merge results. `parts()`/`wholes()` count toward
-  this limit whenever they recurse (the default — see
-  [Composition Shortcuts](#composition-shortcuts-parts-and-wholes)): combining either with any
-  other `.traverse()`/`.recursive()` step in the same query throws `UnsupportedPredicateError`
-  naming the step and the `maxHops: 1` workaround, which compiles to a direct (non-recursive)
-  traversal and so does not count.
 - **Recursive edge properties are not projected.** You can filter them with `whereEdge()`. Fixed-hop
   edge properties remain selectable when fixed hops and recursion appear in the same query.
 - **Recursive edges are not materialized in the result.** Qualified paths expose edge references,

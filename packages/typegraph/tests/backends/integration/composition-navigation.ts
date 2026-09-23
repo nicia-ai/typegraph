@@ -433,34 +433,58 @@ export function registerCompositionNavigationIntegrationTests(
       ]);
     });
 
-    it("a recursing parts() refuses when the query already has another traversal", async () => {
+    it("a recursing mixed-orientation parts() compiles as a later traversal stage", async () => {
       const store = await context.createStore(compositionNavigationGraph);
-      await seedCompositionFixtures(store);
+      const { book, chapter1, paragraph1 } =
+        await seedCompositionFixtures(store);
 
-      // MUTATION CHECK: removing the `willRecurse && traversals.length > 0`
-      // guard lets this query build; it then fails deep in the compiler
-      // (`runRecursiveTraversalSelectionPass`) with a generic message that
-      // names neither `parts()` nor the `maxHops: 1` workaround — verified
-      // and reverted.
-      expect(() =>
-        store
-          .query()
-          .from("CnSection", "s")
-          .traverse("cnParentSection", "s_edge", { direction: "in" })
-          .to("CnSection", "y")
-          .parts("x", { from: "s" }),
-      ).toThrow(expect.objectContaining({ code: "UNSUPPORTED_PREDICATE" }));
+      // The mixed orientation (hasPart walked as stored, then partOf walked
+      // reversed) makes this stage compile its normalizing directed-edges
+      // CTE inside the seeded later stage.
+      const rows = await store
+        .query()
+        .from("CnChapter", "c")
+        .whereNode("c", (chapter) => chapter.id.eq(chapter1.id))
+        .traverse("cnBookHasChapter", "c_book", { direction: "in" })
+        .to("CnBook", "b")
+        .parts("x", { from: "b", path: "route" })
+        .select((ctx) => ({ book: ctx.b.id, part: ctx.x.id, route: ctx.route }))
+        .execute();
 
-      // The identical call with `maxHops: 1` compiles fine: it does not
-      // recurse, so the one-recursive-traversal limitation never applies.
-      expect(() =>
-        store
-          .query()
-          .from("CnSection", "s")
-          .traverse("cnParentSection", "s_edge", { direction: "in" })
-          .to("CnSection", "y")
-          .parts("x", { from: "s", maxHops: 1 }),
-      ).not.toThrow();
+      expect(
+        rows.toSorted((left, right) => left.route.length - right.route.length),
+      ).toEqual([
+        { book: book.id, part: chapter1.id, route: [book.id, chapter1.id] },
+        {
+          book: book.id,
+          part: paragraph1.id,
+          route: [book.id, chapter1.id, paragraph1.id],
+        },
+      ]);
+    });
+
+    it("chains two recursing composition steps in one query", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const { sectionRoot, sectionChild, sectionGrandchild } =
+        await seedCompositionFixtures(store);
+
+      const rows = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (section) => section.id.eq(sectionGrandchild.id))
+        .wholes("w")
+        .parts("p", { from: "w" })
+        .select((ctx) => ({ whole: ctx.w.id, part: ctx.p.id }))
+        .execute();
+
+      const pairs = rows.map((row) => `${row.whole}>${row.part}`).toSorted();
+      expect(pairs).toEqual(
+        [
+          `${sectionChild.id}>${sectionGrandchild.id}`,
+          `${sectionRoot.id}>${sectionChild.id}`,
+          `${sectionRoot.id}>${sectionGrandchild.id}`,
+        ].toSorted(),
+      );
     });
 
     it("parts() refuses when the derived edge alias collides with an existing traversal", async () => {

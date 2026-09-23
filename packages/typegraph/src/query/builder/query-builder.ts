@@ -24,11 +24,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import {
-  ConfigurationError,
-  KindNotFoundError,
-  UnsupportedPredicateError,
-} from "../../errors";
+import { ConfigurationError, KindNotFoundError } from "../../errors";
 import { type PolymorphicNodeType } from "../../ontology/types";
 import {
   compositionViaKind,
@@ -1300,26 +1296,6 @@ export class QueryBuilder<
     const wantsRecursiveOutput =
       options?.depth !== undefined || options?.path !== undefined;
     const willRecurse = !(options?.maxHops === 1 && !wantsRecursiveOutput);
-
-    // A recursing `parts()`/`wholes()` compiles to a variable-length
-    // traversal, and the compiler supports only one of those per query
-    // (`runRecursiveTraversalSelectionPass`). Refuse here, naming the step
-    // and the `maxHops: 1` escape hatch, rather than letting the query build
-    // successfully and fail deep in the compiler with a message that names
-    // neither.
-    if (willRecurse && this.#state.traversals.length > 0) {
-      throw new UnsupportedPredicateError(
-        `.${relation}("${nodeAlias}") recurses by default and compiles to a variable-length traversal, but this query already has ${this.#state.traversals.length} traversal(s) before it. A query may contain only one recursive traversal.`,
-        {
-          relation,
-          alias: nodeAlias,
-          existingTraversalCount: this.#state.traversals.length,
-        },
-        {
-          suggestion: `Pass { maxHops: 1 } to .${relation}("${nodeAlias}", ...) to compile it as a direct (non-recursive) traversal, or split this into separate queries.`,
-        },
-      );
-    }
 
     return (willRecurse ?
       traversalBuilder
