@@ -454,7 +454,7 @@ export function registerCompositionNavigationIntegrationTests(
         .execute();
 
       expectTypeOf(rows).toEqualTypeOf<
-        { depth: number; route: QualifiedRecursivePath }[]
+        readonly { depth: number; route: QualifiedRecursivePath }[]
       >();
       const chapterRoute = [
         { type: "node", kind: "CnBook", id: book.id },
@@ -491,7 +491,7 @@ export function registerCompositionNavigationIntegrationTests(
         .select((ctx) => ({ whole: ctx.w.id, level: ctx.level }))
         .execute();
       expectTypeOf(aliasedRows).toEqualTypeOf<
-        { whole: string; level: number }[]
+        readonly { whole: string; level: number }[]
       >();
       expect(aliasedRows).toEqual([{ whole: chapter1.id, level: 1 }]);
     });
