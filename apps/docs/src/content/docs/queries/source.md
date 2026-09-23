@@ -44,8 +44,10 @@ const page = await store
 ```
 
 The source scans exactly these kinds. Repeated kinds are normalized, an empty list is rejected,
-and unknown kinds throw `KindNotFoundError`. List sources do not accept an options bag or expand
-subclasses. For a reusable list, preserve its nonempty tuple type with `as const`.
+and unknown kinds throw `KindNotFoundError`. An explicit kind list is always exact: unlike
+`from(kind)`, which is polymorphic by default, a list source accepts no options bag and never
+expands subclasses or `equivalentTo` kinds, so name every kind the query should scan. For a
+reusable list, preserve its nonempty tuple type with `as const`.
 
 Predicates and database expressions expose compatible properties shared by every selected kind,
 plus system fields such as `id` and `kind`. A property present on only one kind, or declared with
@@ -178,9 +180,13 @@ silently match nothing. Use `fromDynamic()` (always polymorphically typed) or
 
 Pass `{ expansion: "exact" }` to narrow one alias back to the exact
 kind, or set `queryDefaults.expansion: "exact"` on `createStore(...)` to
-restore the exact-kind behavior everywhere. `search()` and the collection
-APIs (`find`, `count`, `updateWhere`, `compareAndSet`) are unaffected by this
-default and stay exact-kind.
+restore the exact-kind behavior everywhere. `search()`, the collection
+APIs (`find`, `count`, `updateWhere`, `compareAndSet`), and
+`subgraph({ includeKinds })` are unaffected by this default and stay
+exact-kind. An `updateWhere()` `candidates` query is an ordinary query, though:
+it follows this default, and it must resolve to exactly one kind, so pass
+`{ expansion: "exact" }` when the candidate kind has subclasses or equivalents
+(see [`updateWhere`](/schemas-stores#updatewhereparams)).
 
 ### `expansion: "narrower"` — kind-level taxonomies
 

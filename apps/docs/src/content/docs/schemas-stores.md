@@ -1060,8 +1060,14 @@ Updates a set of current, live nodes in one transactional operation and returns
 the number of rows changed. A selector is mandatory: provide `candidates`,
 `where`, one or more independent `exists` relationship predicates, or the
 explicit `all: true` acknowledgement. `candidates` accepts a query created by
-the same Store (or transaction) that selects one concrete node kind; its root
-node ids are intersected with any other selectors in the same atomic write.
+the same Store (or transaction) whose source resolves to exactly one concrete
+node kind; its root node ids are intersected with any other selectors in the
+same atomic write. `from(kind)` is polymorphic by default, so a candidate query
+over a kind that has subclasses or `equivalentTo` kinds resolves to several
+kinds and is refused with `ConfigurationError` (`details.code`
+`SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED`); pass
+`{ expansion: "exact" }` to `from()` to select only the named kind. A kind with
+no subclasses or equivalents resolves to itself either way.
 Candidate queries must contain concrete predicate values and select rows
 directly. TypeGraph refuses `param()` references because `updateWhere()` has no
 binding argument, and refuses `groupBy()` / `having()` because replacing an
@@ -2815,10 +2821,13 @@ Each window accepts `direction: "out" | "in" | "both"`; when omitted it inherits
 global direction. Ranking is partitioned by the oriented source endpoint, so bidirectional windows
 have an unambiguous top N for each endpoint.
 
-Inside `batchOnce()`, the callback's batch-scoped `read.subgraph()` method accepts the same options and produces
-the same result as `store.subgraph()`, but compiles hydration and traversal into one embeddable
-statement. Both forms share the same validation, traversal, projection plan, and result assembly;
-only their physical execution strategy differs.
+Inside `batchOnce()`, the callback's batch-scoped `read.subgraph()` method accepts the same options,
+except `composition`, and produces the same result as `store.subgraph()`, but compiles hydration and
+traversal into one embeddable statement. A composition closure first resolves the root's kind, which
+one statement cannot do, so `read.subgraph()` refuses `composition` with `ConfigurationError`
+(`SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED`) before the batch runs any statement. Both forms
+share the same validation, traversal, projection plan, and result assembly; only their physical
+execution strategy differs.
 
 Under the hood the traversal is a `WITH RECURSIVE` CTE and all filtering and hydration happen in
 the database. Direct `subgraph()` calls use a backend-tuned fixed cost: 2 statements on SQLite
@@ -2841,7 +2850,7 @@ store.subgraph<EK, NK>(
 |--------|------|---------|-------------|
 | `edges` | `readonly EK[]` | *(required)* | Edge kinds to follow during traversal |
 | `maxDepth` | `number` | `10` | Integer traversal depth from root, from 0 through `MAX_EXPLICIT_RECURSIVE_DEPTH` (1000); larger values are rejected |
-| `includeKinds` | `readonly NK[]` | all kinds | Node kinds to include in the result. Other kinds are traversed through but omitted from output |
+| `includeKinds` | `readonly NK[]` | all kinds | Node kinds to include in the result. Other kinds are traversed through but omitted from output. Kinds are exact: a subclass or `equivalentTo` kind is included only when listed |
 | `excludeRoot` | `boolean` | `false` | Exclude the root node from the result |
 | `direction` | `"out" \| "both"` | `"out"` | `"out"` follows edges in their defined direction; `"both"` treats edges as undirected |
 | `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Whether to detect and skip cycles during traversal |
@@ -2958,6 +2967,11 @@ normally. A graph that declares no composition relation at all cannot
 honor the option meaningfully and throws `ConfigurationError`
 (`COMPOSITION_NO_PARTS_DECLARED`) rather than silently running as if
 `composition` were absent.
+
+`tx.subgraph()` honors `composition` the same way inside a transaction,
+reading through the transaction's session. The batch-scoped
+`read.subgraph()` inside `batchOnce()` refuses it (see
+[Subgraph Extraction](#subgraph-extraction)).
 
 Which composition edge kinds join depends on the ROOT's runtime kind, so
 the exact set is not knowable at compile time. `composition: true`
@@ -3501,7 +3515,8 @@ backend-internal setup statements. Fluent queries, `batchOnce()`, `neighbors()`,
 `countNeighbors()`, and `subgraph()` all use this observed execution path. A logical read that
 submits more than one statement fires one start/end pair per statement: direct `subgraph()` emits
 two pairs on SQLite and three on PostgreSQL, while `tx.subgraph()` and the same subgraph embedded in
-`batchOnce()` emit one. A fluent query that retries with a different projection likewise fires a
+`batchOnce()` emit one (a `tx.subgraph()` with `composition` runs the direct statement
+sequence). A fluent query that retries with a different projection likewise fires a
 pair for each statement it submits.
 
 ### `StoreHooks`
