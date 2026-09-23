@@ -16,6 +16,8 @@ A durable merge plan built under `reconcileTypes: "ontology"` also no longer fai
 
 A transaction receipt's `writes.identity` gains `transitions`, counted beside and never inside `total`: the number of identity transition-log notes the transaction's flush wrote.
 
+`applyMergePlanInTransaction()` records the same identity decision as `applyMergePlan()` for one plan: the policy arms the plan's review recorded, including an `edge` or `uniqueness` flag, now reach the transition log from a caller-owned transaction too. `applyDurableMergePlan()` offers a plan to a strategy's native `merge()` only when the plan carries no identity or composition work — identity assertion or retraction writes, identity reconciliations or conflicts, a reported composition orphan, or a write to a composition whole, part or edge kind — and applies every other plan through the portable path, which owns the transition log, closure maintenance, and composition enforcement.
+
 ### Breaking
 
 - `IdentityUnresolvedConflict` gains two arms, `kind: "edge"` and `kind: "uniqueness"`, reported when `identity.onEdgeConflict: "flag"` or `identity.onUniquenessConflict: "flag"` drops a pairing. The `"edge"` arm names `edgeKind`, the two refs `a` and `b`, the `canonical` ref, the collapsed `side` and `edgeIds`; the `"uniqueness"` arm names `constraintName`, `fields`, `canonical`, the `owner` that holds the key, the `loser` write the store refused for it, and the cluster's `members`. Both carry the dropped pairing's `assertionIds` and `branches`. An exhaustive `switch` over `conflict.kind` must handle both; the durable plan artifact's strict `review.identityConflicts` schema admits both.
