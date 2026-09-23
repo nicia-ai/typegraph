@@ -653,19 +653,22 @@ export function registerCompositionExistenceIntegrationTests(
     it("case 12: a create whose `oneActive` composition edge would be born already-ended (unattaching) is refused, and writes no row", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const show = await store.nodes.EeShow.create({});
-      // `validTo` is forwarded straight onto the composition edge
-      // (`attachCompositionCreateEdge`): a `population: "oneActive"` edge
-      // born with its window already closed would never attach its part at
-      // all, which `resolveCompositionCreate`'s "a required part always has
-      // a live whole" rule must refuse just as it refuses a bare create
-      // with no `partOf` — admitting it would leave a state
+      // The attachment's `validTo` is the composition edge's own window
+      // (`compositionEdgeWindow`): a `population: "oneActive"` edge born
+      // with its window already closed would never attach its part at all,
+      // which `resolveCompositionCreate`'s "a required part always has a
+      // live whole" rule must refuse just as it refuses a bare create with
+      // no `partOf` — admitting it would leave a state
       // `store.verifyConstraintFences()` immediately reports as a
       // violation.
       const error = await store.nodes.EeLiveClip.create(
         {},
         {
-          partOf: { kind: "EeShow", id: show.id },
-          validTo: "2000-01-01T00:00:00.000Z",
+          partOf: {
+            kind: "EeShow",
+            id: show.id,
+            validTo: "2000-01-01T00:00:00.000Z",
+          },
         },
       ).catch((error_: unknown) => error_);
 
@@ -706,6 +709,39 @@ export function registerCompositionExistenceIntegrationTests(
     // succeeds unconditionally once the composition edge is built). The
     // `create` call above then resolves instead of rejecting, and the
     // subsequent `find({})`/`verifyConstraintFences` assertions fail.
+
+    it("case 12a: a node-level `validTo` alone never born-ends its `oneActive` composition edge", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const show = await store.nodes.EeShow.create({});
+      // The node's own window is closed, but the attachment states none, so
+      // the realizing edge takes the insert's own open window and attaches
+      // the part.
+      const clip = await store.nodes.EeLiveClip.create(
+        {},
+        {
+          partOf: { kind: "EeShow", id: show.id },
+          validTo: "2000-01-01T00:00:00.000Z",
+        },
+      );
+
+      const connectedEdges = await store.backend.findEdgesConnectedTo({
+        graphId: store.graphId,
+        nodeKind: "EeLiveClip",
+        nodeId: clip.id,
+      });
+      expect(
+        connectedEdges.map((edge) => ({
+          kind: edge.kind,
+          toId: edge.to_id,
+          validTo: edge.valid_to,
+        })),
+      ).toEqual([{ kind: "eeLiveClipOf", toId: show.id, validTo: undefined }]);
+    });
+    // MUTATION CHECK: in `executeNodeCreateInternal`
+    // (src/store/operations/node-operations.ts), spread the part node's
+    // `input.validTo` into the window passed to `attachCompositionCreateEdge`.
+    // The edge is then born ended and the create is refused with
+    // `CompositionExistenceError`.
 
     it("case 12b: an already-unattached `oneActive` composition edge (planted through the RAW backend, bypassing case 12's create-time guard) is unattached, and cleaning it up is not refused", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
