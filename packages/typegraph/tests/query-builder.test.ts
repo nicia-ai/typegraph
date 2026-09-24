@@ -622,6 +622,59 @@ describe("Query Compilation to SQL", () => {
     expect(sql).toContain("cte_p.p_id = e.from_id");
   });
 
+  it("projects a linear traversal chain from its terminal rowset without rejoining earlier CTEs", () => {
+    const knowsWithSince = defineEdge("knowsWithSince", {
+      schema: z.object({ since: z.string() }),
+    });
+    const traversalGraph = defineGraph({
+      id: "linear_projection_graph",
+      nodes: {
+        Person: { type: Person },
+        Organization: { type: Organization },
+      },
+      edges: {
+        knowsWithSince: {
+          type: knowsWithSince,
+          from: [Person],
+          to: [Person],
+        },
+        worksAt: {
+          type: worksAt,
+          from: [Person],
+          to: [Organization],
+        },
+      },
+    });
+    const traversalRegistry = buildKindRegistry(traversalGraph);
+    const query = createQueryBuilder<typeof traversalGraph>(
+      traversalGraph.id,
+      traversalRegistry,
+    )
+      .from("Person", "p")
+      .traverse("knowsWithSince", "e1")
+      .to("Person", "friend")
+      .traverse("worksAt", "e2")
+      .to("Organization", "company")
+      .select((context) => ({
+        starter: context.p.name,
+        since: context.e1.since,
+        friend: context.friend.name,
+        role: context.e2.role,
+        company: context.company.name,
+      }));
+
+    const sqlObject = compileQuery(query.toAst(), traversalGraph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+    const finalSelect = sql.slice(sql.lastIndexOf("SELECT"));
+
+    expect(finalSelect).toMatch(/FROM\s+cte_company\b/);
+    expect(finalSelect).not.toMatch(/\bJOIN\s+cte_(?:p|friend)\b/);
+    expect(finalSelect).toContain("cte_company.p_props");
+    expect(finalSelect).toContain("cte_company.e1_props");
+    expect(finalSelect).toContain("cte_company.friend_props");
+    expect(finalSelect).toContain("cte_company.e2_props");
+  });
+
   it("compiles bidirectional traversal when expand: inverse is enabled", () => {
     const sameAsEdge = defineEdge("sameAs");
     const bidirectionalGraph = defineGraph({

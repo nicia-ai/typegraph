@@ -430,9 +430,10 @@ describe("PGlite backend", () => {
           tables: graphTables,
           vector: false,
         });
-        expect(() => createPostgresBackend(tx, { vector: false })).toThrow(
-          /createPostgresTransactionBackend/,
-        );
+        const compatibleBackend = createPostgresBackend(tx, {
+          tables: graphTables,
+          vector: false,
+        });
         const executeSpy = vi.spyOn(tx, "execute");
 
         const first = backend.execute<{ value: number }>(
@@ -441,17 +442,21 @@ describe("PGlite backend", () => {
         const second = backend.execute<{ value: number }>(
           asCompiledRowsSql(sql`SELECT 2 AS value`),
         );
-        const third = sibling.execute<{ value: number }>(
+        const third = compatibleBackend.execute<{ value: number }>(
           asCompiledRowsSql(sql`SELECT 3 AS value`),
+        );
+        const fourth = sibling.execute<{ value: number }>(
+          asCompiledRowsSql(sql`SELECT 4 AS value`),
         );
         await Promise.resolve();
         expect(executeSpy).toHaveBeenCalledTimes(1);
-        expect(await Promise.all([first, second, third])).toEqual([
+        expect(await Promise.all([first, second, third, fourth])).toEqual([
           [{ value: 1 }],
           [{ value: 2 }],
           [{ value: 3 }],
+          [{ value: 4 }],
         ]);
-        expect(executeSpy).toHaveBeenCalledTimes(3);
+        expect(executeSpy).toHaveBeenCalledTimes(4);
         const transactionStore = createStore(peopleGraph, backend);
         await transactionStore.nodes.Person.create(
           { name: "Transaction owned" },

@@ -488,6 +488,8 @@ export type BaseStoreOptions = Readonly<{
    * revision-tracking contract.
    */
   revisionTracking?: boolean;
+  /** Disable journal-backed changed-key lineage for short-lived working copies. */
+  revisionJournal?: false;
   /**
    * Automatic planner-statistics refresh after large autocommit bulk
    * writes (bulkCreate and bulkInsert on nodes and edges). Stale statistics after a

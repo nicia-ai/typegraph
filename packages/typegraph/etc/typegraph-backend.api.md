@@ -2722,6 +2722,7 @@ export type GraphBackend = Readonly<{
     ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+    revisionChangesJournalReady?: (this: void) => Promise<boolean>;
     ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -4381,7 +4382,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly ensureRevisionChangesJournal: {
         readonly kind: "reasoned";
-        readonly reason: "Journal lineage installs its triggers before minting its first anchor; other lineage sources do not need them.";
+        readonly reason: "Privileged journal installation is explicit; runtime lineage only reads readiness.";
+        readonly accesses: 2;
+    };
+    readonly revisionChangesJournalReady: {
+        readonly kind: "reasoned";
+        readonly reason: "Journal lineage checks installed storage without attempting DDL.";
         readonly accesses: 1;
     };
     readonly getContributionMaterialization: {
@@ -4419,8 +4425,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly lineage: {
         readonly kind: "reasoned";
-        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. Every OTHER consumer — `assertTargetUnchanged`'s commit-time engine-anchor check among them — reaches `lineage` through `resolveLineage`/`requireLineage` rather than a raw `.lineage` read of its own, so none of them add to this count.";
-        readonly accesses: 2;
+        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's recorded-relations derivation selects backend lineage over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.";
+        readonly accesses: 3;
     };
     readonly recordedTime: {
         readonly kind: "reasoned";

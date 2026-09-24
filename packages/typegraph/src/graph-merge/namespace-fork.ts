@@ -58,6 +58,7 @@ const GRAPH_RELATIONS = [
   "typegraph_kind_removals",
   "typegraph_reconciliation_markers",
 ] as const;
+const FORK_LEDGER = "typegraph_namespace_fork_operations";
 
 type QuerySession = Pick<GraphBackend, "execute" | "getActiveSchema">;
 type JsonRow = Readonly<Record<string, unknown>>;
@@ -319,7 +320,7 @@ function namespaceForkResult<G extends GraphDef>(
       await targetBackend.transaction(async (targetTx) => {
         const ledger = await queryRows<LedgerRow>(
           targetTx,
-          sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM typegraph_namespace_fork_operations WHERE operation_key = ${proof.operationKey} FOR UPDATE`,
+          sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${proof.operationKey} FOR UPDATE`,
         );
         if (ledger[0] === undefined) {
           await assertEmpty(targetTx, proof.graphId);
@@ -350,7 +351,7 @@ function namespaceForkResult<G extends GraphDef>(
         );
         await queryRows(
           targetTx,
-          sql`DELETE FROM typegraph_namespace_fork_operations WHERE operation_key = ${proof.operationKey}`,
+          sql`DELETE FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${proof.operationKey}`,
         );
       });
     },
@@ -378,6 +379,34 @@ async function assertIndependentDatabase(
       );
     }
   });
+}
+
+/** Provision the retry ledger on a private target with an owner connection. */
+export async function installNamespaceForkLedger(
+  targetBackend: GraphBackend,
+): Promise<void> {
+  assertDefaultTables(targetBackend);
+  const executeDdl = targetBackend.executeDdl;
+  if (executeDdl === undefined)
+    throw new BranchError(
+      "Namespace fork target does not support owner-side ledger provisioning.",
+    );
+  await executeDdl(`CREATE TABLE IF NOT EXISTS ${FORK_LEDGER} (
+    operation_key text PRIMARY KEY, graph_id text NOT NULL, source_base text NOT NULL,
+    content_digest text NOT NULL, copied_at timestamptz NOT NULL DEFAULT now())`);
+}
+
+async function assertForkLedgerInstalled(
+  targetBackend: GraphBackend,
+): Promise<void> {
+  const rows = await queryRows<Readonly<{ present: boolean }>>(
+    targetBackend,
+    sql`SELECT to_regclass(${FORK_LEDGER}) IS NOT NULL AS present`,
+  );
+  if (rows[0]?.present !== true)
+    throw new BranchError(
+      "Namespace fork retry ledger is missing; install it on the target with installNamespaceForkLedger before runtime use.",
+    );
 }
 
 /**
@@ -435,25 +464,18 @@ export async function forkGraphNamespace<G extends GraphDef>(
       assertIndependentDatabase(sourceTx, targetBackend, source.graphId),
     { accessMode: "read_only" },
   );
-  const executeDdl = targetBackend.executeDdl;
-  if (executeDdl === undefined)
-    throw new BranchError(
-      "Namespace fork target must support operation-ledger provisioning.",
-    );
-  await executeDdl(`CREATE TABLE IF NOT EXISTS typegraph_namespace_fork_operations (
-    operation_key text PRIMARY KEY, graph_id text NOT NULL, source_base text NOT NULL,
-    content_digest text NOT NULL, copied_at timestamptz NOT NULL DEFAULT now())`);
+  await assertForkLedgerInstalled(targetBackend);
 
   const existing = await queryRows<LedgerRow>(
     targetBackend,
-    sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM typegraph_namespace_fork_operations WHERE operation_key = ${operationKey}`,
+    sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${operationKey}`,
   );
   if (existing[0] !== undefined) {
     const ledgerProof = await targetBackend.transaction(
       async (targetTx) => {
         const locked = await queryRows<LedgerRow>(
           targetTx,
-          sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM typegraph_namespace_fork_operations WHERE operation_key = ${operationKey} FOR UPDATE`,
+          sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${operationKey} FOR UPDATE`,
         );
         const row = locked[0];
         if (row?.graph_id !== source.graphId)
@@ -537,7 +559,7 @@ export async function forkGraphNamespace<G extends GraphDef>(
           );
         const copied = await queryRows<LedgerRow>(
           targetTx,
-          sql`INSERT INTO typegraph_namespace_fork_operations (operation_key, graph_id, source_base, content_digest) VALUES (${operationKey}, ${source.graphId}, ${JSON.stringify(stampedBase)}, ${snapshotDigest}) RETURNING graph_id, source_base, content_digest, copied_at::text`,
+          sql`INSERT INTO ${sql.identifier(FORK_LEDGER)} (operation_key, graph_id, source_base, content_digest) VALUES (${operationKey}, ${source.graphId}, ${JSON.stringify(stampedBase)}, ${snapshotDigest}) RETURNING graph_id, source_base, content_digest, copied_at::text`,
         );
         const entry = copied[0];
         if (entry === undefined)

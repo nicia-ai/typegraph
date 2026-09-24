@@ -319,5 +319,23 @@ export function registerClearIntegrationTests(
       });
       expect(hits.map((hit) => hit.node.id)).toContain(article.id);
     });
+
+    it("removes graph-local contribution markers when explicitly requested", async () => {
+      const store = context.getStore();
+      const backend = store.backend;
+      const read = requireDefined(
+        backend.getContributionMaterialization,
+        "backend must read contribution markers",
+      );
+      const markerIdentity = graphMarkerIdentity(
+        store.graphId,
+        fulltextContribution(backend),
+      );
+      expect(await read(markerIdentity)).toBeDefined();
+
+      await store.clear({ preserveContributionMaterializations: false });
+
+      await expect(read(markerIdentity)).resolves.toBeUndefined();
+    });
   });
 }

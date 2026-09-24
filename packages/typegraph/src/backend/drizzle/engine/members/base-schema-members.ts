@@ -93,6 +93,8 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
   sinceIndexDdl: readonly string[];
   /** Idempotent DDL for the version-4 revision-change journal. Older callers may omit it; version-4 adoption then refuses with a clear error. */
   revisionChangesTableDdl?: string;
+  /** Index DDL for the revision-change journal, installed during version-4 adoption. */
+  revisionChangesIndexDdl?: readonly string[];
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -126,6 +128,7 @@ export function createBaseSchemaMembers(
     fencesTableDdl,
     sinceIndexDdl,
     revisionChangesTableDdl,
+    revisionChangesIndexDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -165,16 +168,29 @@ export function createBaseSchemaMembers(
       {
         version: 4,
         async adopt(): Promise<void> {
-          if (revisionChangesTableDdl === undefined) {
+          if (
+            revisionChangesTableDdl === undefined ||
+            revisionChangesIndexDdl === undefined
+          ) {
             throw new ConfigurationError(
-              "Base-schema version 4 adoption requires revisionChangesTableDdl.",
+              "Base-schema version 4 adoption requires revision-change table and index DDL.",
               {
-                dependency: "revisionChangesTableDdl",
+                missingDependencies: [
+                  ...(revisionChangesTableDdl === undefined ?
+                    ["revisionChangesTableDdl"]
+                  : []),
+                  ...(revisionChangesIndexDdl === undefined ?
+                    ["revisionChangesIndexDdl"]
+                  : []),
+                ],
                 adoptionVersion: 4,
               },
             );
           }
           await ensureTable(revisionChangesTableDdl);
+          for (const ddl of revisionChangesIndexDdl) {
+            await ensureTable(ddl);
+          }
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },

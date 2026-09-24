@@ -1188,6 +1188,7 @@ type GraphBackend = Readonly<{
     ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+    revisionChangesJournalReady?: (this: void) => Promise<boolean>;
     ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -1606,6 +1607,9 @@ type InsertUniqueParams = Readonly<{
     nodeId: string;
     concreteKind: string;
 }>;
+
+// @public
+export function installRevisionChangesJournal(backend: GraphBackend): Promise<void>;
 
 // @public
 export function instantiateGraph<G extends GraphDef>(backend: GraphBackend, params: Readonly<{

@@ -70,6 +70,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "ensureReconciliationMarkersTable",
   "ensureRevisionOriginsTable",
   "ensureRevisionChangesJournal",
+  "revisionChangesJournalReady",
   "ensureRuntimeContributions",
   "ensureTrigramExtension",
   "ensureVectorSlotContribution",

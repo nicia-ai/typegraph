@@ -56,6 +56,8 @@ export type CreateIdentityMembersDeps = Readonly<{
   revisionChangesTableDdl?: string;
   /** Trigger DDL for the journal. Older callers may omit it; journal setup then refuses clearly. */
   revisionChangesTriggerDdl?: readonly string[];
+  /** Read-only verification that the journal table and all write triggers are installed. */
+  revisionChangesJournalReady?: () => Promise<boolean>;
   /** Executes trigger DDL. Older callers may omit it; journal setup then refuses clearly. */
   executeDdl?: (ddl: string) => Promise<void>;
   /** Runs one idempotent CREATE-shaped DDL statement — the same closure the profile's own `EngineProvisioning.ensureTable` uses. */
@@ -87,6 +89,7 @@ export type CreateIdentityMembersDeps = Readonly<{
 export type IdentityMembers = Readonly<{
   ensureRevisionOriginsTable: () => Promise<void>;
   ensureRevisionChangesJournal: () => Promise<void>;
+  revisionChangesJournalReady: () => Promise<boolean>;
   ensureIdentityTables: (
     tableNames: IdentityTableNames,
     options: Readonly<{ provisionMissing: boolean }>,
@@ -109,6 +112,7 @@ export function createIdentityMembers(
     revisionOriginsTableDdl,
     revisionChangesTableDdl,
     revisionChangesTriggerDdl,
+    revisionChangesJournalReady,
     executeDdl,
     ensureTable,
     contributionTableExists,
@@ -183,6 +187,10 @@ export function createIdentityMembers(
       for (const ddl of triggerDdl) {
         await runDdl(ddl);
       }
+    },
+
+    async revisionChangesJournalReady(): Promise<boolean> {
+      return (await revisionChangesJournalReady?.()) ?? false;
     },
 
     async ensureIdentityTables(

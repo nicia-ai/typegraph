@@ -56,6 +56,9 @@ export type {
 export {
   branchDurable,
   destroyDurableBranch,
+  durableDescriptorRefusal,
+  durableOriginOfDescriptor,
+  durableOriginsEqual,
   reopenDurableBranch,
 } from "./durable-branch";
 export type { ApplyDurableMergePlanArgs } from "./durable-merge";
@@ -131,7 +134,10 @@ export {
   planMergeIncremental,
 } from "./merge";
 export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
-export { forkGraphNamespace } from "./namespace-fork";
+export {
+  forkGraphNamespace,
+  installNamespaceForkLedger,
+} from "./namespace-fork";
 export type { NormalizedMergeOptions } from "./options";
 export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {

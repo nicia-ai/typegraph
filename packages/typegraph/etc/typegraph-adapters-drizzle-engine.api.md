@@ -745,6 +745,7 @@ type CreateBaseSchemaMembersDeps = Readonly<{
     ensureEdgeMatchIdentityStorage: () => Promise<void>;
     sinceIndexDdl: readonly string[];
     revisionChangesTableDdl?: string;
+    revisionChangesIndexDdl?: readonly string[];
 }>;
 
 // @public (undocumented)
@@ -788,6 +789,7 @@ type CreateIdentityMembersDeps = Readonly<{
     revisionOriginsTableDdl: string;
     revisionChangesTableDdl?: string;
     revisionChangesTriggerDdl?: readonly string[];
+    revisionChangesJournalReady?: () => Promise<boolean>;
     executeDdl?: (ddl: string) => Promise<void>;
     ensureTable: (ddl: string) => Promise<void>;
     contributionTableExists: (tableName: string) => Promise<boolean>;
@@ -8092,6 +8094,7 @@ type GraphBackend = Readonly<{
     ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+    revisionChangesJournalReady?: (this: void) => Promise<boolean>;
     ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;

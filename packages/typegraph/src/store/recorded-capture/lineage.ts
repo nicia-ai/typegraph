@@ -164,10 +164,10 @@
  * durable `typegraph_revision_origins` row.
  */
 import { isFirstPartyFactory } from "../../backend/capabilities/write-fence";
+import { assertRevisionChangesJournalReady } from "../../backend/revision-journal";
 import {
   type EngineRevision,
   type EntityKey,
-  type GraphBackend,
   type LineageDelta,
   type LineageMembers,
   type LineageSession,
@@ -212,6 +212,7 @@ import { readRecordedClock, readRevisionOrigin } from "./clock";
 export type RecordedLineageStore<G extends GraphDef = GraphDef> = Readonly<{
   graphId: string;
   revisionTrackingEnabled: boolean;
+  revisionJournalEnabled?: boolean;
   revisionSchema: SqlSchema;
   /**
    * Mints (or returns) this graph's durable revision-origin nonce, always
@@ -558,9 +559,10 @@ export function recordedRelationsLineage<G extends GraphDef>(
 
 /**
  * Journal-backed lineage for live revision-tracked Stores. Bundled SQL
- * backends install row triggers that write every node/edge key into the same
- * transaction as its mutation. A non-entity sidecar write leaves an
- * incomplete journal row, so this source refuses to claim a complete delta.
+ * backends use row triggers installed by a privileged schema owner to write
+ * every node/edge key into the same transaction as its mutation. A non-entity
+ * sidecar write leaves an incomplete journal row, so this source refuses to
+ * claim a complete delta.
  */
 function revisionJournalLineage<G extends GraphDef>(
   store: RecordedLineageStore<G>,
@@ -569,7 +571,7 @@ function revisionJournalLineage<G extends GraphDef>(
   const graphId = store.graphId;
   return Object.freeze({
     async revision(session: LineageSession): Promise<EngineRevision> {
-      await ensureRevisionJournal(storeBackend(store));
+      await assertRevisionChangesJournalReady(storeBackend(store));
       const [origin, instant] = await Promise.all([
         store.revisionOriginNow(),
         readRecordedClock(session, schema, graphId),
@@ -581,6 +583,7 @@ function revisionJournalLineage<G extends GraphDef>(
       since: EngineRevision,
       requestedGraphId: string,
     ): Promise<LineageDelta> {
+      await assertRevisionChangesJournalReady(storeBackend(store));
       if (requestedGraphId !== graphId) {
         throw new ConfigurationError(
           "revision journal lineage was called for a different graph than the one it was derived from.",
@@ -655,27 +658,6 @@ function revisionJournalLineage<G extends GraphDef>(
   });
 }
 
-const JOURNAL_INSTALLATIONS = new WeakMap<object, Promise<void>>();
-
-async function ensureRevisionJournal(backend: GraphBackend): Promise<void> {
-  const existing = JOURNAL_INSTALLATIONS.get(backend);
-  if (existing !== undefined) return existing;
-  const install = backend.ensureRevisionChangesJournal;
-  if (install === undefined) {
-    throw new ConfigurationError(
-      "Journal-backed lineage requires a backend that can install its revision journal.",
-    );
-  }
-  const installation = install();
-  JOURNAL_INSTALLATIONS.set(backend, installation);
-  try {
-    await installation;
-  } catch (error) {
-    JOURNAL_INSTALLATIONS.delete(backend);
-    throw error;
-  }
-}
-
 /**
  * Whether this store's base token is namespaced by the graph's durable
  * revision origin — true for the revision anchor (tracking on) and for the
@@ -710,7 +692,11 @@ export function resolveLineage<G extends GraphDef>(
   const backend = storeBackend(store);
   if (backend.lineage !== undefined) return backend.lineage;
   if (storeCaptureEnabled(store)) return recordedRelationsLineage(store);
-  if (store.revisionTrackingEnabled && isFirstPartyFactory(backend)) {
+  if (
+    store.revisionTrackingEnabled &&
+    store.revisionJournalEnabled !== false &&
+    isFirstPartyFactory(backend)
+  ) {
     return revisionJournalLineage(store);
   }
   return undefined;

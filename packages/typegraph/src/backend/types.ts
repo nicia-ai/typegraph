@@ -2884,12 +2884,14 @@ export type GraphBackend = Readonly<{
   ensureRevisionOriginsTable?: (this: void) => Promise<void>;
 
   /**
-   * Idempotently install the revision-change table and row triggers before
-   * minting the first journal-backed lineage anchor. This is separate from
-   * origin provisioning so ordinary revision tracking does not add triggers
-   * to a database that has never requested change-key lineage.
+   * Idempotently install the revision-change table and row triggers under a
+   * privileged schema owner. Runtime lineage verifies the installation with
+   * `revisionChangesJournalReady` and never invokes this DDL member.
    */
   ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+
+  /** Read-only proof that the revision journal and every row trigger are installed. */
+  revisionChangesJournalReady?: (this: void) => Promise<boolean>;
 
   /**
    * Idempotently add the durable edge-match identity columns, pair constraint,

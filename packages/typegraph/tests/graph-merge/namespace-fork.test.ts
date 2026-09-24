@@ -4,7 +4,10 @@ import { z } from "zod";
 import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
 import { createPostgresBackend } from "../../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
-import { forkGraphNamespace } from "../../src/graph-merge/namespace-fork";
+import {
+  forkGraphNamespace,
+  installNamespaceForkLedger,
+} from "../../src/graph-merge/namespace-fork";
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
 const graph = defineGraph({
@@ -25,10 +28,29 @@ afterEach(async () => {
 });
 
 describe("forkGraphNamespace", () => {
+  it("requires owner-side retry ledger installation", async () => {
+    const sourceFixture = await createLocalPgliteBackend({ vector: false });
+    const targetFixture = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
+      history: true,
+    });
+    await expect(
+      forkGraphNamespace(source, targetFixture.backend, "missing-ledger"),
+    ).rejects.toThrow("installNamespaceForkLedger");
+    const relation = await targetFixture.client.query<{
+      relation: string | null;
+    }>(
+      "SELECT to_regclass('typegraph_namespace_fork_operations')::text AS relation",
+    );
+    expect(relation.rows[0]?.relation).toBeNull();
+  });
+
   it("copies recorded history and tombstones, and returns the same proof on retry", async () => {
     const sourceFixture = await createLocalPgliteBackend({ vector: false });
     const targetFixture = await createLocalPgliteBackend({ vector: false });
     cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    await installNamespaceForkLedger(targetFixture.backend);
     const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
       history: true,
     });
@@ -99,6 +121,7 @@ describe("forkGraphNamespace", () => {
     const sourceFixture = await createLocalPgliteBackend({ vector: false });
     const targetFixture = await createLocalPgliteBackend({ vector: false });
     cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    await installNamespaceForkLedger(targetFixture.backend);
     const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
       history: true,
     });
@@ -121,6 +144,7 @@ describe("forkGraphNamespace", () => {
     const sourceFixture = await createLocalPgliteBackend({ vector: false });
     const targetFixture = await createLocalPgliteBackend({ vector: false });
     cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    await installNamespaceForkLedger(targetFixture.backend);
     const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
       history: true,
     });

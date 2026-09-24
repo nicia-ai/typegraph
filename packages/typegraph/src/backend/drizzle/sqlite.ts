@@ -475,9 +475,15 @@ function quoteRevisionJournalIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
-function sqliteRevisionChangeTriggers(
+function sqliteRevisionChangeTriggerSpecs(
   names: RevisionJournalTableNames,
-): readonly string[] {
+): readonly Readonly<{
+  name: string;
+  table: string;
+  action: "INSERT" | "UPDATE" | "DELETE";
+  entity: "node" | "edge" | "identity";
+  complete: 0 | 1;
+}>[] {
   const targets = [
     { entity: "node", table: names.nodes, complete: 1 },
     { entity: "edge", table: names.edges, complete: 1 },
@@ -485,13 +491,26 @@ function sqliteRevisionChangeTriggers(
   ] as const;
   const actions = ["INSERT", "UPDATE", "DELETE"] as const;
   return targets.flatMap(({ entity, table, complete }) =>
-    actions.map((action) => {
+    actions.map((action) => ({
+      name: `tg_rc_${table.slice(0, 38)}_${entity}_${action.toLowerCase()}`,
+      table,
+      action,
+      entity,
+      complete,
+    })),
+  );
+}
+
+function sqliteRevisionChangeTriggers(
+  names: RevisionJournalTableNames,
+): readonly string[] {
+  return sqliteRevisionChangeTriggerSpecs(names).map(
+    ({ name, table, action, entity, complete }) => {
       const row = action === "DELETE" ? "OLD" : "NEW";
       const kind = entity === "identity" ? "''" : `${row}.kind`;
       const id = entity === "identity" ? "''" : `${row}.id`;
-      const name = `tg_rc_${table.slice(0, 38)}_${entity}_${action.toLowerCase()}`;
       return `CREATE TRIGGER IF NOT EXISTS ${quoteRevisionJournalIdentifier(name)} AFTER ${action} ON ${quoteRevisionJournalIdentifier(table)} BEGIN INSERT INTO ${quoteRevisionJournalIdentifier(names.revisionChanges)} (entry_id, graph_id, revision, complete, entity, kind, id) SELECT lower(hex(randomblob(16))), ${row}.graph_id, COALESCE((SELECT revision FROM ${quoteRevisionJournalIdentifier(names.recordedClock)} WHERE graph_id = ${row}.graph_id), 0) + 1, ${complete}, '${entity}', ${kind}, ${id}; END`;
-    }),
+    },
   );
 }
 
@@ -1497,6 +1516,30 @@ export function buildSqliteEngineProfile(
       tables.revisionChanges,
     ),
     revisionChangesTriggerDdl: sqliteRevisionChangeTriggers(tableNames),
+    revisionChangesJournalReady: () =>
+      runWithSerializedQueue(serializedQueue, async () => {
+        const specifications = sqliteRevisionChangeTriggerSpecs(tableNames);
+        const names = [tableNames.revisionChanges, ...specifications.map((specification) => specification.name)];
+        const rows = await executionAdapter.execute<Readonly<{
+          type: string;
+          name: string;
+          tbl_name: string;
+          sql: string | null;
+        }>>(portableSql`
+          SELECT type, name, tbl_name, sql FROM sqlite_master
+          WHERE name IN (${sqlValueList(names)})
+        `);
+        if (!rows.some((row) => row.type === "table" && row.name === tableNames.revisionChanges)) return false;
+        return specifications.every((specification) =>
+          rows.some((row) =>
+            row.type === "trigger" &&
+            row.name === specification.name &&
+            row.tbl_name === specification.table &&
+            row.sql?.includes(`AFTER ${specification.action} ON ${quoteRevisionJournalIdentifier(specification.table)}`) === true &&
+            row.sql.includes(`INSERT INTO ${quoteRevisionJournalIdentifier(tableNames.revisionChanges)}`),
+          ),
+        );
+      }),
     executeDdl: runDdlStatement,
     contributionsForTableNames: (overrides) =>
       sqliteContributions(
@@ -1708,6 +1751,9 @@ export function buildSqliteEngineProfile(
       }),
     ],
     revisionChangesTableDdl: generateSqliteCreateTableSQL(
+      tables.revisionChanges,
+    ),
+    revisionChangesIndexDdl: generateSqliteCreateIndexSQL(
       tables.revisionChanges,
     ),
   };

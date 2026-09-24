@@ -101,6 +101,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "ensureTrigramExtension",
   "ensureRevisionOriginsTable",
   "ensureRevisionChangesJournal",
+  "revisionChangesJournalReady",
   "ensureEdgeMatchIdentityStorage",
   "getIndexMaterialization",
   "getIndexMaterializations",

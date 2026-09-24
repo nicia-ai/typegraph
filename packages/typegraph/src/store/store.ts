@@ -62,6 +62,7 @@ import {
   heterogeneousNodeUpsertBatchBindParameterCount,
   heterogeneousNodeUpsertBatchFitsBindBudget,
 } from "../backend/heterogeneous-node-upsert-batch";
+import { installRevisionChangesJournal } from "../backend/revision-journal";
 import {
   createEdgeRowMapper,
   createNodeRowMapper,
@@ -771,6 +772,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   registry: KindRegistry;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
+  revisionJournalEnabled?: boolean;
   revisionSchema: SqlSchema;
   recordedReadBound: boolean;
   recordedTimeOwnership: RecordedTimeOwnership;
@@ -860,7 +862,9 @@ type StoreCore<G extends GraphDef> = Readonly<{
     rootId: NodeId<AllNodeTypes<G>>,
     options: SubgraphOptions<G, EK, NK, P>,
   ) => Promise<SubgraphResult<G, NK, EK, P>>;
-  clear: () => Promise<void>;
+  clear: (
+    options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+  ) => Promise<void>;
   refreshStatistics: () => Promise<void>;
   materializeIndexes: (
     options?: MaterializeIndexesOptions,
@@ -2066,6 +2070,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   get revisionTrackingEnabled(): boolean {
     return this.#revisionTrackingEnabled;
+  }
+
+  /** Whether this store may use journal-backed changed-key lineage. */
+  get revisionJournalEnabled(): boolean {
+    return this.#options?.revisionJournal !== false;
   }
 
   /**
@@ -5021,7 +5030,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * The store is usable after clearing — new data can be created immediately.
    */
-  async clear(): Promise<void> {
+  async clear(
+    options: Readonly<{ preserveContributionMaterializations?: boolean }> = {},
+  ): Promise<void> {
     // Both origin-namespaced `base@V` anchor forms — the TypeGraph revision
     // anchor and the engine anchor — share one `typegraph_revision_origins`
     // row per graph, so any store able to mint either form must rotate it
@@ -5066,7 +5077,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         : undefined;
       const clearGraphPreservingContributions =
         target.clearGraphPreservingContributionMaterializations;
-      if (clearGraphPreservingContributions === undefined) {
+      if (
+        options.preserveContributionMaterializations === false ||
+        clearGraphPreservingContributions === undefined
+      ) {
         await target.clearGraph(this.graphId);
       } else {
         await clearGraphPreservingContributions(this.graphId);
@@ -8269,6 +8283,20 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   }
 
   await assertHistorySchemaOnOpen(backend, merged, options);
+
+  // This path runs under the schema owner. Runtime store construction and
+  // lineage reads only verify the journal, so a DML-only role never creates it.
+  if (
+    result.status !== "breaking" &&
+    result.status !== "pending" &&
+    options?.revisionTracking === true &&
+    options.history !== true &&
+    options.revisionJournal !== false &&
+    backend.lineage === undefined &&
+    backend.ensureRevisionChangesJournal !== undefined
+  ) {
+    await installRevisionChangesJournal(backend);
+  }
 
   // #135/#143: this is the single durable-marker writer, and it MUST
   // run after ensureSchemaImpl so the breaking-change gate is reached

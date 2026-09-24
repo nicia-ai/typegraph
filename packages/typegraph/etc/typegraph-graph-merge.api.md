@@ -296,6 +296,7 @@ export type BaseNodeLookup = Readonly<{
 type BaseStoreOptions = Readonly<{
     hooks?: StoreHooks;
     revisionTracking?: boolean;
+    revisionJournal?: false;
     autoRefreshStatistics?: false | number;
     coalesceUnchangedUpserts?: boolean;
     schema?: SqlSchema;
@@ -1629,6 +1630,12 @@ export type DurableBranchOrigin = Readonly<{
 }>;
 
 // @public
+export function durableDescriptorRefusal(descriptor: unknown, strategy: Readonly<{
+    type: string;
+    version: number;
+}>): BranchError | undefined;
+
+// @public
 type DurableEdgeBatchMembers = Readonly<{
     insertEdgesDurableBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
 }>;
@@ -1730,6 +1737,12 @@ export class DurableOperationUnsupportedError extends DurableOperationError {
     // (undocumented)
     protected static readonly errorCategory = "user";
 }
+
+// @public
+export function durableOriginOfDescriptor<TStoreDescriptor extends DurableStoreDescriptor>(descriptor: DurableBranchDescriptor<TStoreDescriptor>): DurableBranchOrigin;
+
+// @public
+export function durableOriginsEqual(descriptor: DurableBranchOrigin, attested: DurableBranchOrigin): boolean;
 
 // @public
 export type DurableStoreDescriptor = JsonValue;
@@ -3435,6 +3448,7 @@ type GraphBackend = Readonly<{
     ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+    revisionChangesJournalReady?: (this: void) => Promise<boolean>;
     ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -4075,6 +4089,9 @@ type InsertUniqueParams = Readonly<{
     nodeId: string;
     concreteKind: string;
 }>;
+
+// @public
+export function installNamespaceForkLedger(targetBackend: GraphBackend): Promise<void>;
 
 // @public
 type InSubquery = Readonly<{
@@ -7373,6 +7390,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     registry: KindRegistry;
     historyEnabled: boolean;
     revisionTrackingEnabled: boolean;
+    revisionJournalEnabled?: boolean;
     revisionSchema: SqlSchema;
     recordedReadBound: boolean;
     recordedTimeOwnership: RecordedTimeOwnership;
@@ -7417,7 +7435,9 @@ type StoreCore<G extends GraphDef> = Readonly<{
     bulkFindEdgesTo: <const K extends EdgeKinds<G>>(params: BulkFindEdgesToParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
-    clear: () => Promise<void>;
+    clear: (options?: Readonly<{
+        preserveContributionMaterializations?: boolean;
+    }>) => Promise<void>;
     refreshStatistics: () => Promise<void>;
     materializeIndexes: (options?: MaterializeIndexesOptions) => Promise<MaterializeIndexesResult>;
     materializeSystemIndexes: (options?: MaterializeSystemIndexesOptions) => Promise<MaterializeIndexesResult>;

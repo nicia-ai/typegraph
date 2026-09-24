@@ -815,11 +815,6 @@ async function abandonAllocation<
 }
 
 /**
- * The strategy fields descriptor validation reads; nothing host-specific.
- */
-type DescriptorOwner = Readonly<{ type: string; version: number }>;
-
-/**
  * Structural and format validation of a (possibly JSON-parsed, hence untyped)
  * descriptor against the strategy that must own it. Returns the typed refusal
  * or `undefined` when the envelope is well-formed.
@@ -831,7 +826,7 @@ type DescriptorOwner = Readonly<{ type: string; version: number }>;
  */
 export function durableDescriptorRefusal(
   descriptor: unknown,
-  strategy: DescriptorOwner,
+  strategy: Readonly<{ type: string; version: number }>,
 ): BranchError | undefined {
   if (
     typeof descriptor !== "object" ||

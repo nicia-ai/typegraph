@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("16 pilot + 86 unbundled = 102, with no member counted twice", () => {
+  it("16 pilot + 87 unbundled = 103, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(16);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(86);
+    expect(unbundledNames.length).toBe(87);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(102);
+    expect(bundledSet.size + unbundledNames.length).toBe(103);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("36 reasoned entries sum to 105 accesses; 50 deferred entries sum to 229", () => {
+  it("37 reasoned entries sum to 108 accesses; 50 deferred entries sum to 229", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(36);
+    expect(reasoned.length).toBe(37);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -159,7 +159,7 @@ describe("capability bundle totality (T9)", () => {
     // member accesses across Store dispatch and recorded wrappers: 96 -> 102.
     // Revision-change storage resolution adds one tableNames access: 102 -> 103.
     // Lazy journal installation adds one capability access: 103 -> 104.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(105);
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(108);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.

@@ -1272,7 +1272,13 @@ lineage through a DML journal when history capture is disabled. `lineageRevision
 mints a public anchor and `changesSince(anchor)` returns changed node and edge
 keys. Use that anchor API rather than `revisionNow()`, which returns a clock
 value without the graph's origin identity. The journal is installed when the
-anchor is first requested; writes before that anchor are outside its range.
+store is provisioned through `createStoreWithSchema()`, or explicitly with
+`installRevisionChangesJournal(backend)` from `@nicia-ai/typegraph/schema`
+under a schema owner role. Runtime lineage checks the journal and its triggers
+without issuing DDL; it fails with `REVISION_JOURNAL_NOT_READY` if the
+installation is incomplete. Short-lived clones that do not need this bounded
+lineage can set `revisionJournal: false`. Writes before the first anchor are
+outside that anchor's range.
 Node and edge inserts, updates, and deletes are recorded by database triggers.
 Identity-only revisions and revisions whose write provenance is incomplete
 produce `{ kind: "unbounded" }` rather than an incomplete key list. Custom
@@ -2136,8 +2142,13 @@ returns `{ store, proof, abort }`. The source can accept writes after the snapsh
 cut; `proof.sourceBase` identifies the copied cut.
 
 ```typescript
-import { forkGraphNamespace } from "@nicia-ai/typegraph/graph-merge";
+import {
+  forkGraphNamespace,
+  installNamespaceForkLedger,
+} from "@nicia-ai/typegraph/graph-merge";
 
+// Run once with the schema owner role before serving restore requests.
+await installNamespaceForkLedger(privateBackend);
 const fork = await forkGraphNamespace(sourceStore, privateBackend, "restore-42");
 const historical = await fork.store
   .asOfRecorded(receipt.recorded)
@@ -2151,7 +2162,9 @@ const historical = await fork.store
 The caller provisions and owns `privateBackend`. It may contain other graph
 namespaces, but it must contain no rows for the source graph. TypeGraph refuses
 a connection to the source database, including an aliased backend object. The
-target stays private until the caller changes its own placement pointer;
+retry ledger must be installed on the private target by a schema owner before
+the runtime operation; the fork itself issues no DDL. The target stays private
+until the caller changes its own placement pointer;
 TypeGraph does not publish it. `abort()` atomically removes the copied graph
 and operation marker while preserving unrelated namespaces, and refuses if the
 target has changed. A retry with the same operation key returns the same proof

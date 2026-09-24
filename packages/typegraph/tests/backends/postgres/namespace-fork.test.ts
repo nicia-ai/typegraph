@@ -6,7 +6,10 @@ import { z } from "zod";
 import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
-import { forkGraphNamespace } from "../../../src/graph-merge/namespace-fork";
+import {
+  forkGraphNamespace,
+  installNamespaceForkLedger,
+} from "../../../src/graph-merge/namespace-fork";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const SOURCE_URL = await provisionPostgresTestDatabase(import.meta.url);
@@ -49,6 +52,7 @@ describe.runIf(process.env["POSTGRES_URL"] !== undefined)(
       const targetBackend = createPostgresBackend(drizzle(targetPool), {
         vector: false,
       });
+      await installNamespaceForkLedger(targetBackend);
       const [source] = await createStoreWithSchema(graph, sourceBackend, {
         history: true,
       });

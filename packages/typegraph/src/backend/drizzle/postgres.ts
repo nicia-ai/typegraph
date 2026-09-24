@@ -234,6 +234,7 @@ import {
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
   getPgliteClient,
+  getPinnedPostgresTransactionClient,
   hasFunctionProperty,
   isNeonHttpClient,
   isPgliteDatabase,
@@ -433,33 +434,59 @@ function quoteRevisionJournalIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
+const REVISION_CHANGE_FUNCTION = "typegraph_record_revision_change";
+
+function postgresRevisionChangeTargets(names: RevisionJournalTableNames) {
+  return [
+    { entity: "node", table: names.nodes },
+    { entity: "edge", table: names.edges },
+    { entity: "identity", table: names.identityAssertions },
+  ] as const;
+}
+
+function revisionChangeTriggerName(entity: string, table: string): string {
+  return `tg_rc_${entity}_${table.slice(0, 32)}`;
+}
+
 function postgresRevisionChangeTriggers(
   names: RevisionJournalTableNames,
 ): readonly string[] {
-  const targets = [
-    { entity: "node", table: names.nodes, complete: "TRUE" },
-    { entity: "edge", table: names.edges, complete: "TRUE" },
-    { entity: "identity", table: names.identityAssertions, complete: "FALSE" },
-  ] as const;
-  return targets.flatMap(({ entity, table, complete }) => {
-    const suffix = `${entity}_${table.slice(0, 32)}`;
-    const functionName = `tg_rc_${suffix}_fn`;
-    const triggerName = `tg_rc_${suffix}`;
-    const kind = entity === "identity" ? "''" : "changed_kind";
-    const id = entity === "identity" ? "''" : "changed_id";
-    const identityAssignment =
-      entity === "identity" ?
-        "changed_kind := ''; changed_id := '';"
-      : "changed_kind := OLD.kind; changed_id := OLD.id;";
-    const identityNewAssignment =
-      entity === "identity" ?
-        "changed_kind := ''; changed_id := '';"
-      : "changed_kind := NEW.kind; changed_id := NEW.id;";
-    return [
-      `CREATE OR REPLACE FUNCTION ${quoteRevisionJournalIdentifier(functionName)}() RETURNS trigger LANGUAGE plpgsql AS $tg$ DECLARE changed_kind text; changed_id text; changed_graph text; BEGIN IF TG_OP = 'DELETE' THEN changed_graph := OLD.graph_id; ${identityAssignment} ELSE changed_graph := NEW.graph_id; ${identityNewAssignment} END IF; INSERT INTO ${quoteRevisionJournalIdentifier(names.revisionChanges)} (entry_id, graph_id, revision, complete, entity, kind, id) SELECT md5(random()::text || clock_timestamp()::text || txid_current()::text || changed_graph), changed_graph, COALESCE((SELECT revision FROM ${quoteRevisionJournalIdentifier(names.recordedClock)} WHERE graph_id = changed_graph), 0) + 1, ${complete}, '${entity}', ${kind}, ${id}; RETURN NULL; END; $tg$`,
-      `DO $tg$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${triggerName}' AND tgrelid = '${table}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(functionName)}(); END IF; END; $tg$`,
-    ];
+  const functionDdl = `CREATE OR REPLACE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}()
+RETURNS trigger LANGUAGE plpgsql AS $tg$
+DECLARE changed_graph text; changed_kind text; changed_id text; next_revision bigint;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    changed_graph := OLD.graph_id;
+    changed_kind := COALESCE(to_jsonb(OLD)->>'kind', '');
+    changed_id := COALESCE(to_jsonb(OLD)->>'id', '');
+  ELSE
+    changed_graph := NEW.graph_id;
+    changed_kind := COALESCE(to_jsonb(NEW)->>'kind', '');
+    changed_id := COALESCE(to_jsonb(NEW)->>'id', '');
+  END IF;
+  IF TG_ARGV[2] = 'identity' THEN
+    changed_kind := '';
+    changed_id := '';
+  END IF;
+  IF to_regclass(format('%I', TG_ARGV[1])) IS NULL THEN
+    next_revision := 1;
+  ELSE
+    EXECUTE format('SELECT COALESCE((SELECT revision FROM %I WHERE graph_id = $1), 0) + 1', TG_ARGV[1])
+      INTO next_revision USING changed_graph;
+  END IF;
+  EXECUTE format('INSERT INTO %I (entry_id, graph_id, revision, complete, entity, kind, id) VALUES (md5(random()::text || clock_timestamp()::text || txid_current()::text || $1), $1, $2, $3, $4, $5, $6)', TG_ARGV[0])
+    USING changed_graph, next_revision, TG_ARGV[2] <> 'identity', TG_ARGV[2], changed_kind, changed_id;
+  RETURN NULL;
+END; $tg$`;
+  const triggerDdl = postgresRevisionChangeTargets(names).map(({ entity, table }) => {
+    const triggerName = revisionChangeTriggerName(entity, table);
+    const relation = postgresIdentifierRegclassName(table).replaceAll("'", "''");
+    const trigger = triggerName.replaceAll("'", "''");
+    const journal = names.revisionChanges.replaceAll("'", "''");
+    const clock = names.recordedClock.replaceAll("'", "''");
+    return `DO $tg$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
   });
+  return [functionDdl, ...triggerDdl];
 }
 
 function vectorSlotsFromManagedNodeCreatePlan(
@@ -650,7 +677,15 @@ function normalizePostgresColumnKind(
 }
 
 /** Runs ONE DDL statement against `db` with no concurrency handling — see `EngineProvisioning.executeDdl`. */
-async function executeRawDdl(db: AnyPgDatabase, ddl: string): Promise<void> {
+async function executeRawDdl(
+  db: AnyPgDatabase,
+  ddl: string,
+  adapter?: PostgresExecutionAdapter,
+): Promise<void> {
+  if (adapter !== undefined) {
+    await adapter.execute(portableSql.raw(ddl));
+    return;
+  }
   await db.execute(sql.raw(ddl));
 }
 
@@ -964,10 +999,8 @@ export function createPostgresBackend(
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
   if (db instanceof PgTransaction) {
-    throw new ConfigurationError(
-      "A PostgreSQL transaction is a single pinned connection; use createPostgresTransactionBackend(tx, options) so statements are serialized.",
-      { backend: "postgres", code: "TRANSACTION_REQUIRES_SCOPED_BACKEND" },
-    );
+    assertAdoptedDialect<AnyPgTransaction>(db, PgTransaction, "postgres");
+    return createPostgresTransactionBackend(db, options);
   }
   return createSqlBackend(buildPostgresEngineProfile(db, options));
 }
@@ -1139,10 +1172,19 @@ function buildPostgresEngineProfileInternal(
     db,
     adapterOptions,
   );
+  const rawClient: unknown = (db as Readonly<{ $client?: unknown }>).$client;
+  const bareClient =
+    typeof rawClient === "object" &&
+    rawClient !== null &&
+    isBarePgClient(rawClient as Readonly<Record<string, unknown>>) ?
+      rawClient
+    : undefined;
+  const queueOwner =
+    transactionScoped ? (getPinnedPostgresTransactionClient(db) ?? db) : bareClient;
   const executionAdapter =
-    transactionScoped ?
-      createSerialExecutionAdapter(unqueuedExecutionAdapter, db)
-    : unqueuedExecutionAdapter;
+    queueOwner === undefined ?
+      unqueuedExecutionAdapter
+    : createSerialExecutionAdapter(unqueuedExecutionAdapter, queueOwner);
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
   // `declaredCapabilities` above is this profile's contribution; the
@@ -1395,7 +1437,35 @@ function buildPostgresEngineProfileInternal(
     revisionOriginsTableDdl: generatePgCreateTableSQL(tables.revisionOrigins),
     revisionChangesTableDdl: generatePgCreateTableSQL(tables.revisionChanges),
     revisionChangesTriggerDdl: postgresRevisionChangeTriggers(tableNames),
-    executeDdl: (ddl) => executeRawDdl(db, ddl),
+    async revisionChangesJournalReady(): Promise<boolean> {
+      const expectedTriggers = portableSql.join(
+        postgresRevisionChangeTargets(tableNames).map(({ entity, table }) =>
+          portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
+        ),
+        portableSql`, `,
+      );
+      const [state] = await executionAdapter.execute<{ ready?: unknown }>(
+        portableSql`SELECT
+          to_regclass(${postgresIdentifierRegclassName(tableNames.revisionChanges)}) IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM (VALUES ${expectedTriggers}) AS expected(relation_name, trigger_name, entity)
+            WHERE NOT EXISTS (
+              SELECT 1 FROM pg_trigger AS trigger
+              WHERE trigger.tgrelid = to_regclass(expected.relation_name)
+                AND trigger.tgname = expected.trigger_name
+                AND trigger.tgenabled IN ('O', 'A')
+                AND (trigger.tgtype & 31) = 29
+                AND trigger.tgfoid = to_regprocedure(${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION) + "()"})
+                AND trigger.tgargs =
+                  convert_to(${tableNames.revisionChanges}, 'UTF8') || decode('00', 'hex') ||
+                  convert_to(${tableNames.recordedClock}, 'UTF8') || decode('00', 'hex') ||
+                  convert_to(expected.entity, 'UTF8') || decode('00', 'hex')
+            )
+          ) AS ready`,
+      );
+      return state?.ready === true;
+    },
+    executeDdl: (ddl) => executeRawDdl(db, ddl, executionAdapter),
     contributionsForTableNames: (overrides) =>
       postgresContributions(
         buildPostgresTables(overrides),
@@ -1537,7 +1607,7 @@ function buildPostgresEngineProfileInternal(
   }
 
   const provisioning: EngineProvisioning = {
-    executeDdl: (ddl) => executeRawDdl(db, ddl),
+    executeDdl: (ddl) => executeRawDdl(db, ddl, executionAdapter),
     ensureTable: executeConcurrentCreateDdl,
     generateDdl: () => generatePostgresDDL(tables, fulltextStrategy ?? false),
     ensureIndexMaterializationColumns,
@@ -1689,6 +1759,7 @@ function buildPostgresEngineProfileInternal(
       }),
     ],
     revisionChangesTableDdl: generatePgCreateTableSQL(tables.revisionChanges),
+    revisionChangesIndexDdl: generatePgCreateIndexSQL(tables.revisionChanges),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
@@ -3755,7 +3826,7 @@ function createTransactionBackend(
   // this transaction can execute programs.
   const txExecutionAdapter = createSerialExecutionAdapter(
     operationExecutionAdapter,
-    options.db,
+    getPinnedPostgresTransactionClient(options.db) ?? options.db,
   );
   const runExclusive = txExecutionAdapter.runExclusive;
   const sessionAtomicBatchAdapter =

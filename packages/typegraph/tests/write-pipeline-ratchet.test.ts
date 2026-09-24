@@ -127,7 +127,7 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * program and follows the same recorded-capture classification. The clear
  * preservation capability (133→134) remains in the lifecycle class.
  */
-const MEMBER_COUNT = 134;
+const MEMBER_COUNT = 135;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

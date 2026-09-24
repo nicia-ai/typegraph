@@ -59,7 +59,7 @@ export type SerialExecutionAdapter = SqlExecutionAdapter &
 type StatementQueue = Readonly<{
   /** Runs tasks one at a time, in the order they were submitted. */
   enqueue: <T>(task: () => Promise<T>) => Promise<T>;
-  drainAndClose: () => Promise<void>;
+  drain: () => Promise<void>;
 }>;
 
 /**
@@ -75,21 +75,16 @@ function createStatementQueue(): StatementQueue {
   // Always fulfilled: a failed statement must not strand its successors, and
   // an untouched rejection here would surface as an unhandled rejection.
   let tail: Promise<void> = Promise.resolve();
-  let closed = false;
 
   return {
     enqueue<T>(task: () => Promise<T>): Promise<T> {
-      if (closed) return Promise.reject(new TransactionClosedError());
       // Chained synchronously, so queue order is submission order.
       const result = tail.then(() => task());
       tail = result.then(ignoreOutcome, ignoreOutcome);
       return result;
     },
 
-    async drainAndClose(): Promise<void> {
-      // Close first: a statement whose continuation enqueues a successor must
-      // find the queue already shut, or it would slip in behind the drain.
-      closed = true;
+    async drain(): Promise<void> {
       await tail;
     },
   };
@@ -119,14 +114,25 @@ export function createSerialExecutionAdapter(
   adapter: SqlExecutionAdapter,
   transactionOwner?: object,
 ): SerialExecutionAdapter {
-  const { enqueue, drainAndClose } =
+  const queue =
     transactionOwner === undefined ?
       createStatementQueue()
     : queueForTransaction(transactionOwner);
+  let closed = false;
   const { executeCompiled, prepare } = adapter;
 
+  function enqueue<T>(task: () => Promise<T>): Promise<T> {
+    if (closed) return Promise.reject(new TransactionClosedError());
+    return queue.enqueue(task);
+  }
+
   return {
-    drainAndClose,
+    async drainAndClose(): Promise<void> {
+      // Close this transaction's view before draining the shared connection.
+      // A later transaction may reuse that connection with a fresh view.
+      closed = true;
+      await queue.drain();
+    },
 
     compile(query: ExecutableSql): CompiledSqlQuery {
       return adapter.compile(query);

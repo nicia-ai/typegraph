@@ -966,6 +966,13 @@ describe("deployment-wide base-schema adoption", () => {
           )
           .get("typegraph_revision_changes"),
       ).toEqual({ name: "typegraph_revision_changes" });
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+          )
+          .get("typegraph_revision_changes_graph_revision_idx"),
+      ).toEqual({ name: "typegraph_revision_changes_graph_revision_idx" });
     } finally {
       await backend.close();
     }
@@ -994,6 +1001,12 @@ describe("deployment-wide base-schema adoption", () => {
         "SELECT to_regclass('typegraph_revision_changes')::text AS table_name",
       );
       expect(journal.rows[0]?.table_name).toBe("typegraph_revision_changes");
+      const journalIndex = await client.query<{ index_name: string | null }>(
+        "SELECT to_regclass('typegraph_revision_changes_graph_revision_idx')::text AS index_name",
+      );
+      expect(journalIndex.rows[0]?.index_name).toBe(
+        "typegraph_revision_changes_graph_revision_idx",
+      );
     } finally {
       await backend.close();
     }
