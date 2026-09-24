@@ -27,6 +27,8 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     batchOnce?: <const Queries extends OneStatementBatchReads>(build: (read: BatchReadBuilder<G>) => Queries, options?: BatchOnceOptions) => Promise<OneStatementBatchResults<Queries>>;
     neighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
     countNeighbors?: <const K extends EdgeKinds<G>>(source: GraphNodeReference<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
+    lineageRevisionNow?: () => Promise<EngineRevision | undefined>;
+    changesSince?: (revision: EngineRevision) => Promise<LineageDelta>;
 }>;
 
 // @public (undocumented)
@@ -1580,6 +1582,7 @@ export type DurableBranchDescriptor<TStoreDescriptor extends DurableStoreDescrip
         hash: string;
     }> | undefined;
     forkRevision?: EngineRevision | undefined;
+    recordedForkPoint?: RecordedForkPoint;
 }>;
 
 // @public
@@ -1622,6 +1625,7 @@ export type DurableBranchOrigin = Readonly<{
         hash: string;
     }> | undefined;
     forkRevision: EngineRevision | undefined;
+    recordedForkPoint?: RecordedForkPoint;
 }>;
 
 // @public
@@ -3136,6 +3140,9 @@ export type ForkedWorkingCopyOptions<G extends GraphDef, TFork extends ForkHandl
 export function forkedWorkingCopyStrategy<G extends GraphDef, TFork extends ForkHandle>(options: ForkedWorkingCopyOptions<G, TFork>): WorkingCopyStrategy<G>;
 
 // @public
+export function forkGraphNamespace<G extends GraphDef>(source: Store<G>, targetBackend: GraphBackend, operationKey: string): Promise<NamespaceFork<G>>;
+
+// @public
 export type ForkHandle = Readonly<{
     dispose?: () => Promise<void>;
 }>;
@@ -3427,6 +3434,7 @@ type GraphBackend = Readonly<{
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+    ensureRevisionChangesJournal?: (this: void) => Promise<void>;
     ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -3472,6 +3480,7 @@ type GraphBackend = Readonly<{
     adoptBaseSchema?: (this: void) => Promise<void>;
     assertBaseSchemaCurrent?: (this: void) => Promise<void>;
     clearGraph: (this: void, graphId: string) => Promise<void>;
+    clearGraphPreservingContributionMaterializations?: (this: void, graphId: string) => Promise<void>;
     bootstrapTables?: (this: void) => Promise<void>;
     refreshStatistics: (this: void) => Promise<void>;
     trustedImport?: <T>(this: void, fn: (session: TrustedImportSession) => Promise<T>, options?: Readonly<{
@@ -3505,6 +3514,7 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
     }> | undefined;
     close: () => Promise<void>;
     forkRevision?: EngineRevision | undefined;
+    recordedForkPoint?: RecordedForkPoint;
 }>;
 
 // @public
@@ -3592,7 +3602,7 @@ type GraphIdentityConfig = Readonly<{
 }>;
 
 // @public (undocumented)
-type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
+type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "clearGraphPreservingContributionMaterializations" | "bootstrapTables">;
 
 // @public
 type GraphNodeCollections<G extends GraphDef> = {
@@ -4708,7 +4718,7 @@ export function mergeIncremental<G extends GraphDef>(args: MergeIncrementalArgs<
 
 // @public
 export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
-    forkPoint: Store<G>;
+    forkPoint: Store<G> | RecordedForkPoint;
     target: Store<G>;
     branches: readonly MergeBranch<G>[];
     options?: Omit<MergeOptions<G>, "target">;
@@ -5186,6 +5196,22 @@ type MetaEdgeProperties = Readonly<{
     inverse: string | undefined;
     inference: InferenceType;
     description: string | undefined;
+}>;
+
+// @public
+export type NamespaceFork<G extends GraphDef> = Readonly<{
+    store: Store<G>;
+    proof: NamespaceForkProof;
+    abort: () => Promise<void>;
+}>;
+
+// @public
+export type NamespaceForkProof = Readonly<{
+    graphId: string;
+    operationKey: string;
+    sourceBase: BaseVersion;
+    contentDigest: string;
+    copiedAt: string;
 }>;
 
 // @public
@@ -6387,6 +6413,12 @@ const RECORDED_INSTANT_BRAND: unique symbol;
 const RECORDED_POINT_READ_NAMES: readonly ["getById", "getByIds"];
 
 // @public
+export type RecordedForkPoint = Readonly<{
+    recorded: RecordedInstant;
+    base: BaseVersion;
+}>;
+
+// @public
 type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
@@ -6732,6 +6764,7 @@ type ResolvedSqlTableNames = Readonly<{
     recordedEdges: string;
     recordedClock: string;
     revisionOrigins: string;
+    revisionChanges?: string;
     identityAssertions: string;
     recordedIdentityAssertions: string;
     identityClosure: string;
@@ -7294,6 +7327,7 @@ type SqlTableNames = Readonly<{
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
     revisionOrigins?: string | undefined;
+    revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
@@ -7464,6 +7498,7 @@ interface StoreRef<in out T> {
 // @internal
 type StoreRuntime<G extends GraphDef> = Readonly<{
     backend: GraphBackend;
+    recordedReadBinding?: RecordedReadBinding | undefined;
     evolutionPlanningTarget?: (plan: EvolutionPlan) => Store<G>;
     captureEnabled?: boolean;
     uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;

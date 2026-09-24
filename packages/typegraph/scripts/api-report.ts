@@ -653,10 +653,12 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // GraphBackend. The backend barrel exports those contracts directly; the
 // remaining entrypoints retain their deliberately narrower public surfaces,
 // so the exact transitive name sets are booked here rather than widened.
+// Graph-extension introspection now exports its function and two result types
+// from the root, removing those three names from root forgotten-export debt.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 501,
-    sha256: "2087b6807b4984fbe0ecc2473e27d3d21add2de0d3738b0ff9151c12f8555bb4",
+    count: 498,
+    sha256: "ed9b8f4a81bd6114df06a55432f5f7328d6c1782ed01b443a0ad3311b6ced948",
   },
   "./adapters/drizzle/engine": {
     count: 336,
@@ -694,9 +696,10 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 72,
     sha256: "bf73c4f71677d2b3ec2e36bfd37e9ede5c3f57377fc923f0df2eb1b500cfc84d",
   },
+  // ExtensionIndexWhere makes NullCheckOp reachable through this entrypoint.
   "./graph-extension": {
-    count: 16,
-    sha256: "1678650d02e0d9d7cc767ffbacbf163724c82fd4590c219b97d3dff85a6bf2f6",
+    count: 17,
+    sha256: "4b4cedb3e4d62be38f1b9d82e55a7aeaca681847dd99285e13a524064e9c2ab3",
   },
   // MergePlanReadContext derives its read-only surface from the runtime method
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.

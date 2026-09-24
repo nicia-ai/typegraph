@@ -1153,7 +1153,7 @@ function buildPostgresEngineProfileInternal(
   // back through `EngineOperationsContext.capabilities` / `EngineAssemblyContext
   // .capabilities` — `buildOperations` and `lateMembers` below read it off
   // `ctx` rather than re-deriving a local copy.
-  const tableNames: ResolvedSqlTableNames = {
+  const tableNames = {
     schemaVersions: getTableName(tables.schemaVersions),
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
@@ -1170,7 +1170,7 @@ function buildPostgresEngineProfileInternal(
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
     fences: getTableName(tables.fences),
-  };
+  } satisfies ResolvedSqlTableNames;
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
   // ANALYZE statements on every call. The recorded and identity relations
   // are ANALYZEd separately under an existence guard (see refreshStatistics):

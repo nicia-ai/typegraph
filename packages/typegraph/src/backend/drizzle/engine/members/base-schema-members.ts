@@ -30,6 +30,7 @@
  * `ensureTable` primitive plus the caller's own rendered DDL string, the
  * same way `graph-template-members.ts` builds `ensureGraphTemplatesTable`.
  */
+import { ConfigurationError } from "../../../../errors";
 import {
   type BaseSchemaLifecycle,
   createBaseSchemaLifecycle,
@@ -90,8 +91,8 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * are only exercised by offline `adopt()`.
    */
   sinceIndexDdl: readonly string[];
-  /** Idempotent DDL for the revision-change journal introduced in version 4. */
-  revisionChangesTableDdl: string;
+  /** Idempotent DDL for the version-4 revision-change journal. Older callers may omit it; version-4 adoption then refuses with a clear error. */
+  revisionChangesTableDdl?: string;
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -164,6 +165,15 @@ export function createBaseSchemaMembers(
       {
         version: 4,
         async adopt(): Promise<void> {
+          if (revisionChangesTableDdl === undefined) {
+            throw new ConfigurationError(
+              "Base-schema version 4 adoption requires revisionChangesTableDdl.",
+              {
+                dependency: "revisionChangesTableDdl",
+                adoptionVersion: 4,
+              },
+            );
+          }
           await ensureTable(revisionChangesTableDdl);
         },
         bootstrap: { phase: "covered-by-generated-ddl" },

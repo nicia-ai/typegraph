@@ -179,7 +179,10 @@ import {
   recordedInstantRevision,
 } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
-import { type SqlSchema } from "../../query/compiler/schema";
+import {
+  resolveRevisionChangesTableName,
+  type SqlSchema,
+} from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import {
@@ -612,7 +615,7 @@ function revisionJournalLineage<G extends GraphDef>(
         asCompiledRowsSql(sql`
           WITH changes AS (
             SELECT revision, entity, kind, id, complete
-            FROM ${sql.identifier(schema.tables.revisionChanges)}
+            FROM ${sql.identifier(resolveRevisionChangesTableName(schema.tables))}
             WHERE graph_id = ${graphId} AND revision > ${parsed.revision}
               AND revision <= ${current}
           ), summary AS (

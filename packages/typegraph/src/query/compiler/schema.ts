@@ -88,7 +88,7 @@ export type ResolvedSqlTableNames = Readonly<{
   recordedClock: string;
   /** Durable per-graph revision-origin table name */
   revisionOrigins: string;
-  revisionChanges: string;
+  revisionChanges?: string;
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
@@ -118,7 +118,6 @@ type SqlSchemaFields = Readonly<{
   recordedClockTable: SqlFragment;
   /** Get a `SqlFragment` reference to the durable per-graph revision origins. */
   revisionOriginsTable: SqlFragment;
-  revisionChangesTable: SqlFragment;
   /** Get a `SqlFragment` reference to the identity assertion ledger. */
   identityAssertionsTable: SqlFragment;
   /** Get a `SqlFragment` reference to the recorded identity assertion relation. */
@@ -147,7 +146,6 @@ export abstract class SqlSchema implements SqlSchemaFields {
   abstract readonly recordedEdgesTable: SqlFragment;
   abstract readonly recordedClockTable: SqlFragment;
   abstract readonly revisionOriginsTable: SqlFragment;
-  abstract readonly revisionChangesTable: SqlFragment;
   abstract readonly identityAssertionsTable: SqlFragment;
   abstract readonly recordedIdentityAssertionsTable: SqlFragment;
   abstract readonly identityClosureTable: SqlFragment;
@@ -164,7 +162,6 @@ class SqlSchemaDescriptor extends SqlSchema {
   readonly recordedEdgesTable: SqlFragment;
   readonly recordedClockTable: SqlFragment;
   readonly revisionOriginsTable: SqlFragment;
-  readonly revisionChangesTable: SqlFragment;
   readonly identityAssertionsTable: SqlFragment;
   readonly recordedIdentityAssertionsTable: SqlFragment;
   readonly identityClosureTable: SqlFragment;
@@ -186,7 +183,6 @@ class SqlSchemaDescriptor extends SqlSchema {
     this.recordedEdgesTable = fields.recordedEdgesTable;
     this.recordedClockTable = fields.recordedClockTable;
     this.revisionOriginsTable = fields.revisionOriginsTable;
-    this.revisionChangesTable = fields.revisionChangesTable;
     this.identityAssertionsTable = fields.identityAssertionsTable;
     this.recordedIdentityAssertionsTable =
       fields.recordedIdentityAssertionsTable;
@@ -221,7 +217,7 @@ const DEFAULT_TABLE_NAMES = {
 
 function resolveTableNames(
   names: Partial<SqlTableNames>,
-): ResolvedSqlTableNames {
+): ResolvedSqlTableNames & Readonly<{ revisionChanges: string }> {
   return {
     nodes: names.nodes ?? DEFAULT_TABLE_NAMES.nodes,
     edges: names.edges ?? DEFAULT_TABLE_NAMES.edges,
@@ -230,8 +226,7 @@ function resolveTableNames(
     recordedClock: names.recordedClock ?? DEFAULT_TABLE_NAMES.recordedClock,
     revisionOrigins:
       names.revisionOrigins ?? DEFAULT_TABLE_NAMES.revisionOrigins,
-    revisionChanges:
-      names.revisionChanges ?? DEFAULT_TABLE_NAMES.revisionChanges,
+    revisionChanges: resolveRevisionChangesTableName(names),
     identityAssertions:
       names.identityAssertions ?? DEFAULT_TABLE_NAMES.identityAssertions,
     recordedIdentityAssertions:
@@ -247,6 +242,12 @@ function resolveTableNames(
     fences: names.fences ?? DEFAULT_TABLE_NAMES.fences,
     schemaVersions: names.schemaVersions ?? DEFAULT_TABLE_NAMES.schemaVersions,
   };
+}
+
+export function resolveRevisionChangesTableName(
+  tables: Readonly<{ revisionChanges?: string | undefined }>,
+): string {
+  return tables.revisionChanges ?? DEFAULT_TABLE_NAMES.revisionChanges;
 }
 
 /**
@@ -371,7 +372,6 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
     recordedEdgesTable: sql.identifier(tables.recordedEdges),
     recordedClockTable: sql.identifier(tables.recordedClock),
     revisionOriginsTable: sql.identifier(tables.revisionOrigins),
-    revisionChangesTable: sql.identifier(tables.revisionChanges),
     identityAssertionsTable: sql.identifier(tables.identityAssertions),
     recordedIdentityAssertionsTable: sql.identifier(
       tables.recordedIdentityAssertions,
@@ -742,7 +742,6 @@ export function recordedReadSqlSchema(
     recordedEdgesTable: schema.recordedEdgesTable,
     recordedClockTable: schema.recordedClockTable,
     revisionOriginsTable: schema.revisionOriginsTable,
-    revisionChangesTable: schema.revisionChangesTable,
     identityAssertionsTable: schema.identityAssertionsTable,
     recordedIdentityAssertionsTable: schema.recordedIdentityAssertionsTable,
     identityClosureTable: schema.identityClosureTable,

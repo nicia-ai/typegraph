@@ -813,10 +813,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
   recordedNow: () => Promise<RecordedInstant | undefined>;
   revisionNow: () => Promise<RecordedInstant | undefined>;
-  lineageRevisionNow: () => Promise<EngineRevision | undefined>;
   revisionOriginNow: () => Promise<string>;
-  /** Return changed node and edge keys since a lineage revision, or `unbounded` when complete keys are unavailable. */
-  changesSince: (revision: EngineRevision) => Promise<LineageDelta>;
   view: (coordinate: StoreViewCoordinate) => StoreView<G>;
   snapshot: () => StoreView<G>;
   batch: <
@@ -996,6 +993,9 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     source: GraphNodeReference<G>,
     options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
   ) => Promise<number>;
+  lineageRevisionNow?: () => Promise<EngineRevision | undefined>;
+  /** Return changed node and edge keys since a lineage revision, or `unbounded` when complete keys are unavailable. */
+  changesSince?: (revision: EngineRevision) => Promise<LineageDelta>;
 }>;
 
 type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;

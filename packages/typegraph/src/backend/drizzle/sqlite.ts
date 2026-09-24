@@ -1341,7 +1341,7 @@ export function buildSqliteEngineProfile(
   // .capabilities` — `buildOperations` and `lateMembers` below read it off
   // `ctx` rather than re-deriving a local copy.
 
-  const tableNames: ResolvedSqlTableNames = {
+  const tableNames = {
     schemaVersions: getTableName(tables.schemaVersions),
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
@@ -1358,7 +1358,7 @@ export function buildSqliteEngineProfile(
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
     fences: getTableName(tables.fences),
-  };
+  } satisfies ResolvedSqlTableNames;
   // refreshStatistics() scopes ANALYZE to these — matching the Postgres
   // backend, which never touches unrelated tables sharing the database.
   // The recorded and identity relations are ANALYZEd separately under a
