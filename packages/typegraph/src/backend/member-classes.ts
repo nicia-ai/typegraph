@@ -222,6 +222,7 @@ const PROVISIONING_MEMBERS = [
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
   "ensureRevisionOriginsTable",
+  "ensureRevisionChangesJournal",
   "ensureEdgeMatchIdentityStorage",
   "ensureRuntimeContributions",
   "ensureVectorSlotContribution",
@@ -260,6 +261,7 @@ const LIFECYCLE_MEMBERS = [
   "transaction",
   "close",
   "clearGraph",
+  "clearGraphPreservingContributionMaterializations",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 /**

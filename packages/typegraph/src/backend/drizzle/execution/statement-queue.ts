@@ -95,6 +95,16 @@ function createStatementQueue(): StatementQueue {
   };
 }
 
+const transactionQueues = new WeakMap<object, StatementQueue>();
+
+function queueForTransaction(owner: object): StatementQueue {
+  const existing = transactionQueues.get(owner);
+  if (existing !== undefined) return existing;
+  const queue = createStatementQueue();
+  transactionQueues.set(owner, queue);
+  return queue;
+}
+
 /**
  * Wraps `adapter` so at most one statement is in flight on its connection.
  *
@@ -107,8 +117,12 @@ function createStatementQueue(): StatementQueue {
  */
 export function createSerialExecutionAdapter(
   adapter: SqlExecutionAdapter,
+  transactionOwner?: object,
 ): SerialExecutionAdapter {
-  const { enqueue, drainAndClose } = createStatementQueue();
+  const { enqueue, drainAndClose } =
+    transactionOwner === undefined ?
+      createStatementQueue()
+    : queueForTransaction(transactionOwner);
   const { executeCompiled, prepare } = adapter;
 
   return {

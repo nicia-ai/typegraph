@@ -301,6 +301,13 @@ export const DIALECT_SEAM_RESTRICTIONS = [
  */
 export const DIALECT_LITERAL_EXEMPTIONS = [
   {
+    file: "src/graph-merge/namespace-fork.ts",
+    reason:
+      "One-shot PostgreSQL physical namespace copy requires a PostgreSQL database and catalog. The dialect check is a refusal boundary, not query compilation.",
+    permanent: true,
+    sites: 1,
+  },
+  {
     file: "src/store/store.ts",
     reason:
       "Passes ownsWriteLock=true only for SQLite's BEGIN IMMEDIATE transactions, which already hold the write lock recorded-clock allocation would otherwise re-acquire — the one boolean flag this preflight path threads through.",

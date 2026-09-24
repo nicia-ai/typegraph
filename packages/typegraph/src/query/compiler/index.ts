@@ -1323,7 +1323,7 @@ function compileLateMaterializedQuery(
   predicateIndex: PredicateIndex,
   temporalFilterPass: TemporalFilterPass,
   collapsedTraversalCteAlias: string | undefined,
-  shouldCollapseSelectiveTraversalRowset: boolean,
+  shouldCollapseLinearTraversalRowset: boolean,
 ): SqlFragment | undefined {
   const plan = resolveLateMaterializationPlan(ast);
   if (plan === undefined) {
@@ -1338,7 +1338,7 @@ function compileLateMaterializedQuery(
 
   const ctes = buildStandardStartAndTraversalCtes({
     ast: leanAst,
-    carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
+    carryForwardPreviousColumns: shouldCollapseLinearTraversalRowset,
     ctx,
     graphId,
     predicateIndex,
@@ -1485,7 +1485,7 @@ function compileStandardQueryWithCteStrategy(
     logicalPlan,
     predicateIndex,
     requiredColumnsByAlias,
-    shouldCollapseSelectiveTraversalRowset,
+    shouldCollapseLinearTraversalRowset,
     temporalFilterPass,
     traversalCteLimit,
     vectorPredicate,
@@ -1533,7 +1533,7 @@ function compileStandardQueryWithCteStrategy(
       predicateIndex,
       temporalFilterPass,
       collapsedTraversalCteAlias,
-      shouldCollapseSelectiveTraversalRowset,
+      shouldCollapseLinearTraversalRowset,
     );
     if (lateMaterializedSql) {
       return lateMaterializedSql;
@@ -1543,7 +1543,7 @@ function compileStandardQueryWithCteStrategy(
   // Start + traversal candidate CTEs
   const ctes = buildStandardStartAndTraversalCtes({
     ast,
-    carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
+    carryForwardPreviousColumns: shouldCollapseLinearTraversalRowset,
     ctx,
     graphId,
     predicateIndex,

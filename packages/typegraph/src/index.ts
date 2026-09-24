@@ -579,6 +579,9 @@ export type {
   EdgeCollectionLookup,
   EdgeTemporalReads,
   EdgeWrites,
+  EngineRevision,
+  EntityKey,
+  LineageDelta,
   NodeCollectionLookup,
   NodeCurrentReads,
   NodeTemporalReads,
@@ -949,8 +952,10 @@ export {
 
 export type {
   GraphExtension,
+  GraphExtensionEdgeIntrospection,
   GraphExtensionIssue,
   GraphExtensionIssueCode,
+  GraphExtensionKindIntrospection,
   GraphExtensionVersion,
   IncompatibleChange,
   KindReferent,
@@ -964,6 +969,7 @@ export {
   GraphExtensionValidationError,
   GraphExtensionVersionUnsupportedError,
   IncompatibleChangeError,
+  introspectGraphExtension,
   KindCollisionError,
   KindHasReferentsError,
   LEGACY_GRAPH_EXTENSION_VERSION,

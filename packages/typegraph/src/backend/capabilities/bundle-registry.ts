@@ -889,6 +889,12 @@ export type UnbundledOptionalMember =
  * 16 + 84 = 100 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  clearGraphPreservingContributionMaterializations: {
+    kind: "reasoned",
+    reason:
+      "First-party Store.clear lifecycle path that preserves contribution attestations while clearing graph data; custom backends without it retain their clearGraph behavior.",
+    accesses: 1,
+  },
   upsertHeterogeneousNodes: {
     kind: "reasoned",
     reason: "Exact-session PostgreSQL heterogeneous node upsert program.",
@@ -940,12 +946,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.",
-    // 25, including the schema-checked read binding. Previously 24, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
+    // 26, including the namespace fork's backend table-name probe. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
     // accesses on one physical line, which a line-keyed grep counts once but
     // the type-aware scanner counts as two access nodes (§Baselines). The
     // forked working-copy strategy reads the connected backend's names to
     // fence them against the base store's resolved schema.
-    accesses: 25,
+    accesses: 26,
   },
   fenceSql: {
     kind: "reasoned",
@@ -1067,6 +1073,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     reason:
       "Zero consumers in src/** outside the backend implementations — measured, not inferred. A member no code path consults has no measurable arity or disposition.",
     accesses: 0,
+  },
+  ensureRevisionChangesJournal: {
+    kind: "reasoned",
+    reason:
+      "Journal lineage installs its triggers before minting its first anchor; other lineage sources do not need them.",
+    accesses: 1,
   },
   getContributionMaterialization: {
     kind: "reasoned",

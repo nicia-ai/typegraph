@@ -633,6 +633,10 @@ export type ContributionMaterializerDeps = Readonly<{
   getMarkers: (
     graphId: string,
   ) => Promise<readonly ContributionMaterializationRow[]>;
+  /** Optional one-statement read for graph and deployment markers on a pinned session. */
+  getMarkerBatch?: (
+    graphIds: readonly string[],
+  ) => Promise<readonly ContributionMaterializationRow[]>;
   recordMarker: (
     params: RecordContributionMaterializationParams,
   ) => Promise<void>;
@@ -670,6 +674,15 @@ export type ContributionMaterializerDeps = Readonly<{
 }>;
 
 export type ContributionMaterializer = Readonly<{
+  /**
+   * Bind marker reads to one pinned transaction session. The returned gate
+   * owns a fresh positive cache: a root-session marker read cannot authorize
+   * a transaction whose snapshot predates that marker, and a rolled-back
+   * transaction cannot populate the root backend's cache.
+   */
+  bindReadSession: (
+    getMarkerBatch: NonNullable<ContributionMaterializerDeps["getMarkerBatch"]>,
+  ) => ContributionMaterializer;
   /** Canonical durable-marker writer: every `runtimeEnsure` contribution. */
   ensureRuntimeContributions: (graphId: string) => Promise<void>;
   /**
@@ -809,6 +822,13 @@ export type ContributionMaterializer = Readonly<{
     ) => Promise<ContributionRepopulationStats>,
   ) => Promise<ContributionRebuildResult>;
 }>;
+
+function transactionGateAdministrationError(): ConfigurationError {
+  return new ConfigurationError(
+    "Contribution administration is unavailable through a transaction-scoped marker gate",
+    { capability: "contributionAdministration", scope: "transaction" },
+  );
+}
 
 /**
  * Whether a fulltext rebuild can be served, given the active strategy and
@@ -960,6 +980,13 @@ export function createContributionMaterializer(
     graphId: string,
     includeDeployment = false,
   ): Promise<readonly ContributionMaterializationRow[]> {
+    const graphIds =
+      includeDeployment && graphId !== DEPLOYMENT_CONTRIBUTION_GRAPH_ID ?
+        [graphId, DEPLOYMENT_CONTRIBUTION_GRAPH_ID]
+      : [graphId];
+    if (deps.getMarkerBatch !== undefined) {
+      return deps.getMarkerBatch(graphIds);
+    }
     const graphRows = await deps.getMarkers(graphId);
     if (!includeDeployment || graphId === DEPLOYMENT_CONTRIBUTION_GRAPH_ID) {
       return graphRows;
@@ -1099,13 +1126,14 @@ export function createContributionMaterializer(
       // operator at the idempotent re-stamp repair that blesses the
       // unchanged old-shape table, and letting the next attempt skip this
       // guard. Staying `stale` points at `store.rebuildContribution()`.
-      if (deps.recordFailedAttempts !== false) await deps.recordMarker({
-        ...identity,
-        signature: existing.signature,
-        attemptedAt: nowIso(),
-        materializedAt: undefined,
-        error: error.message,
-      });
+      if (deps.recordFailedAttempts !== false)
+        await deps.recordMarker({
+          ...identity,
+          signature: existing.signature,
+          attemptedAt: nowIso(),
+          materializedAt: undefined,
+          error: error.message,
+        });
       throw error;
     }
 
@@ -1115,13 +1143,14 @@ export function createContributionMaterializer(
         await deps.execDdl(statement);
       }
     } catch (error) {
-      if (deps.recordFailedAttempts !== false) await deps.recordMarker({
-        ...identity,
-        signature,
-        attemptedAt,
-        materializedAt: undefined,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      if (deps.recordFailedAttempts !== false)
+        await deps.recordMarker({
+          ...identity,
+          signature,
+          attemptedAt,
+          materializedAt: undefined,
+          error: error instanceof Error ? error.message : String(error),
+        });
       throw error;
     }
     await deps.recordMarker({
@@ -1192,10 +1221,7 @@ export function createContributionMaterializer(
     }>,
     physicalOnly = false,
   ): Promise<void> {
-    if (
-      !physicalOnly &&
-      graphId === DEPLOYMENT_CONTRIBUTION_GRAPH_ID
-    ) {
+    if (!physicalOnly && graphId === DEPLOYMENT_CONTRIBUTION_GRAPH_ID) {
       throw new ConfigurationError(
         `Graph id "${graphId}" is reserved for deployment contribution markers.`,
         { code: "RESERVED_GRAPH_ID" },
@@ -1215,8 +1241,9 @@ export function createContributionMaterializer(
       );
       if (deploymentContributions.length > 0) {
         const deploymentReady =
-          options?.force !== true && options?.bypassCache !== true &&
-          await Promise.all(
+          options?.force !== true &&
+          options?.bypassCache !== true &&
+          (await Promise.all(
             deploymentContributions.map(async (contribution) => {
               const signature = await resolveContributionSignature(
                 contributionKey(graphId, contribution),
@@ -1234,7 +1261,7 @@ export function createContributionMaterializer(
                 ) === signature
               );
             }),
-          ).then((states) => states.every(Boolean));
+          ).then((states) => states.every(Boolean)));
         if (deploymentReady) {
           if (graphContributions.length === 0) return;
           await ensureContributions(graphId, graphContributions, options, true);
@@ -1252,20 +1279,14 @@ export function createContributionMaterializer(
               contributionKey(graphId, contribution),
             );
             const deployment = legacyRead.rows.get(
-              contributionKey(
-                DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
-                contribution,
-              ),
+              contributionKey(DEPLOYMENT_CONTRIBUTION_GRAPH_ID, contribution),
             );
             if (
               legacy?.materializedAt !== undefined &&
               deployment === undefined
             ) {
               await deps.recordMarker({
-                ...identityOf(
-                  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
-                  contribution,
-                ),
+                ...identityOf(DEPLOYMENT_CONTRIBUTION_GRAPH_ID, contribution),
                 signature: legacy.signature,
                 attemptedAt: legacy.lastAttemptedAt,
                 materializedAt: legacy.materializedAt,
@@ -1290,9 +1311,14 @@ export function createContributionMaterializer(
             contribution,
           );
           const key = contributionKey(graphId, contribution);
-          const signature = await resolveContributionSignature(key, contribution);
+          const signature = await resolveContributionSignature(
+            key,
+            contribution,
+          );
           const physical = physicalRows.get(physicalKey);
-          if (evaluateContributionState(physical, signature) !== "initialized") {
+          if (
+            evaluateContributionState(physical, signature) !== "initialized"
+          ) {
             continue;
           }
           const logical = physicalRows.get(key);
@@ -1374,9 +1400,7 @@ export function createContributionMaterializer(
     // Preserve the original race check after marker-table bootstrap, but
     // refresh every pending contribution in one query rather than one query
     // per slot.
-    const existingRows = indexMarkerRows(
-      await getMarkerRowsForGraph(graphId),
-    );
+    const existingRows = indexMarkerRows(await getMarkerRowsForGraph(graphId));
     for (const entry of pending) {
       const outcome = await materializeOne(
         graphId,
@@ -1437,8 +1461,10 @@ export function createContributionMaterializer(
         signature,
       );
       const state =
-        entry.contribution.scope === "deployment" &&
-        physicalState === "initialized" ?
+        (
+          entry.contribution.scope === "deployment" &&
+          physicalState === "initialized"
+        ) ?
           evaluateContributionState(
             read.rows.get(contributionKey(graphId, entry.contribution)),
             signature,
@@ -1678,8 +1704,10 @@ export function createContributionMaterializer(
         entry.signature,
       );
       const state =
-        entry.contribution.scope === "deployment" &&
-        physicalState === "initialized" ?
+        (
+          entry.contribution.scope === "deployment" &&
+          physicalState === "initialized"
+        ) ?
           evaluateContributionState(
             read.rows.get(contributionKey(graphId, entry.contribution)),
             entry.signature,
@@ -1780,9 +1808,7 @@ export function createContributionMaterializer(
       // which the per-target verdict already models as an empty row set.
       const read = await readMarkerRows(
         id,
-        targets.some(
-          (target) => target.contribution.scope === "deployment",
-        ),
+        targets.some((target) => target.contribution.scope === "deployment"),
       );
       const rows =
         read.kind === "rows" ?
@@ -1805,10 +1831,13 @@ export function createContributionMaterializer(
           physicalExists,
         );
         const state =
-          physicalState === undefined && contribution.scope === "deployment" &&
-          physicalExists &&
-          evaluateContributionState(rows.get(key), signature) !==
-            "initialized" ?
+          (
+            physicalState === undefined &&
+            contribution.scope === "deployment" &&
+            physicalExists &&
+            evaluateContributionState(rows.get(key), signature) !==
+              "initialized"
+          ) ?
             "missing-marker"
           : physicalState;
         if (state === undefined) continue;
@@ -2376,6 +2405,27 @@ export function createContributionMaterializer(
   }
 
   return {
+    bindReadSession(getMarkerBatch) {
+      return createContributionMaterializer({
+        ...deps,
+        // This instance is for runtime assertions on the pinned session. Its
+        // other methods must never fall through to the root session captured
+        // by the source materializer, even if a transaction backend exposes
+        // an administrative member.
+        execDdl: () => Promise.reject(transactionGateAdministrationError()),
+        ensureMarkerTable: () =>
+          Promise.reject(transactionGateAdministrationError()),
+        getMarkerBatch,
+        getMarkers: (graphId) => getMarkerBatch([graphId]),
+        recordMarker: () =>
+          Promise.reject(transactionGateAdministrationError()),
+        deleteMarker: () =>
+          Promise.reject(transactionGateAdministrationError()),
+        tableExists: () => Promise.reject(transactionGateAdministrationError()),
+        schemaWriteTransaction: () =>
+          Promise.reject(transactionGateAdministrationError()),
+      });
+    },
     ensureRuntimeContributions,
     assertInitialized,
     refuseUnavailableFulltext,
@@ -2423,10 +2473,16 @@ export async function ensureAdoptedVectorSlots(
     );
   }
   const recordMarker = target.recordContributionMaterialization;
-  if (recordMarker === undefined || !(await target.tableExists(deps.markerTableName))) {
+  if (
+    recordMarker === undefined ||
+    !(await target.tableExists(deps.markerTableName))
+  ) {
     throw new ConfigurationError(
       "Adopted vector provisioning requires existing contribution-marker storage and transaction-scoped marker writes.",
-      { capability: "schemaProvisioning.vectorMarkers", markerTableName: deps.markerTableName },
+      {
+        capability: "schemaProvisioning.vectorMarkers",
+        markerTableName: deps.markerTableName,
+      },
     );
   }
   const markerTable = portableSql.identifier(deps.markerTableName);
@@ -2442,7 +2498,10 @@ export async function ensureAdoptedVectorSlots(
       if (!(await target.tableExists(deps.markerTableName))) {
         throw new ConfigurationError(
           "Adopted vector provisioning requires contribution-marker storage before schema evolution.",
-          { capability: "schemaProvisioning.vectorMarkers", markerTableName: deps.markerTableName },
+          {
+            capability: "schemaProvisioning.vectorMarkers",
+            markerTableName: deps.markerTableName,
+          },
         );
       }
     },
@@ -2457,7 +2516,9 @@ export async function ensureAdoptedVectorSlots(
           FROM ${markerTable} WHERE graph_id = ${graphId}
         `),
       );
-      return rows.map((row) => mapContributionMaterializationRow(row, deps.decodeMarkerTimestamp));
+      return rows.map((row) =>
+        mapContributionMaterializationRow(row, deps.decodeMarkerTimestamp),
+      );
     },
     recordMarker: (params) => recordMarker.call(undefined, params),
     deleteMarker: async () => {

@@ -130,6 +130,8 @@ export {
   planMergeForEvolution,
   planMergeIncremental,
 } from "./merge";
+export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
+export { forkGraphNamespace } from "./namespace-fork";
 export type { NormalizedMergeOptions } from "./options";
 export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
@@ -223,6 +225,7 @@ export type {
   ProvenanceIndex,
   ProvenanceRecord,
   ReconcileTypesMode,
+  RecordedForkPoint,
   ResolveConfig,
   ResolvedCluster,
   ResolveMap,

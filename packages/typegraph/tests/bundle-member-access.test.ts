@@ -37,17 +37,22 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // catalog-driven provisioning decision, both guarded before schema commit.
 // Exact-session heterogeneous node upserts add six guarded accesses across
 // Store dispatch and recorded wrappers: 96 -> 102.
-const REASONED_FLOOR = 102;
+// Namespace forks inspect the backend's physical table names once before
+// creating an isolated schema, raising the reasoned floor to 103.
+// Lazy journal installation adds one guarded backend member access.
+const REASONED_FLOOR = 105;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
 // invokes the adopted same-session facet only when the plan owes a slot.
 // The resolved-node batch update reads its optional port at five guarded call
 // sites and reserves one additional access in its declared ceiling.
-const DEFERRED_LIVE_TOTAL = 225;
+// Namespace fork provisioning probes the fulltext/vector strategy and DDL
+// executor once each, within their existing declared ceilings.
+const DEFERRED_LIVE_TOTAL = 228;
 const DEFERRED_DECLARED_TOTAL = 229;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 341;
+const TOTAL_ROW_COUNT = 347;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",
@@ -194,7 +199,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 335)", () => {
+  it("the class partition covers every scanned row (total 347)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

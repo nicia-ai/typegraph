@@ -553,6 +553,7 @@ export type CommonOperationBackend = Pick<
   | "checkUnique"
   | "checkUniqueBatch"
   | "clearGraph"
+  | "clearGraphPreservingContributionMaterializations"
   | "compareAndSetNode"
   | "countEdgesByKind"
   | "countEdgesFrom"
@@ -4510,6 +4511,16 @@ export function createCommonOperationBackend(
     return { affectedCount: updatedRows.length, rows: updatedRows };
   }
 
+  async function clearGraphWithOptions(
+    graphId: string,
+    options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+  ): Promise<void> {
+    const statements = operationStrategy.buildClearGraph(graphId, options);
+    for (const statement of statements) {
+      await runIgnorableClearStatement(statement);
+    }
+  }
+
   return {
     tableExists,
 
@@ -5515,10 +5526,15 @@ export function createCommonOperationBackend(
     },
 
     async clearGraph(graphId: string): Promise<void> {
-      const statements = operationStrategy.buildClearGraph(graphId);
-      for (const statement of statements) {
-        await runIgnorableClearStatement(statement);
-      }
+      await clearGraphWithOptions(graphId);
+    },
+
+    async clearGraphPreservingContributionMaterializations(
+      graphId: string,
+    ): Promise<void> {
+      await clearGraphWithOptions(graphId, {
+        preserveContributionMaterializations: true,
+      });
     },
   };
 }

@@ -361,6 +361,29 @@ if (!isOk(planned)) throw planned.error;
 const applied = await applyMergePlan(target, planned.data);
 ```
 
+When `target` records history, a durable branch can use its sealed recorded
+fork point without keeping a second frozen Store:
+
+```typescript
+const forkPoint = created.branch.recordedForkPoint;
+if (forkPoint === undefined) throw new Error("History was not captured at fork");
+const planned = await planMergeIncremental({
+  forkPoint,
+  target,
+  branches: [created.branch],
+  options: { onBasePropertyConflict: "flag" },
+});
+```
+
+`recordedForkPoint` is available when the source captured history at fork time;
+it contains both the recorded instant and the branch's `base@V` token. The
+planner reads ancestor rows from the target's recorded relations, validates the
+origin, schema, and revision anchor, and enumerates only changed keys when
+lineage can prove a complete delta. A missing or incompatible anchor is refused
+before planning. The direct `mergeIncremental()` wrapper accepts the same fork
+point. Keep the durable descriptor with the branch: reopening restores the
+recorded fork point from the sealed origin.
+
 The same target revision must still be current when the reviewed plan is
 applied. If it moved during planning, planning returns
 `MergePlanningStaleError` and no artifact. This is an expected retry-and-replan
@@ -1243,14 +1266,23 @@ A backend may declare a `lineage` capability: an opaque, whole-database
 `revision(session)` it can report and compare, plus `changesSince(session,
 revision, graphId)`, which names every node and edge of one graph that
 changed (inserted, updated, deleted, or resurrected) after that revision — or
-admits `{ kind: "unbounded" }` when it cannot bound the answer (an
-unrecognized revision, or history older than what it retains). Neither
-bundled backend implements this itself; when a store has `history: true`, it
-derives one from its own recorded relations instead, and `resolveLineage(store)`
-is the one place that picks between the two — the backend's own `lineage`
-first, else the store's recorded-relations one, else nothing. A `lineage`
-source is consulted only to avoid rework; it never changes what a merge
-decides.
+admits `{ kind: "unbounded" }` when it cannot bound the answer. Bundled SQLite
+and PostgreSQL stores with `revisionTracking: true` also provide bounded
+lineage through a DML journal when history capture is disabled. `lineageRevisionNow()`
+mints a public anchor and `changesSince(anchor)` returns changed node and edge
+keys. Use that anchor API rather than `revisionNow()`, which returns a clock
+value without the graph's origin identity. The journal is installed when the
+anchor is first requested; writes before that anchor are outside its range.
+Node and edge inserts, updates, and deletes are recorded by database triggers.
+Identity-only revisions and revisions whose write provenance is incomplete
+produce `{ kind: "unbounded" }` rather than an incomplete key list. Custom
+backends must provide their own lineage capability to get bounded results.
+Journal rows are retained per revision and grow with tracked graph writes;
+applications that need bounded storage should plan a future retention policy
+that preserves every revision still used as a branch anchor. `resolveLineage(store)`
+selects backend lineage first, then captured history, then the first-party
+revision journal. A lineage source is consulted only to avoid rework; it never
+changes what a merge decides.
 
 `revision()` reports `<origin>:<clock>`, never the bare clock value alone:
 the durable, random per-graph revision-origin nonce
@@ -2091,6 +2123,49 @@ Full interval reconciliation (intersecting `[validFrom, validTo]` across
 branches) is deliberately out of scope — it needs a write path that moves a live
 row's lower bound, which contradicts the temporal model, and it would silently
 discard a branch's extension.
+
+## Forking one graph namespace
+
+`forkGraphNamespace(sourceStore, privateBackend, operationKey)` copies one
+history-enabled graph into an independently allocated PostgreSQL database. It
+copies the graph's committed schema, current rows, tombstones, recorded-time
+relations, revision clock and journal, identity relations, and TypeGraph
+materialization records. It checks a repeatable-read source snapshot against a
+pre-cut `base@V` token, compares every copied row before target commit, and
+returns `{ store, proof, abort }`. The source can accept writes after the snapshot
+cut; `proof.sourceBase` identifies the copied cut.
+
+```typescript
+import { forkGraphNamespace } from "@nicia-ai/typegraph/graph-merge";
+
+const fork = await forkGraphNamespace(sourceStore, privateBackend, "restore-42");
+const historical = await fork.store
+  .asOfRecorded(receipt.recorded)
+  .nodes.Item.getById(receipt.itemId);
+
+// Publish the private database through your own placement registry only after
+// checking the fork and any application-specific restore invariants.
+// Before publication, await fork.abort() to discard an unchanged copy.
+```
+
+The caller provisions and owns `privateBackend`. It may contain other graph
+namespaces, but it must contain no rows for the source graph. TypeGraph refuses
+a connection to the source database, including an aliased backend object. The
+target stays private until the caller changes its own placement pointer;
+TypeGraph does not publish it. `abort()` atomically removes the copied graph
+and operation marker while preserving unrelated namespaces, and refuses if the
+target has changed. A retry with the same operation key returns the same proof
+after checking the target digest and base token; a different key cannot reuse
+the populated target.
+
+This first-party copy supports the bundled PostgreSQL table layout and default
+`tsvector` fulltext storage. It refuses custom table mappings, vector storage,
+custom fulltext strategies, and contribution-owned tables it cannot copy and
+validate. Any graph indexes represented by materialization records must already
+exist on the target. The current copy buffers one relation at a time and
+inserts rows in bounded batches, so operators should size the private copy
+process for its largest graph relation. It does not use interchange, whose payload lacks
+recorded history and tombstones.
 
 ## Determinism
 

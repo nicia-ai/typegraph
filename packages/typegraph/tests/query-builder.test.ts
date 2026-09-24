@@ -568,7 +568,10 @@ describe("Query Compilation to SQL", () => {
 
     expect(sql).toContain("cte_o");
     expect(sql).toContain("typegraph_edges");
-    expect(sql).toContain("INNER JOIN");
+    // Bare JOIN is an inner join; the linear traversal plan omits the
+    // redundant INNER keyword.
+    expect(sql).toMatch(/\bJOIN\s+"typegraph_nodes"\s+n\s+ON/);
+    expect(sql).not.toContain("LEFT JOIN");
   });
 
   it("adds edge endpoint kind filters for outgoing traversals", () => {
@@ -614,7 +617,9 @@ describe("Query Compilation to SQL", () => {
 
     expect(sql).toContain("n.kind = e.to_kind");
     expect(sql).toContain("cte_p.p_kind = e.from_kind");
-    expect(sql).toContain("cte_o.p_kind = cte_p.p_kind");
+    // The optimized linear plan carries the root row forward instead of
+    // joining the target CTE back to the root CTE.
+    expect(sql).toContain("cte_p.p_id = e.from_id");
   });
 
   it("compiles bidirectional traversal when expand: inverse is enabled", () => {
@@ -1703,8 +1708,8 @@ describe("Query Builder - Aggregations", () => {
     const sqlObject = compileQuery(query.toAst(), graph.id);
     const { sql } = toSqlWithParams(sqlObject);
 
-    // ORDER BY must use qualified column reference
-    expect(sql).toMatch(/ORDER BY.*cte_p\.p_props/);
+    // ORDER BY must use the carried root row in the final traversal CTE.
+    expect(sql).toMatch(/ORDER BY.*cte_friend\.p_props/);
   });
 });
 
@@ -1745,7 +1750,9 @@ describe("Query Builder - Optional Matches", () => {
     const sqlObject = compileQuery(query.toAst(), graph.id);
     const { sql } = toSqlWithParams(sqlObject);
 
-    expect(sql).toContain("INNER JOIN");
+    // Bare JOIN is an inner join; the linear traversal plan omits the
+    // redundant INNER keyword.
+    expect(sql).toMatch(/\bJOIN\s+"typegraph_edges"\s+e\s+ON/);
     expect(sql).not.toContain("LEFT JOIN");
   });
 

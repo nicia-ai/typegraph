@@ -13,8 +13,9 @@
  *
  *   - TypeGraph-owned fences: `kind`/`version`, the owning `graphId`, the
  *     branch id, the `base@V` token the working copy forked from, the at-fork
- *     schema anchor (explicitly absent for an unmanaged store), and the
- *     at-fork engine revision when the working copy resolved `lineage`.
+ *     schema anchor (explicitly absent for an unmanaged store), the at-fork
+ *     engine revision when the working copy resolved `lineage`, and the
+ *     source recorded-time cut when history was captured.
  *   - An opaque, strategy-defined `store` locator. TypeGraph never interprets
  *     it and never assumes a database URL, product, or dialect.
  *
@@ -24,7 +25,8 @@
  * TypeGraph captured at the fork, and at reopen it ATTESTS the complete origin
  * it holds. Reopen refuses unless every descriptor fence equals the attested
  * origin — a tampered `graphId`/`definitionHash`/`base`/`branchId`/
- * `forkRevision`/`schemaAnchor`, including DELETING `schemaAnchor` from the
+ * `forkRevision`/`schemaAnchor`/`recordedForkPoint`, including DELETING
+ * `schemaAnchor` from the
  * envelope, cannot relabel a fork, because the host's own record is the
  * reference. `destroy` is verified the same way before it deletes (see
  * {@link DurableWorkingCopyStrategy.destroy}), so swapping one working copy's
@@ -60,6 +62,7 @@
  * Backend-specific mechanics remain entirely within the strategy.
  */
 
+import { asRecordedInstant } from "../core/temporal";
 import { computeBaseVersion, schemaComponentOf } from "./base-version";
 import { readBranchForkState } from "./branch";
 import type { DurableOperationCapability } from "./durable-operation";
@@ -85,6 +88,7 @@ import type {
   BranchOptions,
   GraphBranch,
   MergedCounts,
+  RecordedForkPoint,
 } from "./types";
 import { asBranchId } from "./types";
 import { coalescedWorkingCopyClose } from "./working-copy";
@@ -166,7 +170,8 @@ export type NativeDurableMergeResult =
  * schema anchor (`undefined` meaning the working copy committed no schema row —
  * an EXPLICIT absent, so a descriptor that simply omits the field still
  * disagrees with a host that persisted one), and the at-fork engine revision
- * (`undefined` when the working copy resolved no lineage).
+ * (`undefined` when the working copy resolved no lineage), plus the source
+ * recorded-time cut when history was captured.
  *
  * `graphId` and `definitionHash` are REQUIRED and carry the definition identity
  * even when `schemaAnchor` is absent: an unmanaged working copy still has to
@@ -181,6 +186,7 @@ export type DurableBranchOrigin = Readonly<{
   base: BaseVersion;
   schemaAnchor: Readonly<{ version: number; hash: string }> | undefined;
   forkRevision: EngineRevision | undefined;
+  recordedForkPoint?: RecordedForkPoint;
 }>;
 
 /**
@@ -224,6 +230,8 @@ export type DurableBranchDescriptor<
   schemaAnchor?: Readonly<{ version: number; hash: string }> | undefined;
   /** The at-fork engine revision, when the working copy resolves `lineage`. */
   forkRevision?: EngineRevision | undefined;
+  /** Source recorded-time cut, when the source captured history at fork time. */
+  recordedForkPoint?: RecordedForkPoint;
 }>;
 
 /**
@@ -395,9 +403,14 @@ export async function branchDurable<
   options?: BranchOptions,
 ): Promise<Result<DurableBranch<G, TStoreDescriptor>, BranchError>> {
   let base: BaseVersion;
+  let recordedForkPoint: RecordedForkPoint | undefined;
   let id: BranchId;
   try {
     base = await computeBaseVersion(baseStore);
+    if (baseStore.historyEnabled) {
+      const recorded = await baseStore.recordedNow();
+      if (recorded !== undefined) recordedForkPoint = { recorded, base };
+    }
     id = options?.id ?? asBranchId(generateId());
   } catch (error) {
     return err(
@@ -443,6 +456,7 @@ export async function branchDurable<
     base,
     schemaAnchor: forkState.schemaAnchor,
     forkRevision: forkState.forkRevision,
+    ...(recordedForkPoint === undefined ? {} : { recordedForkPoint }),
   };
   try {
     await strategy.seal(created.descriptor, origin);
@@ -461,6 +475,7 @@ export async function branchDurable<
     ...(forkState.forkRevision === undefined ?
       {}
     : { forkRevision: forkState.forkRevision }),
+    ...(recordedForkPoint === undefined ? {} : { recordedForkPoint }),
   };
   const descriptor: DurableBranchDescriptor<TStoreDescriptor> = {
     kind: strategy.type,
@@ -476,6 +491,7 @@ export async function branchDurable<
     ...(forkState.forkRevision === undefined ?
       {}
     : { forkRevision: forkState.forkRevision }),
+    ...(recordedForkPoint === undefined ? {} : { recordedForkPoint }),
   };
   return ok({ branch, descriptor });
 }
@@ -534,7 +550,9 @@ async function assertDurableWorkingCopyMatchesBase<G extends GraphDef>(
     );
   }
 
-  const diff = await diffAgainstBase(baseStore, workingCopy, false);
+  const diff = await diffAgainstBase(baseStore, workingCopy, {
+    captureForkState: false,
+  });
   const sourceVersionAfterDiff = await computeBaseVersion(baseStore);
   if (sourceVersionAfterDiff !== base) {
     throw new BranchError(
@@ -891,6 +909,29 @@ export function durableDescriptorRefusal(
       { details: { strategyType: strategy.type } },
     );
   }
+  if (record["recordedForkPoint"] !== undefined) {
+    const point = record["recordedForkPoint"];
+    if (
+      typeof point !== "object" ||
+      point === null ||
+      typeof (point as Readonly<Record<string, unknown>>)["recorded"] !==
+        "string" ||
+      typeof (point as Readonly<Record<string, unknown>>)["base"] !== "string"
+    ) {
+      return new BranchError(
+        "Durable branch descriptor is malformed: recordedForkPoint must be { recorded: string, base: string }.",
+        { details: { strategyType: strategy.type } },
+      );
+    }
+    try {
+      asRecordedInstant((point as Readonly<{ recorded: string }>).recorded);
+    } catch (error) {
+      return new BranchError(
+        "Durable branch descriptor has an invalid recorded fork instant.",
+        { cause: error, details: { strategyType: strategy.type } },
+      );
+    }
+  }
   return undefined;
 }
 
@@ -905,6 +946,9 @@ export function durableOriginOfDescriptor<
     base: descriptor.base,
     schemaAnchor: descriptor.schemaAnchor,
     forkRevision: descriptor.forkRevision,
+    ...(descriptor.recordedForkPoint === undefined ?
+      {}
+    : { recordedForkPoint: descriptor.recordedForkPoint }),
   };
 }
 
@@ -926,8 +970,20 @@ export function durableOriginsEqual(
     descriptor.branchId === attested.branchId &&
     descriptor.base === attested.base &&
     schemaAnchorsEqual(descriptor.schemaAnchor, attested.schemaAnchor) &&
-    descriptor.forkRevision === attested.forkRevision
+    descriptor.forkRevision === attested.forkRevision &&
+    recordedForkPointsEqual(
+      descriptor.recordedForkPoint,
+      attested.recordedForkPoint,
+    )
   );
+}
+
+function recordedForkPointsEqual(
+  left: DurableBranchOrigin["recordedForkPoint"],
+  right: DurableBranchOrigin["recordedForkPoint"],
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.recorded === right.recorded && left.base === right.base;
 }
 
 function schemaAnchorsEqual(
@@ -1000,6 +1056,9 @@ function rebuildBranch<G extends GraphDef>(
     ...(descriptor.forkRevision === undefined ?
       {}
     : { forkRevision: descriptor.forkRevision }),
+    ...(descriptor.recordedForkPoint === undefined ?
+      {}
+    : { recordedForkPoint: descriptor.recordedForkPoint }),
   };
 }
 

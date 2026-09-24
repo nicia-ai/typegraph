@@ -1,4 +1,5 @@
 import { validateEdgeEndpoints } from "../constraints";
+import { parseRecordedInstant } from "../core/temporal";
 import { IdentityEndpointValidityError } from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import { resolveEvolvedTransactionStore } from "../store/runtime-port";
@@ -63,6 +64,7 @@ import {
   readActiveSchemaVersion,
   revisionAnchorOf,
   revisionOriginMatch,
+  revisionOriginOf,
   schemaActiveVersionOf,
   schemaComponentOf,
 } from "./base-version";
@@ -116,6 +118,7 @@ import {
 import type { CandidateDiagnostic, CandidateDiagnostics } from "./evidence";
 import { compareMatchEvidence } from "./evidence";
 import { evolutionPlanningTarget } from "./evolution-target";
+import { createRecordedBaseReader } from "./historical-base";
 import { unwrapMergeBranches } from "./ingestion-branch";
 import {
   assertIdentityEndpointsNotDeleted,
@@ -189,7 +192,7 @@ import type {
   StagingSet,
 } from "./staging";
 import { stageBranches } from "./staging";
-import type { ModifiedNode } from "./state-diff";
+import type { ModifiedNode, StateDiffBaseReader } from "./state-diff";
 import type { ReconcileClusterInput } from "./type-reconcile";
 import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
 import type {
@@ -246,6 +249,7 @@ import type {
   PropertyConflictPolicy,
   ProvenanceIndex,
   ProvenanceRecord,
+  RecordedForkPoint,
   SimilarityStrategy,
   TypeReconciliation,
   ValidityEndResolution,
@@ -3074,6 +3078,7 @@ async function resolveMerge<G extends GraphDef, Output>(
   incremental: IncrementalConfig<G> | undefined,
   expectedBaseVersion: BaseVersion | undefined,
   complete: (resolved: ResolvedMerge<G>) => Promise<Output>,
+  baseReader?: StateDiffBaseReader,
 ): Promise<Result<Output, MergeError>> {
   // Reserved BranchIds are used for non-user contributions. Reject real branches
   // that try to mint them rather than silently corrupting conflict/provenance state.
@@ -3156,7 +3161,12 @@ async function resolveMerge<G extends GraphDef, Output>(
     // its diff enumeration — the plan-time baseline for the commit-time
     // lost-update guard (assertInheritedTargetUnchanged).
     const preferredBranchId = incremental?.targetBranchId;
-    const staging = await stageBranches(store, branches, preferredBranchId);
+    const staging = await stageBranches(
+      store,
+      branches,
+      preferredBranchId,
+      baseReader,
+    );
     // Pure over the (now fixed) staging set, so the deterministic per-kind order
     // is computed once and shared by every consumer below.
     const stagedNewByKind = newNodesByKind(staging);
@@ -3358,6 +3368,10 @@ async function resolveMerge<G extends GraphDef, Output>(
       identityGuard = built.probe;
     }
 
+    const inheritedBaselines =
+      baseReader === undefined ? undefined : (
+        await capturePlannedTargetBaselines(target, plan, staging)
+      );
     const incrementalGuard =
       incremental === undefined ? undefined : (
         ({
@@ -3371,8 +3385,10 @@ async function resolveMerge<G extends GraphDef, Output>(
           plannedBaseMatchKeys: new Set(
             candidates.data.baseMembers.map((member) => mergeKeyOf(member)),
           ),
-          targetNodeVersions: staging.targetNodeVersions,
-          targetEdgeSignatures: staging.targetEdgeSignatures,
+          targetNodeVersions:
+            inheritedBaselines?.nodes ?? staging.targetNodeVersions,
+          targetEdgeSignatures:
+            inheritedBaselines?.edges ?? staging.targetEdgeSignatures,
         } satisfies IncrementalCommitGuard<G>)
       );
 
@@ -3773,16 +3789,20 @@ export async function planMergeIncremental<G extends GraphDef>(
       ),
     );
   }
-  const forkPrecondition = await validateForkPointVersions(forkPoint, branches);
-  if (isErr(forkPrecondition)) return err(forkPrecondition.error);
-  const forkVersion = forkPrecondition.data;
+  const prepared = await prepareIncrementalForkPoint(
+    forkPoint,
+    target,
+    branches,
+  );
+  if (isErr(prepared)) return err(prepared.error);
+  const { store: forkStore, version: forkVersion } = prepared.data;
   const [forkSchema, targetSchema] = await Promise.all([
-    computeSchemaComponent(forkPoint),
+    computeSchemaComponent(forkStore),
     computeSchemaComponent(target),
   ]);
   if (forkSchema !== targetSchema) return err(incrementalSchemaError());
-  const forkActiveSchema = await storeBackend(forkPoint).getActiveSchema(
-    forkPoint.graphId,
+  const forkActiveSchema = await storeBackend(forkStore).getActiveSchema(
+    forkStore.graphId,
   );
   const targetBranch: GraphBranch<G> = {
     id: COMMITTED_TARGET_BRANCH,
@@ -3797,7 +3817,7 @@ export async function planMergeIncremental<G extends GraphDef>(
   const anchors: MergePlanAnchors = {
     kind: "incremental",
     forkPoint: {
-      graphId: forkPoint.graphId,
+      graphId: forkStore.graphId,
       baseVersion: forkVersion,
       schema: {
         managed: forkActiveSchema !== undefined,
@@ -3824,22 +3844,19 @@ export async function planMergeIncremental<G extends GraphDef>(
       })),
   };
   return resolveMerge(
-    forkPoint,
+    forkStore,
     target,
     [targetBranch, ...branches],
     options,
     true,
     {
       targetBranchId: COMMITTED_TARGET_BRANCH,
-      forkPoint: { store: forkPoint, version: forkVersion },
+      forkPoint: prepared.data.precondition,
     },
     undefined,
     async (resolved) => {
       await assertPlanningFenceUnchanged(target, targetFence);
-      await assertForkPointUnchanged({
-        store: forkPoint,
-        version: forkVersion,
-      });
+      await assertForkPointUnchanged(prepared.data.precondition);
       return resolvedMergeArtifact(
         resolved,
         "incremental",
@@ -3847,6 +3864,7 @@ export async function planMergeIncremental<G extends GraphDef>(
         anchors,
       );
     },
+    prepared.data.baseReader,
   );
 }
 
@@ -4750,10 +4768,15 @@ export async function mergeAgainstBase<G extends GraphDef>(
  * computed against. Carried into the commit so it can be re-established at the
  * point of no return (see {@link assertForkPointUnchanged}).
  */
-type ForkPointPrecondition<G extends GraphDef> = Readonly<{
-  store: Store<G>;
-  version: BaseVersion;
-}>;
+type ForkPointPrecondition<G extends GraphDef> =
+  | Readonly<{
+      store: Store<G>;
+      version: BaseVersion;
+    }>
+  | Readonly<{
+      target: Store<G>;
+      point: RecordedForkPoint;
+    }>;
 
 /** Internal config carried into {@link resolveMerge} for incremental mode. */
 type IncrementalConfig<G extends GraphDef> = Readonly<{
@@ -4793,6 +4816,114 @@ async function validateForkPointVersions<G extends GraphDef>(
     );
   }
   return ok(forkVersion);
+}
+
+function isRecordedForkPoint<G extends GraphDef>(
+  forkPoint: Store<G> | RecordedForkPoint,
+): forkPoint is RecordedForkPoint {
+  return "recorded" in forkPoint;
+}
+
+/** Checks the durable cut against the source graph that retains its history. */
+async function assertRecordedForkPointAvailable<G extends GraphDef>(
+  target: Store<G>,
+  point: RecordedForkPoint,
+): Promise<void> {
+  if (
+    !target.historyEnabled ||
+    target.recordedTimeOwnership !== "typegraph-relations"
+  ) {
+    throw new MergePlanCapabilityError(
+      "A recorded fork point requires TypeGraph-owned history on the merge target.",
+      { details: { capability: "recordedForkPoint" } },
+    );
+  }
+  const parts = parseRecordedInstant(point.recorded, "forkPoint.recorded");
+  if (parts.kind !== "typegraph" || !hasRevisionAnchor(point.base)) {
+    throw new MergePlanCapabilityError(
+      "A recorded fork point requires a TypeGraph-owned revision anchor.",
+      { details: { capability: "recordedForkPoint" } },
+    );
+  }
+  const [currentBase, origin, currentRecorded] = await Promise.all([
+    computeBaseVersion(target),
+    target.revisionOriginNow(),
+    target.recordedNow(),
+  ]);
+  const currentParts =
+    currentRecorded === undefined ? undefined : (
+      parseRecordedInstant(currentRecorded)
+    );
+  if (
+    revisionAnchorOf(point.base) !== point.recorded ||
+    revisionOriginOf(point.base) !== origin ||
+    schemaComponentOf(point.base) !== schemaComponentOf(currentBase) ||
+    currentParts?.kind !== "typegraph" ||
+    currentParts.revision < parts.revision
+  ) {
+    throw new BaseVersionMismatchError(
+      "The recorded fork point no longer identifies a retained revision of this graph under its current origin and schema.",
+      {
+        details: { forkPointBase: point.base, targetBase: currentBase },
+      },
+    );
+  }
+}
+
+type PreparedIncrementalForkPoint<G extends GraphDef> = Readonly<{
+  store: Store<G>;
+  version: BaseVersion;
+  precondition: ForkPointPrecondition<G>;
+  baseReader?: StateDiffBaseReader;
+}>;
+
+async function prepareIncrementalForkPoint<G extends GraphDef>(
+  forkPoint: Store<G> | RecordedForkPoint,
+  target: Store<G>,
+  branches: readonly GraphBranch<G>[],
+): Promise<Result<PreparedIncrementalForkPoint<G>, MergeError>> {
+  if (!isRecordedForkPoint(forkPoint)) {
+    const validated = await validateForkPointVersions(forkPoint, branches);
+    if (isErr(validated)) return err(validated.error);
+    return ok({
+      store: forkPoint,
+      version: validated.data,
+      precondition: { store: forkPoint, version: validated.data },
+    });
+  }
+  try {
+    await assertRecordedForkPointAvailable(target, forkPoint);
+    for (const branch of branches) {
+      if (branch.base === forkPoint.base) continue;
+      return err(
+        new BaseVersionMismatchError(
+          `Branch "${branch.id}" did not fork from the supplied recorded fork point.`,
+          {
+            details: {
+              branchId: branch.id,
+              branchBase: branch.base,
+              forkPointBase: forkPoint.base,
+            },
+          },
+        ),
+      );
+    }
+    return ok({
+      store: target,
+      version: forkPoint.base,
+      precondition: { target, point: forkPoint },
+      baseReader: createRecordedBaseReader(target, forkPoint.recorded),
+    });
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to read the recorded fork point: ${describeCause(error)}`,
+          { cause: error, details: { capability: "recordedForkPoint" } },
+        )
+      ),
+    );
+  }
 }
 
 /**
@@ -5310,6 +5441,108 @@ async function assertBaseResolutionStable<G extends GraphDef>(
 /** A `(kind, id)` the plan will mutate whose identity was an observed target row. */
 type InheritedTargetRef = Readonly<{ kind: string; id: string }>;
 
+function plannedNodeRefs<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly InheritedTargetRef[] {
+  return [
+    ...plannedNodeWrites(plan).map((write) => ({
+      kind: write.kind,
+      id: write.id,
+    })),
+    ...[...plan.nodeDeletions].map(([identity, kind]) => ({
+      kind,
+      id: idOf(identity),
+    })),
+  ];
+}
+
+function plannedEdgeRefs<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly InheritedTargetRef[] {
+  return [
+    ...plan.mergedEdges.map((edge) => ({ kind: edge.kind, id: edge.id })),
+    ...[...plan.edgeDeletions].map(([identity, kind]) => ({
+      kind,
+      id: idOf(identity),
+    })),
+  ];
+}
+
+/** Historical pruning enumerates changed rows only; fetch any other plan writes by id. */
+async function capturePlannedTargetBaselines<G extends GraphDef>(
+  target: Store<G>,
+  plan: MergePlan<G>,
+  staged: Readonly<{
+    targetNodeVersions: ReadonlyMap<MergeKey, number>;
+    targetEdgeSignatures: ReadonlyMap<MergeKey, string>;
+  }>,
+): Promise<
+  Readonly<{
+    nodes: ReadonlyMap<MergeKey, number>;
+    edges: ReadonlyMap<MergeKey, string>;
+  }>
+> {
+  const nodes = new Map(staged.targetNodeVersions);
+  const edges = new Map(staged.targetEdgeSignatures);
+  const nodeCollections = target.nodes as unknown as TxNodes;
+  const edgeCollections = target.edges as unknown as TxEdges;
+  for (const [kind, ids] of bucketMissingRefsByKind(
+    plannedNodeRefs(plan),
+    nodes,
+  )) {
+    const rows = await nodeCollection(nodeCollections, kind).getByIds(
+      ids,
+      INCLUDE_TOMBSTONES,
+    );
+    for (const [index, id] of ids.entries()) {
+      const version = rows[index]?.meta.version;
+      if (version !== undefined) nodes.set(mergeKey(kind, id), version);
+    }
+  }
+  for (const [kind, ids] of bucketMissingRefsByKind(
+    plannedEdgeRefs(plan),
+    edges,
+  )) {
+    const rows = await edgeCollection(edgeCollections, kind).getByIds(
+      ids,
+      INCLUDE_TOMBSTONES,
+    );
+    for (const [index, id] of ids.entries()) {
+      const row = rows[index];
+      if (row === undefined) continue;
+      edges.set(
+        mergeKey(kind, id),
+        edgeStateSignature({
+          fromKind: row.fromKind,
+          fromId: row.fromId,
+          toKind: row.toKind,
+          toId: row.toId,
+          live: row.meta.deletedAt === undefined,
+          props: edgeProps(row),
+        }),
+      );
+    }
+  }
+  return { nodes, edges };
+}
+
+function bucketMissingRefsByKind(
+  refs: Iterable<InheritedTargetRef>,
+  present: MergeKeyMembership,
+): ReadonlyMap<string, readonly string[]> {
+  const missing = new Map<string, string[]>();
+  const seen = new Set<MergeKey>();
+  for (const ref of refs) {
+    const key = mergeKey(ref.kind, ref.id);
+    if (present.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    const ids = missing.get(ref.kind) ?? [];
+    ids.push(ref.id);
+    missing.set(ref.kind, ids);
+  }
+  return missing;
+}
+
 /** Anything keyed by {@link MergeKey} that can answer a membership check. */
 type MergeKeyMembership = Readonly<{ has(key: MergeKey): boolean }>;
 
@@ -5416,14 +5649,8 @@ async function assertInheritedNodesUnchanged<G extends GraphDef>(
   guard: IncrementalCommitGuard<G>,
   plan: MergePlan<G>,
 ): Promise<void> {
-  const nodeRefs: InheritedTargetRef[] = plannedNodeWrites(plan).map(
-    (write) => ({ kind: write.kind, id: write.id }),
-  );
-  for (const [identity, kind] of plan.nodeDeletions) {
-    nodeRefs.push({ kind, id: idOf(identity) });
-  }
   await assertInheritedUnchanged<Node, number>({
-    refs: nodeRefs,
+    refs: plannedNodeRefs(plan),
     expected: guard.targetNodeVersions,
     fetchRows: (kind, ids) =>
       nodeCollection(nodesApi, kind).getByIds(ids, INCLUDE_TOMBSTONES),
@@ -5457,15 +5684,8 @@ async function assertInheritedEdgesUnchanged<G extends GraphDef>(
   guard: IncrementalCommitGuard<G>,
   plan: MergePlan<G>,
 ): Promise<void> {
-  const edgeRefs: InheritedTargetRef[] = plan.mergedEdges.map((edge) => ({
-    kind: edge.kind,
-    id: edge.id,
-  }));
-  for (const [identity, kind] of plan.edgeDeletions) {
-    edgeRefs.push({ kind, id: idOf(identity) });
-  }
   await assertInheritedUnchanged<Edge, string>({
-    refs: edgeRefs,
+    refs: plannedEdgeRefs(plan),
     expected: guard.targetEdgeSignatures,
     fetchRows: (kind, ids) =>
       edgeCollection(edgesApi, kind).getByIds(ids, INCLUDE_TOMBSTONES),
@@ -5534,7 +5754,39 @@ async function assertInheritedEdgesUnchanged<G extends GraphDef>(
  */
 async function assertForkPointUnchanged<G extends GraphDef>(
   precondition: ForkPointPrecondition<G>,
+  session?: TransactionBackend,
 ): Promise<void> {
+  if ("point" in precondition) {
+    if (session === undefined) {
+      await assertRecordedForkPointAvailable(
+        precondition.target,
+        precondition.point,
+      );
+    } else {
+      const { target, point } = precondition;
+      const [origin, recorded, version] = await Promise.all([
+        readRevisionOrigin(session, target.revisionSchema, target.graphId),
+        readRecordedClock(session, target.revisionSchema, target.graphId),
+        readActiveSchemaVersion(session, target.graphId),
+      ]);
+      const pointParts = parseRecordedInstant(point.recorded);
+      const recordedParts =
+        recorded === undefined ? undefined : parseRecordedInstant(recorded);
+      if (
+        pointParts.kind !== "typegraph" ||
+        recordedParts?.kind !== "typegraph" ||
+        recordedParts.revision < pointParts.revision ||
+        origin !== revisionOriginOf(point.base) ||
+        version !== schemaActiveVersionOf(point.base)
+      ) {
+        throw new BaseVersionMismatchError(
+          "The recorded fork point is unavailable on the merge transaction's graph session.",
+          { details: { forkPointBase: point.base } },
+        );
+      }
+    }
+    return;
+  }
   const liveVersion = await computeBaseVersion(precondition.store);
   if (liveVersion === precondition.version) return;
   // The full-token equality above already accepts a genuinely unchanged fork
@@ -5645,7 +5897,10 @@ async function commitIncrementalPlan<G extends GraphDef>(
           // that has moved. Runs first: it is the premise every later guard's
           // baseline was derived under, and on a revision-anchored fork point it
           // is an O(1) read.
-          await assertForkPointUnchanged(guard.forkPoint);
+          await assertForkPointUnchanged(
+            guard.forkPoint,
+            transactionBackend(tx),
+          );
           const nodesApi = tx.nodes as unknown as TxNodes;
           const edgesApi = tx.edges as unknown as TxEdges;
           // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
@@ -5732,16 +5987,39 @@ export async function mergeIncremental<G extends GraphDef>(
     return err(incrementalBaseConflictPolicyError(options));
   }
 
-  // Every branch must have forked from THIS fork-point (honest diff).
-  const forkPrecondition = await validateForkPointVersions(forkPoint, branches);
-  if (isErr(forkPrecondition)) {
-    return err(forkPrecondition.error);
+  // The recorded path resolves a sparse target diff. Pin the target's durable
+  // revision while planning so the bounded baseline reads and that diff refer
+  // to the same committed state.
+  let targetFence: MergePlanTargetFence | undefined;
+  if ("recorded" in forkPoint) {
+    try {
+      targetFence = await captureMergePlanTargetFence(target);
+    } catch (error) {
+      return err(
+        error instanceof MergeError ? error : (
+          new MergePlanCapabilityError(
+            `Unable to capture the target's durable planning fence: ${describeCause(error)}`,
+            { cause: error },
+          )
+        ),
+      );
+    }
   }
-  const forkVersion = forkPrecondition.data;
+
+  // Every branch must have forked from THIS fork-point (honest diff).
+  const prepared = await prepareIncrementalForkPoint(
+    forkPoint,
+    target,
+    branches,
+  );
+  if (isErr(prepared)) {
+    return err(prepared.error);
+  }
+  const { store: forkStore, version: forkVersion } = prepared.data;
 
   // Schema half of base@V stays a hard precondition; target CONTENT may advance.
   const [forkSchema, targetSchema] = await Promise.all([
-    computeSchemaComponent(forkPoint),
+    computeSchemaComponent(forkStore),
     computeSchemaComponent(target),
   ]);
   if (forkSchema !== targetSchema) {
@@ -5758,7 +6036,7 @@ export async function mergeIncremental<G extends GraphDef>(
     close: (): Promise<void> => Promise.resolve(),
   };
   return resolveMerge(
-    forkPoint,
+    forkStore,
     target,
     [targetBranch, ...branches],
     options,
@@ -5768,9 +6046,15 @@ export async function mergeIncremental<G extends GraphDef>(
       // The fork-point precondition just validated, carried to the commit so
       // it is re-established there rather than assumed to have held for the
       // whole of planning (see `assertForkPointUnchanged`).
-      forkPoint: { store: forkPoint, version: forkVersion },
+      forkPoint: prepared.data.precondition,
     },
     undefined,
-    commitResolvedMerge,
+    async (resolved) => {
+      if (targetFence !== undefined) {
+        await assertPlanningFenceUnchanged(target, targetFence);
+      }
+      return commitResolvedMerge(resolved);
+    },
+    prepared.data.baseReader,
   );
 }

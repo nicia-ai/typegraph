@@ -160,7 +160,7 @@ export function registerClearIntegrationTests(
       await neighborStore.clear();
     });
 
-    it("removes every graph-scoped marker and keeps the deployment physical marker", async () => {
+    it("backend.clearGraph removes graph-scoped markers and keeps the deployment physical marker", async () => {
       const store = context.getStore();
       const backend = store.backend;
       const read = requireDefined(
@@ -182,14 +182,13 @@ export function registerClearIntegrationTests(
       const deploymentMarker = await read(deploymentMarkerIdentity(fulltext));
       expect(deploymentMarker).toBeDefined();
 
-      await store.clear();
+      await backend.clearGraph(store.graphId);
 
       for (const identity of graphScopedIdentities) {
         await expect(read(identity)).resolves.toBeUndefined();
       }
       // The physical marker attests shared storage the per-graph delete
-      // never touches; the next privileged boot re-records the graph-local
-      // rows from it.
+      // never touches; a later privileged boot can re-record graph-local rows.
       await expect(read(deploymentMarkerIdentity(fulltext))).resolves.toEqual(
         deploymentMarker,
       );
@@ -292,8 +291,19 @@ export function registerClearIntegrationTests(
 
     it("leaves the cleared store immediately usable for projected writes", async () => {
       const store = context.getStore();
+      const backend = store.backend;
+      const read = requireDefined(
+        backend.getContributionMaterialization,
+        "backend must read contribution markers",
+      );
+      const fulltext = fulltextContribution(backend);
+      const markerIdentity = graphMarkerIdentity(store.graphId, fulltext);
+      const markerBefore = await read(markerIdentity);
+      expect(markerBefore).toBeDefined();
 
       await store.clear();
+
+      await expect(read(markerIdentity)).resolves.toEqual(markerBefore);
 
       // A searchable write is the sharpest post-clear probe: it runs the
       // contribution gate and the fulltext projection in one statement.

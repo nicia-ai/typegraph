@@ -221,7 +221,10 @@ describe("recordedRelationsLineage: capture-completeness evidence", () => {
     // her row at all.
     expect(pruneTo).toBeUndefined();
 
-    const diff = await diffAgainstBase(storeA, forkStore, false, pruneTo);
+    const diff = await diffAgainstBase(storeA, forkStore, {
+      captureForkState: false,
+      pruneTo,
+    });
     const aliceModified = diff.nodes.modified.find(
       (node) => node.id === alice.id,
     );

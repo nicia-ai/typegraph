@@ -78,8 +78,10 @@ import {
   type ContributionRebuildScope,
   type ContributionRepairResult,
   createTransactionReadBackend,
+  type EngineRevision,
   type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
+  type LineageDelta,
   runOptionallyInTransaction,
   type SchemaCommitPreflightBackend,
   type SchemaVersionRow,
@@ -376,6 +378,7 @@ import {
   type RecordedFlushInstants,
   registerRecordedIdentityMutationWitness,
   resetRevisionOrigin,
+  resolveLineage,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
   withRecordedFlushObserver,
@@ -810,7 +813,10 @@ type StoreCore<G extends GraphDef> = Readonly<{
   asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
   recordedNow: () => Promise<RecordedInstant | undefined>;
   revisionNow: () => Promise<RecordedInstant | undefined>;
+  lineageRevisionNow: () => Promise<EngineRevision | undefined>;
   revisionOriginNow: () => Promise<string>;
+  /** Return changed node and edge keys since a lineage revision, or `unbounded` when complete keys are unavailable. */
+  changesSince: (revision: EngineRevision) => Promise<LineageDelta>;
   view: (coordinate: StoreViewCoordinate) => StoreView<G>;
   snapshot: () => StoreView<G>;
   batch: <
@@ -1528,6 +1534,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend: this.#backend,
       evolutionPlanningTarget: (plan) => this.#evolutionPlanningTarget(plan),
       captureEnabled: this.#captureEnabled,
+      recordedReadBinding: this.#recordedReadBinding,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
       // The query path's own construction, not a second spelling of it: a
       // caller that could only rebuild this object could not observe the one
@@ -3093,6 +3100,26 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#sqlSchema(),
       this.graphId,
     );
+  }
+
+  /** Mint a token usable with {@link Store.changesSince}, when lineage is available. */
+  async lineageRevisionNow(): Promise<EngineRevision | undefined> {
+    const lineage = resolveLineage(this);
+    if (lineage === undefined) return undefined;
+    return lineage.revision(this.#backend);
+  }
+
+  /**
+   * Lists entity keys changed since a lineage revision. History-enabled
+   * stores use recorded relations; bundled SQLite and PostgreSQL live stores
+   * with revision tracking use the entity-key journal. Unknown backends,
+   * identity-only changes, and revisions with incomplete journal evidence
+   * return `unbounded`.
+   */
+  async changesSince(revision: EngineRevision): Promise<LineageDelta> {
+    const lineage = resolveLineage(this);
+    if (lineage === undefined) return { kind: "unbounded" };
+    return lineage.changesSince(this.#backend, revision, this.graphId);
   }
 
   /**
@@ -5037,7 +5064,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#revisionTrackingEnabled && !this.#captureEnabled ?
           await readRecordedClock(target, this.#sqlSchema(), this.graphId)
         : undefined;
-      await target.clearGraph(this.graphId);
+      const clearGraphPreservingContributions =
+        target.clearGraphPreservingContributionMaterializations;
+      if (clearGraphPreservingContributions === undefined) {
+        await target.clearGraph(this.graphId);
+      } else {
+        await clearGraphPreservingContributions(this.graphId);
+      }
       if (mintsAnchorOrigin) {
         // Rotate the durable per-graph revision-origin nonce in the SAME
         // transaction as `clearGraph`, for either origin-namespaced anchor

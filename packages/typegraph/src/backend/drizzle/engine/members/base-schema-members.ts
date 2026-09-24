@@ -90,6 +90,8 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * are only exercised by offline `adopt()`.
    */
   sinceIndexDdl: readonly string[];
+  /** Idempotent DDL for the revision-change journal introduced in version 4. */
+  revisionChangesTableDdl: string;
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -103,8 +105,9 @@ export type BaseSchemaMembers = Readonly<{
  * Builds the base-schema member group. Moved out of the two dialect files
  * unchanged: version 1 (the graph-templates table plus edge-match-identity
  * adoption, run before bootstrap's generated DDL), version 2 (the fence
- * rows table) and version 3 (the recorded-relations' and recorded
- * identity-assertions relation's `since_idx` indexes) all follow the same
+ * rows table), version 3 (the recorded-relations' and recorded
+ * identity-assertions relation's `since_idx` indexes), and version 4 (the
+ * revision-changes relation) all follow the same
  * prepare/adopt-before/adopt-after bootstrap sequencing.
  */
 export function createBaseSchemaMembers(
@@ -121,6 +124,7 @@ export function createBaseSchemaMembers(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl,
     sinceIndexDdl,
+    revisionChangesTableDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -154,6 +158,13 @@ export function createBaseSchemaMembers(
           for (const ddl of sinceIndexDdl) {
             await ensureTable(ddl);
           }
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 4,
+        async adopt(): Promise<void> {
+          await ensureTable(revisionChangesTableDdl);
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },

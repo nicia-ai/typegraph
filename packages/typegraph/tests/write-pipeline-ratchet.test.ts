@@ -124,9 +124,10 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * graph-entity write surface: it is the guarded row statement for portable
  * resolved batches and is routed through recorded capture like updateNode.
  * `upsertHeterogeneousNodes` (131→132) is the exact-session, closed node
- * program and follows the same recorded-capture classification.
+ * program and follows the same recorded-capture classification. The clear
+ * preservation capability (133→134) remains in the lifecycle class.
  */
-const MEMBER_COUNT = 132;
+const MEMBER_COUNT = 134;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

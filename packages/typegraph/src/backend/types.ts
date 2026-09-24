@@ -2884,6 +2884,14 @@ export type GraphBackend = Readonly<{
   ensureRevisionOriginsTable?: (this: void) => Promise<void>;
 
   /**
+   * Idempotently install the revision-change table and row triggers before
+   * minting the first journal-backed lineage anchor. This is separate from
+   * origin provisioning so ordinary revision tracking does not add triggers
+   * to a database that has never requested change-key lineage.
+   */
+  ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+
+  /**
    * Idempotently add the durable edge-match identity columns, pair constraint,
    * and unique index to the configured edge relation.
    *
@@ -3436,6 +3444,17 @@ export type GraphBackend = Readonly<{
   clearGraph: (this: void, graphId: string) => Promise<void>;
 
   /**
+   * Clears graph data while retaining contribution markers for physical
+   * storage that remains provisioned. Optional so custom backends can keep
+   * their existing `clearGraph` behavior; `Store.clear()` uses this member
+   * when available.
+   */
+  clearGraphPreservingContributionMaterializations?: (
+    this: void,
+    graphId: string,
+  ) => Promise<void>;
+
+  /**
    * Creates the base TypeGraph tables if they don't already exist.
    *
    * Called automatically by `createStoreWithSchema()` when a fresh database
@@ -3789,7 +3808,9 @@ export type RemovalMaterializationBackend = Pick<
 
 export type GraphLifecycleBackend = Pick<
   GraphBackend,
-  "clearGraph" | "bootstrapTables"
+  | "clearGraph"
+  | "clearGraphPreservingContributionMaterializations"
+  | "bootstrapTables"
 >;
 
 export type QueryExecutionBackend = Pick<GraphBackend, "execute">;

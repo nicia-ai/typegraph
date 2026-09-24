@@ -50,6 +50,7 @@ export type SqliteTableNames = Readonly<{
   recordedEdges: string;
   recordedClock: string;
   revisionOrigins: string;
+  revisionChanges: string;
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
@@ -91,6 +92,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
   revisionOrigins: "typegraph_revision_origins",
+  revisionChanges: "typegraph_revision_changes",
   identityAssertions: "typegraph_identity_assertions",
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
@@ -253,6 +255,20 @@ export function createSqliteTables(
       origin: text("origin").notNull(),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
+  const revisionChanges = sqliteTable(
+    n.revisionChanges,
+    {
+      entryId: text("entry_id").primaryKey(),
+      graphId: text("graph_id").notNull(),
+      revision: integer("revision").notNull(),
+      complete: integer("complete", { mode: "boolean" }).notNull(),
+      entity: text("entity").notNull(),
+      kind: text("kind").notNull(),
+      id: text("id").notNull(),
+    },
+    (t) => [index(`${n.revisionChanges}_graph_revision_idx`).on(t.graphId, t.revision)],
   );
 
   // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY
@@ -617,6 +633,7 @@ export function createSqliteTables(
     recordedEdges,
     recordedClock,
     revisionOrigins,
+    revisionChanges,
     identityAssertions,
     recordedIdentityAssertions,
     identityClosure,

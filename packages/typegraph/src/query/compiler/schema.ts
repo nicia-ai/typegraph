@@ -48,6 +48,8 @@ export type SqlTableNames = Readonly<{
   recordedClock?: string | undefined;
   /** Durable per-graph revision-origin table name (default: "typegraph_revision_origins") */
   revisionOrigins?: string | undefined;
+  /** Per-revision entity-key journal used when revision tracking runs without history. */
+  revisionChanges?: string | undefined;
   /** Identity assertion ledger (default: "typegraph_identity_assertions") */
   identityAssertions?: string | undefined;
   /** Recorded identity assertion relation */
@@ -86,6 +88,7 @@ export type ResolvedSqlTableNames = Readonly<{
   recordedClock: string;
   /** Durable per-graph revision-origin table name */
   revisionOrigins: string;
+  revisionChanges: string;
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
@@ -115,6 +118,7 @@ type SqlSchemaFields = Readonly<{
   recordedClockTable: SqlFragment;
   /** Get a `SqlFragment` reference to the durable per-graph revision origins. */
   revisionOriginsTable: SqlFragment;
+  revisionChangesTable: SqlFragment;
   /** Get a `SqlFragment` reference to the identity assertion ledger. */
   identityAssertionsTable: SqlFragment;
   /** Get a `SqlFragment` reference to the recorded identity assertion relation. */
@@ -143,6 +147,7 @@ export abstract class SqlSchema implements SqlSchemaFields {
   abstract readonly recordedEdgesTable: SqlFragment;
   abstract readonly recordedClockTable: SqlFragment;
   abstract readonly revisionOriginsTable: SqlFragment;
+  abstract readonly revisionChangesTable: SqlFragment;
   abstract readonly identityAssertionsTable: SqlFragment;
   abstract readonly recordedIdentityAssertionsTable: SqlFragment;
   abstract readonly identityClosureTable: SqlFragment;
@@ -159,6 +164,7 @@ class SqlSchemaDescriptor extends SqlSchema {
   readonly recordedEdgesTable: SqlFragment;
   readonly recordedClockTable: SqlFragment;
   readonly revisionOriginsTable: SqlFragment;
+  readonly revisionChangesTable: SqlFragment;
   readonly identityAssertionsTable: SqlFragment;
   readonly recordedIdentityAssertionsTable: SqlFragment;
   readonly identityClosureTable: SqlFragment;
@@ -180,6 +186,7 @@ class SqlSchemaDescriptor extends SqlSchema {
     this.recordedEdgesTable = fields.recordedEdgesTable;
     this.recordedClockTable = fields.recordedClockTable;
     this.revisionOriginsTable = fields.revisionOriginsTable;
+    this.revisionChangesTable = fields.revisionChangesTable;
     this.identityAssertionsTable = fields.identityAssertionsTable;
     this.recordedIdentityAssertionsTable =
       fields.recordedIdentityAssertionsTable;
@@ -201,6 +208,7 @@ const DEFAULT_TABLE_NAMES = {
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
   revisionOrigins: "typegraph_revision_origins",
+  revisionChanges: "typegraph_revision_changes",
   identityAssertions: "typegraph_identity_assertions",
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
@@ -222,6 +230,8 @@ function resolveTableNames(
     recordedClock: names.recordedClock ?? DEFAULT_TABLE_NAMES.recordedClock,
     revisionOrigins:
       names.revisionOrigins ?? DEFAULT_TABLE_NAMES.revisionOrigins,
+    revisionChanges:
+      names.revisionChanges ?? DEFAULT_TABLE_NAMES.revisionChanges,
     identityAssertions:
       names.identityAssertions ?? DEFAULT_TABLE_NAMES.identityAssertions,
     recordedIdentityAssertions:
@@ -340,6 +350,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.recordedEdges, "recordedEdges");
   validateTableName(tables.recordedClock, "recordedClock");
   validateTableName(tables.revisionOrigins, "revisionOrigins");
+  validateTableName(tables.revisionChanges, "revisionChanges");
   validateTableName(tables.identityAssertions, "identityAssertions");
   validateTableName(
     tables.recordedIdentityAssertions,
@@ -360,6 +371,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
     recordedEdgesTable: sql.identifier(tables.recordedEdges),
     recordedClockTable: sql.identifier(tables.recordedClock),
     revisionOriginsTable: sql.identifier(tables.revisionOrigins),
+    revisionChangesTable: sql.identifier(tables.revisionChanges),
     identityAssertionsTable: sql.identifier(tables.identityAssertions),
     recordedIdentityAssertionsTable: sql.identifier(
       tables.recordedIdentityAssertions,
@@ -730,6 +742,7 @@ export function recordedReadSqlSchema(
     recordedEdgesTable: schema.recordedEdgesTable,
     recordedClockTable: schema.recordedClockTable,
     revisionOriginsTable: schema.revisionOriginsTable,
+    revisionChangesTable: schema.revisionChangesTable,
     identityAssertionsTable: schema.identityAssertionsTable,
     recordedIdentityAssertionsTable: schema.recordedIdentityAssertionsTable,
     identityClosureTable: schema.identityClosureTable,

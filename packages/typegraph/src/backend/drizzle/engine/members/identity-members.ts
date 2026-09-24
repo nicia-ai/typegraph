@@ -51,6 +51,9 @@ const RECORDED_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
 export type CreateIdentityMembersDeps = Readonly<{
   /** Idempotent `CREATE TABLE ...` for the revision-origins table, rendered once by the caller from its own dialect's table-DDL generator. */
   revisionOriginsTableDdl: string;
+  revisionChangesTableDdl: string;
+  revisionChangesTriggerDdl: readonly string[];
+  executeDdl: (ddl: string) => Promise<void>;
   /** Runs one idempotent CREATE-shaped DDL statement — the same closure the profile's own `EngineProvisioning.ensureTable` uses. */
   ensureTable: (ddl: string) => Promise<void>;
   /** Whether the given physical table name currently exists — the same catalog probe `createContributionMembers` builds. */
@@ -79,6 +82,7 @@ export type CreateIdentityMembersDeps = Readonly<{
 
 export type IdentityMembers = Readonly<{
   ensureRevisionOriginsTable: () => Promise<void>;
+  ensureRevisionChangesJournal: () => Promise<void>;
   ensureIdentityTables: (
     tableNames: IdentityTableNames,
     options: Readonly<{ provisionMissing: boolean }>,
@@ -99,6 +103,9 @@ export function createIdentityMembers(
 ): IdentityMembers {
   const {
     revisionOriginsTableDdl,
+    revisionChangesTableDdl,
+    revisionChangesTriggerDdl,
+    executeDdl,
     ensureTable,
     contributionTableExists,
     contributionsForTableNames,
@@ -140,6 +147,13 @@ export function createIdentityMembers(
   return {
     async ensureRevisionOriginsTable(): Promise<void> {
       await ensureTable(revisionOriginsTableDdl);
+    },
+
+    async ensureRevisionChangesJournal(): Promise<void> {
+      await ensureTable(revisionChangesTableDdl);
+      for (const ddl of revisionChangesTriggerDdl) {
+        await executeDdl(ddl);
+      }
     },
 
     async ensureIdentityTables(

@@ -191,6 +191,36 @@ export function registerTraversalIntegrationTests(
       expect(results[0]?.company).toBe("Globex");
     });
 
+    it("projects earlier node and edge values across a linear multi-hop rowset", async () => {
+      const store = context.getStore();
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (person) => person.name.eq("Alice"))
+        .traverse("knows", "e1")
+        .to("Person", "friend")
+        .traverse("worksAt", "e2")
+        .to("Company", "company")
+        .project((fields) => ({
+          starter: fields.p.name,
+          since: fields.e1.since,
+          friend: fields.friend.name,
+          role: fields.e2.role,
+          company: fields.company.name,
+        }))
+        .execute();
+
+      expect(results).toEqual([
+        {
+          starter: "Alice",
+          since: "2020",
+          friend: "Bob",
+          role: "Analyst",
+          company: "Globex",
+        },
+      ]);
+    });
+
     it("filters at each hop", async () => {
       const store = context.getStore();
       // Add more relationships

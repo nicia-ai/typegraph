@@ -69,6 +69,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
   "ensureRevisionOriginsTable",
+  "ensureRevisionChangesJournal",
   "ensureRuntimeContributions",
   "ensureTrigramExtension",
   "ensureVectorSlotContribution",
@@ -165,6 +166,7 @@ type _historyStoreContainsClaimsCore = Assert<
 
 type UnsafeHistoryStoreBackendMember =
   | "clearGraph"
+  | "clearGraphPreservingContributionMaterializations"
   | "commitSchemaVersionWithPreflight"
   | "instantiateGraphTemplate"
   | "executeDdl"
