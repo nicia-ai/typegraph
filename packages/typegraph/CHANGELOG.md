@@ -1,5 +1,39 @@
 # @nicia-ai/typegraph
 
+## 0.69.0
+
+### Highlights
+
+TypeGraph 0.69 can copy one graph namespace into a separately allocated PostgreSQL database without discarding its recorded history. `forkGraphNamespace()` verifies a repeatable-read source snapshot against the target before commit and records a durable proof for exact retries. Durable branches can carry recorded fork points, allowing incremental merge planning to use changes since that point when lineage proves them complete.
+
+Revision-tracked stores without recorded history can now use a revision-change journal for bounded changed-key lineage. The schema owner installs the journal, while runtime reads verify its readiness without running DDL. Disposable working copies can opt out with `revisionJournal: false`, including clones created by `branchForEvolution()`. PostgreSQL backends opened over transaction handles serialize statements on their pinned connection, and contribution-marker reads inside transactions use that same session.
+
+Schema tooling can inspect a graph extension without opening a Store through `introspectGraphExtension()`. Linear traversal queries also carry their final hop directly into the projection.
+
+### Upgrade notes
+
+- Adopt base schema version 4 with the schema owner before deploying runtime roles. On existing PostgreSQL databases, run the generated migration or open once with privileged `createStoreWithSchema()` or `createAdapterStoreWithSchema()`. Older library versions refuse the newer base-schema marker.
+- If a revision-tracked store without history needs journal-backed lineage, call `installRevisionChangesJournal()` once as the schema owner before runtime use. Without a ready journal, lineage raises `REVISION_JOURNAL_NOT_READY`; pass `revisionJournal: false` for a working copy that does not need it. Journal triggers capture every graph writing to their physical tables and rows have no automatic retention, so plan storage and retention before installing them on shared tables.
+- Install the namespace fork ledger with `installNamespaceForkLedger()` on a private target before calling `forkGraphNamespace()`. Allocate an independent target database and size the worker for the largest copied relation; the source holds one repeatable-read snapshot for the full copy.
+- `Store.clear()` now preserves graph-local contribution materialization markers by default. Pass `{ preserveContributionMaterializations: false }` when a full cutover purge must remove them.
+- Custom engine profiles adopting base schema version 4 need revision-change table and index DDL. To enable journal-backed lineage, also provide trigger installation and a readiness probe.
+
+### Minor Changes
+
+- [#738](https://github.com/nicia-ai/typegraph/pull/738) [`8f26c78`](https://github.com/nicia-ai/typegraph/commit/8f26c78ec021668281e7f4dd44e743f32d779b73) Thanks [@pdlug](https://github.com/pdlug)! - Add history-preserving PostgreSQL graph namespace forks, store-free graph-extension introspection, recorded fork points for incremental merge, and bounded change enumeration for revision-tracked stores. Linear traversal queries now read their final hop directly. PostgreSQL transaction backends and bare client sessions serialize statements on their pinned connection; transaction marker checks read that same connection.
+  
+  Install the revision-change journal with `installRevisionChangesJournal()` during privileged schema setup. Runtime lineage verifies that its table and triggers are ready without running DDL; short-lived clones, including `branchForEvolution()` working copies, may set `revisionJournal: false`. Install the namespace fork retry ledger with `installNamespaceForkLedger()` on the private target before runtime use. `Store.clear({ preserveContributionMaterializations: false })` also removes graph-local contribution markers for cutover purges.
+  
+  ### Upgrade notes
+  
+  Adopt base schema version 4 with the schema owner before deploying runtime roles. Existing PostgreSQL installations need the generated migration or a privileged `createStoreWithSchema()` / `createAdapterStoreWithSchema()` open; the new revision-change table and index are part of that base schema. Install the optional revision-change function and triggers once with `installRevisionChangesJournal()` under the owner role. Runtime lineage only checks readiness and never runs DDL; a revision-tracked store without history throws `REVISION_JOURNAL_NOT_READY` when the journal is missing. Set `revisionJournal: false` for clones that do not need journal-backed lineage, including the fourth `branchForEvolution()` argument.
+  
+  `Store.clear()` preserves graph-local contribution materialization markers by default; pass `{ preserveContributionMaterializations: false }` to remove them during a full cutover purge. Journal triggers attach to whole physical tables, so on shared tables they record writes for every graph using those tables, and journal rows have no automatic cleanup or retention policy. Avoid enabling the journal on shared tables unless that cross-graph capture and unbounded retention are acceptable.
+  
+  `forkGraphNamespace()` holds one repeatable-read source transaction open for the entire copy, including row reads, target inserts, and digest checks. Long-running copies therefore retain the source snapshot until the copy finishes.
+  
+  Custom engine profiles need revision-change table and index DDL for base-schema version 4 adoption, and trigger DDL plus a readiness probe to enable the change journal. Missing dependencies raise `ConfigurationError` when those operations are requested.
+
 ## 0.68.1
 
 ### Patch Changes
