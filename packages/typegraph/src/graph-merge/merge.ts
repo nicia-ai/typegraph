@@ -2730,25 +2730,37 @@ async function validateBaseVersions<G extends GraphDef>(
     if (await toleratedByEngineAnchor(target, branch.base, targetVersion)) {
       continue;
     }
-    const legacy = isLegacyBaseVersion(branch.base);
     return err(
-      new BaseVersionMismatchError(
+      branchBaseMismatchError(
+        branch,
         `Branch "${branch.id}" forked from base@V "${branch.base}", which does not match the merge target's current base@V "${targetVersion}".`,
-        {
-          details: {
-            branchId: branch.id,
-            branchBase: branch.base,
-            targetBase: targetVersion,
-            ...(legacy ? { reason: LEGACY_BASE_VERSION_REFUSAL.reason } : {}),
-          },
-          ...(legacy ?
-            { suggestion: LEGACY_BASE_VERSION_REFUSAL.suggestion }
-          : {}),
-        },
+        { targetBase: targetVersion },
       ),
     );
   }
   return ok(targetVersion);
+}
+
+/**
+ * The refusal for a branch whose `base@V` no longer matches, shared by the
+ * snapshot and fork-point preconditions. A token in the retired format is
+ * named as such, with a re-branch suggestion instead of the generic one.
+ */
+function branchBaseMismatchError<G extends GraphDef>(
+  branch: GraphBranch<G>,
+  message: string,
+  details: Readonly<Record<string, unknown>>,
+): BaseVersionMismatchError {
+  const legacy = isLegacyBaseVersion(branch.base);
+  return new BaseVersionMismatchError(message, {
+    details: {
+      branchId: branch.id,
+      branchBase: branch.base,
+      ...details,
+      ...(legacy ? { reason: LEGACY_BASE_VERSION_REFUSAL.reason } : {}),
+    },
+    ...(legacy ? { suggestion: LEGACY_BASE_VERSION_REFUSAL.suggestion } : {}),
+  });
 }
 
 /** Normalizes options, converting an invalid-option throw into a typed result. */
@@ -4810,15 +4822,10 @@ async function validateForkPointVersions<G extends GraphDef>(
       continue;
     }
     return err(
-      new BaseVersionMismatchError(
+      branchBaseMismatchError(
+        branch,
         `Branch "${branch.id}" forked from base@V "${branch.base}", which does not match the fork-point's base@V "${forkVersion}". mergeIncremental() requires every branch to have forked from the supplied forkPoint.`,
-        {
-          details: {
-            branchId: branch.id,
-            branchBase: branch.base,
-            forkPointBase: forkVersion,
-          },
-        },
+        { forkPointBase: forkVersion },
       ),
     );
   }

@@ -125,6 +125,30 @@ describe("base@V tokens minted in the retired NUL-separated format", () => {
     await fork.close();
   });
 
+  it("fail an incremental plan for a branch whose persisted base is legacy with a typed mismatch", async () => {
+    const [target] = await createStoreWithSchema(graph, makeBackend(), {
+      revisionTracking: true,
+    });
+    await target.nodes.Note.create({ text: "before the fork" });
+    const fork = unwrap(
+      await branch(target, () => Promise.resolve(makeBackend())),
+    );
+
+    const planned = await planMergeIncremental({
+      forkPoint: target,
+      target,
+      branches: [{ ...fork, base: legacyFormOf(fork.base) }],
+      options: { onBasePropertyConflict: "flag" },
+    });
+
+    const error = isErr(planned) ? planned.error : undefined;
+    expect(error).toBeInstanceOf(BaseVersionMismatchError);
+    expect(error).toMatchObject({
+      details: { reason: "legacy-token-format" },
+    });
+    await fork.close();
+  });
+
   it("refuse a persisted recorded fork point before reading an anchor out of it", async () => {
     const [target] = await createStoreWithSchema(graph, makeBackend(), {
       history: true,

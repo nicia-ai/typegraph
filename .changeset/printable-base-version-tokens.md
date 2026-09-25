@@ -6,5 +6,7 @@
 
 ### Upgrade notes
 
-- Merge or discard in-flight branches, durable branches, merge plans, and review artifacts before upgrading, or re-create them afterwards. A `base@V` token minted by an earlier release is refused with `BaseVersionMismatchError` and `details.reason: "legacy-token-format"` wherever it is validated against a live store: `planMerge()`, `merge()`, `applyDurableMergePlan()`, and incremental plans from a persisted `RecordedForkPoint`. Reopening an existing durable branch still succeeds; merging it does not.
+- Merge or re-create branches and durable branches minted by an earlier release. Their `base@V` tokens are refused with `BaseVersionMismatchError` and `details.reason: "legacy-token-format"` when `planMerge()`, `merge()`, `planMergeIncremental()`, or `mergeIncremental()` validates the branch's base, and when an incremental plan starts from a persisted `RecordedForkPoint`. Reopening a durable branch still succeeds; planning a merge from it does not.
+- Existing merge plans are unaffected. Applying a plan, including through `applyDurableMergePlan()`, validates the plan's target fence (graph id, schema, and revision anchor), not the format of the tokens recorded in its anchors. A plan whose target has not moved since planning still applies after the upgrade.
+- Durable operation evidence stores the coordinates the host supplied and is not compared with newly minted tokens, so existing evidence remains readable.
 - Code that stored tokens in a re-encoded form (base64, or JSON text in a `text` column) keeps working and may store them directly.
