@@ -70,6 +70,12 @@ export const baseTypeScriptRules = {
   "@typescript-eslint/no-unnecessary-type-arguments": "off",
   "@typescript-eslint/no-unnecessary-type-parameters": "off",
   "@typescript-eslint/only-throw-error": "off",
+  // typescript-eslint 8.70's strict config adds `no-generated-empty-object-type`
+  // and widens `no-meaningless-void-operator` to flag `void identifier;`, the
+  // idiom this codebase uses to mark a value as intentionally unused. Pinned
+  // off so the dependency bump is behavior-neutral; adopt each deliberately.
+  "@typescript-eslint/no-generated-empty-object-type": "off",
+  "@typescript-eslint/no-meaningless-void-operator": "off",
 };
 
 /**

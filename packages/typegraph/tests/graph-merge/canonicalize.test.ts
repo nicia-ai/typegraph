@@ -129,7 +129,7 @@ describe("canonicalizeCluster", () => {
     expect(entity.conflicts).toHaveLength(1);
     const conflict = requireDefined(entity.conflicts[0]);
     expect(conflict.property).toBe("name");
-    expect(`${conflict.entityId}`).toBe("node-a");
+    expect(conflict.entityId).toBe("node-a");
     expect(conflict.resolution).toBe("Anna Rivera");
     expect(conflict.values.map((value) => value.value).sort()).toEqual([
       "A. Rivera",
