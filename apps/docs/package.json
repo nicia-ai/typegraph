@@ -25,21 +25,21 @@
     "@astrojs/check": "^0.9.10",
     "@astrojs/cloudflare": "^14.3.3",
     "@astrojs/markdown-satteri": "^0.4.2",
-    "@astrojs/starlight": "^0.42.3",
+    "@astrojs/starlight": "^0.42.4",
     "@astrojs/starlight-tailwind": "^5.0.0",
-    "astro": "^7.3.4",
+    "astro": "^7.3.5",
     "starlight-blog": "^0.30.0",
     "starlight-llms-txt": "^0.12.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@typegraph/eslint-config": "workspace:*",
-    "@types/node": "^24.13.2",
-    "astro-eslint-parser": "^3.1.0",
-    "eslint": "^10.6.0",
+    "@types/node": "^24.13.6",
+    "astro-eslint-parser": "^3.2.0",
+    "eslint": "^10.11.0",
     "eslint-plugin-astro": "^3.2.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.137.0"
+    "wrangler": "^4.138.0"
   }
 }

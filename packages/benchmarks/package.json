@@ -71,21 +71,21 @@
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {
-    "@ladybugdb/core": "^0.18.0",
+    "@ladybugdb/core": "^0.20.4",
     "@nicia-ai/typegraph": "workspace:*",
     "better-sqlite3": "^13.0.3",
-    "drizzle-orm": "^0.45.2",
+    "drizzle-orm": "^0.45.3",
     "neo4j-driver": "^6.2.0",
-    "pg": "^8.22.0",
+    "pg": "^8.23.0",
     "postgres": "^3.4.9",
     "sqlite-vec": "^0.1.9",
-    "zod": "^4.4.3"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^24.13.2",
-    "@types/pg": "^8.20.0",
-    "tsx": "^4.23.0",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^24.13.6",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   }
 }

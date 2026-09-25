@@ -366,6 +366,12 @@ export type ImportResult = z.infer<typeof ImportResultSchema>;
 /** Largest delay JavaScript timers represent without truncation or overflow. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
+// Annotated as the wider `ZodCustom` because zod 4.6 narrowed `z.instanceof`'s
+// return type to `ZodInstanceOf`, which zod 4.0–4.5 (inside our `^4.0.0` peer
+// range) does not declare; emitting it would break consumers' declarations.
+const AbortSignalSchema: z.ZodCustom<AbortSignal, AbortSignal> =
+  z.instanceof(AbortSignal);
+
 /**
  * Options for exporting graph data.
  */
@@ -405,7 +411,7 @@ export const ExportOptionsSchema = z.object({
    * explicit `iterator.return()` settle the stream cooperatively and need no
    * signal; a race that abandons the iterator needs one.
    */
-  signal: z.instanceof(AbortSignal).optional(),
+  signal: AbortSignalSchema.optional(),
 });
 
 /** Export options with defaults applied (output type) */

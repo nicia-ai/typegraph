@@ -248,7 +248,7 @@ describe("repointEdges", () => {
 
     expect(result.conflicts).toHaveLength(1);
     const conflict = requireDefined(result.conflicts[0]);
-    expect(`${conflict.entityId}`).toBe("edge-1");
+    expect(conflict.entityId).toBe("edge-1");
     expect(conflict.property).toBe("weight");
     // "flag" keeps the survivor's (edge-1, branchA) value.
     expect(conflict.resolution).toBe(1);
