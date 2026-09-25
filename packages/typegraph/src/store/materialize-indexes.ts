@@ -573,7 +573,22 @@ async function materializeVectorIndex(
     statusKey: vectorStatusKey(graphId, declaration.name),
     signature,
     driftLabel: "Vector index",
-    run: () => requireDefined(backend.createVectorIndex)(params),
+    run: async () => {
+      // `run` executes only when this database holds no valid record of
+      // building the index. An IVFFlat index that exists anyway (left behind
+      // by an aborted namespace fork, or created outside TypeGraph) was
+      // clustered for other rows, and `IF NOT EXISTS` would keep it with poor
+      // recall. Rebuild it over the rows present now.
+      // A backend without `dropVectorIndex` keeps its prior behavior.
+      if (declaration.indexType === "ivfflat") {
+        await backend.dropVectorIndex?.({
+          graphId,
+          nodeKind: declaration.kind,
+          fieldPath: declaration.fieldPath,
+        });
+      }
+      await requireDefined(backend.createVectorIndex)(params);
+    },
     existingByStatusKey,
     physicalRebuildPreload: invalidLeftovers,
   });

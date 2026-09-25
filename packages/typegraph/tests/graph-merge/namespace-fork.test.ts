@@ -516,4 +516,57 @@ describe("forkGraphNamespace with an IVFFlat index", () => {
     expect(retry.proof).toEqual(fork.proof);
     await retry.abort();
   });
+
+  it("rebuilds an IVFFlat index an aborted fork left behind when the next fork is materialized", async () => {
+    const sourceFixture = await createLocalPgliteBackend();
+    const targetFixture = await createLocalPgliteBackend();
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    const [source] = await createStoreWithSchema(
+      clusteredGraph,
+      sourceFixture.backend,
+      { history: true },
+    );
+    await source.nodes.ClusteredDoc.create({
+      title: "near",
+      embedding: [0.9, 0.1, 0],
+    });
+    await source.materializeIndexes();
+    const ivfflatOid = async (): Promise<string | undefined> => {
+      const rows = await targetFixture.client.query<{ oid: string }>(
+        "SELECT c.oid::text AS oid FROM pg_class AS c JOIN pg_indexes AS i ON i.indexname = c.relname WHERE i.schemaname = current_schema() AND i.indexdef ILIKE '%USING ivfflat%'",
+      );
+      return rows.rows[0]?.oid;
+    };
+
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    const first = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "ivfflat-first",
+    );
+    await first.store.materializeIndexes();
+    const firstIndex = await ivfflatOid();
+    expect(firstIndex).toBeDefined();
+    await first.abort();
+    expect(await ivfflatOid()).toBe(firstIndex);
+
+    await source.nodes.ClusteredDoc.create({
+      title: "far",
+      embedding: [0, 0, 1],
+    });
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    const second = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "ivfflat-second",
+    );
+    const materialized = await second.store.materializeIndexes();
+
+    expect(
+      materialized.results.find((entry) => entry.entity === "vector")?.status,
+    ).toBe("created");
+    const secondIndex = await ivfflatOid();
+    expect(secondIndex).toBeDefined();
+    expect(secondIndex).not.toBe(firstIndex);
+  });
 });

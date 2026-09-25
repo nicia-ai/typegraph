@@ -2190,7 +2190,9 @@ IVFFlat clusters the rows present when it is built, so building one on an
 empty table gives poor recall. They are not built by preparation and their
 materialization records are not copied; run `fork.store.materializeIndexes()`
 after the fork to build them over the copied rows. Every other index the fork
-carried is already recorded, so that call only builds the IVFFlat ones. The target stays private
+carried is already recorded, so that call only builds the IVFFlat ones. An
+IVFFlat index left on the target by an aborted fork has no record, so the
+next fork's `materializeIndexes()` drops and rebuilds it over the new rows. The target stays private
 until the caller changes its own placement pointer;
 TypeGraph does not publish it. `abort()` atomically removes the copied graph
 and operation marker while preserving unrelated namespaces, and refuses if the

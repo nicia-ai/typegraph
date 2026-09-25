@@ -1193,7 +1193,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "vectorOperations",
-    ceiling: 0,
+    ceiling: 1,
   },
   ensureExtension: {
     kind: "deferred",

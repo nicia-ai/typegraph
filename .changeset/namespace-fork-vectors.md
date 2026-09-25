@@ -6,6 +6,8 @@
 
 `prepareNamespaceForkTarget(source, target)` is the owner-side step. It installs the retry ledger, creates the graph's pgvector tables, and builds every index the source has materialized for the graph with the DDL the source used. It writes no graph rows and no materialization records, and the runtime fork still issues no DDL. IVFFlat indexes need the copied rows to cluster well, so preparation skips them, the fork does not copy their records, and `fork.store.materializeIndexes()` builds them after the copy.
 
+`materializeIndexes()` now rebuilds an IVFFlat index that exists without a materialization record, for example one an aborted fork left behind, instead of keeping it with `IF NOT EXISTS`: it was clustered for other rows. A backend without `dropVectorIndex` keeps the previous behavior.
+
 A materialized vector index no longer makes the fork refuse, and indexes whose build never completed on the source are neither built on nor required of the target.
 
 ### Upgrade notes
