@@ -39,8 +39,8 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // Store dispatch and recorded wrappers: 96 -> 102.
 // Namespace forks inspect the backend's physical table names once before
 // creating an isolated schema, raising the reasoned floor to 103.
-// Lazy journal installation adds one guarded backend member access.
-const REASONED_FLOOR = 108;
+// Readiness-first journal installation adds one guarded backend member access.
+const REASONED_FLOOR = 109;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -52,7 +52,7 @@ const REASONED_FLOOR = 108;
 const DEFERRED_LIVE_TOTAL = 228;
 const DEFERRED_DECLARED_TOTAL = 229;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 350;
+const TOTAL_ROW_COUNT = 351;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",

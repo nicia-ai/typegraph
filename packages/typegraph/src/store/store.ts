@@ -5024,9 +5024,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * Hard-deletes all data for this graph from the database.
    *
-   * Removes all nodes, edges, uniqueness entries, embeddings, and schema versions
-   * for this graph's ID. No hooks, no per-row logic. Wrapped in a transaction
-   * when the backend supports it.
+   * Removes nodes, edges, uniqueness entries, embeddings, and schema versions
+   * for this graph's ID. Contribution materialization markers remain by default;
+   * pass `preserveContributionMaterializations: false` to remove those too.
+   * No hooks or per-row logic. Wrapped in a transaction when the backend
+   * supports it.
    *
    * The store is usable after clearing — new data can be created immediately.
    */

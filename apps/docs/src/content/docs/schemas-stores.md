@@ -2310,8 +2310,11 @@ the full list of affected backends and edge-runtime alternatives.
 
 #### `store.clear()`
 
-Hard-deletes all data for the current graph: nodes, edges, uniqueness entries,
-embeddings, and schema versions. Resets collection caches so the store is
+Hard-deletes the current graph's data: nodes, edges, uniqueness entries,
+embeddings, and schema versions. Contribution materialization markers are
+preserved by default so a clear does not invalidate their attestations. Pass
+`preserveContributionMaterializations: false` to remove those graph-local
+markers during a full cutover purge. Resets collection caches so the store is
 immediately reusable.
 
 ```typescript

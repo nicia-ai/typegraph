@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("37 reasoned entries sum to 108 accesses; 50 deferred entries sum to 229", () => {
+  it("37 reasoned entries sum to 109 accesses; 50 deferred entries sum to 229", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -158,8 +158,8 @@ describe("capability bundle totality (T9)", () => {
     // The exact-session heterogeneous node upsert adds six guarded backend
     // member accesses across Store dispatch and recorded wrappers: 96 -> 102.
     // Revision-change storage resolution adds one tableNames access: 102 -> 103.
-    // Lazy journal installation adds one capability access: 103 -> 104.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(108);
+    // Readiness-first journal installation adds one guarded access.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(109);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.

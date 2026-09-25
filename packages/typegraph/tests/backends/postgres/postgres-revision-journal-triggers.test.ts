@@ -55,6 +55,16 @@ describe("PostgreSQL revision journal triggers", () => {
         new Set(["typegraph_record_revision_change"]),
       );
 
+      const functionVersion = await client.query<{ version: string }>(
+        "SELECT xmin::text AS version FROM pg_proc WHERE proname = 'typegraph_record_revision_change'",
+      );
+      await requireDefined(backend.ensureRevisionChangesJournal)();
+      expect(
+        await client.query<{ version: string }>(
+          "SELECT xmin::text AS version FROM pg_proc WHERE proname = 'typegraph_record_revision_change'",
+        ),
+      ).toEqual(functionVersion);
+
       await store.nodes.Person.create({ name: "Ada" });
       const journal = await client.query<{ entity: string; kind: string }>(
         'SELECT entity, kind FROM "MixedCaseRevisionChanges"',

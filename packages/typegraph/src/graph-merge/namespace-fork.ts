@@ -29,6 +29,8 @@ import {
 } from "./typegraph-internal";
 import type { BaseVersion } from "./types";
 
+const REVISION_CHANGES_TABLE = "typegraph_revision_changes";
+
 const DEFAULT_NAMES: Readonly<Record<string, string>> = {
   nodes: "typegraph_nodes",
   edges: "typegraph_edges",
@@ -36,7 +38,7 @@ const DEFAULT_NAMES: Readonly<Record<string, string>> = {
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
   revisionOrigins: "typegraph_revision_origins",
-  revisionChanges: "typegraph_revision_changes",
+  revisionChanges: REVISION_CHANGES_TABLE,
   identityAssertions: "typegraph_identity_assertions",
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
@@ -531,23 +533,33 @@ export async function forkGraphNamespace<G extends GraphDef>(
         await assertEmpty(targetTx, source.graphId);
         const sourceDigests: [string, string][] = [];
         for (const table of GRAPH_RELATIONS) {
+          if (table === REVISION_CHANGES_TABLE) continue;
           const rows = await graphRows(sourceTx, table, source.graphId);
           if (table === "typegraph_contribution_materializations")
             await assertSupportedContributions(sourceTx, rows);
           if (table === "typegraph_index_materializations")
             await assertPhysicalIndexes(targetTx, rows);
           sourceDigests.push([table, await digestRows(rows)]);
-          if (table === "typegraph_revision_changes") {
-            // Bundled node/edge INSERT triggers may journal the mechanical
-            // copy. Replace only this private target graph's generated rows
-            // with the source's exact recorded journal before validation.
-            await queryRows(
-              targetTx,
-              sql`DELETE FROM ${sql.identifier(table)} WHERE graph_id = ${source.graphId}`,
-            );
-          }
           await insertRows(targetTx, table, rows);
         }
+        // The destination triggers may have journaled the copied node, edge,
+        // and identity rows. Replace those mechanical entries with the exact
+        // source journal snapshot before checking the digest.
+        await queryRows(
+          targetTx,
+          sql`DELETE FROM ${sql.identifier(REVISION_CHANGES_TABLE)} WHERE graph_id = ${source.graphId}`,
+        );
+        const sourceJournalRows = await graphRows(
+          sourceTx,
+          REVISION_CHANGES_TABLE,
+          source.graphId,
+        );
+        sourceDigests.splice(
+          GRAPH_RELATIONS.indexOf(REVISION_CHANGES_TABLE),
+          0,
+          [REVISION_CHANGES_TABLE, await digestRows(sourceJournalRows)],
+        );
+        await insertRows(targetTx, REVISION_CHANGES_TABLE, sourceJournalRows);
         const snapshotDigest = await sha256Hex(
           JSON.stringify(sourceDigests),
           32,

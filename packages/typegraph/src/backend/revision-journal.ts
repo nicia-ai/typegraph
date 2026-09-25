@@ -8,6 +8,7 @@ import type { GraphBackend } from "./types";
 export async function installRevisionChangesJournal(
   backend: GraphBackend,
 ): Promise<void> {
+  if ((await backend.revisionChangesJournalReady?.()) === true) return;
   const install = backend.ensureRevisionChangesJournal;
   if (install === undefined) {
     throw new ConfigurationError(

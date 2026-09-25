@@ -271,6 +271,7 @@ import {
 } from "./operations/strategy";
 import {
   advisoryLockSingleExpression,
+  postgresDdlLockStatement,
   postgresFenceSql,
 } from "./postgres-fence-sql";
 import {
@@ -451,7 +452,7 @@ function revisionChangeTriggerName(entity: string, table: string): string {
 function postgresRevisionChangeTriggers(
   names: RevisionJournalTableNames,
 ): readonly string[] {
-  const functionDdl = `CREATE OR REPLACE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}()
+  const functionDdl = `CREATE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}()
 RETURNS trigger LANGUAGE plpgsql AS $tg$
 DECLARE changed_graph text; changed_kind text; changed_id text; next_revision bigint;
 BEGIN
@@ -478,15 +479,21 @@ BEGIN
     USING changed_graph, next_revision, TG_ARGV[2] <> 'identity', TG_ARGV[2], changed_kind, changed_id;
   RETURN NULL;
 END; $tg$`;
+  const installFunctionDdl = `DO $install$ BEGIN
+  ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)}
+  IF to_regprocedure('${REVISION_CHANGE_FUNCTION}()') IS NULL THEN
+    EXECUTE $definition$ ${functionDdl} $definition$;
+  END IF;
+END; $install$`;
   const triggerDdl = postgresRevisionChangeTargets(names).map(({ entity, table }) => {
     const triggerName = revisionChangeTriggerName(entity, table);
     const relation = postgresIdentifierRegclassName(table).replaceAll("'", "''");
     const trigger = triggerName.replaceAll("'", "''");
     const journal = names.revisionChanges.replaceAll("'", "''");
     const clock = names.recordedClock.replaceAll("'", "''");
-    return `DO $tg$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
+    return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
   });
-  return [functionDdl, ...triggerDdl];
+  return [installFunctionDdl, ...triggerDdl];
 }
 
 function vectorSlotsFromManagedNodeCreatePlan(

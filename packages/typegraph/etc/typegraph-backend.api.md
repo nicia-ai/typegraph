@@ -4387,8 +4387,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly revisionChangesJournalReady: {
         readonly kind: "reasoned";
-        readonly reason: "Journal lineage checks installed storage without attempting DDL.";
-        readonly accesses: 1;
+        readonly reason: "Owner installation first checks readiness; runtime lineage also verifies installed storage without attempting DDL.";
+        readonly accesses: 2;
     };
     readonly getContributionMaterialization: {
         readonly kind: "reasoned";

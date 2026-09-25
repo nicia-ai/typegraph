@@ -185,13 +185,18 @@ async function assertWorkingCopyMatchesBase<G extends GraphDef>(
  *
  * @param makeBackend - Constructs the fresh, EMPTY backend the working copy is
  *   built on.
+ * @param options - Set `revisionJournal: false` when the clone does not need
+ *   journal-backed changed-key lineage. This avoids installing journal
+ *   triggers on its tables.
  */
 export function cloneWorkingCopyStrategy<G extends GraphDef>(
   makeBackend: MakeBackend,
+  options: Readonly<{ revisionJournal?: false }> = {},
 ): WorkingCopyStrategy<G> {
   return cloneWorkingCopyWithGraphStrategy(
     makeBackend,
     (baseStore) => baseStore.graph,
+    options,
   );
 }
 
@@ -206,14 +211,17 @@ export function cloneWorkingCopyStrategy<G extends GraphDef>(
 export function cloneIngestionWorkingCopyStrategy<G extends GraphDef>(
   makeBackend: MakeBackend,
 ): WorkingCopyStrategy<G> {
-  return cloneWorkingCopyWithGraphStrategy(makeBackend, (baseStore) =>
-    graphWithoutNodeUniqueness(baseStore.graph),
+  return cloneWorkingCopyWithGraphStrategy(
+    makeBackend,
+    (baseStore) => graphWithoutNodeUniqueness(baseStore.graph),
+    { revisionJournal: false },
   );
 }
 
 function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
   makeBackend: MakeBackend,
   graphForClone: (baseStore: Store<G>) => G,
+  options: Readonly<{ revisionJournal?: false }> = {},
 ): WorkingCopyStrategy<G> {
   return {
     create: async (baseStore: Store<G>): Promise<Store<G>> => {
@@ -240,6 +248,9 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
             // branchability contract (`revisionTracking`) is load-bearing
             // enough to thread through unconditionally.
             revisionTracking: baseStore.revisionTrackingEnabled,
+            ...(options.revisionJournal === false ?
+              { revisionJournal: false as const }
+            : {}),
           },
         );
         const exportOptions = {

@@ -958,7 +958,9 @@ type ClaimTarget = Readonly<{
 }>;
 
 // @public
-export function cloneWorkingCopyStrategy<G extends GraphDef>(makeBackend: MakeBackend): WorkingCopyStrategy<G>;
+export function cloneWorkingCopyStrategy<G extends GraphDef>(makeBackend: MakeBackend, options?: Readonly<{
+    revisionJournal?: false;
+}>): WorkingCopyStrategy<G>;
 
 // @public (undocumented)
 type CoalesceExpressionNode = Readonly<{

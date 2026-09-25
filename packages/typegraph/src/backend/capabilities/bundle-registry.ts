@@ -1082,8 +1082,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   },
   revisionChangesJournalReady: {
     kind: "reasoned",
-    reason: "Journal lineage checks installed storage without attempting DDL.",
-    accesses: 1,
+    reason:
+      "Owner installation first checks readiness; runtime lineage also verifies installed storage without attempting DDL.",
+    accesses: 2,
   },
   getContributionMaterialization: {
     kind: "reasoned",

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
 import { createPostgresBackend } from "../../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
+import { installRevisionChangesJournal } from "../../src/backend/revision-journal";
 import {
   forkGraphNamespace,
   installNamespaceForkLedger,
@@ -14,6 +15,7 @@ const graph = defineGraph({
   id: "namespace-fork-fidelity",
   nodes: { Item: { type: Item } },
   edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
 });
 const otherGraph = defineGraph({
   id: "namespace-fork-unrelated",
@@ -115,6 +117,31 @@ describe("forkGraphNamespace", () => {
     expect(
       (await unrelatedTarget.nodes.Item.getById(unrelatedTargetItem.id))?.name,
     ).toBe("target-only");
+  });
+
+  it("validates identity assertions when the target has revision journal triggers", async () => {
+    const sourceFixture = await createLocalPgliteBackend({ vector: false });
+    const targetFixture = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    await installNamespaceForkLedger(targetFixture.backend);
+    const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
+      history: true,
+    });
+    await createStoreWithSchema(otherGraph, targetFixture.backend, {
+      history: true,
+    });
+    await installRevisionChangesJournal(targetFixture.backend);
+    const first = await source.nodes.Item.create({ name: "first" });
+    const second = await source.nodes.Item.create({ name: "second" });
+    await source.identity.assertSame(first, second);
+
+    const fork = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "identity-journal-fork",
+    );
+    expect(await fork.store.identity.assertionsOf(first)).toHaveLength(1);
+    expect(fork.proof.contentDigest).toMatch(/^[a-f\d]{64}$/);
   });
 
   it("refuses strategy-owned contributions before copying any target rows", async () => {

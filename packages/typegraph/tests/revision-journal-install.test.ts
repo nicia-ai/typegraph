@@ -4,10 +4,12 @@ import {
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { computeBaseVersion } from "../src/graph-merge/base-version";
+import { cloneWorkingCopyStrategy } from "../src/graph-merge/working-copy";
 import { installRevisionChangesJournal } from "../src/schema";
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
@@ -20,6 +22,7 @@ const graph = defineGraph({
 const backends: ReturnType<typeof createLocalSqliteBackend>["backend"][] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const backend of backends.splice(0)) await backend.close();
 });
 
@@ -38,7 +41,10 @@ describe("revision journal installation", () => {
     });
     await expect(backend.revisionChangesJournalReady?.()).resolves.toBe(false);
 
+    const install = vi.spyOn(backend, "ensureRevisionChangesJournal");
     await installRevisionChangesJournal(backend);
+    await installRevisionChangesJournal(backend);
+    expect(install).toHaveBeenCalledTimes(1);
     await expect(backend.revisionChangesJournalReady?.()).resolves.toBe(true);
     await expect(store.lineageRevisionNow()).resolves.toBeDefined();
 
@@ -53,14 +59,28 @@ describe("revision journal installation", () => {
   });
 
   it("allows a short-lived clone to opt out of journal-backed lineage", async () => {
-    const { backend } = createLocalSqliteBackend();
-    backends.push(backend);
-    const [store] = await createStoreWithSchema(graph, backend, {
+    const { backend: baseBackend } = createLocalSqliteBackend();
+    const { backend: cloneBackend } = createLocalSqliteBackend();
+    backends.push(baseBackend, cloneBackend);
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend, {
       revisionTracking: true,
       revisionJournal: false,
     });
+    const install = vi.spyOn(cloneBackend, "ensureRevisionChangesJournal");
+    const readiness = vi.spyOn(cloneBackend, "revisionChangesJournalReady");
+    const strategy = cloneWorkingCopyStrategy<typeof graph>(
+      () => Promise.resolve(cloneBackend),
+      { revisionJournal: false },
+    );
+    const clone = await strategy.create(
+      baseStore,
+      await computeBaseVersion(baseStore),
+    );
 
-    await expect(store.lineageRevisionNow()).resolves.toBeUndefined();
-    await expect(backend.revisionChangesJournalReady?.()).resolves.toBe(false);
+    expect(clone.revisionTrackingEnabled).toBe(true);
+    expect(install).not.toHaveBeenCalled();
+    expect(readiness).not.toHaveBeenCalled();
+    await expect(clone.lineageRevisionNow()).resolves.toBeUndefined();
+    expect(readiness).not.toHaveBeenCalled();
   });
 });

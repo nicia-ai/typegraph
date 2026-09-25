@@ -1274,18 +1274,25 @@ keys. Use that anchor API rather than `revisionNow()`, which returns a clock
 value without the graph's origin identity. The journal is installed when the
 store is provisioned through `createStoreWithSchema()`, or explicitly with
 `installRevisionChangesJournal(backend)` from `@nicia-ai/typegraph/schema`
-under a schema owner role. Runtime lineage checks the journal and its triggers
-without issuing DDL; it fails with `REVISION_JOURNAL_NOT_READY` if the
-installation is incomplete. Short-lived clones that do not need this bounded
+under a schema owner role. Existing installations must first adopt base schema
+version 4 through a privileged schema open or generated base-schema migration.
+Runtime lineage checks the journal and its triggers without issuing DDL; a
+revision-tracked store without history fails with `REVISION_JOURNAL_NOT_READY`
+when the journal is not ready. Short-lived clones that do not need this bounded
 lineage can set `revisionJournal: false`. Writes before the first anchor are
 outside that anchor's range.
 Node and edge inserts, updates, and deletes are recorded by database triggers.
 Identity-only revisions and revisions whose write provenance is incomplete
 produce `{ kind: "unbounded" }` rather than an incomplete key list. Custom
 backends must provide their own lineage capability to get bounded results.
-Journal rows are retained per revision and grow with tracked graph writes;
-applications that need bounded storage should plan a future retention policy
-that preserves every revision still used as a branch anchor. `resolveLineage(store)`
+Each trigger is attached to a whole physical node, edge, or identity table; it
+records every write to that table and uses `graph_id` to identify the affected
+graph. On shared tables this captures writes from every graph, not only graphs
+whose stores enabled the journal. Journal rows are retained per revision and
+never cleaned up automatically; applications should avoid installing triggers
+on shared tables unless cross-graph capture is intended, and should plan an
+external retention policy that preserves every revision still used as a branch
+anchor. `resolveLineage(store)`
 selects backend lineage first, then captured history, then the first-party
 revision journal. A lineage source is consulted only to avoid rework; it never
 changes what a merge decides.
@@ -2138,8 +2145,11 @@ copies the graph's committed schema, current rows, tombstones, recorded-time
 relations, revision clock and journal, identity relations, and TypeGraph
 materialization records. It checks a repeatable-read source snapshot against a
 pre-cut `base@V` token, compares every copied row before target commit, and
-returns `{ store, proof, abort }`. The source can accept writes after the snapshot
-cut; `proof.sourceBase` identifies the copied cut.
+returns `{ store, proof, abort }`. One source transaction holds that snapshot
+for the entire copy, from its first source read through the target copy and
+digest checks. The source can accept writes after the snapshot cut, while the
+long-lived snapshot remains open until copying finishes; `proof.sourceBase`
+identifies the copied cut.
 
 ```typescript
 import {
