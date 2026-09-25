@@ -15,6 +15,7 @@
  * set, how a missing table is detected, how a recorded relation's DDL
  * splits into `createTable` / `indexes` — is genuinely identical.
  */
+import { ConfigurationError } from "../../../../errors";
 import { requireDefined } from "../../../../utils/presence";
 import type { TableContribution } from "../../../table-contribution";
 import type {
@@ -51,6 +52,14 @@ const RECORDED_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
 export type CreateIdentityMembersDeps = Readonly<{
   /** Idempotent `CREATE TABLE ...` for the revision-origins table, rendered once by the caller from its own dialect's table-DDL generator. */
   revisionOriginsTableDdl: string;
+  /** Idempotent journal-table DDL. Older callers may omit it; journal setup then refuses clearly. */
+  revisionChangesTableDdl?: string;
+  /** Trigger DDL for the journal. Older callers may omit it; journal setup then refuses clearly. */
+  revisionChangesTriggerDdl?: readonly string[];
+  /** Read-only verification that the journal table and all write triggers are installed. */
+  revisionChangesJournalReady?: () => Promise<boolean>;
+  /** Executes trigger DDL. Older callers may omit it; journal setup then refuses clearly. */
+  executeDdl?: (ddl: string) => Promise<void>;
   /** Runs one idempotent CREATE-shaped DDL statement — the same closure the profile's own `EngineProvisioning.ensureTable` uses. */
   ensureTable: (ddl: string) => Promise<void>;
   /** Whether the given physical table name currently exists — the same catalog probe `createContributionMembers` builds. */
@@ -79,6 +88,8 @@ export type CreateIdentityMembersDeps = Readonly<{
 
 export type IdentityMembers = Readonly<{
   ensureRevisionOriginsTable: () => Promise<void>;
+  ensureRevisionChangesJournal: () => Promise<void>;
+  revisionChangesJournalReady: () => Promise<boolean>;
   ensureIdentityTables: (
     tableNames: IdentityTableNames,
     options: Readonly<{ provisionMissing: boolean }>,
@@ -99,6 +110,10 @@ export function createIdentityMembers(
 ): IdentityMembers {
   const {
     revisionOriginsTableDdl,
+    revisionChangesTableDdl,
+    revisionChangesTriggerDdl,
+    revisionChangesJournalReady,
+    executeDdl,
     ensureTable,
     contributionTableExists,
     contributionsForTableNames,
@@ -140,6 +155,42 @@ export function createIdentityMembers(
   return {
     async ensureRevisionOriginsTable(): Promise<void> {
       await ensureTable(revisionOriginsTableDdl);
+    },
+
+    async ensureRevisionChangesJournal(): Promise<void> {
+      // Resolve the entire new dependency set before writing the table, so a
+      // legacy caller cannot leave a partially provisioned journal behind.
+      if (
+        revisionChangesTableDdl === undefined ||
+        revisionChangesTriggerDdl === undefined ||
+        executeDdl === undefined
+      ) {
+        throw new ConfigurationError(
+          "Revision-change journal provisioning requires its table DDL, trigger DDL, and DDL executor dependencies.",
+          {
+            missingDependencies: [
+              ...(revisionChangesTableDdl === undefined ?
+                ["revisionChangesTableDdl"]
+              : []),
+              ...(revisionChangesTriggerDdl === undefined ?
+                ["revisionChangesTriggerDdl"]
+              : []),
+              ...(executeDdl === undefined ? ["executeDdl"] : []),
+            ],
+          },
+        );
+      }
+      const journalTableDdl = revisionChangesTableDdl;
+      const triggerDdl = revisionChangesTriggerDdl;
+      const runDdl = executeDdl;
+      await ensureTable(journalTableDdl);
+      for (const ddl of triggerDdl) {
+        await runDdl(ddl);
+      }
+    },
+
+    async revisionChangesJournalReady(): Promise<boolean> {
+      return (await revisionChangesJournalReady?.()) ?? false;
     },
 
     async ensureIdentityTables(

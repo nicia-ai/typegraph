@@ -217,6 +217,20 @@ function transactionSession(
   return carrier.session ?? carrier._?.session;
 }
 
+/** The driver client pinned by this Drizzle transaction, when inspectable. */
+export function getPinnedPostgresTransactionClient(
+  db: AnyPgDatabase,
+): object | undefined {
+  const client = transactionSession(db as PgClientCarrier)?.client;
+  if (
+    (typeof client !== "object" || client === null) &&
+    typeof client !== "function"
+  ) {
+    return undefined;
+  }
+  return client;
+}
+
 function hasPgliteSession(carrier: PgClientCarrier): boolean {
   return transactionSession(carrier)?.constructor?.name === "PgliteSession";
 }
@@ -520,7 +534,7 @@ function resolvePgClient(
   // outer pool while a transaction is open.
   const client =
     carrier.$client ??
-    (useTransactionClient ? transactionSession(carrier)?.client : undefined);
+    (useTransactionClient ? getPinnedPostgresTransactionClient(db) : undefined);
   // Must precede `isPgNativeClient`: PGlite matches it too (object with
   // `.query`), but only the unnamed wrapper is safe for it (see
   // `isPgliteClient`).

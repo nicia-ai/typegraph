@@ -30,6 +30,7 @@
  * `ensureTable` primitive plus the caller's own rendered DDL string, the
  * same way `graph-template-members.ts` builds `ensureGraphTemplatesTable`.
  */
+import { ConfigurationError } from "../../../../errors";
 import {
   type BaseSchemaLifecycle,
   createBaseSchemaLifecycle,
@@ -90,6 +91,10 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * are only exercised by offline `adopt()`.
    */
   sinceIndexDdl: readonly string[];
+  /** Idempotent DDL for the version-4 revision-change journal. Older callers may omit it; version-4 adoption then refuses with a clear error. */
+  revisionChangesTableDdl?: string;
+  /** Index DDL for the revision-change journal, installed during version-4 adoption. */
+  revisionChangesIndexDdl?: readonly string[];
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -103,8 +108,9 @@ export type BaseSchemaMembers = Readonly<{
  * Builds the base-schema member group. Moved out of the two dialect files
  * unchanged: version 1 (the graph-templates table plus edge-match-identity
  * adoption, run before bootstrap's generated DDL), version 2 (the fence
- * rows table) and version 3 (the recorded-relations' and recorded
- * identity-assertions relation's `since_idx` indexes) all follow the same
+ * rows table), version 3 (the recorded-relations' and recorded
+ * identity-assertions relation's `since_idx` indexes), and version 4 (the
+ * revision-changes relation) all follow the same
  * prepare/adopt-before/adopt-after bootstrap sequencing.
  */
 export function createBaseSchemaMembers(
@@ -121,6 +127,8 @@ export function createBaseSchemaMembers(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl,
     sinceIndexDdl,
+    revisionChangesTableDdl,
+    revisionChangesIndexDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -152,6 +160,35 @@ export function createBaseSchemaMembers(
         version: 3,
         async adopt(): Promise<void> {
           for (const ddl of sinceIndexDdl) {
+            await ensureTable(ddl);
+          }
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 4,
+        async adopt(): Promise<void> {
+          if (
+            revisionChangesTableDdl === undefined ||
+            revisionChangesIndexDdl === undefined
+          ) {
+            throw new ConfigurationError(
+              "Base-schema version 4 adoption requires revision-change table and index DDL.",
+              {
+                missingDependencies: [
+                  ...(revisionChangesTableDdl === undefined ?
+                    ["revisionChangesTableDdl"]
+                  : []),
+                  ...(revisionChangesIndexDdl === undefined ?
+                    ["revisionChangesIndexDdl"]
+                  : []),
+                ],
+                adoptionVersion: 4,
+              },
+            );
+          }
+          await ensureTable(revisionChangesTableDdl);
+          for (const ddl of revisionChangesIndexDdl) {
             await ensureTable(ddl);
           }
         },

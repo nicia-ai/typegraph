@@ -2310,12 +2310,15 @@ the full list of affected backends and edge-runtime alternatives.
 
 #### `store.clear()`
 
-Hard-deletes all data for the current graph: nodes, edges, uniqueness entries,
-embeddings, and schema versions. Resets collection caches so the store is
+Hard-deletes the current graph's data: nodes, edges, uniqueness entries,
+embeddings, and schema versions. Contribution materialization markers are
+preserved by default so a clear does not invalidate their attestations. Pass
+`preserveContributionMaterializations: false` to remove those graph-local
+markers during a full cutover purge. Resets collection caches so the store is
 immediately reusable.
 
 ```typescript
-store.clear(): Promise<void>;
+store.clear(options?: { preserveContributionMaterializations?: boolean }): Promise<void>;
 ```
 
 Wrapped in a transaction when the backend supports it. Does not affect other graphs sharing the same backend.
@@ -2323,6 +2326,9 @@ Wrapped in a transaction when the backend supports it. Does not affect other gra
 ```typescript
 // Wipe all data and start fresh
 await store.clear();
+
+// Also remove this graph's contribution markers during a full cutover purge.
+await store.clear({ preserveContributionMaterializations: false });
 
 // Store is immediately reusable, now with raw/unversioned semantics.
 const person = await store.nodes.Person.create({ name: "Alice" });

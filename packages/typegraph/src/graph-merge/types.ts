@@ -12,6 +12,7 @@
  * runtime merge logic.
  */
 
+import type { RecordedInstant } from "../core/temporal";
 import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
 import type {
@@ -43,6 +44,12 @@ export type BranchId = string & Readonly<{ readonly __brand: "BranchId" }>;
  */
 export type BaseVersion = string &
   Readonly<{ readonly __brand: "BaseVersion" }>;
+
+/** An attested source cut for a branch forked from a history-enabled graph. */
+export type RecordedForkPoint = Readonly<{
+  recorded: RecordedInstant;
+  base: BaseVersion;
+}>;
 
 /**
  * Mints a {@link BranchId} from a raw string. Centralizes the brand cast so the
@@ -105,6 +112,12 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
    * either way, the merge always diffs this branch in full.
    */
   forkRevision?: EngineRevision | undefined;
+  /**
+   * The source graph's recorded high-water mark at the fork cut, paired with
+   * the base token captured from that same source state. Present only when
+   * the source Store records history and had a captured write at fork time.
+   */
+  recordedForkPoint?: RecordedForkPoint;
 }>;
 
 declare const INGESTION_BRANCH_BRAND: unique symbol;
@@ -455,7 +468,7 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
  * options type because the named `target` argument is authoritative.
  */
 export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
-  forkPoint: Store<G>;
+  forkPoint: Store<G> | RecordedForkPoint;
   target: Store<G>;
   branches: readonly MergeBranch<G>[];
   options?: Omit<MergeOptions<G>, "target">;

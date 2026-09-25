@@ -353,6 +353,24 @@ describe("createSerialExecutionAdapter", () => {
     await expect(serial.drainAndClose()).resolves.toBeUndefined();
   });
 
+  it("keeps a connection queue usable by a later transaction", async () => {
+    const probe = createProbeAdapter();
+    const connection = {};
+    const first = createSerialExecutionAdapter(probe.adapter, connection);
+    await first.drainAndClose();
+
+    const second = createSerialExecutionAdapter(probe.adapter, connection);
+    const running = second.execute(statement("next-transaction"));
+    await drainMicrotasks();
+    expect(probe.trace.started).toEqual(["next-transaction"]);
+    probe.settle("next-transaction");
+    await running;
+    await second.drainAndClose();
+    await expect(first.execute(statement("late"))).rejects.toThrow(
+      TransactionClosedError,
+    );
+  });
+
   it("leaves compile synchronous and unqueued", async () => {
     const probe = createProbeAdapter();
     const serial = createSerialExecutionAdapter(probe.adapter);

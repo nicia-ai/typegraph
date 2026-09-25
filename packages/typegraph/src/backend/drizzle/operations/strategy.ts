@@ -620,7 +620,10 @@ export type CommonOperationStrategy = Readonly<{
     identity: ContributionMaterializationIdentity,
   ) => SQL;
   buildTableExists: (tableName: string) => SQL;
-  buildClearGraph: (graphId: string) => readonly ClearGraphStatement[];
+  buildClearGraph: (
+    graphId: string,
+    options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+  ) => readonly ClearGraphStatement[];
 }>;
 
 /**
@@ -799,9 +802,9 @@ function createCommonOperationStrategy(
       params: UpsertFulltextParams,
       timestamp: string,
     ): readonly SQL[] =>
-      (fulltextStrategy?.buildUpsert(fulltextTable, params, timestamp) ?? []).map(
-        (statement) => toDrizzleSql(statement, dialect),
-      ),
+      (
+        fulltextStrategy?.buildUpsert(fulltextTable, params, timestamp) ?? []
+      ).map((statement) => toDrizzleSql(statement, dialect)),
     buildDeleteFulltext: (params: DeleteFulltextParams): readonly SQL[] =>
       (fulltextStrategy?.buildDelete(fulltextTable, params) ?? []).map(
         (statement) => toDrizzleSql(statement, dialect),
@@ -1285,8 +1288,11 @@ function createCommonOperationStrategy(
     buildTableExists(tableName: string): SQL {
       return TABLE_EXISTS_QUERIES[dialect](tableName);
     },
-    buildClearGraph(graphId: string): readonly ClearGraphStatement[] {
-      return buildClearGraph(tables, graphId, fulltextStrategy);
+    buildClearGraph(
+      graphId: string,
+      options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+    ): readonly ClearGraphStatement[] {
+      return buildClearGraph(tables, graphId, fulltextStrategy, options);
     },
   };
 }

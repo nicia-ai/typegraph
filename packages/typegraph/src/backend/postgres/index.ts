@@ -57,6 +57,7 @@ export type { AnyPgDatabase, AnyPgTransaction } from "../drizzle/execution";
 export {
   createPostgresBackend,
   createPostgresTables,
+  createPostgresTransactionBackend,
   type PostgresBackendOptions,
   type PostgresTableNames,
   type PostgresTables,

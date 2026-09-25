@@ -28,23 +28,20 @@ export type ClearGraphStatement = Readonly<{
  * vector strategy.
  *
  * Per-deployment status tables (`indexMaterializations`, `kindRemovals`,
- * `reconciliationMarkers`, `contributionMaterializations`) also get cleaned
+ * and `reconciliationMarkers`) also get cleaned
  * because reuse of the same graphId after `clearGraph` would otherwise inherit
  * stale state. The reconciliation marker is the sharpest case: a stale
  * high-water mark would cause `materializeRemovals` to skip the recovery walk
- * entirely for the freshly-created graph. For the contribution markers the
- * graph-scoped delete removes the graph's own rows — full markers for
- * graph-scoped contributions and graph-local activation markers for
- * deployment-scoped ones — while a deployment contribution's physical marker
- * survives, because it is keyed by the reserved deployment graph id (which
- * `defineGraph` refuses for user graphs) and attests shared storage this
- * per-graph delete never touches. The next privileged boot re-records the
- * graph-local rows from that surviving physical marker.
+ * entirely for the freshly-created graph. By default, graph-scoped contribution
+ * markers are deleted too; `Store.clear()` may preserve them when it retains
+ * initialized storage for immediate reuse. Deployment contributions' physical
+ * markers remain keyed by the reserved deployment graph id.
  */
 export function buildClearGraph(
   tables: Tables,
   graphId: string,
   fulltextStrategy: FulltextStrategy | undefined,
+  options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
 ): readonly ClearGraphStatement[] {
   return [
     // The fulltext table is shared by every graph in the database, so its
@@ -111,6 +108,11 @@ export function buildClearGraph(
       query: sql`DELETE FROM ${tables.nodes} WHERE ${tables.nodes.graphId} = ${graphId}`,
     },
     {
+      query: sql`DELETE FROM ${tables.revisionChanges} WHERE ${tables.revisionChanges.graphId} = ${graphId}`,
+      ignoreMissingTable: true,
+      requiredTableName: getTableName(tables.revisionChanges),
+    },
+    {
       query: sql`DELETE FROM ${tables.indexMaterializations} WHERE ${tables.indexMaterializations.graphId} = ${graphId}`,
     },
     {
@@ -119,15 +121,16 @@ export function buildClearGraph(
     {
       query: sql`DELETE FROM ${tables.reconciliationMarkers} WHERE ${tables.reconciliationMarkers.graphId} = ${graphId}`,
     },
-    // Tolerates absence for the same reason the recorded relations do: the
-    // marker table is provisioned lazily by the materializer's ensure, so a
-    // database that never materialized a contribution has no such table, and
-    // clearing a graph must not become the operation that fails on it.
-    {
-      query: sql`DELETE FROM ${tables.contributionMaterializations} WHERE ${tables.contributionMaterializations.graphId} = ${graphId}`,
-      ignoreMissingTable: true,
-      requiredTableName: getTableName(tables.contributionMaterializations),
-    },
+    ...(options?.preserveContributionMaterializations === true ?
+      []
+    : [
+        // Tolerates absence because the marker table is provisioned lazily.
+        {
+          query: sql`DELETE FROM ${tables.contributionMaterializations} WHERE ${tables.contributionMaterializations.graphId} = ${graphId}`,
+          ignoreMissingTable: true,
+          requiredTableName: getTableName(tables.contributionMaterializations),
+        },
+      ]),
     {
       query: sql`DELETE FROM ${tables.schemaVersions} WHERE ${tables.schemaVersions.graphId} = ${graphId}`,
     },

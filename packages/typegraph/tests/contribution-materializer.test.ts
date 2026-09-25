@@ -655,6 +655,54 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
 });
 
 describe("assertInitialized verdicts after the readContributionState refactor", () => {
+  it("binds cold marker reads to the transaction and keeps its cache private", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await createMockMaterializer(
+      markers,
+    ).materializer.ensureRuntimeContributions(GRAPH_ID);
+    const root = createMockMaterializer(markers);
+    const staleSnapshot = vi.fn(() =>
+      Promise.resolve([] as readonly ContributionMaterializationRow[]),
+    );
+    const transaction = root.materializer.bindReadSession(staleSnapshot);
+
+    await expect(transaction.assertInitialized(GRAPH_ID)).rejects.toMatchObject(
+      {
+        name: "StoreNotInitializedError",
+        details: { reason: "missing" },
+      },
+    );
+    expect(staleSnapshot).toHaveBeenCalledExactlyOnceWith([
+      GRAPH_ID,
+      DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+    ]);
+    expect(root.spies.getMarkers).not.toHaveBeenCalled();
+    await expect(
+      transaction.ensureRuntimeContributions(GRAPH_ID),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { scope: "transaction" },
+    });
+    expect(root.spies.execDdl).not.toHaveBeenCalled();
+    expect(root.spies.ensureMarkerTable).not.toHaveBeenCalled();
+
+    const visibleSnapshot = vi.fn((graphIds: readonly string[]) =>
+      Promise.resolve(
+        [...markers.values()].filter((row) => graphIds.includes(row.graphId)),
+      ),
+    );
+    await root.materializer
+      .bindReadSession(visibleSnapshot)
+      .assertInitialized(GRAPH_ID);
+    markers.clear();
+    await expect(
+      root.materializer.assertInitialized(GRAPH_ID),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "missing" },
+    });
+  });
+
   it("resolves without DDL when every contribution is materialized", async () => {
     const markers = new Map<string, ContributionMaterializationRow>();
     await createMockMaterializer(

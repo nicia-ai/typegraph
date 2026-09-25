@@ -572,6 +572,7 @@ export function createSqlBackend<TTx>(
   const identityMembers = createIdentityMembers({
     ...profile.identityRuntime,
     ensureTable: profile.provisioning.ensureTable,
+    executeDdl: profile.provisioning.executeDdl,
     contributionTableExists,
   });
 

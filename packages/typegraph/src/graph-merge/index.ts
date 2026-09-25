@@ -56,6 +56,9 @@ export type {
 export {
   branchDurable,
   destroyDurableBranch,
+  durableDescriptorRefusal,
+  durableOriginOfDescriptor,
+  durableOriginsEqual,
   reopenDurableBranch,
 } from "./durable-branch";
 export type { ApplyDurableMergePlanArgs } from "./durable-merge";
@@ -119,6 +122,7 @@ export type {
   MatchSource,
   MatchStrategy,
 } from "./evidence";
+export type { EvolutionBranchOptions } from "./evolution-branch";
 export { branchForEvolution } from "./evolution-branch";
 export { ingestionBranch } from "./ingestion-branch";
 export {
@@ -130,6 +134,11 @@ export {
   planMergeForEvolution,
   planMergeIncremental,
 } from "./merge";
+export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
+export {
+  forkGraphNamespace,
+  installNamespaceForkLedger,
+} from "./namespace-fork";
 export type { NormalizedMergeOptions } from "./options";
 export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
@@ -223,6 +232,7 @@ export type {
   ProvenanceIndex,
   ProvenanceRecord,
   ReconcileTypesMode,
+  RecordedForkPoint,
   ResolveConfig,
   ResolvedCluster,
   ResolveMap,

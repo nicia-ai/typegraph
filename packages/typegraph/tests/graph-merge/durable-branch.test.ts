@@ -130,6 +130,8 @@ function sameOrigin(a: DurableBranchOrigin, b: DurableBranchOrigin): boolean {
     a.branchId === b.branchId &&
     a.base === b.base &&
     a.forkRevision === b.forkRevision &&
+    a.recordedForkPoint?.recorded === b.recordedForkPoint?.recorded &&
+    a.recordedForkPoint?.base === b.recordedForkPoint?.base &&
     anchor(a.schemaAnchor) === anchor(b.schemaAnchor)
   );
 }
@@ -464,6 +466,44 @@ describe("durable branch", () => {
     const alice = await baseStore.nodes.Person.create({ name: "Alice" });
     return { baseStore, aliceId: alice.id };
   }
+
+  it("attests the source recorded fork point in a durable descriptor", async () => {
+    const fixture = createSqliteMergeBackend();
+    cleanups.push(fixture.cleanup);
+    const [baseStore] = await createStoreWithSchema(graph, fixture.backend, {
+      history: true,
+    });
+    await baseStore.nodes.Person.create({ name: "Alice" });
+    const recorded = await baseStore.recordedNow();
+    const created = unwrap(await branchDurable(baseStore, host.strategy));
+
+    expect(recorded).toBeDefined();
+    expect(created.descriptor.recordedForkPoint).toEqual({
+      recorded,
+      base: created.descriptor.base,
+    });
+    if (created.descriptor.recordedForkPoint === undefined) {
+      throw new Error("Expected a recorded fork point after a captured write");
+    }
+    await created.branch.close();
+
+    const tampered = {
+      ...created.descriptor,
+      recordedForkPoint: {
+        recorded: created.descriptor.recordedForkPoint.recorded,
+        base: asBaseVersion("tampered-base"),
+      },
+    };
+    const result = await reopenDurableBranch(graph, tampered, host.strategy);
+    expect(isErr(result)).toBe(true);
+    const reopened = unwrap(
+      await reopenDurableBranch(graph, wire(created.descriptor), host.strategy),
+    );
+    expect(reopened.recordedForkPoint).toEqual(
+      created.descriptor.recordedForkPoint,
+    );
+    await reopened.close();
+  });
 
   /**
    * A fake host whose working copies have NO active schema row — an unmanaged

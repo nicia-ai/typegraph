@@ -944,6 +944,74 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
+  it("catches an installed version-3 SQLite database up to version 4, gaining revision changes", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      client.exec('DROP TABLE "typegraph_revision_changes"');
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 3 WHERE installation = 1",
+      );
+
+      await requireDefined(backend.adoptBaseSchema)();
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+          )
+          .get("typegraph_revision_changes"),
+      ).toEqual({ name: "typegraph_revision_changes" });
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+          )
+          .get("typegraph_revision_changes_graph_revision_idx"),
+      ).toEqual({ name: "typegraph_revision_changes_graph_revision_idx" });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-3 PGlite database up to version 4, gaining revision changes", async () => {
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    try {
+      await createStoreWithSchema(graph, backend);
+      await client.exec(
+        [
+          'DROP TABLE "typegraph_revision_changes"',
+          'UPDATE "typegraph_base_schema_versions" SET version = 3 WHERE installation = 1',
+        ].join(";\n"),
+      );
+
+      await requireDefined(backend.adoptBaseSchema)();
+
+      const advancedMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const journal = await client.query<{ table_name: string | null }>(
+        "SELECT to_regclass('typegraph_revision_changes')::text AS table_name",
+      );
+      expect(journal.rows[0]?.table_name).toBe("typegraph_revision_changes");
+      const journalIndex = await client.query<{ index_name: string | null }>(
+        "SELECT to_regclass('typegraph_revision_changes_graph_revision_idx')::text AS index_name",
+      );
+      expect(journalIndex.rows[0]?.index_name).toBe(
+        "typegraph_revision_changes_graph_revision_idx",
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("accepts pre-provisioned SQLite identity columns without a pair CHECK", async () => {
     const tableNames = {
       baseSchemaVersions: "tg_base_schema_versions",

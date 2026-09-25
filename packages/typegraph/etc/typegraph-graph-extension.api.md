@@ -211,6 +211,16 @@ export type GraphExtension = Readonly<{
     indexes?: readonly ExtensionIndex[];
 }>;
 
+// @public (undocumented)
+export type GraphExtensionEdgeIntrospection = Readonly<{
+    name: string;
+    description: string | undefined;
+    from: readonly string[];
+    to: readonly string[];
+    properties: JsonSchema;
+    annotations: KindAnnotations | undefined;
+}>;
+
 // @public
 export abstract class GraphExtensionError extends TypeGraphError {
     protected constructor(spec: {
@@ -234,6 +244,20 @@ export type GraphExtensionIssue = Readonly<{
 
 // @public (undocumented)
 export type GraphExtensionIssueCode = (typeof GRAPH_EXTENSION_ISSUE_CODES)[number];
+
+// @public
+export type GraphExtensionKindIntrospection = Readonly<{
+    name: string;
+    description: string | undefined;
+    annotations: KindAnnotations | undefined;
+    properties: JsonSchema;
+    unique: readonly Readonly<{
+        name: string;
+        fields: readonly string[];
+        scope: "kind" | "kindWithSubClasses";
+        collation: "binary" | "caseInsensitive";
+    }>[];
+}>;
 
 // @public (undocumented)
 export type GraphExtensionTopLevelKey = (typeof GRAPH_EXTENSION_TOP_LEVEL_KEYS)[number];
@@ -313,7 +337,38 @@ export class IncompatibleChangeError extends GraphExtensionError {
 export type IncompatibleChangeType = (typeof INCOMPATIBLE_CHANGE_TYPES)[number];
 
 // @public
+export function introspectGraphExtension(extension: GraphExtension): Readonly<{
+    kinds: readonly GraphExtensionKindIntrospection[];
+    edges: readonly GraphExtensionEdgeIntrospection[];
+}>;
+
+// @public
 type JsonScalar = null | string | number | boolean;
+
+// @public
+type JsonSchema = Readonly<{
+    $schema?: string;
+    type?: string | readonly string[];
+    properties?: Record<string, JsonSchema>;
+    required?: readonly string[];
+    items?: JsonSchema;
+    additionalProperties?: boolean | JsonSchema;
+    enum?: readonly unknown[];
+    const?: unknown;
+    anyOf?: readonly JsonSchema[];
+    oneOf?: readonly JsonSchema[];
+    allOf?: readonly JsonSchema[];
+    not?: JsonSchema;
+    description?: string;
+    default?: unknown;
+    minimum?: number;
+    maximum?: number;
+    minLength?: number;
+    maxLength?: number;
+    pattern?: string;
+    format?: string;
+    [key: string]: unknown;
+}>;
 
 // @public
 type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{

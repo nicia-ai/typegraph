@@ -329,6 +329,21 @@ export type StateDiff = Readonly<{
   forkEdgeSignatures: ReadonlyMap<MergeKey, string>;
 }>;
 
+/** Raw ancestor reads used by the state diff, including tombstones and ended assertions. */
+export type StateDiffBaseReader = Readonly<{
+  readNodes: (
+    kind: string,
+    ids?: readonly string[],
+  ) => Promise<readonly NodeRow[]>;
+  readEdges: (
+    kind: string,
+    ids?: readonly string[],
+  ) => Promise<readonly EdgeRow[]>;
+  readIdentity: (
+    mode: "state" | "archival",
+  ) => Promise<readonly IdentityTransferAssertion[]>;
+}>;
+
 /**
  * Enumerates EVERY node of `kind` for `graphId` (live and soft-deleted) via
  * keyset pagination on `id`. Returns rows ascending in the BACKEND's own id
@@ -757,14 +772,14 @@ function byId<T extends Readonly<{ id: string }>>(left: T, right: T): number {
  * pure function of the stores' content, independent of enumeration order. No
  * branch tag is attached here — provenance tagging happens in T7 (staging).
  *
- * @param captureForkState Whether to populate {@link StateDiff.forkNodeVersions}
+ * @param options.captureForkState Whether to populate {@link StateDiff.forkNodeVersions}
  *   / {@link StateDiff.forkEdgeSignatures}. `stageBranches` only ever keeps these
  *   maps for the one branch matching `captureTargetStateFor`, and computing the
  *   edge signatures (canonicalizing props + stringifying every edge) is real
  *   work — so callers that don't need them for this branch can skip it. Defaults
  *   to `true` so direct callers (e.g. tests) get the full diff without having to
  *   know this parameter exists.
- * @param pruneTo A lineage delta bounding which rows changed on EITHER side
+ * @param options.pruneTo A lineage delta bounding which rows changed on EITHER side
  *   since this branch forked (see `staging.ts`'s `stageBranches`, which
  *   computes the union of the fork's and the base's own `changesSince`). When
  *   it is `{ kind: "keys" }`, both sides are read by ID SET instead of full
@@ -772,23 +787,29 @@ function byId<T extends Readonly<{ id: string }>>(left: T, right: T): number {
  *   both sides (see the property test asserting this), so restricting reads
  *   to the union is lossless. `undefined` or `{ kind: "unbounded" }` runs the
  *   full enumeration, exactly as when this parameter is omitted. When
- *   `captureForkState` is also true, the fork side is still enumerated IN
- *   FULL for {@link StateDiff.forkNodeVersions} / {@link StateDiff.forkEdgeSignatures}
- *   (the lost-update guard needs the whole store); pruning then narrows only
- *   which of those already-fetched rows are diffed, at no extra read.
+ *   `captureForkState` is also true, a live-store ancestor still enumerates
+ *   the fork IN FULL for its lost-update baseline. A recorded ancestor captures
+ *   only the bounded delta; the incremental planner later fills any additional
+ *   plan-touched target baselines by id before its commit guard is built.
  */
 export async function diffAgainstBase<G extends GraphDef>(
   baseStore: Store<G>,
   forkStore: Store<G>,
-  captureForkState = true,
-  pruneTo?: LineageDelta,
+  options: Readonly<{
+    captureForkState?: boolean;
+    pruneTo?: LineageDelta | undefined;
+    baseReader?: StateDiffBaseReader | undefined;
+  }> = {},
 ): Promise<StateDiff> {
+  const { captureForkState = true, pruneTo, baseReader } = options;
   const prunedKeys = pruneTo?.kind === "keys" ? pruneTo : undefined;
   const graph = baseStore.graph;
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
   const [baseIdentity, forkIdentity] = await Promise.all([
-    storeRuntime(baseStore).readCurrentIdentityAssertions("archival"),
+    baseReader === undefined ?
+      storeRuntime(baseStore).readCurrentIdentityAssertions("archival")
+    : baseReader.readIdentity("archival"),
     storeRuntime(forkStore).readCurrentIdentityAssertions("archival"),
   ]);
   const baseIdentityById = new Map(
@@ -810,20 +831,28 @@ export async function diffAgainstBase<G extends GraphDef>(
     const nodeIds =
       prunedKeys === undefined ? [] : idsForKind(prunedKeys.nodes, kind);
     const baseRows =
-      prunedKeys === undefined ?
-        await enumerateAllNodes(
-          storeBackend(baseStore),
-          baseStore.graphId,
+      baseReader === undefined ?
+        prunedKeys === undefined ?
+          await enumerateAllNodes(
+            storeBackend(baseStore),
+            baseStore.graphId,
+            kind,
+          )
+        : await fetchNodesByIds(
+            storeBackend(baseStore),
+            baseStore.graphId,
+            kind,
+            nodeIds,
+          )
+      : await baseReader.readNodes(
           kind,
-        )
-      : await fetchNodesByIds(
-          storeBackend(baseStore),
-          baseStore.graphId,
-          kind,
-          nodeIds,
+          prunedKeys === undefined ? undefined : nodeIds,
         );
     const forkRowsFetched =
-      captureForkState || prunedKeys === undefined ?
+      (
+        (captureForkState && baseReader === undefined) ||
+        prunedKeys === undefined
+      ) ?
         await enumerateAllNodes(
           storeBackend(forkStore),
           forkStore.graphId,
@@ -844,7 +873,11 @@ export async function diffAgainstBase<G extends GraphDef>(
     // is active, the rows fed to `diffNodeKind` are narrowed to the pruned
     // set here — no second read, just a filter over what was already fetched.
     const forkRows =
-      prunedKeys === undefined || !captureForkState ?
+      (
+        prunedKeys === undefined ||
+        !captureForkState ||
+        baseReader !== undefined
+      ) ?
         forkRowsFetched
       : filterRowsByIds(forkRowsFetched, nodeIds);
     const delta = diffNodeKind(kind, baseRows, forkRows);
@@ -875,20 +908,28 @@ export async function diffAgainstBase<G extends GraphDef>(
     const edgeIds =
       prunedKeys === undefined ? [] : idsForKind(prunedKeys.edges, kind);
     const baseRows =
-      prunedKeys === undefined ?
-        await enumerateAllEdges(
-          storeBackend(baseStore),
-          baseStore.graphId,
+      baseReader === undefined ?
+        prunedKeys === undefined ?
+          await enumerateAllEdges(
+            storeBackend(baseStore),
+            baseStore.graphId,
+            kind,
+          )
+        : await fetchEdgesByIds(
+            storeBackend(baseStore),
+            baseStore.graphId,
+            kind,
+            edgeIds,
+          )
+      : await baseReader.readEdges(
           kind,
-        )
-      : await fetchEdgesByIds(
-          storeBackend(baseStore),
-          baseStore.graphId,
-          kind,
-          edgeIds,
+          prunedKeys === undefined ? undefined : edgeIds,
         );
     const forkRowsFetched =
-      captureForkState || prunedKeys === undefined ?
+      (
+        (captureForkState && baseReader === undefined) ||
+        prunedKeys === undefined
+      ) ?
         await enumerateAllEdges(
           storeBackend(forkStore),
           forkStore.graphId,
@@ -901,7 +942,11 @@ export async function diffAgainstBase<G extends GraphDef>(
           edgeIds,
         );
     const forkRows =
-      prunedKeys === undefined || !captureForkState ?
+      (
+        prunedKeys === undefined ||
+        !captureForkState ||
+        baseReader !== undefined
+      ) ?
         forkRowsFetched
       : filterRowsByIds(forkRowsFetched, edgeIds);
     if (captureForkState) {

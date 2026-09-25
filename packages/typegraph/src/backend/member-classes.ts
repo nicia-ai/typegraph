@@ -88,6 +88,7 @@ const READ_MEMBERS = [
   // `checkUnique` — and for the same reason it must NOT be a write member: the
   // audit runs from `store.ts`, outside any write frame.
   "readConstraintFenceViolations",
+  "revisionChangesJournalReady",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 /**
@@ -222,6 +223,7 @@ const PROVISIONING_MEMBERS = [
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
   "ensureRevisionOriginsTable",
+  "ensureRevisionChangesJournal",
   "ensureEdgeMatchIdentityStorage",
   "ensureRuntimeContributions",
   "ensureVectorSlotContribution",
@@ -260,6 +262,7 @@ const LIFECYCLE_MEMBERS = [
   "transaction",
   "close",
   "clearGraph",
+  "clearGraphPreservingContributionMaterializations",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 /**

@@ -13,6 +13,11 @@
 
 // Public entry
 export { defineGraphExtension } from "./define-graph-extension";
+export {
+  type GraphExtensionEdgeIntrospection,
+  type GraphExtensionKindIntrospection,
+  introspectGraphExtension,
+} from "./introspect";
 
 // Document type surface
 export {

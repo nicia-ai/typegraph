@@ -62,6 +62,7 @@ import {
   heterogeneousNodeUpsertBatchBindParameterCount,
   heterogeneousNodeUpsertBatchFitsBindBudget,
 } from "../backend/heterogeneous-node-upsert-batch";
+import { installRevisionChangesJournal } from "../backend/revision-journal";
 import {
   createEdgeRowMapper,
   createNodeRowMapper,
@@ -78,8 +79,10 @@ import {
   type ContributionRebuildScope,
   type ContributionRepairResult,
   createTransactionReadBackend,
+  type EngineRevision,
   type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
+  type LineageDelta,
   runOptionallyInTransaction,
   type SchemaCommitPreflightBackend,
   type SchemaVersionRow,
@@ -376,6 +379,7 @@ import {
   type RecordedFlushInstants,
   registerRecordedIdentityMutationWitness,
   resetRevisionOrigin,
+  resolveLineage,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
   withRecordedFlushObserver,
@@ -768,6 +772,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   registry: KindRegistry;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
+  revisionJournalEnabled?: boolean;
   revisionSchema: SqlSchema;
   recordedReadBound: boolean;
   recordedTimeOwnership: RecordedTimeOwnership;
@@ -857,7 +862,9 @@ type StoreCore<G extends GraphDef> = Readonly<{
     rootId: NodeId<AllNodeTypes<G>>,
     options: SubgraphOptions<G, EK, NK, P>,
   ) => Promise<SubgraphResult<G, NK, EK, P>>;
-  clear: () => Promise<void>;
+  clear: (
+    options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+  ) => Promise<void>;
   refreshStatistics: () => Promise<void>;
   materializeIndexes: (
     options?: MaterializeIndexesOptions,
@@ -990,6 +997,9 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     source: GraphNodeReference<G>,
     options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
   ) => Promise<number>;
+  lineageRevisionNow?: () => Promise<EngineRevision | undefined>;
+  /** Return changed node and edge keys since a lineage revision, or `unbounded` when complete keys are unavailable. */
+  changesSince?: (revision: EngineRevision) => Promise<LineageDelta>;
 }>;
 
 type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;
@@ -1528,6 +1538,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend: this.#backend,
       evolutionPlanningTarget: (plan) => this.#evolutionPlanningTarget(plan),
       captureEnabled: this.#captureEnabled,
+      recordedReadBinding: this.#recordedReadBinding,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
       // The query path's own construction, not a second spelling of it: a
       // caller that could only rebuild this object could not observe the one
@@ -2059,6 +2070,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   get revisionTrackingEnabled(): boolean {
     return this.#revisionTrackingEnabled;
+  }
+
+  /** Whether this store may use journal-backed changed-key lineage. */
+  get revisionJournalEnabled(): boolean {
+    return this.#options?.revisionJournal !== false;
   }
 
   /**
@@ -3093,6 +3109,26 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#sqlSchema(),
       this.graphId,
     );
+  }
+
+  /** Mint a token usable with {@link Store.changesSince}, when lineage is available. */
+  async lineageRevisionNow(): Promise<EngineRevision | undefined> {
+    const lineage = resolveLineage(this);
+    if (lineage === undefined) return undefined;
+    return lineage.revision(this.#backend);
+  }
+
+  /**
+   * Lists entity keys changed since a lineage revision. History-enabled
+   * stores use recorded relations; bundled SQLite and PostgreSQL live stores
+   * with revision tracking use the entity-key journal. Unknown backends,
+   * identity-only changes, and revisions with incomplete journal evidence
+   * return `unbounded`.
+   */
+  async changesSince(revision: EngineRevision): Promise<LineageDelta> {
+    const lineage = resolveLineage(this);
+    if (lineage === undefined) return { kind: "unbounded" };
+    return lineage.changesSince(this.#backend, revision, this.graphId);
   }
 
   /**
@@ -4988,13 +5024,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * Hard-deletes all data for this graph from the database.
    *
-   * Removes all nodes, edges, uniqueness entries, embeddings, and schema versions
-   * for this graph's ID. No hooks, no per-row logic. Wrapped in a transaction
-   * when the backend supports it.
+   * Removes nodes, edges, uniqueness entries, embeddings, and schema versions
+   * for this graph's ID. Contribution materialization markers remain by default;
+   * pass `preserveContributionMaterializations: false` to remove those too.
+   * No hooks or per-row logic. Wrapped in a transaction when the backend
+   * supports it.
    *
    * The store is usable after clearing — new data can be created immediately.
    */
-  async clear(): Promise<void> {
+  async clear(
+    options: Readonly<{ preserveContributionMaterializations?: boolean }> = {},
+  ): Promise<void> {
     // Both origin-namespaced `base@V` anchor forms — the TypeGraph revision
     // anchor and the engine anchor — share one `typegraph_revision_origins`
     // row per graph, so any store able to mint either form must rotate it
@@ -5037,7 +5077,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#revisionTrackingEnabled && !this.#captureEnabled ?
           await readRecordedClock(target, this.#sqlSchema(), this.graphId)
         : undefined;
-      await target.clearGraph(this.graphId);
+      const clearGraphPreservingContributions =
+        target.clearGraphPreservingContributionMaterializations;
+      if (
+        options.preserveContributionMaterializations === false ||
+        clearGraphPreservingContributions === undefined
+      ) {
+        await target.clearGraph(this.graphId);
+      } else {
+        await clearGraphPreservingContributions(this.graphId);
+      }
       if (mintsAnchorOrigin) {
         // Rotate the durable per-graph revision-origin nonce in the SAME
         // transaction as `clearGraph`, for either origin-namespaced anchor
@@ -8236,6 +8285,20 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   }
 
   await assertHistorySchemaOnOpen(backend, merged, options);
+
+  // This path runs under the schema owner. Runtime store construction and
+  // lineage reads only verify the journal, so a DML-only role never creates it.
+  if (
+    result.status !== "breaking" &&
+    result.status !== "pending" &&
+    options?.revisionTracking === true &&
+    options.history !== true &&
+    options.revisionJournal !== false &&
+    backend.lineage === undefined &&
+    backend.ensureRevisionChangesJournal !== undefined
+  ) {
+    await installRevisionChangesJournal(backend);
+  }
 
   // #135/#143: this is the single durable-marker writer, and it MUST
   // run after ensureSchemaImpl so the breaking-change gate is reached

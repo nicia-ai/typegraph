@@ -10,8 +10,16 @@
  */
 import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { Client, Pool } from "pg";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { z } from "zod";
 
 import {
@@ -41,7 +49,11 @@ import type {
   TransactionOptions,
 } from "../../../src/backend/types";
 import { rowPropsToObject } from "../../../src/backend/types";
-import type { CompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
+import { sql as portableSql } from "../../../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  type CompiledTemporaryStatementSql,
+} from "../../../src/query/sql-intent";
 import { migrateSchema } from "../../../src/schema";
 import {
   createAdapterStoreWithSchema,
@@ -458,6 +470,33 @@ describe("PostgreSQL Adapter", () => {
 // ============================================================
 
 describe("PostgreSQL Backend - Adapter Specific", () => {
+  it("serializes overlapping statements across backends sharing a bare client", async (ctx) => {
+    requirePostgres(ctx);
+    const client = new Client({ connectionString: TEST_DATABASE_URL });
+    await client.connect();
+    try {
+      const db = drizzle(client);
+      const firstBackend = createPostgresBackend(db);
+      const secondBackend = createPostgresBackend(db);
+      const querySpy = vi.spyOn(client, "query");
+
+      const first = firstBackend.execute<{ value: number }>(
+        asCompiledRowsSql(portableSql`SELECT 1 AS value FROM pg_sleep(0.1)`),
+      );
+      const second = secondBackend.execute<{ value: number }>(
+        asCompiledRowsSql(portableSql`SELECT 2 AS value`),
+      );
+      await Promise.resolve();
+      expect(querySpy).toHaveBeenCalledTimes(1);
+      expect(await Promise.all([first, second])).toEqual([
+        [{ value: 1 }],
+        [{ value: 2 }],
+      ]);
+      expect(querySpy).toHaveBeenCalledTimes(2);
+    } finally {
+      await client.end();
+    }
+  });
   beforeEach(async () => {
     if (!isPostgresAvailable) return;
     await clearTestData();

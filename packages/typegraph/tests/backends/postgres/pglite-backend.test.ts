@@ -30,10 +30,14 @@ import {
   createPostgresTables,
   type PostgresTableNames,
 } from "../../../src/backend/drizzle/schema/postgres";
-import { createPostgresBackend } from "../../../src/backend/postgres";
+import {
+  createPostgresBackend,
+  createPostgresTransactionBackend,
+} from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { sharesSerializedTransactionResource } from "../../../src/backend/transaction-resource";
 import { type GraphBackend } from "../../../src/backend/types";
+import { asNodeId } from "../../../src/core/types";
 import { computeBaseVersion } from "../../../src/graph-merge/base-version";
 import { cloneWorkingCopyStrategy } from "../../../src/graph-merge/working-copy";
 import {
@@ -43,6 +47,8 @@ import {
   importGraphStream,
   ImportOptionsSchema,
 } from "../../../src/interchange";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import {
   instantiateGraphTemplate,
   registerGraphTemplate,
@@ -109,6 +115,7 @@ const CLONE_TABLE_NAMES = {
   recordedEdges: "clone_recorded_edges",
   recordedClock: "clone_recorded_clock",
   revisionOrigins: "clone_revision_origins",
+  revisionChanges: "clone_revision_changes",
   identityAssertions: "clone_identity_assertions",
   recordedIdentityAssertions: "clone_recorded_identity_assertions",
   identityClosure: "clone_identity_closure",
@@ -402,6 +409,65 @@ describe("PGlite backend", () => {
   });
 
   describe("serialized transaction resource ownership", () => {
+    it("serializes overlapping statements on a caller-owned transaction", async () => {
+      const client = await PGlite.create();
+      cleanups.push(() => client.close());
+      const db = drizzle(client);
+      const graphTables = createPostgresTables(CLONE_TABLE_NAMES);
+      await client.exec(generatePostgresDDL(graphTables).join("\n\n"));
+      const rootBackend = createPostgresBackend(db, {
+        tables: graphTables,
+        vector: false,
+      });
+      const [rootStore] = await createStoreWithSchema(peopleGraph, rootBackend);
+
+      await db.transaction(async (tx) => {
+        const backend = createPostgresTransactionBackend(tx, {
+          tables: graphTables,
+          vector: false,
+        });
+        const sibling = createPostgresTransactionBackend(tx, {
+          tables: graphTables,
+          vector: false,
+        });
+        const compatibleBackend = createPostgresBackend(tx, {
+          tables: graphTables,
+          vector: false,
+        });
+        const executeSpy = vi.spyOn(tx, "execute");
+
+        const first = backend.execute<{ value: number }>(
+          asCompiledRowsSql(sql`SELECT 1 AS value`),
+        );
+        const second = backend.execute<{ value: number }>(
+          asCompiledRowsSql(sql`SELECT 2 AS value`),
+        );
+        const third = compatibleBackend.execute<{ value: number }>(
+          asCompiledRowsSql(sql`SELECT 3 AS value`),
+        );
+        const fourth = sibling.execute<{ value: number }>(
+          asCompiledRowsSql(sql`SELECT 4 AS value`),
+        );
+        await Promise.resolve();
+        expect(executeSpy).toHaveBeenCalledTimes(1);
+        expect(await Promise.all([first, second, third, fourth])).toEqual([
+          [{ value: 1 }],
+          [{ value: 2 }],
+          [{ value: 3 }],
+          [{ value: 4 }],
+        ]);
+        expect(executeSpy).toHaveBeenCalledTimes(4);
+        const transactionStore = createStore(peopleGraph, backend);
+        await transactionStore.nodes.Person.create(
+          { name: "Transaction owned" },
+          { id: "transaction-owned" },
+        );
+      });
+      expect(
+        await rootStore.nodes.Person.getById(asNodeId("transaction-owned")),
+      ).toMatchObject({ name: "Transaction owned" });
+    });
+
     it("recognizes Drizzle wrappers over the same PGlite client", async () => {
       const client = await PGlite.create();
       cleanups.push(() => client.close());

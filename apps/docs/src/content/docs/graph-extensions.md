@@ -759,6 +759,20 @@ The `extension` field round-trips: passing it back through
 `defineGraphExtension(intro.extension!)` and `evolve()` against an
 empty graph reconstructs the same extension kinds.
 
+For schema tooling that has an extension document but no Store, call
+`introspectGraphExtension(extension)`. It compiles the extension through the
+same TypeGraph compiler used by `evolve()` and returns `kinds` and `edges`
+with JSON Schema `properties`, descriptions, annotations, and endpoint names.
+The result describes only the supplied document; it has no graph ID, committed
+schema version, or schema hash.
+
+```ts
+import { introspectGraphExtension } from "@nicia-ai/typegraph";
+
+const declaration = introspectGraphExtension(extension);
+console.log(declaration.kinds[0]?.properties);
+```
+
 Graph extensions may also carry graph-scoped annotations:
 
 ```ts

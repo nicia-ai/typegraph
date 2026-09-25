@@ -103,6 +103,11 @@ export function advisoryLockSingleExpression(key: string): SqlFragment {
   return sql`pg_advisory_xact_lock(hashtext(${key}))`;
 }
 
+/** A lock statement embedded in a PostgreSQL `DO` block during owner-only DDL. */
+export function postgresDdlLockStatement(key: string): string {
+  return `PERFORM pg_advisory_xact_lock(hashtext('${key.replaceAll("'", "''")}'));`;
+}
+
 function lockTables(
   tables: readonly string[],
   mode: "share" | "share-row-exclusive" | "access-exclusive",

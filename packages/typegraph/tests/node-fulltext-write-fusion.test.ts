@@ -53,6 +53,10 @@ function hasSchemaFence(query: string): boolean {
   return /typegraph_schema_versions/iu.test(query);
 }
 
+function isEntityWrite(statement: Readonly<{ query: string }>): boolean {
+  return hasNodeInsert(statement.query) || hasFulltextWrite(statement.query);
+}
+
 function fulltextProjection(fulltext: NodeFulltextSync): NodeInsertProjection {
   return fulltext.action === "upsert" ?
       {
@@ -115,8 +119,11 @@ describe("fresh node + fulltext write fusion", () => {
     expect((node as unknown as { title: string }).title).toBe(
       "Neon keeps this in one round trip",
     );
-    expect(fixture.statements).toHaveLength(1);
-    const statement = requireDefined(fixture.statements[0], "fused statement");
+    const writes = fixture.statements.filter((statement) =>
+      isEntityWrite(statement),
+    );
+    expect(writes).toHaveLength(1);
+    const statement = requireDefined(writes[0], "fused statement");
     expect(hasSchemaFence(statement.query)).toBe(true);
     expect(hasNodeInsert(statement.query)).toBe(true);
     expect(hasFulltextWrite(statement.query)).toBe(true);
@@ -229,8 +236,11 @@ describe("fresh node + fulltext write fusion", () => {
       );
     });
 
-    expect(fixture.statements).toHaveLength(1);
-    const statement = requireDefined(fixture.statements[0], "fused statement");
+    const writes = fixture.statements.filter((statement) =>
+      isEntityWrite(statement),
+    );
+    expect(writes).toHaveLength(1);
+    const statement = requireDefined(writes[0], "fused statement");
     expect(hasSchemaFence(statement.query)).toBe(false);
     expect(hasNodeInsert(statement.query)).toBe(true);
     expect(hasFulltextWrite(statement.query)).toBe(true);
@@ -364,9 +374,12 @@ describe("fresh node + fulltext write fusion", () => {
       tx.nodes.Document.create({ title: "" }),
     );
 
-    expect(fixture.statements).toHaveLength(1);
-    expect(fixture.statements[0]?.query).toMatch(/delete\s+from/iu);
-    expect(fixture.statements[0]?.query).toMatch(/typegraph_node_fulltext/iu);
+    const writes = fixture.statements.filter((statement) =>
+      isEntityWrite(statement),
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.query).toMatch(/delete\s+from/iu);
+    expect(writes[0]?.query).toMatch(/typegraph_node_fulltext/iu);
     const hits = await store.search.fulltext("Document", {
       query: "title only",
       limit: 10,

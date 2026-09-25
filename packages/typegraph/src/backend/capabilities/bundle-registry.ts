@@ -889,6 +889,12 @@ export type UnbundledOptionalMember =
  * 16 + 84 = 100 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  clearGraphPreservingContributionMaterializations: {
+    kind: "reasoned",
+    reason:
+      "First-party Store.clear lifecycle path that preserves contribution attestations while clearing graph data; custom backends without it retain their clearGraph behavior.",
+    accesses: 1,
+  },
   upsertHeterogeneousNodes: {
     kind: "reasoned",
     reason: "Exact-session PostgreSQL heterogeneous node upsert program.",
@@ -940,12 +946,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.",
-    // 25, including the schema-checked read binding. Previously 24, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
+    // 26, including the namespace fork's backend table-name probe. Previously 25, not the grep tier's 23: store/store.ts holds two `backend.tableNames`
     // accesses on one physical line, which a line-keyed grep counts once but
     // the type-aware scanner counts as two access nodes (§Baselines). The
     // forked working-copy strategy reads the connected backend's names to
     // fence them against the base store's resolved schema.
-    accesses: 25,
+    accesses: 26,
   },
   fenceSql: {
     kind: "reasoned",
@@ -1068,6 +1074,18 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
       "Zero consumers in src/** outside the backend implementations — measured, not inferred. A member no code path consults has no measurable arity or disposition.",
     accesses: 0,
   },
+  ensureRevisionChangesJournal: {
+    kind: "reasoned",
+    reason:
+      "Privileged journal installation is explicit; runtime lineage only reads readiness.",
+    accesses: 2,
+  },
+  revisionChangesJournalReady: {
+    kind: "reasoned",
+    reason:
+      "Owner installation first checks readiness; runtime lineage also verifies installed storage without attempting DDL.",
+    accesses: 2,
+  },
   getContributionMaterialization: {
     kind: "reasoned",
     reason:
@@ -1108,8 +1126,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   lineage: {
     kind: "reasoned",
     reason:
-      "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. Every OTHER consumer — `assertTargetUnchanged`'s commit-time engine-anchor check among them — reaches `lineage` through `resolveLineage`/`requireLineage` rather than a raw `.lineage` read of its own, so none of them add to this count.",
-    accesses: 2,
+      "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's recorded-relations derivation selects backend lineage over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.",
+    accesses: 3,
   },
   recordedTime: {
     kind: "reasoned",

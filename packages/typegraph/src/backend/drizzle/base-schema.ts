@@ -40,6 +40,16 @@ export const BASE_SCHEMA_RELEASES = [
         "4bd7e6a5caeb3b5e54933b26f6697e53fc7a9aa916c0606c77006fdc93080981",
     },
   },
+  {
+    version: 4,
+    id: "revision-changes",
+    orderedShapeDigests: {
+      postgres:
+        "2a4c801c10b2c10d87b78bc66a91f23e0140c524e8cdf2fb5ab6b04a91b2ce32",
+      sqlite:
+        "1af1dd3e48559a59034490abd728290ca46ec8b4c1912b9a4b24880a918cc739",
+    },
+  },
 ] as const;
 
 function currentBaseSchemaVersion(): number {

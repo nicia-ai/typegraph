@@ -2721,6 +2721,8 @@ export type GraphBackend = Readonly<{
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+    ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+    revisionChangesJournalReady?: (this: void) => Promise<boolean>;
     ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -2766,6 +2768,7 @@ export type GraphBackend = Readonly<{
     adoptBaseSchema?: (this: void) => Promise<void>;
     assertBaseSchemaCurrent?: (this: void) => Promise<void>;
     clearGraph: (this: void, graphId: string) => Promise<void>;
+    clearGraphPreservingContributionMaterializations?: (this: void, graphId: string) => Promise<void>;
     bootstrapTables?: (this: void) => Promise<void>;
     refreshStatistics: (this: void) => Promise<void>;
     trustedImport?: <T>(this: void, fn: (session: TrustedImportSession) => Promise<T>, options?: Readonly<{
@@ -2848,7 +2851,7 @@ export type GraphIdentityConfig = Readonly<{
 }>;
 
 // @public (undocumented)
-export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
+export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "clearGraphPreservingContributionMaterializations" | "bootstrapTables">;
 
 // @public
 export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findEdgesByHeterogeneousEndpointSet" | "findEdgesConnectedTo">;
@@ -3722,6 +3725,7 @@ export type ResolvedSqlTableNames = Readonly<{
     recordedEdges: string;
     recordedClock: string;
     revisionOrigins: string;
+    revisionChanges?: string;
     identityAssertions: string;
     recordedIdentityAssertions: string;
     identityClosure: string;
@@ -3981,6 +3985,7 @@ export type SqlTableNames = Readonly<{
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
     revisionOrigins?: string | undefined;
+    revisionChanges?: string | undefined;
     identityAssertions?: string | undefined;
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
@@ -4225,6 +4230,11 @@ type TypeGraphErrorOptions = Readonly<{
 
 // @public
 export const UNBUNDLED_OPTIONAL_MEMBERS: {
+    readonly clearGraphPreservingContributionMaterializations: {
+        readonly kind: "reasoned";
+        readonly reason: "First-party Store.clear lifecycle path that preserves contribution attestations while clearing graph data; custom backends without it retain their clearGraph behavior.";
+        readonly accesses: 1;
+    };
     readonly upsertHeterogeneousNodes: {
         readonly kind: "reasoned";
         readonly reason: "Exact-session PostgreSQL heterogeneous node upsert program.";
@@ -4268,7 +4278,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly tableNames: {
         readonly kind: "reasoned";
         readonly reason: "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.";
-        readonly accesses: 25;
+        readonly accesses: 26;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";
@@ -4370,6 +4380,16 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly reason: "Zero consumers in src/** outside the backend implementations — measured, not inferred. A member no code path consults has no measurable arity or disposition.";
         readonly accesses: 0;
     };
+    readonly ensureRevisionChangesJournal: {
+        readonly kind: "reasoned";
+        readonly reason: "Privileged journal installation is explicit; runtime lineage only reads readiness.";
+        readonly accesses: 2;
+    };
+    readonly revisionChangesJournalReady: {
+        readonly kind: "reasoned";
+        readonly reason: "Owner installation first checks readiness; runtime lineage also verifies installed storage without attempting DDL.";
+        readonly accesses: 2;
+    };
     readonly getContributionMaterialization: {
         readonly kind: "reasoned";
         readonly reason: "Same zero-consumer family as ensureContributionMaterializationsTable.";
@@ -4405,8 +4425,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly lineage: {
         readonly kind: "reasoned";
-        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. Every OTHER consumer — `assertTargetUnchanged`'s commit-time engine-anchor check among them — reaches `lineage` through `resolveLineage`/`requireLineage` rather than a raw `.lineage` read of its own, so none of them add to this count.";
-        readonly accesses: 2;
+        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's recorded-relations derivation selects backend lineage over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.";
+        readonly accesses: 3;
     };
     readonly recordedTime: {
         readonly kind: "reasoned";

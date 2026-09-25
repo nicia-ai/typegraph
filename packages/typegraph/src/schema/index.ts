@@ -19,6 +19,7 @@
  * ```
  */
 
+export { installRevisionChangesJournal } from "../backend/revision-journal";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,

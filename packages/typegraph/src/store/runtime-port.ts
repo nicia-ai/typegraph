@@ -26,6 +26,7 @@ import {
 import { ConfigurationError } from "../errors";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
+import { type RecordedReadBinding } from "../query/compiler/schema";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
@@ -55,6 +56,8 @@ export const STORE_RUNTIME: unique symbol =
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
+  /** The Store's validated historical source, shared by all recorded reads. */
+  recordedReadBinding?: RecordedReadBinding | undefined;
   /** Constructs a plan-owned resulting-schema view for outside-transaction merge planning. */
   evolutionPlanningTarget?: (plan: EvolutionPlan) => Store<G>;
   /**
