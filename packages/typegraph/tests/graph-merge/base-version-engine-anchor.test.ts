@@ -357,7 +357,7 @@ describe("base@V engine anchor", () => {
     // of the scripted revision (`engine:<origin>:<revision>`, see
     // `base-version.ts`'s `engineComponent`), so every assertion in this
     // suite matches the revision suffix rather than a literal `engine:r0`.
-    expect(forkBranch.base).toMatch(/\0engine:[^:]+:r0$/);
+    expect(forkBranch.base).toMatch(/\|engine:[^:]+:r0$/);
     await forkBranch.store.nodes.Widget.create({
       label: "from fork",
       group: "g1",
@@ -863,7 +863,7 @@ describe("base@V engine anchor", () => {
     const forkBranch = unwrap(
       await branch<WidgetGraph>(forkPoint, makePlainBackend, { id: BRANCH }),
     );
-    expect(forkBranch.base).toMatch(/\0engine:[^:]+:r0$/);
+    expect(forkBranch.base).toMatch(/\|engine:[^:]+:r0$/);
     await forkBranch.store.nodes.Widget.create({
       label: "from fork",
       group: "g1",
@@ -889,7 +889,7 @@ describe("base@V engine anchor", () => {
       const anchors = planned.data.anchors;
       expect(anchors.kind).toBe("incremental");
       if (anchors.kind === "incremental") {
-        expect(anchors.forkPoint.baseVersion).toMatch(/\0engine:[^:]+:r1$/);
+        expect(anchors.forkPoint.baseVersion).toMatch(/\|engine:[^:]+:r1$/);
         expect(anchors.branches).toEqual([
           { branchId: BRANCH, baseVersion: anchors.forkPoint.baseVersion },
         ]);
@@ -1042,7 +1042,7 @@ describe("base@V engine anchor", () => {
         id: BRANCH,
       }),
     );
-    expect(forkBranch.base).toMatch(/\0engine:[^:]+:r0$/);
+    expect(forkBranch.base).toMatch(/\|engine:[^:]+:r0$/);
     await forkBranch.store.nodes.Widget.create({
       label: "from fork",
       group: "g1",

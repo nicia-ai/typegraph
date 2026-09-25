@@ -6,7 +6,7 @@
  * changes, so that `merge()`'s precondition check (T11) can reject a branch that
  * forked from a divergent base.
  *
- * The token is two stable components joined by a separator:
+ * The token is two stable components joined by `|`:
  *
  *   1. A **schema hash** — `computeSchemaHash(serializeSchema(graph, version))`.
  *      This is content-addressed (the public `computeSchemaHash` deliberately
@@ -106,10 +106,16 @@ import { asBaseVersion } from "./types";
 
 /**
  * Separator between the schema-hash and revision-or-content token components.
- * The schema hash contains no NUL byte, so one NUL unambiguously delimits the
- * two components.
+ * The schema component is a hex digest plus an optional `#s<version>` tag, so
+ * it never contains `|`: the FIRST `|` delimits the two components even when
+ * an engine revision after it contains one. Printable, so a token survives
+ * every text store an application persists it in; PostgreSQL `text` and
+ * `jsonb` both reject NUL.
  */
-const TOKEN_SEPARATOR = "\0";
+const TOKEN_SEPARATOR = "|";
+
+/** The separator tokens were minted with before it became printable. */
+const LEGACY_TOKEN_SEPARATOR = "\0";
 
 /** Separates the schema hash from the monotonic active schema version. */
 const SCHEMA_VERSION_TAG = "#s";
@@ -561,8 +567,34 @@ function revisionPartsOf(
 }
 
 /**
+ * Whether `version` was minted in the retired NUL-separated format. Such a
+ * token can never equal one a live store mints now, so every precondition
+ * refuses it; callers use this only to say why.
+ */
+export function isLegacyBaseVersion(version: BaseVersion): boolean {
+  return (version as string).includes(LEGACY_TOKEN_SEPARATOR);
+}
+
+/** Refusal details shared by every site that rejects a legacy token. */
+export const LEGACY_BASE_VERSION_REFUSAL = {
+  reason: "legacy-token-format",
+  suggestion:
+    "This token was minted by an earlier TypeGraph release in a retired format. Re-branch or re-plan from the current target.",
+} as const;
+
+/**
+ * Index of the component separator, or -1 for a token with no schema
+ * component. A legacy token parses as having none, so no anchor or schema
+ * half is ever read out of it.
+ */
+function tokenSeparatorIndex(version: BaseVersion): number {
+  if (isLegacyBaseVersion(version)) return -1;
+  return (version as string).indexOf(TOKEN_SEPARATOR);
+}
+
+/**
  * Extracts the second component from a `base@V` token. The schema component
- * contains no NUL byte, so the substring after the separator is exactly the
+ * contains no separator, so the substring after the separator is exactly the
  * durable revision or compatibility content fingerprint.
  *
  * Used by both revision-token parsing and legacy in-transaction content
@@ -570,7 +602,7 @@ function revisionPartsOf(
  * graph definition, so only the second component needs runtime checking.
  */
 export function contentComponentOf(version: BaseVersion): string {
-  const separatorIndex = (version as string).indexOf(TOKEN_SEPARATOR);
+  const separatorIndex = tokenSeparatorIndex(version);
   return separatorIndex === -1 ? version : (
       (version as string).slice(separatorIndex + 1)
     );
@@ -586,7 +618,7 @@ export function contentComponentOf(version: BaseVersion): string {
  * real divergence.
  */
 export function schemaComponentOf(version: BaseVersion): string {
-  const separatorIndex = (version as string).indexOf(TOKEN_SEPARATOR);
+  const separatorIndex = tokenSeparatorIndex(version);
   return separatorIndex === -1 ? "" : (
       (version as string).slice(0, separatorIndex)
     );

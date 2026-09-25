@@ -61,6 +61,8 @@ import {
   engineAnchorOf,
   engineAnchorOriginOf,
   hasRevisionAnchor,
+  isLegacyBaseVersion,
+  LEGACY_BASE_VERSION_REFUSAL,
   readActiveSchemaVersion,
   revisionAnchorOf,
   revisionOriginMatch,
@@ -2728,6 +2730,7 @@ async function validateBaseVersions<G extends GraphDef>(
     if (await toleratedByEngineAnchor(target, branch.base, targetVersion)) {
       continue;
     }
+    const legacy = isLegacyBaseVersion(branch.base);
     return err(
       new BaseVersionMismatchError(
         `Branch "${branch.id}" forked from base@V "${branch.base}", which does not match the merge target's current base@V "${targetVersion}".`,
@@ -2736,7 +2739,11 @@ async function validateBaseVersions<G extends GraphDef>(
             branchId: branch.id,
             branchBase: branch.base,
             targetBase: targetVersion,
+            ...(legacy ? { reason: LEGACY_BASE_VERSION_REFUSAL.reason } : {}),
           },
+          ...(legacy ?
+            { suggestion: LEGACY_BASE_VERSION_REFUSAL.suggestion }
+          : {}),
         },
       ),
     );
@@ -4836,6 +4843,18 @@ async function assertRecordedForkPointAvailable<G extends GraphDef>(
     throw new MergePlanCapabilityError(
       "A recorded fork point requires TypeGraph-owned history on the merge target.",
       { details: { capability: "recordedForkPoint" } },
+    );
+  }
+  if (isLegacyBaseVersion(point.base)) {
+    throw new BaseVersionMismatchError(
+      "The recorded fork point's base@V token was minted in a retired format.",
+      {
+        details: {
+          forkPointBase: point.base,
+          reason: LEGACY_BASE_VERSION_REFUSAL.reason,
+        },
+        suggestion: LEGACY_BASE_VERSION_REFUSAL.suggestion,
+      },
     );
   }
   const parts = parseRecordedInstant(point.recorded, "forkPoint.recorded");

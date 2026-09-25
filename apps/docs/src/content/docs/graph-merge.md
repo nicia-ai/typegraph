@@ -1220,6 +1220,14 @@ rotates that origin — a branch forked before a clear can never match the
 same store again, even once it is repopulated to look the same. The two
 merge entry points differ in how they treat that token.
 
+The token is printable text, so it can be stored anywhere an application
+keeps descriptors, plans, and fork points, including PostgreSQL `text` and
+`jsonb` columns. Treat it as opaque: compare it whole and never parse it.
+Tokens minted by releases before this format, which separated components
+with a NUL character, are refused with a `BaseVersionMismatchError` whose
+`details.reason` is `"legacy-token-format"`. Re-branch or re-plan from the
+current target.
+
 **`merge()` is a snapshot merge.** Every branch must have forked from the
 target's *current* `base@V`. If the target advanced since the branch was taken,
 `merge()` returns a `BaseVersionMismatchError` rather than risk clobbering newer
