@@ -444,7 +444,8 @@ export const pgvectorStrategy: VectorStrategy = {
   },
 };
 
-function pgvectorIndexName(slot: VectorSlot): string {
+/** Physical name of the ANN index pgvector builds for `slot`. */
+export function pgvectorIndexName(slot: VectorSlot): string {
   return vectorPhysicalName(
     INDEX_PREFIX,
     slot.graphId,

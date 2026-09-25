@@ -1,13 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
+import {
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+  defineNodeIndex,
+  embedding,
+  type Store,
+} from "../../src";
 import { createPostgresBackend } from "../../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
 import { installRevisionChangesJournal } from "../../src/backend/revision-journal";
 import {
   forkGraphNamespace,
-  installNamespaceForkLedger,
+  prepareNamespaceForkTarget,
 } from "../../src/graph-merge/namespace-fork";
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
@@ -22,6 +29,17 @@ const otherGraph = defineGraph({
   nodes: { Item: { type: Item } },
   edges: {},
 });
+
+const Doc = defineNode("Doc", {
+  schema: z.object({ title: z.string(), embedding: embedding(3) }),
+});
+const vectorGraph = defineGraph({
+  id: "namespace-fork-vectors",
+  nodes: { Doc: { type: Doc } },
+  edges: {},
+  indexes: [defineNodeIndex(Doc, { name: "doc_title_idx", fields: ["title"] })],
+});
+const QUERY = [1, 0, 0];
 
 const cleanups: (() => Promise<void>)[] = [];
 
@@ -39,7 +57,7 @@ describe("forkGraphNamespace", () => {
     });
     await expect(
       forkGraphNamespace(source, targetFixture.backend, "missing-ledger"),
-    ).rejects.toThrow("installNamespaceForkLedger");
+    ).rejects.toThrow("prepareNamespaceForkTarget");
     const relation = await targetFixture.client.query<{
       relation: string | null;
     }>(
@@ -52,10 +70,10 @@ describe("forkGraphNamespace", () => {
     const sourceFixture = await createLocalPgliteBackend({ vector: false });
     const targetFixture = await createLocalPgliteBackend({ vector: false });
     cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
-    await installNamespaceForkLedger(targetFixture.backend);
     const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
       history: true,
     });
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
     const [unrelatedSource] = await createStoreWithSchema(
       otherGraph,
       sourceFixture.backend,
@@ -123,10 +141,10 @@ describe("forkGraphNamespace", () => {
     const sourceFixture = await createLocalPgliteBackend({ vector: false });
     const targetFixture = await createLocalPgliteBackend({ vector: false });
     cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
-    await installNamespaceForkLedger(targetFixture.backend);
     const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
       history: true,
     });
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
     await createStoreWithSchema(otherGraph, targetFixture.backend, {
       history: true,
     });
@@ -148,10 +166,10 @@ describe("forkGraphNamespace", () => {
     const sourceFixture = await createLocalPgliteBackend({ vector: false });
     const targetFixture = await createLocalPgliteBackend({ vector: false });
     cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
-    await installNamespaceForkLedger(targetFixture.backend);
     const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
       history: true,
     });
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
     await source.nodes.Item.create({ name: "source" });
     await sourceFixture.client
       .exec(`INSERT INTO typegraph_contribution_materializations
@@ -160,7 +178,7 @@ describe("forkGraphNamespace", () => {
 
     await expect(
       forkGraphNamespace(source, targetFixture.backend, "contribution-refusal"),
-    ).rejects.toThrow("strategy-owned contribution tables");
+    ).rejects.toThrow("bundled tsvector and pgvector contribution tables");
     const targetRows = await targetFixture.client.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM typegraph_nodes WHERE graph_id = 'namespace-fork-fidelity'",
     );
@@ -171,10 +189,10 @@ describe("forkGraphNamespace", () => {
     const sourceFixture = await createLocalPgliteBackend({ vector: false });
     const targetFixture = await createLocalPgliteBackend({ vector: false });
     cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
-    await installNamespaceForkLedger(targetFixture.backend);
     const [source] = await createStoreWithSchema(graph, sourceFixture.backend, {
       history: true,
     });
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
     const item = await source.nodes.Item.create({ name: "before" });
     const revisionNow = source.revisionNow.bind(source);
     vi.spyOn(source, "revisionNow").mockImplementationOnce(async () => {
@@ -210,5 +228,171 @@ describe("forkGraphNamespace", () => {
       "SELECT to_regclass('typegraph_namespace_fork_operations')::text AS relation",
     );
     expect(relation.rows[0]?.relation).toBeNull();
+  });
+});
+
+describe("forkGraphNamespace with pgvector storage", () => {
+  async function vectorSource() {
+    const sourceFixture = await createLocalPgliteBackend();
+    const targetFixture = await createLocalPgliteBackend();
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    const [source] = await createStoreWithSchema(
+      vectorGraph,
+      sourceFixture.backend,
+      { history: true },
+    );
+    const near = await source.nodes.Doc.create({
+      title: "near",
+      embedding: [0.9, 0.1, 0],
+    });
+    const far = await source.nodes.Doc.create({
+      title: "far",
+      embedding: [0, 0, 1],
+    });
+    const results = await source.materializeIndexes();
+    expect(results.results.map((entry) => entry.status)).not.toContain(
+      "failed",
+    );
+    return { source, sourceFixture, targetFixture, near, far };
+  }
+
+  async function nearestTitles(
+    store: Store<typeof vectorGraph>,
+  ): Promise<readonly string[]> {
+    const rows = await store
+      .query()
+      .from("Doc", "d")
+      .whereNode("d", (d) => d.embedding.similarTo(QUERY, 2))
+      .select((ctx) => ({ title: ctx.d.title }))
+      .execute();
+    return rows.map((row) => row.title);
+  }
+
+  async function physicalIndexes(
+    client: Awaited<ReturnType<typeof createLocalPgliteBackend>>["client"],
+  ): Promise<readonly string[]> {
+    const rows = await client.query<{ indexname: string }>(
+      "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND (indexname LIKE 'tg_vecidx%' OR indexname = 'doc_title_idx') ORDER BY indexname",
+    );
+    return rows.rows.map((row) => row.indexname);
+  }
+
+  it("copies embeddings, and the prepared target has the source's ANN and relational indexes", async () => {
+    const { source, sourceFixture, targetFixture, near } = await vectorSource();
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    expect(await physicalIndexes(targetFixture.client)).toEqual(
+      await physicalIndexes(sourceFixture.client),
+    );
+    expect(await physicalIndexes(targetFixture.client)).toHaveLength(2);
+
+    const fork = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "vector-fork",
+    );
+
+    expect((await fork.store.nodes.Doc.getById(near.id))?.embedding).toEqual(
+      near.embedding,
+    );
+    expect(await nearestTitles(fork.store)).toEqual(
+      await nearestTitles(source),
+    );
+    expect(await nearestTitles(fork.store)).toEqual(["near", "far"]);
+    const retry = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "vector-fork",
+    );
+    expect(retry.proof).toEqual(fork.proof);
+  });
+
+  it("covers embeddings in the digest a retry verifies", async () => {
+    const { source, targetFixture, near } = await vectorSource();
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    await forkGraphNamespace(source, targetFixture.backend, "vector-digest");
+    const table = await targetFixture.client.query<{ name: string }>(
+      "SELECT tablename AS name FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'tg_vec%'",
+    );
+    const tableName = table.rows[0]?.name;
+    if (tableName === undefined) throw new Error("vector table missing");
+    await targetFixture.client.query(
+      `UPDATE "${tableName}" SET embedding = '[0,1,0]' WHERE node_id = $1`,
+      [near.id],
+    );
+
+    await expect(
+      forkGraphNamespace(source, targetFixture.backend, "vector-digest"),
+    ).rejects.toThrow("changed target namespace");
+  });
+
+  it("aborts by removing the copied embeddings and keeping the prepared tables", async () => {
+    const { source, targetFixture } = await vectorSource();
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    const fork = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "vector-abort",
+    );
+
+    await fork.abort();
+
+    const vectorTable = await targetFixture.client.query<{ name: string }>(
+      "SELECT tablename AS name FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'tg_vec%'",
+    );
+    expect(vectorTable.rows).toHaveLength(1);
+    const remaining = await targetFixture.client.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM "${vectorTable.rows[0]?.name ?? ""}"`,
+    );
+    expect(remaining.rows[0]?.count).toBe("0");
+    const second = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "vector-after-abort",
+    );
+    expect(await nearestTitles(second.store)).toEqual(["near", "far"]);
+  });
+
+  it("refuses an unprepared target before copying any rows", async () => {
+    const { source, targetFixture } = await vectorSource();
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    await targetFixture.client.exec("DROP INDEX doc_title_idx");
+
+    await expect(
+      forkGraphNamespace(source, targetFixture.backend, "vector-unprepared"),
+    ).rejects.toThrow("prepareNamespaceForkTarget");
+    const targetRows = await targetFixture.client.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM typegraph_nodes WHERE graph_id = 'namespace-fork-vectors'",
+    );
+    expect(targetRows.rows[0]?.count).toBe("0");
+  });
+
+  it("neither replays nor requires an index whose build never completed", async () => {
+    const { source, sourceFixture, targetFixture } = await vectorSource();
+    await sourceFixture.client.exec(
+      "DROP INDEX doc_title_idx; UPDATE typegraph_index_materializations SET materialized_at = NULL WHERE index_name = 'doc_title_idx'",
+    );
+
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    const fork = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "vector-unbuilt-index",
+    );
+
+    expect(await physicalIndexes(targetFixture.client)).toHaveLength(1);
+    expect(await nearestTitles(fork.store)).toEqual(["near", "far"]);
+  });
+
+  it("refuses a target opened without vector storage", async () => {
+    const { source } = await vectorSource();
+    const vectorless = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(vectorless.backend.close);
+
+    await expect(
+      prepareNamespaceForkTarget(source, vectorless.backend),
+    ).rejects.toThrow("needs pgvector storage");
+    await expect(
+      forkGraphNamespace(source, vectorless.backend, "vectorless"),
+    ).rejects.toThrow("needs pgvector storage");
   });
 });
