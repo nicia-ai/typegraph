@@ -122,6 +122,7 @@ export type {
   MatchSource,
   MatchStrategy,
 } from "./evidence";
+export type { EvolutionBranchOptions } from "./evolution-branch";
 export { branchForEvolution } from "./evolution-branch";
 export { ingestionBranch } from "./ingestion-branch";
 export {

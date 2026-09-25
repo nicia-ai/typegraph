@@ -550,6 +550,44 @@ export function registerGraphMergePlanIntegrationTests(
       expect(result.error.cause).toBe(failure);
     });
 
+    it("keeps evolution branches revision-tracked without a revision journal", async () => {
+      const store = await context.createStore(graph, {
+        revisionTracking: true,
+      });
+      const plan = await store.planEvolution(
+        defineGraphExtension({
+          nodes: {
+            Tag: { properties: { label: { type: "string", optional: true } } },
+          },
+        }),
+      );
+      const result = await branchForEvolution(
+        store,
+        plan,
+        async () =>
+          deriveBackend(await context.createIsolatedBackend(), {
+            ensureRevisionChangesJournal: () =>
+              Promise.reject(new Error("working-copy journal DDL was invoked")),
+          }),
+        {
+          id: asBranchId("future-tag-without-journal"),
+          revisionJournal: false,
+        },
+      );
+      const futureBranch = unwrap(result);
+
+      expect(futureBranch.store.revisionTrackingEnabled).toBe(true);
+      expect(futureBranch.store.revisionJournalEnabled).toBe(false);
+      await expect(
+        futureBranch.store.lineageRevisionNow(),
+      ).resolves.toBeUndefined();
+      await futureBranch.store.nodes.Person.create({
+        name: "Ada",
+        email: "ada@future.test",
+      });
+      await futureBranch.close();
+    });
+
     it("merges a newly added kind from a resulting-schema branch", async () => {
       const backend = context.getBackend();
       const [target] = await createAdapterStoreWithSchema(graph, backend, {

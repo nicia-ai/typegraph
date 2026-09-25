@@ -897,8 +897,10 @@ on its single pinned connection, including concurrent reads started by the
 same Store operation. Backends created for the same transaction handle share
 one queue. The application owns commit and rollback and must await all work
 using these backends before its transaction callback returns.
-`createPostgresBackend(tx)` refuses a transaction handle and directs callers
-to this factory; `createPostgresBackend(db)` remains pooled.
+`createPostgresBackend(tx)` also routes a PostgreSQL transaction handle to the
+transaction-scoped backend automatically. Use `createPostgresTransactionBackend`
+when you want the transaction-scoped intent to be explicit; a regular database
+handle passed to `createPostgresBackend(db)` still creates the pooled backend.
 
 #### `createLocalPgliteBackend(options?)`
 

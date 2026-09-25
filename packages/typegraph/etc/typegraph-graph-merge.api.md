@@ -500,7 +500,7 @@ export class BranchError extends TypeGraphError {
 }
 
 // @public
-export function branchForEvolution<G extends GraphDef>(store: Store<G>, plan: EvolutionPlan, makeBackend: MakeBackend, options?: BranchOptions): Promise<Result<GraphBranch<G>, BranchError | MergePlanCapabilityError>>;
+export function branchForEvolution<G extends GraphDef>(store: Store<G>, plan: EvolutionPlan, makeBackend: MakeBackend, options?: EvolutionBranchOptions): Promise<Result<GraphBranch<G>, BranchError | MergePlanCapabilityError>>;
 
 // @public
 export type BranchId = string & Readonly<{
@@ -2414,6 +2414,11 @@ type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
+
+// @public (undocumented)
+export type EvolutionBranchOptions = BranchOptions & Readonly<{
+    revisionJournal?: false;
+}>;
 
 // @public
 type EvolutionPlan = (EvolutionPlanBase & Readonly<{

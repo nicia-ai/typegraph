@@ -257,6 +257,10 @@ include a newly added kind, call
 transaction, then add data on that isolated branch. The planner accepts
 branches from either one matching baseline; a mixed set of old-schema and
 resulting-schema forks is refused.
+Pass `{ revisionJournal: false }` as the fourth `branchForEvolution()` argument
+when its working copy does not need journal-backed changed-key lineage. The
+branch remains revision-tracked, and merge planning uses the portable diff
+when no other lineage source is available.
 
 ```typescript
 const evolutionPlan = await target.planEvolution(extension);
