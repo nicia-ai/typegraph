@@ -1779,6 +1779,16 @@ requested. The result has two outcomes:
 A thrown or uncertain native failure never falls back: the host may have applied
 part of a change, and replaying the portable plan could double-apply it.
 
+For a Doltgres strategy, pin each Store connection to the intended database
+branch. [Doltgres revision specifiers](https://www.doltgres.com/docs/reference/version-control/branches/)
+provide that connection-level selection. Its
+[`DOLT_BRANCH()` and `DOLT_MERGE()` functions](https://www.doltgres.com/docs/reference/version-control/dolt-sql-functions/)
+implicitly commit the current transaction, so a TypeGraph fence read in an
+earlier SQL transaction does not by itself protect a subsequent native merge.
+Until the strategy can prove a host-native target compare-and-swap across that
+commit boundary and exact equivalence to the approved graph plan, return
+`unsupported` and use the portable apply path.
+
 This boundary matters for whole-database branch engines. TypeGraph plans one
 graph and may canonicalize nodes, repoint edges, arbitrate conflicts, maintain
 identity state, run callbacks, or persist provenance. A raw database merge that
