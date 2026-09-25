@@ -50,6 +50,7 @@ import {
   applyMergePlan,
   asBaseVersion,
   asBranchId,
+  type BranchId,
   branchDurable,
   BranchError,
   destroyDurableBranch,
@@ -125,6 +126,7 @@ function sameOrigin(a: DurableBranchOrigin, b: DurableBranchOrigin): boolean {
   const anchor = (value: DurableBranchOrigin["schemaAnchor"]): string =>
     value === undefined ? "absent" : `${value.version}:${value.hash}`;
   return (
+    a.allocationId === b.allocationId &&
     a.graphId === b.graphId &&
     a.definitionHash === b.definitionHash &&
     a.branchId === b.branchId &&
@@ -176,6 +178,10 @@ function createFakeDurableHost(
   options: FakeDurableHostOptions = {},
 ): FakeDurableHost {
   const databases = new Map<string, Database.Database>();
+  const allocations = new Map<
+    string,
+    Readonly<{ locator: string; branchId: BranchId }>
+  >();
   const origins = new Map<string, DurableBranchOrigin>();
   const abortedLocators: string[] = [];
   let sequence = 0;
@@ -208,11 +214,16 @@ function createFakeDurableHost(
   const strategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
     type: "fake-in-memory-durable-host",
     version: 1,
-    create: async (baseStore, base) => {
+    create: async (baseStore, base, branchId, allocationId) => {
+      const existing = allocations.get(allocationId);
+      if (existing !== undefined) {
+        throw new Error("allocation id already exists; reconcile it before retrying");
+      }
       sequence += 1;
       const locator = `working-copy-${sequence}`;
       const database = new Database(":memory:");
       databases.set(locator, database);
+      allocations.set(allocationId, { locator, branchId });
       if (captureFailure !== undefined) {
         const error = captureFailure;
         captureFailure = undefined;
@@ -228,6 +239,7 @@ function createFakeDurableHost(
           }),
           descriptor: { locator },
           access: ENGINE_FENCED_ACCESS,
+          forkRevision: FIXED_REVISION,
         };
       }
       const seed = cloneWorkingCopyStrategy<G>(() =>
@@ -245,6 +257,7 @@ function createFakeDurableHost(
         store,
         descriptor: { locator },
         access: ENGINE_FENCED_ACCESS,
+        forkRevision: FIXED_REVISION,
       };
     },
     seal: async (descriptor, origin) => {
@@ -268,6 +281,10 @@ function createFakeDurableHost(
         databases.delete(descriptor.locator);
       }
       origins.delete(descriptor.locator);
+      for (const [allocationId, allocation] of allocations) {
+        if (allocation.locator === descriptor.locator)
+          allocations.delete(allocationId);
+      }
     },
     reopen: async (reopenedGraph, descriptor) => {
       const database = requireDatabase(descriptor.locator);
@@ -298,6 +315,10 @@ function createFakeDurableHost(
       database.close();
       databases.delete(descriptor.locator);
       origins.delete(descriptor.locator);
+      for (const [allocationId, allocation] of allocations) {
+        if (allocation.locator === descriptor.locator)
+          allocations.delete(allocationId);
+      }
     },
   };
 
@@ -391,7 +412,12 @@ function createFileBackedStrategy(
         Promise.resolve(openFileBackend(locator)),
       );
       const store = await seed.create(baseStore, base);
-      return { store, descriptor: locator, access: ENGINE_FENCED_ACCESS };
+      return {
+        store,
+        descriptor: locator,
+        access: ENGINE_FENCED_ACCESS,
+        forkRevision: FIXED_REVISION,
+      };
     },
     seal: async (locator, origin) => {
       await writeFile(originPathOf(locator), JSON.stringify(origin), "utf8");
@@ -505,6 +531,34 @@ describe("durable branch", () => {
     await reopened.close();
   });
 
+  it("applies a durable plan with a recorded fork point", async () => {
+    const fixture = createSqliteMergeBackend();
+    cleanups.push(fixture.cleanup);
+    const [baseStore] = await createStoreWithSchema(graph, fixture.backend, {
+      history: true,
+    });
+    const alice = await baseStore.nodes.Person.create({ name: "Alice" });
+    const created = unwrap(await branchDurable(baseStore, host.strategy));
+    await created.branch.store.nodes.Person.update(alice.id, {
+      name: "Alice (durable)",
+    });
+    const plan = unwrap(await planMerge(baseStore, [created.branch]));
+
+    const applied = await applyDurableMergePlan({
+      target: baseStore,
+      branch: created.branch,
+      descriptor: created.descriptor,
+      strategy: host.strategy,
+      plan,
+    });
+
+    expect(isOk(applied)).toBe(true);
+    expect((await baseStore.nodes.Person.getById(alice.id))?.name).toBe(
+      "Alice (durable)",
+    );
+    await created.branch.close();
+  });
+
   /**
    * A fake host whose working copies have NO active schema row — an unmanaged
    * branch, where only the graph id + definition-hash identity can fence it.
@@ -566,6 +620,26 @@ describe("durable branch", () => {
       "Bob (durable)",
     );
 
+    await reopened.close();
+  });
+
+  it("passes a readable older locator version to an upgraded strategy", async () => {
+    const { baseStore } = await seedBase();
+    const created = unwrap(await branchDurable(baseStore, host.strategy));
+    await created.branch.close();
+    const upgraded: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
+      ...host.strategy,
+      version: 2,
+      readableVersions: [1],
+      reopen: (reopenedGraph, locator, descriptorVersion) => {
+        expect(descriptorVersion).toBe(1);
+        return host.strategy.reopen(reopenedGraph, locator, descriptorVersion);
+      },
+    };
+
+    const reopened = unwrap(
+      await reopenDurableBranch(graph, created.descriptor, upgraded),
+    );
     await reopened.close();
   });
 
@@ -964,6 +1038,7 @@ describe("durable branch", () => {
     await created.branch.close();
 
     host.attest(created.descriptor.store.locator, {
+      allocationId: created.descriptor.allocationId,
       graphId: created.descriptor.graphId,
       definitionHash: created.descriptor.definitionHash,
       branchId: asBranchId("a-different-branch"),
@@ -984,6 +1059,7 @@ describe("durable branch", () => {
 
     // Restore the honest attestation; the copy itself was never touched.
     host.attest(created.descriptor.store.locator, {
+      allocationId: created.descriptor.allocationId,
       graphId: created.descriptor.graphId,
       definitionHash: created.descriptor.definitionHash,
       branchId: created.descriptor.branchId,
@@ -1345,6 +1421,43 @@ describe("durable branch", () => {
     );
     expect(isOk(destroyed)).toBe(true);
     expect(host.liveLocators()).toEqual([branchB.descriptor.store.locator]);
+  });
+
+  it("distinguishes allocations even when callers reuse the same branch id", async () => {
+    const { baseStore } = await seedBase();
+    const options = { id: asBranchId("reused-branch-id") };
+    const first = unwrap(await branchDurable(baseStore, host.strategy, options));
+    const second = unwrap(await branchDurable(baseStore, host.strategy, options));
+    expect(first.descriptor.allocationId).not.toBe(second.descriptor.allocationId);
+    await first.branch.close();
+    await second.branch.close();
+
+    const swapped = { ...first.descriptor, store: second.descriptor.store };
+    expect(isErr(await reopenDurableBranch(graph, swapped, host.strategy))).toBe(
+      true,
+    );
+    expect(isErr(await destroyDurableBranch(swapped, host.strategy))).toBe(
+      true,
+    );
+    expect(host.liveLocators()).toContain(second.descriptor.store.locator);
+  });
+
+  it("refuses a duplicate allocation id without deleting the sealed branch", async () => {
+    const { baseStore } = await seedBase();
+    const options = {
+      id: asBranchId("retry-branch"),
+      allocationId: "retry-allocation",
+    };
+    const first = unwrap(await branchDurable(baseStore, host.strategy, options));
+    await first.branch.close();
+    expect(isErr(await branchDurable(baseStore, host.strategy, options))).toBe(
+      true,
+    );
+    expect(host.liveLocators()).toContain(first.descriptor.store.locator);
+    const reopened = unwrap(
+      await reopenDurableBranch(graph, first.descriptor, host.strategy),
+    );
+    await reopened.close();
   });
 
   it("a destroyed working copy cannot be reopened even for a matching descriptor that was serialized earlier", async () => {

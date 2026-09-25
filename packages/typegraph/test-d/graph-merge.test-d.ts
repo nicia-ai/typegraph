@@ -20,6 +20,7 @@ import {
   type EntityResolution,
   destroyDurableBranch,
   type DurableBranchDescriptor,
+  type DurableGraphBranch,
   type DurableWorkingCopyStrategy,
   type GraphBranch,
   type MakeBackend,
@@ -116,18 +117,19 @@ declare const durableStrategy: DurableWorkingCopyStrategy<
   typeof graph,
   Readonly<{ branchName: string }>
 >;
+declare const durableBranch: DurableGraphBranch<typeof graph>;
 expectType<
   Promise<
     Result<
       Readonly<{
-        branch: GraphBranch<typeof graph>;
+        branch: DurableGraphBranch<typeof graph>;
         descriptor: DurableBranchDescriptor<Readonly<{ branchName: string }>>;
       }>,
       BranchError
     >
   >
 >(branchDurable(store, durableStrategy));
-expectType<Promise<Result<GraphBranch<typeof graph>, BranchError>>>(
+expectType<Promise<Result<DurableGraphBranch<typeof graph>, BranchError>>>(
   reopenDurableBranch(graph, durableDescriptor, durableStrategy),
 );
 expectType<Promise<Result<void, BranchError>>>(
@@ -155,7 +157,7 @@ expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
 expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
   applyDurableMergePlan({
     target: store,
-    branch: branches[0]!,
+    branch: durableBranch,
     descriptor: durableDescriptor,
     strategy: durableStrategy,
     plan: mergePlan,

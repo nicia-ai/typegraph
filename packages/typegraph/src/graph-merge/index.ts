@@ -46,6 +46,8 @@ export {
 export type {
   DurableBranch,
   DurableBranchDescriptor,
+  DurableBranchOptions,
+  DurableGraphBranch,
   DurableBranchOrigin,
   DurableStoreDescriptor,
   DurableWorkingCopyAccess,

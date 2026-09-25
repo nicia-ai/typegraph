@@ -12,6 +12,7 @@
 import type { MergePlanApplyOptions } from "./apply-callbacks";
 import type {
   DurableBranchDescriptor,
+  DurableGraphBranch,
   DurableStoreDescriptor,
   DurableWorkingCopyStrategy,
   NativeDurableMergeResult,
@@ -32,7 +33,7 @@ import type { Result } from "./result";
 import { err, ok } from "./result";
 import type { GraphDef, Store } from "./typegraph-internal";
 import { getGraphDefinitionHash } from "./typegraph-internal";
-import type { GraphBranch, MergeReport } from "./types";
+import type { MergeReport } from "./types";
 
 /** Arguments for {@link applyDurableMergePlan}. */
 export type ApplyDurableMergePlanArgs<
@@ -40,7 +41,7 @@ export type ApplyDurableMergePlanArgs<
   TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor,
 > = Readonly<{
   target: Store<G>;
-  branch: GraphBranch<G>;
+  branch: DurableGraphBranch<G>;
   descriptor: DurableBranchDescriptor<TStoreDescriptor>;
   strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>;
   plan: MergePlanArtifact;
@@ -77,12 +78,14 @@ export async function applyDurableMergePlan<
   try {
     artifact = await validateMergePlanForTarget(target, plan);
     const branchOrigin = {
+      allocationId: branch.allocationId,
       graphId: branch.store.graphId,
       definitionHash: await getGraphDefinitionHash(branch.store.graph),
       branchId: branch.id,
       base: branch.base,
       schemaAnchor: branch.schemaAnchor,
       forkRevision: branch.forkRevision,
+      recordedForkPoint: branch.recordedForkPoint,
     };
     if (!durableOriginsEqual(branchOrigin, descriptorOrigin)) {
       throw new MergeError(
@@ -124,6 +127,7 @@ export async function applyDurableMergePlan<
       target,
       branch,
       descriptor: descriptor.store,
+      descriptorVersion: descriptor.version,
       expectedOrigin: descriptorOrigin,
       plan: artifact,
     });

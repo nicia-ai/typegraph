@@ -137,7 +137,7 @@ export function applyDurableMergePlan<G extends GraphDef, TStoreDescriptor exten
 // @public
 export type ApplyDurableMergePlanArgs<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
     target: Store<G>;
-    branch: GraphBranch<G>;
+    branch: DurableGraphBranch<G>;
     descriptor: DurableBranchDescriptor<TStoreDescriptor>;
     strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>;
     plan: MergePlanArtifact;
@@ -492,7 +492,7 @@ type BooleanFieldAccessor<T extends boolean = boolean> = BaseFieldAccessor<T>;
 export function branch<G extends GraphDef>(baseStore: GraphBranch<G>["store"], makeBackend: MakeBackend, options?: BranchOptions, strategy?: WorkingCopyStrategy<G>): Promise<Result<GraphBranch<G>, BranchError>>;
 
 // @public
-export function branchDurable<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(baseStore: Store<G>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>, options?: BranchOptions): Promise<Result<DurableBranch<G, TStoreDescriptor>, BranchError>>;
+export function branchDurable<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(baseStore: Store<G>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>, options?: DurableBranchOptions): Promise<Result<DurableBranch<G, TStoreDescriptor>, BranchError>>;
 
 // @public
 export class BranchError extends TypeGraphError {
@@ -1561,8 +1561,13 @@ export const DURABLE_OPERATION_SCAN_MAX_LIMIT = 1000;
 
 // @public
 export type DurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
-    branch: GraphBranch<G>;
+    branch: DurableGraphBranch<G>;
     descriptor: DurableBranchDescriptor<TStoreDescriptor>;
+}>;
+
+// @public
+export type DurableBranchOptions = BranchOptions & Readonly<{
+    allocationId?: string | undefined;
 }>;
 
 // @public
@@ -1573,6 +1578,7 @@ export type DurableBranchCoordinates = Readonly<{
 
 // @public
 export type DurableBranchDescriptor<TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
+    allocationId: string;
     kind: string;
     version: number;
     graphId: string;
@@ -1619,6 +1625,7 @@ export type DurableBranchOperationRequest = Readonly<{
 
 // @public
 export type DurableBranchOrigin = Readonly<{
+    allocationId: string;
     graphId: string;
     definitionHash: string;
     branchId: BranchId;
@@ -1635,6 +1642,7 @@ export type DurableBranchOrigin = Readonly<{
 export function durableDescriptorRefusal(descriptor: unknown, strategy: Readonly<{
     type: string;
     version: number;
+    readableVersions?: readonly number[] | undefined;
 }>): BranchError | undefined;
 
 // @public
@@ -1650,30 +1658,40 @@ export class DurableEvidenceUndeliveredError extends BranchError {
 }
 
 // @public
+export type DurableGraphBranch<G extends GraphDef> = GraphBranch<G> & Readonly<{
+    allocationId: string;
+}>;
+
+// @public
 export type DurableOperationCapability<TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
     operate: (args: Readonly<{
         descriptor: TStoreDescriptor;
+        descriptorVersion: number;
         expectedOrigin: DurableBranchOrigin;
         request: DurableBranchOperation;
     }>) => Promise<DurableOperationOutcome>;
     get: (args: Readonly<{
         descriptor: TStoreDescriptor;
+        descriptorVersion: number;
         expectedOrigin: DurableBranchOrigin;
         idempotencyKey: string;
     }>) => Promise<DurableBranchOperationEvidence | undefined>;
     scan: (args: Readonly<{
         descriptor: TStoreDescriptor;
+        descriptorVersion: number;
         expectedOrigin: DurableBranchOrigin;
         after?: string | undefined;
         limit: number;
     }>) => Promise<DurableOperationScan>;
     markDelivered: (args: Readonly<{
         descriptor: TStoreDescriptor;
+        descriptorVersion: number;
         expectedOrigin: DurableBranchOrigin;
         idempotencyKey: string;
     }>) => Promise<DurableBranchOperationEvidence | undefined>;
     hasUndelivered: (args: Readonly<{
         descriptor: TStoreDescriptor;
+        descriptorVersion: number;
         expectedOrigin: DurableBranchOrigin;
     }>) => Promise<boolean>;
 }>;
@@ -1726,6 +1744,7 @@ export class DurableOperationRequestError extends DurableOperationError {
 export type DurableOperationScan = Readonly<{
     operations: readonly DurableBranchOperationEvidence[];
     cursor?: string | undefined;
+    hasMore: boolean;
 }>;
 
 // @public
@@ -1762,23 +1781,26 @@ export type DurableWorkingCopyAccess = Readonly<{
 export type DurableWorkingCopyStrategy<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor> = Readonly<{
     type: string;
     version: number;
-    create: (baseStore: Store<G>, base: BaseVersion, branchId: BranchId) => Promise<Readonly<{
+    readableVersions?: readonly number[] | undefined;
+    create: (baseStore: Store<G>, base: BaseVersion, branchId: BranchId, allocationId: string) => Promise<Readonly<{
         store: Store<G>;
         descriptor: TStoreDescriptor;
         access: DurableWorkingCopyAccess;
+        forkRevision?: EngineRevision | undefined;
     }>>;
     seal: (descriptor: TStoreDescriptor, origin: DurableBranchOrigin) => Promise<void>;
     abort: (descriptor: TStoreDescriptor) => Promise<void>;
-    reopen: (graph: G, descriptor: TStoreDescriptor) => Promise<Readonly<{
+    reopen: (graph: G, descriptor: TStoreDescriptor, descriptorVersion: number) => Promise<Readonly<{
         store: Store<G>;
         origin: DurableBranchOrigin;
         access: DurableWorkingCopyAccess;
     }>>;
-    destroy: (descriptor: TStoreDescriptor, expectedOrigin: DurableBranchOrigin) => Promise<void>;
+    destroy: (descriptor: TStoreDescriptor, expectedOrigin: DurableBranchOrigin, descriptorVersion: number) => Promise<void>;
     merge?: ((args: Readonly<{
         target: Store<G>;
-        branch: GraphBranch<G>;
+        branch: DurableGraphBranch<G>;
         descriptor: TStoreDescriptor;
+        descriptorVersion: number;
         expectedOrigin: DurableBranchOrigin;
         plan: MergePlanArtifactV1;
     }>) => Promise<NativeDurableMergeResult>) | undefined;
@@ -6717,7 +6739,7 @@ type ReleaseIndexMaterializationClaimParams = Readonly<{
 type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
 
 // @public
-export function reopenDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(graph: G, descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>): Promise<Result<GraphBranch<G>, BranchError>>;
+export function reopenDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(graph: G, descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>): Promise<Result<DurableGraphBranch<G>, BranchError>>;
 
 // @public
 type ReportNodeIdentity = Readonly<{

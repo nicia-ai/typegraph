@@ -1662,6 +1662,14 @@ returns a non-secret JSON locator. TypeGraph seals the immutable fork origin
 beside that allocation and returns a `DurableBranchDescriptor` that can cross a
 queue, process, deployment, or machine boundary.
 
+For a remote host, persist a chosen `{ id, allocationId }` before calling
+`branchDurable(base, strategy, { id, allocationId })`. `create()` receives both
+and must refuse an allocation ID that may already exist. If the host allocates
+a branch but its response is lost, use host tooling to inspect the ID and
+recover or remove the allocation before retrying. A failed create reports both
+IDs for that reconciliation. The host must never allocate a second physical
+copy for the same ID or return a sealed copy as though it were new.
+
 ```typescript
 import {
   applyDurableMergePlan,
@@ -1706,9 +1714,15 @@ Closing and destroying are deliberately separate. `GraphBranch.close()` closes
 the backend and releases its access lease, but leaves the persistent allocation
 reopenable. `destroyDurableBranch()` asks the strategy to attest the complete
 origin and delete or archive that allocation atomically. A descriptor is
-untrusted input: TypeGraph checks its graph definition, branch id, base token,
-schema anchor, and engine revision against the origin the host sealed. Swapping
-or relabeling a locator cannot authorize deletion of another allocation.
+untrusted input: TypeGraph checks its allocation id, graph definition, branch
+id, base token, schema anchor, and engine revision against the origin the host
+sealed. The allocation id is independent of the caller's branch id, so
+swapping or relabeling a locator cannot authorize deletion of another copy
+even when two copies were given the same branch id.
+
+Strategies write new locators using `version` and may list older supported
+locator versions in `readableVersions`. Every method must understand each
+listed version, including destroy and evidence access.
 
 The strategy locator must be JSON-safe and **must not contain secrets**. Use a
 branch id, database id, or other lookup key, then resolve credentials from
@@ -1727,6 +1741,10 @@ equivalent persistent copy with an independent revision namespace, TypeGraph
 instead verifies that its complete merge-visible graph state has no delta from
 the source, fencing the source again after enumeration. The host remains
 responsible for physical fidelity outside TypeGraph's graph semantics.
+To enable lineage-pruned merge diffs, `create()` may return `forkRevision`
+captured atomically with the physical fork. When it cannot prove that cut, omit
+the revision and TypeGraph compares the complete graph state; reading a later
+revision after the copy was opened could miss an intervening branch write.
 
 Every `create()` and `reopen()` also returns a `DurableWorkingCopyAccess`:
 
@@ -1846,9 +1864,10 @@ host outcome envelope: malformed outcomes and empty, duplicate, or unknown
 - `getDurableOperation(descriptor, strategy, idempotencyKey)` reads one
   operation's evidence, or `undefined` when it was never committed.
 - `scanDurableOperations(descriptor, strategy, { after?, limit? })` returns
-  `{ operations, cursor }` in the strategy's stable total order (commit order,
-  ties broken deterministically). Pass the opaque `cursor` back as `after` to
-  resume; an absent `cursor` means the scan reached the end. `limit` defaults to
+  `{ operations, cursor, hasMore }` in monotonic commit order, with ties broken
+  deterministically. Pass the opaque `cursor` back as `after` to resume, even
+  after `hasMore: false`; later commits must sort after that cursor. An empty
+  page echoes `after`, and only an empty initial scan omits `cursor`. `limit` defaults to
   `DURABLE_OPERATION_SCAN_DEFAULT_LIMIT` (100) and may not exceed
   `DURABLE_OPERATION_SCAN_MAX_LIMIT` (1000); a larger page is refused.
 - `markDurableOperationDelivered(descriptor, strategy, idempotencyKey)` marks
