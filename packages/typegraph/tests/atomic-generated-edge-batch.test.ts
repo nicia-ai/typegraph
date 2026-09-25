@@ -23,6 +23,7 @@ import {
 import { markBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { edgeMatchIdentityUniqueIndexName } from "../src/backend/drizzle/ddl";
+import { detectLibsqlTransactionMode } from "../src/backend/drizzle/libsql-client";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
@@ -160,7 +161,10 @@ async function createChunkedLibsqlBackend(
   await initialized.backend.close();
   return createSqliteBackend(initialized.db, {
     capabilities: { maxBindParameters: 100 },
-    executionProfile: { isSync: false, transactionMode: "sql" },
+    executionProfile: {
+      isSync: false,
+      transactionMode: await detectLibsqlTransactionMode(client),
+    },
   });
 }
 
@@ -1168,7 +1172,10 @@ describe("generated edge batch store consumer", () => {
     const installed = await createLibsqlBackend(client);
     const backend = createSqliteBackend(installed.db, {
       capabilities: { maxBindParameters: 9 },
-      executionProfile: { isSync: false, transactionMode: "sql" },
+      executionProfile: {
+        isSync: false,
+        transactionMode: await detectLibsqlTransactionMode(client),
+      },
     });
     try {
       const [store] = await createStoreWithSchema(deleteRollbackGraph, backend);
