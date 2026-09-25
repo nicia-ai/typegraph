@@ -39,6 +39,17 @@ const vectorGraph = defineGraph({
   edges: {},
   indexes: [defineNodeIndex(Doc, { name: "doc_title_idx", fields: ["title"] })],
 });
+const ClusteredDoc = defineNode("ClusteredDoc", {
+  schema: z.object({
+    title: z.string(),
+    embedding: embedding(3, { indexType: "ivfflat", lists: 1 }),
+  }),
+});
+const clusteredGraph = defineGraph({
+  id: "namespace-fork-ivfflat",
+  nodes: { ClusteredDoc: { type: ClusteredDoc } },
+  edges: {},
+});
 const QUERY = [1, 0, 0];
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -390,9 +401,119 @@ describe("forkGraphNamespace with pgvector storage", () => {
 
     await expect(
       prepareNamespaceForkTarget(source, vectorless.backend),
-    ).rejects.toThrow("needs pgvector storage");
+    ).rejects.toThrow("same vector storage");
     await expect(
-      forkGraphNamespace(source, vectorless.backend, "vectorless"),
-    ).rejects.toThrow("needs pgvector storage");
+      forkGraphNamespace(source, vectorless.backend, "vectorless-target"),
+    ).rejects.toThrow("same vector storage");
+  });
+
+  it("refuses a source opened without vector storage, whose vector tables were never written", async () => {
+    const sourceFixture = await createLocalPgliteBackend({ vector: false });
+    const targetFixture = await createLocalPgliteBackend();
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    const [source] = await createStoreWithSchema(
+      vectorGraph,
+      sourceFixture.backend,
+      { history: true },
+    );
+    await source.nodes.Doc.create({ title: "near", embedding: [0.9, 0.1, 0] });
+
+    await expect(
+      prepareNamespaceForkTarget(source, targetFixture.backend),
+    ).rejects.toThrow("the source has none and the target has pgvector");
+    await expect(
+      forkGraphNamespace(source, targetFixture.backend, "vectorless-source"),
+    ).rejects.toThrow("the source has none and the target has pgvector");
+  });
+
+  it("forks between two vector-disabled backends, keeping embeddings in properties", async () => {
+    const sourceFixture = await createLocalPgliteBackend({ vector: false });
+    const targetFixture = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    const [source] = await createStoreWithSchema(
+      vectorGraph,
+      sourceFixture.backend,
+      { history: true },
+    );
+    const near = await source.nodes.Doc.create({
+      title: "near",
+      embedding: [0.9, 0.1, 0],
+    });
+
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    const fork = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "both-vectorless",
+    );
+
+    expect((await fork.store.nodes.Doc.getById(near.id))?.embedding).toEqual(
+      near.embedding,
+    );
+  });
+});
+
+describe("forkGraphNamespace with an IVFFlat index", () => {
+  async function ivfflatIndexes(
+    client: Awaited<ReturnType<typeof createLocalPgliteBackend>>["client"],
+  ): Promise<readonly string[]> {
+    const rows = await client.query<{ indexname: string }>(
+      "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexdef ILIKE '%USING ivfflat%'",
+    );
+    return rows.rows.map((row) => row.indexname);
+  }
+
+  async function recordedIvfflat(
+    client: Awaited<ReturnType<typeof createLocalPgliteBackend>>["client"],
+  ): Promise<number> {
+    const rows = await client.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM typegraph_index_materializations WHERE graph_id = 'namespace-fork-ivfflat' AND entity = 'vector'",
+    );
+    return Number(rows.rows[0]?.count);
+  }
+
+  it("builds IVFFlat after the copy, and a later materialization keeps retries verifiable", async () => {
+    const sourceFixture = await createLocalPgliteBackend();
+    const targetFixture = await createLocalPgliteBackend();
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    const [source] = await createStoreWithSchema(
+      clusteredGraph,
+      sourceFixture.backend,
+      { history: true },
+    );
+    await source.nodes.ClusteredDoc.create({
+      title: "near",
+      embedding: [0.9, 0.1, 0],
+    });
+    await source.nodes.ClusteredDoc.create({
+      title: "far",
+      embedding: [0, 0, 1],
+    });
+    await source.materializeIndexes();
+    expect(await ivfflatIndexes(sourceFixture.client)).toHaveLength(1);
+
+    await prepareNamespaceForkTarget(source, targetFixture.backend);
+    expect(await ivfflatIndexes(targetFixture.client)).toEqual([]);
+    const fork = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "ivfflat-fork",
+    );
+    expect(await recordedIvfflat(targetFixture.client)).toBe(0);
+
+    const materialized = await fork.store.materializeIndexes();
+    expect(
+      materialized.results.find((entry) => entry.entity === "vector")?.status,
+    ).toBe("created");
+    expect(await ivfflatIndexes(targetFixture.client)).toHaveLength(1);
+    expect(await recordedIvfflat(targetFixture.client)).toBe(1);
+
+    const retry = await forkGraphNamespace(
+      source,
+      targetFixture.backend,
+      "ivfflat-fork",
+    );
+    expect(retry.proof).toEqual(fork.proof);
+    await retry.abort();
   });
 });

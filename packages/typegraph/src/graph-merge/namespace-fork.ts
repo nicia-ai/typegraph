@@ -152,18 +152,24 @@ function vectorRelations(graph: GraphDef): readonly string[] {
   );
 }
 
-/** A graph with embedding fields forks only between pgvector backends. */
-function assertVectorStorage(
+/**
+ * A graph with embedding fields forks only between backends with the same
+ * vector storage: pgvector on both sides, or vector support disabled on both,
+ * where embeddings live only in node properties. A vector-disabled source
+ * never wrote the vector tables a pgvector target would search, and a
+ * pgvector source's tables have nowhere to go on a vector-disabled target.
+ */
+function assertMatchingVectorStorage(
   graph: GraphDef,
-  backend: GraphBackend,
-  role: "source" | "target",
+  sourceBackend: GraphBackend,
+  targetBackend: GraphBackend,
 ): void {
-  if (
-    resolveGraphVectorSlots(graph).length > 0 &&
-    vectorStorageOf(backend) !== "pgvector"
-  ) {
+  if (resolveGraphVectorSlots(graph).length === 0) return;
+  const source = vectorStorageOf(sourceBackend);
+  const target = vectorStorageOf(targetBackend);
+  if (source !== target) {
     throw new BranchError(
-      `Namespace fork ${role} needs pgvector storage for this graph's embedding fields; open it without \`vector: false\`.`,
+      `Namespace fork needs the same vector storage on source and target for this graph's embedding fields; the source has ${source} and the target has ${target}.`,
     );
   }
 }
@@ -248,10 +254,8 @@ async function digestGraph(
 ): Promise<string> {
   const digests: [string, string][] = [];
   for (const table of GRAPH_RELATIONS) {
-    digests.push([
-      table,
-      await digestRows(await graphRows(session, table, graph.id)),
-    ]);
+    const rows = await graphRows(session, table, graph.id);
+    digests.push([table, await digestRows(forkedRows(graph, table, rows))]);
   }
   for (const [table, rows] of await vectorGraphRows(
     session,
@@ -285,17 +289,54 @@ function vectorIndexSlot(
   return slot;
 }
 
-function materializedIndexes(
+function declarationsByStatusKey(
   graph: GraphDef,
-  rows: readonly JsonRow[],
-): readonly MaterializedIndex[] {
-  const declarations = new Map(
+): ReadonlyMap<string, IndexDeclaration> {
+  return new Map(
     (graph.indexes ?? []).map((declaration) => [
       indexMaterializationStatusKey(declaration, graph.id),
       declaration,
     ]),
   );
-  return rows
+}
+
+/**
+ * IVFFlat clusters the rows present when it is built, so an IVFFlat index
+ * built on an empty target table has poor recall. It is built after the copy
+ * instead, by `materializeIndexes()` on the forked store.
+ */
+function isBuiltAfterCopy(declaration: IndexDeclaration): boolean {
+  return declaration.entity === "vector" && declaration.indexType === "ivfflat";
+}
+
+/**
+ * The rows of `table` a fork carries to the target. Materialization records
+ * for indexes built after the copy stay behind: the target records its own
+ * when `materializeIndexes()` builds them. Copy and digest both go through
+ * here, so a record the target writes later never changes the digest that
+ * retries and `abort()` verify.
+ */
+function forkedRows(
+  graph: GraphDef,
+  table: string,
+  rows: readonly JsonRow[],
+): readonly JsonRow[] {
+  if (table !== "typegraph_index_materializations") return rows;
+  const declarations = declarationsByStatusKey(graph);
+  return rows.filter((row) => {
+    const statusKey = row["index_name"];
+    const declaration =
+      typeof statusKey === "string" ? declarations.get(statusKey) : undefined;
+    return declaration === undefined || !isBuiltAfterCopy(declaration);
+  });
+}
+
+function materializedIndexes(
+  graph: GraphDef,
+  rows: readonly JsonRow[],
+): readonly MaterializedIndex[] {
+  const declarations = declarationsByStatusKey(graph);
+  return forkedRows(graph, "typegraph_index_materializations", rows)
     .filter((row) => row["materialized_at"] !== null)
     .map((row) => {
       const statusKey = row["index_name"];
@@ -562,16 +603,22 @@ async function assertIndependentDatabase(
  * Prepares a private target to receive `source`'s graph, with an owner
  * connection, before any runtime fork. Installs the retry ledger, creates the
  * graph's pgvector tables, and builds every index the source has materialized
- * for the graph, relational and ANN alike, with the DDL the source used. It
- * writes no graph rows and no materialization records: the fork copies those,
- * and refuses a target that already has any. Idempotent.
+ * for the graph with the DDL the source used, except IVFFlat indexes, which
+ * need the copied rows and are built afterwards by `materializeIndexes()` on
+ * the forked store. It writes no graph rows and no materialization records:
+ * the fork copies those, and refuses a target that already has any.
+ * Idempotent.
  */
 export async function prepareNamespaceForkTarget<G extends GraphDef>(
   source: Store<G>,
   targetBackend: GraphBackend,
 ): Promise<void> {
+  const sourceBackend = backendDerivationRoot(
+    storeBackend(source),
+  ) as GraphBackend;
+  assertDefaultTables(sourceBackend);
   assertDefaultTables(targetBackend);
-  assertVectorStorage(source.graph, targetBackend, "target");
+  assertMatchingVectorStorage(source.graph, sourceBackend, targetBackend);
   const executeDdl = targetBackend.executeDdl;
   if (executeDdl === undefined)
     throw new BranchError(
@@ -581,16 +628,17 @@ export async function prepareNamespaceForkTarget<G extends GraphDef>(
     operation_key text PRIMARY KEY, graph_id text NOT NULL, source_base text NOT NULL,
     content_digest text NOT NULL, copied_at timestamptz NOT NULL DEFAULT now())`);
 
-  for (const slot of resolveGraphVectorSlots(source.graph)) {
+  const slots =
+    vectorStorageOf(targetBackend) === "pgvector" ?
+      resolveGraphVectorSlots(source.graph)
+    : [];
+  for (const slot of slots) {
     for (const contribution of pgvectorStrategy.ownedTables(slot)) {
       for (const statement of contribution.createDdl)
         await executeDdl(statement);
     }
   }
 
-  const sourceBackend = backendDerivationRoot(
-    storeBackend(source),
-  ) as GraphBackend;
   const recorded = await graphRows(
     sourceBackend,
     "typegraph_index_materializations",
@@ -659,7 +707,7 @@ export async function forkGraphNamespace<G extends GraphDef>(
   ) as GraphBackend;
   assertDefaultTables(sourceBackend);
   assertDefaultTables(targetBackend);
-  assertVectorStorage(source.graph, targetBackend, "target");
+  assertMatchingVectorStorage(source.graph, sourceBackend, targetBackend);
   assertDefaultNameMap(source.revisionSchema.tables);
   const targetStore = createStore(
     source.graph,
@@ -751,7 +799,11 @@ export async function forkGraphNamespace<G extends GraphDef>(
         const sourceDigests: [string, string][] = [];
         for (const table of GRAPH_RELATIONS) {
           if (table === REVISION_CHANGES_TABLE) continue;
-          const rows = await graphRows(sourceTx, table, source.graphId);
+          const rows = forkedRows(
+            source.graph,
+            table,
+            await graphRows(sourceTx, table, source.graphId),
+          );
           if (table === "typegraph_contribution_materializations")
             await assertSupportedContributions(targetTx, source.graph, rows);
           if (table === "typegraph_index_materializations")

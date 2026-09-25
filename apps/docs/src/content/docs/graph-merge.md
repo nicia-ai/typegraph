@@ -2164,6 +2164,8 @@ import {
 // Run with the schema owner role before the runtime fork.
 await prepareNamespaceForkTarget(sourceStore, privateBackend);
 const fork = await forkGraphNamespace(sourceStore, privateBackend, "restore-42");
+// Owner role again: builds IVFFlat indexes over the copied rows.
+await fork.store.materializeIndexes();
 const historical = await fork.store
   .asOfRecorded(receipt.recorded)
   .nodes.Item.getById(receipt.itemId);
@@ -2180,10 +2182,15 @@ a connection to the source database, including an aliased backend object.
 `prepareNamespaceForkTarget()` is the owner-side step, and the fork itself
 issues no DDL. It installs the retry ledger, creates the graph's per-field
 pgvector tables, and builds every index the source has materialized for the
-graph, relational and ANN alike, with the DDL the source used. It writes no
-graph rows and no materialization records, so it can run before the target is
-empty-checked, and running it again is harmless. Indexes whose build never
-completed on the source are neither built nor required. The target stays private
+graph with the DDL the source used. It writes no graph rows and no
+materialization records, so it can run before the target is empty-checked,
+and running it again is harmless. Indexes whose build never completed on the
+source are neither built nor required. IVFFlat indexes are the exception:
+IVFFlat clusters the rows present when it is built, so building one on an
+empty table gives poor recall. They are not built by preparation and their
+materialization records are not copied; run `fork.store.materializeIndexes()`
+after the fork to build them over the copied rows. Every other index the fork
+carried is already recorded, so that call only builds the IVFFlat ones. The target stays private
 until the caller changes its own placement pointer;
 TypeGraph does not publish it. `abort()` atomically removes the copied graph
 and operation marker while preserving unrelated namespaces, and refuses if the
@@ -2195,8 +2202,10 @@ This first-party copy supports the bundled PostgreSQL table layout, bundled
 `pgvector` embedding storage, and default `tsvector` fulltext storage.
 Embeddings are copied, digested, and verified like every other graph relation,
 and `abort()` removes them. A graph with embedding fields forks only between
-backends that both use pgvector; a backend opened with `vector: false` is
-refused. The fork refuses custom table mappings, custom vector or fulltext
+backends with the same vector storage: pgvector on both sides, or
+`vector: false` on both, where embeddings live only in node properties. A
+vector-disabled source never wrote the vector tables a pgvector target would
+search, so that pair is refused. The fork refuses custom table mappings, custom vector or fulltext
 strategies, and contribution-owned tables it cannot copy and validate. The
 current copy buffers one relation at a time and
 inserts rows in bounded batches, so operators should size the private copy
