@@ -21,6 +21,7 @@ import {
   resolveBundledRootAtomicNodeBatch,
   withAtomicMutationProgramDispatchObserver,
 } from "../src/backend/capabilities/atomic-mutation-program";
+import { detectLibsqlTransactionMode } from "../src/backend/drizzle/libsql-client";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
@@ -226,7 +227,10 @@ async function createFallbackFixture(maxBindParameters?: number) {
       installed.backend
     : createSqliteBackend(installed.db, {
         capabilities: { maxBindParameters },
-        executionProfile: { isSync: false, transactionMode: "sql" },
+        executionProfile: {
+          isSync: false,
+          transactionMode: await detectLibsqlTransactionMode(client),
+        },
         vector: libsqlVectorStrategy,
       });
   const { db } = installed;
@@ -298,7 +302,10 @@ describe("plain node batch store contract", () => {
     const installed = await createLibsqlBackend(client);
     const backend = createSqliteBackend(installed.db, {
       capabilities: { maxBindParameters: 7 },
-      executionProfile: { isSync: false, transactionMode: "sql" },
+      executionProfile: {
+        isSync: false,
+        transactionMode: await detectLibsqlTransactionMode(client),
+      },
     });
     try {
       const [store] = await createStoreWithSchema(deleteGraph, backend);

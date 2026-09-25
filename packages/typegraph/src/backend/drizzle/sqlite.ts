@@ -1181,8 +1181,9 @@ function createSqliteOperationBackend(
 }
 
 /**
- * Whether a driver client is a LOCAL `@libsql/client`: one stable connection
- * that every statement from every wrapper over it runs on, in order.
+ * Whether a driver client is a LOCAL `@libsql/client`: before 0.18, one stable
+ * connection that every statement from every wrapper over it runs on, in
+ * order; from 0.18, a small pool of connections to one local database.
  *
  * `protocol === "file"` is the client's own answer to "am I local?" — it covers
  * `file:` paths, `:memory:` databases, and an embedded replica's local file. An
@@ -1198,10 +1199,13 @@ function createSqliteOperationBackend(
  * `protocol: "file"` is not adopted, and none of it imports `@libsql/client`,
  * which this bundler-friendly module must not depend on.
  *
- * Single owner of the local/remote distinction: `../sqlite/libsql.ts` picks its
- * transaction framing (raw BEGIN/COMMIT on the one local connection vs Drizzle's
- * per-stream `db.transaction()`) by asking here, so the framing and the
- * serialized-resource mark cannot drift apart.
+ * Single owner of the local/remote distinction. `detectLibsqlTransactionMode`
+ * asks here before probing a local client for whether raw BEGIN/COMMIT can
+ * span its `execute()` calls; remote clients always use Drizzle's per-stream
+ * `db.transaction()`. The serialized-resource mark stays on every local
+ * client, pooled or not: an in-memory database or embedded replica is still
+ * one connection, and for a pooled file the mark refuses concurrent streams
+ * conservatively rather than risk one waiting on the other's lock.
  */
 export { isLocalLibsqlClient } from "./libsql-client";
 
@@ -1228,11 +1232,11 @@ export { isLocalLibsqlClient } from "./libsql-client";
  *   `capabilities.execution.interactiveTransactions: true` nothing else abstains for it. Identified by
  *   {@link getDurableObjectStorageClient}, the same full-shape evidence the
  *   transaction runner requires, so the framing and the mark cannot drift apart.
- * - **a local `@libsql/client`**: also one stable connection — which is exactly
- *   why local clients frame transactions as raw BEGIN/COMMIT on it (see
- *   {@link isLocalLibsqlClient}). libsql clients expose no `prepare`, so no
- *   prepare-capable predicate can see them and the driver client is read
- *   directly here.
+ * - **a local `@libsql/client`**: one stable connection before 0.18, and still
+ *   one for in-memory databases and embedded replicas after it (see
+ *   {@link isLocalLibsqlClient} for why pooled files stay marked). libsql
+ *   clients expose no `prepare`, so no prepare-capable predicate can see them
+ *   and the driver client is read directly here.
  *
  * Unrecognized clients stay unmarked: SEPARATE connections to the same file are
  * genuinely concurrent under WAL and must not be treated as one serialized
@@ -1255,7 +1259,7 @@ function getSerializedSqliteConnection(
   // same `ctx.storage` shares its one connection and its ambient transaction.
   const storageClient = getDurableObjectStorageClient(db);
   if (storageClient !== undefined) return storageClient;
-  return isLocalLibsqlClient(client) ? (client as object) : undefined;
+  return isLocalLibsqlClient(client) ? (client) : undefined;
 }
 
 /**
@@ -2155,10 +2159,11 @@ export function buildSqliteEngineProfile(
               // with manual BEGIN/COMMIT on the *outer* `db`, so it must
               // reuse that connection's already-built `executionAdapter`
               // rather than synthesize a fresh one for a distinct handle.
-              // Serves sync drivers AND local libsql connections: both keep
-              // one stable connection, where raw BEGIN/COMMIT composes and
-              // Drizzle's `db.transaction()` (which for libsql abandons the
-              // client's connection — fatal for `:memory:`) must be avoided.
+              // Serves sync drivers AND local libsql clients before 0.18:
+              // both keep one stable connection, where raw BEGIN/COMMIT
+              // composes and Drizzle's `db.transaction()` (which for those
+              // libsql clients abandons the client's connection — fatal for
+              // `:memory:`) must be avoided.
               const txBackend = createTransactionBackend({
                 capabilities,
                 db,
