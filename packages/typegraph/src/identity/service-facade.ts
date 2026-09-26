@@ -83,11 +83,11 @@ import {
   type IdentityAssertionResult,
   type IdentityClassPage,
   type IdentityClassPageOptions,
-  type IdentityFacade,
   type IdentityNodeRefInput,
-  type IdentityReadFacade,
+  type IdentityReadSurface,
   type IdentityRelation,
   type IdentitySamePathStep,
+  type IdentitySurface,
   type IdentityValidityWindow,
 } from "./types";
 import {
@@ -762,7 +762,7 @@ async function loadCurrentIdentityClassPage<G extends GraphDef>(
 
 export function createIdentityReadFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
-): IdentityReadFacade<G> {
+): IdentityReadSurface<G> {
   return {
     async classes(options: IdentityClassPageOptions) {
       if (!Number.isSafeInteger(options.limit) || options.limit < 1)
@@ -1145,7 +1145,7 @@ export function partitionRetractedEndpoints(
 
 export function createIdentityFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
-): IdentityFacade<G> {
+): IdentitySurface<G> {
   return {
     ...createIdentityReadFacade(ctx),
 

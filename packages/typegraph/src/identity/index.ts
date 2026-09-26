@@ -13,8 +13,10 @@ export type {
   IdentityNodeRefInput,
   IdentityPair,
   IdentityReadFacade,
+  IdentityReadSurface,
   IdentityRelation,
   IdentitySamePathStep,
+  IdentitySurface,
   IdentityValidityWindow,
   IdentityWriteSummary,
 } from "./types";

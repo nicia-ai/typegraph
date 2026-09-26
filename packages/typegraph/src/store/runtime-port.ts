@@ -24,7 +24,7 @@ import {
   type NodeType,
 } from "../core/types";
 import { ConfigurationError } from "../errors";
-import { type IdentityReadFacade } from "../identity/types";
+import { type IdentityReadSurface } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { type RecordedReadBinding } from "../query/compiler/schema";
 import type { EvolutionPlan } from "../schema/evolution-plan";
@@ -155,7 +155,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   algorithmsAtCoordinate: (
     coordinate: ReadCoordinate,
   ) => InternalGraphAlgorithms<G>;
-  identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
+  identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadSurface<G>;
   rebuildIdentityClosure: () => Promise<void>;
   validateIdentity: () => Promise<void>;
   /**
