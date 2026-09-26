@@ -643,25 +643,11 @@ describe("durable branch", () => {
     await reopened.close();
   });
 
-  it("uses an authoritative native merge result when the strategy proves the complete plan", async () => {
+  it("applies a durable plan through the target transaction", async () => {
     const { baseStore, aliceId } = await seedBase();
-    let nativeCalls = 0;
-    const nativeStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
-      ...host.strategy,
-      merge: async ({ target, plan }) => {
-        nativeCalls += 1;
-        // The fake host has no native SQL primitive, so its authoritative test
-        // command delegates to the same exact-plan applier and reports what it
-        // actually committed. A database-native strategy replaces this body
-        // with its own diff-equivalence proof and merge primitive.
-        const applied = await applyMergePlan(target, plan);
-        if (isErr(applied)) throw applied.error;
-        return { outcome: "applied", merged: applied.data.merged };
-      },
-    };
-    const created = unwrap(await branchDurable(baseStore, nativeStrategy));
+    const created = unwrap(await branchDurable(baseStore, host.strategy));
     await created.branch.store.nodes.Person.update(aliceId, {
-      name: "native",
+      name: "portable",
     });
     const plan = unwrap(await planMerge(baseStore, [created.branch]));
 
@@ -669,79 +655,38 @@ describe("durable branch", () => {
       target: baseStore,
       branch: created.branch,
       descriptor: created.descriptor,
-      strategy: nativeStrategy,
+      strategy: host.strategy,
       plan,
     });
 
     expect(isOk(applied)).toBe(true);
-    expect(nativeCalls).toBe(1);
     expect((await baseStore.nodes.Person.getById(aliceId))?.name).toBe(
-      "native",
+      "portable",
     );
     await created.branch.close();
   });
 
-  it("re-enters the complete portable apply when native merge executes nothing and returns unsupported", async () => {
+  it("refuses a legacy native merge callback instead of silently ignoring it", async () => {
     const { baseStore, aliceId } = await seedBase();
-    let nativeCalls = 0;
-    const nativeStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
-      ...host.strategy,
-      merge: () => {
-        nativeCalls += 1;
-        return Promise.resolve({
-          outcome: "unsupported",
-          dimensions: ["planSemantics"],
-        });
-      },
-    };
-    const created = unwrap(await branchDurable(baseStore, nativeStrategy));
+    const created = unwrap(await branchDurable(baseStore, host.strategy));
     await created.branch.store.nodes.Person.update(aliceId, {
-      name: "portable fallback",
+      name: "branch",
     });
     const plan = unwrap(await planMerge(baseStore, [created.branch]));
+    const legacyStrategy = {
+      ...host.strategy,
+      merge: () => Promise.reject(new Error("must not execute")),
+    };
 
     const applied = await applyDurableMergePlan({
       target: baseStore,
       branch: created.branch,
       descriptor: created.descriptor,
-      strategy: nativeStrategy,
-      plan,
-    });
-
-    expect(isOk(applied)).toBe(true);
-    expect(nativeCalls).toBe(1);
-    expect((await baseStore.nodes.Person.getById(aliceId))?.name).toBe(
-      "portable fallback",
-    );
-    await created.branch.close();
-  });
-
-  it("does not replay the portable plan after an uncertain native merge failure", async () => {
-    const { baseStore, aliceId } = await seedBase();
-    let nativeCalls = 0;
-    const nativeStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
-      ...host.strategy,
-      merge: () => {
-        nativeCalls += 1;
-        throw new Error("native outcome is unknown");
-      },
-    };
-    const created = unwrap(await branchDurable(baseStore, nativeStrategy));
-    await created.branch.store.nodes.Person.update(aliceId, {
-      name: "must not replay",
-    });
-    const plan = unwrap(await planMerge(baseStore, [created.branch]));
-
-    const applied = await applyDurableMergePlan({
-      target: baseStore,
-      branch: created.branch,
-      descriptor: created.descriptor,
-      strategy: nativeStrategy,
+      strategy: legacyStrategy,
       plan,
     });
 
     expect(isErr(applied)).toBe(true);
-    expect(nativeCalls).toBe(1);
     expect((await baseStore.nodes.Person.getById(aliceId))?.name).toBe("Alice");
     await created.branch.close();
   });

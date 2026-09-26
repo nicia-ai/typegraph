@@ -73,7 +73,6 @@ import {
   describeCause,
   DurableEvidenceUndeliveredError,
 } from "./errors";
-import type { MergePlanArtifactV1 } from "./plan-schema";
 import type { Result } from "./result";
 import { err, ok } from "./result";
 import { diffAgainstBase } from "./state-diff";
@@ -89,7 +88,6 @@ import type {
   BranchId,
   BranchOptions,
   GraphBranch,
-  MergedCounts,
   RecordedForkPoint,
 } from "./types";
 import { asBranchId } from "./types";
@@ -129,39 +127,6 @@ export type DurableWorkingCopyAccess =
       kind: "exclusive";
       leaseId: string;
       release: () => Promise<void>;
-    }>;
-
-/** Why an authoritative native merge attempt could not safely run. */
-export type NativeDurableMergeUnsupportedDimension =
-  | "branchOrigin"
-  | "graphScope"
-  | "nativeConflicts"
-  | "planSemantics"
-  | "targetFence";
-
-/**
- * Result of a host-native merge optimization attempt.
- *
- * `unsupported` proves that NO native merge SQL or host mutation ran; TypeGraph
- * then executes the complete portable plan application. `applied` proves the
- * strategy atomically validated every dimension named by
- * {@link DurableWorkingCopyStrategy.merge} and applied exactly the approved
- * plan. A refusal or uncertain/partial execution throws instead of returning
- * `unsupported`, because falling back after a possible native write would
- * double-apply the plan.
- */
-export type NativeDurableMergeResult =
-  | Readonly<{
-      outcome: "applied";
-      merged: MergedCounts;
-      warnings?: readonly string[] | undefined;
-    }>
-  | Readonly<{
-      outcome: "unsupported";
-      dimensions: readonly [
-        NativeDurableMergeUnsupportedDimension,
-        ...NativeDurableMergeUnsupportedDimension[],
-      ];
     }>;
 
 /**
@@ -340,44 +305,6 @@ export type DurableWorkingCopyStrategy<
     expectedOrigin: DurableBranchOrigin,
     descriptorVersion: number,
   ) => Promise<void>;
-  /**
-   * Optional authoritative host-native merge optimization.
-   *
-   * Before returning `applied`, the strategy MUST, atomically with the native
-   * merge operation:
-   *
-   * 1. attest `expectedOrigin` against the same allocation `branch.store` is
-   *    connected to;
-   * 2. validate `plan.target` on the exact target branch/session the host will
-   *    merge into;
-   * 3. prove the host-native diff contains exactly `plan.writes`, including all
-   *    TypeGraph sidecars and no rows belonging to another graph or application;
-   * 4. prove the plan needs no canonicalization, repointing, identity, callback,
-   *    provenance, or other semantic work the native merge would bypass; and
-   * 5. report the actual applied counts.
-   *
-   * If the native merge commits or switches transactions internally, a prior
-   * SQL transaction fence is insufficient. The strategy needs a host-native
-   * compare-and-swap or equivalent guarantee on the merge's actual target.
-   *
-   * A whole-database merge primitive therefore qualifies only for an allocation
-   * whose complete physical diff is owned by this graph and is byte-for-byte
-   * equivalent to the approved TypeGraph plan. If any dimension cannot be
-   * proven, return `unsupported` BEFORE executing host SQL; TypeGraph will apply
-   * the plan through its portable transaction path.
-   */
-  merge?:
-    | ((
-        args: Readonly<{
-          target: Store<G>;
-          branch: DurableGraphBranch<G>;
-          descriptor: TStoreDescriptor;
-          descriptorVersion: number;
-          expectedOrigin: DurableBranchOrigin;
-          plan: MergePlanArtifactV1;
-        }>,
-      ) => Promise<NativeDurableMergeResult>)
-    | undefined;
   /**
    * Optional atomic operation + evidence capability.
    *

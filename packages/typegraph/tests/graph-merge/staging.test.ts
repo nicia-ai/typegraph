@@ -322,7 +322,7 @@ describe("branchPruneTo: falls back to the full diff when a lineage call rejects
     await expect(branchPruneTo(baseStore, forkBranch)).resolves.toBeUndefined();
   });
 
-  it("returns undefined (no pruning) when the base's own changesSince rejects", async () => {
+  it("returns undefined (no pruning) for a content-anchored base with lineage", async () => {
     const { backend: baseBackendRaw, cleanup: baseCleanup } =
       createSqliteMergeBackend();
     cleanups.push(baseCleanup);
@@ -337,15 +337,10 @@ describe("branchPruneTo: falls back to the full diff when a lineage call rejects
       }),
     );
     await baseStore.nodes.Person.create({ name: "Alice" });
-    // No revision tracking + a real backend lineage: `base` is
-    // engine-anchored, so `lineageDeltaSinceAnchor` DOES call `changesSince`
-    // on this same lineage below.
+    // An untracked base fingerprints complete content even when its backend
+    // exposes lineage; there is no base-side revision for pruning.
     const base = await computeBaseVersion(baseStore);
-    // The engine anchor embeds the store's durable per-graph origin ahead
-    // of the scripted revision (`engine:<origin>:<revision>` —
-    // `base-version.ts`'s `engineComponent`), so this asserts on the
-    // revision suffix rather than a literal substring.
-    expect(base).toMatch(/\|engine:[^:]+:base-r0$/);
+    expect(base).not.toContain("|engine:");
 
     const { backend: forkBackendRaw, cleanup: forkCleanup } =
       createSqliteMergeBackend();

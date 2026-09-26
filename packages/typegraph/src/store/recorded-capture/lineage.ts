@@ -158,7 +158,7 @@
  * for free by going through `revision()`/`changesSince()` rather than
  * comparing a bare clock value itself. `base-version.ts`'s OWN `base@V`
  * token grammar carries a separate, independently-checked origin pairing
- * for its own revision and engine anchors (see that module's doc and
+ * for its own revision anchor (see that module's doc and
  * `revisionOriginMatch`) — the two origin checks protect different tokens
  * and neither substitutes for the other, though both draw on the same
  * durable `typegraph_revision_origins` row.
@@ -660,22 +660,19 @@ function revisionJournalLineage<G extends GraphDef>(
 
 /**
  * Whether this store's base token is namespaced by the graph's durable
- * revision origin — true for the revision anchor (tracking on) and for the
- * engine anchor (tracking off, a backend `lineage` present), false only for
- * the content-fingerprint fallback. The one spelling `Store.clear()` uses
- * to decide whether there is an origin to rotate, so it cannot drift from
- * the anchor precedence `computeBaseVersion` applies: a store that mints an
- * origin-namespaced anchor is exactly a store whose `clear()` must rotate
- * that origin. A backend whose `lineage` is present but which cannot
- * bootstrap the origins relation mints no anchor at all (`computeBaseVersion`
- * refuses), so it has nothing to rotate either.
+ * revision origin — true for TypeGraph revision tracking and for an untracked
+ * lineage store whose backend supports the origins relation. The latter uses
+ * a complete content fingerprint namespaced by that same origin. `Store.clear()`
+ * rotates exactly the origins that `computeBaseVersion` can include.
  */
 export function mintsOriginNamespacedAnchor<G extends GraphDef>(
   store: RecordedLineageStore<G>,
   originsSupported: boolean,
 ): boolean {
-  if (store.revisionTrackingEnabled) return true;
-  return resolveLineage(store) !== undefined && originsSupported;
+  return (
+    store.revisionTrackingEnabled ||
+    (resolveLineage(store) !== undefined && originsSupported)
+  );
 }
 
 /**
@@ -683,7 +680,7 @@ export function mintsOriginNamespacedAnchor<G extends GraphDef>(
  * when it declares one, else the store's recorded-relations lineage when
  * it captures history, else the trigger-backed revision journal for a
  * revision-tracked first-party SQL backend, else `undefined`. Every caller that wants a
- * `lineage` — graph-merge's base-token anchor and pruned diff among
+ * `lineage` — graph-merge's pruned diff among
  * them — consults this function instead of re-deriving the choice.
  */
 export function resolveLineage<G extends GraphDef>(

@@ -16,7 +16,7 @@ import type {
 } from "../src/backend/types";
 import {
   computeBaseVersion,
-  engineAnchorOf,
+  contentOriginOf,
   hasRevisionAnchor,
 } from "../src/graph-merge/base-version";
 import { createSqlSchema } from "../src/query/compiler/schema";
@@ -328,24 +328,23 @@ describe("store.clear() and the anchor-origin predicate", () => {
     const tracked = createStore(graph, createTestBackend(), {
       revisionTracking: true,
     });
-    const engineAnchored = createStore(
+    const lineageStore = createStore(
       graph,
       deriveBackend(createTestBackend(), { lineage: scriptedLineage() }),
     );
     const fingerprinted = createStore(graph, createTestBackend());
-    for (const store of [tracked, engineAnchored, fingerprinted]) {
+    for (const store of [tracked, lineageStore, fingerprinted]) {
       const token = await computeBaseVersion(store);
       const originNamespaced =
-        hasRevisionAnchor(token) || engineAnchorOf(token) !== undefined;
+        hasRevisionAnchor(token) || contentOriginOf(token) !== undefined;
       expect(mintsOriginNamespacedAnchor(store, true)).toBe(originNamespaced);
     }
     expect(mintsOriginNamespacedAnchor(fingerprinted, true)).toBe(false);
   });
 
   it("clears a store whose backend declares lineage but cannot bootstrap revision origins", async () => {
-    // Such a store mints no engine anchor at all (computeBaseVersion refuses
-    // it), so there is no origin to rotate and clear() must not refuse
-    // either — it did once the rotation was gated on lineage alone.
+    // An untracked store with lineage still uses a content fingerprint,
+    // so no origin needs rotation during clear().
     const backend = projectBackendWithout(
       deriveBackend(createTestBackend(), { lineage: scriptedLineage() }),
       ["ensureRevisionOriginsTable"],

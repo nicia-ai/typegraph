@@ -201,18 +201,16 @@ unwrap(await destroyDurableBranch(descriptor, host));
 
 ```text
 plan: 2 node upserts, 0 conflicts
-  host.merge(): declining native merge (no SQL executed)
 merged: {"nodes":2,"edges":0,"identity":{"asserted":0,"retracted":0}}
 base now: Grace=40, Ada=160
 reopen after destroy refused: true
 ```
 
-That `host.merge()` line is an optional hook: a host with a real
-database-branching primitive can apply the approved plan natively, as long as
-it proves its physical diff matches the approved write set. If it answers
-`unsupported`, no SQL has run and TypeGraph applies the portable plan instead.
-If it _throws_, TypeGraph doesn't fall back, because the host may have applied
-part of the change and replaying it could apply it twice.
+`applyDurableMergePlan()` applies the approved plan through the target Store
+transaction. The former optional host-native merge hook was retired because a
+database merge that commits internally can cross the transaction boundary
+that checked the target revision. A host may still use native database
+branches for its durable working copies.
 
 A descriptor is a document your application stored and handed back later, so
 TypeGraph treats it as untrusted input. At fork time the host seals the true

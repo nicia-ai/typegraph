@@ -52,8 +52,6 @@ export type {
   DurableStoreDescriptor,
   DurableWorkingCopyAccess,
   DurableWorkingCopyStrategy,
-  NativeDurableMergeResult,
-  NativeDurableMergeUnsupportedDimension,
 } from "./durable-branch";
 export {
   branchDurable,

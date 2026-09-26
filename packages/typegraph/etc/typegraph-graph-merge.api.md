@@ -1796,14 +1796,6 @@ export type DurableWorkingCopyStrategy<G extends GraphDef, TStoreDescriptor exte
         access: DurableWorkingCopyAccess;
     }>>;
     destroy: (descriptor: TStoreDescriptor, expectedOrigin: DurableBranchOrigin, descriptorVersion: number) => Promise<void>;
-    merge?: ((args: Readonly<{
-        target: Store<G>;
-        branch: DurableGraphBranch<G>;
-        descriptor: TStoreDescriptor;
-        descriptorVersion: number;
-        expectedOrigin: DurableBranchOrigin;
-        plan: MergePlanArtifactV1;
-    }>) => Promise<NativeDurableMergeResult>) | undefined;
     operations?: DurableOperationCapability<TStoreDescriptor> | undefined;
 }>;
 
@@ -5259,22 +5251,6 @@ export type NamespaceForkProof = Readonly<{
     contentDigest: string;
     copiedAt: string;
 }>;
-
-// @public
-export type NativeDurableMergeResult = Readonly<{
-    outcome: "applied";
-    merged: MergedCounts;
-    warnings?: readonly string[] | undefined;
-}> | Readonly<{
-    outcome: "unsupported";
-    dimensions: readonly [
-    NativeDurableMergeUnsupportedDimension,
-    ...NativeDurableMergeUnsupportedDimension[]
-    ];
-}>;
-
-// @public
-export type NativeDurableMergeUnsupportedDimension = "branchOrigin" | "graphScope" | "nativeConflicts" | "planSemantics" | "targetFence";
 
 // @public
 type NeighborNodeOrderField<G extends GraphDef> = {

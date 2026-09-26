@@ -3,9 +3,7 @@
  * host to combine an opaque graph mutation with immutable operation evidence in
  * ONE host transaction.
  *
- * The facility is deliberately the same shape as the optional host-native merge
- * command ({@link import("./durable-merge").applyDurableMergePlan}): TypeGraph
- * owns descriptor validation, sealed-origin attestation, request
+ * TypeGraph owns descriptor validation, sealed-origin attestation, request
  * canonicalization, and evidence validation; the host owns the database
  * mechanics. A strategy that cannot combine the mutation and its evidence in a
  * single atomic unit returns `unsupported` BEFORE touching the host, and
@@ -161,8 +159,8 @@ export type DurableOperationOutcome =
  * The optional host capability behind `DurableWorkingCopyStrategy.operations`.
  *
  * Every member receives the opaque locator AND the caller's expected origin, so
- * the host attests the sealed origin exactly as it does for reopen, destroy,
- * and native merge. TypeGraph validates the descriptor before any member is
+ * the host attests the sealed origin exactly as it does for reopen and destroy.
+ * TypeGraph validates the descriptor before any member is
  * called.
  */
 export type DurableOperationCapability<
@@ -631,7 +629,7 @@ function unsupportedError(
  * the strategy's optional `operations.operate` capability.
  *
  * Descriptor format/type/version validation and the sealed-origin attestation
- * are exactly those of reopen, destroy, and native merge: TypeGraph validates
+ * are exactly those of reopen and destroy: TypeGraph validates
  * the envelope and hands the caller's expected origin to the host, which
  * attests it inside its own transaction. A strategy without the capability
  * yields the `unsupported` outcome with no host call.
