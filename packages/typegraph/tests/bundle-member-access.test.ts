@@ -49,10 +49,12 @@ const REASONED_FLOOR = 109;
 // sites and reserves one additional access in its declared ceiling.
 // Namespace fork provisioning probes the fulltext/vector strategy and DDL
 // executor once each, within their existing declared ceilings.
-const DEFERRED_LIVE_TOTAL = 228;
-const DEFERRED_DECLARED_TOTAL = 229;
+// IVFFlat materialization drops an unrecorded leftover index before building
+// it, one guarded dropVectorIndex read: 228 -> 229 live, 229 -> 230 declared.
+const DEFERRED_LIVE_TOTAL = 229;
+const DEFERRED_DECLARED_TOTAL = 230;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 351;
+const TOTAL_ROW_COUNT = 352;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:161#executeStatement",
   "backend/migrate-recorded-time.ts:168#executeStatement",

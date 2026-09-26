@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("37 reasoned entries sum to 109 accesses; 50 deferred entries sum to 229", () => {
+  it("37 reasoned entries sum to 109 accesses; 50 deferred entries sum to 230", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -165,6 +165,8 @@ describe("capability bundle totality (T9)", () => {
     // endpoint-set prefetch: 218 -> 223.
     // The resolved-node batch update adds one optional member with a ceiling
     // of six live access sites: 223 -> 229.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(229);
+    // IVFFlat materialization drops an unrecorded leftover index before
+    // building it: dropVectorIndex 0 -> 1, 229 -> 230.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(230);
   });
 });

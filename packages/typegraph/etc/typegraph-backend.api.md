@@ -4491,7 +4491,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorOperations";
-        readonly ceiling: 0;
+        readonly ceiling: 1;
     };
     readonly ensureExtension: {
         readonly kind: "deferred";

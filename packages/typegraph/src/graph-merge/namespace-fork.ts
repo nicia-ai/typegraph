@@ -6,9 +6,26 @@
 import { backendDerivationRoot } from "../backend/derive-backend";
 import type { GraphBackend } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
+import { resolveGraphVectorSlots } from "../core/embedding";
+import { generateIndexDDL } from "../indexes/ddl";
+import type { IndexDeclaration } from "../indexes/types";
 import { tsvectorStrategy } from "../query/dialect/fulltext-strategy";
+import {
+  pgvectorIndexName,
+  pgvectorStrategy,
+} from "../query/dialect/vector/pgvector-strategy";
+import {
+  VECTOR_CONTRIBUTION_PREFIX,
+  type VectorSlot,
+} from "../query/dialect/vector-strategy";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import {
+  ensureTrigramExtension,
+  indexMaterializationStatusKey,
+  relationalIndexDdlOptions,
+  vectorIndexParams,
+} from "../store/materialize-indexes";
 import { createStore, type Store } from "../store/store";
 import type { StoreOptions } from "../store/types";
 import { sha256Hex } from "../utils/hash";
@@ -101,18 +118,89 @@ function queryRows<T>(
   return session.execute<T>(asCompiledRowsSql(query));
 }
 
+/** The only vector storage a fork can copy is bundled pgvector. */
+function vectorStorageOf(
+  backend: GraphBackend,
+): "none" | "pgvector" | "custom" {
+  const strategy = backend.vectorStrategy;
+  if (strategy === undefined) return "none";
+  return strategy === pgvectorStrategy ? "pgvector" : "custom";
+}
+
 function assertDefaultTables(backend: GraphBackend): void {
   const fulltextStrategy = backend.fulltextStrategy;
   if (
     backend.dialect !== "postgres" ||
-    backend.vectorStrategy !== undefined ||
+    vectorStorageOf(backend) === "custom" ||
     (fulltextStrategy !== undefined && fulltextStrategy !== tsvectorStrategy)
   ) {
     throw new BranchError(
-      "Namespace fork supports bundled PostgreSQL tables without custom vector or fulltext storage.",
+      "Namespace fork supports bundled PostgreSQL tables with the bundled pgvector and tsvector storage only.",
     );
   }
   assertDefaultNameMap(backend.tableNames);
+}
+
+/**
+ * The per-`(kind, field)` pgvector tables `graph` can own, written or not.
+ * They are graph-scoped relations like the bundled ones, except that each
+ * exists only once a slot is materialized.
+ */
+function vectorRelations(graph: GraphDef): readonly string[] {
+  return resolveGraphVectorSlots(graph).map((slot) =>
+    pgvectorStrategy.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  );
+}
+
+/**
+ * A graph with embedding fields forks only between backends with the same
+ * vector storage: pgvector on both sides, or vector support disabled on both,
+ * where embeddings live only in node properties. A vector-disabled source
+ * never wrote the vector tables a pgvector target would search, and a
+ * pgvector source's tables have nowhere to go on a vector-disabled target.
+ */
+function assertMatchingVectorStorage(
+  graph: GraphDef,
+  sourceBackend: GraphBackend,
+  targetBackend: GraphBackend,
+): void {
+  if (resolveGraphVectorSlots(graph).length === 0) return;
+  const source = vectorStorageOf(sourceBackend);
+  const target = vectorStorageOf(targetBackend);
+  if (source !== target) {
+    throw new BranchError(
+      `Namespace fork needs the same vector storage on source and target for this graph's embedding fields; the source has ${source} and the target has ${target}.`,
+    );
+  }
+}
+
+async function presentRelations(
+  session: QuerySession,
+  tables: readonly string[],
+): Promise<ReadonlySet<string>> {
+  if (tables.length === 0) return new Set();
+  const rows = await queryRows<Readonly<{ name: string }>>(
+    session,
+    sql`SELECT name FROM unnest(${tables}::text[]) AS name WHERE to_regclass(quote_ident(name)) IS NOT NULL`,
+  );
+  return new Set(rows.map((row) => row.name));
+}
+
+/** A relation that does not exist yet holds no rows for any graph. */
+async function vectorGraphRows(
+  session: QuerySession,
+  tables: readonly string[],
+  graphId: string,
+): Promise<readonly (readonly [string, readonly JsonRow[]])[]> {
+  const present = await presentRelations(session, tables);
+  const relations: (readonly [string, readonly JsonRow[]])[] = [];
+  for (const table of tables) {
+    relations.push([
+      table,
+      present.has(table) ? await graphRows(session, table, graphId) : [],
+    ]);
+  }
+  return relations;
 }
 
 function assertDefaultNameMap(names: object | undefined): void {
@@ -162,67 +250,186 @@ async function digestRows(rows: readonly JsonRow[]): Promise<string> {
 
 async function digestGraph(
   session: QuerySession,
-  graphId: string,
+  graph: GraphDef,
 ): Promise<string> {
   const digests: [string, string][] = [];
   for (const table of GRAPH_RELATIONS) {
-    digests.push([
-      table,
-      await digestRows(await graphRows(session, table, graphId)),
-    ]);
+    const rows = await graphRows(session, table, graph.id);
+    digests.push([table, await digestRows(forkedRows(graph, table, rows))]);
+  }
+  for (const [table, rows] of await vectorGraphRows(
+    session,
+    vectorRelations(graph),
+    graph.id,
+  )) {
+    digests.push([table, await digestRows(rows)]);
   }
   return sha256Hex(JSON.stringify(digests), 32);
 }
 
+/**
+ * The index a materialization row records as built, resolved against the
+ * graph's declarations. Rows for failed or in-flight builds are skipped: the
+ * copied row describes an index that does not exist anywhere.
+ */
+type MaterializedIndex = Readonly<{
+  declaration: IndexDeclaration;
+  physicalName: string;
+}>;
+
+function vectorIndexSlot(
+  declaration: IndexDeclaration & Readonly<{ entity: "vector" }>,
+  graphId: string,
+): VectorSlot {
+  const { concurrent: _concurrent, ...slot } = vectorIndexParams(
+    declaration,
+    graphId,
+    false,
+  );
+  return slot;
+}
+
+function declarationsByStatusKey(
+  graph: GraphDef,
+): ReadonlyMap<string, IndexDeclaration> {
+  return new Map(
+    (graph.indexes ?? []).map((declaration) => [
+      indexMaterializationStatusKey(declaration, graph.id),
+      declaration,
+    ]),
+  );
+}
+
+/**
+ * IVFFlat clusters the rows present when it is built, so an IVFFlat index
+ * built on an empty target table has poor recall. It is built after the copy
+ * instead, by `materializeIndexes()` on the forked store.
+ */
+function isBuiltAfterCopy(declaration: IndexDeclaration): boolean {
+  return declaration.entity === "vector" && declaration.indexType === "ivfflat";
+}
+
+/**
+ * The rows of `table` a fork carries to the target. Materialization records
+ * for indexes built after the copy stay behind: the target records its own
+ * when `materializeIndexes()` builds them. Copy and digest both go through
+ * here, so a record the target writes later never changes the digest that
+ * retries and `abort()` verify.
+ */
+function forkedRows(
+  graph: GraphDef,
+  table: string,
+  rows: readonly JsonRow[],
+): readonly JsonRow[] {
+  if (table !== "typegraph_index_materializations") return rows;
+  const declarations = declarationsByStatusKey(graph);
+  return rows.filter((row) => {
+    const statusKey = row["index_name"];
+    const declaration =
+      typeof statusKey === "string" ? declarations.get(statusKey) : undefined;
+    return declaration === undefined || !isBuiltAfterCopy(declaration);
+  });
+}
+
+function materializedIndexes(
+  graph: GraphDef,
+  rows: readonly JsonRow[],
+): readonly MaterializedIndex[] {
+  const declarations = declarationsByStatusKey(graph);
+  return forkedRows(graph, "typegraph_index_materializations", rows)
+    .filter((row) => row["materialized_at"] !== null)
+    .map((row) => {
+      const statusKey = row["index_name"];
+      const declaration =
+        typeof statusKey === "string" ? declarations.get(statusKey) : undefined;
+      if (declaration === undefined)
+        throw new BranchError(
+          `Namespace fork cannot resolve materialized index ${String(statusKey)} against this graph's declarations.`,
+        );
+      return {
+        declaration,
+        physicalName:
+          declaration.entity === "vector" ?
+            pgvectorIndexName(vectorIndexSlot(declaration, graph.id))
+          : declaration.name,
+      };
+    });
+}
+
 async function assertPhysicalIndexes(
   session: QuerySession,
+  graph: GraphDef,
   rows: readonly JsonRow[],
 ): Promise<void> {
-  const names = rows.map((row) => row["index_name"]);
-  if (names.some((name) => typeof name !== "string"))
-    throw new BranchError(
-      "Malformed index materialization row in source namespace.",
-    );
   const physical = await queryRows<IndexRow>(
     session,
     sql`SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()`,
   );
   const present = new Set(physical.map((row) => row.indexname));
-  for (const name of names) {
-    if (typeof name === "string" && !present.has(name)) {
+  for (const { physicalName } of materializedIndexes(graph, rows)) {
+    if (!present.has(physicalName)) {
       throw new BranchError(
-        `Target database lacks materialized graph index ${name}.`,
+        `Target database lacks materialized graph index ${physicalName}; prepare it with prepareNamespaceForkTarget.`,
       );
     }
   }
 }
 
+function isForkableContribution(
+  row: JsonRow,
+  vectorTables: readonly string[],
+): boolean {
+  const logicalName = row["logical_name"];
+  const tableName = row["table_name"];
+  if (row["owner"] === "tsvector") {
+    return (
+      logicalName === "fulltext" && tableName === "typegraph_node_fulltext"
+    );
+  }
+  return (
+    row["owner"] === "pgvector" &&
+    typeof logicalName === "string" &&
+    logicalName.startsWith(`${VECTOR_CONTRIBUTION_PREFIX}:`) &&
+    typeof tableName === "string" &&
+    vectorTables.includes(tableName)
+  );
+}
+
 async function assertSupportedContributions(
-  session: QuerySession,
+  targetSession: QuerySession,
+  graph: GraphDef,
   rows: readonly JsonRow[],
 ): Promise<void> {
+  const vectorTables = vectorRelations(graph);
   for (const row of rows) {
-    if (
-      row["logical_name"] !== "fulltext" ||
-      row["owner"] !== "tsvector" ||
-      row["table_name"] !== "typegraph_node_fulltext"
-    ) {
+    if (!isForkableContribution(row, vectorTables)) {
       throw new BranchError(
-        "Namespace fork cannot copy strategy-owned contribution tables without a storage strategy copy port.",
+        "Namespace fork can copy only bundled tsvector and pgvector contribution tables.",
       );
     }
   }
-  if (rows.length > 0) await columns(session, "typegraph_node_fulltext");
+  const required = rows.map((row) => String(row["table_name"]));
+  const present = await presentRelations(targetSession, required);
+  for (const table of required) {
+    if (!present.has(table))
+      throw new BranchError(
+        `Target database lacks contribution table ${table}; prepare it with prepareNamespaceForkTarget.`,
+      );
+  }
 }
 
 async function assertEmpty(
   session: QuerySession,
-  graphId: string,
+  graph: GraphDef,
 ): Promise<void> {
-  for (const table of GRAPH_RELATIONS) {
+  const presentVectorTables = await presentRelations(
+    session,
+    vectorRelations(graph),
+  );
+  for (const table of [...GRAPH_RELATIONS, ...presentVectorTables]) {
     const rows = await queryRows<ExistsRow>(
       session,
-      sql`SELECT EXISTS(SELECT 1 FROM ${sql.identifier(table)} WHERE graph_id = ${graphId}) AS present`,
+      sql`SELECT EXISTS(SELECT 1 FROM ${sql.identifier(table)} WHERE graph_id = ${graph.id}) AS present`,
     );
     if (rows[0]?.present !== false)
       throw new BranchError(
@@ -325,7 +532,7 @@ function namespaceForkResult<G extends GraphDef>(
           sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${proof.operationKey} FOR UPDATE`,
         );
         if (ledger[0] === undefined) {
-          await assertEmpty(targetTx, proof.graphId);
+          await assertEmpty(targetTx, store.graph);
           return;
         }
         const ledgerProof = proofFromLedger(ledger[0], proof.operationKey);
@@ -333,10 +540,19 @@ function namespaceForkResult<G extends GraphDef>(
           ledger[0].graph_id !== proof.graphId ||
           ledgerProof.sourceBase !== proof.sourceBase ||
           ledger[0].content_digest !== proof.contentDigest ||
-          (await digestGraph(targetTx, proof.graphId)) !== proof.contentDigest
+          (await digestGraph(targetTx, store.graph)) !== proof.contentDigest
         ) {
           throw new BranchError(
             "Namespace fork abort found a changed target namespace.",
+          );
+        }
+        for (const table of await presentRelations(
+          targetTx,
+          vectorRelations(store.graph),
+        )) {
+          await queryRows(
+            targetTx,
+            sql`DELETE FROM ${sql.identifier(table)} WHERE graph_id = ${proof.graphId}`,
           );
         }
         const journal = "typegraph_revision_changes";
@@ -383,19 +599,69 @@ async function assertIndependentDatabase(
   });
 }
 
-/** Provision the retry ledger on a private target with an owner connection. */
-export async function installNamespaceForkLedger(
+/**
+ * Prepares a private target to receive `source`'s graph, with an owner
+ * connection, before any runtime fork. Installs the retry ledger, creates the
+ * graph's pgvector tables, and builds every index the source has materialized
+ * for the graph with the DDL the source used, except IVFFlat indexes, which
+ * need the copied rows and are built afterwards by `materializeIndexes()` on
+ * the forked store. It writes no graph rows and no materialization records:
+ * the fork copies those, and refuses a target that already has any.
+ * Idempotent.
+ */
+export async function prepareNamespaceForkTarget<G extends GraphDef>(
+  source: Store<G>,
   targetBackend: GraphBackend,
 ): Promise<void> {
+  const sourceBackend = backendDerivationRoot(
+    storeBackend(source),
+  ) as GraphBackend;
+  assertDefaultTables(sourceBackend);
   assertDefaultTables(targetBackend);
+  assertMatchingVectorStorage(source.graph, sourceBackend, targetBackend);
   const executeDdl = targetBackend.executeDdl;
   if (executeDdl === undefined)
     throw new BranchError(
-      "Namespace fork target does not support owner-side ledger provisioning.",
+      "Namespace fork target does not support owner-side provisioning.",
     );
   await executeDdl(`CREATE TABLE IF NOT EXISTS ${FORK_LEDGER} (
     operation_key text PRIMARY KEY, graph_id text NOT NULL, source_base text NOT NULL,
     content_digest text NOT NULL, copied_at timestamptz NOT NULL DEFAULT now())`);
+
+  const slots =
+    vectorStorageOf(targetBackend) === "pgvector" ?
+      resolveGraphVectorSlots(source.graph)
+    : [];
+  for (const slot of slots) {
+    for (const contribution of pgvectorStrategy.ownedTables(slot)) {
+      for (const statement of contribution.createDdl)
+        await executeDdl(statement);
+    }
+  }
+
+  const recorded = await graphRows(
+    sourceBackend,
+    "typegraph_index_materializations",
+    source.graphId,
+  );
+  for (const { declaration } of materializedIndexes(source.graph, recorded)) {
+    if (declaration.entity === "vector") {
+      const statement = pgvectorStrategy.buildCreateIndex?.(
+        vectorIndexSlot(declaration, source.graphId),
+      );
+      if (statement !== undefined) await queryRows(targetBackend, statement);
+      continue;
+    }
+    if (declaration.method === "trigram")
+      await ensureTrigramExtension(targetBackend);
+    await executeDdl(
+      generateIndexDDL(
+        declaration,
+        targetBackend.dialect,
+        relationalIndexDdlOptions(targetBackend, false),
+      ),
+    );
+  }
 }
 
 async function assertForkLedgerInstalled(
@@ -407,7 +673,7 @@ async function assertForkLedgerInstalled(
   );
   if (rows[0]?.present !== true)
     throw new BranchError(
-      "Namespace fork retry ledger is missing; install it on the target with installNamespaceForkLedger before runtime use.",
+      "Namespace fork retry ledger is missing; prepare the target with prepareNamespaceForkTarget before runtime use.",
     );
 }
 
@@ -441,6 +707,7 @@ export async function forkGraphNamespace<G extends GraphDef>(
   ) as GraphBackend;
   assertDefaultTables(sourceBackend);
   assertDefaultTables(targetBackend);
+  assertMatchingVectorStorage(source.graph, sourceBackend, targetBackend);
   assertDefaultNameMap(source.revisionSchema.tables);
   const targetStore = createStore(
     source.graph,
@@ -491,9 +758,7 @@ export async function forkGraphNamespace<G extends GraphDef>(
           proof.sourceBase,
           "Namespace fork retry found an invalid source base token on target.",
         );
-        if (
-          (await digestGraph(targetTx, source.graphId)) !== proof.contentDigest
-        )
+        if ((await digestGraph(targetTx, source.graph)) !== proof.contentDigest)
           throw new BranchError(
             "Namespace fork retry found a changed target namespace.",
           );
@@ -530,15 +795,19 @@ export async function forkGraphNamespace<G extends GraphDef>(
       );
       await assertIndependentDatabase(sourceTx, targetBackend, source.graphId);
       return targetBackend.transaction(async (targetTx) => {
-        await assertEmpty(targetTx, source.graphId);
+        await assertEmpty(targetTx, source.graph);
         const sourceDigests: [string, string][] = [];
         for (const table of GRAPH_RELATIONS) {
           if (table === REVISION_CHANGES_TABLE) continue;
-          const rows = await graphRows(sourceTx, table, source.graphId);
+          const rows = forkedRows(
+            source.graph,
+            table,
+            await graphRows(sourceTx, table, source.graphId),
+          );
           if (table === "typegraph_contribution_materializations")
-            await assertSupportedContributions(sourceTx, rows);
+            await assertSupportedContributions(targetTx, source.graph, rows);
           if (table === "typegraph_index_materializations")
-            await assertPhysicalIndexes(targetTx, rows);
+            await assertPhysicalIndexes(targetTx, source.graph, rows);
           sourceDigests.push([table, await digestRows(rows)]);
           await insertRows(targetTx, table, rows);
         }
@@ -560,11 +829,19 @@ export async function forkGraphNamespace<G extends GraphDef>(
           [REVISION_CHANGES_TABLE, await digestRows(sourceJournalRows)],
         );
         await insertRows(targetTx, REVISION_CHANGES_TABLE, sourceJournalRows);
+        for (const [table, rows] of await vectorGraphRows(
+          sourceTx,
+          vectorRelations(source.graph),
+          source.graphId,
+        )) {
+          sourceDigests.push([table, await digestRows(rows)]);
+          await insertRows(targetTx, table, rows);
+        }
         const snapshotDigest = await sha256Hex(
           JSON.stringify(sourceDigests),
           32,
         );
-        const targetDigest = await digestGraph(targetTx, source.graphId);
+        const targetDigest = await digestGraph(targetTx, source.graph);
         if (targetDigest !== snapshotDigest)
           throw new BranchError(
             "Namespace fork target validation disagrees with the source snapshot.",

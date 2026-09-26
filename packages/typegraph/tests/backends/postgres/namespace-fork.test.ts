@@ -8,7 +8,7 @@ import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
 import {
   forkGraphNamespace,
-  installNamespaceForkLedger,
+  prepareNamespaceForkTarget,
 } from "../../../src/graph-merge/namespace-fork";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
@@ -52,10 +52,10 @@ describe.runIf(process.env["POSTGRES_URL"] !== undefined)(
       const targetBackend = createPostgresBackend(drizzle(targetPool), {
         vector: false,
       });
-      await installNamespaceForkLedger(targetBackend);
       const [source] = await createStoreWithSchema(graph, sourceBackend, {
         history: true,
       });
+      await prepareNamespaceForkTarget(source, targetBackend);
       const item = await source.nodes.Item.create({ name: "old" });
       const before = await source.recordedNow();
       if (before === undefined) throw new Error("recorded instant missing");
