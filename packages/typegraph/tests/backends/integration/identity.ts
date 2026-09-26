@@ -361,12 +361,15 @@ export function registerIdentityIntegrationTests(
 
       const visibleStructuralPage = await store.identity.classes({
         kinds: ["Person"],
-        limit: 10,
+        limit: 1,
       });
-      expect(visibleStructuralPage.classes).toContainEqual({
-        representative: { kind: "Person", id: "class-page-filter-a" },
-        members: [{ kind: "Person", id: "class-page-filter-a" }],
-      });
+      expect(visibleStructuralPage.classes).toEqual([
+        {
+          representative: { kind: "Person", id: "class-page-filter-a" },
+          members: [{ kind: "Person", id: "class-page-filter-a" }],
+        },
+      ]);
+      expect(visibleStructuralPage.nextCursor).toBeDefined();
 
       const filteredClassPage = await store.identity.classes({
         kinds: ["Company"],
