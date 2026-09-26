@@ -324,6 +324,119 @@ export function registerIdentityIntegrationTests(
       ).rejects.toThrow();
     });
 
+    it("pages only visible class members and applies kind filters before cursor limits", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create(
+        { name: "Visible peer" },
+        { id: "class-page-filter-a" },
+      );
+      await store.nodes.Company.create(
+        { name: "Future structural anchor" },
+        {
+          id: "class-page-filter-a",
+          validFrom: "2099-01-01T00:00:00.000Z",
+        },
+      );
+      const classPerson = await store.nodes.Person.create(
+        { name: "Class person" },
+        { id: "class-page-filter-z" },
+      );
+      const classCompany = await store.nodes.Company.create(
+        { name: "Class company" },
+        { id: "class-page-filter-b" },
+      );
+      await store.identity.assertSame(classPerson, classCompany);
+      await store.nodes.Person.create(
+        { name: "Last singleton" },
+        { id: "class-page-filter-last" },
+      );
+      await store.nodes.Product.create(
+        { name: "Private use sort key", price: 1, category: "test" },
+        { id: "id-\u{E000}" },
+      );
+      await store.nodes.Product.create(
+        { name: "Astral sort key", price: 1, category: "test" },
+        { id: "id-\u{1F600}" },
+      );
+
+      const visibleStructuralPage = await store.identity.classes({
+        kinds: ["Person"],
+        limit: 10,
+      });
+      expect(visibleStructuralPage.classes).toContainEqual({
+        representative: { kind: "Person", id: "class-page-filter-a" },
+        members: [{ kind: "Person", id: "class-page-filter-a" }],
+      });
+
+      const filteredClassPage = await store.identity.classes({
+        kinds: ["Company"],
+        limit: 10,
+      });
+      expect(filteredClassPage.classes).toEqual([
+        {
+          representative: { kind: "Company", id: "class-page-filter-b" },
+          members: [
+            { kind: "Company", id: "class-page-filter-b" },
+            { kind: "Person", id: "class-page-filter-z" },
+          ],
+        },
+      ]);
+
+      expect(
+        await store.identity.classes({ kinds: ["Company"], limit: 10 }),
+      ).toMatchObject({
+        classes: [
+          {
+            representative: { kind: "Company", id: "class-page-filter-b" },
+            members: [
+              { kind: "Company", id: "class-page-filter-b" },
+              { kind: "Person", id: "class-page-filter-z" },
+            ],
+          },
+        ],
+      });
+
+      const unicodeFirstPage = await store.identity.classes({
+        kinds: ["Product"],
+        limit: 1,
+      });
+      expect(unicodeFirstPage.classes).toMatchObject([
+        {
+          representative: { kind: "Product", id: "id-\u{E000}" },
+        },
+      ]);
+      const unicodeSecondPage = await store.identity.classes({
+        kinds: ["Product"],
+        ...(unicodeFirstPage.nextCursor === undefined ?
+          {}
+        : { cursor: unicodeFirstPage.nextCursor }),
+        limit: 1,
+      });
+      expect(unicodeSecondPage.classes).toMatchObject([
+        {
+          representative: { kind: "Product", id: "id-\u{1F600}" },
+        },
+      ]);
+      expect(unicodeSecondPage.nextCursor).toBeUndefined();
+
+      expect(
+        await store.asOf("2100-01-01T00:00:00.000Z").identity.classes({
+          kinds: ["Person"],
+          limit: 1,
+        }),
+      ).toMatchObject({
+        classes: [
+          {
+            representative: { kind: "Company", id: "class-page-filter-a" },
+            members: [
+              { kind: "Company", id: "class-page-filter-a" },
+              { kind: "Person", id: "class-page-filter-a" },
+            ],
+          },
+        ],
+      });
+    });
+
     it("applies bounded and open identity assertion validity windows", async () => {
       const store = context.getStore();
       const endpointStart = "2019-01-01T00:00:00.000Z";
