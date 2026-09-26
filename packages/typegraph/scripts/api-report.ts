@@ -709,36 +709,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 870,
-    sha256: "9e25e8b0a9aef5cbbcccf5f09629912edfbdb5bac34ac10e1c02f2341517450c",
+    count: 871,
+    sha256: "72f5638d65467afeef9005408abcf390f2eafca82ffb297f6e8a3b965b81cbbd",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 853,
-    sha256: "49a9ee0ea480f33d22dceb0f37cc9c5a27a98d7b445d3597364572f673c47ed2",
+    count: 855,
+    sha256: "465990da644e5c50a081683aebf06dc98d5240c9c7f49427be87550baeea3b60",
   },
   "./postgres/pglite": {
-    count: 859,
-    sha256: "a4d313ca654adbb25e3b9b8f96684fb8216ada25d18d2ea2785b023cdbb4903a",
+    count: 861,
+    sha256: "76af20962161604d746046eae40dc271d8b1951e76815cc28b4f2c925c225d99",
   },
   "./profiler": {
-    count: 855,
-    sha256: "8c4977e233e562a023769bf02bf0ae95bd1fa7709464c1405b0aab49376e4710",
+    count: 857,
+    sha256: "a812d8ae55ce9dda358ce1d858e6bb4b6125ff3b787186c36930be8256607431",
   },
   "./provenance": {
-    count: 868,
-    sha256: "f560719ba12f2d2e31f0b93c74cc9878b31b41e4a9a6ca1abee001d36c81d979",
+    count: 870,
+    sha256: "11b8282bf5126a2298ca15b379bbd09f0e950818127775aee1969b90493659cb",
   },
   "./schema": {
     count: 288,
     sha256: "588e9ab6d547e809644ca2543f3268c45bcedb2c485b0c3e9c4f0658b5857539",
   },
   "./sqlite/local": {
-    count: 859,
-    sha256: "a4d313ca654adbb25e3b9b8f96684fb8216ada25d18d2ea2785b023cdbb4903a",
+    count: 861,
+    sha256: "76af20962161604d746046eae40dc271d8b1951e76815cc28b4f2c925c225d99",
   },
 };
 

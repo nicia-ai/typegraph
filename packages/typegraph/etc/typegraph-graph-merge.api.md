@@ -3808,9 +3808,6 @@ type HybridVectorOptions = Readonly<{
 }>;
 
 // @public
-const IDENTITY_READ_NAMES: readonly ["classes", "representativeOf", "membersOf", "nodesOf", "areSame", "areDifferent", "assertionsOf", "explainSame"];
-
-// @public
 type IdentityAssertion<G extends GraphDef> = Readonly<{
     id: IdentityAssertionId;
     relation: IdentityRelation;
@@ -3898,13 +3895,17 @@ type IdentityPair<G extends GraphDef> = Readonly<{
 
 // @public
 type IdentityReadFacade<G extends GraphDef> = Readonly<{
-    classes: (options: IdentityClassPageOptions) => Promise<IdentityClassPage<G>>;
     representativeOf: (ref: IdentityNodeRefInput<G>) => Promise<IdentityNodeReference<G> | undefined>;
     membersOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityNodeReference<G>[]>;
     nodesOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityNode<G>[]>;
     areSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
     areDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
     assertionsOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityAssertion<G>[]>;
+}>;
+
+// @public
+type IdentityReadSurface<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
+    classes: (options: IdentityClassPageOptions) => Promise<IdentityClassPage<G>>;
     explainSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<readonly IdentitySamePathStep<G>[] | undefined>;
 }>;
 
@@ -3922,6 +3923,9 @@ type IdentitySamePathStep<G extends GraphDef> = Readonly<{
         type: "same-id-fold";
     }>;
 }>;
+
+// @public
+type IdentitySurface<G extends GraphDef> = IdentityReadSurface<G> & Omit<IdentityFacade<G>, keyof IdentityReadFacade<G>>;
 
 // @public
 type IdentityTableNames = Readonly<{
@@ -5074,7 +5078,7 @@ export type MergePlanReadContext<G extends GraphDef> = Readonly<{
         [K in keyof TransactionContext<G>["edges"]]: Pick<TransactionContext<G>["edges"][K], (typeof EDGE_TEMPORAL_READ_NAMES)[number]>;
     }>;
 }> & (G["identity"] extends GraphIdentityConfig ? Readonly<{
-    identity: Pick<IdentityFacade<G>, (typeof IDENTITY_READ_NAMES)[number]>;
+    identity: IdentityReadFacade<G>;
 }> : Readonly<Record<never, never>>);
 
 // @public (undocumented)
@@ -7537,7 +7541,7 @@ type StoreHooks = Readonly<{
 
 // @public
 type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
-    identity: IdentityFacade<G>;
+    identity: IdentitySurface<G>;
 }> : Readonly<Record<never, never>>;
 
 // @public (undocumented)
@@ -7570,7 +7574,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
     subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
-    identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
+    identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadSurface<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
     applyResolvedNodeUniqueness: <Output>(target: TransactionBackend, writes: Readonly<{
@@ -8105,7 +8109,7 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
     backend: TransactionReadBackend;
     getNodeCollection: <const K extends string>(kind: K) => DynamicNodeCollection<K> | undefined;
 }> & (G["identity"] extends GraphIdentityConfig ? Readonly<{
-    identity: IdentityFacade<G>;
+    identity: IdentitySurface<G>;
 }> : Readonly<Record<never, never>>);
 
 // @public
@@ -8831,7 +8835,7 @@ type VectorStrategy = Readonly<{
 
 // @public
 type ViewIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
-    identity: IdentityReadFacade<G>;
+    identity: IdentityReadSurface<G>;
 }> : Readonly<Record<never, never>>;
 
 // @public
