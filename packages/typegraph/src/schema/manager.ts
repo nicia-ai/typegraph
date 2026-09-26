@@ -522,6 +522,7 @@ export async function ensureSchema<G extends GraphDef>(
       `Schema migration required: ${diff.summary}. ` +
         `${actions.length} migration action(s) needed. ` +
         `Use getSchemaChanges() to review, then migrateSchema() to apply.` +
+        (actions.length > 0 ? `\n${actions.join("\n")}` : "") +
         (removesKind ?
           ` This diff removes a kind: migrateSchema() refuses to drop one ` +
           `that still holds rows, so export or delete those rows first and ` +
