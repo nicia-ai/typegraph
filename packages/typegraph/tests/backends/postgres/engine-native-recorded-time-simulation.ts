@@ -267,7 +267,7 @@ function totalSubgraphEdgeCount(
  * engine-native store built alongside it (see {@link buildEngineNativeSimulation})
  * reconstructs the SAME answers at the SAME translated instant across every
  * recorded-read surface, its own writes leave the recorded relations
- * untouched, and its base-version anchor is the engine anchor (never a
+ * untouched, and its base-version token is a content fingerprint (never a
  * TypeGraph revision anchor), tracking the capturing store's further
  * commits.
  */
@@ -471,12 +471,11 @@ export async function runEngineNativeSimulationScenario(
   );
   expect(receiptRevision).toBeGreaterThan(beforeRevision);
 
-  // Branch/merge base-version anchoring: the engine anchor, never a
-  // TypeGraph revision anchor, tracking the capturing store's own further
-  // commits.
+  // Engine-native history leaves TypeGraph revision tracking off. Its merge
+  // base token fingerprints complete graph content, including identity.
   const baseBefore = await computeBaseVersion(engineNativeStore);
   expect(hasRevisionAnchor(baseBefore)).toBe(false);
-  expect(engineAnchorOf(baseBefore)).toBeDefined();
+  expect(engineAnchorOf(baseBefore)).toBeUndefined();
 
   await capturingStore.nodes.Person.create({ name: "Dave" });
   const baseAfter = await computeBaseVersion(engineNativeStore);

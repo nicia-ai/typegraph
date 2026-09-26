@@ -3,9 +3,7 @@
  * host to combine an opaque graph mutation with immutable operation evidence in
  * ONE host transaction.
  *
- * The facility is deliberately the same shape as the optional host-native merge
- * command ({@link import("./durable-merge").applyDurableMergePlan}): TypeGraph
- * owns descriptor validation, sealed-origin attestation, request
+ * TypeGraph owns descriptor validation, sealed-origin attestation, request
  * canonicalization, and evidence validation; the host owns the database
  * mechanics. A strategy that cannot combine the mutation and its evidence in a
  * single atomic unit returns `unsupported` BEFORE touching the host, and
@@ -38,10 +36,9 @@
  * first (the operation fails against the removed allocation). No partial state
  * is ever observable.
  *
- * CURSORS. {@link scanDurableOperations} returns evidence in a stable total
- * order the strategy defines (commit order, ties broken deterministically).
- * `cursor` is an opaque continuation token; pass it back as `after` to resume.
- * A missing `cursor` means the scan reached the end.
+ * CURSORS. {@link scanDurableOperations} returns evidence in monotonic commit
+ * order. `cursor` is an opaque high-water mark; pass it back as `after` to
+ * resume, including after a page with `hasMore: false`.
  */
 
 import { assertJsonValue } from "../core/json-value";
@@ -135,11 +132,13 @@ export type DurableBranchOperationEvidence = Readonly<{
   delivered: boolean;
 }>;
 
-/** One stable-order page of evidence returned by {@link scanDurableOperations}. */
+/** One commit-order page of evidence returned by {@link scanDurableOperations}. */
 export type DurableOperationScan = Readonly<{
   operations: readonly DurableBranchOperationEvidence[];
-  /** Opaque continuation token; absent when the scan reached the end. */
+  /** Opaque high-water mark retained even when this page reached the end. */
   cursor?: string | undefined;
+  /** Whether more committed evidence was visible when this page was read. */
+  hasMore: boolean;
 }>;
 
 /** Outcome of an atomic operation attempt. */
@@ -160,8 +159,8 @@ export type DurableOperationOutcome =
  * The optional host capability behind `DurableWorkingCopyStrategy.operations`.
  *
  * Every member receives the opaque locator AND the caller's expected origin, so
- * the host attests the sealed origin exactly as it does for reopen, destroy,
- * and native merge. TypeGraph validates the descriptor before any member is
+ * the host attests the sealed origin exactly as it does for reopen and destroy.
+ * TypeGraph validates the descriptor before any member is
  * called.
  */
 export type DurableOperationCapability<
@@ -184,6 +183,7 @@ export type DurableOperationCapability<
   operate: (
     args: Readonly<{
       descriptor: TStoreDescriptor;
+      descriptorVersion: number;
       expectedOrigin: DurableBranchOrigin;
       request: DurableBranchOperation;
     }>,
@@ -192,17 +192,23 @@ export type DurableOperationCapability<
   get: (
     args: Readonly<{
       descriptor: TStoreDescriptor;
+      descriptorVersion: number;
       expectedOrigin: DurableBranchOrigin;
       idempotencyKey: string;
     }>,
   ) => Promise<DurableBranchOperationEvidence | undefined>;
   /**
-   * Reads evidence in the strategy's stable total order. `after` resumes from
-   * a previous page's `cursor`; `limit` bounds the page.
+   * Reads evidence in monotonically increasing commit order, with ties broken
+   * deterministically. A later commit MUST sort after every cursor already
+   * issued. `after` resumes from a previous page's `cursor`; `limit` bounds
+   * the page. Return the last observed cursor even when `hasMore` is false,
+   * so a caller can resume when new operations commit. An empty page echoes
+   * `after`; only an empty initial scan may omit `cursor`.
    */
   scan: (
     args: Readonly<{
       descriptor: TStoreDescriptor;
+      descriptorVersion: number;
       expectedOrigin: DurableBranchOrigin;
       after?: string | undefined;
       limit: number;
@@ -216,6 +222,7 @@ export type DurableOperationCapability<
   markDelivered: (
     args: Readonly<{
       descriptor: TStoreDescriptor;
+      descriptorVersion: number;
       expectedOrigin: DurableBranchOrigin;
       idempotencyKey: string;
     }>,
@@ -224,6 +231,7 @@ export type DurableOperationCapability<
   hasUndelivered: (
     args: Readonly<{
       descriptor: TStoreDescriptor;
+      descriptorVersion: number;
       expectedOrigin: DurableBranchOrigin;
     }>,
   ) => Promise<boolean>;
@@ -249,6 +257,7 @@ type OperationStrategy<TStoreDescriptor extends DurableStoreDescriptor> =
   Readonly<{
     type: string;
     version: number;
+    readableVersions?: readonly number[] | undefined;
     operations?: DurableOperationCapability<TStoreDescriptor> | undefined;
   }>;
 
@@ -620,7 +629,7 @@ function unsupportedError(
  * the strategy's optional `operations.operate` capability.
  *
  * Descriptor format/type/version validation and the sealed-origin attestation
- * are exactly those of reopen, destroy, and native merge: TypeGraph validates
+ * are exactly those of reopen and destroy: TypeGraph validates
  * the envelope and hands the caller's expected origin to the host, which
  * attests it inside its own transaction. A strategy without the capability
  * yields the `unsupported` outcome with no host call.
@@ -648,6 +657,7 @@ export async function operateDurableBranch<
   try {
     const outcome: unknown = await strategy.operations.operate({
       descriptor: descriptor.store,
+      descriptorVersion: descriptor.version,
       expectedOrigin: owner.origin,
       request: normalized.data,
     });
@@ -690,6 +700,7 @@ export async function getDurableOperation<
   try {
     const evidence = await strategy.operations.get({
       descriptor: descriptor.store,
+      descriptorVersion: descriptor.version,
       expectedOrigin: owner.origin,
       idempotencyKey,
     });
@@ -708,10 +719,11 @@ export async function getDurableOperation<
 }
 
 /**
- * Reads evidence in a stable order. `after` resumes from a previous page's
+ * Reads evidence in commit order. `after` resumes from a previous page's
  * `cursor`; `limit` defaults to {@link DURABLE_OPERATION_SCAN_DEFAULT_LIMIT}
- * and may not exceed {@link DURABLE_OPERATION_SCAN_MAX_LIMIT}. The returned
- * `cursor` is absent at the end of the scan.
+ * and may not exceed {@link DURABLE_OPERATION_SCAN_MAX_LIMIT}. `hasMore` tells
+ * the caller whether to page now; the cursor remains usable after reaching
+ * the end so the caller can check for later commits.
  */
 export async function scanDurableOperations<
   G extends GraphDef,
@@ -752,6 +764,7 @@ export async function scanDurableOperations<
   try {
     const rawPage: unknown = await strategy.operations.scan({
       descriptor: descriptor.store,
+      descriptorVersion: descriptor.version,
       expectedOrigin: owner.origin,
       after: options.after,
       limit,
@@ -771,9 +784,15 @@ export async function scanDurableOperations<
     const page = rawPage as Readonly<Record<string, unknown>>;
     const rawOperations = page["operations"];
     const cursor = page["cursor"];
+    const hasMore = page["hasMore"];
     if (
       !Array.isArray(rawOperations) ||
       rawOperations.length > limit ||
+      typeof hasMore !== "boolean" ||
+      (hasMore && (rawOperations.length === 0 || cursor === undefined)) ||
+      (rawOperations.length > 0 && cursor === undefined) ||
+      (rawOperations.length > 0 && cursor === options.after) ||
+      (rawOperations.length === 0 && cursor !== options.after) ||
       (cursor !== undefined &&
         (typeof cursor !== "string" || cursor.length === 0))
     ) {
@@ -791,7 +810,9 @@ export async function scanDurableOperations<
       operations.push(normalized.data);
     }
     return ok(
-      cursor === undefined ? { operations } : { operations, cursor: cursor },
+      cursor === undefined ?
+        { operations, hasMore }
+      : { operations, cursor, hasMore },
     );
   } catch (error) {
     return err(
@@ -828,6 +849,7 @@ export async function markDurableOperationDelivered<
   try {
     const evidence = await strategy.operations.markDelivered({
       descriptor: descriptor.store,
+      descriptorVersion: descriptor.version,
       expectedOrigin: owner.origin,
       idempotencyKey,
     });
@@ -875,6 +897,7 @@ export async function durableBranchHasUndeliveredEvidence<
   try {
     const hasUndelivered: unknown = await strategy.operations.hasUndelivered({
       descriptor: descriptor.store,
+      descriptorVersion: descriptor.version,
       expectedOrigin: owner.origin,
     });
     return typeof hasUndelivered === "boolean" ?

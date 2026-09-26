@@ -13,6 +13,7 @@ import {
 } from "../../src/graph-merge";
 
 const origin: DurableBranchOrigin = {
+  allocationId: "allocation-1",
   graphId: "people",
   definitionHash: "definition-v1",
   branchId: asBranchId("branch-1"),
@@ -24,6 +25,7 @@ const origin: DurableBranchOrigin = {
 describe("durable branch origin helpers", () => {
   it("extracts all TypeGraph-owned origin fences from a descriptor", () => {
     const descriptor: DurableBranchDescriptor = {
+      allocationId: origin.allocationId,
       kind: "sqlite",
       version: 1,
       graphId: origin.graphId,
@@ -41,6 +43,9 @@ describe("durable branch origin helpers", () => {
   it("compares every origin fence, including explicit absence", () => {
     expect(durableOriginsEqual(origin, { ...origin })).toBe(true);
     expect(
+      durableOriginsEqual(origin, { ...origin, allocationId: "other" }),
+    ).toBe(false);
+    expect(
       durableOriginsEqual(origin, { ...origin, definitionHash: "other" }),
     ).toBe(false);
     expect(
@@ -53,6 +58,7 @@ describe("durable branch origin helpers", () => {
 
   it("validates untrusted descriptor JSON through the shared refusal predicate", () => {
     const descriptor: DurableBranchDescriptor = {
+      allocationId: origin.allocationId,
       kind: "sqlite",
       version: 1,
       graphId: origin.graphId,
@@ -64,6 +70,19 @@ describe("durable branch origin helpers", () => {
 
     expect(
       durableDescriptorRefusal(descriptor, { type: "sqlite", version: 1 }),
+    ).toBeUndefined();
+    expect(
+      durableDescriptorRefusal(
+        { ...descriptor, allocationId: undefined },
+        { type: "sqlite", version: 1 },
+      ),
+    ).toMatchObject({ name: "BranchError" });
+    expect(
+      durableDescriptorRefusal(descriptor, {
+        type: "sqlite",
+        version: 2,
+        readableVersions: [1],
+      }),
     ).toBeUndefined();
     expect(
       durableDescriptorRefusal(

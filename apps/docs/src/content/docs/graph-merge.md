@@ -1209,16 +1209,23 @@ const store = await openProvenanceStore(backend, targetGraphId);
 ## Snapshot vs incremental
 
 A branch is forked from a `base@V` — a token combining the base's schema hash
-with an anchor chosen by one precedence: the store's durable revision anchor
-when `revisionTracking: true` or `history: true` is on; otherwise an **engine
-anchor** when the backend itself declares a `lineage` capability (see
-[Lineage and pruned diffs](#lineage-and-pruned-diffs) below); otherwise the
-compatibility fingerprint of live content. Both the revision anchor and the
-engine anchor are namespaced by the SAME durable per-graph origin, so neither
-is transferable between independently created stores, and `Store.clear()`
-rotates that origin — a branch forked before a clear can never match the
-same store again, even once it is repopulated to look the same. The two
-merge entry points differ in how they treat that token.
+with the store's durable revision anchor when `revisionTracking: true` or
+`history: true` is on, or a complete live-content fingerprint otherwise.
+The revision anchor is namespaced by a durable per-graph origin, which
+`Store.clear()` rotates. A lineage-capable untracked store whose backend
+supports that origin relation also carries it beside its content fingerprint.
+The two merge entry points differ in how they
+treat that token.
+
+The token is printable text, so it can be stored anywhere an application
+keeps descriptors, plans, and fork points, including PostgreSQL `text` and
+`jsonb` columns. Treat it as opaque: compare it whole and never parse it.
+Tokens minted by releases before this format, which separated components
+with a NUL character, are refused with a `BaseVersionMismatchError` whose
+`details.reason` is `"legacy-token-format"`. Re-branch or re-plan from the
+current target. Earlier `engine:` anchors and untracked content tokens without
+the active schema version also require re-branching; they cannot match the
+current target's token.
 
 The token is printable text, so it can be stored anywhere an application
 keeps descriptors, plans, and fork points, including PostgreSQL `text` and
@@ -1340,68 +1347,24 @@ exhaustive.
 session-less bag could never be pinned to anything, so this one always
 carries one. A caller planning outside any transaction (`branch()`'s
 fork-revision capture, the pruning below) passes the root backend it holds;
-a caller re-validating an anchor from inside an open commit transaction
-passes that transaction's own handle, so the read observes the transaction's
-snapshot rather than a separate connection's possibly stale view — see the
-engine anchor's re-validation just below for the concrete case.
+a caller re-validating a content fingerprint inside an open commit transaction
+reads through that transaction's own handle, so the fingerprint observes the
+transaction's snapshot and establishes dependencies on the rows it covers.
 
-**The engine anchor.** When a store has no revision tracking but its backend
-declares `lineage`, `base@V`'s anchor is `engine:<origin>:<revision>` — the
-SAME durable per-graph revision-origin nonce the revision anchor carries
-(`typegraph_revision_origins`, ensured at mint time on the store's own
-backend), paired with the engine's own whole-database revision at fork time.
-(A capturing store never reaches this form: `history: true` also turns
-revision tracking on, so the per-graph revision anchor wins first — the
-recorded-relations lineage can back an engine anchor only for a caller that
-builds one by hand.) The origin exists because the engine's revision is NOT
-per-graph: two independent databases whose engines both happen to report the
-same bare revision string (a fresh counter starting at "r1", say) would
-otherwise mint indistinguishable anchors, letting a branch forked from one
-database satisfy the merge precondition of a completely unrelated one.
-Re-validating an engine anchor checks the origin FIRST — the live
-`typegraph_revision_origins` row for this graph, via the same
-`revisionOriginMatch` predicate the revision anchor's own guard uses — and
-raises `BaseVersionMismatchError` ("forked from a different store") on a
-mismatch before ever consulting `changesSince`. Once the origin matches, the
-guard still cannot stop at a raw revision inequality the way a revision
-anchor does, because the engine's revision is whole-database: a commit to a
-completely unrelated graph on the same engine also bumps it. So a bare
-revision mismatch calls `changesSince(session, anchored, graphId)` — an
-empty `keys` delta means nothing in *this* graph moved and the merge
-proceeds as unchanged; a non-empty delta, or `unbounded`, is a real
-divergence and raises `BaseVersionMismatchError` with
-`details: { expectedRevision, liveRevision, changedKeys? }`. This
-re-validation runs strictly INSIDE the target's own open commit transaction
-(no advisory lock pins an engine-anchored store's write path the way a
-revision-anchored one is pinned), and it passes that PINNED TRANSACTION
-HANDLE as `session` — never the root backend. A `lineage` threaded through
-`EngineProvisioning.lineage` reaches every transaction handle a profile
-builds, so this is the ordinary path; a `lineage` reachable only through a
-`deriveBackend` overlay applied to the already-built root object never
-reaches a transaction handle that way, and this re-validation then refuses
-the commit with a `LINEAGE_UNAVAILABLE` `ConfigurationError` rather than
-silently falling back to a different connection's answer. One known gap:
-`changesSince` names only node and edge keys, so a commit that changes
-nothing but a graph's current identity assertions is invisible to an
-engine-anchored guard and is tolerated as unchanged — the content-fingerprint
-fallback does not share this gap (its fingerprint folds identity assertions
-in), and neither does a revision anchor (any store write advances its shared
-clock).
+**Untracked stores use a complete fingerprint.** An engine-wide revision and
+node/edge-only `changesSince` result cannot fence an identity-only write. It
+also cannot establish read dependencies on the graph state used in planning.
+For this reason, a store without TypeGraph revision tracking fingerprints live
+nodes, edges, and current identity assertions even if its backend exposes
+`lineage`. Where supported, the token also carries the durable graph origin.
+The commit transaction checks the origin and recomputes the fingerprint before
+applying its writes. Previously minted `engine:` base tokens are retired; re-branch
+from the current store rather than applying an old merge.
 
-**`Store.clear()` rotates the origin.** Both origin-namespaced anchor forms
-share one `typegraph_revision_origins` row per graph, and `clear()` deletes
-and re-mints it — inside the same transaction as the rest of the clear — for
-any store able to mint EITHER form: one with `revisionTracking` or `history`
-enabled (the revision anchor), and, separately, an engine-anchored store
-whose backend declares `lineage` directly with tracking off. Without this, a
-graph cleared and repopulated to look the same — the same revision COUNT for
-a tracked store, or a coincidentally-matching engine revision for an
-engine-anchored one — would mint a `base@V` byte-identical to one minted
-before the clear (origin unchanged), and a branch forked before the clear
-would merge as if the clear had never happened. A branch forked from a store
-before it was cleared therefore always fails the `base@V` precondition
-against that store once cleared, even after it is repopulated to look the
-same — re-branch from the post-clear store instead.
+**`Store.clear()` rotates the revision origin.** For revision-tracked stores,
+`clear()` deletes and re-mints the per-graph origin in the same transaction.
+A branch forked before that clear cannot merge into the post-clear store even
+when its revision clock has the same numeric value.
 
 The origin row is also read fresh on every mint (`computeBaseVersion`,
 `Store.revisionOriginNow()`), never cached on a `Store` instance. Two live
@@ -1437,8 +1400,8 @@ REJECTING (a transient engine error never fails a merge the full diff would
 have completed); and the base's own anchor failing to resolve against the
 base store's lineage at all — an origin mismatch between a revision-anchored
 `base` and the base store's live revision row, a revision anchor minted
-before the base store's first tracked write, or an engine anchor whose store
-now resolves no `lineage`. Nothing about *what* a merge decides depends on
+before the base store's first tracked write, or an old engine anchor that
+must be re-branched. Nothing about *what* a merge decides depends on
 whether its diff was pruned.
 
 ## Working copies
@@ -1662,6 +1625,14 @@ returns a non-secret JSON locator. TypeGraph seals the immutable fork origin
 beside that allocation and returns a `DurableBranchDescriptor` that can cross a
 queue, process, deployment, or machine boundary.
 
+For a remote host, persist a chosen `{ id, allocationId }` before calling
+`branchDurable(base, strategy, { id, allocationId })`. `create()` receives both
+and must refuse an allocation ID that may already exist. If the host allocates
+a branch but its response is lost, use host tooling to inspect the ID and
+recover or remove the allocation before retrying. A failed create reports both
+IDs for that reconciliation. The host must never allocate a second physical
+copy for the same ID or return a sealed copy as though it were new.
+
 ```typescript
 import {
   applyDurableMergePlan,
@@ -1686,8 +1657,7 @@ const reopened = unwrap(
 );
 const plan = unwrap(await planMerge(base, [reopened]));
 
-// Uses a proven-equivalent host-native merge when the strategy supports one;
-// otherwise applies the complete TypeGraph plan transactionally.
+// Applies the complete TypeGraph plan inside the target transaction.
 const report = unwrap(
   await applyDurableMergePlan({
     target: base,
@@ -1706,9 +1676,15 @@ Closing and destroying are deliberately separate. `GraphBranch.close()` closes
 the backend and releases its access lease, but leaves the persistent allocation
 reopenable. `destroyDurableBranch()` asks the strategy to attest the complete
 origin and delete or archive that allocation atomically. A descriptor is
-untrusted input: TypeGraph checks its graph definition, branch id, base token,
-schema anchor, and engine revision against the origin the host sealed. Swapping
-or relabeling a locator cannot authorize deletion of another allocation.
+untrusted input: TypeGraph checks its allocation id, graph definition, branch
+id, base token, schema anchor, and engine revision against the origin the host
+sealed. The allocation id is independent of the caller's branch id, so
+swapping or relabeling a locator cannot authorize deletion of another copy
+even when two copies were given the same branch id.
+
+Strategies write new locators using `version` and may list older supported
+locator versions in `readableVersions`. Every method must understand each
+listed version, including destroy and evidence access.
 
 The strategy locator must be JSON-safe and **must not contain secrets**. Use a
 branch id, database id, or other lookup key, then resolve credentials from
@@ -1727,6 +1703,10 @@ equivalent persistent copy with an independent revision namespace, TypeGraph
 instead verifies that its complete merge-visible graph state has no delta from
 the source, fencing the source again after enumeration. The host remains
 responsible for physical fidelity outside TypeGraph's graph semantics.
+To enable lineage-pruned merge diffs, `create()` may return `forkRevision`
+captured atomically with the physical fork. When it cannot prove that cut, omit
+the revision and TypeGraph compares the complete graph state; reading a later
+revision after the copy was opened could miss an intervening branch write.
 
 Every `create()` and `reopen()` also returns a `DurableWorkingCopyAccess`:
 
@@ -1744,37 +1724,29 @@ instance, so two reopened pools or two processes still race. Such an engine must
 use a host-wide `exclusive` lease, and a concurrent reopen must wait or refuse.
 Merge planning also assumes the working copy is quiescent while it is diffed.
 
-#### Native merge is an optimization attempt
+#### Native database branches
 
-A strategy may implement `merge()` to apply an approved plan through a database
-branch primitive. `applyDurableMergePlan()` validates the plan and descriptor,
-then calls that method only when no apply callbacks or persisted provenance were
-requested. The result has two outcomes:
+A strategy may allocate a working copy using a database-native branch, but
+`applyDurableMergePlan()` always applies the approved TypeGraph plan through
+the target Store transaction. The former native-merge callback was removed:
+it could commit outside the transaction that checked the target revision.
+A future native merge capability needs a host-native compare-and-swap on the
+actual target, plus proof that the full physical diff equals the approved
+TypeGraph writes, including schema, history, identity, and sidecars.
 
-- `applied`: the strategy proved the branch origin and target fence on the
-  resources being merged, proved the complete physical diff is exactly the
-  approved TypeGraph write set, applied it atomically, and returned actual
-  counts.
-- `unsupported`: the strategy executed **no** merge SQL or host mutation.
-  TypeGraph re-enters the complete portable `applyMergePlan()` path.
-
-A thrown or uncertain native failure never falls back: the host may have applied
-part of a change, and replaying the portable plan could double-apply it.
-
-This boundary matters for whole-database branch engines. TypeGraph plans one
-graph and may canonicalize nodes, repoint edges, arbitrate conflicts, maintain
-identity state, run callbacks, or persist provenance. A raw database merge that
-bypasses those decisions is not equivalent. The strategy must return
-`unsupported` unless it can prove that the entire native diff—including schema,
-history, revision, identity, index, and contribution sidecars, plus the absence
-of other application graphs—is byte-for-byte represented by the approved plan.
+For a Doltgres strategy, pin each Store connection to the intended database
+branch. [Doltgres revision specifiers](https://www.doltgres.com/docs/reference/version-control/branches/)
+provide that connection-level selection. Its
+[`DOLT_BRANCH()` and `DOLT_MERGE()` functions](https://www.doltgres.com/docs/reference/version-control/dolt-sql-functions/)
+implicitly commit the current transaction, so a fence checked before those
+functions cannot by itself protect their target.
 
 #### Atomic operations and immutable evidence
 
 A `DurableWorkingCopyStrategy` may also expose an optional `operations`
 capability (`DurableOperationCapability`). It lets a durable host combine one
 opaque graph mutation with its immutable operation evidence in a **single host
-transaction** — the branch's durable analogue of the native merge command above.
+transaction**.
 TypeGraph owns descriptor validation, sealed-origin attestation, request
 canonicalization, and evidence validation; the host owns the database mechanics.
 
@@ -1820,7 +1792,7 @@ refused before any host call.
 `metadata` is retained as evidence; `mutation` is the host's own description of
 the graph change it must apply atomically with the evidence row. The strategy
 attests the caller's `expectedOrigin` against the allocation the descriptor
-names, exactly as reopen, destroy, and native merge do. Every committed
+names, exactly as reopen and destroy do. Every committed
 operation returns `before`/`after` coordinates — the merge-visible `base`
 fingerprint and, when the working copy resolves lineage, the engine `revision`.
 TypeGraph validates that the returned evidence echoes the canonical request and
@@ -1846,9 +1818,10 @@ host outcome envelope: malformed outcomes and empty, duplicate, or unknown
 - `getDurableOperation(descriptor, strategy, idempotencyKey)` reads one
   operation's evidence, or `undefined` when it was never committed.
 - `scanDurableOperations(descriptor, strategy, { after?, limit? })` returns
-  `{ operations, cursor }` in the strategy's stable total order (commit order,
-  ties broken deterministically). Pass the opaque `cursor` back as `after` to
-  resume; an absent `cursor` means the scan reached the end. `limit` defaults to
+  `{ operations, cursor, hasMore }` in monotonic commit order, with ties broken
+  deterministically. Pass the opaque `cursor` back as `after` to resume, even
+  after `hasMore: false`; later commits must sort after that cursor. An empty
+  page echoes `after`, and only an empty initial scan omits `cursor`. `limit` defaults to
   `DURABLE_OPERATION_SCAN_DEFAULT_LIMIT` (100) and may not exceed
   `DURABLE_OPERATION_SCAN_MAX_LIMIT` (1000); a larger page is refused.
 - `markDurableOperationDelivered(descriptor, strategy, idempotencyKey)` marks

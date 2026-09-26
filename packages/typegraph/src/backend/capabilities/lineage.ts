@@ -95,8 +95,7 @@ export type LineageDelta =
  * caller's own connection is holding (the bundled caller-serialized SQLite
  * backend's reentrancy guard refuses exactly this collision with a typed
  * `ConfigurationError` rather than hanging — see
- * `tests/graph-merge/base-version-engine-anchor.test.ts`'s
- * ignores-the-session case). A `session` is always either the backend that
+ * transaction conformance case). A `session` is always either the backend that
  * declared this `lineage` or a `transaction()` handle it built, so an
  * implementation can freely call `session.execute`/`session.executeRaw`
  * without opening anything of its own. The one documented exception is the

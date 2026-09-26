@@ -3060,7 +3060,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * created with `{ revisionTracking: true }`.
    *
    * Under engine-native ownership, `revisionTrackingEnabled` is always
-   * false (the engine anchor applies instead), but a `history: true` store
+   * false (graph-merge uses a content fingerprint instead), but a `history: true` store
    * still answers from `recordedTime.revisionNow` on the root backend —
    * the same source `recordedNow()` uses — so this and `recordedNow()`
    * report the same value there, unlike under TypeGraph-owned tracking
@@ -5035,15 +5035,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async clear(
     options: Readonly<{ preserveContributionMaterializations?: boolean }> = {},
   ): Promise<void> {
-    // Both origin-namespaced `base@V` anchor forms — the TypeGraph revision
-    // anchor and the engine anchor — share one `typegraph_revision_origins`
-    // row per graph, so any store able to mint either form must rotate it
-    // here; `mintsOriginNamespacedAnchor` is the one spelling of that
-    // decision (it follows `computeBaseVersion`'s anchor precedence). Gating
-    // on `#revisionTrackingEnabled` alone left an engine-anchored store's
-    // origin untouched, so a branch forked before the clear could satisfy
-    // the base-version precondition again once the graph was repopulated to
-    // the same engine revision.
+    // Tracked tokens and content fingerprints from lineage-capable stores
+    // can carry the graph's durable origin; clear rotates that namespace.
     const mintsAnchorOrigin = mintsOriginNamespacedAnchor(
       this,
       this.#recordedRevisionOrigins.supported,
@@ -5089,14 +5082,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       }
       if (mintsAnchorOrigin) {
         // Rotate the durable per-graph revision-origin nonce in the SAME
-        // transaction as `clearGraph`, for either origin-namespaced anchor
-        // form this store can mint. `clearGraph` deletes the recorded-clock
-        // row (and, under history, every recorded relation row) but never
-        // touches the origin row — without this, a graph repopulated after
-        // clear() to look the same (the same revision COUNT for a tracked
-        // store, or a coincidentally-matching engine revision for an
-        // engine-anchored one) would restore the anchor's origin half
-        // unchanged, and a pre-clear branch would silently pass the
+        // transaction as `clearGraph` for revision-tracked tokens and
+        // origin-namespaced content fingerprints. `clearGraph` deletes the
+        // recorded-clock row but not the origin row; without this, a graph
+        // repopulated after clear() could restore the old token and pass the
         // base-version precondition again. See `resetRevisionOrigin`'s own
         // doc for why this must be the origin row, not the revision, that
         // fences the epoch.

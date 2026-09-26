@@ -150,13 +150,14 @@ export type BranchForkState = Readonly<{
  */
 export async function readBranchForkState<G extends GraphDef>(
   store: GraphBranch<G>["store"],
+  captureRevision = true,
 ): Promise<BranchForkState> {
   const schemaRow = await storeBackend(store).getActiveSchema(store.graphId);
   const schemaAnchor =
     schemaRow === undefined ? undefined : (
       { version: schemaRow.version, hash: schemaRow.schema_hash }
     );
-  const lineage = resolveLineage(store);
+  const lineage = captureRevision ? resolveLineage(store) : undefined;
   // The session is the working copy's own root backend — the same object
   // `resolveLineage(store)` just resolved `lineage` off of, and the only
   // session available this far outside any transaction.

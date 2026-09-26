@@ -46,12 +46,12 @@ export {
 export type {
   DurableBranch,
   DurableBranchDescriptor,
+  DurableBranchOptions,
   DurableBranchOrigin,
+  DurableGraphBranch,
   DurableStoreDescriptor,
   DurableWorkingCopyAccess,
   DurableWorkingCopyStrategy,
-  NativeDurableMergeResult,
-  NativeDurableMergeUnsupportedDimension,
 } from "./durable-branch";
 export {
   branchDurable,

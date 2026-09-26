@@ -294,15 +294,9 @@ export function registerLineageConformanceIntegrationTests(
       const r0 = await lineage.revision(backend);
       const alice = await store.nodes.LineagePerson.create({ name: "Alice" });
 
-      // The transaction handle IS the session passed to both members here —
-      // exactly the shape `assertTargetUnchanged` (`graph-merge/merge.ts`)
-      // uses at commit time. Reading on the handle it is given, rather than
-      // on a separately-held connection, is what lets this run from inside
-      // an open transaction on the bundled caller-serialized SQLite backend
-      // without colliding with its own reentrancy guard (contrast
-      // `tests/graph-merge/base-version-engine-anchor.test.ts`'s
-      // ignores-the-session case, which deliberately reads through a
-      // different connection and DOES collide).
+      // A lineage member must use the supplied transaction handle. Reading
+      // through a separately held connection could observe another snapshot
+      // or collide with the bundled SQLite backend's reentrancy guard.
       const delta = await backend.transaction(async (tx) => {
         return lineage.changesSince(tx, r0, store.graphId);
       });

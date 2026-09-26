@@ -14,7 +14,11 @@ import {
 } from "../../src/graph-merge/base-version";
 import { branch } from "../../src/graph-merge/branch";
 import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
-import { planMerge, planMergeIncremental } from "../../src/graph-merge/merge";
+import {
+  merge,
+  planMerge,
+  planMergeIncremental,
+} from "../../src/graph-merge/merge";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import { asBaseVersion, type BaseVersion } from "../../src/graph-merge/types";
 import { backendMatrix, createSqliteMergeBackend } from "./test-utils";
@@ -92,6 +96,24 @@ describe("base@V tokens minted in the retired NUL-separated format", () => {
     cleanups.push(fixture.cleanup);
     return fixture.backend;
   }
+
+  it("refuses an older untracked token without its active schema version", async () => {
+    const [target] = await createStoreWithSchema(graph, makeBackend());
+    const fork = unwrap(
+      await branch(target, () => Promise.resolve(makeBackend())),
+    );
+    const olderBase = asBaseVersion(
+      (fork.base as string).replace(/#s\d+\|/, "|"),
+    );
+
+    const result = await merge(target, [{ ...fork, base: olderBase }]);
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+    await fork.close();
+  });
 
   it("parse as having no components, so no anchor is read out of them", async () => {
     const [store] = await createStoreWithSchema(graph, makeBackend(), {

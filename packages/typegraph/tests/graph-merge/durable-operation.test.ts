@@ -51,6 +51,7 @@ const graph = defineGraph({
 type G = typeof graph;
 
 const FIXED_ORIGIN: DurableBranchOrigin = {
+  allocationId: "allocation-1",
   graphId: graph.id,
   definitionHash: "definition-hash",
   branchId: asBranchId("branch-1"),
@@ -65,6 +66,7 @@ function sameOrigin(a: DurableBranchOrigin, b: DurableBranchOrigin): boolean {
   const anchor = (value: DurableBranchOrigin["schemaAnchor"]): string =>
     value === undefined ? "absent" : `${value.version}:${value.hash}`;
   return (
+    a.allocationId === b.allocationId &&
     a.graphId === b.graphId &&
     a.definitionHash === b.definitionHash &&
     a.branchId === b.branchId &&
@@ -174,9 +176,11 @@ function createRecordingHost(): RecordingHost {
           return evidence;
         });
         const lastIndex = start + page.length - 1;
-        return lastIndex + 1 < order.length ?
-            { operations, cursor: String(lastIndex) }
-          : { operations };
+        return {
+          operations,
+          cursor: page.length === 0 ? after : String(lastIndex),
+          hasMore: lastIndex + 1 < order.length,
+        };
       },
       markDelivered: async ({ expectedOrigin, idempotencyKey }) => {
         assertOrigin(expectedOrigin);
@@ -235,6 +239,7 @@ async function storedEvidence(
 }
 
 const descriptor = {
+  allocationId: FIXED_ORIGIN.allocationId,
   kind: "recording-durable-operation-host",
   version: 1,
   graphId: graph.id,
@@ -502,7 +507,19 @@ describe("durable branch operations", () => {
     expect(
       last.data.operations.map((operation) => operation.idempotencyKey),
     ).toEqual(["op-5"]);
-    expect(last.data.cursor).toBeUndefined();
+    expect(last.data.cursor).toBe("4");
+    expect(last.data.hasMore).toBe(false);
+
+    await operateDurableBranch(descriptor, host.strategy, request("op-6"));
+    const resumed = await scanDurableOperations(descriptor, host.strategy, {
+      after: last.data.cursor,
+      limit: 2,
+    });
+    expect(isOk(resumed)).toBe(true);
+    if (!isOk(resumed)) return;
+    expect(
+      resumed.data.operations.map((operation) => operation.idempotencyKey),
+    ).toEqual(["op-6"]);
   });
 
   it("rejects an out-of-range scan limit before touching the host", async () => {
@@ -830,6 +847,8 @@ describe("durable branch operations", () => {
               before: { base: asBaseVersion("") },
             }),
           ],
+          cursor: "0",
+          hasMore: false,
         }),
       },
     };
@@ -838,7 +857,7 @@ describe("durable branch operations", () => {
         ...host.strategy,
         operations: {
           ...operations,
-          scan: async () => ({ operations: [], cursor: "" }),
+          scan: async () => ({ operations: [], cursor: "", hasMore: false }),
         },
       };
 
