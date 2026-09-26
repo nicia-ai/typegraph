@@ -1,5 +1,70 @@
 # @nicia-ai/typegraph
 
+## 0.70.0
+
+### Highlights
+
+TypeGraph 0.70 strengthens durable branch identity and recovery. Each allocation has its own ID, which is checked against the sealed host origin when a branch is reopened, destroyed, or merged. Hosts can persist the branch and allocation IDs before creation to reconcile an uncertain result. Durable merge plans now retain recorded fork points, and strategies can keep older locator formats readable while writing a new format.
+
+PostgreSQL namespace forks now support the bundled pgvector storage. Embedding rows join the same verified snapshot as the rest of the graph, and owner-side preparation builds the target's vector tables and eligible indexes before the runtime copy. IVFFlat indexes are deferred until a post-copy `materializeIndexes()` call so they cluster the forked rows. Base-version tokens are now printable and can be stored directly in PostgreSQL text and JSON columns.
+
+Incremental merges now preserve a node already committed by the target when another branch proposes the same entity. This prevents a second merge from trying to change the endpoints of existing committed edges. Local `@libsql/client` 0.18 clients also use transaction framing compatible with pooled connections.
+
+### Upgrade notes
+
+- Finish or remove durable branches created by an earlier release before upgrading, then create new descriptors and sealed host origins with allocation IDs. Earlier descriptors cannot be reopened, destroyed, merged, or used for evidence access in 0.70. Re-branch other work whose legacy `base@V` token is needed for merge planning; existing plans can still apply when their target fence has not moved.
+- Update custom durable strategies: accept the allocation ID in `create()`, return `{ operations, cursor, hasMore }` from operation scans, and capture `forkRevision` inside `create()` only when it is atomic with allocation. Remove native `merge` implementations; durable plans now apply through the target Store transaction. Use `readableVersions` if a new strategy version must read older locator formats.
+- Replace `installNamespaceForkLedger(target)` with owner-side `prepareNamespaceForkTarget(source, target)` before runtime namespace forks. Use matching vector storage on both backends for graphs with embedding fields, and call `materializeIndexes()` on the forked store after copying a graph with IVFFlat indexes.
+- Re-branch or re-plan work that uses an old `engine:` anchor or untracked content token. New untracked tokens include the complete graph content and active schema version.
+
+### Minor Changes
+
+- [#745](https://github.com/nicia-ai/typegraph/pull/745) [`01b8149`](https://github.com/nicia-ai/typegraph/commit/01b814961c61b038fd71f6ad383bfdb0e350914b) Thanks [@pdlug](https://github.com/pdlug)! - Durable branch descriptors now carry a unique allocation ID, independent of the caller's branch ID. Reopen, destroy, and durable merge compare this ID with the host's sealed origin, so two copies using the same branch ID cannot be confused by a swapped locator. Callers may persist a stable branch ID and allocation ID before creation for host-side reconciliation after an uncertain result. A durable branch handle has the `DurableGraphBranch` type, which binds it to its allocation. `applyDurableMergePlan()` also carries the recorded fork point when comparing a branch with its descriptor, allowing plans for history-enabled durable branches to apply.
+  
+  Strategies may declare `readableVersions` alongside the locator format `version` they write, allowing upgraded strategies to continue reading and managing older locator formats. The descriptor version is passed to every read, destroy, and evidence method. A strategy may supply a `forkRevision` captured atomically with allocation; when it cannot, TypeGraph uses a full diff to avoid missing writes between allocation and sealing. Durable operation scans now return `hasMore` and retain their cursor at the end of a page, so callers can resume after later commits; strategies must order evidence by a monotonic commit position.
+  
+  Untracked stores now use the complete graph-content fingerprint and active schema version even when their backend offers lineage. The previous engine anchor could miss identity-only writes and did not read the planned graph state inside the commit transaction. The optional host-native `merge` strategy method is removed; `applyDurableMergePlan()` applies through the target Store transaction until a native merge contract can prove its target fence across the native operation's commit boundary.
+  
+  ### Upgrade notes
+  
+  - Re-create durable branch descriptors and sealed host origins from earlier releases. They lack the required `allocationId` fence and are refused on reopen, destroy, merge, and evidence access. Keep the previous release available to finish or remove those branches before upgrading.
+  - Update `DurableOperationCapability.scan` implementations to return `{ operations, cursor, hasMore }`. The cursor must identify the last observed commit position even when `hasMore` is `false`; an empty page echoes `after`.
+  - Move any strategy revision capture into `create()` and return it as `forkRevision` only when it was captured atomically with the physical fork. Omit it when the host cannot prove that cut.
+  - Update `DurableWorkingCopyStrategy.create` to accept the allocation ID and refuse a duplicate until the host has explicitly reconciled it. Callers that need crash recovery should persist both IDs before calling `branchDurable` and pass them in options.
+  - Re-branch or re-plan work whose base version uses the retired `engine:` anchor or an older untracked content token. New untracked tokens fingerprint current identity assertions and include the active schema version.
+  - Remove `DurableWorkingCopyStrategy.merge` implementations and use `applyDurableMergePlan()`'s transactional apply. Database-native working-copy allocation remains supported.
+
+- [#744](https://github.com/nicia-ai/typegraph/pull/744) [`3f7da34`](https://github.com/nicia-ai/typegraph/commit/3f7da34e23265941cffc52cb984aa60d657a2014) Thanks [@pdlug](https://github.com/pdlug)! - `forkGraphNamespace()` now forks graphs that use the bundled pgvector storage. Embedding rows are copied inside the same repeatable-read snapshot, included in the content digest that the copy, retries and `abort()` verify, and removed by `abort()`. A graph with embedding fields forks only between backends with the same vector storage, pgvector on both sides or `vector: false` on both; custom vector and fulltext strategies are still refused.
+  
+  `prepareNamespaceForkTarget(source, target)` is the owner-side step. It installs the retry ledger, creates the graph's pgvector tables, and builds every index the source has materialized for the graph with the DDL the source used. It writes no graph rows and no materialization records, and the runtime fork still issues no DDL. IVFFlat indexes need the copied rows to cluster well, so preparation skips them, the fork does not copy their records, and `fork.store.materializeIndexes()` builds them after the copy.
+  
+  `materializeIndexes()` now rebuilds an IVFFlat index that exists without a materialization record, for example one an aborted fork left behind, instead of keeping it with `IF NOT EXISTS`: it was clustered for other rows. A backend without `dropVectorIndex` keeps the previous behavior.
+  
+  A materialized vector index no longer makes the fork refuse, and indexes whose build never completed on the source are neither built on nor required of the target.
+  
+  ### Upgrade notes
+  
+  - Replace `installNamespaceForkLedger(target)` with `prepareNamespaceForkTarget(source, target)`, run with the schema owner role before the runtime fork. `installNamespaceForkLedger` is removed.
+  - Namespace-fork backends no longer need `vector: false`. For a graph with embedding fields, open source and target with the same vector storage: pgvector on both, or `vector: false` on both.
+  - After forking a graph that declares IVFFlat indexes, run `materializeIndexes()` on the forked store under the owner role to build them.
+
+- [#743](https://github.com/nicia-ai/typegraph/pull/743) [`b69ec0b`](https://github.com/nicia-ai/typegraph/commit/b69ec0b9f4dc358b031e39eb8728b6ea11be871a) Thanks [@pdlug](https://github.com/pdlug)! - `base@V` tokens are now printable text. Their two components were joined by a NUL character, which PostgreSQL `text` and `jsonb` columns reject, so an application could not persist a durable branch descriptor, a recorded fork point, a merge plan, or durable operation evidence in PostgreSQL without re-encoding it. The separator is now `|`.
+  
+  ### Upgrade notes
+  
+  - Merge or re-create branches and durable branches minted by an earlier release. Their `base@V` tokens are refused with `BaseVersionMismatchError` and `details.reason: "legacy-token-format"` when `planMerge()`, `merge()`, `planMergeIncremental()`, or `mergeIncremental()` validates the branch's base, and when an incremental plan starts from a persisted `RecordedForkPoint`. Reopening a durable branch still succeeds; planning a merge from it does not.
+  - Existing merge plans are unaffected. Applying a plan, including through `applyDurableMergePlan()`, validates the plan's target fence (graph id, schema, and revision anchor), not the format of the tokens recorded in its anchors. A plan whose target has not moved since planning still applies after the upgrade.
+  - Durable operation evidence stores the coordinates the host supplied and is not compared with newly minted tokens, so existing evidence remains readable.
+  - Code that stored tokens in a re-encoded form (base64, or JSON text in a `text` column) keeps working and may store them directly.
+
+### Patch Changes
+
+- [#740](https://github.com/nicia-ai/typegraph/pull/740) [`fe345b0`](https://github.com/nicia-ai/typegraph/commit/fe345b0e08213d414dc71321bc39bfe30c345e07) Thanks [@pdlug](https://github.com/pdlug)! - Update `nanoid` to 6.0, which requires Node.js 22 or later, matching the package's existing `engines` range. `ExportOptionsSchema.signal` keeps its declared `ZodCustom<AbortSignal, AbortSignal>` type, so the published declarations stay valid across the whole `zod ^4.0.0` peer range.
+
+- [#746](https://github.com/nicia-ai/typegraph/pull/746) [`6ad8c03`](https://github.com/nicia-ai/typegraph/commit/6ad8c030a5786ad09a73ddbc204bdc6c2d68f730) Thanks [@pdlug](https://github.com/pdlug)! - Incremental merges now keep a node the target committed after the fork point as the survivor when a branch proposes the same entity. Two branches forked from one point that both added an entity could previously fail on the second merge: when the second branch's node had the lexicographically smaller id, it won survivor selection, and the plan tried to repoint the committed edges of the first branch's node, which `applyMergePlan()` refused as an immutable-endpoint change. Merges that resolved through `blockIndex` or a unique constraint were not affected.
+
+- [#741](https://github.com/nicia-ai/typegraph/pull/741) [`b8fd08e`](https://github.com/nicia-ai/typegraph/commit/b8fd08e2854d609325928038725c5502027b4b81) Thanks [@pdlug](https://github.com/pdlug)! - Support `@libsql/client` 0.18 local clients. From 0.18 a local client pools its connections and rolls back any transaction a single `execute()` leaves open, so the raw `BEGIN`/`COMMIT` framing used for local clients failed every transaction with "no transaction is active". `createLibsqlBackend()` now probes whether a local client's `execute()` calls share one session and frames transactions through `client.transaction()` when they do not; clients before 0.18 keep raw `BEGIN`/`COMMIT`.
+
 ## 0.69.0
 
 ### Highlights
