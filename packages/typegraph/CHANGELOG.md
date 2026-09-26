@@ -2,6 +2,21 @@
 
 ## 0.70.0
 
+### Highlights
+
+TypeGraph 0.70 strengthens durable branch identity and recovery. Each allocation has its own ID, which is checked against the sealed host origin when a branch is reopened, destroyed, or merged. Hosts can persist the branch and allocation IDs before creation to reconcile an uncertain result. Durable merge plans now retain recorded fork points, and strategies can keep older locator formats readable while writing a new format.
+
+PostgreSQL namespace forks now support the bundled pgvector storage. Embedding rows join the same verified snapshot as the rest of the graph, and owner-side preparation builds the target's vector tables and eligible indexes before the runtime copy. IVFFlat indexes are deferred until a post-copy `materializeIndexes()` call so they cluster the forked rows. Base-version tokens are now printable and can be stored directly in PostgreSQL text and JSON columns.
+
+Incremental merges now preserve a node already committed by the target when another branch proposes the same entity. This prevents a second merge from trying to change the endpoints of existing committed edges. Local `@libsql/client` 0.18 clients also use transaction framing compatible with pooled connections.
+
+### Upgrade notes
+
+- Finish or remove durable branches created by an earlier release before upgrading, then create new descriptors and sealed host origins with allocation IDs. Earlier descriptors cannot be reopened, destroyed, merged, or used for evidence access in 0.70. Re-branch other work whose legacy `base@V` token is needed for merge planning; existing plans can still apply when their target fence has not moved.
+- Update custom durable strategies: accept the allocation ID in `create()`, return `{ operations, cursor, hasMore }` from operation scans, and capture `forkRevision` inside `create()` only when it is atomic with allocation. Remove native `merge` implementations; durable plans now apply through the target Store transaction. Use `readableVersions` if a new strategy version must read older locator formats.
+- Replace `installNamespaceForkLedger(target)` with owner-side `prepareNamespaceForkTarget(source, target)` before runtime namespace forks. Use matching vector storage on both backends for graphs with embedding fields, and call `materializeIndexes()` on the forked store after copying a graph with IVFFlat indexes.
+- Re-branch or re-plan work that uses an old `engine:` anchor or untracked content token. New untracked tokens include the complete graph content and active schema version.
+
 ### Minor Changes
 
 - [#745](https://github.com/nicia-ai/typegraph/pull/745) [`01b8149`](https://github.com/nicia-ai/typegraph/commit/01b814961c61b038fd71f6ad383bfdb0e350914b) Thanks [@pdlug](https://github.com/pdlug)! - Durable branch descriptors now carry a unique allocation ID, independent of the caller's branch ID. Reopen, destroy, and durable merge compare this ID with the host's sealed origin, so two copies using the same branch ID cannot be confused by a swapped locator. Callers may persist a stable branch ID and allocation ID before creation for host-side reconciliation after an uncertain result. A durable branch handle has the `DurableGraphBranch` type, which binds it to its allocation. `applyDurableMergePlan()` also carries the recorded fork point when comparing a branch with its descriptor, allowing plans for history-enabled durable branches to apply.
