@@ -1566,11 +1566,6 @@ export type DurableBranch<G extends GraphDef, TStoreDescriptor extends DurableSt
 }>;
 
 // @public
-export type DurableBranchOptions = BranchOptions & Readonly<{
-    allocationId?: string | undefined;
-}>;
-
-// @public
 export type DurableBranchCoordinates = Readonly<{
     base: BaseVersion;
     revision?: EngineRevision | undefined;
@@ -1621,6 +1616,11 @@ export type DurableBranchOperationRequest = Readonly<{
     idempotencyKey: string;
     metadata: JsonValue;
     mutation: JsonValue;
+}>;
+
+// @public
+export type DurableBranchOptions = BranchOptions & Readonly<{
+    allocationId?: string | undefined;
 }>;
 
 // @public
