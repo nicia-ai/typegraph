@@ -4112,9 +4112,6 @@ type InsertUniqueParams = Readonly<{
 }>;
 
 // @public
-export function installNamespaceForkLedger(targetBackend: GraphBackend): Promise<void>;
-
-// @public
 type InSubquery = Readonly<{
     __type: "in_subquery";
     field: FieldRef;
@@ -6023,6 +6020,9 @@ type PreparedQueryConfig<R> = Readonly<{
     selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
     schemaIntrospector: SchemaIntrospector;
 }>;
+
+// @public
+export function prepareNamespaceForkTarget<G extends GraphDef>(source: Store<G>, targetBackend: GraphBackend): Promise<void>;
 
 // @public (undocumented)
 type ProjectedEdgeResult<E extends AnyEdgeType, Selection extends readonly string[] | undefined> = Readonly<Pick<Edge<E>, "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId">> & Readonly<SelectedEdgeProps<E, Selection>> & (HasMeta<Selection> extends true ? Readonly<{

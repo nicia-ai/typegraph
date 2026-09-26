@@ -122,7 +122,9 @@ function hasIndexBuildClaimProtocol(backend: GraphBackend): boolean {
  *
  * A backend with none of them keeps failing loudly on `requireDefined`.
  */
-async function ensureTrigramExtension(backend: GraphBackend): Promise<void> {
+export async function ensureTrigramExtension(
+  backend: GraphBackend,
+): Promise<void> {
   if (backend.ensureExtension !== undefined) {
     await backend.ensureExtension("pg_trgm");
     return;
@@ -256,24 +258,17 @@ export async function materializeIndexes(
 
   const catalog = requireCatalog(backend, "store.materializeIndexes()");
   const dialect = backend.dialect;
-  const tableNames = backend.tableNames;
-  const ddlOptions = {
-    ifNotExists: true,
-    concurrent: catalog.indexBehavior.concurrentBuilds,
-    ...(tableNames?.nodes === undefined ?
-      {}
-    : { nodesTableName: tableNames.nodes }),
-    ...(tableNames?.edges === undefined ?
-      {}
-    : { edgesTableName: tableNames.edges }),
-  } as const;
+  const ddlOptions = relationalIndexDdlOptions(
+    backend,
+    catalog.indexBehavior.concurrentBuilds,
+  );
 
   // Bulk-preload existing materialization rows for every candidate's
   // status key in one round-trip. With 30 declared indexes this drops 30
   // sequential SELECTs to one. Backends without the bulk primitive fall
   // back to per-key lookups inside `materializeOne`.
   const statusKeys = candidates.map((declaration) =>
-    statusKeyFor(declaration, graphId),
+    indexMaterializationStatusKey(declaration, graphId),
   );
   const existingByStatusKey = await preloadMaterializations(
     backend,
@@ -564,22 +559,11 @@ async function materializeVectorIndex(
     embeddingsTable,
     declaration,
   );
-  const params: CreateVectorIndexParams = {
+  const params = vectorIndexParams(
+    declaration,
     graphId,
-    nodeKind: declaration.kind,
-    fieldPath: declaration.fieldPath,
-    dimensions: declaration.dimensions,
-    metric: declaration.metric,
-    indexType: declaration.indexType,
-    indexParams: {
-      m: declaration.indexParams.m,
-      efConstruction: declaration.indexParams.efConstruction,
-      ...(declaration.indexParams.lists === undefined ?
-        {}
-      : { lists: declaration.indexParams.lists }),
-    },
-    concurrent: catalog.indexBehavior.concurrentBuilds,
-  };
+    catalog.indexBehavior.concurrentBuilds,
+  );
   return materializeOne(declaration, backend, catalog, graphId, schemaVersion, {
     // Compound status-table key for vector entries. Pgvector creates
     // one physical index per (graphId, kind, field) — so the
@@ -589,7 +573,22 @@ async function materializeVectorIndex(
     statusKey: vectorStatusKey(graphId, declaration.name),
     signature,
     driftLabel: "Vector index",
-    run: () => requireDefined(backend.createVectorIndex)(params),
+    run: async () => {
+      // `run` executes only when this database holds no valid record of
+      // building the index. An IVFFlat index that exists anyway (left behind
+      // by an aborted namespace fork, or created outside TypeGraph) was
+      // clustered for other rows, and `IF NOT EXISTS` would keep it with poor
+      // recall. Rebuild it over the rows present now.
+      // A backend without `dropVectorIndex` keeps its prior behavior.
+      if (declaration.indexType === "ivfflat") {
+        await backend.dropVectorIndex?.({
+          graphId,
+          nodeKind: declaration.kind,
+          fieldPath: declaration.fieldPath,
+        });
+      }
+      await requireDefined(backend.createVectorIndex)(params);
+    },
     existingByStatusKey,
     physicalRebuildPreload: invalidLeftovers,
   });
@@ -1167,7 +1166,64 @@ export function vectorStatusKey(
   return `${graphId}::${declarationName}`;
 }
 
-function statusKeyFor(declaration: IndexDeclaration, graphId: string): string {
+/**
+ * DDL options every relational declaration is rendered with against
+ * `backend`: idempotent, on the backend's own node and edge tables.
+ */
+export function relationalIndexDdlOptions(
+  backend: GraphBackend,
+  concurrent: boolean,
+): Readonly<{
+  ifNotExists: true;
+  concurrent: boolean;
+  nodesTableName?: string;
+  edgesTableName?: string;
+}> {
+  const tableNames = backend.tableNames;
+  return {
+    ifNotExists: true,
+    concurrent,
+    ...(tableNames?.nodes === undefined ?
+      {}
+    : { nodesTableName: tableNames.nodes }),
+    ...(tableNames?.edges === undefined ?
+      {}
+    : { edgesTableName: tableNames.edges }),
+  };
+}
+
+/** The vector index a declaration materializes, including its declared tuning. */
+export function vectorIndexParams(
+  declaration: VectorIndexDeclaration,
+  graphId: string,
+  concurrent: boolean,
+): CreateVectorIndexParams {
+  return {
+    graphId,
+    nodeKind: declaration.kind,
+    fieldPath: declaration.fieldPath,
+    dimensions: declaration.dimensions,
+    metric: declaration.metric,
+    indexType: declaration.indexType,
+    indexParams: {
+      m: declaration.indexParams.m,
+      efConstruction: declaration.indexParams.efConstruction,
+      ...(declaration.indexParams.lists === undefined ?
+        {}
+      : { lists: declaration.indexParams.lists }),
+    },
+    concurrent,
+  };
+}
+
+/**
+ * The `index_materializations` key a declaration is recorded under: its name,
+ * or for a vector declaration its graph-qualified {@link vectorStatusKey}.
+ */
+export function indexMaterializationStatusKey(
+  declaration: IndexDeclaration,
+  graphId: string,
+): string {
   return declaration.entity === "vector" ?
       vectorStatusKey(graphId, declaration.name)
     : declaration.name;

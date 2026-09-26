@@ -307,9 +307,9 @@ export async function computeBaseVersion<G extends GraphDef>(
   ]);
   const backend = storeBackend(store);
   const originsVerdict =
-    resolveLineage(store) === undefined ?
-      undefined
-    : recordedRevisionOriginsVerdict(backend);
+    resolveLineage(store) === undefined ? undefined : (
+      recordedRevisionOriginsVerdict(backend)
+    );
   const origin =
     originsVerdict?.supported ?
       await ensureRevisionOrigin(

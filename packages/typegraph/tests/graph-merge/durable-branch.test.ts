@@ -50,9 +50,9 @@ import {
   applyMergePlan,
   asBaseVersion,
   asBranchId,
-  type BranchId,
   branchDurable,
   BranchError,
+  type BranchId,
   destroyDurableBranch,
   type DurableBranchOrigin,
   type DurableWorkingCopyStrategy,
@@ -217,7 +217,9 @@ function createFakeDurableHost(
     create: async (baseStore, base, branchId, allocationId) => {
       const existing = allocations.get(allocationId);
       if (existing !== undefined) {
-        throw new Error("allocation id already exists; reconcile it before retrying");
+        throw new Error(
+          "allocation id already exists; reconcile it before retrying",
+        );
       }
       sequence += 1;
       const locator = `working-copy-${sequence}`;
@@ -1114,8 +1116,13 @@ describe("durable branch", () => {
     const mismatchedStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> =
       {
         ...host.strategy,
-        create: async (source, base, branchId) => {
-          const created = await host.strategy.create(source, base, branchId);
+        create: async (source, base, branchId, allocationId) => {
+          const created = await host.strategy.create(
+            source,
+            base,
+            branchId,
+            allocationId,
+          );
           await created.store.nodes.Person.create({ name: "not in the base" });
           return created;
         },
@@ -1139,8 +1146,13 @@ describe("durable branch", () => {
     const { baseStore } = await seedBase();
     const racingStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> = {
       ...host.strategy,
-      create: async (source, base, branchId) => {
-        const created = await host.strategy.create(source, base, branchId);
+      create: async (source, base, branchId, allocationId) => {
+        const created = await host.strategy.create(
+          source,
+          base,
+          branchId,
+          allocationId,
+        );
         await source.nodes.Person.create({ name: "raced the fork" });
         return created;
       },
@@ -1167,9 +1179,14 @@ describe("durable branch", () => {
     const exclusiveStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> =
       {
         ...host.strategy,
-        create: async (source, base, branchId) => {
+        create: async (source, base, branchId, allocationId) => {
           if (leased) throw new Error("working copy is already leased");
-          const created = await host.strategy.create(source, base, branchId);
+          const created = await host.strategy.create(
+            source,
+            base,
+            branchId,
+            allocationId,
+          );
           leased = true;
           return {
             ...created,
@@ -1184,11 +1201,12 @@ describe("durable branch", () => {
             },
           };
         },
-        reopen: async (reopenedGraph, descriptor) => {
+        reopen: async (reopenedGraph, descriptor, descriptorVersion) => {
           if (leased) throw new Error("working copy is already leased");
           const reopened = await host.strategy.reopen(
             reopenedGraph,
             descriptor,
+            descriptorVersion,
           );
           leased = true;
           return {
@@ -1231,8 +1249,13 @@ describe("durable branch", () => {
     const exclusiveStrategy: DurableWorkingCopyStrategy<G, LocatorDescriptor> =
       {
         ...host.strategy,
-        create: async (source, base, branchId) => {
-          const created = await host.strategy.create(source, base, branchId);
+        create: async (source, base, branchId, allocationId) => {
+          const created = await host.strategy.create(
+            source,
+            base,
+            branchId,
+            allocationId,
+          );
           return {
             ...created,
             access: {
@@ -1371,16 +1394,22 @@ describe("durable branch", () => {
   it("distinguishes allocations even when callers reuse the same branch id", async () => {
     const { baseStore } = await seedBase();
     const options = { id: asBranchId("reused-branch-id") };
-    const first = unwrap(await branchDurable(baseStore, host.strategy, options));
-    const second = unwrap(await branchDurable(baseStore, host.strategy, options));
-    expect(first.descriptor.allocationId).not.toBe(second.descriptor.allocationId);
+    const first = unwrap(
+      await branchDurable(baseStore, host.strategy, options),
+    );
+    const second = unwrap(
+      await branchDurable(baseStore, host.strategy, options),
+    );
+    expect(first.descriptor.allocationId).not.toBe(
+      second.descriptor.allocationId,
+    );
     await first.branch.close();
     await second.branch.close();
 
     const swapped = { ...first.descriptor, store: second.descriptor.store };
-    expect(isErr(await reopenDurableBranch(graph, swapped, host.strategy))).toBe(
-      true,
-    );
+    expect(
+      isErr(await reopenDurableBranch(graph, swapped, host.strategy)),
+    ).toBe(true);
     expect(isErr(await destroyDurableBranch(swapped, host.strategy))).toBe(
       true,
     );
@@ -1393,7 +1422,9 @@ describe("durable branch", () => {
       id: asBranchId("retry-branch"),
       allocationId: "retry-allocation",
     };
-    const first = unwrap(await branchDurable(baseStore, host.strategy, options));
+    const first = unwrap(
+      await branchDurable(baseStore, host.strategy, options),
+    );
     await first.branch.close();
     expect(isErr(await branchDurable(baseStore, host.strategy, options))).toBe(
       true,

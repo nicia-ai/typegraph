@@ -47,8 +47,8 @@ export type {
   DurableBranch,
   DurableBranchDescriptor,
   DurableBranchOptions,
-  DurableGraphBranch,
   DurableBranchOrigin,
+  DurableGraphBranch,
   DurableStoreDescriptor,
   DurableWorkingCopyAccess,
   DurableWorkingCopyStrategy,
@@ -137,7 +137,7 @@ export {
 export type { NamespaceFork, NamespaceForkProof } from "./namespace-fork";
 export {
   forkGraphNamespace,
-  installNamespaceForkLedger,
+  prepareNamespaceForkTarget,
 } from "./namespace-fork";
 export type { NormalizedMergeOptions } from "./options";
 export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";

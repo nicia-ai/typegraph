@@ -78,7 +78,9 @@ export async function applyDurableMergePlan<
       base: branch.base,
       schemaAnchor: branch.schemaAnchor,
       forkRevision: branch.forkRevision,
-      recordedForkPoint: branch.recordedForkPoint,
+      ...(branch.recordedForkPoint === undefined ?
+        {}
+      : { recordedForkPoint: branch.recordedForkPoint }),
     };
     if (!durableOriginsEqual(branchOrigin, descriptorOrigin)) {
       throw new MergeError(

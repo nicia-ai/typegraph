@@ -639,7 +639,11 @@ export async function reopenDurableBranch<
     access: DurableWorkingCopyAccess;
   }>;
   try {
-    reopened = await strategy.reopen(graph, descriptor.store, descriptor.version);
+    reopened = await strategy.reopen(
+      graph,
+      descriptor.store,
+      descriptor.version,
+    );
   } catch (error) {
     return err(
       new BranchError(
