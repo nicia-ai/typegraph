@@ -167,8 +167,10 @@ singletons, in representative order. A kind filter selects classes containing
 at least one visible member of the requested kinds; each result still includes
 all of that class's visible members. Pass `nextCursor` to the next call until
 it is absent. The cursor is exclusive and applies to the same graph and read
-coordinate. Each page reconstructs the visible classes for the graph, so page
-size bounds the response rather than the work of reconstruction; prefer a
+coordinate. At current coordinates, the database finds visible representatives
+for the page and expands members only for those classes; discovering
+representatives still examines the visible node set. Historical coordinates
+reconstruct all visible classes before applying the page boundary. Prefer a
 stable `asOf` coordinate when paging while writes may occur.
 
 ## Integrity and lifecycle

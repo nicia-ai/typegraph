@@ -5,6 +5,7 @@ import {
   type IdentityContradictionErrorDetails,
 } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
+import { getDialect } from "../query/dialect";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
@@ -80,6 +81,7 @@ import {
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
   type IdentityAssertionResult,
+  type IdentityClassPage,
   type IdentityClassPageOptions,
   type IdentityFacade,
   type IdentityNodeRefInput,
@@ -605,6 +607,159 @@ export async function runIdentityMutation<G extends GraphDef, T>(
   );
 }
 
+type CurrentIdentityClassPageRow = Readonly<{
+  page_index: number | string;
+  representative_kind: string;
+  representative_id: string;
+  member_kind: string | null;
+  member_id: string | null;
+}>;
+
+async function loadCurrentIdentityClassPage<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  allKinds: readonly string[],
+  kinds: readonly string[],
+  limit: number,
+  after: PlainNodeRef | undefined,
+): Promise<IdentityClassPage<G>> {
+  const coordinate = identitySqlCoordinate(ctx.coordinate, nowIso());
+  const dialect = getDialect(ctx.backend.dialect);
+  const kindValues = sql.join(
+    kinds.map((kind) => sql`${kind}`),
+    sql`, `,
+  );
+  const registeredKindValues = sql.join(
+    allKinds.map((kind) => sql`${kind}`),
+    sql`, `,
+  );
+  const nodeSource = identityNodeSnapshotSource(
+    ctx.schema,
+    ctx.graphId,
+    coordinate,
+  );
+  const afterPredicate =
+    after === undefined ?
+      sql``
+    : sql`
+      AND (
+        ${dialect.binaryText(sql`representative_kind`)} > ${dialect.binaryText(sql`${after.kind}`)}
+        OR (
+          ${dialect.binaryText(sql`representative_kind`)} = ${dialect.binaryText(sql`${after.kind}`)}
+          AND ${dialect.binaryText(sql`representative_id`)} > ${dialect.binaryText(sql`${after.id}`)}
+        )
+      )
+    `;
+  const pageLimit = limit === Number.MAX_SAFE_INTEGER ? limit : limit + 1;
+  const rows = await ctx.backend.execute<CurrentIdentityClassPageRow>(
+    asCompiledRowsSql(sql`
+      WITH node_snapshot AS (${nodeSource}), visible_nodes AS (
+        SELECT n.kind, n.id
+        FROM node_snapshot n
+        WHERE n.kind IN (${registeredKindValues})
+          AND ${identityNodeVisibilitySql(coordinate, "n")}
+      ), class_members AS (
+        SELECT
+          COALESCE(anchor.class_kind, visible.kind) AS class_kind,
+          COALESCE(anchor.class_id, visible.id) AS class_id,
+          visible.kind AS member_kind,
+          visible.id AS member_id
+        FROM visible_nodes visible
+        LEFT JOIN ${ctx.schema.identityClosureTable} anchor
+          ON anchor.graph_id = ${ctx.graphId}
+         AND anchor.member_kind = visible.kind
+         AND anchor.member_id = visible.id
+      ), ranked_members AS (
+        SELECT
+          class_kind, class_id, member_kind, member_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY class_kind, class_id
+            ORDER BY ${dialect.binaryText(sql`member_kind`)},
+                     ${dialect.binaryText(sql`member_id`)}
+          ) AS representative_rank
+        FROM class_members
+      ), representatives AS (
+        SELECT
+          ranked.class_kind, ranked.class_id,
+          ranked.member_kind AS representative_kind,
+          ranked.member_id AS representative_id
+        FROM ranked_members ranked
+        WHERE ranked.representative_rank = 1
+          AND EXISTS (
+            SELECT 1
+            FROM class_members requested_member
+            WHERE requested_member.class_kind = ranked.class_kind
+              AND requested_member.class_id = ranked.class_id
+              AND requested_member.member_kind IN (${kindValues})
+          )
+      ), eligible AS (
+        SELECT * FROM representatives
+        WHERE 1 = 1 ${afterPredicate}
+      ), page_candidates AS (
+        SELECT
+          eligible.*,
+          ROW_NUMBER() OVER (
+            ORDER BY ${dialect.binaryText(sql`representative_kind`)},
+                     ${dialect.binaryText(sql`representative_id`)}
+          ) AS page_index
+        FROM eligible
+        ORDER BY ${dialect.binaryText(sql`representative_kind`)},
+                 ${dialect.binaryText(sql`representative_id`)}
+        LIMIT ${pageLimit}
+      )
+      SELECT
+        page.page_index,
+        page.representative_kind,
+        page.representative_id,
+        CASE WHEN page.page_index <= ${limit} THEN member.member_kind ELSE NULL END AS member_kind,
+        CASE WHEN page.page_index <= ${limit} THEN member.member_id ELSE NULL END AS member_id
+      FROM page_candidates page
+      LEFT JOIN class_members member
+        ON page.page_index <= ${limit}
+       AND member.class_kind = page.class_kind
+       AND member.class_id = page.class_id
+      ORDER BY page.page_index,
+               ${dialect.binaryText(sql`member.member_kind`)},
+               ${dialect.binaryText(sql`member.member_id`)}
+    `),
+  );
+  const membersByPage = new Map<number, PlainNodeRef[]>();
+  const representativesByPage = new Map<number, PlainNodeRef>();
+  let hasMore = false;
+  for (const row of rows) {
+    const pageIndex = Number(row.page_index);
+    if (pageIndex > limit) {
+      hasMore = true;
+      continue;
+    }
+    representativesByPage.set(pageIndex, {
+      kind: row.representative_kind,
+      id: row.representative_id,
+    });
+    if (row.member_kind === null || row.member_id === null) continue;
+    const members = membersByPage.get(pageIndex) ?? [];
+    members.push({ kind: row.member_kind, id: row.member_id });
+    membersByPage.set(pageIndex, members);
+  }
+  const pageClasses = [...representativesByPage]
+    .toSorted(([left], [right]) => left - right)
+    .map(([pageIndex, representative]) => {
+      const members = requireDefined(membersByPage.get(pageIndex));
+      return {
+        representative: publicNodeRef<G>(representative),
+        members: members.map((member) => publicNodeRef<G>(member)),
+      };
+    });
+  const last = pageClasses.at(-1)?.representative;
+  return {
+    classes: pageClasses,
+    ...(hasMore && last !== undefined ?
+      {
+        nextCursor: `${encodeURIComponent(last.kind)}:${encodeURIComponent(last.id)}`,
+      }
+    : {}),
+  };
+}
+
 export function createIdentityReadFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
 ): IdentityReadFacade<G> {
@@ -640,6 +795,17 @@ export function createIdentityReadFacade<G extends GraphDef>(
           throw new ConfigurationError("identity.classes cursor is invalid.");
       }
       if (kinds.length === 0) return { classes: [] };
+      if (
+        ctx.coordinate === undefined ||
+        isCurrentClosureCoordinate(ctx.coordinate)
+      )
+        return loadCurrentIdentityClassPage(
+          ctx,
+          allKinds,
+          kinds,
+          options.limit,
+          after,
+        );
       const coordinate = identitySqlCoordinate(ctx.coordinate, nowIso());
       const kindValues = sql.join(
         allKinds.map((kind) => sql`${kind}`),
@@ -661,55 +827,27 @@ export function createIdentityReadFacade<G extends GraphDef>(
         `),
       );
       const seeds = rows.map((row) => ({ kind: row.kind, id: row.id }));
-      const visibleSeedKeys = new Set(seeds.map((seed) => refKey(seed)));
       const grouped = new Map<string, Map<string, PlainNodeRef>>();
-      if (
-        ctx.coordinate === undefined ||
-        isCurrentClosureCoordinate(ctx.coordinate)
-      ) {
-        const components = await loadCurrentStructuralClassComponents(
-          ctx.backend,
-          ctx.schema,
-          ctx.graphId,
-          seeds,
+      const historical = await loadHistoricalClasses(
+        ctx.backend,
+        ctx.schema,
+        ctx.graphId,
+        seeds,
+        ctx.coordinate,
+        ctx.sameIdAcrossKinds,
+      );
+      for (const value of historical.values()) {
+        const members = value.visible;
+        if (members.length === 0) continue;
+        if (!members.some((member) => kinds.includes(member.kind))) continue;
+        const representative = members[0];
+        if (representative === undefined) continue;
+        const key = refKey(representative);
+        if (grouped.has(key)) continue;
+        grouped.set(
+          key,
+          new Map(members.map((member) => [refKey(member), member])),
         );
-        for (const members of components.values()) {
-          const visibleMembers = members.filter((member) =>
-            visibleSeedKeys.has(refKey(member)),
-          );
-          if (visibleMembers.length === 0) continue;
-          if (!visibleMembers.some((member) => kinds.includes(member.kind)))
-            continue;
-          const representative = visibleMembers[0];
-          if (representative === undefined) continue;
-          const key = refKey(representative);
-          grouped.set(
-            key,
-            new Map(visibleMembers.map((member) => [refKey(member), member])),
-          );
-        }
-      } else {
-        const historical = await loadHistoricalClasses(
-          ctx.backend,
-          ctx.schema,
-          ctx.graphId,
-          seeds,
-          ctx.coordinate,
-          ctx.sameIdAcrossKinds,
-        );
-        for (const value of historical.values()) {
-          const members = value.visible;
-          if (members.length === 0) continue;
-          if (!members.some((member) => kinds.includes(member.kind))) continue;
-          const representative = members[0];
-          if (representative === undefined) continue;
-          const key = refKey(representative);
-          if (grouped.has(key)) continue;
-          grouped.set(
-            key,
-            new Map(members.map((member) => [refKey(member), member])),
-          );
-        }
       }
       const sorted = [...grouped.values()]
         .map((members) =>
