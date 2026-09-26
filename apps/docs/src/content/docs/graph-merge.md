@@ -984,9 +984,12 @@ const result = await merge(base, branches, { reconcileTypes: "ontology" });
 ## Choosing the survivor
 
 By default a cluster's canonical survivor is the member with the
-lexicographically-minimal id (and, on new-vs-base merges, a committed base
-member always wins so its committed identity stays stable). Override the
-staged-vs-staged choice with `canonical`:
+lexicographically-minimal id. A committed member always wins instead, so its
+committed identity and the edges already attached to it stay stable: on
+new-vs-base merges that is a committed base member, and on incremental merges
+it is also a node the live target committed after the fork point, such as one
+an earlier branch's merge added. Override the staged-vs-staged choice with
+`canonical`:
 
 ```typescript
 const result = await merge(base, branches, {
