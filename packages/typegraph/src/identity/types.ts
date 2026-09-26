@@ -110,6 +110,15 @@ export type IdentityValidityWindow = Readonly<{
   validTo?: string;
 }>;
 
+/** One edge in a proof that two references belong to the same identity class. */
+export type IdentitySamePathStep<G extends GraphDef> = Readonly<{
+  from: IdentityNodeReference<G>;
+  to: IdentityNodeReference<G>;
+  via:
+    | Readonly<{ type: "assertion"; assertion: IdentityAssertion<G> }>
+    | Readonly<{ type: "same-id-fold" }>;
+}>;
+
 /** One ordered node pair handed to `bulkAssertSame` / `bulkAssertDifferent`. */
 export type IdentityPair<G extends GraphDef> = Readonly<{
   a: IdentityNodeRefInput<G>;
@@ -146,6 +155,11 @@ export type IdentityReadFacade<G extends GraphDef> = Readonly<{
   assertionsOf: (
     ref: IdentityNodeRefInput<G>,
   ) => Promise<readonly IdentityAssertion<G>[]>;
+  /** Returns a shortest proof at this facade's read coordinate, or undefined if distinct. */
+  explainSame: (
+    a: IdentityNodeRefInput<G>,
+    b: IdentityNodeRefInput<G>,
+  ) => Promise<readonly IdentitySamePathStep<G>[] | undefined>;
 }>;
 
 /**

@@ -114,6 +114,7 @@ export const IDENTITY_READ_NAMES = [
   "areSame",
   "areDifferent",
   "assertionsOf",
+  "explainSame",
 ] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
 
 /** Identity facade write method names: never available on a read-only view. */

@@ -30,6 +30,7 @@ import {
   selfAssertionError,
   UnionFind,
 } from "./service-components";
+import { identityActiveKinds, loadSnapshot } from "./service-components";
 import {
   assertPair,
   buildAssertionRow,
@@ -77,6 +78,7 @@ import {
   type IdentityNodeRefInput,
   type IdentityReadFacade,
   type IdentityRelation,
+  type IdentitySamePathStep,
   type IdentityValidityWindow,
 } from "./types";
 import {
@@ -727,6 +729,114 @@ export function createIdentityReadFacade<G extends GraphDef>(
         )
         .toSorted((left, right) => compareCodePoints(left.id, right.id))
         .map((assertion) => publicAssertion<G>(assertion));
+    },
+
+    async explainSame(firstInput, secondInput) {
+      const first = registeredPlainRef(ctx, firstInput);
+      const second = registeredPlainRef(ctx, secondInput);
+      const visibleMembers = await visibleMembersAtCoordinate(ctx, first);
+      if (!containsRef(visibleMembers, second)) return;
+      const snapshot = await loadSnapshot(
+        ctx.backend,
+        ctx.schema,
+        ctx.graphId,
+        ctx.coordinate,
+        identityActiveKinds(ctx.registry),
+        ctx.sameIdAcrossKinds,
+      );
+      const firstClass = snapshot.components.get(refKey(first));
+      if (firstClass === undefined || !containsRef(firstClass, second)) {
+        return;
+      }
+      if (refKey(first) === refKey(second)) return [];
+
+      type Previous = Readonly<{
+        ref: PlainNodeRef;
+        step: IdentitySamePathStep<G>;
+      }>;
+      const structuralById = new Map<string, PlainNodeRef[]>();
+      for (const ref of snapshot.structuralNodes) {
+        const group = structuralById.get(ref.id) ?? [];
+        group.push(ref);
+        structuralById.set(ref.id, group);
+      }
+      const assertionEdges = snapshot.assertions
+        .filter((assertion) => assertion.rel === "same")
+        .map((assertion) => ({
+          a: { kind: assertion.a_kind, id: assertion.a_id },
+          b: { kind: assertion.b_kind, id: assertion.b_id },
+          assertion,
+        }));
+      const visited = new Set([refKey(first)]);
+      const previous = new Map<string, Previous>();
+      const queue = [first];
+      for (
+        let index = 0;
+        index < queue.length && !visited.has(refKey(second));
+        index += 1
+      ) {
+        const current = queue[index];
+        if (current === undefined) continue;
+        const neighbors: readonly Readonly<{
+          ref: PlainNodeRef;
+          via: Previous["step"]["via"];
+        }>[] = [
+          ...assertionEdges.flatMap((edge) =>
+            refKey(edge.a) === refKey(current) ?
+              [
+                {
+                  ref: edge.b,
+                  via: {
+                    type: "assertion" as const,
+                    assertion: publicAssertion<G>(edge.assertion),
+                  },
+                },
+              ]
+            : refKey(edge.b) === refKey(current) ?
+              [
+                {
+                  ref: edge.a,
+                  via: {
+                    type: "assertion" as const,
+                    assertion: publicAssertion<G>(edge.assertion),
+                  },
+                },
+              ]
+            : [],
+          ),
+          ...(ctx.sameIdAcrossKinds === "fold" ?
+            (structuralById.get(current.id) ?? [])
+              .filter((member) => member.kind !== current.kind)
+              .map((member) => ({
+                ref: member,
+                via: { type: "same-id-fold" as const },
+              }))
+          : []),
+        ];
+        for (const neighbor of neighbors) {
+          const key = refKey(neighbor.ref);
+          if (visited.has(key)) continue;
+          visited.add(key);
+          previous.set(key, {
+            ref: current,
+            step: {
+              from: publicNodeRef<G>(current),
+              to: publicNodeRef<G>(neighbor.ref),
+              via: neighbor.via,
+            },
+          });
+          queue.push(neighbor.ref);
+        }
+      }
+      const path: IdentitySamePathStep<G>[] = [];
+      let cursor = refKey(second);
+      while (cursor !== refKey(first)) {
+        const entry = previous.get(cursor);
+        if (entry === undefined) return;
+        path.push(entry.step);
+        cursor = refKey(entry.ref);
+      }
+      return path.toReversed();
     },
   };
 }

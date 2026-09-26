@@ -183,6 +183,45 @@ export function registerIdentityIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Operational Identity", () => {
+    it("explains same-class membership through assertions and implicit ID folds", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Folded proof person" },
+        { id: "proof-shared-id" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Folded proof company" },
+        { id: "proof-shared-id" },
+      );
+      const product = await store.nodes.Product.create({
+        name: "Proof product",
+        price: 1,
+        category: "test",
+      });
+      const assertion = await store.identity.assertSame(company, product);
+
+      expect(await store.identity.explainSame(person, product)).toEqual([
+        {
+          from: { kind: "Person", id: person.id },
+          to: { kind: "Company", id: company.id },
+          via: { type: "same-id-fold" },
+        },
+        expect.objectContaining({
+          from: { kind: "Company", id: company.id },
+          to: { kind: "Product", id: product.id },
+          via: {
+            type: "assertion",
+            assertion: assertion.assertion,
+          },
+        }),
+      ]);
+      expect(await store.identity.explainSame(person, person)).toEqual([]);
+      const unrelated = await store.nodes.Person.create({ name: "Unrelated" });
+      expect(
+        await store.identity.explainSame(person, unrelated),
+      ).toBeUndefined();
+    });
+
     it("asserts, reads, retracts, and folds classes", async () => {
       const store = context.getStore();
       const person = await store.nodes.Person.create(
@@ -234,12 +273,25 @@ export function registerIdentityIntegrationTests(
       });
       expect(historical.assertion).toMatchObject({ validFrom, validTo });
       expect(await store.identity.areSame(person, company)).toBe(false);
+      expect(await store.identity.explainSame(person, company)).toBeUndefined();
       expect(await store.asOf(inside).identity.areSame(person, company)).toBe(
         true,
       );
+      expect(
+        await store.asOf(inside).identity.explainSame(person, company),
+      ).toEqual([
+        {
+          from: { kind: "Person", id: person.id },
+          to: { kind: "Company", id: company.id },
+          via: { type: "assertion", assertion: historical.assertion },
+        },
+      ]);
       expect(await store.asOf(validTo).identity.areSame(person, company)).toBe(
         false,
       );
+      expect(
+        await store.asOf(validTo).identity.explainSame(person, company),
+      ).toBeUndefined();
       await storeRuntime(store).validateIdentity();
       await rebuildIdentityClosure(store);
       expect(await store.identity.areSame(person, company)).toBe(false);

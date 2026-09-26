@@ -123,6 +123,7 @@ export {
   type IdentityPair,
   type IdentityReadFacade,
   type IdentityRelation,
+  type IdentitySamePathStep,
   type IdentityValidityWindow,
   type IdentityWriteSummary,
   rebuildIdentityClosure,

@@ -11,6 +11,7 @@ export type {
   IdentityPair,
   IdentityReadFacade,
   IdentityRelation,
+  IdentitySamePathStep,
   IdentityValidityWindow,
   IdentityWriteSummary,
 } from "./types";

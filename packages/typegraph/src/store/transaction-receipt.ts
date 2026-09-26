@@ -241,6 +241,7 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     areSame: (a, b) => identity.areSame(a, b),
     areDifferent: (a, b) => identity.areDifferent(a, b),
     assertionsOf: (ref) => identity.assertionsOf(ref),
+    explainSame: (a, b) => identity.explainSame(a, b),
     async assertSame(a, b) {
       recorder.assertWritable();
       const result = await identity.assertSame(a, b);
