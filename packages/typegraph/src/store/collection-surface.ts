@@ -108,6 +108,7 @@ export const EDGE_WRITE_NAMES = [
 
 /** Identity facade read method names: available on a read-only StoreView. */
 export const IDENTITY_READ_NAMES = [
+  "classes",
   "representativeOf",
   "membersOf",
   "nodesOf",

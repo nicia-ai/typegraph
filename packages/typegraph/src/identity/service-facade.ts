@@ -14,7 +14,12 @@ import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { identityAssertionSemanticKey } from "./assertion-key";
-import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
+import {
+  IDENTITY_ASSERTION_COLUMNS,
+  identityNodeSnapshotSource,
+  identityNodeVisibilitySql,
+  identitySqlCoordinate,
+} from "./historical-sql";
 import {
   normalizeIdentityAssertionRow,
   type RawIdentityAssertionRow,
@@ -45,6 +50,7 @@ import type { Backend, IdentityTouch } from "./service-read";
 import {
   assertionResult,
   clampValidTo,
+  compareReferences,
   containsRef,
   isCurrentClosureCoordinate,
   loadAssertionsTouching,
@@ -74,6 +80,7 @@ import {
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
   type IdentityAssertionResult,
+  type IdentityClassPageOptions,
   type IdentityFacade,
   type IdentityNodeRefInput,
   type IdentityReadFacade,
@@ -602,6 +609,133 @@ export function createIdentityReadFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
 ): IdentityReadFacade<G> {
   return {
+    async classes(options: IdentityClassPageOptions) {
+      if (!Number.isSafeInteger(options.limit) || options.limit < 1)
+        throw new ConfigurationError(
+          "identity.classes limit must be a positive safe integer.",
+        );
+      const allKinds: string[] = [];
+      ctx.registry.nodeKinds.forEach((_nodeType, kind) => allKinds.push(kind));
+      const kinds = options.kinds ?? allKinds;
+      for (const kind of kinds) {
+        if (!ctx.registry.nodeKinds.has(kind))
+          throw new ConfigurationError(
+            `identity.classes received unregistered node kind ${kind}.`,
+          );
+      }
+      let after: PlainNodeRef | undefined;
+      if (options.cursor !== undefined) {
+        const separator = options.cursor.indexOf(":");
+        if (separator === -1)
+          throw new ConfigurationError("identity.classes cursor is invalid.");
+        try {
+          after = {
+            kind: decodeURIComponent(options.cursor.slice(0, separator)),
+            id: decodeURIComponent(options.cursor.slice(separator + 1)),
+          };
+        } catch {
+          throw new ConfigurationError("identity.classes cursor is invalid.");
+        }
+        if (after.kind.length === 0 || after.id.length === 0)
+          throw new ConfigurationError("identity.classes cursor is invalid.");
+      }
+      if (kinds.length === 0) return { classes: [] };
+      const coordinate = identitySqlCoordinate(ctx.coordinate, nowIso());
+      const kindValues = sql.join(
+        allKinds.map((kind) => sql`${kind}`),
+        sql`, `,
+      );
+      const nodeSource = identityNodeSnapshotSource(
+        ctx.schema,
+        ctx.graphId,
+        coordinate,
+      );
+      const rows = await ctx.backend.execute<PlainNodeRef>(
+        asCompiledRowsSql(sql`
+          WITH node_snapshot AS (${nodeSource})
+          SELECT n.kind, n.id
+          FROM node_snapshot n
+          WHERE n.kind IN (${kindValues})
+            AND ${identityNodeVisibilitySql(coordinate, "n")}
+          ORDER BY n.kind, n.id
+        `),
+      );
+      const seeds = rows.map((row) => ({ kind: row.kind, id: row.id }));
+      const grouped = new Map<string, Map<string, PlainNodeRef>>();
+      if (
+        ctx.coordinate === undefined ||
+        isCurrentClosureCoordinate(ctx.coordinate)
+      ) {
+        const components = await loadCurrentStructuralClassComponents(
+          ctx.backend,
+          ctx.schema,
+          ctx.graphId,
+          seeds,
+        );
+        for (const members of components.values()) {
+          const visibleMembers = members.filter((member) =>
+            seeds.some((seed) => refKey(seed) === refKey(member)),
+          );
+          if (visibleMembers.length === 0) continue;
+          if (!visibleMembers.some((member) => kinds.includes(member.kind)))
+            continue;
+          const representative = visibleMembers[0];
+          if (representative === undefined) continue;
+          const key = refKey(representative);
+          grouped.set(
+            key,
+            new Map(visibleMembers.map((member) => [refKey(member), member])),
+          );
+        }
+      } else {
+        const historical = await loadHistoricalClasses(
+          ctx.backend,
+          ctx.schema,
+          ctx.graphId,
+          seeds,
+          ctx.coordinate,
+          ctx.sameIdAcrossKinds,
+        );
+        for (const value of historical.values()) {
+          const members = value.visible;
+          if (members.length === 0) continue;
+          if (!members.some((member) => kinds.includes(member.kind))) continue;
+          const representative = members[0];
+          if (representative === undefined) continue;
+          grouped.set(
+            refKey(representative),
+            new Map(members.map((member) => [refKey(member), member])),
+          );
+        }
+      }
+      const sorted = [...grouped.values()]
+        .map((members) =>
+          [...members.values()].toSorted((left, right) =>
+            compareReferences(left, right),
+          ),
+        )
+        .toSorted((left, right) =>
+          compareReferences(requireDefined(left[0]), requireDefined(right[0])),
+        );
+      const remaining = sorted.filter((members) => {
+        const first = requireDefined(members[0]);
+        return after === undefined || compareReferences(first, after) > 0;
+      });
+      const selected = remaining.slice(0, options.limit);
+      const classes = selected.map((members) => ({
+        representative: publicNodeRef<G>(requireDefined(members[0])),
+        members: members.map((member) => publicNodeRef<G>(member)),
+      }));
+      const last = selected.at(-1)?.[0];
+      return {
+        classes,
+        ...(remaining.length > selected.length && last !== undefined ?
+          {
+            nextCursor: `${encodeURIComponent(last.kind)}:${encodeURIComponent(last.id)}`,
+          }
+        : {}),
+      };
+    },
     async representativeOf(input) {
       const members = await visibleMembersAtCoordinate(
         ctx,

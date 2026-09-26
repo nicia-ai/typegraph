@@ -252,6 +252,78 @@ export function registerIdentityIntegrationTests(
       expect(await store.identity.areSame(person, product)).toBe(false);
     });
 
+    it("pages visible classes in stable order at current and historical coordinates", async () => {
+      const store = context.getStore();
+      const first = await store.nodes.Person.create(
+        { name: "First" },
+        { id: "class-page-a" },
+      );
+      const peer = await store.nodes.Company.create(
+        { name: "Peer" },
+        { id: "class-page-b" },
+      );
+      await store.nodes.Person.create(
+        { name: "Second" },
+        { id: "class-page-d" },
+      );
+      await store.nodes.Product.create(
+        { name: "Singleton", price: 1, category: "test" },
+        { id: "class-page-c" },
+      );
+      await store.identity.assertSame(first, peer);
+
+      const firstPage = await store.identity.classes({
+        kinds: ["Person", "Company"],
+        limit: 1,
+      });
+      expect(firstPage.classes).toHaveLength(1);
+      expect(firstPage.classes[0]?.members).toEqual([
+        { kind: "Company", id: "class-page-b" },
+        { kind: "Person", id: "class-page-a" },
+      ]);
+      expect(firstPage.nextCursor).toBeDefined();
+      const secondPage = await store.identity.classes({
+        kinds: ["Person", "Company"],
+        ...(firstPage.nextCursor === undefined ?
+          {}
+        : { cursor: firstPage.nextCursor }),
+        limit: 1,
+      });
+      expect(secondPage.classes).toHaveLength(1);
+      expect(secondPage.classes[0]?.members).toEqual([
+        { kind: "Person", id: "class-page-d" },
+      ]);
+
+      const productClasses = await store.identity.classes({
+        kinds: ["Product"],
+        limit: 5,
+      });
+      expect(productClasses.classes).toEqual([
+        {
+          representative: { kind: "Product", id: "class-page-c" },
+          members: [{ kind: "Product", id: "class-page-c" }],
+        },
+      ]);
+      expect(
+        await store
+          .asOf(new Date(Date.now() + 1000).toISOString())
+          .identity.classes({ kinds: ["Person"], limit: 5 }),
+      ).toMatchObject({
+        classes: [
+          {
+            members: [
+              { kind: "Company", id: "class-page-b" },
+              { kind: "Person", id: "class-page-a" },
+            ],
+          },
+          { members: [{ kind: "Person", id: "class-page-d" }] },
+        ],
+      });
+      await expect(
+        store.identity.classes({ kinds: ["Missing"], limit: 2 }),
+      ).rejects.toThrow();
+    });
+
     it("applies bounded and open identity assertion validity windows", async () => {
       const store = context.getStore();
       const endpointStart = "2019-01-01T00:00:00.000Z";

@@ -235,6 +235,7 @@ export function wrapTransactionIdentity<G extends GraphDef>(
   recorder: TransactionReceiptRecorder,
 ): IdentityFacade<G> {
   return {
+    classes: (options) => identity.classes(options),
     representativeOf: (ref) => identity.representativeOf(ref),
     membersOf: (ref) => identity.membersOf(ref),
     nodesOf: (ref) => identity.nodesOf(ref),

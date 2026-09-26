@@ -119,6 +119,27 @@ export type IdentitySamePathStep<G extends GraphDef> = Readonly<{
     | Readonly<{ type: "same-id-fold" }>;
 }>;
 
+/** A page of visible identity classes, ordered by their stable representative. */
+export type IdentityClassPageOptions = Readonly<{
+  /** Restrict classes to those containing a visible member of one of these kinds. */
+  kinds?: readonly string[];
+  /** Opaque exclusive cursor returned by the preceding page. */
+  cursor?: string;
+  /** Maximum number of classes to return. */
+  limit: number;
+}>;
+
+export type IdentityClass<G extends GraphDef> = Readonly<{
+  /** The current coordinate's code-point-smallest visible member. */
+  representative: IdentityNodeReference<G>;
+  members: readonly IdentityNodeReference<G>[];
+}>;
+
+export type IdentityClassPage<G extends GraphDef> = Readonly<{
+  classes: readonly IdentityClass<G>[];
+  nextCursor?: string;
+}>;
+
 /** One ordered node pair handed to `bulkAssertSame` / `bulkAssertDifferent`. */
 export type IdentityPair<G extends GraphDef> = Readonly<{
   a: IdentityNodeRefInput<G>;
@@ -135,6 +156,7 @@ export type IdentityPair<G extends GraphDef> = Readonly<{
  * The full read+write surface is {@link IdentityFacade}.
  */
 export type IdentityReadFacade<G extends GraphDef> = Readonly<{
+  classes: (options: IdentityClassPageOptions) => Promise<IdentityClassPage<G>>;
   representativeOf: (
     ref: IdentityNodeRefInput<G>,
   ) => Promise<IdentityNodeReference<G> | undefined>;
