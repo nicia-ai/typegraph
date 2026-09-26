@@ -345,7 +345,7 @@ describe("branchPruneTo: falls back to the full diff when a lineage call rejects
     // of the scripted revision (`engine:<origin>:<revision>` —
     // `base-version.ts`'s `engineComponent`), so this asserts on the
     // revision suffix rather than a literal substring.
-    expect(base).toMatch(/\0engine:[^:]+:base-r0$/);
+    expect(base).toMatch(/\|engine:[^:]+:base-r0$/);
 
     const { backend: forkBackendRaw, cleanup: forkCleanup } =
       createSqliteMergeBackend();

@@ -61,6 +61,8 @@ import {
   engineAnchorOf,
   engineAnchorOriginOf,
   hasRevisionAnchor,
+  isLegacyBaseVersion,
+  LEGACY_BASE_VERSION_REFUSAL,
   readActiveSchemaVersion,
   revisionAnchorOf,
   revisionOriginMatch,
@@ -2729,19 +2731,36 @@ async function validateBaseVersions<G extends GraphDef>(
       continue;
     }
     return err(
-      new BaseVersionMismatchError(
+      branchBaseMismatchError(
+        branch,
         `Branch "${branch.id}" forked from base@V "${branch.base}", which does not match the merge target's current base@V "${targetVersion}".`,
-        {
-          details: {
-            branchId: branch.id,
-            branchBase: branch.base,
-            targetBase: targetVersion,
-          },
-        },
+        { targetBase: targetVersion },
       ),
     );
   }
   return ok(targetVersion);
+}
+
+/**
+ * The refusal for a branch whose `base@V` no longer matches, shared by the
+ * snapshot and fork-point preconditions. A token in the retired format is
+ * named as such, with a re-branch suggestion instead of the generic one.
+ */
+function branchBaseMismatchError<G extends GraphDef>(
+  branch: GraphBranch<G>,
+  message: string,
+  details: Readonly<Record<string, unknown>>,
+): BaseVersionMismatchError {
+  const legacy = isLegacyBaseVersion(branch.base);
+  return new BaseVersionMismatchError(message, {
+    details: {
+      branchId: branch.id,
+      branchBase: branch.base,
+      ...details,
+      ...(legacy ? { reason: LEGACY_BASE_VERSION_REFUSAL.reason } : {}),
+    },
+    ...(legacy ? { suggestion: LEGACY_BASE_VERSION_REFUSAL.suggestion } : {}),
+  });
 }
 
 /** Normalizes options, converting an invalid-option throw into a typed result. */
@@ -4803,15 +4822,10 @@ async function validateForkPointVersions<G extends GraphDef>(
       continue;
     }
     return err(
-      new BaseVersionMismatchError(
+      branchBaseMismatchError(
+        branch,
         `Branch "${branch.id}" forked from base@V "${branch.base}", which does not match the fork-point's base@V "${forkVersion}". mergeIncremental() requires every branch to have forked from the supplied forkPoint.`,
-        {
-          details: {
-            branchId: branch.id,
-            branchBase: branch.base,
-            forkPointBase: forkVersion,
-          },
-        },
+        { forkPointBase: forkVersion },
       ),
     );
   }
@@ -4836,6 +4850,18 @@ async function assertRecordedForkPointAvailable<G extends GraphDef>(
     throw new MergePlanCapabilityError(
       "A recorded fork point requires TypeGraph-owned history on the merge target.",
       { details: { capability: "recordedForkPoint" } },
+    );
+  }
+  if (isLegacyBaseVersion(point.base)) {
+    throw new BaseVersionMismatchError(
+      "The recorded fork point's base@V token was minted in a retired format.",
+      {
+        details: {
+          forkPointBase: point.base,
+          reason: LEGACY_BASE_VERSION_REFUSAL.reason,
+        },
+        suggestion: LEGACY_BASE_VERSION_REFUSAL.suggestion,
+      },
     );
   }
   const parts = parseRecordedInstant(point.recorded, "forkPoint.recorded");
