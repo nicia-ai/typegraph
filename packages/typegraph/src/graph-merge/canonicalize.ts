@@ -181,6 +181,19 @@ function pickClusterSurvivor(
     return requireDefined(baseMembers[0]);
   }
 
+  // A node the live incremental target committed after the fork point is
+  // committed identity too: its id already anchors committed edges. It reaches
+  // the cluster as a staged member of the synthetic target branch rather than as
+  // a base member, so it needs the same precedence here. If a user branch's
+  // member won the id tie-break instead, the plan would repoint those committed
+  // edges, which apply refuses as an immutable-endpoint change.
+  const committedTargetMembers = members
+    .filter((member) => member.branchId === COMMITTED_TARGET_BRANCH)
+    .sort(byKey);
+  if (committedTargetMembers.length > 0) {
+    return requireDefined(committedTargetMembers[0]);
+  }
+
   // The survivor's bare id: the override's pick (mapped over the bare-id view of the
   // cluster) when it names a real member, else the minimum identity's id.
   let canonicalId: AnyNodeId | undefined;
