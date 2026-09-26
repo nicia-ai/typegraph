@@ -1,4 +1,3 @@
-export { requireLineage } from "../backend/capabilities/lineage";
 export {
   batchPointReadVerdict,
   recordedRevisionOriginsVerdict,
@@ -22,8 +21,6 @@ export type {
   EntityKey,
   GraphBackend,
   LineageDelta,
-  LineageMembers,
-  LineageSession,
   NodeRow,
   TransactionBackend,
   TransactionOptions,

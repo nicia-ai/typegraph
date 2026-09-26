@@ -4143,7 +4143,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
   };
 }
 
-export function reportFromArtifact<G extends GraphDef>(
+function reportFromArtifact<G extends GraphDef>(
   artifact: MergePlanArtifactV1,
   merged: MergedCounts,
   warnings: readonly string[],
