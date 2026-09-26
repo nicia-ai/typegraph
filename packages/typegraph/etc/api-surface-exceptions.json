@@ -1,1 +1,66 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "DurableGraphBranch",
+    "member": "allocationId",
+    "kind": "required-member-added",
+    "reason": "Durable branch handles must carry the allocation identity so reopen, destroy, and plan application can reject a locator swapped between allocations that share a branch name. This intentionally breaks callers constructing durable handles directly; they should use branchDurable or reopenDurableBranch.",
+    "issue": "#745"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "DurableBranchDescriptor",
+    "member": "allocationId",
+    "kind": "required-member-added",
+    "reason": "A persisted descriptor must identify its physical allocation independently of the reusable branch name. Existing descriptors must be recreated so reopen and destroy can reject locator substitution.",
+    "issue": "#745"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "DurableBranchOrigin",
+    "member": "allocationId",
+    "kind": "required-member-added",
+    "reason": "The host attestation must include allocation identity so descriptor comparison rejects a different working copy with the same branch name. Hosts must persist this field for new allocations.",
+    "issue": "#745"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "DurableWorkingCopyStrategy",
+    "member": "merge",
+    "kind": "member-removed",
+    "reason": "A host-native merge that commits internally can bypass the target Store transaction's revision fence. Durable plans now apply through that transaction; native databases may still provide the working copy.",
+    "issue": "#745"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NativeDurableMergeResult",
+    "member": "outcome",
+    "kind": "member-removed",
+    "reason": "The native merge result type was retired with the unsafe host-native merge callback. Plan application now returns the portable Store merge result.",
+    "issue": "#745"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NativeDurableMergeResult",
+    "member": "merged",
+    "kind": "member-removed",
+    "reason": "The native merge result type was retired with the unsafe host-native merge callback. Plan application now returns the portable Store merge result.",
+    "issue": "#745"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NativeDurableMergeResult",
+    "member": "warnings",
+    "kind": "member-removed",
+    "reason": "The native merge result type was retired with the unsafe host-native merge callback. Plan application now returns the portable Store merge result.",
+    "issue": "#745"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NativeDurableMergeResult",
+    "member": "dimensions",
+    "kind": "member-removed",
+    "reason": "The native merge result type was retired with the unsafe host-native merge callback. Plan application now returns the portable Store merge result.",
+    "issue": "#745"
+  }
+]
