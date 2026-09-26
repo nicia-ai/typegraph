@@ -129,12 +129,14 @@ export type IdentityClassPageOptions = Readonly<{
   limit: number;
 }>;
 
+/** One visible class with its stable representative and every visible member. */
 export type IdentityClass<G extends GraphDef> = Readonly<{
   /** The current coordinate's code-point-smallest visible member. */
   representative: IdentityNodeReference<G>;
   members: readonly IdentityNodeReference<G>[];
 }>;
 
+/** One page of identity classes and an exclusive cursor for the next page. */
 export type IdentityClassPage<G extends GraphDef> = Readonly<{
   classes: readonly IdentityClass<G>[];
   nextCursor?: string;

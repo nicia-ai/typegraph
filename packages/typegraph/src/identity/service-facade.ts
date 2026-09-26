@@ -661,6 +661,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         `),
       );
       const seeds = rows.map((row) => ({ kind: row.kind, id: row.id }));
+      const visibleSeedKeys = new Set(seeds.map((seed) => refKey(seed)));
       const grouped = new Map<string, Map<string, PlainNodeRef>>();
       if (
         ctx.coordinate === undefined ||
@@ -674,7 +675,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         );
         for (const members of components.values()) {
           const visibleMembers = members.filter((member) =>
-            seeds.some((seed) => refKey(seed) === refKey(member)),
+            visibleSeedKeys.has(refKey(member)),
           );
           if (visibleMembers.length === 0) continue;
           if (!visibleMembers.some((member) => kinds.includes(member.kind)))
@@ -702,8 +703,10 @@ export function createIdentityReadFacade<G extends GraphDef>(
           if (!members.some((member) => kinds.includes(member.kind))) continue;
           const representative = members[0];
           if (representative === undefined) continue;
+          const key = refKey(representative);
+          if (grouped.has(key)) continue;
           grouped.set(
-            refKey(representative),
+            key,
             new Map(members.map((member) => [refKey(member), member])),
           );
         }
