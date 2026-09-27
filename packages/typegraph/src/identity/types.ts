@@ -110,6 +110,38 @@ export type IdentityValidityWindow = Readonly<{
   validTo?: string;
 }>;
 
+/** One edge in a proof that two references belong to the same identity class. */
+export type IdentitySamePathStep<G extends GraphDef> = Readonly<{
+  from: IdentityNodeReference<G>;
+  to: IdentityNodeReference<G>;
+  via:
+    | Readonly<{ type: "assertion"; assertion: IdentityAssertion<G> }>
+    | Readonly<{ type: "same-id-fold" }>;
+}>;
+
+/** A page of visible identity classes, ordered by their stable representative. */
+export type IdentityClassPageOptions = Readonly<{
+  /** Restrict classes to those containing a visible member of one of these kinds. */
+  kinds?: readonly string[];
+  /** Opaque exclusive cursor returned by the preceding page. */
+  cursor?: string;
+  /** Maximum number of classes to return. */
+  limit: number;
+}>;
+
+/** One visible class with its stable representative and every visible member. */
+export type IdentityClass<G extends GraphDef> = Readonly<{
+  /** The current coordinate's code-point-smallest visible member. */
+  representative: IdentityNodeReference<G>;
+  members: readonly IdentityNodeReference<G>[];
+}>;
+
+/** One page of identity classes and an exclusive cursor for the next page. */
+export type IdentityClassPage<G extends GraphDef> = Readonly<{
+  classes: readonly IdentityClass<G>[];
+  nextCursor?: string;
+}>;
+
 /** One ordered node pair handed to `bulkAssertSame` / `bulkAssertDifferent`. */
 export type IdentityPair<G extends GraphDef> = Readonly<{
   a: IdentityNodeRefInput<G>;
@@ -147,6 +179,19 @@ export type IdentityReadFacade<G extends GraphDef> = Readonly<{
     ref: IdentityNodeRefInput<G>,
   ) => Promise<readonly IdentityAssertion<G>[]>;
 }>;
+
+/** The current read surface returned by TypeGraph stores and views. */
+export type IdentityReadSurface<G extends GraphDef> = IdentityReadFacade<G> &
+  Readonly<{
+    classes: (
+      options: IdentityClassPageOptions,
+    ) => Promise<IdentityClassPage<G>>;
+    /** Returns a shortest proof at this facade's read coordinate, or undefined if distinct. */
+    explainSame: (
+      a: IdentityNodeRefInput<G>,
+      b: IdentityNodeRefInput<G>,
+    ) => Promise<readonly IdentitySamePathStep<G>[] | undefined>;
+  }>;
 
 /**
  * The full TypeGraph Identity Profile surface: {@link IdentityReadFacade} plus
@@ -190,6 +235,10 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
       ids: readonly IdentityAssertionId[],
     ) => Promise<readonly IdentityAssertion<G>[]>;
   }>;
+
+/** The current read and write surface returned by TypeGraph stores. */
+export type IdentitySurface<G extends GraphDef> = IdentityReadSurface<G> &
+  Omit<IdentityFacade<G>, keyof IdentityReadFacade<G>>;
 
 /**
  * The assertion-only write surface of the TypeGraph Identity Profile.

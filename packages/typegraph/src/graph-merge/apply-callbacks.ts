@@ -1,5 +1,5 @@
 import type { GraphDef, GraphIdentityConfig } from "../core/define-graph";
-import type { IdentityFacade } from "../identity/types";
+import type { IdentityReadFacade } from "../identity/types";
 import {
   CURRENT_ONLY_READ_NAMES,
   EDGE_TEMPORAL_READ_NAMES,
@@ -33,7 +33,7 @@ export type MergePlanReadContext<G extends GraphDef> = Readonly<{
 }> &
   (G["identity"] extends GraphIdentityConfig ?
     Readonly<{
-      identity: Pick<IdentityFacade<G>, (typeof IDENTITY_READ_NAMES)[number]>;
+      identity: IdentityReadFacade<G>;
     }>
   : Readonly<Record<never, never>>);
 

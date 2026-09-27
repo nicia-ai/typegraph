@@ -655,6 +655,10 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // so the exact transitive name sets are booked here rather than widened.
 // Graph-extension introspection now exports its function and two result types
 // from the root, removing those three names from root forgotten-export debt.
+// Identity class paging and same-class explanations export their four result
+// types at the root. Store-bearing secondary entrypoints reach those types
+// through IdentityReadFacade without exporting them directly, so each gains
+// the same four forgotten names.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 498,
@@ -705,36 +709,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 866,
-    sha256: "2d6663245e0507451946b8519cdcac3f7b4b185c142e9b1ee27c25d74f91fb49",
+    count: 871,
+    sha256: "72f5638d65467afeef9005408abcf390f2eafca82ffb297f6e8a3b965b81cbbd",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 849,
-    sha256: "f0a15151233e52449f14610067263b04e2e6e63147318287accfd78e326a1dc0",
+    count: 855,
+    sha256: "465990da644e5c50a081683aebf06dc98d5240c9c7f49427be87550baeea3b60",
   },
   "./postgres/pglite": {
-    count: 855,
-    sha256: "f09819a0eeded08fb10c68db7d6ae17cafa005dcba8b7863fa6ac4a55887542f",
+    count: 861,
+    sha256: "76af20962161604d746046eae40dc271d8b1951e76815cc28b4f2c925c225d99",
   },
   "./profiler": {
-    count: 851,
-    sha256: "8e9639ae422506df342bb7c6ffeabfd2524eeef316795d107e89de4e838f844a",
+    count: 857,
+    sha256: "a812d8ae55ce9dda358ce1d858e6bb4b6125ff3b787186c36930be8256607431",
   },
   "./provenance": {
-    count: 864,
-    sha256: "27ee1b7e293ae2f6fe2862fb4d754445e86e60c82955b3cfa5e7453013a06af1",
+    count: 870,
+    sha256: "11b8282bf5126a2298ca15b379bbd09f0e950818127775aee1969b90493659cb",
   },
   "./schema": {
     count: 288,
     sha256: "588e9ab6d547e809644ca2543f3268c45bcedb2c485b0c3e9c4f0658b5857539",
   },
   "./sqlite/local": {
-    count: 855,
-    sha256: "f09819a0eeded08fb10c68db7d6ae17cafa005dcba8b7863fa6ac4a55887542f",
+    count: 861,
+    sha256: "76af20962161604d746046eae40dc271d8b1951e76815cc28b4f2c925c225d99",
   },
 };
 

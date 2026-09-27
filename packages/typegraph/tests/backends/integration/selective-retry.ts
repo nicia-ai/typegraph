@@ -50,6 +50,41 @@ export function registerSelectiveRetryIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("selective projection retries", () => {
+    it("expands only the selected current identity class in one statement", async () => {
+      const counter = createStatementCounter(context.getBackend());
+      const [store] = await createStoreWithSchema(
+        integrationTestGraph,
+        counter.backend,
+      );
+      const person = await store.nodes.Person.create(
+        { name: "First" },
+        { id: "identity-page-first" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Peer" },
+        { id: "identity-page-peer" },
+      );
+      await store.identity.assertSame(person, company);
+      await store.nodes.Person.create(
+        { name: "Second" },
+        { id: "identity-page-second" },
+      );
+
+      counter.reset();
+      const page = await store.identity.classes({ limit: 1 });
+      expect(page.classes).toEqual([
+        {
+          representative: { kind: "Company", id: "identity-page-peer" },
+          members: [
+            { kind: "Company", id: "identity-page-peer" },
+            { kind: "Person", id: "identity-page-first" },
+          ],
+        },
+      ]);
+      expect(page.nextCursor).toBeDefined();
+      expect(counter.count()).toBe(1);
+    });
+
     it("selects complete nodes before executing fresh, prepared, and paginated queries", async () => {
       const counter = createStatementCounter(context.getBackend());
       const [store] = await createStoreWithSchema(

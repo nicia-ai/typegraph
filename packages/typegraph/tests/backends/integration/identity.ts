@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  createStore,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -12,6 +13,7 @@ import {
   IdentityEndpointValidityError,
   rebuildIdentityClosure,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { exportGraph } from "../../../src/interchange";
 import { inverseOf } from "../../../src/ontology";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
@@ -19,6 +21,7 @@ import { sql } from "../../../src/query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
+  type CompiledRowsSql,
 } from "../../../src/query/sql-intent";
 import { storeRuntime } from "../../../src/store/runtime-port";
 import { compareStrings } from "../../../src/utils/compare";
@@ -63,6 +66,16 @@ const identityTraversalGraph = defineGraph({
     },
   },
   ontology: [inverseOf(identityTravBridge, identityTravBridge)],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const identityCursorOtherGraph = defineGraph({
+  id: "identity_classes_cursor_other_graph",
+  nodes: {
+    Person: { type: IdentityTravPerson },
+    Company: { type: IdentityTravCompany },
+  },
+  edges: {},
   identity: { sameIdAcrossKinds: "fold" },
 });
 
@@ -183,6 +196,79 @@ export function registerIdentityIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Operational Identity", () => {
+    it("explains same-class membership through assertions and implicit ID folds", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Folded proof person" },
+        { id: "proof-shared-id" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Folded proof company" },
+        { id: "proof-shared-id" },
+      );
+      const product = await store.nodes.Product.create({
+        name: "Proof product",
+        price: 1,
+        category: "test",
+      });
+      const assertion = await store.identity.assertSame(company, product);
+
+      expect(await store.identity.explainSame(person, product)).toEqual([
+        {
+          from: { kind: "Person", id: person.id },
+          to: { kind: "Company", id: company.id },
+          via: { type: "same-id-fold" },
+        },
+        expect.objectContaining({
+          from: { kind: "Company", id: company.id },
+          to: { kind: "Product", id: product.id },
+          via: {
+            type: "assertion",
+            assertion: assertion.assertion,
+          },
+        }),
+      ]);
+      expect(await store.identity.explainSame(person, person)).toEqual([]);
+      const unrelated = await store.nodes.Person.create({ name: "Unrelated" });
+      expect(
+        await store.identity.explainSame(person, unrelated),
+      ).toBeUndefined();
+    });
+
+    it("chooses a shortest proof with a stable tie break", async () => {
+      const store = context.getStore();
+      const first = await store.nodes.Person.create(
+        { name: "Proof A" },
+        { id: "proof-route-a" },
+      );
+      const lower = await store.nodes.Person.create(
+        { name: "Proof B" },
+        { id: "proof-route-b" },
+      );
+      const higher = await store.nodes.Person.create(
+        { name: "Proof C" },
+        { id: "proof-route-c" },
+      );
+      const last = await store.nodes.Person.create(
+        { name: "Proof D" },
+        { id: "proof-route-d" },
+      );
+      await store.identity.bulkAssertSame([
+        { a: first, b: higher },
+        { a: higher, b: last },
+        { a: first, b: lower },
+        { a: lower, b: last },
+      ]);
+      expect(await store.identity.explainSame(first, last)).toMatchObject([
+        { from: { id: first.id }, to: { id: lower.id } },
+        { from: { id: lower.id }, to: { id: last.id } },
+      ]);
+      await store.identity.assertSame(first, last);
+      expect(await store.identity.explainSame(first, last)).toMatchObject([
+        { from: { id: first.id }, to: { id: last.id } },
+      ]);
+    });
+
     it("asserts, reads, retracts, and folds classes", async () => {
       const store = context.getStore();
       const person = await store.nodes.Person.create(
@@ -213,6 +299,259 @@ export function registerIdentityIntegrationTests(
       expect(await store.identity.areSame(person, product)).toBe(false);
     });
 
+    it("pages visible classes in stable order at current and historical coordinates", async () => {
+      const store = context.getStore();
+      const first = await store.nodes.Person.create(
+        { name: "First" },
+        { id: "class-page-a" },
+      );
+      const peer = await store.nodes.Company.create(
+        { name: "Peer" },
+        { id: "class-page-b" },
+      );
+      await store.nodes.Person.create(
+        { name: "Second" },
+        { id: "class-page-d" },
+      );
+      await store.nodes.Product.create(
+        { name: "Singleton", price: 1, category: "test" },
+        { id: "class-page-c" },
+      );
+      await store.identity.assertSame(first, peer);
+
+      const firstPage = await store.identity.classes({
+        kinds: ["Person", "Company"],
+        limit: 1,
+      });
+      expect(firstPage.classes).toHaveLength(1);
+      expect(firstPage.classes[0]?.members).toEqual([
+        { kind: "Company", id: "class-page-b" },
+        { kind: "Person", id: "class-page-a" },
+      ]);
+      expect(firstPage.nextCursor).toBeDefined();
+      const cursor = requireDefined(firstPage.nextCursor);
+      const [otherGraphStore] = await createStoreWithSchema(
+        identityCursorOtherGraph,
+        store.backend,
+      );
+      await expect(
+        otherGraphStore.identity.classes({
+          kinds: ["Person", "Company"],
+          cursor,
+          limit: 1,
+        }),
+      ).rejects.toThrow(
+        "does not match this graph, coordinate, or kind filter",
+      );
+      await expect(
+        store.asOf("2100-01-01T00:00:00.000Z").identity.classes({
+          kinds: ["Person", "Company"],
+          cursor,
+          limit: 1,
+        }),
+      ).rejects.toThrow(
+        "does not match this graph, coordinate, or kind filter",
+      );
+      await expect(
+        store.identity.classes({ kinds: ["Person"], cursor, limit: 1 }),
+      ).rejects.toThrow(
+        "does not match this graph, coordinate, or kind filter",
+      );
+      const secondPage = await store.identity.classes({
+        kinds: ["Person", "Company"],
+        ...(firstPage.nextCursor === undefined ?
+          {}
+        : { cursor: firstPage.nextCursor }),
+        limit: 1,
+      });
+      expect(secondPage.classes).toHaveLength(1);
+      expect(secondPage.classes[0]?.members).toEqual([
+        { kind: "Person", id: "class-page-d" },
+      ]);
+
+      const productClasses = await store.identity.classes({
+        kinds: ["Product"],
+        limit: 5,
+      });
+      expect(productClasses.classes).toEqual([
+        {
+          representative: { kind: "Product", id: "class-page-c" },
+          members: [{ kind: "Product", id: "class-page-c" }],
+        },
+      ]);
+      expect(
+        await store
+          .asOf(new Date(Date.now() + 1000).toISOString())
+          .identity.classes({ kinds: ["Person"], limit: 5 }),
+      ).toMatchObject({
+        classes: [
+          {
+            members: [
+              { kind: "Company", id: "class-page-b" },
+              { kind: "Person", id: "class-page-a" },
+            ],
+          },
+          { members: [{ kind: "Person", id: "class-page-d" }] },
+        ],
+      });
+      await expect(
+        store.identity.classes({ kinds: ["Missing"], limit: 2 }),
+      ).rejects.toThrow();
+      await expect(store.identity.classes({ limit: 0 })).rejects.toThrow();
+      await expect(
+        store.identity.classes({ limit: 1, cursor: "malformed" }),
+      ).rejects.toThrow("Invalid cursor format");
+    });
+
+    it("refuses current class paging when window functions are unavailable", async () => {
+      const store = await provisionIdentityTraversalStore(context, false);
+      await store.nodes.Person.create(
+        { name: "Window capability" },
+        { id: "class-page-no-windows" },
+      );
+      const sourceBackend = context.getStore().backend;
+      let executeCount = 0;
+      const incapableBackend = deriveBackend(sourceBackend, {
+        capabilities: {
+          ...sourceBackend.capabilities,
+          windowFunctions: false,
+        },
+        execute: async <Row>(query: CompiledRowsSql) => {
+          executeCount += 1;
+          return sourceBackend.execute<Row>(query);
+        },
+      });
+      const incapableStore = createStore(
+        identityTraversalGraph,
+        incapableBackend,
+      );
+
+      await expect(
+        incapableStore.identity.classes({ limit: 1 }),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          capability: "windowFunctions",
+          operation: "identity.classes current page",
+          windowFunctions: false,
+        },
+      });
+      expect(executeCount).toBe(0);
+    });
+
+    it("pages only visible class members and applies kind filters before cursor limits", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create(
+        { name: "Visible peer" },
+        { id: "class-page-filter-a" },
+      );
+      await store.nodes.Company.create(
+        { name: "Future structural anchor" },
+        {
+          id: "class-page-filter-a",
+          validFrom: "2099-01-01T00:00:00.000Z",
+        },
+      );
+      const classPerson = await store.nodes.Person.create(
+        { name: "Class person" },
+        { id: "class-page-filter-z" },
+      );
+      const classCompany = await store.nodes.Company.create(
+        { name: "Class company" },
+        { id: "class-page-filter-b" },
+      );
+      await store.identity.assertSame(classPerson, classCompany);
+      await store.nodes.Person.create(
+        { name: "Last singleton" },
+        { id: "class-page-filter-last" },
+      );
+      await store.nodes.Product.create(
+        { name: "Private use sort key", price: 1, category: "test" },
+        { id: "id-\u{E000}" },
+      );
+      await store.nodes.Product.create(
+        { name: "Astral sort key", price: 1, category: "test" },
+        { id: "id-\u{1F600}" },
+      );
+
+      const visibleStructuralPage = await store.identity.classes({
+        kinds: ["Person"],
+        limit: 10,
+      });
+      expect(visibleStructuralPage.classes).toContainEqual({
+        representative: { kind: "Person", id: "class-page-filter-a" },
+        members: [{ kind: "Person", id: "class-page-filter-a" }],
+      });
+
+      const filteredClassPage = await store.identity.classes({
+        kinds: ["Company"],
+        limit: 10,
+      });
+      expect(filteredClassPage.classes).toEqual([
+        {
+          representative: { kind: "Company", id: "class-page-filter-b" },
+          members: [
+            { kind: "Company", id: "class-page-filter-b" },
+            { kind: "Person", id: "class-page-filter-z" },
+          ],
+        },
+      ]);
+
+      expect(
+        await store.identity.classes({ kinds: ["Company"], limit: 10 }),
+      ).toMatchObject({
+        classes: [
+          {
+            representative: { kind: "Company", id: "class-page-filter-b" },
+            members: [
+              { kind: "Company", id: "class-page-filter-b" },
+              { kind: "Person", id: "class-page-filter-z" },
+            ],
+          },
+        ],
+      });
+
+      const unicodeFirstPage = await store.identity.classes({
+        kinds: ["Product"],
+        limit: 1,
+      });
+      expect(unicodeFirstPage.classes).toMatchObject([
+        {
+          representative: { kind: "Product", id: "id-\u{E000}" },
+        },
+      ]);
+      const unicodeSecondPage = await store.identity.classes({
+        kinds: ["Product"],
+        ...(unicodeFirstPage.nextCursor === undefined ?
+          {}
+        : { cursor: unicodeFirstPage.nextCursor }),
+        limit: 1,
+      });
+      expect(unicodeSecondPage.classes).toMatchObject([
+        {
+          representative: { kind: "Product", id: "id-\u{1F600}" },
+        },
+      ]);
+      expect(unicodeSecondPage.nextCursor).toBeUndefined();
+
+      expect(
+        await store.asOf("2100-01-01T00:00:00.000Z").identity.classes({
+          kinds: ["Person"],
+          limit: 1,
+        }),
+      ).toMatchObject({
+        classes: [
+          {
+            representative: { kind: "Company", id: "class-page-filter-a" },
+            members: [
+              { kind: "Company", id: "class-page-filter-a" },
+              { kind: "Person", id: "class-page-filter-a" },
+            ],
+          },
+        ],
+      });
+    });
+
     it("applies bounded and open identity assertion validity windows", async () => {
       const store = context.getStore();
       const endpointStart = "2019-01-01T00:00:00.000Z";
@@ -234,12 +573,25 @@ export function registerIdentityIntegrationTests(
       });
       expect(historical.assertion).toMatchObject({ validFrom, validTo });
       expect(await store.identity.areSame(person, company)).toBe(false);
+      expect(await store.identity.explainSame(person, company)).toBeUndefined();
       expect(await store.asOf(inside).identity.areSame(person, company)).toBe(
         true,
       );
+      expect(
+        await store.asOf(inside).identity.explainSame(person, company),
+      ).toEqual([
+        {
+          from: { kind: "Person", id: person.id },
+          to: { kind: "Company", id: company.id },
+          via: { type: "assertion", assertion: historical.assertion },
+        },
+      ]);
       expect(await store.asOf(validTo).identity.areSame(person, company)).toBe(
         false,
       );
+      expect(
+        await store.asOf(validTo).identity.explainSame(person, company),
+      ).toBeUndefined();
       await storeRuntime(store).validateIdentity();
       await rebuildIdentityClosure(store);
       expect(await store.identity.areSame(person, company)).toBe(false);
@@ -524,6 +876,41 @@ export function registerIdentityIntegrationTests(
           .asOfRecorded(beforeAssertion)
           .identity.areSame(person, company),
       ).toBe(false);
+      expect(
+        await validView
+          .asOfRecorded(beforeAssertion)
+          .identity.classes({ limit: 10 }),
+      ).toMatchObject({
+        classes: [
+          { members: [{ kind: "Company", id: company.id }] },
+          { members: [{ kind: "Person", id: person.id }] },
+        ],
+      });
+      expect(
+        await validView
+          .asOfRecorded(beforeAssertion)
+          .identity.explainSame(person, company),
+      ).toBeUndefined();
+      const afterAssertion = requireDefined(await store.recordedNow());
+      expect(
+        await validView
+          .asOfRecorded(afterAssertion)
+          .identity.classes({ limit: 10 }),
+      ).toMatchObject({
+        classes: [
+          {
+            members: [
+              { kind: "Company", id: company.id },
+              { kind: "Person", id: person.id },
+            ],
+          },
+        ],
+      });
+      expect(
+        await validView
+          .asOfRecorded(afterAssertion)
+          .identity.explainSame(person, company),
+      ).toMatchObject([{ via: { type: "assertion" } }]);
     });
 
     it("grows a materialized folded class without closure conflicts", async () => {
@@ -890,7 +1277,7 @@ export function registerIdentityIntegrationTests(
           { name: "Backdated" },
           { id: "backdated", validFrom: backdatedValidFrom },
         );
-        await store.nodes.Company.create(
+        const company = await store.nodes.Company.create(
           { name: "Backdated LLC" },
           { id: "backdated", validFrom: backdatedValidFrom },
         );
@@ -916,6 +1303,9 @@ export function registerIdentityIntegrationTests(
         expect(
           await store.asOf(asOfInstant).identity.membersOf(person),
         ).toEqual([{ kind: "Person", id: "backdated" }]);
+        expect(
+          await store.asOf(asOfInstant).identity.explainSame(person, company),
+        ).toBeUndefined();
 
         const currentMembers = await store.identity.membersOf(person);
         expect(currentMembers).toEqual([
@@ -960,6 +1350,25 @@ export function registerIdentityIntegrationTests(
         expect(
           await store.asOf(beforeDeletion).identity.areSame(seed, far),
         ).toBe(true);
+        expect(
+          await store.asOf(beforeDeletion).identity.explainSame(seed, far),
+        ).toMatchObject([
+          {
+            from: { kind: "Person", id: seed.id },
+            to: { kind: "Person", id: bridgePerson.id },
+            via: { type: "assertion" },
+          },
+          {
+            from: { kind: "Person", id: bridgePerson.id },
+            to: { kind: "Company", id: bridgeCompany.id },
+            via: { type: "same-id-fold" },
+          },
+          {
+            from: { kind: "Company", id: bridgeCompany.id },
+            to: { kind: "Product", id: far.id },
+            via: { type: "assertion" },
+          },
+        ]);
       } finally {
         vi.useRealTimers();
       }
@@ -1116,6 +1525,13 @@ export function registerIdentityIntegrationTests(
           .asOfRecorded(requireDefined(beforeRemoval))
           .identity.assertionsOf(person),
       ).toHaveLength(1);
+      expect(
+        await removed
+          .asOfRecorded(requireDefined(beforeRemoval))
+          .identity.classes({ kinds: ["Person"], limit: 10 }),
+      ).toMatchObject({
+        classes: [{ members: [{ kind: "Person", id: person.id }] }],
+      });
       expect(
         await removed
           .asOfRecorded(requireDefined(afterRemoval))
@@ -2017,6 +2433,9 @@ export function registerIdentityIntegrationTests(
         );
 
         expect(await store.identity.areSame(person, company)).toBe(false);
+        expect(
+          await store.identity.explainSame(person, company),
+        ).toBeUndefined();
         expect(await store.identity.membersOf(person)).toEqual([
           { kind: "Person", id: "shared" },
         ]);
@@ -2027,6 +2446,9 @@ export function registerIdentityIntegrationTests(
         const assertion = await store.identity.assertSame(person, company);
 
         expect(await store.identity.areSame(person, company)).toBe(true);
+        expect(await store.identity.explainSame(person, company)).toMatchObject(
+          [{ via: { type: "assertion" } }],
+        );
         expect(await store.identity.membersOf(person)).toEqual([
           { kind: "Company", id: "shared" },
           { kind: "Person", id: "shared" },

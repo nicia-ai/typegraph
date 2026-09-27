@@ -4,7 +4,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../src";
+import {
+  createAdapterStore,
+  createAdapterStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  MigrationError,
+} from "../src";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -99,6 +106,43 @@ describe("store.clear()", () => {
 
   beforeEach(() => {
     backend = createTestBackend();
+  });
+
+  it("clears a graph whose breaking schema prevents store initialization", async () => {
+    const adapterBackend = createTestBackend();
+    const [oldStore] = await createAdapterStoreWithSchema(
+      graph,
+      adapterBackend,
+    );
+    await oldStore.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+    const renamedPerson = defineNode("Person", {
+      schema: z.object({ email: z.string(), fullName: z.string() }),
+    });
+    const breakingGraph = defineGraph({
+      id: graph.id,
+      nodes: { Person: { type: renamedPerson } },
+      edges: {},
+    });
+    await expect(
+      createAdapterStoreWithSchema(breakingGraph, adapterBackend),
+    ).rejects.toThrow(MigrationError);
+
+    const recoveryStore = createAdapterStore(breakingGraph, adapterBackend);
+    await recoveryStore.clear();
+    expect(await adapterBackend.getActiveSchema(graph.id)).toBeUndefined();
+
+    const [reopened] = await createAdapterStoreWithSchema(
+      breakingGraph,
+      adapterBackend,
+    );
+    const person = await reopened.nodes.Person.create({
+      email: "alice@example.com",
+      fullName: "Alice",
+    });
+    expect(person.fullName).toBe("Alice");
   });
 
   it("removes all nodes and edges for the graph", async () => {

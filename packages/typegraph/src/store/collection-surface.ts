@@ -1,6 +1,6 @@
 import { type GraphDef } from "../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../core/types";
-import { type IdentityFacade } from "../identity/types";
+import { type IdentitySurface } from "../identity/types";
 import type {
   EdgeCollection,
   NodeCollection,
@@ -108,13 +108,15 @@ export const EDGE_WRITE_NAMES = [
 
 /** Identity facade read method names: available on a read-only StoreView. */
 export const IDENTITY_READ_NAMES = [
+  "classes",
   "representativeOf",
   "membersOf",
   "nodesOf",
   "areSame",
   "areDifferent",
   "assertionsOf",
-] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
+  "explainSame",
+] as const satisfies readonly (keyof IdentitySurface<GraphDef>)[];
 
 /** Identity facade write method names: never available on a read-only view. */
 export const IDENTITY_WRITE_NAMES = [
@@ -126,7 +128,7 @@ export const IDENTITY_WRITE_NAMES = [
   "retractSameAssertion",
   "retractDifferentAssertion",
   "bulkRetractAssertions",
-] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
+] as const satisfies readonly (keyof IdentitySurface<GraphDef>)[];
 
 /** Recorded-time collection point reads that reconstruct safely by id. */
 export const RECORDED_POINT_READ_NAMES = [

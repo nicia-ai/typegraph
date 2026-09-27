@@ -175,6 +175,8 @@ export function registerGraphMergeCallbackIntegrationTests(
               "areDifferent",
               "areSame",
               "assertionsOf",
+              "classes",
+              "explainSame",
               "membersOf",
               "nodesOf",
               "representativeOf",
