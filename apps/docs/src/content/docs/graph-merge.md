@@ -436,10 +436,13 @@ Candidate planning on revision-tracked graphs reads existing candidate ids and
 edge endpoints by key, then seeds only those rows in the transient working
 copy. On identity-enabled graphs, it also follows live same-id peers and
 current identity assertions from those references to a fixed point. The
-candidate diff and its target baseline are bounded to that dependency set and
+planner reads peers of a candidate edge with `one` cardinality by source,
+and peers of a `unique` edge by its endpoint pair. These reads
+let the transient copy enforce the same cardinality rule as a complete clone.
+The candidate diff and its target baseline are bounded to that dependency set and
 any committed rows recalled by configured unique or index sources. Planning
 still fences the target revision before and after these reads. Graphs with
-ontology relations, edge cardinality or match-identity constraints, or no
+ontology relations, `oneActive` or edge match-identity constraints, or no
 revision tracking continue to use the complete clone path.
 
 On the complete clone path, when the copy and target really share one serialized connection, clone export
@@ -560,7 +563,7 @@ The V1 baseline is deliberately conservative:
   plan content. Candidate-derived anchors and the execution digest/fence are
   regenerated. There is no exemption for an “audit” kind.
 
-For a revision-tracked graph without ontology relations, edge cardinality, or
+For a revision-tracked graph without ontology relations, `oneActive`, or edge
 match-identity constraints, pass
 `reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit V2
 candidate-scoped evidence. V2 fingerprints the candidate's node and edge ids,
@@ -2011,10 +2014,10 @@ to incremental merge planning, and closes the working copy on every outcome.
 The result is the ordinary `MergePlanArtifact`, so review and application use
 the same APIs as every other merge plan.
 
-On revision-tracked graphs without ontology relations, edge cardinality, or
+On revision-tracked graphs without ontology relations, `oneActive`, or edge
 match-identity constraints, planning seeds existing candidate rows, edge
-endpoints, and any reachable current identity component into the disposable
-working copy.
+endpoints, cardinality peers, and any reachable current identity component into
+the disposable working copy.
 The resolver still queries the live target for declared unique and index peers,
 and the plan retains its ordinary provenance, conflicts, digest, and commit-time
 fences. Existing undeclared target properties survive staging; extra candidate
