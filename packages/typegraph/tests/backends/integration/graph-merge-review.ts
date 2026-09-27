@@ -143,123 +143,127 @@ export function registerGraphMergeReviewIntegrationTests(
     return { target, writeSet: await candidate(target), makeBackend, policy };
   }
   describe("durable merge review", () => {
-    it("matches full-clone cardinality decisions for one and unique", async () => {
-      for (const edgeKind of ["limited", "paired"] as const) {
-        for (const peerState of ["occupied", "available", "deleted"] as const) {
-          const prefix = `${edgeKind}-${peerState}`;
-          const target = await context.createHistoryStore(
-            boundedCardinalityGraph,
-          );
-          const source = await target.nodes.Item.create(
-            itemProps(`${prefix}-source`),
-            {
-              id: `${prefix}-source`,
-              validFrom,
-            },
-          );
-          const otherSource = await target.nodes.Item.create(
-            itemProps(`${prefix}-other-source`),
-            { id: `${prefix}-other-source`, validFrom },
-          );
-          const existing = await target.nodes.Artifact.create(
-            { content: "existing" },
-            { id: `${prefix}-existing`, validFrom },
-          );
-          const proposed = await target.nodes.Artifact.create(
-            { content: "proposed" },
-            { id: `${prefix}-proposed`, validFrom },
-          );
-          const existingSource =
-            edgeKind === "limited" && peerState === "available" ?
-              otherSource
-            : source;
-          const existingTarget =
-            edgeKind === "paired" && peerState === "occupied" ?
-              proposed
-            : existing;
-          const peer = await target.edges[edgeKind].create(
-            existingSource,
-            existingTarget,
-            {},
-            {
-              id: `${prefix}-existing-edge`,
-              validFrom,
-            },
-          );
-          if (peerState === "deleted") {
-            if (edgeKind === "limited")
-              await target.edges.limited.delete(
-                asEdgeId<typeof limited>(peer.id),
-              );
-            else
-              await target.edges.paired.delete(
-                asEdgeId<typeof paired>(peer.id),
-              );
-          }
-          const writeSet: CandidateWriteSet = {
-            formatVersion: 1,
-            sourceId: `cardinality-${edgeKind}-${peerState}`,
-            target: await captureCandidateWriteSetTarget(target),
-            nodes: [],
-            edges: [
-              {
-                kind: edgeKind,
-                id: `${prefix}-candidate-edge`,
-                from: { kind: "Item", id: source.id },
-                to: { kind: "Artifact", id: proposed.id },
-                properties: {},
-                validFrom,
-              },
-            ],
-          };
-          const full = unwrap(
-            await ingestionBranch(target, makeBackend, {
-              id: asBranchId(writeSet.sourceId),
-            }),
-          );
-          try {
-            const imported = await importGraph(
-              full,
-              {
-                formatVersion: "2.0",
-                exportedAt: "1970-01-01T00:00:00.000Z",
-                source: { type: "external" },
-                nodes: writeSet.nodes,
-                edges: writeSet.edges,
-              },
-              {
-                onConflict: "update",
-                onUnknownProperty: "error",
-                validateReferences: true,
-                refreshStatistics: false,
-              },
+    it.each([
+      ["limited", "occupied"],
+      ["limited", "available"],
+      ["limited", "deleted"],
+      ["paired", "occupied"],
+      ["paired", "available"],
+      ["paired", "deleted"],
+    ] as const)(
+      "matches full-clone cardinality decisions for %s with %s peer",
+      async (edgeKind, peerState) => {
+        const prefix = `${edgeKind}-${peerState}`;
+        const target = await context.createHistoryStore(
+          boundedCardinalityGraph,
+        );
+        const source = await target.nodes.Item.create(
+          itemProps(`${prefix}-source`),
+          {
+            id: `${prefix}-source`,
+            validFrom,
+          },
+        );
+        const otherSource = await target.nodes.Item.create(
+          itemProps(`${prefix}-other-source`),
+          { id: `${prefix}-other-source`, validFrom },
+        );
+        const existing = await target.nodes.Artifact.create(
+          { content: "existing" },
+          { id: `${prefix}-existing`, validFrom },
+        );
+        const proposed = await target.nodes.Artifact.create(
+          { content: "proposed" },
+          { id: `${prefix}-proposed`, validFrom },
+        );
+        const existingSource =
+          edgeKind === "limited" && peerState === "available" ?
+            otherSource
+          : source;
+        const existingTarget =
+          edgeKind === "paired" && peerState === "occupied" ?
+            proposed
+          : existing;
+        const peer = await target.edges[edgeKind].create(
+          existingSource,
+          existingTarget,
+          {},
+          {
+            id: `${prefix}-existing-edge`,
+            validFrom,
+          },
+        );
+        if (peerState === "deleted") {
+          if (edgeKind === "limited")
+            await target.edges.limited.delete(
+              asEdgeId<typeof limited>(peer.id),
             );
-            const bounded = await planCandidateWriteSet({
-              target,
-              writeSet,
-              makeBackend,
-            });
-            const expectedJson =
-              imported.success ?
-                canonicalMergePlanJson(
-                  unwrap(
-                    await planMergeIncremental({
-                      forkPoint: target,
-                      target,
-                      branches: [full],
-                    }),
-                  ),
-                )
-              : undefined;
-            const actualJson =
-              isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
-            expect(actualJson).toBe(expectedJson);
-          } finally {
-            await full.close();
-          }
+          else
+            await target.edges.paired.delete(asEdgeId<typeof paired>(peer.id));
         }
-      }
-    });
+        const writeSet: CandidateWriteSet = {
+          formatVersion: 1,
+          sourceId: `cardinality-${edgeKind}-${peerState}`,
+          target: await captureCandidateWriteSetTarget(target),
+          nodes: [],
+          edges: [
+            {
+              kind: edgeKind,
+              id: `${prefix}-candidate-edge`,
+              from: { kind: "Item", id: source.id },
+              to: { kind: "Artifact", id: proposed.id },
+              properties: {},
+              validFrom,
+            },
+          ],
+        };
+        const full = unwrap(
+          await ingestionBranch(target, makeBackend, {
+            id: asBranchId(writeSet.sourceId),
+          }),
+        );
+        try {
+          const imported = await importGraph(
+            full,
+            {
+              formatVersion: "2.0",
+              exportedAt: "1970-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: writeSet.nodes,
+              edges: writeSet.edges,
+            },
+            {
+              onConflict: "update",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              refreshStatistics: false,
+            },
+          );
+          const bounded = await planCandidateWriteSet({
+            target,
+            writeSet,
+            makeBackend,
+          });
+          const expectedJson =
+            imported.success ?
+              canonicalMergePlanJson(
+                unwrap(
+                  await planMergeIncremental({
+                    forkPoint: target,
+                    target,
+                    branches: [full],
+                  }),
+                ),
+              )
+            : undefined;
+          const actualJson =
+            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+          expect(actualJson).toBe(expectedJson);
+        } finally {
+          await full.close();
+        }
+      },
+    );
     it("matches full-clone planning for an identity class and unrelated ended assertion", async () => {
       const target = await context.createHistoryStore(boundedIdentityGraph);
       const first = await target.nodes.Item.create(itemProps("first"), {
