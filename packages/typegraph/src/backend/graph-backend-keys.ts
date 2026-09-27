@@ -58,6 +58,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "countNodesByKind",
   "findEdgesByKind",
   "findActiveEdgesBySourceV1",
+  "findEdgesByMatchIdentity",
   "findEdgesAcrossKinds",
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",

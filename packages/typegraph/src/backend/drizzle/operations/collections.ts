@@ -12,6 +12,7 @@ import type {
   FindEdgesByEndpointSetParams,
   FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
+  FindEdgesByMatchIdentityParams,
   FindNodesByKindParams,
   FindRowsAcrossKindsParams,
 } from "../../types";
@@ -157,10 +158,7 @@ export function buildCountNodesByKind(
 }
 
 /** Builds an `IN (...)` membership predicate over a non-empty id list. */
-function buildIdSetCondition(
-  column: SQLWrapper,
-  ids: readonly string[],
-): SQL {
+function buildIdSetCondition(column: SQLWrapper, ids: readonly string[]): SQL {
   return sql`${column} IN (${sql.join(
     ids.map((id) => sql`${id}`),
     sql`, `,
@@ -289,6 +287,32 @@ export function buildFindActiveEdgesBySourceV1(
   `;
 }
 
+/** Reads exact durable identity owners without filtering soft-deleted rows. */
+export function buildFindEdgesByMatchIdentity(
+  tables: Tables,
+  params: FindEdgesByMatchIdentityParams,
+): SQL {
+  const { edges } = tables;
+  const predicates = params.identities.map(
+    (identity) => sql`
+      (
+      ${edges.kind} = ${identity.kind}
+      AND ${edges.matchIdentityName} = ${identity.name}
+      AND ${edges.matchIdentityKey} = ${identity.key}
+      )
+    `,
+  );
+  if (predicates.length === 0) {
+    return sql`SELECT * FROM ${edges} WHERE ${edges.graphId} = ${params.graphId} AND 1 = 0`;
+  }
+  return sql`
+    SELECT * FROM ${edges}
+       WHERE ${edges.graphId} = ${params.graphId}
+       AND (${sql.join(predicates, sql` OR `)})
+       ORDER BY ${edges.id} ASC
+    `;
+  }
+
 /** One keyset page across declared edge kinds. */
 export function buildFindEdgesAcrossKinds(
   tables: Tables,
@@ -385,9 +409,7 @@ export function buildFindEdgesByHeterogeneousEndpointSet(
   const idColumn = fromSide ? edges.fromId : edges.toId;
   const requestedKind = sql.raw(`requested_endpoints."endpoint_kind"`);
   const requestedId = sql.raw(`requested_endpoints."endpoint_id"`);
-  const requestedOppositeKind = sql.raw(
-    `requested_endpoints."opposite_kind"`,
-  );
+  const requestedOppositeKind = sql.raw(`requested_endpoints."opposite_kind"`);
   const requestedOppositeId = sql.raw(`requested_endpoints."opposite_id"`);
   const oppositeKindColumn = fromSide ? edges.toKind : edges.fromKind;
   const oppositeIdColumn = fromSide ? edges.toId : edges.fromId;

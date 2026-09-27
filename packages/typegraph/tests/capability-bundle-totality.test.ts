@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("40 reasoned entries sum to 121 accesses; 50 deferred entries sum to 241", () => {
+  it("41 reasoned entries sum to 121 accesses; 50 deferred entries sum to 241", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(40);
+    expect(reasoned.length).toBe(41);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -153,6 +153,9 @@ describe("capability bundle totality (T9)", () => {
     // or off `EngineProvisioning`, never off a `GraphBackend`/
     // `TransactionBackend`-typed receiver — still 93.
     // The checked-read schema binding adds one tableNames access: 93 -> 94.
+    // The optional durable identity owner lookup adds one reasoned capability
+    // with zero reads until merge planning consumes it; custom backends that
+    // omit it retain the full-clone path, so the access floor stays 113.
     // Adopted evolution hands the identity DDL factory into the transaction
     // and inspects its required storage on that session: 94 -> 96.
     // The exact-session heterogeneous node upsert adds six guarded backend

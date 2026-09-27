@@ -907,6 +907,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
       "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.",
     accesses: 2,
   },
+  findEdgesByMatchIdentity: {
+    kind: "reasoned",
+    reason:
+      "Optional bounded lookup for durable edge identity owners, including tombstones. Merge planning does not consume the capability yet, so its omission keeps the portable full-clone path.",
+    accesses: 0,
+  },
   clearGraphPreservingContributionMaterializations: {
     kind: "reasoned",
     reason:

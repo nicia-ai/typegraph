@@ -2444,6 +2444,18 @@ export type GraphBackend = Readonly<{
       fromId: string;
     }>,
   ) => Promise<readonly EdgeRow[]>;
+  /** Exact lookup for durable identity owners, including tombstoned rows. */
+  findEdgesByMatchIdentity?: (
+    this: void,
+    params: Readonly<{
+      graphId: string;
+      identities: readonly Readonly<{
+        kind: string;
+        name: string;
+        key: string;
+      }>[];
+    }>,
+  ) => Promise<readonly EdgeRow[]>;
   /** Optional graph-wide keyset read for merge and interchange. */
   findEdgesAcrossKinds?: (
     this: void,
@@ -3731,6 +3743,7 @@ export type EdgeEntityReadBackend = Pick<
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
   | "findActiveEdgesBySourceV1"
+  | "findEdgesByMatchIdentity"
   | "findEdgesAcrossKinds"
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
@@ -4544,6 +4557,19 @@ export type FindEdgesByKindParams = Readonly<{
    * `offset` — callers pick one. Mirrors {@link FindNodesByKindParams.after}.
    */
   after?: string;
+}>;
+
+/** One durable edge identity tuple owned by a graph edge kind. */
+export type EdgeMatchIdentityOwnerKey = Readonly<{
+  kind: string;
+  name: string;
+  key: string;
+}>;
+
+/** Exact owner keys for a bounded durable edge identity lookup. */
+export type FindEdgesByMatchIdentityParams = Readonly<{
+  graphId: string;
+  identities: readonly EdgeMatchIdentityOwnerKey[];
 }>;
 
 /**

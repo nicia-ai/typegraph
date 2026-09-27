@@ -169,6 +169,7 @@ type _historyStoreContainsClaimsCore = Assert<
 >;
 
 type UnsafeHistoryStoreBackendMember =
+  | "findEdgesByMatchIdentity"
   | "clearGraph"
   | "clearGraphPreservingContributionMaterializations"
   | "commitSchemaVersionWithPreflight"

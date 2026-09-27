@@ -124,6 +124,7 @@ import type {
   FindEdgesByEndpointSetParams,
   FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
+  FindEdgesByMatchIdentityParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
   FindRowsAcrossKindsParams,
@@ -568,6 +569,7 @@ export type CommonOperationBackend = Pick<
   | "executeTemporaryStatement"
   | "findEdgesByKind"
   | "findActiveEdgesBySourceV1"
+  | "findEdgesByMatchIdentity"
   | "findEdgesAcrossKinds"
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
@@ -5109,6 +5111,33 @@ export function createCommonOperationBackend(
           return rows.map((row) => rowMappers.toEdgeRow(row));
         },
       }),
+    ...(operationStrategy.buildFindEdgesByMatchIdentity === undefined ?
+      {}
+    : {
+        async findEdgesByMatchIdentity(
+          params: FindEdgesByMatchIdentityParams,
+        ): Promise<readonly EdgeRow[]> {
+          const edgeRows: EdgeRow[] = [];
+          for (const identityChunk of chunkArray(
+            params.identities,
+            Math.max(1, Math.floor((maxBindParameters - 1) / 3)),
+          )) {
+            const query = operationStrategy.buildFindEdgesByMatchIdentity?.({
+              ...params,
+              identities: identityChunk,
+            });
+            if (query === undefined) {
+              throw new CompilerInvariantError(
+                "The backend operation strategy omitted its durable edge identity owner query.",
+              );
+            }
+            const rows =
+              await execution.execAll<Record<string, unknown>>(query);
+            edgeRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));
+          }
+          return edgeRows;
+        },
+        }),
 
     ...(buildFindEdgesAcrossKinds === undefined ?
       {}

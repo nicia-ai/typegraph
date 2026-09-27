@@ -64,21 +64,25 @@ describe("optional operation read compatibility", () => {
       buildFindNodesAcrossKinds,
       buildFindEdgesAcrossKinds,
       buildFindActiveEdgesBySourceV1,
+      buildFindEdgesByMatchIdentity,
       ...legacy
     } = bundled;
     expect(buildFindNodesAcrossKinds).toBeTypeOf("function");
     expect(buildFindEdgesAcrossKinds).toBeTypeOf("function");
     expect(buildFindActiveEdgesBySourceV1).toBeTypeOf("function");
+    expect(buildFindEdgesByMatchIdentity).toBeTypeOf("function");
     const legacyStrategy: CommonOperationStrategy = legacy;
 
     const legacyBackend = operationBackend(legacyStrategy);
     expect(legacyBackend.findNodesAcrossKinds).toBeUndefined();
     expect(legacyBackend.findEdgesAcrossKinds).toBeUndefined();
     expect(legacyBackend.findActiveEdgesBySourceV1).toBeUndefined();
+    expect(legacyBackend.findEdgesByMatchIdentity).toBeUndefined();
 
     const bundledBackend = operationBackend(bundled);
     expect(bundledBackend.findNodesAcrossKinds).toBeTypeOf("function");
     expect(bundledBackend.findEdgesAcrossKinds).toBeTypeOf("function");
     expect(bundledBackend.findActiveEdgesBySourceV1).toBeTypeOf("function");
+    expect(bundledBackend.findEdgesByMatchIdentity).toBeTypeOf("function");
   });
 });
