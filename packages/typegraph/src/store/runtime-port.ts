@@ -268,6 +268,24 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     target: GraphBackend | TransactionBackend,
     references: readonly Readonly<{ kind: string; id: string }>[],
     mode?: "state" | "archival",
+    options?: Readonly<{ includeDeleted?: boolean }>,
+  ) => Promise<
+    readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
+    }>[]
+  >;
+  /** Interchange-visible assertion ID rows, with the requested archive state. */
+  interchangeIdentityAssertionsByIdsAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    ids: readonly string[],
+    mode: "state" | "archival",
+    options?: Readonly<{ includeDeleted?: boolean }>,
   ) => Promise<
     readonly Readonly<{
       id: string;

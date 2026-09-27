@@ -5,7 +5,6 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
-import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
 import { identityReferenceKey } from "./reference";
 import {
   normalizeIdentityAssertionRow,
@@ -35,6 +34,7 @@ export async function readIdentityAssertionsTouchingAtTarget<
   target: IdentityTarget,
   references: readonly PlainNodeRef[],
   mode: "state" | "archival",
+  options?: Readonly<{ includeDeleted?: boolean }>,
 ): Promise<readonly IdentityTransferAssertion[]> {
   const uniqueReferences = new Map<string, PlainNodeRef>();
   for (const reference of references) {
@@ -63,11 +63,53 @@ export async function readIdentityAssertionsTouchingAtTarget<
     );
     const rows = await target.execute<RawIdentityAssertionRow>(
       asCompiledRowsSql(sql`
-        SELECT ${IDENTITY_ASSERTION_COLUMNS}
+        SELECT ${interchangeIdentityAssertionProjection()}
         FROM ${ctx.schema.identityAssertionsTable} identity_assertions
+        ${liveEndpointJoins(ctx, options)}
         WHERE identity_assertions.graph_id = ${ctx.graphId}
           ${interchangeAssertionVisibility(mode)}
           AND (${aMatches} OR ${bMatches})
+      `),
+    );
+    for (const row of rows) {
+      const assertion = toTransferAssertion(normalizeIdentityAssertionRow(row));
+      assertionsById.set(assertion.id, assertion);
+    }
+  }
+  return [...assertionsById.values()].toSorted((left, right) =>
+    compareCodePoints(left.id, right.id),
+  );
+}
+
+/** Reads the interchange-visible rows matching the supplied assertion IDs. */
+export async function readIdentityAssertionsByIdsAtTarget<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  target: IdentityTarget,
+  ids: readonly string[],
+  mode: "state" | "archival",
+  options?: Readonly<{ includeDeleted?: boolean }>,
+): Promise<readonly IdentityTransferAssertion[]> {
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length === 0) return [];
+  const chunkSize = identityChunkSize(target, {
+    fixedParameters: 1,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 1,
+  });
+  const assertionsById = new Map<string, IdentityTransferAssertion>();
+  for (const idChunk of chunk(uniqueIds, chunkSize)) {
+    const idList = sql.join(
+      idChunk.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    const rows = await target.execute<RawIdentityAssertionRow>(
+      asCompiledRowsSql(sql`
+        SELECT ${interchangeIdentityAssertionProjection()}
+        FROM ${ctx.schema.identityAssertionsTable} identity_assertions
+        ${liveEndpointJoins(ctx, options)}
+        WHERE identity_assertions.graph_id = ${ctx.graphId}
+          ${interchangeAssertionVisibility(mode)}
+          AND identity_assertions.id IN (${idList})
       `),
     );
     for (const row of rows) {
@@ -87,6 +129,44 @@ function interchangeAssertionVisibility(
   return sql`
     AND identity_assertions.deleted_at IS NULL
     ${mode === "state" ? sql`AND identity_assertions.valid_to IS NULL` : sql``}
+  `;
+}
+
+function liveEndpointJoins<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  options: Readonly<{ includeDeleted?: boolean }> | undefined,
+): SqlFragment {
+  if (options?.includeDeleted !== false) return sql``;
+  return sql`
+    JOIN ${ctx.schema.nodesTable} identity_a_node
+      ON identity_a_node.graph_id = identity_assertions.graph_id
+     AND identity_a_node.kind = identity_assertions.a_kind
+     AND identity_a_node.id = identity_assertions.a_id
+     AND identity_a_node.deleted_at IS NULL
+    JOIN ${ctx.schema.nodesTable} identity_b_node
+      ON identity_b_node.graph_id = identity_assertions.graph_id
+     AND identity_b_node.kind = identity_assertions.b_kind
+     AND identity_b_node.id = identity_assertions.b_id
+     AND identity_b_node.deleted_at IS NULL
+  `;
+}
+
+function interchangeIdentityAssertionProjection(): SqlFragment {
+  return sql`
+    identity_assertions.graph_id AS graph_id,
+    identity_assertions.id AS id,
+    identity_assertions.rel AS rel,
+    identity_assertions.a_kind AS a_kind,
+    identity_assertions.a_id AS a_id,
+    identity_assertions.b_kind AS b_kind,
+    identity_assertions.b_id AS b_id,
+    identity_assertions.valid_from AS valid_from,
+    identity_assertions.valid_to AS valid_to,
+    identity_assertions.created_at AS created_at,
+    identity_assertions.updated_at AS updated_at,
+    identity_assertions.deleted_at AS deleted_at,
+    identity_assertions.ended_by_kind AS ended_by_kind,
+    identity_assertions.ended_by_id AS ended_by_id
   `;
 }
 
@@ -162,40 +242,12 @@ export async function readIdentityAssertionPageAtTarget<G extends GraphDef>(
         sql`, `,
       )})
     `;
-  const liveEndpointJoins =
-    options.includeDeleted === false ?
-      sql`
-        JOIN ${ctx.schema.nodesTable} identity_a_node
-          ON identity_a_node.graph_id = identity_assertions.graph_id
-         AND identity_a_node.kind = identity_assertions.a_kind
-         AND identity_a_node.id = identity_assertions.a_id
-         AND identity_a_node.deleted_at IS NULL
-        JOIN ${ctx.schema.nodesTable} identity_b_node
-          ON identity_b_node.graph_id = identity_assertions.graph_id
-         AND identity_b_node.kind = identity_assertions.b_kind
-         AND identity_b_node.id = identity_assertions.b_id
-         AND identity_b_node.deleted_at IS NULL
-      `
-    : sql``;
   const assertionIdKey = codePointOrderedAssertionId(target);
   const rows = await target.execute<RawIdentityAssertionRow>(
     asCompiledRowsSql(sql`
-      SELECT identity_assertions.graph_id AS graph_id,
-             identity_assertions.id AS id,
-             identity_assertions.rel AS rel,
-             identity_assertions.a_kind AS a_kind,
-             identity_assertions.a_id AS a_id,
-             identity_assertions.b_kind AS b_kind,
-             identity_assertions.b_id AS b_id,
-             identity_assertions.valid_from AS valid_from,
-             identity_assertions.valid_to AS valid_to,
-             identity_assertions.created_at AS created_at,
-             identity_assertions.updated_at AS updated_at,
-             identity_assertions.deleted_at AS deleted_at,
-             identity_assertions.ended_by_kind AS ended_by_kind,
-             identity_assertions.ended_by_id AS ended_by_id
+      SELECT ${interchangeIdentityAssertionProjection()}
       FROM ${ctx.schema.identityAssertionsTable} identity_assertions
-      ${liveEndpointJoins}
+      ${liveEndpointJoins(ctx, options)}
       WHERE identity_assertions.graph_id = ${ctx.graphId}
         ${interchangeAssertionVisibility(mode)}
         ${

@@ -6,6 +6,7 @@
  */
 export {
   readIdentityAssertionPageAtTarget,
+  readIdentityAssertionsByIdsAtTarget,
   readIdentityAssertionsForInterchange,
   readIdentityAssertionsTouchingAtTarget,
 } from "./interchange-read";

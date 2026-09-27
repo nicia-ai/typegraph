@@ -175,6 +175,7 @@ import {
   loadCurrentStructuralClasses,
   lockIdentityGraph,
   readIdentityAssertionPageAtTarget,
+  readIdentityAssertionsByIdsAtTarget,
   readIdentityAssertionsForInterchange,
   readIdentityAssertionsTouchingAtTarget,
   rebuildIdentityClosureForContext,
@@ -1678,8 +1679,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.readCurrentIdentityAssertions(mode, options),
       identityAssertionsAtTarget: (target, mode) =>
         this.identityAssertionsAtTarget(target, mode),
-      identityAssertionsTouchingAtTarget: (target, references, mode) =>
-        this.identityAssertionsTouchingAtTarget(target, references, mode),
+      identityAssertionsTouchingAtTarget: (target, references, mode, options) =>
+        this.identityAssertionsTouchingAtTarget(
+          target,
+          references,
+          mode,
+          options,
+        ),
+      interchangeIdentityAssertionsByIdsAtTarget: async (
+        target,
+        ids,
+        mode,
+        options,
+      ) => {
+        if (this.#graph.identity === undefined || ids.length === 0) return [];
+        return readIdentityAssertionsByIdsAtTarget(
+          this.#identityContext(target),
+          target,
+          ids,
+          mode,
+          options,
+        );
+      },
       readIdentityAssertionPageAtTarget: (target, mode, options) =>
         this.readIdentityAssertionPageAtTarget(target, mode, options),
       lockIdentityImportTarget: (target) =>
@@ -1898,6 +1919,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     target: GraphBackend | TransactionBackend,
     references: readonly Readonly<{ kind: string; id: string }>[],
     mode: "state" | "archival" = "state",
+    options?: Readonly<{ includeDeleted?: boolean }>,
   ): Promise<readonly IdentityTransferAssertion[]> {
     if (this.#graph.identity === undefined || references.length === 0) {
       return Promise.resolve([]);
@@ -1907,6 +1929,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       target,
       references,
       mode,
+      options,
     );
   }
 
