@@ -114,6 +114,9 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   fences: "typegraph_fences",
 };
 
+/** The bundled physical names, shared with working-copy allocation. */
+export const defaultPostgresTableNames = DEFAULT_TABLE_NAMES;
+
 /**
  * Creates PostgreSQL table definitions with customizable table names.
  * Index names are derived from table names.

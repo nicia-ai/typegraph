@@ -75,6 +75,14 @@ VALUES (1, ${String(CURRENT_BASE_SCHEMA_VERSION)}, CURRENT_TIMESTAMP)
 ON CONFLICT (${installation}) DO NOTHING;`;
 }
 
+/** Current marker statement shared by fresh installation and working copies. */
+export function generatePostgresBaseSchemaMarkerSQL(tables: PostgresTables): string {
+  return generateBaseSchemaVersionMarkerSQL(
+    getPgTableConfig(tables.baseSchemaVersions).name,
+    tables.baseSchemaVersions,
+  );
+}
+
 /** Identifier-preserving text accepted by PostgreSQL's `regclass` input. */
 export function postgresIdentifierRegclassName(identifier: string): string {
   return quoteDdlIdentifier(identifier);
@@ -746,10 +754,7 @@ function generatePostgresInstallationSQL(
       "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;"
     : undefined;
   const ddlSql = generatePostgresDDL(tables, fulltextStrategy).join("\n\n");
-  const markerSql = generateBaseSchemaVersionMarkerSQL(
-    getPgTableConfig(tables.baseSchemaVersions).name,
-    tables.baseSchemaVersions,
-  );
+  const markerSql = generatePostgresBaseSchemaMarkerSQL(tables);
   return [extensionSql, ddlSql, markerSql]
     .filter((statement) => statement !== undefined)
     .join("\n\n");

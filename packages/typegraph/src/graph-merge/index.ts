@@ -10,6 +10,13 @@ export type {
 // points, typed errors, and durable provenance helpers. The phase-level
 // algorithms stay internal and are covered through relative test imports.
 export type {
+  PostgresAbandonedAllocation,
+  PostgresWorkingCopyLocator,
+  PostgresWorkingCopyManager,
+  PostgresWorkingCopyOptions,
+} from "../backend/drizzle/postgres-working-copy";
+export { createPostgresWorkingCopyManager } from "../backend/drizzle/postgres-working-copy";
+export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
   ContributionRepairEntry,

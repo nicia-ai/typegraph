@@ -1442,6 +1442,76 @@ operations mutate rows through their own preflights, and projecting the side
 effects into a merge would detach them from the schema change that caused
 them. Apply schema changes to the target first (or re-fork), then merge.
 
+### PostgreSQL table-backed working copies
+
+`createPostgresWorkingCopyManager` allocates a private set of TypeGraph tables
+in the source PostgreSQL database. It derives the table inventory and base
+schema marker from TypeGraph's PostgreSQL schema contributions, copies the
+source graph with fenced `INSERT ... SELECT` statements, and records ownership
+in `typegraph_working_copy_allocations`. The control backend, source backend,
+and backends returned by `connect` must all reach the same database. TypeGraph
+checks the allocation's private ownership token through each connection.
+
+```typescript
+import { drizzle } from "drizzle-orm/node-postgres";
+import {
+  createPostgresBackend,
+  createPostgresTables,
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import {
+  asBranchId,
+  branchDurable,
+  createPostgresWorkingCopyManager,
+  destroyDurableBranch,
+  reopenDurableBranch,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const control = createPostgresBackend(drizzle(pool));
+const copies = createPostgresWorkingCopyManager<typeof graph>({
+  control,
+  connect: (names) =>
+    Promise.resolve(
+      createPostgresBackend(drizzle(pool), {
+        tables: createPostgresTables(names),
+      }),
+    ),
+});
+
+const { branch: copy, descriptor } = unwrap(
+  await branchDurable(sourceStore, copies.durable, {
+    id: asBranchId("candidate-42"),
+    allocationId: "candidate-allocation-42",
+  }),
+);
+await copy.close(); // Releases the connection; the tables remain.
+
+const reopened = unwrap(
+  await reopenDurableBranch(graph, descriptor, copies.durable),
+);
+await reopened.close();
+unwrap(await destroyDurableBranch(descriptor, copies.durable));
+```
+
+The same manager exposes `ephemeral` for `branch()`; closing that branch drops
+its tables. `listAbandoned({ after, limit })` pages through unsealed durable
+and crashed ephemeral allocations, and `abortAllocation(id)` explicitly
+removes one. A durable branch's descriptor contains only the allocation ID,
+not connection credentials. Pass `sourceTables` when the source backend uses
+custom status table names; pass `reopenOptions` to restore process-local hooks
+or query options on a later process. An external `recordedRead` binding is
+refused because its relation is outside the owned table inventory. Reopen
+options cannot replace the allocation's schema, recorded-read binding,
+history mode, or revision-tracking mode.
+
+The table-backed strategy supports the bundled tsvector fulltext storage and
+rebuilds physical-name materialization markers for the copied relations.
+It refuses graphs with declared indexes or enabled vector fields because their
+current physical names are database-global or graph-scoped rather than
+allocation-scoped. Use a host-level database fork for those graphs. Source
+table locks cover the entire TypeGraph relation set while the SQL clone runs,
+so a large clone briefly blocks writes to other graphs in the same database.
+
 ### Forked working copies
 
 A second bundled strategy, `forkedWorkingCopyStrategy<G, TFork>({ fork, connect })`,
@@ -1513,6 +1583,12 @@ await worker.close();
 ```
 
 `TFork` must extend `ForkHandle` (`{ dispose?: () => Promise<void> }`).
+For a hosted PostgreSQL branch such as Neon, `connect` must bind every
+checkout and transaction to that branch, and durable reopen must attest its
+origin from the host's persisted allocation record. Doltgres exposes native
+branch and merge commands, but TypeGraph continues to use its own merge
+planner and apply path; native merge and Doltgres backend support require
+separate conformance testing.
 `create()` calls `fork(baseStore)`, then `connect(fork)`; the connected
 backend's `close` is composed with the fork's `dispose` through `deriveBackend`
 (never a spread), so `worker.close()` — the branch's public release call —
