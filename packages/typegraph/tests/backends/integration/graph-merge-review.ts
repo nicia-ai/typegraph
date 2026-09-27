@@ -9,7 +9,9 @@ import {
   defineGraph,
   defineNode,
   defineNodeIndex,
+  disjointWith,
   type Store,
+  subClassOf,
 } from "../../../src";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import {
@@ -28,6 +30,7 @@ import {
 import { captureMergePlanTargetFence } from "../../../src/graph-merge/merge";
 import { canonicalMergePlanJson } from "../../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
+import { canUseSparseCandidatePlanning } from "../../../src/graph-merge/sparse-candidate-branch";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { importGraph } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
@@ -100,6 +103,42 @@ const boundedCardinalityGraph = defineGraph({
     },
   },
 });
+const BaseKind = defineNode("BaseKind", {
+  schema: z.object({ label: z.string() }),
+});
+const SpecificKind = defineNode("SpecificKind", {
+  schema: z.object({ label: z.string() }),
+});
+const ExcludedKind = defineNode("ExcludedKind", {
+  schema: z.object({ label: z.string() }),
+});
+const boundedOntologyGraph = defineGraph({
+  id: "bounded_ontology_candidate_review",
+  nodes: {
+    BaseKind: { type: BaseKind },
+    SpecificKind: { type: SpecificKind },
+    ExcludedKind: { type: ExcludedKind },
+  },
+  edges: {},
+  ontology: [
+    subClassOf(SpecificKind, BaseKind),
+    disjointWith(BaseKind, ExcludedKind),
+  ],
+});
+const boundedOntologyIdentityGraph = defineGraph({
+  id: "bounded_ontology_identity_candidate_review",
+  identity: { sameIdAcrossKinds: "fold" },
+  nodes: {
+    BaseKind: { type: BaseKind },
+    SpecificKind: { type: SpecificKind },
+    ExcludedKind: { type: ExcludedKind },
+  },
+  edges: {},
+  ontology: [
+    subClassOf(SpecificKind, BaseKind),
+    disjointWith(BaseKind, ExcludedKind),
+  ],
+});
 const policy = {
   id: "review-policy-v1",
   context: { minimumApprovals: 1 },
@@ -143,6 +182,229 @@ export function registerGraphMergeReviewIntegrationTests(
     return { target, writeSet: await candidate(target), makeBackend, policy };
   }
   describe("durable merge review", () => {
+    it.each([
+      ["off", "compatible"],
+      ["off", "disjoint"],
+      ["off", "deleted"],
+      ["off", "absent"],
+      ["ontology", "compatible"],
+      ["ontology", "disjoint"],
+      ["ontology", "deleted"],
+      ["ontology", "absent"],
+    ] as const)(
+      "matches full-clone ontology decisions with %s reconciliation and %s peer",
+      async (reconcileTypes, peerState) => {
+        const prefix = `${reconcileTypes}-${peerState}`;
+        const target = await context.createHistoryStore(boundedOntologyGraph);
+        if (peerState === "compatible")
+          await target.nodes.BaseKind.create(
+            { label: prefix },
+            { id: prefix, validFrom },
+          );
+        if (peerState === "disjoint" || peerState === "deleted") {
+          const peer = await target.nodes.ExcludedKind.create(
+            { label: prefix },
+            { id: prefix, validFrom },
+          );
+          if (peerState === "deleted")
+            await target.nodes.ExcludedKind.delete(peer.id);
+        }
+        const writeSet: CandidateWriteSet = {
+          formatVersion: 1,
+          sourceId: `ontology-${prefix}`,
+          target: await captureCandidateWriteSetTarget(target),
+          nodes: [
+            {
+              kind: "SpecificKind",
+              id: prefix,
+              properties: { label: `candidate-${prefix}` },
+              validFrom,
+            },
+          ],
+          edges: [],
+        };
+        const full = unwrap(
+          await ingestionBranch(target, makeBackend, {
+            id: asBranchId(writeSet.sourceId),
+          }),
+        );
+        try {
+          const imported = await importGraph(
+            full,
+            {
+              formatVersion: "2.0",
+              exportedAt: "1970-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: writeSet.nodes,
+              edges: writeSet.edges,
+            },
+            {
+              onConflict: "update",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              refreshStatistics: false,
+            },
+          );
+          const options = { reconcileTypes };
+          const bounded = await planCandidateWriteSet({
+            target,
+            writeSet,
+            makeBackend,
+            options,
+          });
+          const expectedJson =
+            imported.success ?
+              canonicalMergePlanJson(
+                unwrap(
+                  await planMergeIncremental({
+                    forkPoint: target,
+                    target,
+                    branches: [full],
+                    options,
+                  }),
+                ),
+              )
+            : undefined;
+          const actualJson =
+            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+          expect(canUseSparseCandidatePlanning(target)).toBe(true);
+          expect(imported.success).toBe(peerState !== "disjoint");
+          expect(actualJson).toBe(expectedJson);
+        } finally {
+          await full.close();
+        }
+      },
+    );
+    it("revalidates scoped ontology evidence when a same-id disjoint peer appears", async () => {
+      const target = await context.createHistoryStore(boundedOntologyGraph);
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "ontology-reviewed",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "SpecificKind",
+            id: "ontology-reviewed",
+            properties: { label: "candidate" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      await target.nodes.ExcludedKind.create(
+        { label: "late disjoint sibling" },
+        { id: "ontology-reviewed", validFrom },
+      );
+      const revalidated = unwrap(
+        await revalidateCandidateWriteSetReview({ ...args, review }),
+      );
+      expect(review.baseline.scope).toBe("referenced");
+      expect(revalidated.status).toBe("changed");
+    });
+    it("seeds same-id ontology peers through identity closure", async () => {
+      const target = await context.createHistoryStore(
+        boundedOntologyIdentityGraph,
+      );
+      await target.nodes.ExcludedKind.create(
+        { label: "disjoint incumbent" },
+        { id: "identity-disjoint", validFrom },
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "ontology-identity-disjoint",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "SpecificKind",
+            id: "identity-disjoint",
+            properties: { label: "candidate" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const full = unwrap(
+        await ingestionBranch(target, makeBackend, {
+          id: asBranchId(writeSet.sourceId),
+        }),
+      );
+      try {
+        const imported = await importGraph(
+          full,
+          {
+            formatVersion: "2.0",
+            exportedAt: "1970-01-01T00:00:00.000Z",
+            source: { type: "external" },
+            nodes: writeSet.nodes,
+            edges: writeSet.edges,
+          },
+          {
+            onConflict: "update",
+            onUnknownProperty: "error",
+            validateReferences: true,
+            refreshStatistics: false,
+          },
+        );
+        const bounded = await planCandidateWriteSet({
+          target,
+          writeSet,
+          makeBackend,
+        });
+        const boundedImportErrors =
+          isErr(bounded) && bounded.error instanceof CandidateWriteSetError ?
+            bounded.error.details["errors"]
+          : undefined;
+        expect(canUseSparseCandidatePlanning(target)).toBe(true);
+        expect(imported.success).toBe(false);
+        expect(boundedImportErrors).toEqual(imported.errors);
+      } finally {
+        await full.close();
+      }
+    });
+    it("revalidates identity-enabled ontology evidence for a late disjoint peer", async () => {
+      const target = await context.createHistoryStore(
+        boundedOntologyIdentityGraph,
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "ontology-identity-reviewed",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [
+          {
+            kind: "SpecificKind",
+            id: "identity-reviewed",
+            properties: { label: "candidate" },
+            validFrom,
+          },
+        ],
+        edges: [],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      await target.nodes.ExcludedKind.create(
+        { label: "late disjoint sibling" },
+        { id: "identity-reviewed", validFrom },
+      );
+      const revalidated = unwrap(
+        await revalidateCandidateWriteSetReview({ ...args, review }),
+      );
+      expect(review.baseline.scope).toBe("referenced");
+      expect(revalidated.status).toBe("changed");
+    });
     it.each([
       ["limited", "occupied"],
       ["limited", "available"],

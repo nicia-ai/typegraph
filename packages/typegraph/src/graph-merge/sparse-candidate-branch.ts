@@ -34,8 +34,8 @@ type EntityReference = Readonly<{ kind: string; id: string }>;
  * `one` and `unique` cardinality peers are keyed by source or endpoint pair.
  * `oneActive` can have arbitrarily many ended rows from one source, so it
  * requires an active-only keyed read before sparse seeding can be bounded.
- * Durable edge match identity has no keyed owner read, while ontology can add
- * cross-kind claims outside the candidate's references.
+ * Durable edge match identity has no keyed owner read. Ontology disjointness
+ * can inspect live same-id siblings, which sparse seeding includes below.
  */
 export function canUseSparseCandidatePlanning<G extends GraphDef>(
   target: Store<G>,
@@ -44,7 +44,6 @@ export function canUseSparseCandidatePlanning<G extends GraphDef>(
     target.revisionTrackingEnabled &&
     (target.graph.identity === undefined ||
       hasScopedIdentityReads(storeRuntime(target))) &&
-    target.graph.ontology.length === 0 &&
     Object.values(target.graph.edges).every(
       (edge) =>
         edge.cardinality !== "oneActive" && edge.matchIdentity === undefined,
@@ -139,6 +138,14 @@ async function sparseBaseDocument<G extends GraphDef>(
     add(assertion.a);
     add(assertion.b);
     if (assertion.endedBy !== undefined) add(assertion.endedBy);
+  }
+  if (target.graph.ontology.length > 0 && target.graph.identity === undefined) {
+    const ids = [...new Set([...references.values()].map((ref) => ref.id))];
+    for (const peer of await storeRuntime(target).liveNodesSharingIds(
+      ids,
+      backend,
+    ))
+      add(peer);
   }
   const identityClosure =
     target.graph.identity === undefined ?
