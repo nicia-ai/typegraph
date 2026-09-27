@@ -370,6 +370,60 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
+    it("skips clone statistics refresh unless requested", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      try {
+        const control = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(graph, control, {
+          autoRefreshStatistics: 1,
+          revisionTracking: true,
+        });
+        await source.nodes.Person.create({ name: "Source" });
+        const refreshes: string[] = [];
+        const connect = (names: PostgresTableNames) =>
+          Promise.resolve(
+            deriveBackend(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+              }),
+              {
+                refreshStatistics: () => {
+                  refreshes.push(names.nodes);
+                  return Promise.resolve();
+                },
+              },
+            ),
+          );
+
+        const defaultManager = createPostgresWorkingCopyManager<typeof graph>({
+          control,
+          connect,
+        });
+        const defaultCopy = await defaultManager.ephemeral.create(
+          source,
+          await computeBaseVersion(source),
+        );
+        expect(refreshes).toEqual([]);
+        await storeBackend(defaultCopy).close();
+
+        const refreshingManager = createPostgresWorkingCopyManager<
+          typeof graph
+        >({
+          control,
+          connect,
+          refreshStatistics: true,
+        });
+        const refreshingCopy = await refreshingManager.ephemeral.create(
+          source,
+          await computeBaseVersion(source),
+        );
+        expect(refreshes).toHaveLength(1);
+        await storeBackend(refreshingCopy).close();
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
     it("supports custom quoted source names and refuses a stale source", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
       try {
