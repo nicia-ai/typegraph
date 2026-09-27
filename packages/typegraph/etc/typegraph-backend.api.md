@@ -2059,7 +2059,7 @@ export type EdgeCreateCommandResult = Readonly<{
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -2495,6 +2495,18 @@ export type FindNodesByKindParams = Readonly<{
     after?: string;
 }>;
 
+// @public
+export type FindRowsAcrossKindsParams = Readonly<{
+    graphId: string;
+    kinds: readonly string[];
+    limit: number;
+    after?: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    excludeDeleted?: boolean;
+}>;
+
 // @public (undocumented)
 export const fts5Strategy: FulltextStrategy;
 
@@ -2653,8 +2665,10 @@ export type GraphBackend = Readonly<{
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
+    findNodesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
+    findEdgesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly EdgeRow[]>;
     findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
     findEdgesByHeterogeneousEndpointSet?: (this: void, params: FindEdgesByHeterogeneousEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
@@ -2854,7 +2868,7 @@ export type GraphIdentityConfig = Readonly<{
 export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "clearGraphPreservingContributionMaterializations" | "bootstrapTables">;
 
 // @public
-export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findEdgesByHeterogeneousEndpointSet" | "findEdgesConnectedTo">;
+export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findNodesAcrossKinds" | "findEdgesAcrossKinds" | "findEdgesByHeterogeneousEndpointSet" | "findEdgesConnectedTo">;
 
 // @public
 type GraphTemplateRow = Readonly<{
@@ -3315,7 +3329,7 @@ export type NodeCreateCommandResult = Readonly<{
 }>;
 
 // @public (undocumented)
-export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
+export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
 
 // @public (undocumented)
 export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
@@ -4230,6 +4244,16 @@ type TypeGraphErrorOptions = Readonly<{
 
 // @public
 export const UNBUNDLED_OPTIONAL_MEMBERS: {
+    readonly findNodesAcrossKinds: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.";
+        readonly accesses: 2;
+    };
+    readonly findEdgesAcrossKinds: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.";
+        readonly accesses: 2;
+    };
     readonly clearGraphPreservingContributionMaterializations: {
         readonly kind: "reasoned";
         readonly reason: "First-party Store.clear lifecycle path that preserves contribution attestations while clearing graph data; custom backends without it retain their clearGraph behavior.";
