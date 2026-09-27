@@ -90,5 +90,6 @@ export {
 // DDL generation
 export {
   generatePostgresDDL,
+  generatePostgresDropSQL,
   generatePostgresMigrationSQL,
 } from "../drizzle/ddl";

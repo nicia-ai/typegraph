@@ -965,6 +965,24 @@ function generatePostgresDDL(
 ): string[];
 ```
 
+#### `generatePostgresDropSQL(tables?, fulltextStrategy?)`
+
+Returns one `DROP TABLE IF EXISTS` statement for the base and fulltext tables
+that `generatePostgresDDL()` would create. Use it to clean up an isolated,
+prefixed PostgreSQL table set after closing every backend connected to it.
+Pass the same tables and fulltext strategy used at installation. The statement
+does not use `CASCADE`: PostgreSQL refuses the drop if an application-owned
+object depends on one of these tables. It does not drop graph-scoped vector
+tables materialized later at runtime, so a working copy using those tables
+needs additional graph-scoped cleanup.
+
+```typescript
+function generatePostgresDropSQL(
+  tables?: PostgresTables,
+  fulltextStrategy?: FulltextStrategy | false,
+): string;
+```
+
 ### Upgrading deployment-wide base storage
 
 Skip this section when `createStoreWithSchema()` or

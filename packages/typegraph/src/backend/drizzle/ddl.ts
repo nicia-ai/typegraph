@@ -264,7 +264,7 @@ function renderTableChecks(
 ): readonly string[] {
   return checks.map(
     (check) =>
-      `CONSTRAINT "${check.name}" CHECK (${inlineSqlOrThrow(
+      `CONSTRAINT ${quoteDdlIdentifier(check.name)} CHECK (${inlineSqlOrThrow(
         check.value,
         `table "${tableName}" CHECK constraint "${check.name}"`,
       )})`,
@@ -276,7 +276,7 @@ function renderTableChecks(
  */
 function renderIndexColumn(col: unknown): string {
   if (col && typeof col === "object" && "name" in col) {
-    return `"${(col as { name: string }).name}"`;
+    return quoteDdlIdentifier((col as { name: string }).name);
   }
 
   const sql = tryInlineSql(col);
@@ -309,7 +309,7 @@ function flattenSqlChunk(chunk: unknown): string {
     // a column's `.getSQL()` wraps the column back inside a SQL object
     // that points to itself, which would recurse infinitely.
     if ("name" in chunk && typeof chunk.name === "string") {
-      return `"${(chunk as { name: string }).name}"`;
+      return quoteDdlIdentifier((chunk as { name: string }).name);
     }
 
     // Drizzle's StringChunk stores its literal as `.value`, usually as a
@@ -561,7 +561,10 @@ export function generatePgCreateTableSQL(
 
   // Generate column definitions
   for (const column of config.columns) {
-    const parts: string[] = [`"${column.name}"`, getPgColumnType(column)];
+    const parts: string[] = [
+      quoteDdlIdentifier(column.name),
+      getPgColumnType(column),
+    ];
 
     if (column.notNull) {
       parts.push("NOT NULL");
@@ -577,13 +580,15 @@ export function generatePgCreateTableSQL(
   // Add primary key constraint
   const pk = config.primaryKeys[0];
   if (pk) {
-    const pkColumns = pk.columns.map((c) => `"${c.name}"`).join(", ");
+    const pkColumns = pk.columns
+      .map((column) => quoteDdlIdentifier(column.name))
+      .join(", ");
     columnDefs.push(`PRIMARY KEY (${pkColumns})`);
   }
 
   columnDefs.push(...renderTableChecks(config.checks, config.name));
 
-  return `CREATE TABLE IF NOT EXISTS "${config.name}" (\n  ${columnDefs.join(",\n  ")}\n);`;
+  return `CREATE TABLE IF NOT EXISTS ${quoteDdlIdentifier(config.name)} (\n  ${columnDefs.join(",\n  ")}\n);`;
 }
 
 /**
@@ -598,6 +603,11 @@ export function generatePgCreateIndexSQL(
 
   for (const index of config.indexes) {
     const indexConfig = index.config;
+    if (indexConfig.name === undefined) {
+      throw new Error(
+        `PostgreSQL index on ${quoteDdlIdentifier(config.name)} needs a name for generated DDL.`,
+      );
+    }
     const columns = indexConfig.columns
       .map((c) => renderIndexColumn(c))
       .join(", ");
@@ -612,7 +622,7 @@ export function generatePgCreateIndexSQL(
       : "";
 
     statements.push(
-      `CREATE ${unique}INDEX IF NOT EXISTS "${indexConfig.name}" ON "${config.name}"${method} (${columns})${where};`,
+      `CREATE ${unique}INDEX IF NOT EXISTS ${quoteDdlIdentifier(indexConfig.name)} ON ${quoteDdlIdentifier(config.name)}${method} (${columns})${where};`,
     );
   }
 
@@ -698,6 +708,30 @@ export function generatePostgresDDL(
   return postgresContributions(tables, fulltextStrategy).flatMap(
     (contribution) => [...contribution.createDdl],
   );
+}
+
+/**
+ * Drops the same base and fulltext tables that {@link generatePostgresDDL}
+ * creates. PostgreSQL removes their indexes with the tables. The statement
+ * deliberately omits CASCADE so an application-owned dependent object cannot
+ * be removed silently. Runtime vector tables are graph-scoped contributions
+ * and are not part of a fresh-installation table set.
+ */
+export function generatePostgresDropSQL(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
+): string {
+  const tableNames = [
+    ...new Set(
+      postgresContributions(tables, fulltextStrategy).map(
+        (contribution) => contribution.tableName,
+      ),
+    ),
+  ];
+  return `DROP TABLE IF EXISTS ${tableNames
+    .toReversed()
+    .map((tableName) => quoteDdlIdentifier(tableName))
+    .join(", ")};`;
 }
 
 /** Builds complete PostgreSQL installation SQL for a bundled factory profile. */
