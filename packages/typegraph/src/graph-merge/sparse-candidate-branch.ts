@@ -1,4 +1,8 @@
 import type { GraphData } from "../interchange";
+import {
+  type CandidateIdentityScope,
+  readCandidateIdentityClosure,
+} from "./candidate-identity-closure";
 import type { CandidateWriteSet } from "./candidate-write-set";
 import { parseRowProps } from "./canonical-props";
 import { CandidateWriteSetError } from "./errors";
@@ -34,7 +38,6 @@ export function canUseSparseCandidatePlanning<G extends GraphDef>(
 ): boolean {
   return (
     target.revisionTrackingEnabled &&
-    target.graph.identity === undefined &&
     target.graph.ontology.length === 0 &&
     Object.values(target.graph.edges).every(
       (edge) =>
@@ -70,7 +73,9 @@ function candidateKeys(writeSet: CandidateWriteSet): LineageDelta {
 async function sparseBaseDocument<G extends GraphDef>(
   target: Store<G>,
   writeSet: CandidateWriteSet,
-): Promise<GraphData> {
+): Promise<
+  Readonly<{ document: GraphData; identityScope?: CandidateIdentityScope }>
+> {
   const backend = storeBackend(target);
   const verdict = batchPointReadVerdict(backend);
   const edgesById = await getEdgeRowsByIds(
@@ -93,6 +98,27 @@ async function sparseBaseDocument<G extends GraphDef>(
     add({ kind: edge.from_kind, id: edge.from_id });
     add({ kind: edge.to_kind, id: edge.to_id });
   }
+  for (const assertion of writeSet.identity?.assertions ?? []) {
+    add(assertion.a);
+    add(assertion.b);
+    if (assertion.endedBy !== undefined) add(assertion.endedBy);
+  }
+  const identityClosure =
+    target.graph.identity === undefined ?
+      undefined
+    : await readCandidateIdentityClosure(target, backend, {
+        references: [...references.values()],
+        ...(writeSet.identity === undefined ?
+          {}
+        : {
+            assertionIds: writeSet.identity.assertions.map(
+              (assertion) => assertion.id,
+            ),
+          }),
+        includeArchival: false,
+      });
+  for (const reference of identityClosure?.cloneReferences ?? [])
+    add(reference);
   const idsByKind = new Map<string, string[]>();
   for (const reference of references.values()) {
     const ids = idsByKind.get(reference.kind) ?? [];
@@ -152,11 +178,30 @@ async function sparseBaseDocument<G extends GraphDef>(
     });
   }
   return {
-    formatVersion: "2.0",
-    exportedAt: "1970-01-01T00:00:00.000Z",
-    source: { type: "external", description: "bounded candidate baseline" },
-    nodes,
-    edges,
+    document: {
+      formatVersion: "2.0",
+      exportedAt: "1970-01-01T00:00:00.000Z",
+      source: { type: "external", description: "bounded candidate baseline" },
+      nodes,
+      edges,
+      ...(identityClosure === undefined ?
+        {}
+      : {
+          identity: {
+            profile: "typegraph-identity-v1",
+            mode: "state",
+            assertions: [...identityClosure.cloneState],
+          },
+        }),
+    },
+    ...(identityClosure === undefined ?
+      {}
+    : {
+        identityScope: {
+          baseState: identityClosure.baseState,
+          cloneState: identityClosure.cloneState,
+        },
+      }),
   };
 }
 
@@ -178,51 +223,62 @@ function assertIndependentBackend(
 
 /**
  * A disposable working copy seeded only with candidate rows and references.
- * Identity-enabled graphs keep the full clone until scoped ledger reads can
- * establish the complete affected identity closure.
+ * The scope accessor exposes the same target identity projection used to seed
+ * the copy, so the subsequent diff compares one bounded baseline.
  */
 export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
   writeSet: CandidateWriteSet,
   makeBackend: MakeBackend,
-): WorkingCopyStrategy<G> {
+): Readonly<{
+  strategy: WorkingCopyStrategy<G>;
+  identityScope: () => CandidateIdentityScope | undefined;
+}> {
+  let scopedIdentity: CandidateIdentityScope | undefined;
   return {
-    create: async (target) => {
-      const document = await sparseBaseDocument(target, writeSet);
-      const backend = await makeBackend();
-      // An aliased backend still belongs to the target. Refuse it before the
-      // cleanup scope takes ownership of independently allocated backends.
-      assertIndependentBackend(storeBackend(target), backend);
-      try {
-        const [store] = await createStoreWithSchema(
-          graphWithoutNodeUniqueness(target.graph),
-          backend,
-          {
-            revisionTracking: target.revisionTrackingEnabled,
-            revisionJournal: false,
-          },
+    strategy: {
+      create: async (target) => {
+        const { document, identityScope } = await sparseBaseDocument(
+          target,
+          writeSet,
         );
-        const imported = await importGraph(store, document, {
-          onConflict: "error",
-          onUnknownProperty: "allow",
-          validateReferences: true,
-          refreshStatistics: false,
-        });
-        if (!imported.success) {
-          throw new CandidateWriteSetError(
-            "Unable to seed candidate peers into the transient staging store.",
-            { details: { errors: imported.errors } },
-          );
-        }
-        return store;
-      } catch (error) {
+        scopedIdentity = identityScope;
+        const backend = await makeBackend();
+        // An aliased backend still belongs to the target. Refuse it before
+        // cleanup takes ownership of independently allocated backends.
+        assertIndependentBackend(storeBackend(target), backend);
         try {
-          await backend.close();
-        } catch {
-          // Preserve the staging failure.
+          const [store] = await createStoreWithSchema(
+            graphWithoutNodeUniqueness(target.graph),
+            backend,
+            {
+              revisionTracking: target.revisionTrackingEnabled,
+              revisionJournal: false,
+            },
+          );
+          const imported = await importGraph(store, document, {
+            onConflict: "error",
+            onUnknownProperty: "allow",
+            validateReferences: true,
+            refreshStatistics: false,
+          });
+          if (!imported.success) {
+            throw new CandidateWriteSetError(
+              "Unable to seed candidate peers into the transient staging store.",
+              { details: { errors: imported.errors } },
+            );
+          }
+          return store;
+        } catch (error) {
+          try {
+            await backend.close();
+          } catch {
+            // Preserve the staging failure.
+          }
+          throw error;
         }
-        throw error;
-      }
+      },
     },
+    identityScope: () => scopedIdentity,
   };
 }
 

@@ -1,24 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../src";
-import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
-import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import type { GraphBackend } from "../src/backend/types";
-import { readCandidateIdentityClosure } from "../src/graph-merge/candidate-identity-closure";
-import { stageBranches } from "../src/graph-merge/staging";
-import { diffAgainstBase } from "../src/graph-merge/state-diff";
-import type { GraphBranch } from "../src/graph-merge/types";
-import { asBaseVersion, asBranchId } from "../src/graph-merge/types";
-import { asIdentityAssertionId } from "../src/identity/types";
-import { exportGraph, importGraph } from "../src/interchange";
-import { createSqlSchema } from "../src/query/compiler/schema";
-import { sql } from "../src/query/sql-fragment";
-import { asCompiledStatementSql } from "../src/query/sql-intent";
-import { storeRuntime } from "../src/store/runtime-port";
-import { compareCodePoints } from "../src/utils/compare";
-import { requireDefined } from "../src/utils/presence";
-import { identityAssertionDocument } from "./graph-merge/test-utils";
+import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
+import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
+import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import type { GraphBackend } from "../../src/backend/types";
+import { readCandidateIdentityClosure } from "../../src/graph-merge/candidate-identity-closure";
+import { stageBranches } from "../../src/graph-merge/staging";
+import { diffAgainstBase } from "../../src/graph-merge/state-diff";
+import type { GraphBranch } from "../../src/graph-merge/types";
+import { asBaseVersion, asBranchId } from "../../src/graph-merge/types";
+import { asIdentityAssertionId } from "../../src/identity/types";
+import { exportGraph, importGraph } from "../../src/interchange";
+import { createSqlSchema } from "../../src/query/compiler/schema";
+import { sql } from "../../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../../src/query/sql-intent";
+import { storeRuntime } from "../../src/store/runtime-port";
+import { compareCodePoints } from "../../src/utils/compare";
+import { requireDefined } from "../../src/utils/presence";
+import { identityAssertionDocument } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ label: z.string() }),

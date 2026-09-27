@@ -29,6 +29,7 @@ import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
 import { importGraph } from "../../src/interchange";
+import type { CompiledRowsSql } from "../../src/query/sql-intent";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend, getStoreBackend } from "./test-utils";
 
@@ -89,6 +90,12 @@ const edgeIdentityGraph = defineGraph({
       matchIdentity: { name: "code", fields: ["code"] },
     },
   },
+});
+const identityGraph = defineGraph({
+  id: "candidate-identity",
+  identity: { sameIdAcrossKinds: "fold" },
+  nodes: { Person: { type: Person }, Alias: { type: Alias } },
+  edges: {},
 });
 
 describe("candidate write-set planning", () => {
@@ -153,6 +160,9 @@ describe("candidate write-set planning", () => {
           source: { type: "external" },
           nodes: writeSet.nodes,
           edges: writeSet.edges,
+          ...(writeSet.identity === undefined ?
+            {}
+          : { identity: writeSet.identity }),
         },
         {
           onConflict: "update",
@@ -299,6 +309,250 @@ describe("candidate write-set planning", () => {
     } finally {
       await full.close();
     }
+  });
+
+  it("matches full clone planning for a candidate identity assertion and existing class", async () => {
+    const [target] = await createStoreWithSchema(identityGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    for (const id of ["a", "bridge", "unrelated-a", "unrelated-b"]) {
+      await target.nodes.Person.create(
+        { name: id, externalKey: id },
+        { id, validFrom: "2026-01-01T00:00:00.000Z" },
+      );
+    }
+    await target.nodes.Alias.create(
+      { name: "Alias b", externalKey: "alias-b" },
+      { id: "b", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const inherited = await importGraph(
+      target,
+      {
+        formatVersion: "2.0",
+        exportedAt: "1970-01-01T00:00:00.000Z",
+        source: { type: "external" },
+        nodes: [],
+        edges: [],
+        identity: {
+          profile: "typegraph-identity-v1",
+          mode: "state",
+          assertions: [
+            {
+              id: "inherited-same",
+              relation: "same",
+              a: { kind: "Person", id: "a" },
+              b: { kind: "Person", id: "bridge" },
+              validFrom: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "unrelated-different",
+              relation: "different",
+              a: { kind: "Person", id: "unrelated-a" },
+              b: { kind: "Person", id: "unrelated-b" },
+              validFrom: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+      },
+      { onConflict: "error" },
+    );
+    expect(inherited.success).toBe(true);
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "identity-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [
+          {
+            id: "candidate-same",
+            relation: "same",
+            a: { kind: "Alias", id: "b" },
+            b: { kind: "Person", id: "bridge" },
+            validFrom: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    };
+    const full = unwrap(
+      await ingestionBranch(target, candidateBackend().makeBackend, {
+        id: asBranchId(writeSet.sourceId),
+      }),
+    );
+    try {
+      const imported = await importGraph(
+        full,
+        {
+          formatVersion: "2.0",
+          exportedAt: "1970-01-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: writeSet.nodes,
+          edges: writeSet.edges,
+          identity: writeSet.identity,
+        },
+        {
+          onConflict: "update",
+          onUnknownProperty: "error",
+          validateReferences: true,
+          refreshStatistics: false,
+        },
+      );
+      expect(imported.success).toBe(true);
+      const expected = unwrap(
+        await planMergeIncremental({
+          forkPoint: target,
+          target,
+          branches: [full],
+        }),
+      );
+      const actual = unwrap(
+        await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        }),
+      );
+      expect(canonicalMergePlanJson(actual)).toBe(
+        canonicalMergePlanJson(expected),
+      );
+    } finally {
+      await full.close();
+    }
+  });
+
+  it("keeps identity planning reads bounded as unrelated assertions grow", async () => {
+    const [target] = await createStoreWithSchema(identityGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    const first = await target.nodes.Person.create(
+      { name: "First", externalKey: "first" },
+      { id: "first", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const second = await target.nodes.Person.create(
+      { name: "Second", externalKey: "second" },
+      { id: "second", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "identity-budget",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [
+          {
+            id: "proposed-same",
+            relation: "same",
+            a: { kind: "Person", id: first.id },
+            b: { kind: "Person", id: second.id },
+            validFrom: "2026-09-27T00:00:00.000Z",
+          },
+        ],
+      },
+    };
+    async function measure() {
+      const execute = baseBackend.execute;
+      let statements = 0;
+      let returnedRows = 0;
+      const read = vi
+        .spyOn(baseBackend, "execute")
+        .mockImplementation(async <T>(query: CompiledRowsSql) => {
+          const rows = await execute<T>(query);
+          statements += 1;
+          returnedRows += rows.length;
+          return rows;
+        });
+      const targetWrite = vi.spyOn(baseBackend, "insertNode");
+      try {
+        unwrap(
+          await planCandidateWriteSet({
+            target,
+            makeBackend: candidateBackend().makeBackend,
+            writeSet,
+          }),
+        );
+        return {
+          statements,
+          returnedRows,
+          targetWrites: targetWrite.mock.calls.length,
+        };
+      } finally {
+        read.mockRestore();
+        targetWrite.mockRestore();
+      }
+    }
+    const before = await measure();
+    for (let index = 0; index < 40; index += 1) {
+      const left = await target.nodes.Person.create(
+        { name: `Left ${index}`, externalKey: `left-${index}` },
+        { id: `left-${index}` },
+      );
+      const right = await target.nodes.Person.create(
+        { name: `Right ${index}`, externalKey: `right-${index}` },
+        { id: `right-${index}` },
+      );
+      await target.identity.assertDifferent(left, right);
+    }
+    const after = await measure();
+    expect(after.statements).toBeLessThanOrEqual(before.statements);
+    expect(after.returnedRows).toBe(before.returnedRows);
+    expect(after.targetWrites).toBe(0);
+  });
+
+  it("rejects a candidate assertion contradicting a target identity class", async () => {
+    const [target] = await createStoreWithSchema(identityGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    const first = await target.nodes.Person.create(
+      { name: "First", externalKey: "first" },
+      { id: "first", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const second = await target.nodes.Person.create(
+      { name: "Second", externalKey: "second" },
+      { id: "second", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    await target.identity.assertDifferent(first, second);
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "contradicting-identity-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [
+          {
+            id: "candidate-same",
+            relation: "same",
+            a: { kind: "Person", id: first.id },
+            b: { kind: "Person", id: second.id },
+            validFrom: "2026-09-27T00:00:00.000Z",
+          },
+        ],
+      },
+    };
+    expect(
+      await fullCloneImportSucceeded(
+        target,
+        writeSet,
+        "full-identity-conflict",
+      ),
+    ).toBe(false);
+    expect(
+      isErr(
+        await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("refuses candidate-scoped review on a graph requiring a complete clone", async () => {

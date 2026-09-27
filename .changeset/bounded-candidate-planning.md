@@ -2,4 +2,4 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Plan candidate write sets on revision-tracked graphs without identity, ontology relations, or cross-row edge constraints from bounded point reads instead of cloning the complete target. Add opt-in candidate-scoped durable review evidence for those graphs while retaining the existing whole-graph review default.
+Plan candidate write sets on revision-tracked graphs, including Operational Identity graphs, from bounded candidate dependencies instead of cloning the complete target. Graphs with ontology relations or cross-row edge constraints retain full clone staging. Add opt-in candidate-scoped durable review evidence while retaining the existing whole-graph review default.

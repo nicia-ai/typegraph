@@ -4737,6 +4737,9 @@ export const MERGE_PLAN_FORMAT_VERSION: 1;
 // @public (undocumented)
 export const MERGE_REVIEW_FORMAT_VERSION: 2;
 
+// @public (undocumented)
+export const MERGE_REVIEW_FORMAT_VERSION_V1: 1;
+
 // @public
 export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G>;
 
@@ -5198,7 +5201,7 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
 
 // @public
 export type MergeReviewArtifact = Readonly<{
-    formatVersion: 1 | typeof MERGE_REVIEW_FORMAT_VERSION;
+    formatVersion: typeof MERGE_REVIEW_FORMAT_VERSION_V1 | typeof MERGE_REVIEW_FORMAT_VERSION;
     kind: "candidate-write-set";
     digest: MergePlanDigest;
     writeSet: CandidateWriteSet;
@@ -5213,6 +5216,8 @@ export type MergeReviewBaseline = Readonly<{
     rows: readonly MergeReviewRow[];
     identityDigest: string;
     scope?: "referenced" | undefined;
+    identityReferences?: readonly MergePlanEntityRef[] | undefined;
+    identityAssertionIds?: readonly string[] | undefined;
 }>;
 
 // @public
@@ -7650,6 +7655,49 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         id: string;
     }>[]>>;
     identityAssertionsAtTarget: (target: GraphBackend | TransactionBackend, mode?: "state" | "archival") => Promise<readonly Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        b: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        validFrom: string;
+        validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
+    }>[]>;
+    identityAssertionsTouchingAtTarget: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[], mode?: "state" | "archival", options?: Readonly<{
+        includeDeleted?: boolean;
+    }>) => Promise<readonly Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        b: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        validFrom: string;
+        validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
+    }>[]>;
+    interchangeIdentityAssertionsByIdsAtTarget: (target: GraphBackend | TransactionBackend, ids: readonly string[], mode: "state" | "archival", options?: Readonly<{
+        includeDeleted?: boolean;
+    }>) => Promise<readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{

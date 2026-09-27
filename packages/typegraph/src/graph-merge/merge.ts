@@ -68,6 +68,7 @@ import {
   schemaComponentOf,
 } from "./base-version";
 import { blockNodes } from "./blocking";
+import type { CandidateIdentityScope } from "./candidate-identity-closure";
 import { canonicalizeProps, edgeStateSignature } from "./canonical-props";
 import type { CanonicalEntity, ClusterMember } from "./canonicalize";
 import {
@@ -2841,6 +2842,7 @@ async function resolveMerge<G extends GraphDef, Output>(
   complete: (resolved: ResolvedMerge<G>) => Promise<Output>,
   baseReader?: StateDiffBaseReader,
   explicitPruneTo?: ReadonlyMap<BranchId, LineageDelta>,
+  scopedIdentity?: CandidateIdentityScope,
 ): Promise<Result<Output, MergeError>> {
   // Reserved BranchIds are used for non-user contributions. Reject real branches
   // that try to mint them rather than silently corrupting conflict/provenance state.
@@ -2929,6 +2931,7 @@ async function resolveMerge<G extends GraphDef, Output>(
       preferredBranchId,
       baseReader,
       explicitPruneTo,
+      scopedIdentity,
     );
     // Pure over the (now fixed) staging set, so the deterministic per-kind order
     // is computed once and shared by every consumer below.
@@ -3526,6 +3529,7 @@ export async function planMergeIncremental<G extends GraphDef>(
 export async function planMergeIncrementalWithCandidateKeys<G extends GraphDef>(
   args: MergeIncrementalArguments<G>,
   candidateKeys: LineageDelta,
+  scopedIdentity?: CandidateIdentityScope,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
   if (candidateKeys.kind !== "keys" || args.forkPoint !== args.target) {
     return err(
@@ -3548,12 +3552,14 @@ export async function planMergeIncrementalWithCandidateKeys<G extends GraphDef>(
       [COMMITTED_TARGET_BRANCH, { kind: "keys", nodes: [], edges: [] }],
       [branch.id, candidateKeys],
     ]),
+    scopedIdentity,
   );
 }
 
 async function planMergeIncrementalWithPruning<G extends GraphDef>(
   args: MergeIncrementalArguments<G>,
   explicitPruneTo?: ReadonlyMap<BranchId, LineageDelta>,
+  scopedIdentity?: CandidateIdentityScope,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
   const { forkPoint, target } = args;
   const branches = unwrapMergeBranches(args.branches);
@@ -3644,6 +3650,7 @@ async function planMergeIncrementalWithPruning<G extends GraphDef>(
     },
     prepared.data.baseReader,
     explicitPruneTo,
+    scopedIdentity,
   );
 }
 

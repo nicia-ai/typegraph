@@ -429,16 +429,18 @@ identity/context, and target baseline. You can persist this artifact and later
 approval records in the target before calling
 `revalidateCandidateWriteSetReview()` to compute a fresh execution plan.
 
-V1 supports candidate write sets only. It does not rebase arbitrary artifacts
+Both review versions support candidate write sets only. They do not rebase arbitrary artifacts
 from `planMerge()` or `planMergeIncremental()`.
 
-Candidate planning on revision-tracked graphs without Operational Identity
-reads existing candidate ids and edge endpoints by key, then seeds only those
-rows in the transient working copy. The candidate diff and its target baseline
-are bounded to those keys and any committed rows recalled by configured
-unique or index sources. Planning still fences the target revision before and
-after these reads. Identity-enabled or non-revision-tracked graphs continue
-to use the complete clone path.
+Candidate planning on revision-tracked graphs reads existing candidate ids and
+edge endpoints by key, then seeds only those rows in the transient working
+copy. On identity-enabled graphs, it also follows live same-id peers and
+current identity assertions from those references to a fixed point. The
+candidate diff and its target baseline are bounded to that dependency set and
+any committed rows recalled by configured unique or index sources. Planning
+still fences the target revision before and after these reads. Graphs with
+ontology relations, edge cardinality or match-identity constraints, or no
+revision tracking continue to use the complete clone path.
 
 On the complete clone path, when the copy and target really share one serialized connection, clone export
 is materialized before import, but its snapshot still holds the connection's
@@ -558,13 +560,15 @@ The V1 baseline is deliberately conservative:
   plan content. Candidate-derived anchors and the execution digest/fence are
   regenerated. There is no exemption for an “audit” kind.
 
-For a revision-tracked graph without Operational Identity, ontology relations,
-or edge cardinality or match-identity constraints, pass
+For a revision-tracked graph without ontology relations, edge cardinality, or
+match-identity constraints, pass
 `reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit V2
 candidate-scoped evidence. V2 fingerprints the candidate's node and edge ids,
 edge endpoints, resolved writes, and plan guards, including expected absences
-across kinds. Revalidation rereads those references and replans the retained
-candidate under a new target fence. An unrelated original row may change
+across kinds. On Operational Identity graphs it also records the reachable
+identity assertion and same-id peer closure, plus assertion-ID collision
+evidence. Revalidation expands that retained identity scope, rereads the
+referenced rows, and replans the candidate under a new target fence. An unrelated original row may change
 without invalidating V2 when it cannot affect the fresh resolved plan; V1
 would report that row change. Applications whose approval policy needs the
 V1 whole-graph rule should omit `reviewScope`. The review artifact records
@@ -597,8 +601,8 @@ so protect it with the same care as graph data.
 V1 review capture and revalidation read and fingerprint the complete target
 graph and archival identity ledger. The artifact stores one fingerprint per
 original row plus expected absences. Budget graph-sized reads and artifact
-storage for V1. V2 candidate-scoped review uses bounded point reads for its
-baseline on eligible graphs.
+storage for V1. V2 candidate-scoped review uses bounded point and identity
+closure reads for its baseline on eligible graphs.
 
 The execution receipt above is a separate commit. If its write fails or the
 process stops after apply, the merge may already be committed without a receipt.
@@ -2003,9 +2007,10 @@ to incremental merge planning, and closes the working copy on every outcome.
 The result is the ordinary `MergePlanArtifact`, so review and application use
 the same APIs as every other merge plan.
 
-On revision-tracked graphs without Operational Identity, ontology relations, or
-edge cardinality or match-identity constraints, planning seeds only existing
-candidate rows and edge endpoints into the disposable working copy.
+On revision-tracked graphs without ontology relations, edge cardinality, or
+match-identity constraints, planning seeds existing candidate rows, edge
+endpoints, and any reachable current identity component into the disposable
+working copy.
 The resolver still queries the live target for declared unique and index peers,
 and the plan retains its ordinary provenance, conflicts, digest, and commit-time
 fences. Existing undeclared target properties survive staging; extra candidate
