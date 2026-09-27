@@ -170,8 +170,9 @@ it is absent. The cursor is exclusive and applies to the same graph and read
 coordinate. At current coordinates, the database finds visible representatives
 for the page and expands members only for those classes; discovering
 representatives still examines the visible node set. Historical coordinates
-reconstruct all visible classes before applying the page boundary. Prefer a
-stable `asOf` coordinate when paging while writes may occur.
+reconstruct all visible classes before applying the page boundary. For paging
+across writes, use a recorded-time coordinate when recorded history is enabled:
+valid-time `asOf` reads still observe later changes to the live tables.
 
 ## Integrity and lifecycle
 

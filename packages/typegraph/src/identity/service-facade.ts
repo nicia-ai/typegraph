@@ -16,6 +16,10 @@ import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { identityAssertionSemanticKey } from "./assertion-key";
 import {
+  decodeIdentityClassCursor,
+  encodeIdentityClassCursor,
+} from "./class-cursor";
+import {
   IDENTITY_ASSERTION_COLUMNS,
   identityNodeSnapshotSource,
   identityNodeVisibilitySql,
@@ -29,6 +33,7 @@ import { isSeparated } from "./separation";
 import type { DifferentAssertionIndex } from "./service-components";
 import {
   classHasDisjointKinds,
+  identityActiveKinds,
   indexDifferentAssertion,
   kindSetsHaveDisjointKinds,
   mergeDifferentAssertionRoots,
@@ -36,7 +41,6 @@ import {
   selfAssertionError,
   UnionFind,
 } from "./service-components";
-import { identityActiveKinds, loadSnapshot } from "./service-components";
 import {
   assertPair,
   buildAssertionRow,
@@ -754,7 +758,14 @@ async function loadCurrentIdentityClassPage<G extends GraphDef>(
     classes: pageClasses,
     ...(hasMore && last !== undefined ?
       {
-        nextCursor: `${encodeURIComponent(last.kind)}:${encodeURIComponent(last.id)}`,
+        nextCursor: encodeIdentityClassCursor(
+          {
+            graphId: ctx.graphId,
+            coordinate: ctx.coordinate,
+            kinds,
+          },
+          last,
+        ),
       }
     : {}),
   };
@@ -769,8 +780,8 @@ export function createIdentityReadFacade<G extends GraphDef>(
         throw new ConfigurationError(
           "identity.classes limit must be a positive safe integer.",
         );
-      const allKinds: string[] = [];
-      ctx.registry.nodeKinds.forEach((_nodeType, kind) => allKinds.push(kind));
+      const activeKinds = identityActiveKinds(ctx.registry);
+      const allKinds = [...activeKinds];
       const kinds = options.kinds ?? allKinds;
       for (const kind of kinds) {
         if (!ctx.registry.nodeKinds.has(kind))
@@ -780,25 +791,30 @@ export function createIdentityReadFacade<G extends GraphDef>(
       }
       let after: PlainNodeRef | undefined;
       if (options.cursor !== undefined) {
-        const separator = options.cursor.indexOf(":");
-        if (separator === -1)
-          throw new ConfigurationError("identity.classes cursor is invalid.");
-        try {
-          after = {
-            kind: decodeURIComponent(options.cursor.slice(0, separator)),
-            id: decodeURIComponent(options.cursor.slice(separator + 1)),
-          };
-        } catch {
-          throw new ConfigurationError("identity.classes cursor is invalid.");
-        }
-        if (after.kind.length === 0 || after.id.length === 0)
-          throw new ConfigurationError("identity.classes cursor is invalid.");
+        after = decodeIdentityClassCursor(options.cursor, {
+          graphId: ctx.graphId,
+          coordinate: ctx.coordinate,
+          kinds,
+        });
       }
       if (kinds.length === 0) return { classes: [] };
       if (
         ctx.coordinate === undefined ||
         isCurrentClosureCoordinate(ctx.coordinate)
-      )
+      ) {
+        if (!ctx.backend.capabilities.windowFunctions)
+          throw new ConfigurationError(
+            "identity.classes current page requires SQL window functions, but this backend profile declares windowFunctions: false.",
+            {
+              capability: "windowFunctions",
+              operation: "identity.classes current page",
+              windowFunctions: false,
+            },
+            {
+              suggestion:
+                "Use a backend profile that supports SQL window functions, or avoid this query shape.",
+            },
+          );
         return loadCurrentIdentityClassPage(
           ctx,
           allKinds,
@@ -806,6 +822,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
           options.limit,
           after,
         );
+      }
       const coordinate = identitySqlCoordinate(ctx.coordinate, nowIso());
       const kindValues = sql.join(
         allKinds.map((kind) => sql`${kind}`),
@@ -837,7 +854,9 @@ export function createIdentityReadFacade<G extends GraphDef>(
         ctx.sameIdAcrossKinds,
       );
       for (const value of historical.values()) {
-        const members = value.visible;
+        const members = value.visible.filter((member) =>
+          activeKinds.has(member.kind),
+        );
         if (members.length === 0) continue;
         if (!members.some((member) => kinds.includes(member.kind))) continue;
         const representative = members[0];
@@ -872,7 +891,14 @@ export function createIdentityReadFacade<G extends GraphDef>(
         classes,
         ...(remaining.length > selected.length && last !== undefined ?
           {
-            nextCursor: `${encodeURIComponent(last.kind)}:${encodeURIComponent(last.id)}`,
+            nextCursor: encodeIdentityClassCursor(
+              {
+                graphId: ctx.graphId,
+                coordinate: ctx.coordinate,
+                kinds,
+              },
+              last,
+            ),
           }
         : {}),
       };
@@ -1011,37 +1037,99 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const second = registeredPlainRef(ctx, secondInput);
       const visibleMembers = await visibleMembersAtCoordinate(ctx, first);
       if (!containsRef(visibleMembers, second)) return;
-      const snapshot = await loadSnapshot(
+      if (refKey(first) === refKey(second)) return [];
+
+      let structuralMembers: readonly PlainNodeRef[];
+      if (
+        ctx.coordinate === undefined ||
+        isCurrentClosureCoordinate(ctx.coordinate)
+      ) {
+        const classes = await loadCurrentStructuralClassComponents(
+          ctx.backend,
+          ctx.schema,
+          ctx.graphId,
+          [first],
+        );
+        structuralMembers = [...classes.values()].find((members) =>
+          containsRef(members, first),
+        ) ?? [first];
+      } else {
+        const classes = await loadHistoricalClasses(
+          ctx.backend,
+          ctx.schema,
+          ctx.graphId,
+          [first],
+          ctx.coordinate,
+          ctx.sameIdAcrossKinds,
+        );
+        structuralMembers = requireDefined(
+          classes.get(refKey(first)),
+        ).structural;
+      }
+      if (!containsRef(structuralMembers, second))
+        throw new ConfigurationError(
+          "Identity closure contains a same-class pair outside its reconstructed structural class.",
+        );
+      const classKeys = new Set(
+        structuralMembers.map((member) => refKey(member)),
+      );
+      const classAssertions = await loadAssertionsTouching(
         ctx.backend,
         ctx.schema,
         ctx.graphId,
+        structuralMembers,
         ctx.coordinate,
-        identityActiveKinds(ctx.registry),
-        ctx.sameIdAcrossKinds,
+        "same",
       );
-      const firstClass = snapshot.components.get(refKey(first));
-      if (firstClass === undefined || !containsRef(firstClass, second)) {
-        return;
-      }
-      if (refKey(first) === refKey(second)) return [];
 
       type Previous = Readonly<{
         ref: PlainNodeRef;
         step: IdentitySamePathStep<G>;
       }>;
       const structuralById = new Map<string, PlainNodeRef[]>();
-      for (const ref of snapshot.structuralNodes) {
+      for (const ref of structuralMembers) {
         const group = structuralById.get(ref.id) ?? [];
         group.push(ref);
         structuralById.set(ref.id, group);
       }
-      const assertionEdges = snapshot.assertions
-        .filter((assertion) => assertion.rel === "same")
+      const assertionEdges = classAssertions
+        .filter(
+          (assertion) =>
+            assertion.rel === "same" &&
+            classKeys.has(
+              refKey({ kind: assertion.a_kind, id: assertion.a_id }),
+            ) &&
+            classKeys.has(
+              refKey({ kind: assertion.b_kind, id: assertion.b_id }),
+            ),
+        )
         .map((assertion) => ({
           a: { kind: assertion.a_kind, id: assertion.a_id },
           b: { kind: assertion.b_kind, id: assertion.b_id },
           assertion,
         }));
+      const assertionAdjacency = new Map<
+        string,
+        { ref: PlainNodeRef; via: Previous["step"]["via"] }[]
+      >();
+      for (const edge of assertionEdges) {
+        const edgeValue = publicAssertion<G>(edge.assertion);
+        const neighborsA = assertionAdjacency.get(refKey(edge.a)) ?? [];
+        neighborsA.push({
+          ref: edge.b,
+          via: { type: "assertion", assertion: edgeValue },
+        });
+        assertionAdjacency.set(refKey(edge.a), neighborsA);
+        const neighborsB = assertionAdjacency.get(refKey(edge.b)) ?? [];
+        neighborsB.push({
+          ref: edge.a,
+          via: { type: "assertion", assertion: edgeValue },
+        });
+        assertionAdjacency.set(refKey(edge.b), neighborsB);
+      }
+      for (const members of structuralById.values()) {
+        members.sort((left, right) => compareReferences(left, right));
+      }
       const visited = new Set([refKey(first)]);
       const previous = new Map<string, Previous>();
       const queue = [first];
@@ -1056,29 +1144,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
           ref: PlainNodeRef;
           via: Previous["step"]["via"];
         }>[] = [
-          ...assertionEdges.flatMap((edge) =>
-            refKey(edge.a) === refKey(current) ?
-              [
-                {
-                  ref: edge.b,
-                  via: {
-                    type: "assertion" as const,
-                    assertion: publicAssertion<G>(edge.assertion),
-                  },
-                },
-              ]
-            : refKey(edge.b) === refKey(current) ?
-              [
-                {
-                  ref: edge.a,
-                  via: {
-                    type: "assertion" as const,
-                    assertion: publicAssertion<G>(edge.assertion),
-                  },
-                },
-              ]
-            : [],
-          ),
+          ...(assertionAdjacency.get(refKey(current)) ?? []),
           ...(ctx.sameIdAcrossKinds === "fold" ?
             (structuralById.get(current.id) ?? [])
               .filter((member) => member.kind !== current.kind)
@@ -1088,7 +1154,17 @@ export function createIdentityReadFacade<G extends GraphDef>(
               }))
           : []),
         ];
-        for (const neighbor of neighbors) {
+        const orderedNeighbors = [...neighbors].toSorted((left, right) => {
+          const refOrder = compareReferences(left.ref, right.ref);
+          if (refOrder !== 0) return refOrder;
+          if (left.via.type === "same-id-fold") return -1;
+          if (right.via.type === "same-id-fold") return 1;
+          return compareCodePoints(
+            left.via.assertion.id,
+            right.via.assertion.id,
+          );
+        });
+        for (const neighbor of orderedNeighbors) {
           const key = refKey(neighbor.ref);
           if (visited.has(key)) continue;
           visited.add(key);
@@ -1107,7 +1183,10 @@ export function createIdentityReadFacade<G extends GraphDef>(
       let cursor = refKey(second);
       while (cursor !== refKey(first)) {
         const entry = previous.get(cursor);
-        if (entry === undefined) return;
+        if (entry === undefined)
+          throw new ConfigurationError(
+            "Identity closure contains a same-class pair without a reconstructable proof.",
+          );
         path.push(entry.step);
         cursor = refKey(entry.ref);
       }
