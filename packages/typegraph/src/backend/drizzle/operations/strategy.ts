@@ -511,10 +511,10 @@ export type CommonOperationStrategy = Readonly<{
   buildEdgeExistsBetween: (params: EdgeExistsBetweenParams) => SQL;
   buildFindEdgesConnectedTo: (params: FindEdgesConnectedToParams) => SQL;
   buildFindNodesByKind: (params: FindNodesByKindParams) => SQL;
-  buildFindNodesAcrossKinds: (params: FindRowsAcrossKindsParams) => SQL;
+  buildFindNodesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   buildCountNodesByKind: (params: CountNodesByKindParams) => SQL;
   buildFindEdgesByKind: (params: FindEdgesByKindParams) => SQL;
-  buildFindEdgesAcrossKinds: (params: FindRowsAcrossKindsParams) => SQL;
+  buildFindEdgesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   /**
    * Interface member rather than an optional one: every dialect must supply
    * an endpoint-set read, so the operation can never be silently skipped by a
