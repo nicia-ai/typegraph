@@ -47,6 +47,7 @@ import {
 import type { StoreOptions, WorkingCopyOptions } from "../../store/types";
 import { sha256Hex } from "../../utils/hash";
 import { deriveBackend } from "../derive-backend";
+import type { VectorIndexType, VectorMetric } from "../types";
 import type { GraphBackend, TransactionBackend } from "../types";
 import { CURRENT_BASE_SCHEMA_VERSION } from "./base-schema";
 import {
@@ -75,9 +76,11 @@ type VectorSlotManifest = Readonly<{
   nodeKind: string;
   fieldPath: string;
   dimensions: number;
-  metric: string;
-  indexType: string;
+  metric: VectorMetric;
+  indexType: VectorIndexType;
+  indexParams?: VectorSlot["indexParams"];
   tableName: string;
+  ownedTableNames: readonly string[];
 }>;
 type AllocationRow = Readonly<{
   allocation_id: string;
@@ -159,6 +162,29 @@ function relationNamesForTables(tables: PostgresTables): readonly string[] {
   );
 }
 
+/** Enumerates every table contribution and validates the strategy's primary name. */
+function ownedVectorTableNames(
+  slot: VectorSlot,
+  strategy: VectorStrategy,
+): readonly string[] {
+  const tableNames = strategy.ownedTables(slot).map((item) => item.tableName);
+  if (tableNames.length === 0 || new Set(tableNames).size !== tableNames.length) {
+    throw new BranchError(
+      "PostgreSQL working-copy vector strategy returned an empty or duplicate owned-table inventory.",
+    );
+  }
+  if (!tableNames.includes(strategy.tableName(
+    slot.graphId,
+    slot.nodeKind,
+    slot.fieldPath,
+  ))) {
+    throw new BranchError(
+      "PostgreSQL working-copy vector strategy omitted its primary slot table from the owned-table inventory.",
+    );
+  }
+  return tableNames;
+}
+
 function vectorSlotManifest(
   slots: readonly VectorSlot[],
   strategy: VectorStrategy,
@@ -171,11 +197,13 @@ function vectorSlotManifest(
       dimensions: slot.dimensions,
       metric: slot.metric,
       indexType: slot.indexType,
+      ...(slot.indexParams === undefined ? {} : { indexParams: slot.indexParams }),
       tableName: strategy.tableName(
         slot.graphId,
         slot.nodeKind,
         slot.fieldPath,
       ),
+      ownedTableNames: ownedVectorTableNames(slot, strategy),
     }))
     .toSorted((left, right) =>
       left.tableName < right.tableName ? -1
@@ -201,9 +229,10 @@ function assertVectorManifestMatches(
       entry.metric,
       entry.indexType,
       entry.tableName,
+      ...entry.ownedTableNames,
     ].join("\u0000");
   if (
-    expected.map((entry) => toKey(entry)).join("\n") !==
+        expected.map((entry) => toKey(entry)).join("\n") !==
     persisted.map((entry) => toKey(entry)).join("\n")
   ) {
     throw new BranchError(
@@ -221,15 +250,34 @@ function parseVectorManifest(value: unknown): readonly VectorSlotManifest[] {
       throw new BranchError("Working-copy vector slot manifest is invalid.");
     }
     const row = entry as Record<string, unknown>;
+    const metric = row["metric"];
+    const indexType = row["indexType"];
+    const indexParams = row["indexParams"];
+    if (
+      indexParams !== undefined &&
+      (typeof indexParams !== "object" || indexParams === null || Array.isArray(indexParams))
+    ) {
+      throw new BranchError("Working-copy vector slot manifest is invalid.");
+    }
+    const validIndexParams =
+      indexParams === undefined ?
+        true
+      : Object.values(indexParams).every(
+          (value) => typeof value === "number" && Number.isSafeInteger(value),
+        );
     if (
       typeof row["graphId"] !== "string" ||
       typeof row["nodeKind"] !== "string" ||
       typeof row["fieldPath"] !== "string" ||
       typeof row["dimensions"] !== "number" ||
       !Number.isSafeInteger(row["dimensions"]) ||
-      typeof row["metric"] !== "string" ||
-      typeof row["indexType"] !== "string" ||
-      typeof row["tableName"] !== "string"
+      !(metric === "cosine" || metric === "l2" || metric === "inner_product") ||
+      !(indexType === "hnsw" || indexType === "ivfflat" || indexType === "none") ||
+      !validIndexParams ||
+      typeof row["tableName"] !== "string" ||
+      (row["ownedTableNames"] !== undefined &&
+        (!Array.isArray(row["ownedTableNames"]) ||
+          row["ownedTableNames"].some((name) => typeof name !== "string")))
     ) {
       throw new BranchError("Working-copy vector slot manifest is invalid.");
     }
@@ -238,9 +286,14 @@ function parseVectorManifest(value: unknown): readonly VectorSlotManifest[] {
       nodeKind: row["nodeKind"],
       fieldPath: row["fieldPath"],
       dimensions: row["dimensions"],
-      metric: row["metric"],
-      indexType: row["indexType"],
+      metric,
+      indexType,
+      ...(indexParams === undefined ? {} : { indexParams }),
       tableName: row["tableName"],
+      // Rows written before the owned-table inventory used one table per
+      // slot; preserve their cleanup and reopen behavior.
+      ownedTableNames:
+        row["ownedTableNames"] ?? [row["tableName"]],
     } satisfies VectorSlotManifest;
   });
   return manifest;
@@ -492,17 +545,13 @@ async function cloneRelations(
   const sourceNames = source.map((contribution) => contribution.tableName);
   // A table lock on the pinned source transaction prevents writes between the
   // source token check and every INSERT ... SELECT. SHARE blocks ROW EXCLUSIVE.
-  const sourceVectorNames = vectorSlots.map((slot) => {
+  const sourceVectorNames = vectorSlots.flatMap((slot) => {
     if (sourceVectorStrategy === undefined) {
       throw new BranchError(
         "A vector working copy requires the source vector storage strategy.",
       );
     }
-    return sourceVectorStrategy.tableName(
-      slot.graphId,
-      slot.nodeKind,
-      slot.fieldPath,
-    );
+    return ownedVectorTableNames(slot, sourceVectorStrategy);
   });
   await rows(
     transaction,
@@ -569,30 +618,40 @@ async function cloneRelations(
         "A vector working copy requires source and allocation vector strategies.",
       );
     }
-    const from = sourceVectorStrategy.tableName(
-      slot.graphId,
-      slot.nodeKind,
-      slot.fieldPath,
-    );
-    const to = targetVectorStrategy.tableName(
-      slot.graphId,
-      slot.nodeKind,
-      slot.fieldPath,
-    );
-    const names = await columns(transaction, from);
-    if (!names.includes("graph_id")) {
+    const sourceContributions = sourceVectorStrategy.ownedTables(slot);
+    const targetContributions = targetVectorStrategy.ownedTables(slot);
+    if (
+      sourceContributions.length !== targetContributions.length ||
+      sourceContributions.some(
+        (contribution, index) =>
+          contribution.logicalName !== targetContributions[index]?.logicalName,
+      )
+    ) {
       throw new BranchError(
-        `Vector sidecar ${from} has no graph_id column and cannot be cloned safely.`,
+        "Source and allocation vector contribution inventories differ.",
       );
     }
-    const selected = sql.join(
-      names.map((name) => sqlName(name)),
-      sql`, `,
-    );
-    await rows(
-      transaction,
-      sql`INSERT INTO ${sqlName(to)} (${selected}) SELECT ${selected} FROM ${sqlName(from)} WHERE graph_id = ${graphId}`,
-    );
+    for (const [index, sourceContribution] of sourceContributions.entries()) {
+      const targetContribution = targetContributions[index];
+      if (targetContribution === undefined)
+        throw new BranchError("Working-copy vector inventory changed during clone.");
+      const from = sourceContribution.tableName;
+      const to = targetContribution.tableName;
+      const names = await columns(transaction, from);
+      if (!names.includes("graph_id")) {
+        throw new BranchError(
+          `Vector sidecar ${from} has no graph_id column and cannot be cloned safely.`,
+        );
+      }
+      const selected = sql.join(
+        names.map((name) => sqlName(name)),
+        sql`, `,
+      );
+      await rows(
+        transaction,
+        sql`INSERT INTO ${sqlName(to)} (${selected}) SELECT ${selected} FROM ${sqlName(from)} WHERE graph_id = ${graphId}`,
+      );
+    }
   }
 }
 
@@ -694,21 +753,34 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       const vectorSlots = parseVectorManifest(row.vector_slots);
       const vectorStrategy = createPgvectorStrategy(allocationId);
       for (const slot of vectorSlots) {
+        const slotDescriptor: VectorSlot = {
+          graphId: slot.graphId,
+          nodeKind: slot.nodeKind,
+          fieldPath: slot.fieldPath,
+          dimensions: slot.dimensions,
+          metric: slot.metric,
+          indexType: slot.indexType,
+          ...(slot.indexParams === undefined ? {} : { indexParams: slot.indexParams }),
+        };
         if (
           vectorStrategy.tableName(
             slot.graphId,
             slot.nodeKind,
             slot.fieldPath,
-          ) !== slot.tableName
+          ) !== slot.tableName ||
+          ownedVectorTableNames(slotDescriptor, vectorStrategy).join("\0") !==
+            slot.ownedTableNames.join("\0")
         ) {
           throw new BranchError(
             "Working-copy vector slot manifest does not match its allocation.",
           );
         }
-        await rows(
-          transaction,
-          sql.raw(`DROP TABLE IF EXISTS ${quoteDdlIdentifier(slot.tableName)}`),
-        );
+        for (const tableName of slot.ownedTableNames.toReversed()) {
+          await rows(
+            transaction,
+            sql.raw(`DROP TABLE IF EXISTS ${quoteDdlIdentifier(tableName)}`),
+          );
+        }
       }
       await rows(
         transaction,
@@ -769,7 +841,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     await ensureLedger();
     const existing = await rows<Readonly<{ name: string }>>(
       control,
-      sql`SELECT name FROM unnest(${[...new Set([...relationNamesForTables(targetTables), ...indexNames.values(), ...vectorManifest.map((slot) => slot.tableName)])]}::text[]) AS name WHERE to_regclass(quote_ident(name)) IS NOT NULL`,
+      sql`SELECT name FROM unnest(${[...new Set([...relationNamesForTables(targetTables), ...indexNames.values(), ...vectorManifest.flatMap((slot) => slot.ownedTableNames)])]}::text[]) AS name WHERE to_regclass(quote_ident(name)) IS NOT NULL`,
     );
     if (existing.length > 0) {
       throw new BranchError(

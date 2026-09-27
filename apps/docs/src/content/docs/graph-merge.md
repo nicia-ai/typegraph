@@ -1543,11 +1543,14 @@ hashes unchanged. `materializeIndexes()` can retry or repair indexes after
 reopen; destroy removes their owned tables and indexes. When `connect` receives
 an allocation vector strategy, pass it to `createPostgresBackend`; the strategy
 assigns stable table and index names to that allocation. Source vector sidecars
-are copied under the same transaction locks as TypeGraph relations, and their
-physical names are stored in the allocation ledger so destroy can remove them
-without a graph object. Reopening requires the graph's vector slots to match
-the persisted allocation manifest. A declared vector slot whose source sidecar
-is absent is refused because its contents cannot be snapshotted exactly.
+are copied under the same transaction locks as TypeGraph relations. The ledger
+stores every relation name declared by each slot's `ownedTables()` contribution,
+so destroy can remove them in reverse declaration order without a graph object.
+Reopening requires the graph's vector slots and owned-relation inventory to
+match the persisted allocation manifest. Older ledger rows that stored only
+`tableName()` remain readable as single-relation slots. A declared vector slot
+whose source sidecar is absent is refused because its contents cannot be
+snapshotted exactly.
 
 The copy has a fixed schema: `evolve`, kind removal, and deprecation refuse
 before mutation. Custom fulltext strategies still need a host-level database

@@ -467,6 +467,19 @@ describe.runIf(process.env["POSTGRES_URL"])(
         });
         if (!isOk(created)) throw created.error;
         const { branch, descriptor } = unwrap(created);
+        const manifest = await pool.query<{ vector_slots: unknown }>(
+          "SELECT vector_slots FROM typegraph_working_copy_allocations WHERE allocation_id = $1",
+          ["vector-copy-allocation"],
+        );
+        const manifestSlots = manifest.rows[0]?.vector_slots;
+        expect(Array.isArray(manifestSlots)).toBe(true);
+        expect(
+          (
+            manifestSlots as readonly { ownedTableNames?: readonly string[] }[]
+          )[0]?.ownedTableNames,
+        ).toEqual([
+          (manifestSlots as readonly { tableName: string }[])[0]?.tableName,
+        ]);
         const branchBackend = storeBackend(branch.store);
         const branchStrategy = branchBackend.vectorStrategy;
         if (branchStrategy === undefined)
@@ -516,6 +529,12 @@ describe.runIf(process.env["POSTGRES_URL"])(
         );
         expect(isolatedSource.rows[0]?.embedding).toContain("0.1");
         await branch.close();
+        // Older allocation rows only persisted the primary table name. The
+        // parser keeps those rows reopenable and destroyable.
+        await pool.query(
+          "UPDATE typegraph_working_copy_allocations SET vector_slots = jsonb_set(vector_slots, '{0}', (vector_slots->0) - 'ownedTableNames') WHERE allocation_id = $1",
+          ["vector-copy-allocation"],
+        );
         const vectorDisabled = createStore(
           vectorGraph,
           createPostgresBackend(drizzle(pool), { vector: false }),

@@ -287,12 +287,14 @@ function createPgvectorStrategyWithPrefixes(
       );
       const value = vectorLiteral(params.embedding, "embedding");
       return [
+        // The captured SQL indentation is part of the engine-profile parity contract.
+        // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
         sql`
-          INSERT INTO ${table} ("graph_id", "node_id", "embedding", "created_at", "updated_at")
-          VALUES (${params.graphId}, ${params.nodeId}, ${value}, ${timestamp}, ${timestamp})
-          ON CONFLICT ("graph_id", "node_id")
-          DO UPDATE SET "embedding" = EXCLUDED."embedding", "updated_at" = EXCLUDED."updated_at"
-        `,
+        INSERT INTO ${table} ("graph_id", "node_id", "embedding", "created_at", "updated_at")
+        VALUES (${params.graphId}, ${params.nodeId}, ${value}, ${timestamp}, ${timestamp})
+        ON CONFLICT ("graph_id", "node_id")
+        DO UPDATE SET "embedding" = EXCLUDED."embedding", "updated_at" = EXCLUDED."updated_at"
+      `,
       ];
     },
 
@@ -305,19 +307,21 @@ function createPgvectorStrategyWithPrefixes(
         sql`${source}.${sql.identifier(name)}`;
       const value = vectorLiteral(embedding, "embedding");
 
+      // The captured SQL indentation is part of the engine-profile parity contract.
+      // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
       return sql`
-        INSERT INTO ${table}
-          ("graph_id", "node_id", "embedding", "created_at", "updated_at")
-        SELECT
-          ${sourceColumn("graph_id")}, ${sourceColumn("id")},
-          ${value}, ${timestamp}, ${timestamp}
-        FROM ${source}
-        ON CONFLICT ("graph_id", "node_id")
-        DO UPDATE SET
-          "embedding" = EXCLUDED."embedding",
-          "updated_at" = EXCLUDED."updated_at"
-        RETURNING 1
-      `;
+      INSERT INTO ${table}
+        ("graph_id", "node_id", "embedding", "created_at", "updated_at")
+      SELECT
+        ${sourceColumn("graph_id")}, ${sourceColumn("id")},
+        ${value}, ${timestamp}, ${timestamp}
+      FROM ${source}
+      ON CONFLICT ("graph_id", "node_id")
+      DO UPDATE SET
+        "embedding" = EXCLUDED."embedding",
+        "updated_at" = EXCLUDED."updated_at"
+      RETURNING 1
+    `;
     },
 
     buildUpsertBatch(
@@ -432,27 +436,30 @@ function createPgvectorStrategyWithPrefixes(
       if (slot.indexType === "ivfflat") {
         const direction =
           params.metric === "cosine" ? sql.raw("DESC") : sql.raw("ASC");
+        // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
         const relaxedBody = sql`
-          SELECT ${table}."node_id" AS node_id, ${score} AS score
-          FROM ${table}
-          WHERE ${sql.join(conditions, sql` AND `)}
-          ORDER BY ${distance} ASC
-          LIMIT ${params.limit + pageOffset}
-        `;
-        return sql`
-          WITH tg_vec_relaxed AS MATERIALIZED (${relaxedBody})
-          SELECT node_id, score FROM tg_vec_relaxed
-          ORDER BY score ${direction}, node_id ASC
-          ${pageClause}
-        `;
-      }
-      return sql`
         SELECT ${table}."node_id" AS node_id, ${score} AS score
         FROM ${table}
         WHERE ${sql.join(conditions, sql` AND `)}
         ORDER BY ${distance} ASC
+        LIMIT ${params.limit + pageOffset}
+      `;
+        // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
+        return sql`
+        WITH tg_vec_relaxed AS MATERIALIZED (${relaxedBody})
+        SELECT node_id, score FROM tg_vec_relaxed
+        ORDER BY score ${direction}, node_id ASC
         ${pageClause}
       `;
+      }
+      // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
+      return sql`
+      SELECT ${table}."node_id" AS node_id, ${score} AS score
+      FROM ${table}
+      WHERE ${sql.join(conditions, sql` AND `)}
+      ORDER BY ${distance} ASC
+      ${pageClause}
+    `;
     },
 
     distanceExpression(embeddingColumn, queryEmbedding, metric) {
