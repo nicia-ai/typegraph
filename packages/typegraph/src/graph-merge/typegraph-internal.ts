@@ -92,6 +92,7 @@ export {
   resolveLineage,
 } from "../store/recorded-capture";
 export {
+  hasScopedIdentityReads,
   storeBackend,
   storeCaptureEnabled,
   storeQueryBackend,

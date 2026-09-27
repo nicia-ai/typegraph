@@ -264,7 +264,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     }>[]
   >;
   /** Current-state or archival assertions incident to any supplied endpoint. */
-  identityAssertionsTouchingAtTarget: (
+  identityAssertionsTouchingAtTarget?: (
     target: GraphBackend | TransactionBackend,
     references: readonly Readonly<{ kind: string; id: string }>[],
     mode?: "state" | "archival",
@@ -281,7 +281,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     }>[]
   >;
   /** Interchange-visible assertion ID rows, with the requested archive state. */
-  interchangeIdentityAssertionsByIdsAtTarget: (
+  interchangeIdentityAssertionsByIdsAtTarget?: (
     target: GraphBackend | TransactionBackend,
     ids: readonly string[],
     mode: "state" | "archival",
@@ -398,6 +398,23 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     seeds: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
 }>;
+
+/** Optional scoped identity reads added after the original Store runtime port. */
+export function hasScopedIdentityReads<G extends GraphDef>(
+  runtime: StoreRuntime<G>,
+): runtime is StoreRuntime<G> &
+  Required<
+    Pick<
+      StoreRuntime<G>,
+      | "identityAssertionsTouchingAtTarget"
+      | "interchangeIdentityAssertionsByIdsAtTarget"
+    >
+  > {
+  return (
+    runtime.identityAssertionsTouchingAtTarget !== undefined &&
+    runtime.interchangeIdentityAssertionsByIdsAtTarget !== undefined
+  );
+}
 
 export function storeRuntime<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,

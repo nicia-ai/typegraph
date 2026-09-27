@@ -23,7 +23,10 @@ import {
   asCompiledStatementSql,
   type CompiledRowsSql,
 } from "../../../src/query/sql-intent";
-import { storeRuntime } from "../../../src/store/runtime-port";
+import {
+  hasScopedIdentityReads,
+  storeRuntime,
+} from "../../../src/store/runtime-port";
 import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
@@ -1187,6 +1190,8 @@ export function registerIdentityIntegrationTests(
       );
 
       const runtime = storeRuntime(store);
+      if (!hasScopedIdentityReads(runtime))
+        throw new Error("Bundled stores must support scoped identity reads.");
       const currentRows = await runtime.identityAssertionsTouchingAtTarget(
         store.backend,
         [{ kind: "Company", id: company.id }],

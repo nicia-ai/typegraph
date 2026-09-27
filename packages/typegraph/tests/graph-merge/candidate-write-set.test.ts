@@ -30,6 +30,7 @@ import { isErr, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
 import { importGraph } from "../../src/interchange";
 import type { CompiledRowsSql } from "../../src/query/sql-intent";
+import { storeRuntime } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend, getStoreBackend } from "./test-utils";
 
@@ -418,6 +419,133 @@ describe("candidate write-set planning", () => {
       expect(canonicalMergePlanJson(actual)).toBe(
         canonicalMergePlanJson(expected),
       );
+    } finally {
+      await full.close();
+    }
+  });
+
+  it("uses the full clone for a custom runtime without scoped identity reads", async () => {
+    const [target] = await createStoreWithSchema(identityGraph, baseBackend, {
+      revisionTracking: true,
+    });
+    for (const id of ["first", "second"])
+      await target.nodes.Person.create(
+        { name: id, externalKey: id },
+        { id, validFrom: "2026-01-01T00:00:00.000Z" },
+      );
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "legacy-runtime-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [
+          {
+            id: "legacy-runtime-assertion",
+            relation: "same",
+            a: { kind: "Person", id: "first" },
+            b: { kind: "Person", id: "second" },
+            validFrom: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    };
+    const full = unwrap(
+      await ingestionBranch(target, candidateBackend().makeBackend, {
+        id: asBranchId(writeSet.sourceId),
+      }),
+    );
+    try {
+      const imported = await importGraph(
+        full,
+        {
+          formatVersion: "2.0",
+          exportedAt: "1970-01-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: writeSet.nodes,
+          edges: writeSet.edges,
+          identity: writeSet.identity,
+        },
+        {
+          onConflict: "update",
+          onUnknownProperty: "error",
+          validateReferences: true,
+          refreshStatistics: false,
+        },
+      );
+      expect(imported.success).toBe(true);
+      const expected = unwrap(
+        await planMergeIncremental({
+          forkPoint: target,
+          target,
+          branches: [full],
+        }),
+      );
+      const runtime = storeRuntime(target);
+      const touchingDescriptor = Object.getOwnPropertyDescriptor(
+        runtime,
+        "identityAssertionsTouchingAtTarget",
+      );
+      const byIdDescriptor = Object.getOwnPropertyDescriptor(
+        runtime,
+        "interchangeIdentityAssertionsByIdsAtTarget",
+      );
+      expect(touchingDescriptor).toBeDefined();
+      expect(byIdDescriptor).toBeDefined();
+      Reflect.deleteProperty(runtime, "identityAssertionsTouchingAtTarget");
+      Reflect.deleteProperty(
+        runtime,
+        "interchangeIdentityAssertionsByIdsAtTarget",
+      );
+      try {
+        const actual = unwrap(
+          await planCandidateWriteSet({
+            target,
+            makeBackend: candidateBackend().makeBackend,
+            writeSet,
+          }),
+        );
+        expect(canonicalMergePlanJson(actual)).toBe(
+          canonicalMergePlanJson(expected),
+        );
+        const review = await planCandidateWriteSetReview({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+          policy: { id: "legacy-runtime-review", context: {} },
+          reviewScope: "candidate",
+        });
+        expect(isErr(review)).toBe(true);
+        if (isErr(review)) {
+          expect(review.error.code).toBe("GRAPH_MERGE_REVIEW");
+          expect(review.error.details?.["reason"]).toBe(
+            "candidate-scope-ineligible",
+          );
+        }
+        const legacyReview = await planCandidateWriteSetReview({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+          policy: { id: "legacy-runtime-review", context: {} },
+        });
+        expect(isErr(legacyReview)).toBe(false);
+      } finally {
+        if (touchingDescriptor)
+          Object.defineProperty(
+            runtime,
+            "identityAssertionsTouchingAtTarget",
+            touchingDescriptor,
+          );
+        if (byIdDescriptor)
+          Object.defineProperty(
+            runtime,
+            "interchangeIdentityAssertionsByIdsAtTarget",
+            byIdDescriptor,
+          );
+      }
     } finally {
       await full.close();
     }

@@ -6091,7 +6091,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
-    identityAssertionsTouchingAtTarget: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
+    identityAssertionsTouchingAtTarget?: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
         kind: string;
         id: string;
     }>[], mode?: "state" | "archival", options?: Readonly<{
@@ -6114,7 +6114,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
-    interchangeIdentityAssertionsByIdsAtTarget: (target: GraphBackend | TransactionBackend, ids: readonly string[], mode: "state" | "archival", options?: Readonly<{
+    interchangeIdentityAssertionsByIdsAtTarget?: (target: GraphBackend | TransactionBackend, ids: readonly string[], mode: "state" | "archival", options?: Readonly<{
         includeDeleted?: boolean;
     }>) => Promise<readonly Readonly<{
         id: string;

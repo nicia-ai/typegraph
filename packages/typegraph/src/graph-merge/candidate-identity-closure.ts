@@ -13,9 +13,10 @@
 import type { GraphBackend, TransactionBackend } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import type { IdentityTransferAssertion } from "../identity/service";
-import { storeRuntime } from "../store/runtime-port";
+import { hasScopedIdentityReads, storeRuntime } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import { compareCodePoints } from "../utils/compare";
+import { CandidateWriteSetError } from "./errors";
 
 export type CandidateIdentityReference = Readonly<{
   kind: string;
@@ -57,6 +58,12 @@ export async function readCandidateIdentityClosure<G extends GraphDef>(
   >
 > {
   const runtime = storeRuntime(store);
+  if (!hasScopedIdentityReads(runtime)) {
+    throw new CandidateWriteSetError(
+      "Candidate identity closure requires endpoint and assertion-ID scoped runtime reads.",
+      { details: { reason: "scoped-identity-reads-unavailable" } },
+    );
+  }
   const references = new Map<string, CandidateIdentityReference>();
   const assertions = new Map<string, IdentityTransferAssertion>();
   const addReference = (reference: CandidateIdentityReference): boolean => {
@@ -174,6 +181,12 @@ async function readStateIdentityProjection<G extends GraphDef>(
   }>
 > {
   const runtime = storeRuntime(store);
+  if (!hasScopedIdentityReads(runtime)) {
+    throw new CandidateWriteSetError(
+      "Candidate identity closure requires endpoint and assertion-ID scoped runtime reads.",
+      { details: { reason: "scoped-identity-reads-unavailable" } },
+    );
+  }
   const references = new Map<string, CandidateIdentityReference>();
   const assertions = new Map<string, IdentityTransferAssertion>();
   const addReference = (reference: CandidateIdentityReference): void => {

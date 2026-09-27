@@ -18,10 +18,12 @@ import {
   createStoreWithSchema,
   getEdgeRowsByIds,
   getNodeRowsByIds,
+  hasScopedIdentityReads,
   importGraph,
   isBackendDerivedFrom,
   sharesSerializedTransactionResource,
   storeBackend,
+  storeRuntime,
 } from "./typegraph-internal";
 import type { MakeBackend, WorkingCopyStrategy } from "./working-copy";
 import { graphWithoutNodeUniqueness } from "./working-copy";
@@ -38,6 +40,8 @@ export function canUseSparseCandidatePlanning<G extends GraphDef>(
 ): boolean {
   return (
     target.revisionTrackingEnabled &&
+    (target.graph.identity === undefined ||
+      hasScopedIdentityReads(storeRuntime(target))) &&
     target.graph.ontology.length === 0 &&
     Object.values(target.graph.edges).every(
       (edge) =>

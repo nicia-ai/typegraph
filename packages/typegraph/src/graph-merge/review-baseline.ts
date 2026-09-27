@@ -2,6 +2,7 @@ import type { IdentityTransferAssertion } from "../identity/service";
 import { type CandidateIdentityReference } from "./candidate-identity-closure";
 import type { CandidateWriteSet } from "./candidate-write-set";
 import { parseRowProps } from "./canonical-props";
+import { MergeReviewError } from "./errors";
 import { compareStrings } from "./node-key";
 import type { MergePlanArtifact, MergePlanEntityRef } from "./plan-schema";
 import { reviewDigest } from "./review-evidence";
@@ -21,6 +22,7 @@ import {
   getEdgeRowsByIds,
   getNodeKinds,
   getNodeRowsByIds,
+  hasScopedIdentityReads,
   storeBackend,
   storeRuntime,
 } from "./typegraph-internal";
@@ -214,6 +216,19 @@ async function readReviewIdentityClosure<G extends GraphDef>(
     if (assertion.endedBy !== undefined) addReference(assertion.endedBy);
   }
   for (const reference of seedReferences) addReference(reference);
+  if (!hasScopedIdentityReads(runtime)) {
+    if (target.graph.identity !== undefined) {
+      throw new MergeReviewError(
+        "Candidate-scoped identity review requires endpoint and assertion-ID scoped runtime reads.",
+        { details: { reason: "scoped-identity-reads-unavailable" } },
+      );
+    }
+    for (const peer of await runtime.liveNodesSharingIds([
+      ...new Set(seedReferences.map((reference) => reference.id)),
+    ]))
+      addReference(peer);
+    return { references: [...references.values()], assertions: [] };
+  }
   for (const assertion of await runtime.interchangeIdentityAssertionsByIdsAtTarget(
     storeBackend(target),
     assertionIds,

@@ -574,6 +574,10 @@ would report that row change. Applications whose approval policy needs the
 V1 whole-graph rule should omit `reviewScope`. The review artifact records
 its version and scope, so revalidation applies the rule originally reviewed.
 Candidate-scoped review refuses graphs outside those eligibility rules.
+On an Operational Identity graph, a custom Store runtime must also expose
+endpoint-scoped and assertion-ID-scoped identity reads. Without both reads,
+ordinary candidate planning uses the complete working-copy clone and V1 review
+remains available; an explicit V2 candidate-scoped review request is refused.
 
 Applicable store constraints still run during atomic application. Compatibility
 does not promise that apply will succeed: new rows may introduce constraint
