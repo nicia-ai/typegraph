@@ -152,6 +152,7 @@ export function registerExpressionSubqueryQueryIntegrationTests(
           ),
           name: expression.outerPerson.name,
         }))
+        .orderBy((expression) => expression.outerPerson.name)
         .prepare();
 
       expect(await prepared.execute({ needle: "Alice" })).toEqual([

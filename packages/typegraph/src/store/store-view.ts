@@ -40,7 +40,7 @@ import {
   type TemporalMode,
 } from "../core/types";
 import { ConfigurationError } from "../errors";
-import { type IdentityReadSurface } from "../identity/types";
+import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { requireDefined } from "../utils/presence";
 import {
@@ -842,7 +842,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     // the `search` backstop on RecordedStoreView.
     Object.defineProperty(this, "identity", {
       enumerable: false,
-      get: (): IdentityReadSurface<G> =>
+      get: (): IdentityReadFacade<G> =>
         storeRuntime(this.store).identityAtCoordinate(this.coordinate),
     });
   }

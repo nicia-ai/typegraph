@@ -7,6 +7,7 @@ import { resolveBackendFulltext } from "../../backend/capabilities/fulltext";
 import { resolveRecursiveTraversal } from "../../backend/capabilities/recursive-traversal";
 import { resolveEmbeddingFields } from "../../core/embedding";
 import { resolveDeclaredFulltextLanguage } from "../../core/searchable";
+import { identityActiveKinds } from "../../identity/service-components";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
   type CompileQueryOptions,
@@ -42,6 +43,7 @@ export function buildCompileOptions(
         COMPILER_DEFAULT_RECURSIVE_TRAVERSAL
       : resolveRecursiveTraversal(config.backend.capabilities),
     identitySameIdAcrossKinds: config.identitySameIdAcrossKinds,
+    identityRegisteredKinds: [...identityActiveKinds(config.registry)],
     ...(fulltextStrategy === undefined ?
       {}
     : {

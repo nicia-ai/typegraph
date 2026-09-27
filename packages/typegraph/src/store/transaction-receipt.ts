@@ -2,8 +2,8 @@ import { type GraphDef } from "../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import { ConfigurationError } from "../errors";
 import {
-  type IdentityReadSurface,
-  type IdentitySurface,
+  type IdentityFacade,
+  type IdentityReadFacade,
   type IdentityWriteSummary,
 } from "../identity/types";
 import { type Assert, type Equal } from "../utils/type-assert";
@@ -34,14 +34,14 @@ type _receiptEdgeSurfaceIsComplete = Assert<
   Equal<EdgeWriteMethodName, keyof EdgeWrites<AnyEdgeType, NodeType, NodeType>>
 >;
 // wrapTransactionIdentity re-implements the facade method by method, so a new
-// IdentitySurface method that nobody adds here would silently bypass both the
+// IdentityFacade method that nobody adds here would silently bypass both the
 // receipt counters and the sealing guard.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
-type _receiptIdentitySurfaceIsComplete = Assert<
+type _receiptIdentityFacadeIsComplete = Assert<
   Equal<
     | (typeof IDENTITY_READ_NAMES)[number]
     | (typeof IDENTITY_WRITE_NAMES)[number],
-    keyof IdentitySurface<GraphDef>
+    keyof IdentityFacade<GraphDef>
   >
 >;
 // And the read/write split itself: a method the read facade exposes must be
@@ -50,7 +50,7 @@ type _receiptIdentitySurfaceIsComplete = Assert<
 type _identityReadSplitIsHonest = Assert<
   Equal<
     (typeof IDENTITY_READ_NAMES)[number],
-    keyof IdentityReadSurface<GraphDef>
+    keyof IdentityReadFacade<GraphDef>
   >
 >;
 
@@ -231,9 +231,9 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
 }
 
 export function wrapTransactionIdentity<G extends GraphDef>(
-  identity: IdentitySurface<G>,
+  identity: IdentityFacade<G>,
   recorder: TransactionReceiptRecorder,
-): IdentitySurface<G> {
+): IdentityFacade<G> {
   return {
     classes: (options) => identity.classes(options),
     representativeOf: (ref) => identity.representativeOf(ref),

@@ -794,6 +794,7 @@ type CompileQueryOptions = Readonly<{
     recordedReadBinding?: RecordedReadBinding | undefined;
     readInstant?: ReadInstantMode | undefined;
     identitySameIdAcrossKinds?: "fold" | "ignore" | undefined;
+    identityRegisteredKinds?: readonly string[] | undefined;
     recursiveTraversal?: RecursiveTraversalVerdict | undefined;
 }>;
 
@@ -3297,10 +3298,6 @@ export type IdentityReadFacade<G extends GraphDef> = Readonly<{
     areSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
     areDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
     assertionsOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityAssertion<G>[]>;
-}>;
-
-// @public
-type IdentityReadSurface<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
     classes: (options: IdentityClassPageOptions) => Promise<IdentityClassPage<G>>;
     explainSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<readonly IdentitySamePathStep<G>[] | undefined>;
 }>;
@@ -3319,9 +3316,6 @@ type IdentitySamePathStep<G extends GraphDef> = Readonly<{
         type: "same-id-fold";
     }>;
 }>;
-
-// @public
-type IdentitySurface<G extends GraphDef> = IdentityReadSurface<G> & Omit<IdentityFacade<G>, keyof IdentityReadFacade<G>>;
 
 // @public
 type IdentityTableNames = Readonly<{
@@ -6015,7 +6009,7 @@ type StoreHooks = Readonly<{
 
 // @public
 type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
-    identity: IdentitySurface<G>;
+    identity: IdentityFacade<G>;
 }> : Readonly<Record<never, never>>;
 
 // @public
@@ -6051,7 +6045,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
     subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
-    identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadSurface<G>;
+    identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
     applyResolvedNodeUniqueness: <Output>(target: TransactionBackend, writes: Readonly<{
@@ -6586,7 +6580,7 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
     backend: TransactionReadBackend;
     getNodeCollection: <const K extends string>(kind: K) => DynamicNodeCollection<K> | undefined;
 }> & (G["identity"] extends GraphIdentityConfig ? Readonly<{
-    identity: IdentitySurface<G>;
+    identity: IdentityFacade<G>;
 }> : Readonly<Record<never, never>>);
 
 // @public
@@ -7262,7 +7256,7 @@ type VectorStrategy = Readonly<{
 
 // @public
 type ViewIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
-    identity: IdentityReadSurface<G>;
+    identity: IdentityReadFacade<G>;
 }> : Readonly<Record<never, never>>;
 
 // @public

@@ -37,6 +37,22 @@ describe("identity class cursor", () => {
     ).toEqual({ kind: "Person", id: "id-😀" });
   });
 
+  it("keeps cursor size fixed as the kind filter grows", () => {
+    const smallCursor = encodeIdentityClassCursor(scope, {
+      kind: "Person",
+      id: "one",
+    });
+    const largeCursor = encodeIdentityClassCursor(
+      {
+        ...scope,
+        kinds: Array.from({ length: 3000 }, (_, index) => `Kind${index}`),
+      },
+      { kind: "Person", id: "one" },
+    );
+
+    expect(largeCursor.length).toBe(smallCursor.length);
+  });
+
   it.each([
     ["graph", { ...scope, graphId: "graph-b" }],
     [

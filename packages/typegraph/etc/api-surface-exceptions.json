@@ -1,1 +1,114 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "classes",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "explainSame",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "classes",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "explainSame",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "classes",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "explainSame",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "classes",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "explainSame",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "classes",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "explainSame",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "classes",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "explainSame",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "classes",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityReadFacade",
+    "member": "explainSame",
+    "kind": "required-member-added",
+    "reason": "The identity read facade now requires this method so all runtime read contexts expose one complete public type before the 0.71.0 release.",
+    "issue": "#751"
+  }
+]
