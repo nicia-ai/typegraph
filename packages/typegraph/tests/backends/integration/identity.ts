@@ -1307,6 +1307,23 @@ export function registerIdentityIntegrationTests(
           await store.asOf(asOfInstant).identity.explainSame(person, company),
         ).toBeUndefined();
 
+        const assertion = await store.identity.assertSame(person, company, {
+          validFrom: backdatedValidFrom,
+          validTo: "2022-01-01T00:00:00.000Z",
+        });
+        expect(
+          await store.asOf(asOfInstant).identity.areSame(person, company),
+        ).toBe(true);
+        expect(
+          await store.asOf(asOfInstant).identity.explainSame(person, company),
+        ).toEqual([
+          {
+            from: { kind: "Person", id: person.id },
+            to: { kind: "Company", id: company.id },
+            via: { type: "assertion", assertion: assertion.assertion },
+          },
+        ]);
+
         const currentMembers = await store.identity.membersOf(person);
         expect(currentMembers).toEqual([
           { kind: "Company", id: "backdated" },

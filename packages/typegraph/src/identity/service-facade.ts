@@ -1035,15 +1035,15 @@ export function createIdentityReadFacade<G extends GraphDef>(
     async explainSame(firstInput, secondInput) {
       const first = registeredPlainRef(ctx, firstInput);
       const second = registeredPlainRef(ctx, secondInput);
-      const visibleMembers = await visibleMembersAtCoordinate(ctx, first);
-      if (!containsRef(visibleMembers, second)) return;
-      if (refKey(first) === refKey(second)) return [];
-
       let structuralMembers: readonly PlainNodeRef[];
+      let foldEligibleMembers: readonly PlainNodeRef[];
       if (
         ctx.coordinate === undefined ||
         isCurrentClosureCoordinate(ctx.coordinate)
       ) {
+        const visibleMembers = await visibleMembersAtCoordinate(ctx, first);
+        if (!containsRef(visibleMembers, second)) return;
+        if (refKey(first) === refKey(second)) return [];
         const classes = await loadCurrentStructuralClassComponents(
           ctx.backend,
           ctx.schema,
@@ -1053,6 +1053,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         structuralMembers = [...classes.values()].find((members) =>
           containsRef(members, first),
         ) ?? [first];
+        foldEligibleMembers = structuralMembers;
       } else {
         const classes = await loadHistoricalClasses(
           ctx.backend,
@@ -1062,9 +1063,11 @@ export function createIdentityReadFacade<G extends GraphDef>(
           ctx.coordinate,
           ctx.sameIdAcrossKinds,
         );
-        structuralMembers = requireDefined(
-          classes.get(refKey(first)),
-        ).structural;
+        const historicalClass = requireDefined(classes.get(refKey(first)));
+        if (!containsRef(historicalClass.visible, second)) return;
+        if (refKey(first) === refKey(second)) return [];
+        structuralMembers = historicalClass.structural;
+        foldEligibleMembers = historicalClass.foldEligible;
       }
       if (!containsRef(structuralMembers, second))
         throw new ConfigurationError(
@@ -1087,7 +1090,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         step: IdentitySamePathStep<G>;
       }>;
       const structuralById = new Map<string, PlainNodeRef[]>();
-      for (const ref of structuralMembers) {
+      for (const ref of foldEligibleMembers) {
         const group = structuralById.get(ref.id) ?? [];
         group.push(ref);
         structuralById.set(ref.id, group);

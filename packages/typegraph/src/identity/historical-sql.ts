@@ -132,7 +132,7 @@ export function identityNodeVisibilitySql(
  * valid-time-only read has the live row and therefore reconstructs existence
  * from created_at/deleted_at.
  */
-function structuralFoldVisibilitySql(
+export function structuralFoldVisibilitySql(
   coordinate: HistoricalIdentitySqlCoordinate,
   alias: string,
 ): SqlFragment {

@@ -22,6 +22,7 @@ import {
   identityNodeSnapshotSource,
   identityNodeVisibilitySql,
   identitySqlCoordinate,
+  structuralFoldVisibilitySql,
 } from "./historical-sql";
 import {
   compareIdentityReferences,
@@ -99,7 +100,7 @@ type RawDistinctClassMemberRow = RawClosureClassRow &
   }>;
 
 type RawHistoricalClassMemberRow = RawSeedClassMemberRow &
-  Readonly<{ is_visible: unknown }>;
+  Readonly<{ is_visible: unknown; is_fold_eligible: unknown }>;
 
 export type NodeSnapshot = Readonly<{
   ref: PlainNodeRef;
@@ -584,6 +585,7 @@ async function loadHistoricalVisibleMembers(
 export type HistoricalClass = Readonly<{
   structural: readonly PlainNodeRef[];
   visible: readonly PlainNodeRef[];
+  foldEligible: readonly PlainNodeRef[];
 }>;
 
 export async function loadHistoricalClasses(
@@ -600,7 +602,11 @@ export async function loadHistoricalClasses(
   const emptyClasses = new Map(
     uniqueReferences.map((ref) => [
       refKey(ref),
-      { structural: [], visible: [] } satisfies HistoricalClass,
+      {
+        structural: [],
+        visible: [],
+        foldEligible: [],
+      } satisfies HistoricalClass,
     ]),
   );
   if (uniqueReferences.length === 0) return emptyClasses;
@@ -645,19 +651,27 @@ export async function loadHistoricalClasses(
       SELECT member.seed_kind, member.seed_id,
              member.kind AS member_kind, member.id AS member_id,
              CASE WHEN ${identityNodeVisibilitySql(sqlCoordinate, "n")}
-               THEN 1 ELSE 0 END AS is_visible
+               THEN 1 ELSE 0 END AS is_visible,
+             CASE WHEN ${structuralFoldVisibilitySql(sqlCoordinate, "n")}
+               THEN 1 ELSE 0 END AS is_fold_eligible
       FROM identity_members member
       JOIN node_snapshot n ON n.kind = member.kind AND n.id = member.id
     `),
   );
   const structuralBySeed = new Map<string, PlainNodeRef[]>();
   const visibleBySeed = new Map<string, PlainNodeRef[]>();
+  const foldEligibleBySeed = new Map<string, PlainNodeRef[]>();
   for (const row of rows) {
     const seedKey = refKey({ kind: row.seed_kind, id: row.seed_id });
     const member = { kind: row.member_kind, id: row.member_id };
     const structural = structuralBySeed.get(seedKey) ?? [];
     structural.push(member);
     structuralBySeed.set(seedKey, structural);
+    if (row.is_fold_eligible) {
+      const foldEligible = foldEligibleBySeed.get(seedKey) ?? [];
+      foldEligible.push(member);
+      foldEligibleBySeed.set(seedKey, foldEligible);
+    }
     if (!row.is_visible) continue;
     const visible = visibleBySeed.get(seedKey) ?? [];
     visible.push(member);
@@ -674,6 +688,9 @@ export async function loadHistoricalClasses(
           ),
           visible: (visibleBySeed.get(key) ?? []).toSorted((left, right) =>
             compareReferences(left, right),
+          ),
+          foldEligible: (foldEligibleBySeed.get(key) ?? []).toSorted(
+            (left, right) => compareReferences(left, right),
           ),
         },
       ];
