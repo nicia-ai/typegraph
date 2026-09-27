@@ -12,6 +12,7 @@ import type {
 import { mergePlanArtifactV1Schema } from "./plan-schema";
 import type { JsonValue } from "./typegraph-internal";
 
+export const MERGE_REVIEW_FORMAT_VERSION_V1 = 1 as const;
 export const MERGE_REVIEW_FORMAT_VERSION = 2 as const;
 
 /** Application-owned identity of policy code and all opaque/external dependencies. */
@@ -29,23 +30,25 @@ export type MergeReviewRow = MergePlanEntityRef &
     digest?: string | undefined;
   }>;
 
-/**
- * V1 records all original rows and the complete identity ledger. V2 records
- * only plan-relevant references for identity-disabled graphs; revalidation
- * reads exactly those references and replans the retained candidate.
- */
+/** V1 retains a global baseline; V2 records the exact candidate identity scope. */
 export type MergeReviewBaseline = Readonly<{
   rows: readonly MergeReviewRow[];
   identityDigest: string;
   scope?: "referenced" | undefined;
+  /** Present in V2: endpoint scope retained to make revalidation exact. */
+  identityReferences?: readonly MergePlanEntityRef[] | undefined;
+  /** Candidate assertion IDs whose unrelated ID collisions affect import. */
+  identityAssertionIds?: readonly string[] | undefined;
 }>;
 
 /**
  * Immutable review evidence, distinct from its single-use execution plan.
- * Both versions support candidate write sets. Authenticate stored artifacts separately.
+ * Both versions support candidate write sets. Authenticate stored artifacts
+ * separately.
  */
 export type MergeReviewArtifact = Readonly<{
-  formatVersion: 1 | typeof MERGE_REVIEW_FORMAT_VERSION;
+  formatVersion:
+    typeof MERGE_REVIEW_FORMAT_VERSION_V1 | typeof MERGE_REVIEW_FORMAT_VERSION;
   kind: "candidate-write-set";
   digest: MergePlanDigest;
   writeSet: CandidateWriteSet;
@@ -89,7 +92,7 @@ export const mergeReviewPolicySchema = z
 export const mergeReviewArtifactSchema = z
   .object({
     formatVersion: z.union([
-      z.literal(1),
+      z.literal(MERGE_REVIEW_FORMAT_VERSION_V1),
       z.literal(MERGE_REVIEW_FORMAT_VERSION),
     ]),
     kind: z.literal("candidate-write-set"),
@@ -114,6 +117,14 @@ export const mergeReviewArtifactSchema = z
         ),
         identityDigest: digestSchema,
         scope: z.literal("referenced").optional(),
+        identityReferences: z
+          .array(
+            z
+              .object({ kind: z.string().min(1), id: z.string().min(1) })
+              .strict(),
+          )
+          .optional(),
+        identityAssertionIds: z.array(z.string().min(1)).optional(),
       })
       .strict(),
   })

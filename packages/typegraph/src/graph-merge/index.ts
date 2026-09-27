@@ -197,7 +197,10 @@ export type {
   MergeReviewRevalidation,
   MergeReviewRow,
 } from "./review-schema";
-export { MERGE_REVIEW_FORMAT_VERSION } from "./review-schema";
+export {
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_V1,
+} from "./review-schema";
 export type {
   BaseNodeLookup,
   CandidateSource,
