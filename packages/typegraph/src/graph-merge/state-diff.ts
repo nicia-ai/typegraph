@@ -942,10 +942,15 @@ export async function diffAgainstBase<G extends GraphDef>(
   const sameStore = baseReader === undefined && baseStore === forkStore;
   const reuseRows =
     sameStore && (prunedKeys === undefined || !captureForkState);
+  // Branch clones export current identity state, not historical rows. Compare
+  // that seed against the fork's archival rows so branch-authored endings keep
+  // their `endedBy` stamps without treating assertions that were already ended
+  // at the base as branch retractions. A same-store diff reads one shared
+  // state snapshot to preserve its identical-snapshot contract.
   const baseIdentityPromise =
     baseReader === undefined ?
-      storeRuntime(baseStore).readCurrentIdentityAssertions("archival")
-    : baseReader.readIdentity("archival");
+      storeRuntime(baseStore).readCurrentIdentityAssertions("state")
+    : baseReader.readIdentity("state");
   const [baseIdentity, forkIdentity] = await Promise.all([
     baseIdentityPromise,
     sameStore ? baseIdentityPromise : (

@@ -173,6 +173,44 @@ describe.each(backendMatrix())("cascade retraction [$name]", (entry) => {
     expect(causeById.get("explicit-id")).toEqual({ kind: "explicit" });
   });
 
+  it("ignores base-ended assertions but preserves branch-authored retractions", async () => {
+    const forkPoint = await anchoredForkPoint();
+    const endedImport = await importGraph(
+      forkPoint,
+      assertionDocument("already-ended", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(endedImport.success).toBe(true);
+    await forkPoint.identity.retractAssertion(
+      asIdentityAssertionId("already-ended"),
+    );
+    const openImport = await importGraph(
+      forkPoint,
+      assertionDocument("still-open", "c", "d"),
+      { onConflict: "skip" },
+    );
+    expect(openImport.success).toBe(true);
+
+    const emptyBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    expect(
+      (await diffAgainstBase(forkPoint, emptyBranch.store)).identity.retracted,
+    ).toEqual([]);
+
+    const retractBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    );
+    await retractBranch.store.identity.retractAssertion(
+      asIdentityAssertionId("still-open"),
+    );
+    const diff = await diffAgainstBase(forkPoint, retractBranch.store);
+    expect(diff.identity.retracted).toHaveLength(1);
+    const retracted = requireDefined(diff.identity.retracted[0]);
+    expect(retracted.assertion.id).toBe("still-open");
+    expect(retracted.cause).toEqual({ kind: "explicit" });
+  });
+
   it("treats a stamp from a deletion the fork itself undid as explicit", async () => {
     // The fork deleted b (stamping the cascade onto the assertion) and then
     // brought b back. Its final state stages no deletion for b, so there is no
