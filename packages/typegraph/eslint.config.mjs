@@ -1119,6 +1119,24 @@ const LINT_BLOCKS = [
       ],
     },
   },
+  // The working-copy manager decorates a proven target backend with a
+  // fixed-schema refusal while retaining its connection/resource lineage.
+  {
+    files: ["src/backend/drizzle/postgres-working-copy.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...RUNTIME_PORT_RESTRICTIONS,
+        ...BACKEND_CARRY_RESTRICTIONS,
+        ...BACKEND_AUDIT_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+        ...DIALECT_SEAM_RESTRICTIONS,
+      ],
+    },
+  },
   // The shared engine factory both dialect factories delegate to
   // (`createSqlBackend`) is the sole module that writes a verdict, so it is
   // exempted from the audit import ban. It also decorates its own

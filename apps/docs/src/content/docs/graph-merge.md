@@ -1508,7 +1508,10 @@ The table-backed strategy supports the bundled tsvector fulltext storage and
 rebuilds physical-name materialization markers for the copied relations.
 It refuses graphs with declared indexes or enabled vector fields because their
 current physical names are database-global or graph-scoped rather than
-allocation-scoped. Use a host-level database fork for those graphs. Source
+allocation-scoped. The copy has a fixed schema: `evolve`, kind removal and
+deprecation, and graph-index materialization refuse before mutation. System
+index maintenance remains available. Use a host-level database fork when
+schema evolution or those physical storage features are needed. Source
 table locks cover the entire TypeGraph relation set while the SQL clone runs,
 so a large clone briefly blocks writes to other graphs in the same database.
 

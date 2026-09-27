@@ -19,9 +19,11 @@ import type { WorkingCopyStrategy } from "../../graph-merge/working-copy";
 import { tsvectorStrategy } from "../../query/dialect/fulltext-strategy";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
+import { markFixedSchemaWorkingCopyBackend } from "../../store/fixed-schema-working-copy";
 import { createStore, createStoreWithSchema, type Store } from "../../store/store";
 import type { StoreOptions, WorkingCopyOptions } from "../../store/types";
 import { sha256Hex } from "../../utils/hash";
+import { deriveBackend } from "../derive-backend";
 import type { GraphBackend, TransactionBackend } from "../types";
 import { CURRENT_BASE_SCHEMA_VERSION } from "./base-schema";
 import {
@@ -167,6 +169,53 @@ function assertTargetBindings(
       );
     }
   }
+}
+
+function fixedSchemaError(operation: string): BranchError {
+  return new BranchError(
+    `Managed PostgreSQL table-backed working copies have a fixed schema; ${operation} is unsupported.`,
+  );
+}
+
+function fixedSchemaBackend(backend: GraphBackend): GraphBackend {
+  const guarded = deriveBackend(backend, {
+    commitSchemaVersion: () =>
+      Promise.reject(fixedSchemaError("commitSchemaVersion")),
+    setActiveVersion: () =>
+      Promise.reject(fixedSchemaError("setActiveVersion")),
+    ...(backend.commitSchemaVersionIfKindsEmpty === undefined ?
+      {}
+    : {
+        commitSchemaVersionIfKindsEmpty: () =>
+          Promise.reject(fixedSchemaError("commitSchemaVersionIfKindsEmpty")),
+      }),
+    ...(backend.commitSchemaVersionWithPreflight === undefined ?
+      {}
+    : {
+        commitSchemaVersionWithPreflight: () =>
+          Promise.reject(fixedSchemaError("commitSchemaVersionWithPreflight")),
+      }),
+    ...(backend.instantiateGraphTemplate === undefined ?
+      {}
+    : {
+        instantiateGraphTemplate: () =>
+          Promise.reject(fixedSchemaError("instantiateGraphTemplate")),
+      }),
+    ...(backend.registerGraphTemplate === undefined ?
+      {}
+    : {
+        registerGraphTemplate: () =>
+          Promise.reject(fixedSchemaError("registerGraphTemplate")),
+      }),
+    ...(backend.schemaWriteTransaction === undefined ?
+      {}
+    : {
+        schemaWriteTransaction: () =>
+          Promise.reject(fixedSchemaError("schemaWriteTransaction")),
+      }),
+  });
+  markFixedSchemaWorkingCopyBackend(guarded);
+  return guarded;
 }
 
 function cloneOptions<G extends GraphDef>(source: Store<G>): StoreOptions {
@@ -406,10 +455,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     // External recorded reads can name relations outside the bundled inventory.
     // Refuse before writing the ledger or provisioning any target table.
     const inheritedOptions = cloneOptions(source);
-    if (
-      sourceBackend.vectorStrategy !== undefined &&
-      resolveGraphVectorSlots(source.graph).length > 0
-    ) {
+    if (resolveGraphVectorSlots(source.graph).length > 0) {
       throw new BranchError(
         "Table-backed PostgreSQL working copies cannot isolate graph-scoped vector tables; use a native database fork for this graph.",
       );
@@ -495,7 +541,12 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         inheritedOptions,
       );
       if (options.refreshStatistics === true) await store.refreshStatistics();
-      return { store, descriptor: { allocationId } };
+      const [fixedStore] = await createStoreWithSchema(
+        source.graph,
+        fixedSchemaBackend(backend),
+        inheritedOptions,
+      );
+      return { store: fixedStore, descriptor: { allocationId } };
     } catch (error) {
       try {
         await backend?.close();
@@ -562,7 +613,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
         const store = createStore(
           graph,
-          backend,
+          fixedSchemaBackend(backend),
           reopenedOptions(graph, row, options.reopenOptions),
         );
         return { store, origin: row.origin, access: { kind: "engine-fenced" } };
@@ -585,9 +636,13 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       const allocationId = globalThis.crypto.randomUUID();
       const created = await allocate(source, base, allocationId, "ephemeral");
       const backend = storeBackend(created.store);
+      const disposableBackend = wrapWithManagedClose(backend, () =>
+        dropAllocation(allocationId),
+      );
+      markFixedSchemaWorkingCopyBackend(disposableBackend);
       return createStore(
         source.graph,
-        wrapWithManagedClose(backend, () => dropAllocation(allocationId)),
+        disposableBackend,
         cloneOptions(source),
       );
     },

@@ -282,6 +282,7 @@ import {
   withAdoptedTransactionScope,
 } from "./evolution";
 import { scopeBackendExecution } from "./execution-lifetime";
+import { assertFixedSchemaWorkingCopyAllows } from "./fixed-schema-working-copy";
 import { repopulateFulltextInTransaction } from "./fulltext-rebuild";
 import { getSearchableFields } from "./fulltext-sync";
 import {
@@ -5251,6 +5252,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         ) => Promise<T>),
     options?: EvolvedTransactionOptions,
   ): Promise<EvolvedTransactionOutcome<T>> {
+    assertFixedSchemaWorkingCopyAllows(
+      this.#baseBackend,
+      "withEvolvedTransaction",
+    );
     return withAdoptedTransactionScope(
       externalTx,
       () => this.#applyEvolvedTransaction(externalTx, plan, fn, options),
@@ -5536,6 +5541,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       syncStoreReplacementRef(options?.ref, this);
       return this;
     }
+    assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "refreshSchema");
     return this.#cloneWithGraph(
       this.#catchUpToStored(parseSerializedSchema(active.schema_doc)),
       options?.ref,
@@ -5612,6 +5618,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       eager?: MaterializeIndexesOptions;
     }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "evolve");
     // Catch up to the persisted state first (extension AND deprecated
     // set). Without this, a stale store applying an extension on top
     // of an out-of-date baseline would make ensureSchema diff against
@@ -5873,6 +5880,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async materializeIndexes(
     options?: MaterializeIndexesOptions,
   ): Promise<MaterializeIndexesResult> {
+    assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "materializeIndexes");
     const { activeRow, baseline } = await this.#loadCaughtUp("materialize");
     return materializeIndexesImpl(
       {
@@ -6509,6 +6517,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       eager?: MaterializeRemovalsOptions;
     }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "removeKinds");
     const { activeRow, storedSchema, baseline } =
       await this.#loadCaughtUp("remove");
     const plan = planRemovals(baseline, names);
@@ -6678,6 +6687,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     names: readonly string[],
     options: Readonly<{ ref?: StoreRef<TRefStore> }> | undefined,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    assertFixedSchemaWorkingCopyAllows(
+      this.#baseBackend,
+      direction === "add" ? "deprecateKinds" : "undeprecateKinds",
+    );
     const verb = direction === "add" ? "deprecate" : "undeprecate";
     const { activeRow, storedSchema, baseline } =
       await this.#loadCaughtUp(verb);

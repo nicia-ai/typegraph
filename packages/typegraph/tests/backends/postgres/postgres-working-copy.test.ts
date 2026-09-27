@@ -3,7 +3,13 @@ import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, embedding, searchable } from "../../../src";
+import {
+  defineGraph,
+  defineGraphExtension,
+  defineNode,
+  embedding,
+  searchable,
+} from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generateVectorlessPostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
@@ -29,6 +35,7 @@ import {
   createSqlSchema,
   recordedRelation,
 } from "../../../src/query/compiler/schema";
+import { pgvectorStrategy } from "../../../src/query/dialect/vector/pgvector-strategy";
 import { storeBackend } from "../../../src/store/runtime-port";
 import { createStore, createStoreWithSchema } from "../../../src/store/store";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
@@ -123,6 +130,15 @@ describe.runIf(process.env["POSTGRES_URL"])(
           person.id,
         );
         expect(reopenedPerson?.name).toBe("Copy");
+        await expect(
+          reopened.store.evolve(
+            defineGraphExtension({
+              nodes: { Tag: { properties: { label: { type: "string" } } } },
+            }),
+          ),
+        ).rejects.toMatchObject({
+          details: { code: "WORKING_COPY_SCHEMA_EVOLUTION_UNSUPPORTED" },
+        });
         await reopened.close();
 
         const tampered = {
@@ -281,6 +297,13 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await expect(
           manager.ephemeral.create(source, asBaseVersion("unused")),
         ).rejects.toThrow(/vector tables/);
+        const vectorDisabled = createStore(
+          vectorGraph,
+          createPostgresBackend(drizzle(pool), { vector: false }),
+        );
+        await expect(
+          manager.ephemeral.create(vectorDisabled, asBaseVersion("unused")),
+        ).rejects.toThrow(/vector tables/);
         expect(await manager.listAbandoned()).toEqual([]);
       } finally {
         await pool.end();
@@ -352,6 +375,94 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await expect(
           manager.ephemeral.create(source, asBaseVersion("unused")),
         ).rejects.toThrow(/index names/);
+        expect(await manager.listAbandoned()).toEqual([]);
+      } finally {
+        await pool.end();
+      }
+    }, 60_000);
+
+    it("refuses schema evolution before creating unowned vector storage", async () => {
+      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
+      try {
+        const control = createPostgresBackend(drizzle(pool));
+        const [source] = await createStoreWithSchema(graph, control, {
+          revisionTracking: true,
+        });
+        const connectedNames: PostgresTableNames[] = [];
+        const manager = createPostgresWorkingCopyManager<typeof graph>({
+          control,
+          connect: (names) => {
+            connectedNames.push(names);
+            return Promise.resolve(
+              createPostgresBackend(drizzle(pool), {
+                tables: createPostgresTables(names),
+              }),
+            );
+          },
+        });
+        const copy = await manager.ephemeral.create(
+          source,
+          await computeBaseVersion(source),
+        );
+        const names = connectedNames[0];
+        if (names === undefined) throw new Error("Missing target names.");
+        const before = await pool.query<{ version: number }>(
+          `SELECT version FROM "${names.schemaVersions}" WHERE graph_id = $1`,
+          [graph.id],
+        );
+        const abandoned = await manager.listAbandoned();
+        const extension = defineGraphExtension({
+          nodes: {
+            Document: {
+              properties: {
+                embedding: {
+                  type: "array",
+                  items: { type: "number" },
+                  embedding: { dimensions: 3 },
+                },
+              },
+            },
+          },
+        });
+        await expect(copy.evolve(extension)).rejects.toMatchObject({
+          details: { code: "WORKING_COPY_SCHEMA_EVOLUTION_UNSUPPORTED" },
+        });
+        await expect(copy.materializeIndexes()).rejects.toMatchObject({
+          details: { code: "WORKING_COPY_SCHEMA_EVOLUTION_UNSUPPORTED" },
+        });
+        await expect(
+          storeBackend(copy).setActiveVersion({
+            graphId: graph.id,
+            expected: { kind: "active", version: 1 },
+            version: 1,
+          }),
+        ).rejects.toThrow(/fixed schema/);
+        const systemIndexes = await copy.materializeSystemIndexes();
+        expect(
+          systemIndexes.results.some((entry) => entry.status === "failed"),
+        ).toBe(false);
+        const after = await pool.query<{ version: number }>(
+          `SELECT version FROM "${names.schemaVersions}" WHERE graph_id = $1`,
+          [graph.id],
+        );
+        expect(after.rows).toEqual(before.rows);
+        expect(await manager.listAbandoned()).toEqual(abandoned);
+        const vectorMarkers = await pool.query<{ count: number }>(
+          `SELECT count(*)::int AS count FROM "${names.contributionMaterializations}" WHERE graph_id = $1 AND owner = 'pgvector'`,
+          [graph.id],
+        );
+        expect(vectorMarkers.rows[0]?.count).toBe(0);
+        const vectorTable = pgvectorStrategy.tableName(
+          graph.id,
+          "Document",
+          "embedding",
+        );
+        const unowned = await pool.query<{ present: string | null }>(
+          "SELECT to_regclass($1)::text AS present",
+          [`"${vectorTable}"`],
+        );
+        expect(unowned.rows[0]?.present).toBeNull();
+        await storeBackend(copy).close();
         expect(await manager.listAbandoned()).toEqual([]);
       } finally {
         await pool.end();
