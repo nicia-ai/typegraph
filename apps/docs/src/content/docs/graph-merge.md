@@ -432,8 +432,15 @@ approval records in the target before calling
 V1 supports candidate write sets only. It does not rebase arbitrary artifacts
 from `planMerge()` or `planMergeIncremental()`.
 
-Planning and revalidation clone the target into a transient working copy. When
-that copy and the target really share one serialized connection, clone export
+Candidate planning on revision-tracked graphs without Operational Identity
+reads existing candidate ids and edge endpoints by key, then seeds only those
+rows in the transient working copy. The candidate diff and its target baseline
+are bounded to those keys and any committed rows recalled by configured
+unique or index sources. Planning still fences the target revision before and
+after these reads. Identity-enabled or non-revision-tracked graphs continue
+to use the complete clone path.
+
+On the complete clone path, when the copy and target really share one serialized connection, clone export
 is materialized before import, but its snapshot still holds the connection's
 exclusive stream lease while it is collected. Concurrent review calls on that
 resource can therefore return a merge error caused by a `ConfigurationError`
@@ -551,6 +558,19 @@ The V1 baseline is deliberately conservative:
   plan content. Candidate-derived anchors and the execution digest/fence are
   regenerated. There is no exemption for an “audit” kind.
 
+For an identity-disabled, revision-tracked graph, pass
+`reviewScope: "candidate"` to `planCandidateWriteSetReview()` to emit V2
+candidate-scoped evidence. V2 fingerprints the candidate's node and edge ids,
+edge endpoints, resolved writes, and plan guards, including expected absences
+across kinds. Revalidation rereads those references and replans the retained
+candidate under a new target fence. An unrelated original row may change
+without invalidating V2 when it cannot affect the fresh resolved plan; V1
+would report that row change. Applications whose approval policy needs the
+V1 whole-graph rule should omit `reviewScope`. The review artifact records
+its version and scope, so revalidation applies the rule originally reviewed.
+Candidate-scoped review refuses an identity-enabled or non-revision-tracked
+target.
+
 Applicable store constraints still run during atomic application. Compatibility
 does not promise that apply will succeed: new rows may introduce constraint
 conflicts, and any write between revalidation and apply causes
@@ -574,12 +594,11 @@ reuse approval. Enforce artifact immutability and access control in your storage
 or application. The review contains candidate data and an entire reviewed plan,
 so protect it with the same care as graph data.
 
-Review capture and revalidation read/fingerprint the complete target graph and
-archival identity ledger. The artifact stores one fingerprint per original row
-plus expected absences. Fresh candidate planning additionally clones the whole
-graph into its disposable working copy. Budget graph-sized reads, memory,
-artifact storage, and cloning for this workflow; it is intended for bounded
-review batches.
+V1 review capture and revalidation read and fingerprint the complete target
+graph and archival identity ledger. The artifact stores one fingerprint per
+original row plus expected absences. Budget graph-sized reads and artifact
+storage for V1. V2 candidate-scoped review uses bounded point reads for its
+baseline on eligible graphs.
 
 The execution receipt above is a separate commit. If its write fails or the
 process stops after apply, the merge may already be committed without a receipt.
@@ -1864,11 +1883,13 @@ to incremental merge planning, and closes the working copy on every outcome.
 The result is the ordinary `MergePlanArtifact`, so review and application use
 the same APIs as every other merge plan.
 
-Planning clones the complete target graph into a disposable working copy before
-staging the candidate set. Existing undeclared properties on the target survive
-that clone; extra properties on the candidate document itself are still refused.
-Use it for bounded review workflows, not as a hot-path comparison primitive
-against a large graph.
+On revision-tracked graphs without Operational Identity, planning seeds only
+existing candidate rows and edge endpoints into the disposable working copy.
+The resolver still queries the live target for declared unique and index peers,
+and the plan retains its ordinary provenance, conflicts, digest, and commit-time
+fences. Existing undeclared target properties survive staging; extra candidate
+properties are refused. Identity-enabled and non-revision-tracked graphs use
+the complete clone path.
 
 ```typescript
 import {

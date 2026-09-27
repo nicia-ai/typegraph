@@ -203,6 +203,7 @@ import type {
   GraphDef,
   IdentityTransferAssertion,
   JsonValue,
+  LineageDelta,
   Node,
   NodeId,
   NodeType,
@@ -2854,6 +2855,7 @@ async function resolveMerge<G extends GraphDef, Output>(
   expectedBaseVersion: BaseVersion | undefined,
   complete: (resolved: ResolvedMerge<G>) => Promise<Output>,
   baseReader?: StateDiffBaseReader,
+  explicitPruneTo?: ReadonlyMap<BranchId, LineageDelta>,
 ): Promise<Result<Output, MergeError>> {
   // Reserved BranchIds are used for non-user contributions. Reject real branches
   // that try to mint them rather than silently corrupting conflict/provenance state.
@@ -2941,6 +2943,7 @@ async function resolveMerge<G extends GraphDef, Output>(
       branches,
       preferredBranchId,
       baseReader,
+      explicitPruneTo,
     );
     // Pure over the (now fixed) staging set, so the deterministic per-kind order
     // is computed once and shared by every consumer below.
@@ -3144,9 +3147,9 @@ async function resolveMerge<G extends GraphDef, Output>(
     }
 
     const inheritedBaselines =
-      baseReader === undefined ? undefined : (
-        await capturePlannedTargetBaselines(target, plan, staging)
-      );
+      baseReader === undefined && explicitPruneTo === undefined ?
+        undefined
+      : await capturePlannedTargetBaselines(target, plan, staging);
     const incrementalGuard =
       incremental === undefined ? undefined : (
         ({
@@ -3531,6 +3534,42 @@ export async function planMergeIncrementalForEvolution<G extends GraphDef>(
 export async function planMergeIncremental<G extends GraphDef>(
   args: MergeIncrementalArguments<G>,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
+  return planMergeIncrementalWithPruning(args);
+}
+
+/** Candidate-only bounded diff; the candidate keys are complete by construction. */
+export async function planMergeIncrementalWithCandidateKeys<G extends GraphDef>(
+  args: MergeIncrementalArguments<G>,
+  candidateKeys: LineageDelta,
+): Promise<Result<MergePlanArtifact, MergeError>> {
+  if (candidateKeys.kind !== "keys" || args.forkPoint !== args.target) {
+    return err(
+      new MergePlanCapabilityError(
+        "Bounded candidate planning requires the live target as its fork point and exact candidate keys.",
+      ),
+    );
+  }
+  const branch = args.branches[0];
+  if (branch === undefined || args.branches.length !== 1) {
+    return err(
+      new MergePlanCapabilityError(
+        "Bounded candidate planning requires exactly one candidate source.",
+      ),
+    );
+  }
+  return planMergeIncrementalWithPruning(
+    args,
+    new Map([
+      [COMMITTED_TARGET_BRANCH, { kind: "keys", nodes: [], edges: [] }],
+      [branch.id, candidateKeys],
+    ]),
+  );
+}
+
+async function planMergeIncrementalWithPruning<G extends GraphDef>(
+  args: MergeIncrementalArguments<G>,
+  explicitPruneTo?: ReadonlyMap<BranchId, LineageDelta>,
+): Promise<Result<MergePlanArtifact, MergeError>> {
   const { forkPoint, target } = args;
   const branches = unwrapMergeBranches(args.branches);
   const normalized = tryNormalize(args.options ?? {}, ["target"]);
@@ -3619,6 +3658,7 @@ export async function planMergeIncremental<G extends GraphDef>(
       );
     },
     prepared.data.baseReader,
+    explicitPruneTo,
   );
 }
 

@@ -12,7 +12,7 @@ import type {
 import { mergePlanArtifactV1Schema } from "./plan-schema";
 import type { JsonValue } from "./typegraph-internal";
 
-export const MERGE_REVIEW_FORMAT_VERSION = 1 as const;
+export const MERGE_REVIEW_FORMAT_VERSION = 2 as const;
 
 /** Application-owned identity of policy code and all opaque/external dependencies. */
 export type MergeReviewPolicy = Readonly<{
@@ -29,18 +29,23 @@ export type MergeReviewRow = MergePlanEntityRef &
     digest?: string | undefined;
   }>;
 
-/** Conservative baseline: all original rows and the complete identity ledger. */
+/**
+ * V1 records all original rows and the complete identity ledger. V2 records
+ * only plan-relevant references for identity-disabled graphs; revalidation
+ * reads exactly those references and replans the retained candidate.
+ */
 export type MergeReviewBaseline = Readonly<{
   rows: readonly MergeReviewRow[];
   identityDigest: string;
+  scope?: "referenced" | undefined;
 }>;
 
 /**
  * Immutable review evidence, distinct from its single-use execution plan.
- * V1 supports candidate write sets only. Authenticate stored artifacts separately.
+ * Both versions support candidate write sets. Authenticate stored artifacts separately.
  */
 export type MergeReviewArtifact = Readonly<{
-  formatVersion: typeof MERGE_REVIEW_FORMAT_VERSION;
+  formatVersion: 1 | typeof MERGE_REVIEW_FORMAT_VERSION;
   kind: "candidate-write-set";
   digest: MergePlanDigest;
   writeSet: CandidateWriteSet;
@@ -83,7 +88,10 @@ export const mergeReviewPolicySchema = z
 
 export const mergeReviewArtifactSchema = z
   .object({
-    formatVersion: z.literal(MERGE_REVIEW_FORMAT_VERSION),
+    formatVersion: z.union([
+      z.literal(1),
+      z.literal(MERGE_REVIEW_FORMAT_VERSION),
+    ]),
     kind: z.literal("candidate-write-set"),
     digest: z
       .object({ algorithm: z.literal("sha256"), value: digestSchema })
@@ -105,6 +113,7 @@ export const mergeReviewArtifactSchema = z
             .strict(),
         ),
         identityDigest: digestSchema,
+        scope: z.literal("referenced").optional(),
       })
       .strict(),
   })

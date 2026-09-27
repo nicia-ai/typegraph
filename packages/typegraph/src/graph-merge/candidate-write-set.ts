@@ -15,10 +15,15 @@ import {
   captureMergePlanTargetFence,
   planMergeIncremental,
   planMergeIncrementalForEvolution,
+  planMergeIncrementalWithCandidateKeys,
 } from "./merge";
 import type { MergePlanArtifact } from "./plan-schema";
 import type { Result } from "./result";
 import { err, isErr } from "./result";
+import {
+  boundedCandidateKeys,
+  sparseCandidateWorkingCopyStrategy,
+} from "./sparse-candidate-branch";
 import type { GraphDef, Store } from "./typegraph-internal";
 import { storeBackend } from "./typegraph-internal";
 import type { MergeOptions } from "./types";
@@ -214,10 +219,20 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   }
 
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
+  const bounded =
+    args.target.graph.identity === undefined &&
+    args.target.revisionTrackingEnabled;
   try {
-    created = await ingestionBranch(args.target, args.makeBackend, {
-      id: asBranchId(writeSet.sourceId),
-    });
+    created = await ingestionBranch(
+      args.target,
+      args.makeBackend,
+      {
+        id: asBranchId(writeSet.sourceId),
+      },
+      bounded ?
+        sparseCandidateWorkingCopyStrategy(writeSet, args.makeBackend)
+      : undefined,
+    );
   } catch (error) {
     return err(
       new CandidateWriteSetError(
@@ -254,12 +269,18 @@ export async function planCandidateWriteSet<G extends GraphDef>(
         ),
       );
     }
-    return await planMergeIncremental({
+    const mergeArgs = {
       forkPoint: args.target,
       target: args.target,
       branches: [candidate],
       ...(args.options === undefined ? {} : { options: args.options }),
-    });
+    };
+    return bounded ?
+        await planMergeIncrementalWithCandidateKeys(
+          mergeArgs,
+          boundedCandidateKeys(writeSet),
+        )
+      : await planMergeIncremental(mergeArgs);
   } catch (error) {
     return err(
       error instanceof CandidateWriteSetError ? error : (

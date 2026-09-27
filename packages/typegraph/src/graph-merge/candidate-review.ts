@@ -17,6 +17,7 @@ import type { MergePlanArtifact, MergePlanTargetFence } from "./plan-schema";
 import { validateMergePlanArtifact } from "./plan-wire";
 import { err, isErr, ok, type Result } from "./result";
 import {
+  captureReferencedReviewBaseline,
   captureReviewBaseline,
   compareReviewBaseline,
   reviewRowKey,
@@ -42,11 +43,13 @@ export type PlanCandidateWriteSetReviewArgs<G extends GraphDef> =
   PlanCandidateWriteSetArgs<G> &
     Readonly<{
       policy: MergeReviewPolicy;
+      /** Opt in to v2 evidence scoped to the candidate's dependency set. */
+      reviewScope?: "candidate";
     }>;
 
 export type RevalidateCandidateWriteSetReviewArgs<G extends GraphDef> = Omit<
   PlanCandidateWriteSetReviewArgs<G>,
-  "writeSet"
+  "writeSet" | "reviewScope"
 > &
   Readonly<{
     review: unknown;
@@ -57,18 +60,51 @@ export async function planCandidateWriteSetReview<G extends GraphDef>(
   args: PlanCandidateWriteSetReviewArgs<G>,
 ): Promise<Result<MergeReviewArtifact, MergeError>> {
   try {
+    const reviewScope: unknown = args.reviewScope;
+    if (reviewScope !== undefined && reviewScope !== "candidate") {
+      throw new MergeReviewError("Unsupported candidate review scope.", {
+        details: { reviewScope },
+      });
+    }
     const writeSet = CandidateWriteSetSchema.parse(args.writeSet);
     const policy = mergeReviewPolicySchema.parse(args.policy);
     const options = reviewOptionEvidence(args.options);
     const startingFence = await captureMergePlanTargetFence(args.target);
-    const baseline = await captureReviewBaseline(args.target);
+    const referenced = args.reviewScope === "candidate";
+    if (
+      referenced &&
+      (args.target.graph.identity !== undefined ||
+        !args.target.revisionTrackingEnabled)
+    ) {
+      throw new MergeReviewError(
+        "Candidate-scoped review requires an identity-disabled, revision-tracked target.",
+      );
+    }
+    const fullBaseline =
+      referenced ? undefined : await captureReviewBaseline(args.target);
     const planned = await planCandidateWriteSet({ ...args, writeSet });
     if (isErr(planned)) return planned;
     assertReviewPlanFence(startingFence, planned.data);
+    const references =
+      referenced ?
+        withReviewAbsences(
+          { rows: [], identityDigest: await reviewDigest([]) },
+          writeSet,
+          planned.data,
+          args.target.graph,
+        ).rows
+      : undefined;
+    const baseline =
+      references === undefined ? fullBaseline : (
+        await captureReferencedReviewBaseline(args.target, references)
+      );
+    if (baseline === undefined) {
+      throw new MergeReviewError("Unable to capture review baseline.");
+    }
     await assertPlanningFenceUnchanged(args.target, startingFence);
     assertOptionsUnchanged(options, reviewOptionEvidence(args.options));
     const input = {
-      formatVersion: MERGE_REVIEW_FORMAT_VERSION,
+      formatVersion: referenced ? MERGE_REVIEW_FORMAT_VERSION : (1 as const),
       kind: "candidate-write-set" as const,
       writeSet,
       policy,
@@ -140,7 +176,18 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
         differences: policyDifferences,
       });
 
-    const baseline = await captureReviewBaseline(args.target);
+    if (
+      review.baseline.scope === "referenced" &&
+      args.target.graph.identity !== undefined
+    ) {
+      throw new MergeReviewError(
+        "Scoped review evidence requires an identity-disabled graph.",
+      );
+    }
+    const baseline =
+      review.baseline.scope === "referenced" ?
+        await captureReferencedReviewBaseline(args.target, review.baseline.rows)
+      : await captureReviewBaseline(args.target);
     const baselineDifferences = compareReviewBaseline(
       review.baseline,
       baseline,
@@ -187,6 +234,16 @@ export async function revalidateCandidateWriteSetReview<G extends GraphDef>(
 
 async function validateReview(input: unknown): Promise<MergeReviewArtifact> {
   const review = mergeReviewArtifactSchema.parse(input);
+  if (
+    (review.formatVersion === 1 && review.baseline.scope !== undefined) ||
+    (review.formatVersion === MERGE_REVIEW_FORMAT_VERSION &&
+      review.baseline.scope !== "referenced")
+  ) {
+    throw new MergeReviewError(
+      "The review baseline scope does not match its format version.",
+      { details: { reason: "invalid-baseline-scope" } },
+    );
+  }
   // Candidate staging schemas normalize defaults and strip unknown transport
   // fields. Stored review evidence must already be normalized: otherwise an
   // added field could disappear before its digest is checked.

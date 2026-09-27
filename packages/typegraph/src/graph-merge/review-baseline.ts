@@ -8,17 +8,88 @@ import type {
   MergeReviewDifference,
   MergeReviewRow,
 } from "./review-schema";
+import type { EdgeRow, NodeRow } from "./state-diff";
 import {
   createGraphEdgeKindReader,
   createGraphNodeKindReader,
 } from "./state-diff";
 import type { GraphDef, Store } from "./typegraph-internal";
 import {
+  batchPointReadVerdict,
   getEdgeKinds,
+  getEdgeRowsByIds,
   getNodeKinds,
+  getNodeRowsByIds,
   storeBackend,
   storeRuntime,
 } from "./typegraph-internal";
+
+/** Read only the references the candidate and resolved plan could depend on. */
+export async function captureReferencedReviewBaseline<G extends GraphDef>(
+  target: Store<G>,
+  references: readonly MergeReviewRow[],
+): Promise<MergeReviewBaseline> {
+  const backend = storeBackend(target);
+  const verdict = batchPointReadVerdict(backend);
+  const rows: MergeReviewRow[] = [];
+  const nodesByKind = new Map<string, string[]>();
+  const edgeIds = new Set<string>();
+  for (const reference of references) {
+    if (reference.role === "node") {
+      const ids = nodesByKind.get(reference.kind) ?? [];
+      ids.push(reference.id);
+      nodesByKind.set(reference.kind, ids);
+    } else {
+      edgeIds.add(reference.id);
+    }
+  }
+  const nodeRows = new Map<string, NodeRow>();
+  for (const [kind, ids] of nodesByKind) {
+    const fetched = await getNodeRowsByIds(
+      backend,
+      verdict,
+      target.graphId,
+      kind,
+      ids,
+    );
+    for (const row of fetched.values()) {
+      nodeRows.set(JSON.stringify([kind, row.id]), row);
+    }
+  }
+  const fetchedEdges = await getEdgeRowsByIds(
+    backend,
+    verdict,
+    target.graphId,
+    [...edgeIds],
+  );
+  for (const reference of references) {
+    const row: NodeRow | EdgeRow | undefined =
+      reference.role === "node" ?
+        nodeRows.get(JSON.stringify([reference.kind, reference.id]))
+      : fetchedEdges.get(reference.id);
+    if (
+      row === undefined ||
+      (reference.role === "edge" && row.kind !== reference.kind)
+    ) {
+      rows.push({
+        role: reference.role,
+        kind: reference.kind,
+        id: reference.id,
+      });
+      continue;
+    }
+    const digest = await reviewDigest({
+      ...row,
+      props: parseRowProps(row.props),
+    });
+    rows.push({ ...reference, digest });
+  }
+  return {
+    rows,
+    identityDigest: await reviewDigest([]),
+    scope: "referenced",
+  };
+}
 
 export function reviewRowKey(row: MergeReviewRow): string {
   return JSON.stringify([row.role, row.kind, row.id]);

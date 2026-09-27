@@ -9,14 +9,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  BaseVersionMismatchError,
   BranchError,
   type CandidateWriteSet,
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
   planCandidateWriteSet,
+  planMergeIncremental,
 } from "../../src/graph-merge";
+import { ingestionBranch } from "../../src/graph-merge/ingestion-branch";
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../src/graph-merge/result";
+import { asBranchId } from "../../src/graph-merge/types";
+import { importGraph } from "../../src/interchange";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend, getStoreBackend } from "./test-utils";
 
@@ -161,6 +166,170 @@ describe("candidate write-set planning", () => {
     expect(
       await people.getById(asNodeId<typeof Person>("accepted")),
     ).toMatchObject({ name: "Accepted", externalKey: "shared" });
+  });
+
+  it("matches the full clone for overlapping and unrelated target rows", async () => {
+    const { target, writeSet } = await setup();
+    await target.nodes.Person.create(
+      { name: "Unrelated", externalKey: "unrelated" },
+      { id: "unrelated", validFrom: "2026-01-01T00:00:00.000Z" },
+    );
+    const updated = {
+      ...writeSet,
+      nodes: [
+        ...writeSet.nodes,
+        {
+          kind: "Person",
+          id: "accepted",
+          properties: { name: "Changed", externalKey: "shared" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    } satisfies CandidateWriteSet;
+    const bounded = unwrap(
+      await planCandidateWriteSet({
+        target,
+        makeBackend: candidateBackend().makeBackend,
+        writeSet: updated,
+        options,
+      }),
+    );
+    const fullBranch = unwrap(
+      await ingestionBranch(target, candidateBackend().makeBackend, {
+        id: asBranchId(updated.sourceId),
+      }),
+    );
+    try {
+      const imported = await importGraph(
+        fullBranch,
+        {
+          formatVersion: "2.0",
+          exportedAt: "1970-01-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: updated.nodes,
+          edges: updated.edges,
+        },
+        {
+          onConflict: "update",
+          onUnknownProperty: "error",
+          validateReferences: true,
+          refreshStatistics: false,
+        },
+      );
+      expect(imported.success).toBe(true);
+      const full = unwrap(
+        await planMergeIncremental({
+          forkPoint: target,
+          target,
+          branches: [fullBranch],
+          options,
+        }),
+      );
+      expect(canonicalMergePlanJson(bounded)).toBe(
+        canonicalMergePlanJson(full),
+      );
+    } finally {
+      await fullBranch.close();
+    }
+  });
+
+  it("refuses a target write during bounded point reads", async () => {
+    const { target, writeSet } = await setup();
+    const getNodes = baseBackend.getNodes;
+    if (getNodes === undefined) throw new Error("Expected batched point read");
+    vi.spyOn(baseBackend, "getNodes").mockImplementationOnce(
+      async (graphId, kind, ids) => {
+        const rows = await getNodes(graphId, kind, ids);
+        await target.nodes.Person.create(
+          { name: "Concurrent", externalKey: "concurrent" },
+          { id: "concurrent" },
+        );
+        return rows;
+      },
+    );
+    const result = await planCandidateWriteSet({
+      target,
+      makeBackend: candidateBackend().makeBackend,
+      writeSet,
+      options,
+    });
+    expect(isErr(result)).toBe(true);
+    if (isErr(result))
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    expect(
+      await target.nodes.Person.getById(asNodeId<typeof Person>("candidate")),
+    ).toBeUndefined();
+  });
+
+  it("keeps planning reads and staging writes bounded as unrelated rows grow", async () => {
+    const { target, writeSet } = await setup();
+    async function measure() {
+      const getNodes = baseBackend.getNodes;
+      if (getNodes === undefined)
+        throw new Error("Expected batched point read");
+      let requestedIds = 0;
+      let returnedRows = 0;
+      const pointRead = vi
+        .spyOn(baseBackend, "getNodes")
+        .mockImplementation(async (graphId, kind, ids) => {
+          requestedIds += ids.length;
+          const rows = await getNodes(graphId, kind, ids);
+          returnedRows += rows.length;
+          return rows;
+        });
+      const nodeScan = vi.spyOn(baseBackend, "findNodesByKind");
+      const edgeScan = vi.spyOn(baseBackend, "findEdgesByKind");
+      const acrossKinds = baseBackend.findNodesAcrossKinds;
+      const acrossKindsScan =
+        acrossKinds === undefined ? undefined : (
+          vi.spyOn(baseBackend, "findNodesAcrossKinds")
+        );
+      const targetWrite = vi.spyOn(baseBackend, "insertNode");
+      const fixture = createSqliteMergeBackend();
+      const stagingWrite = vi.spyOn(fixture.backend, "insertNode");
+      try {
+        unwrap(
+          await planCandidateWriteSet({
+            target,
+            makeBackend: () => Promise.resolve(fixture.backend),
+            writeSet,
+            options,
+          }),
+        );
+        return {
+          requestedIds,
+          returnedRows,
+          nodeScans: nodeScan.mock.calls.length,
+          edgeScans: edgeScan.mock.calls.length,
+          acrossKindsScans: acrossKindsScan?.mock.calls.length ?? 0,
+          targetWrites: targetWrite.mock.calls.length,
+          stagingWrites: stagingWrite.mock.calls.length,
+        };
+      } finally {
+        pointRead.mockRestore();
+        nodeScan.mockRestore();
+        edgeScan.mockRestore();
+        acrossKindsScan?.mockRestore();
+        targetWrite.mockRestore();
+        stagingWrite.mockRestore();
+      }
+    }
+    const before = await measure();
+    for (let index = 0; index < 60; index += 1) {
+      await target.nodes.Person.create(
+        { name: `Unrelated ${index}`, externalKey: `unrelated-${index}` },
+        { id: `unrelated-${index}` },
+      );
+    }
+    const after = await measure();
+    expect(after).toEqual(before);
+    expect(after).toMatchObject({
+      nodeScans: 0,
+      edgeScans: 0,
+      acrossKindsScans: 0,
+      targetWrites: 0,
+    });
+    expect(after.returnedRows).toBeLessThanOrEqual(2);
   });
 
   it("does not refresh statistics for a disposable ingestion clone", async () => {
