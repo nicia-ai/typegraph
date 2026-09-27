@@ -1525,6 +1525,9 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
     validTo?: string;
 }>;
 
+// @public
+export function createPgvectorStrategy(namespace: string): VectorStrategy;
+
 // @public (undocumented)
 export function createQueryBuilder<G extends GraphDef>(graphId: string, registry: KindRegistry, options?: CreateQueryBuilderOptions): InitialQueryBuilder<G>;
 
@@ -6691,7 +6694,7 @@ export type PersonalizedPageRankSeed<G extends GraphDef> = Readonly<{
     weight?: number;
 }>;
 
-// @public (undocumented)
+// @public
 export const pgvectorStrategy: VectorStrategy;
 
 // @public

@@ -4742,7 +4742,9 @@ export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
 // @public
 export type PostgresWorkingCopyOptions<G extends GraphDef> = Readonly<{
     control: GraphBackend;
-    connect: (names: PostgresTableNames) => Promise<GraphBackend>;
+    connect: (names: PostgresTableNames, allocation?: Readonly<{
+        vectorStrategy: VectorStrategy;
+    }>) => Promise<GraphBackend>;
     sourceTableNames?: Partial<PostgresTableNames>;
     reopenOptions?: (graph: G) => PostgresWorkingCopyReopenOptions;
     refreshStatistics?: boolean;
