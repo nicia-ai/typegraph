@@ -263,6 +263,22 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       endedBy?: Readonly<{ kind: string; id: string }> | undefined;
     }>[]
   >;
+  /** Current-state or archival assertions incident to any supplied endpoint. */
+  identityAssertionsTouchingAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+    mode?: "state" | "archival",
+  ) => Promise<
+    readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
+    }>[]
+  >;
   readIdentityAssertionPageAtTarget: (
     target: GraphBackend | TransactionBackend,
     mode: "state" | "archival",

@@ -176,6 +176,7 @@ import {
   lockIdentityGraph,
   readIdentityAssertionPageAtTarget,
   readIdentityAssertionsForInterchange,
+  readIdentityAssertionsTouchingAtTarget,
   rebuildIdentityClosureForContext,
   refKey,
   removeIdentityKindsForContext,
@@ -1677,6 +1678,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.readCurrentIdentityAssertions(mode, options),
       identityAssertionsAtTarget: (target, mode) =>
         this.identityAssertionsAtTarget(target, mode),
+      identityAssertionsTouchingAtTarget: (target, references, mode) =>
+        this.identityAssertionsTouchingAtTarget(target, references, mode),
       readIdentityAssertionPageAtTarget: (target, mode, options) =>
         this.readIdentityAssertionPageAtTarget(target, mode, options),
       lockIdentityImportTarget: (target) =>
@@ -1886,6 +1889,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (this.#graph.identity === undefined) return Promise.resolve([]);
     return readIdentityAssertionsForInterchange(
       this.#identityContext(target),
+      mode,
+    );
+  }
+
+  /** @internal Reads current or archival identity truth incident to endpoints. */
+  identityAssertionsTouchingAtTarget(
+    target: GraphBackend | TransactionBackend,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+    mode: "state" | "archival" = "state",
+  ): Promise<readonly IdentityTransferAssertion[]> {
+    if (this.#graph.identity === undefined || references.length === 0) {
+      return Promise.resolve([]);
+    }
+    return readIdentityAssertionsTouchingAtTarget(
+      this.#identityContext(target),
+      target,
+      references,
       mode,
     );
   }

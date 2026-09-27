@@ -3,11 +3,16 @@ import { ConfigurationError } from "../errors";
 import { getDialect } from "../query/dialect";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { chunk } from "../utils/array";
+import { compareCodePoints } from "../utils/compare";
+import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
+import { identityReferenceKey } from "./reference";
 import {
   normalizeIdentityAssertionRow,
   type RawIdentityAssertionRow,
   toTransferAssertion,
 } from "./row-codec";
+import { referenceCondition } from "./service-read";
 import {
   type IdentityAssertionPage,
   type IdentityAssertionPageOptions,
@@ -19,7 +24,71 @@ import {
   identityChunkSize,
   type IdentityTarget,
   MAX_REFERENCE_CHUNK_SIZE,
+  type PlainNodeRef,
 } from "./sql-target";
+
+/** Reads the interchange-visible assertion ledger incident to endpoint keys. */
+export async function readIdentityAssertionsTouchingAtTarget<
+  G extends GraphDef,
+>(
+  ctx: IdentityServiceContext<G>,
+  target: IdentityTarget,
+  references: readonly PlainNodeRef[],
+  mode: "state" | "archival",
+): Promise<readonly IdentityTransferAssertion[]> {
+  const uniqueReferences = new Map<string, PlainNodeRef>();
+  for (const reference of references) {
+    uniqueReferences.set(identityReferenceKey(reference), reference);
+  }
+  if (uniqueReferences.size === 0) return [];
+  const chunkSize = identityChunkSize(target, {
+    fixedParameters: 16,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 4,
+  });
+  const assertionsById = new Map<string, IdentityTransferAssertion>();
+  for (const referenceChunk of chunk(
+    [...uniqueReferences.values()],
+    chunkSize,
+  )) {
+    const aMatches = referenceCondition(
+      sql`identity_assertions.a_kind`,
+      sql`identity_assertions.a_id`,
+      referenceChunk,
+    );
+    const bMatches = referenceCondition(
+      sql`identity_assertions.b_kind`,
+      sql`identity_assertions.b_id`,
+      referenceChunk,
+    );
+    const rows = await target.execute<RawIdentityAssertionRow>(
+      asCompiledRowsSql(sql`
+        SELECT ${IDENTITY_ASSERTION_COLUMNS}
+        FROM ${ctx.schema.identityAssertionsTable} identity_assertions
+        WHERE identity_assertions.graph_id = ${ctx.graphId}
+          ${interchangeAssertionVisibility(mode)}
+          AND (${aMatches} OR ${bMatches})
+      `),
+    );
+    for (const row of rows) {
+      const assertion = toTransferAssertion(normalizeIdentityAssertionRow(row));
+      assertionsById.set(assertion.id, assertion);
+    }
+  }
+  return [...assertionsById.values()].toSorted((left, right) =>
+    compareCodePoints(left.id, right.id),
+  );
+}
+
+/** The shared interchange visibility rule for state and archival reads. */
+function interchangeAssertionVisibility(
+  mode: "state" | "archival",
+): SqlFragment {
+  return sql`
+    AND identity_assertions.deleted_at IS NULL
+    ${mode === "state" ? sql`AND identity_assertions.valid_to IS NULL` : sql``}
+  `;
+}
 
 /**
  * The assertion-id expression this read scans and paginates by, pinned to
@@ -128,16 +197,11 @@ export async function readIdentityAssertionPageAtTarget<G extends GraphDef>(
       FROM ${ctx.schema.identityAssertionsTable} identity_assertions
       ${liveEndpointJoins}
       WHERE identity_assertions.graph_id = ${ctx.graphId}
-        AND identity_assertions.deleted_at IS NULL
+        ${interchangeAssertionVisibility(mode)}
         ${
           options.after === undefined ?
             sql``
           : sql`AND ${assertionIdKey} > ${options.after}`
-        }
-        ${
-          mode === "state" ?
-            sql`AND identity_assertions.valid_to IS NULL`
-          : sql``
         }
         ${kindFilter}
       ORDER BY ${assertionIdKey} ASC

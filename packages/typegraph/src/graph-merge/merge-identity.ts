@@ -980,14 +980,10 @@ async function relevantLedgerAssertions<G extends GraphDef>(
   memberKeys: ReadonlySet<MergeKey>,
   backend: GraphBackend | TransactionBackend,
 ): Promise<readonly LedgerAssertion[]> {
-  const current = await storeRuntime(target).identityAssertionsAtTarget(
+  return storeRuntime(target).identityAssertionsTouchingAtTarget(
     backend,
+    [...memberKeys].map((key) => ({ kind: kindOf(key), id: idOf(key) })),
     "state",
-  );
-  return current.filter(
-    (assertion) =>
-      memberKeys.has(mergeKey(assertion.a.kind, assertion.a.id)) ||
-      memberKeys.has(mergeKey(assertion.b.kind, assertion.b.id)),
   );
 }
 

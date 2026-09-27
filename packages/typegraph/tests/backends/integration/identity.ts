@@ -1144,6 +1144,83 @@ export function registerIdentityIntegrationTests(
       );
     });
 
+    it("reads only current or archival identity assertions touching requested endpoints", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create({ name: "Scoped person" });
+      const company = await store.nodes.Company.create({
+        name: "Scoped company",
+      });
+      const unrelated = await store.nodes.Person.create({
+        name: "Unrelated assertion endpoint",
+      });
+      const endedEndpoint = await store.nodes.Product.create({
+        name: "Ended assertion endpoint",
+        price: 2,
+        category: "test",
+      });
+      const current = await store.identity.assertSame(person, company);
+      const ended = await store.identity.assertDifferent(
+        company,
+        endedEndpoint,
+      );
+      await store.identity.retractDifferentAssertion(company, endedEndpoint);
+      const outside = await store.identity.assertDifferent(person, unrelated);
+
+      const futureValidFrom = "2099-01-01T00:00:00.000Z";
+      const identityAssertionsTable = requireDefined(
+        requireDefined(store.backend.tableNames).identityAssertions,
+      );
+      const executeStatement = requireDefined(store.backend.executeStatement);
+      await executeStatement(
+        asCompiledStatementSql(sql`
+          UPDATE ${sql.identifier(identityAssertionsTable)}
+          SET valid_from = ${futureValidFrom}, id = ${"z-mixed"}
+          WHERE graph_id = ${store.graphId} AND id = ${current.assertion.id}
+        `),
+      );
+      await executeStatement(
+        asCompiledStatementSql(sql`
+          UPDATE ${sql.identifier(identityAssertionsTable)}
+          SET id = ${"A-mixed"}
+          WHERE graph_id = ${store.graphId} AND id = ${ended.assertion.id}
+        `),
+      );
+
+      const runtime = storeRuntime(store);
+      const currentRows = await runtime.identityAssertionsTouchingAtTarget(
+        store.backend,
+        [{ kind: "Company", id: company.id }],
+        "state",
+      );
+      const archivalRows = await runtime.identityAssertionsTouchingAtTarget(
+        store.backend,
+        [{ kind: "Company", id: company.id }],
+        "archival",
+      );
+
+      expect(currentRows.map((assertion) => assertion.id).toSorted()).toEqual([
+        "z-mixed",
+      ]);
+      expect(currentRows[0]?.validFrom).toBe(futureValidFrom);
+      expect(archivalRows.map((assertion) => assertion.id).toSorted()).toEqual([
+        "A-mixed",
+        "z-mixed",
+      ]);
+      expect(archivalRows.map((assertion) => assertion.id)).not.toContain(
+        outside.assertion.id,
+      );
+
+      const reverseEndpointRows =
+        await runtime.identityAssertionsTouchingAtTarget(
+          store.backend,
+          [{ kind: "Product", id: endedEndpoint.id }],
+          "archival",
+        );
+      expect(reverseEndpointRows.map((assertion) => assertion.id)).toEqual([
+        "A-mixed",
+      ]);
+    });
+
     it("filters identity assertions with omitted endpoint kinds", async () => {
       const store = context.getStore();
       const person = await store.nodes.Person.create(
