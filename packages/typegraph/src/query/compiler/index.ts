@@ -209,6 +209,8 @@ export type CompileQueryOptions = Readonly<{
   readInstant?: ReadInstantMode | undefined;
   /** Equal-id behavior for historical identity traversal reconstruction. */
   identitySameIdAcrossKinds?: "fold" | "ignore" | undefined;
+  /** Registered node kinds allowed to conduct historical identity. */
+  identityRegisteredKinds?: readonly string[] | undefined;
   /**
    * Whether the active backend can compute a bounded transitive closure in
    * one round trip. Defaults to {@link COMPILER_DEFAULT_RECURSIVE_TRAVERSAL}
@@ -234,6 +236,7 @@ export const COMPILE_QUERY_OPTION_KEYS = [
   "recordedReadBinding",
   "readInstant",
   "identitySameIdAcrossKinds",
+  "identityRegisteredKinds",
   "recursiveTraversal",
 ] as const;
 
@@ -358,6 +361,9 @@ function compileQueryInExpressionContext(
       {}
     : { recordedReadBinding: options_.recordedReadBinding }),
     identitySameIdAcrossKinds: options_.identitySameIdAcrossKinds ?? "fold",
+    ...(options_.identityRegisteredKinds === undefined ?
+      {}
+    : { identityRegisteredKinds: options_.identityRegisteredKinds }),
     compileQuery: (subAst, subGraphId) =>
       compileQuery(
         inheritRecordedAsOf(subAst, ast.recordedAsOf),
@@ -665,6 +671,9 @@ export function propagateOptions(
     : {
         identitySameIdAcrossKinds: options_.identitySameIdAcrossKinds,
       }),
+    ...(options_.identityRegisteredKinds === undefined ?
+      {}
+    : { identityRegisteredKinds: options_.identityRegisteredKinds }),
   };
 }
 

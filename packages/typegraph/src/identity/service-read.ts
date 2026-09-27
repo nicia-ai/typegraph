@@ -570,6 +570,7 @@ async function loadHistoricalVisibleMembers(
   ref: PlainNodeRef,
   coordinate: ReadCoordinate,
   sameIdAcrossKinds: "fold" | "ignore",
+  allowedKinds: ReadonlySet<string>,
 ): Promise<readonly PlainNodeRef[]> {
   const classes = await loadHistoricalClasses(
     target,
@@ -578,6 +579,7 @@ async function loadHistoricalVisibleMembers(
     [ref],
     coordinate,
     sameIdAcrossKinds,
+    allowedKinds,
   );
   return requireDefined(classes.get(refKey(ref))).visible;
 }
@@ -595,6 +597,7 @@ export async function loadHistoricalClasses(
   references: readonly PlainNodeRef[],
   coordinate: ReadCoordinate,
   sameIdAcrossKinds: "fold" | "ignore",
+  allowedKinds: ReadonlySet<string>,
 ): Promise<ReadonlyMap<string, HistoricalClass>> {
   const uniqueByKey = new Map<string, PlainNodeRef>();
   for (const ref of references) uniqueByKey.set(refKey(ref), ref);
@@ -611,7 +614,7 @@ export async function loadHistoricalClasses(
   );
   if (uniqueReferences.length === 0) return emptyClasses;
   const chunkSize = identityChunkSize(target, {
-    fixedParameters: 24,
+    fixedParameters: 24 + allowedKinds.size,
     maxItems: MAX_REFERENCE_CHUNK_SIZE,
     parametersPerItem: 2,
   });
@@ -625,6 +628,7 @@ export async function loadHistoricalClasses(
         refChunk,
         coordinate,
         sameIdAcrossKinds,
+        allowedKinds,
       );
       for (const [key, value] of classes) combined.set(key, value);
     }
@@ -642,6 +646,7 @@ export async function loadHistoricalClasses(
     coordinate: sqlCoordinate,
     seedSource: sql`VALUES ${seeds}`,
     sameIdAcrossKinds,
+    allowedKinds: [...allowedKinds],
     recursiveTraversal: resolveRecursiveTraversal(target.capabilities),
   });
   const rows = await target.execute<RawHistoricalClassMemberRow>(
@@ -701,6 +706,7 @@ export async function loadHistoricalClasses(
 export function visibleMembersAtCoordinate<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   ref: PlainNodeRef,
+  allowedKinds: ReadonlySet<string>,
 ): Promise<readonly PlainNodeRef[]> {
   const { coordinate } = ctx;
   if (coordinate === undefined || isCurrentClosureCoordinate(coordinate)) {
@@ -713,6 +719,7 @@ export function visibleMembersAtCoordinate<G extends GraphDef>(
     ref,
     coordinate,
     ctx.sameIdAcrossKinds,
+    allowedKinds,
   );
 }
 

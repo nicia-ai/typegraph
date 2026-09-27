@@ -216,6 +216,7 @@ export function historicalIdentityReconstructionCtes(
     coordinate: HistoricalIdentitySqlCoordinate;
     seedSource: SqlFragment;
     sameIdAcrossKinds: "fold" | "ignore";
+    allowedKinds?: readonly string[];
     recursiveTraversal: RecursiveTraversalVerdict;
   }>,
 ): SqlFragment {
@@ -234,8 +235,26 @@ export function historicalIdentityReconstructionCtes(
     input.coordinate,
     "same",
   );
+  const allowedKinds =
+    input.allowedKinds === undefined ? undefined
+    : input.allowedKinds.length === 0 ? sql`SELECT NULL WHERE 1 = 0`
+    : sql`VALUES ${sql.join(
+        input.allowedKinds.map((kind) => sql`(${kind})`),
+        sql`, `,
+      )}`;
+  const allowedKindPredicate =
+    input.allowedKinds === undefined ? sql`1 = 1`
+    : input.allowedKinds.length === 0 ? sql`1 = 0`
+    : sql`EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = n.kind)`;
+  const assertionKindsPredicate =
+    input.allowedKinds === undefined ? sql`1 = 1`
+    : input.allowedKinds.length === 0 ? sql`1 = 0`
+    : sql`
+      EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = a_kind)
+            AND EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = b_kind)
+    `;
   const sameIdEdges =
-    input.sameIdAcrossKinds === "fold" ?
+    input.sameIdAcrossKinds === "fold" && input.allowedKinds?.length !== 0 ?
       sql`
         UNION ALL
         SELECT left_node.kind, left_node.id, right_node.kind, right_node.id
@@ -245,17 +264,28 @@ export function historicalIdentityReconstructionCtes(
          AND right_node.kind <> left_node.kind
         WHERE ${structuralFoldVisibilitySql(input.coordinate, "left_node")}
           AND ${structuralFoldVisibilitySql(input.coordinate, "right_node")}
+          ${
+            input.allowedKinds === undefined ?
+              sql``
+            : sql`
+              AND EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = left_node.kind)
+              AND EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = right_node.kind)
+            `
+          }
       `
     : sql``;
   // `seeds` is declared after `identity_edges` so a seed source may itself read
   // the edge relation (see {@link historicalIdentityPeerClassQuery}); every
   // entry still references only entries declared before it.
   return sql`
+    ${allowedKinds === undefined ? sql`` : sql`allowed_kinds(kind) AS (${allowedKinds}),`}
     node_snapshot(kind, id, valid_from, valid_to, created_at, deleted_at) AS (
       ${nodes}
     ),
     same_assertions(a_kind, a_id, b_kind, b_id) AS (
-      SELECT a_kind, a_id, b_kind, b_id FROM (${assertions}) identity_assertions
+      SELECT a_kind, a_id, b_kind, b_id
+      FROM (${assertions}) identity_assertions
+      WHERE ${assertionKindsPredicate}
     ),
     identity_edges(a_kind, a_id, b_kind, b_id) AS (
       SELECT a_kind, a_id, b_kind, b_id FROM same_assertions
@@ -271,7 +301,8 @@ export function historicalIdentityReconstructionCtes(
       FROM seeds
       JOIN node_snapshot n
         ON n.kind = seeds.seed_kind AND n.id = seeds.seed_id
-      WHERE ${identityNodeVisibilitySql(input.coordinate, "n")}
+      WHERE ${allowedKindPredicate}
+        AND ${identityNodeVisibilitySql(input.coordinate, "n")}
       UNION
       SELECT member.seed_kind, member.seed_id, edge.b_kind, edge.b_id
       FROM identity_members member
@@ -320,6 +351,7 @@ export function historicalIdentityPeerClassQuery(
     graphId: string;
     coordinate: HistoricalIdentitySqlCoordinate;
     sameIdAcrossKinds: "fold" | "ignore";
+    allowedKinds?: readonly string[];
     recursiveTraversal: RecursiveTraversalVerdict;
   }>,
 ): SqlFragment {

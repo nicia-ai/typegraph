@@ -19,7 +19,7 @@ export type IdentityClassCursorScope = Readonly<{
 
 function identityClassCursorScope(scope: IdentityClassCursorScope): string {
   const coordinate = scope.coordinate;
-  return JSON.stringify([
+  const canonicalScope = JSON.stringify([
     "identity-classes",
     scope.graphId,
     coordinate?.valid.mode ?? "current",
@@ -29,6 +29,18 @@ function identityClassCursorScope(scope: IdentityClassCursorScope): string {
       compareCodePoints(left, right),
     ),
   ]);
+  return fnv1a128Hex(canonicalScope);
+}
+
+/** Fixed-width FNV-1a digest keeps cursor size independent of kind count. */
+function fnv1a128Hex(input: string): string {
+  const mask = (1n << 128n) - 1n;
+  let hash = 0x6c_62_27_2e_07_bb_01_42_62_b8_21_75_62_95_c5_8dn;
+  for (const byte of new TextEncoder().encode(input)) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x00_00_00_00_01_00_00_00_00_00_00_00_00_00_01_3bn) & mask;
+  }
+  return hash.toString(16).padStart(32, "0");
 }
 
 /** Encode a class representative together with the query scope that produced it. */

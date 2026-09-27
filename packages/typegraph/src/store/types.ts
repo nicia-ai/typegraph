@@ -36,7 +36,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
-import type { IdentitySurface, IdentityWriteSummary } from "../identity/types";
+import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
 import type {
   DynamicEdgeAccessor,
@@ -2306,7 +2306,7 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
   ) => DynamicNodeCollection<K> | undefined;
 }> &
   (G["identity"] extends GraphIdentityConfig ?
-    Readonly<{ identity: IdentitySurface<G> }>
+    Readonly<{ identity: IdentityFacade<G> }>
   : Readonly<Record<never, never>>);
 
 /**

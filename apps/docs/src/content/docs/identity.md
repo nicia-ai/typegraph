@@ -161,13 +161,19 @@ endpoints and either the assertion or `type: "same-id-fold"`. It returns `[]`
 for one visible reference and `undefined` when the references are distinct or
 not visible at the read coordinate. Use `store.asOf(instant).identity` for a
 historical explanation.
+Historical identity reads and identity-expanded traversals use the kinds
+registered on the current Store. Assertions involving a removed kind remain
+in recorded history but no longer connect active classes.
 
 `classes({ limit, kinds?, cursor? })` lists visible classes, including
 singletons, in representative order. A kind filter selects classes containing
 at least one visible member of the requested kinds; each result still includes
 all of that class's visible members. Pass `nextCursor` to the next call until
-it is absent. The cursor is exclusive and applies to the same graph and read
-coordinate. At current coordinates, the database finds visible representatives
+it is absent. The cursor is exclusive and applies to the same graph, read
+coordinate, and kind filter. When `kinds` is omitted, the scan uses the
+registered runtime kinds present when each page is requested; adding a runtime
+kind during that scan changes the filter and invalidates its cursor. At current
+coordinates, the database finds visible representatives
 for the page and expands members only for those classes; discovering
 representatives still examines the visible node set. Historical coordinates
 reconstruct all visible classes before applying the page boundary. For paging

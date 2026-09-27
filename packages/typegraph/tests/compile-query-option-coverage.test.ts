@@ -48,6 +48,7 @@ function fullyPopulatedOptions(): Required<CompileQueryOptions> {
     recordedReadBinding: recordedRelation({ schema: DEFAULT_SQL_SCHEMA }),
     readInstant: "placeholder",
     identitySameIdAcrossKinds: "ignore",
+    identityRegisteredKinds: ["Document"],
     recursiveTraversal: assumeRecursiveTraversalSupported(
       "compile-query-option-coverage test",
     ),

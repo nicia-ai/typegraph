@@ -185,9 +185,9 @@ import {
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
 import type {
+  IdentityFacade,
   IdentityNode,
-  IdentityReadSurface,
-  IdentitySurface,
+  IdentityReadFacade,
 } from "../identity/types";
 import { type VectorIndexDeclaration } from "../indexes/types";
 import {
@@ -723,13 +723,13 @@ function defineUnavailableSqlGuard(context: object, guard: () => never): void {
  */
 type StoreIdentityAccess<G extends GraphDef> =
   G["identity"] extends GraphIdentityConfig ?
-    Readonly<{ identity: IdentitySurface<G> }>
+    Readonly<{ identity: IdentityFacade<G> }>
   : Readonly<Record<never, never>>;
 
 /** The same conditional presence for the read-only pinned views. */
 export type ViewIdentityAccess<G extends GraphDef> =
   G["identity"] extends GraphIdentityConfig ?
-    Readonly<{ identity: IdentityReadSurface<G> }>
+    Readonly<{ identity: IdentityReadFacade<G> }>
   : Readonly<Record<never, never>>;
 
 export type NodeCollectionLookup = <const K extends string>(
@@ -1726,12 +1726,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * The facade is memoized per store, so it must not close over any state a
    * lifecycle operation can move — see `#identityContext`.
    */
-  get identity(): IdentitySurface<G> {
+  get identity(): IdentityFacade<G> {
     this.#requireIdentityEnabled(
       'Add identity: { sameIdAcrossKinds: "fold" } to defineGraph(...).',
     );
     const existing = IDENTITY_FACADES.get(this);
-    if (existing !== undefined) return existing as IdentitySurface<G>;
+    if (existing !== undefined) return existing as IdentityFacade<G>;
     const facade = createIdentityFacade(this.#identityContext(this.#backend));
     IDENTITY_FACADES.set(this, facade);
     return facade;
@@ -1751,7 +1751,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /** @internal Builds the identity read facade for a pinned StoreView. */
-  identityAtCoordinate(coordinate: ReadCoordinate): IdentityReadSurface<G> {
+  identityAtCoordinate(coordinate: ReadCoordinate): IdentityReadFacade<G> {
     this.#requireIdentityEnabled();
     // A recorded-time identity read must reconstruct from the SAME recorded
     // relation the coordinate's node/edge reads use — binding-aware, so an
@@ -4536,7 +4536,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         : wrapTransactionIdentity(
             (
               context as unknown as TransactionContext<G> & {
-                identity: IdentitySurface<G>;
+                identity: IdentityFacade<G>;
               }
             ).identity,
             scopeRecorder,

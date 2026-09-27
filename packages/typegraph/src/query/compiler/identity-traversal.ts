@@ -112,6 +112,9 @@ export function compileIdentityClassCte(
     graphId,
     coordinate,
     sameIdAcrossKinds: ctx.identitySameIdAcrossKinds ?? "fold",
+    ...(ctx.identityRegisteredKinds === undefined ?
+      {}
+    : { allowedKinds: ctx.identityRegisteredKinds }),
     recursiveTraversal,
   });
   // MATERIALIZED is load-bearing, not a hint. Left inlinable, SQLite pushes the

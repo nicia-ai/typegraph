@@ -33,6 +33,7 @@ import { isSeparated } from "./separation";
 import type { DifferentAssertionIndex } from "./service-components";
 import {
   classHasDisjointKinds,
+  closureMismatchError,
   identityActiveKinds,
   indexDifferentAssertion,
   kindSetsHaveDisjointKinds,
@@ -87,11 +88,11 @@ import {
   type IdentityAssertionResult,
   type IdentityClassPage,
   type IdentityClassPageOptions,
+  type IdentityFacade,
   type IdentityNodeRefInput,
-  type IdentityReadSurface,
+  type IdentityReadFacade,
   type IdentityRelation,
   type IdentitySamePathStep,
-  type IdentitySurface,
   type IdentityValidityWindow,
 } from "./types";
 import {
@@ -773,14 +774,14 @@ async function loadCurrentIdentityClassPage<G extends GraphDef>(
 
 export function createIdentityReadFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
-): IdentityReadSurface<G> {
+): IdentityReadFacade<G> {
+  const activeKinds = identityActiveKinds(ctx.registry);
   return {
     async classes(options: IdentityClassPageOptions) {
       if (!Number.isSafeInteger(options.limit) || options.limit < 1)
         throw new ConfigurationError(
           "identity.classes limit must be a positive safe integer.",
         );
-      const activeKinds = identityActiveKinds(ctx.registry);
       const allKinds = [...activeKinds];
       const kinds = options.kinds ?? allKinds;
       for (const kind of kinds) {
@@ -852,11 +853,10 @@ export function createIdentityReadFacade<G extends GraphDef>(
         seeds,
         ctx.coordinate,
         ctx.sameIdAcrossKinds,
+        activeKinds,
       );
       for (const value of historical.values()) {
-        const members = value.visible.filter((member) =>
-          activeKinds.has(member.kind),
-        );
+        const members = value.visible;
         if (members.length === 0) continue;
         if (!members.some((member) => kinds.includes(member.kind))) continue;
         const representative = members[0];
@@ -907,6 +907,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const members = await visibleMembersAtCoordinate(
         ctx,
         registeredPlainRef(ctx, input),
+        activeKinds,
       );
       return members[0] === undefined ? undefined : publicNodeRef(members[0]);
     },
@@ -915,6 +916,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const members = await visibleMembersAtCoordinate(
         ctx,
         registeredPlainRef(ctx, input),
+        activeKinds,
       );
       return members.map((member) => publicNodeRef<G>(member));
     },
@@ -923,6 +925,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const members = await visibleMembersAtCoordinate(
         ctx,
         registeredPlainRef(ctx, input),
+        activeKinds,
       );
       const nodes = await ctx.loadNodes(members, ctx.coordinate);
       return nodes.filter((node) => node !== undefined);
@@ -931,7 +934,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
     async areSame(firstInput, secondInput) {
       const first = registeredPlainRef(ctx, firstInput);
       const second = registeredPlainRef(ctx, secondInput);
-      const members = await visibleMembersAtCoordinate(ctx, first);
+      const members = await visibleMembersAtCoordinate(ctx, first, activeKinds);
       return containsRef(members, second);
     },
 
@@ -988,6 +991,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         [first, second],
         coordinate,
         ctx.sameIdAcrossKinds,
+        activeKinds,
       );
       const firstClass = requireDefined(classes.get(refKey(first)));
       const secondClass = requireDefined(classes.get(refKey(second)));
@@ -1013,7 +1017,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
 
     async assertionsOf(input) {
       const ref = registeredPlainRef(ctx, input);
-      const members = await visibleMembersAtCoordinate(ctx, ref);
+      const members = await visibleMembersAtCoordinate(ctx, ref, activeKinds);
       if (members.length === 0) return [];
       const assertions = await loadAssertionsTouching(
         ctx.backend,
@@ -1041,7 +1045,11 @@ export function createIdentityReadFacade<G extends GraphDef>(
         ctx.coordinate === undefined ||
         isCurrentClosureCoordinate(ctx.coordinate)
       ) {
-        const visibleMembers = await visibleMembersAtCoordinate(ctx, first);
+        const visibleMembers = await visibleMembersAtCoordinate(
+          ctx,
+          first,
+          activeKinds,
+        );
         if (!containsRef(visibleMembers, second)) return;
         if (refKey(first) === refKey(second)) return [];
         const classes = await loadCurrentStructuralClassComponents(
@@ -1062,6 +1070,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
           [first],
           ctx.coordinate,
           ctx.sameIdAcrossKinds,
+          activeKinds,
         );
         const historicalClass = requireDefined(classes.get(refKey(first)));
         if (!containsRef(historicalClass.visible, second)) return;
@@ -1070,8 +1079,15 @@ export function createIdentityReadFacade<G extends GraphDef>(
         foldEligibleMembers = historicalClass.foldEligible;
       }
       if (!containsRef(structuralMembers, second))
-        throw new ConfigurationError(
-          "Identity closure contains a same-class pair outside its reconstructed structural class.",
+        throw closureMismatchError(
+          ctx.graphId,
+          { first, second, invariant: "class member missing from structure" },
+          (
+            ctx.coordinate === undefined ||
+              isCurrentClosureCoordinate(ctx.coordinate)
+          ) ?
+            "current"
+          : "historical",
         );
       const classKeys = new Set(
         structuralMembers.map((member) => refKey(member)),
@@ -1187,8 +1203,15 @@ export function createIdentityReadFacade<G extends GraphDef>(
       while (cursor !== refKey(first)) {
         const entry = previous.get(cursor);
         if (entry === undefined)
-          throw new ConfigurationError(
-            "Identity closure contains a same-class pair without a reconstructable proof.",
+          throw closureMismatchError(
+            ctx.graphId,
+            { first, second, invariant: "same-class pair has no proof" },
+            (
+              ctx.coordinate === undefined ||
+                isCurrentClosureCoordinate(ctx.coordinate)
+            ) ?
+              "current"
+            : "historical",
           );
         path.push(entry.step);
         cursor = refKey(entry.ref);
@@ -1227,7 +1250,7 @@ export function partitionRetractedEndpoints(
 
 export function createIdentityFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
-): IdentitySurface<G> {
+): IdentityFacade<G> {
   return {
     ...createIdentityReadFacade(ctx),
 

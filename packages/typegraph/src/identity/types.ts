@@ -178,20 +178,13 @@ export type IdentityReadFacade<G extends GraphDef> = Readonly<{
   assertionsOf: (
     ref: IdentityNodeRefInput<G>,
   ) => Promise<readonly IdentityAssertion<G>[]>;
+  classes: (options: IdentityClassPageOptions) => Promise<IdentityClassPage<G>>;
+  /** Returns a shortest proof at this facade's read coordinate, or undefined if distinct. */
+  explainSame: (
+    a: IdentityNodeRefInput<G>,
+    b: IdentityNodeRefInput<G>,
+  ) => Promise<readonly IdentitySamePathStep<G>[] | undefined>;
 }>;
-
-/** The current read surface returned by TypeGraph stores and views. */
-export type IdentityReadSurface<G extends GraphDef> = IdentityReadFacade<G> &
-  Readonly<{
-    classes: (
-      options: IdentityClassPageOptions,
-    ) => Promise<IdentityClassPage<G>>;
-    /** Returns a shortest proof at this facade's read coordinate, or undefined if distinct. */
-    explainSame: (
-      a: IdentityNodeRefInput<G>,
-      b: IdentityNodeRefInput<G>,
-    ) => Promise<readonly IdentitySamePathStep<G>[] | undefined>;
-  }>;
 
 /**
  * The full TypeGraph Identity Profile surface: {@link IdentityReadFacade} plus
@@ -235,10 +228,6 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
       ids: readonly IdentityAssertionId[],
     ) => Promise<readonly IdentityAssertion<G>[]>;
   }>;
-
-/** The current read and write surface returned by TypeGraph stores. */
-export type IdentitySurface<G extends GraphDef> = IdentityReadSurface<G> &
-  Omit<IdentityFacade<G>, keyof IdentityReadFacade<G>>;
 
 /**
  * The assertion-only write surface of the TypeGraph Identity Profile.
