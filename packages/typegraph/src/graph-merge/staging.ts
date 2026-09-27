@@ -36,6 +36,7 @@ import { requireDefined } from "../utils/presence";
  *   identical to what a full enumeration would have produced.
  */
 import { lineageDeltaSinceAnchor } from "./base-version";
+import type { CandidateIdentityScope } from "./candidate-identity-closure";
 import { compareStrings, type MergeKey, mergeKey } from "./node-key";
 import type {
   ChangedEdge,
@@ -375,6 +376,7 @@ export async function stageBranches<G extends GraphDef>(
   captureTargetStateFor?: BranchId,
   baseReader?: StateDiffBaseReader,
   explicitPruneTo?: ReadonlyMap<BranchId, LineageDelta>,
+  scopedIdentity?: CandidateIdentityScope,
 ): Promise<StagingSet> {
   const newNodes: (StagedNewNode & { kind: string; id: string })[] = [];
   const modifiedNodes: (StagedModifiedNode & { kind: string; id: string })[] =
@@ -393,7 +395,9 @@ export async function stageBranches<G extends GraphDef>(
 
   const baseIdentityAssertions =
     baseReader === undefined ?
-      await storeRuntime(baseStore).readCurrentIdentityAssertions("state")
+      scopedIdentity === undefined ?
+        await storeRuntime(baseStore).readCurrentIdentityAssertions("state")
+      : scopedIdentity.baseState
     : await baseReader.readIdentity("state");
 
   let targetNodeVersions: ReadonlyMap<MergeKey, number> = new Map();
@@ -409,6 +413,7 @@ export async function stageBranches<G extends GraphDef>(
       captureForkState: branchId === captureTargetStateFor,
       pruneTo,
       baseReader,
+      scopedIdentity,
     });
     if (branchId === captureTargetStateFor) {
       targetNodeVersions = diff.forkNodeVersions;
