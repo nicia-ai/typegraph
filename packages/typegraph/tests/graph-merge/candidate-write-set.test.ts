@@ -223,6 +223,80 @@ describe("candidate write-set planning", () => {
     expect(isErr(bounded)).toBe(true);
   });
 
+  it("plans an unrelated candidate on a constrained graph", async () => {
+    const [target] = await createStoreWithSchema(
+      cardinalityGraph,
+      baseBackend,
+      { revisionTracking: true },
+    );
+    const source = await target.nodes.Person.create(
+      { name: "Source", externalKey: "source" },
+      { id: "source" },
+    );
+    const peer = await target.nodes.Person.create(
+      { name: "Peer", externalKey: "peer" },
+      { id: "peer" },
+    );
+    await target.edges.related.create(source, peer, {}, { id: "old-edge" });
+    const writeSet: CandidateWriteSet = {
+      formatVersion: 1,
+      sourceId: "unrelated-candidate",
+      target: await captureCandidateWriteSetTarget(target),
+      nodes: [
+        {
+          kind: "Person",
+          id: "new",
+          properties: { name: "New", externalKey: "new" },
+          validFrom: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      edges: [],
+    };
+    const full = unwrap(
+      await ingestionBranch(target, candidateBackend().makeBackend, {
+        id: asBranchId(writeSet.sourceId),
+      }),
+    );
+    try {
+      const imported = await importGraph(
+        full,
+        {
+          formatVersion: "2.0",
+          exportedAt: "1970-01-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: writeSet.nodes,
+          edges: writeSet.edges,
+        },
+        {
+          onConflict: "update",
+          onUnknownProperty: "error",
+          validateReferences: true,
+          refreshStatistics: false,
+        },
+      );
+      expect(imported.success).toBe(true);
+      const expected = unwrap(
+        await planMergeIncremental({
+          forkPoint: target,
+          target,
+          branches: [full],
+        }),
+      );
+      const actual = unwrap(
+        await planCandidateWriteSet({
+          target,
+          makeBackend: candidateBackend().makeBackend,
+          writeSet,
+        }),
+      );
+      expect(canonicalMergePlanJson(actual)).toBe(
+        canonicalMergePlanJson(expected),
+      );
+    } finally {
+      await full.close();
+    }
+  });
+
   it("refuses candidate-scoped review on a graph requiring a complete clone", async () => {
     const [target] = await createStoreWithSchema(
       cardinalityGraph,
